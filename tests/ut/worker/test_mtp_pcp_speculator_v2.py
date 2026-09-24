@@ -77,6 +77,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         block_size=128,
     )
     target_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(async_scheduling=False),
         parallel_config=target_parallel_config,
         speculative_config=SimpleNamespace(
             draft_parallel_config=draft_parallel_config,
@@ -103,6 +104,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
 
     def fake_parent_init(speculator, execution_config, device):
         captured["execution_config"] = execution_config
+        speculator.device = device
         speculator.vllm_config = execution_config
         speculator.speculative_config = execution_config.speculative_config
         speculator.draft_model_config = draft_model_config
@@ -112,6 +114,8 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         speculator.num_speculative_steps = 3
 
     with (
+        patch.object(speculator_module, "get_dcp_group", return_value=SimpleNamespace(rank_in_group=0)),
+        patch.object(speculator_module, "DCPManager") as dcp_manager,
         patch.object(
             speculator_module,
             "replace",
@@ -134,6 +138,8 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     ):
         speculator = AscendMTPSpeculator(target_config, torch.device("cpu"))
 
+    assert dcp_manager.call_args.kwargs["dcp_world_size"] == dcp_size
+    assert dcp_manager.call_args.kwargs["dcp_rank"] == 0
     execution_config = captured["execution_config"]
     execution_parallel_config = execution_config.parallel_config
     assert execution_parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
@@ -525,7 +531,6 @@ def test_graph_prefill_without_real_batch_preserves_metadata(attn_architecture: 
     speculator._build_draft_attn_metadata.assert_not_called()
 
 
-@pytest.mark.skipif(speculator_module.vllm_version_is("0.28.0"), reason="DPSyncState is a main2main interface")
 @pytest.mark.parametrize(
     ("speculator_cls", "parent_cls", "replicated_pcp", "batch_kind"),
     [
@@ -605,17 +610,16 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
     assert speculator.model_state.pcp_manager is speculator.pcp_manager
 
 
-def test_propose_preserves_v028_dp_token_counts() -> None:
+def test_propose_preserves_dp_sync_state() -> None:
     speculator = object.__new__(AscendMTPSpeculator)
-    speculator.replicated_pcp = True
+    speculator.replicated_pcp = False
     input_batch = object()
-    token_counts = torch.tensor([4, 8])
+    dp_sync = object()
     with (
-        patch.object(speculator_module, "vllm_version_is", return_value=True),
         patch.object(speculator_module, "disable_target_pcp_for_replicated_draft", return_value=nullcontext()),
         patch.object(speculator_module, "build_attn_metadata_wrapper", return_value=nullcontext()),
         patch.object(speculator_module, "torch_gather_wrapper", return_value=nullcontext()),
         patch.object(MTPSpeculator, "propose") as parent,
     ):
-        speculator.propose(input_batch, *[MagicMock() for _ in range(10)], token_counts, dp_sync=object())
-    assert parent.call_args.args[11] is token_counts
+        speculator.propose(input_batch, *[MagicMock() for _ in range(10)], dp_sync)
+    assert parent.call_args.args[11] is dp_sync

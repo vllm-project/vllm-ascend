@@ -20,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
     Backend,
+    BatchResultShapeError,
     parse_qos_from_extra_config,
     require_aligned_batch_results,
     set_scheduler_device,
@@ -334,6 +335,13 @@ class MooncakeBackend(Backend):
             return [0] * len(keys)
         assert self.store is not None
         return self.store.batch_is_exist(keys)
+
+    def batch_is_readable(self, keys: list[str]) -> list[bool]:
+        """Map committed Mooncake objects to the common readability contract."""
+        states = require_aligned_batch_results("batch_is_exist", keys, self.batch_is_exist(keys))
+        if any(state not in (0, 1) for state in states):
+            raise BatchResultShapeError("batch_is_exist returned states other than 0 or 1")
+        return [state == 1 for state in states]
 
     def _build_replicate_config(self) -> ReplicateConfig:
         config = ReplicateConfig()

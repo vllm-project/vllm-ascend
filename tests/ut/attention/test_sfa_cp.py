@@ -586,7 +586,7 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     impl.q_lora_rank = 2
     impl.qk_rope_head_dim = 2
     impl.kv_lora_rank = 4
-    hidden_states = torch.zeros(2, 4)
+    hidden_states = torch.arange(8, dtype=torch.float32).reshape(2, 4)
     shared_topk = torch.ones(2, 1, dtype=torch.int32)
     computed_topk = torch.zeros_like(shared_topk)
     main_cache = tuple(torch.empty(1) for _ in range(1 if sfa_c8 else 2))
@@ -641,14 +641,17 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
         patch("vllm_ascend.attention.sfa_v1.get_forward_context", return_value=forward_context),
         patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector"),
         patch("vllm_ascend.attention.sfa_v1.notify_kv_cache_written") as notify,
-        patch("vllm_ascend.attention.sfa_v1.record_attention_compute_start"),
+        patch("vllm_ascend.attention.sfa_v1.attention_transfer_window"),
         patch("vllm_ascend.attention.sfa_v1.maybe_save_kv_layer_to_connector"),
     ):
         impl.forward(impl.layer_name, hidden_states, main_cache, metadata, output=torch.empty_like(hidden_states))
     if expect_indexer:
         indexer.assert_called_once()
         assert indexer.call_args.kwargs["compute_topk"] is (not skip_topk)
-        assert indexer.call_args.args[2] is hidden_states
+        # Trimming attention inputs may create a view of the original tensor.
+        k_hidden_states = indexer.call_args.args[2]
+        torch.testing.assert_close(k_hidden_states, hidden_states)
+        assert k_hidden_states.data_ptr() == hidden_states.data_ptr()
         assert indexer.call_args.args[3] is own_metadata
         assert own_metadata.actual_seq_lengths_query is own_query_lengths
         assert own_metadata.actual_seq_lengths_key is own_key_lengths
@@ -923,3 +926,26 @@ def test_sfa_dcp_prefill_passes_contiguous_gathered_cache() -> None:
     for actual, expected in zip(execute.call_args.args[3], gathered):
         assert actual.is_contiguous()
         torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("impl_cls", [AscendSFADCPImpl, AscendSFAPCPDCPImpl, AscendSFADSADCPImpl])
+@pytest.mark.parametrize("num_prefills,num_decode_tokens", [(0, 2), (1, 0), (1, 1)])
+@pytest.mark.parametrize("enable_c8", [False, True])
+def test_sfa_dcp_slot_mapping_matches_parallel_layout(impl_cls, num_prefills, num_decode_tokens, enable_c8):
+    impl = impl_cls.__new__(impl_cls)
+    impl.enable_sparse_sfa_c8 = enable_c8
+    metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+    metadata.num_input_tokens = 2
+    metadata.num_prefills = num_prefills
+    metadata.num_decode_tokens = num_decode_tokens
+    full_slots = torch.tensor([3200, -1, 3201, -1], dtype=torch.int32)
+    metadata.dcp_context = SimpleNamespace(slot_mapping=full_slots)
+
+    result = impl._get_sfa_kv_slot_mapping(metadata)
+
+    if impl_cls is AscendSFAPCPDCPImpl and num_prefills:
+        assert result is full_slots
+        assert result.tolist() == [3200, -1, 3201, -1]
+    else:
+        assert result.tolist() == [3200, -1]
+        assert result.data_ptr() == full_slots.data_ptr()

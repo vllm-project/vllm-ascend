@@ -13,9 +13,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
     Backend,
+    BatchResultShapeError,
     get_scheduler_device_id,
     parse_qos_from_extra_config,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 
 
 def _is_device_sdma() -> bool:
@@ -75,6 +77,26 @@ class MmcDirect(Enum):
 # hits into misses after an upgrade.
 # tests/ut/distributed/ascend_store/test_backend.py locks the key formats
 # with snapshot assertions.
+
+LAYERWISE_DATA_PLANE = "gva"
+
+
+def bind_layerwise_keys(
+    *,
+    vllm_config: Any,
+    kv_cache_config: Any,
+    model_name: str,
+    use_hybrid: bool,
+    grouped_block_size: list[int],
+) -> LayerwiseKeyBuilder:
+    """Bind GVA key identity behind the same interface as block-key stores."""
+    num_groups = len(grouped_block_size)
+    pp_size = vllm_config.parallel_config.pipeline_parallel_size
+
+    def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+        return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
+
+    return LayerwiseKeyBuilder(make_key, pp_size)
 
 
 def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
@@ -283,6 +305,23 @@ class MemcacheBackend(Backend):
             return []
         assert self.store is not None
         return self.store.batch_get_key_info(keys)
+
+    def batch_is_readable(self, keys: list[str]) -> list[bool]:
+        """Map valid MemCache GVA metadata to the common readability contract."""
+        if self._lazy_init and not self._store_initialized:
+            return [False] * len(keys)
+        key_infos = self.batch_get_key_info(keys)
+        if len(key_infos) != len(keys):
+            raise BatchResultShapeError(f"batch_get_key_info returned {len(key_infos)} results for {len(keys)} keys")
+        readable = []
+        for key_info in key_infos:
+            try:
+                size = int(key_info.size())
+                gvas = key_info.gva_list()
+                readable.append(size > 0 and bool(gvas) and int(gvas[0]) > 0)
+            except (AttributeError, IndexError, TypeError, ValueError) as exc:
+                raise BatchResultShapeError("batch_get_key_info returned invalid key metadata") from exc
+        return readable
 
     def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
         self.ensure_initialized()

@@ -25,7 +25,10 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendSFAIndexerCacheSpec,
+    is_circular_kv_cache_spec,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
@@ -112,7 +115,6 @@ class MooncakePullRecvingThread(threading.Thread):
         self.pcp_size = pcp_size
         self.dcp_rank = dcp_rank
         self.dcp_size = dcp_size
-        assert self.pcp_size == 1, f"Mooncake pull worker temporarily requires pcp_size=1, got {self.pcp_size}"
         self.device = device
         self.ready_event = ready_event
         self.executor = ThreadPoolExecutor(
@@ -221,9 +223,10 @@ class MooncakePullRecvingThread(threading.Thread):
         dict[int, dict[tuple[int, int], list[list[int]]]],
         dict[int, list[tuple[int, int]]],
     ]:
-        """Build per-PP layer matches and producer TP candidates.
+        """Build per-PP layer matches and producer PCP/TP candidates.
 
-        Candidate groups use the same layout as ``remote_tp_rank_groups``:
+        Candidate ranks are TP-major/PCP-minor flattened worker ranks. Groups
+        use the same layout as ``remote_tp_rank_groups``:
         one outer entry per required remote head/TP piece and one inner list of
         replica candidates (DCP=1) or participating DCP shards (DCP>1).
         """
@@ -242,12 +245,15 @@ class MooncakePullRecvingThread(threading.Thread):
             remote_layer_index_by_name = {
                 layer_name: layer_index for layer_index, layer_name in enumerate(pp_metadata.layer_names)
             }
-            # remote_layer_index -> TP ranks that physically own this layer.
-            owner_tp_ranks_by_layer_index: list[set[int]] = [set() for _ in pp_metadata.layer_names]
+            # remote_layer_index -> TP-major/PCP-minor flattened worker ranks
+            # that physically own this layer.
+            owner_worker_ranks_by_layer_index: list[set[int]] = [set() for _ in pp_metadata.layer_names]
             if remote_metadata.use_kv_pp:
-                for remote_tp_rank, tp_metadata in pp_metadata.metadata_by_tp_rank.items():
-                    for owned_remote_layer_index in tp_metadata.layer_indices:
-                        owner_tp_ranks_by_layer_index[owned_remote_layer_index].add(remote_tp_rank)
+                for remote_pcp_rank, pcp_metadata in pp_metadata.metadata_by_pcp_rank.items():
+                    for remote_tp_rank, tp_metadata in pcp_metadata.metadata_by_tp_rank.items():
+                        worker_rank = remote_tp_rank * remote_metadata.pcp_size + remote_pcp_rank
+                        for owned_remote_layer_index in tp_metadata.layer_indices:
+                            owner_worker_ranks_by_layer_index[owned_remote_layer_index].add(worker_rank)
 
             for local_layer_index, layer_name in enumerate(self.layer_names):
                 remote_layer_index = remote_layer_index_by_name.get(layer_name)
@@ -265,6 +271,7 @@ class MooncakePullRecvingThread(threading.Thread):
                         remote_layer_index,
                         self.kv_cache_specs[local_spec_index],
                         pp_metadata,
+                        remote_metadata.pcp_size,
                         remote_metadata.tp_size,
                         remote_metadata.dcp_size,
                     )
@@ -272,13 +279,14 @@ class MooncakePullRecvingThread(threading.Thread):
 
                 remote_tp_rank_groups = raw_tp_rank_groups
                 if remote_metadata.use_kv_pp:
-                    owner_tp_ranks = owner_tp_ranks_by_layer_index[remote_layer_index]
+                    owner_worker_ranks = owner_worker_ranks_by_layer_index[remote_layer_index]
                     remote_tp_rank_groups = [
-                        [tp_rank for tp_rank in group if tp_rank in owner_tp_ranks] for group in remote_tp_rank_groups
+                        [worker_rank for worker_rank in group if worker_rank in owner_worker_ranks]
+                        for group in remote_tp_rank_groups
                     ]
                     if any(not group for group in remote_tp_rank_groups):
                         raise ValueError(
-                            "Mooncake KV parallel metadata has no producer TP owning "
+                            "Mooncake KV parallel metadata has no producer PCP/TP worker owning "
                             f"layer {layer_name!r} for every required TP group on PP rank {remote_pp_rank}"
                         )
                 groups_by_layer_pair[layer_pair] = remote_tp_rank_groups
@@ -302,15 +310,34 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_layer_index: int,
         spec: KVCacheSpec,
         remote_metadata: MooncakePPTransferMetadata,
+        remote_pcp_size: int,
         remote_tp_size: int,
         remote_dcp_size: int,
     ) -> list[list[int]]:
         """Infer one matched layer's TP strategy and remote rank groups."""
         if isinstance(spec, MambaSpec):
-            return self._get_mamba_remote_tp_rank_groups(remote_tp_size)
+            return self._get_mamba_remote_tp_rank_groups(
+                remote_pcp_size,
+                remote_tp_size,
+            )
 
         fixed_total_num_kv_heads = None
-        if isinstance(spec, (AscendSFAIndexerCacheSpec, SlidingWindowMLASpec)):
+        if is_circular_kv_cache_spec(spec):
+            # Every rank owns a complete request-lifetime ring page. Treat
+            # PCP/TP/DCP ranks as replicas rather than sequence/head shards.
+            local_dcp_size = remote_dcp_size = 1
+            local_num_kv_heads = remote_num_kv_heads = 1
+            fixed_total_num_kv_heads = 1
+        elif isinstance(spec, AscendSFAIndexerCacheSpec) and (
+            spec.sfa_dcp_replicated_indexer_size > 1
+            or any(scale > 1 for scale in remote_metadata.block_size_scales[remote_layer_index])
+        ):
+            # A replicated SFA indexer stores the complete sequence on every
+            # DCP rank, so keep the original effective-DCP1 path.
+            local_num_kv_heads = remote_num_kv_heads = 1
+            local_dcp_size = remote_dcp_size = 1
+            fixed_total_num_kv_heads = 1
+        elif isinstance(spec, SlidingWindowMLASpec):
             local_dcp_size = remote_dcp_size = 1
             local_num_kv_heads = remote_num_kv_heads = 1
             fixed_total_num_kv_heads = 1
@@ -333,6 +360,8 @@ class MooncakePullRecvingThread(threading.Thread):
         total_num_kv_heads = self._infer_total_num_kv_heads(
             local_num_kv_heads=local_num_kv_heads,
             remote_num_kv_heads=remote_num_kv_heads,
+            local_pcp_size=self.pcp_size,
+            remote_pcp_size=remote_pcp_size,
             remote_tp_size=remote_tp_size,
             local_dcp_size=local_dcp_size,
             remote_dcp_size=remote_dcp_size,
@@ -340,6 +369,7 @@ class MooncakePullRecvingThread(threading.Thread):
         )
         return self._get_attention_remote_tp_rank_groups(
             remote_tp_size=remote_tp_size,
+            remote_pcp_size=remote_pcp_size,
             local_dcp_size=local_dcp_size,
             remote_dcp_size=remote_dcp_size,
             total_num_kv_heads=total_num_kv_heads,
@@ -347,6 +377,7 @@ class MooncakePullRecvingThread(threading.Thread):
 
     def _get_mamba_remote_tp_rank_groups(
         self,
+        remote_pcp_size: int,
         remote_tp_size: int,
     ) -> list[list[int]]:
         """Map Mamba ranks like non-replicated FullAttention TP shards."""
@@ -359,13 +390,19 @@ class MooncakePullRecvingThread(threading.Thread):
         tp_ratio = larger_tp_size // smaller_tp_size
         if remote_tp_size >= self.tp_size:
             start_rank = self.tp_rank * tp_ratio
-            return [[remote_tp_rank] for remote_tp_rank in range(start_rank, start_rank + tp_ratio)]
-        return [[self.tp_rank // tp_ratio]]
+            return [
+                [remote_tp_rank * remote_pcp_size + remote_pcp_rank for remote_pcp_rank in range(remote_pcp_size)]
+                for remote_tp_rank in range(start_rank, start_rank + tp_ratio)
+            ]
+        remote_tp_rank = self.tp_rank // tp_ratio
+        return [[remote_tp_rank * remote_pcp_size + remote_pcp_rank for remote_pcp_rank in range(remote_pcp_size)]]
 
     def _infer_total_num_kv_heads(
         self,
         local_num_kv_heads: int,
         remote_num_kv_heads: int | None,
+        local_pcp_size: int,
+        remote_pcp_size: int,
         remote_tp_size: int,
         local_dcp_size: int,
         remote_dcp_size: int,
@@ -378,16 +415,18 @@ class MooncakePullRecvingThread(threading.Thread):
             raise ValueError("Remote KV head count is required when it cannot be inferred from the cache spec")
         assert max(self.tp_size, remote_tp_size) % min(self.tp_size, remote_tp_size) == 0
         assert max(local_num_kv_heads, remote_num_kv_heads) % min(local_num_kv_heads, remote_num_kv_heads) == 0
-        local_head_tp_size = self.tp_size // local_dcp_size
-        remote_head_tp_size = remote_tp_size // remote_dcp_size
+        local_dcp_tp_size = 1 if local_dcp_size == 1 else local_dcp_size // local_pcp_size
+        remote_dcp_tp_size = 1 if remote_dcp_size == 1 else remote_dcp_size // remote_pcp_size
+        local_head_tp_size = self.tp_size // local_dcp_tp_size
+        remote_head_tp_size = remote_tp_size // remote_dcp_tp_size
         inferred_total_heads: set[int] = set()
         if local_num_kv_heads > 1:
             inferred_total_heads.add(local_num_kv_heads * self.tp_size)
         if remote_num_kv_heads > 1:
             inferred_total_heads.add(remote_num_kv_heads * remote_tp_size)
-        if local_dcp_size > 1:
+        if local_dcp_tp_size > 1:
             inferred_total_heads.add(local_head_tp_size)
-        if remote_dcp_size > 1:
+        if remote_dcp_tp_size > 1:
             inferred_total_heads.add(remote_head_tp_size)
 
         if not inferred_total_heads:
@@ -400,6 +439,7 @@ class MooncakePullRecvingThread(threading.Thread):
     def _get_attention_remote_tp_rank_groups(
         self,
         remote_tp_size: int,
+        remote_pcp_size: int,
         local_dcp_size: int,
         remote_dcp_size: int,
         total_num_kv_heads: int,
@@ -410,19 +450,24 @@ class MooncakePullRecvingThread(threading.Thread):
         head interval and a remote head shard. Its rank list contains either
         interchangeable replicas or all DCP ranks for that remote head shard.
         """
-        local_head_tp_size = self.tp_size // local_dcp_size
-        remote_head_tp_size = remote_tp_size // remote_dcp_size
-        local_head_tp_rank = self.tp_rank // local_dcp_size
+        local_dcp_tp_size = 1 if local_dcp_size == 1 else local_dcp_size // self.pcp_size
+        remote_dcp_tp_size = 1 if remote_dcp_size == 1 else remote_dcp_size // remote_pcp_size
+        local_head_tp_size = self.tp_size // local_dcp_tp_size
+        remote_head_tp_size = remote_tp_size // remote_dcp_tp_size
+        local_head_tp_rank = self.tp_rank // local_dcp_tp_size
         local_head_interval = self._get_head_interval(local_head_tp_rank, local_head_tp_size, total_num_kv_heads)
 
         ranks_by_head_piece: dict[tuple[int, int], list[int]] = {}
-        for remote_head_tp_rank in range(remote_head_tp_size):
+        num_remote_dcp_groups = remote_pcp_size * remote_tp_size // remote_dcp_size
+        for remote_dcp_group_rank in range(num_remote_dcp_groups):
+            remote_rank_start = remote_dcp_group_rank * remote_dcp_size
+            remote_tp_rank = remote_rank_start // remote_pcp_size
+            remote_head_tp_rank = remote_tp_rank // remote_dcp_tp_size
             remote_head_interval = self._get_head_interval(remote_head_tp_rank, remote_head_tp_size, total_num_kv_heads)
             head_start = max(local_head_interval[0], remote_head_interval[0])
             head_end = min(local_head_interval[1], remote_head_interval[1])
             if head_start >= head_end:
                 continue
-            remote_rank_start = remote_head_tp_rank * remote_dcp_size
             ranks_by_head_piece.setdefault((head_start, head_end), []).extend(
                 range(remote_rank_start, remote_rank_start + remote_dcp_size)
             )
@@ -430,7 +475,8 @@ class MooncakePullRecvingThread(threading.Thread):
         if not ranks_by_head_piece:
             raise ValueError(
                 "MooncakeConnector found no remote TP group for local rank "
-                f"{self.tp_rank}, local_tp={self.tp_size}, remote_tp={remote_tp_size}, "
+                f"{self.pcp_rank}/{self.tp_rank}, local_pcp/tp={self.pcp_size}/{self.tp_size}, "
+                f"remote_pcp/tp={remote_pcp_size}/{remote_tp_size}, "
                 f"total_heads={total_num_kv_heads}, local_dcp={local_dcp_size}, remote_dcp={remote_dcp_size}"
             )
         return [ranks for _, ranks in sorted(ranks_by_head_piece.items())]
@@ -475,26 +521,30 @@ class MooncakePullRecvingThread(threading.Thread):
                 list[tuple[int, list[int], list[int]]],
             ],
         ] = {}
-        # future -> (remote_pp_rank, remote_tp_rank, affected_request_ids).
-        # A failed TP task marks only the requests represented in that bucket.
-        future_to_task: dict[Future[None], tuple[int, int, set[str]]] = {}
+        # future -> (remote_pp_rank, remote_pcp_rank, remote_tp_rank,
+        # affected_request_ids). A failed replica/TP task marks only the
+        # requests represented in that bucket.
+        future_to_task: dict[Future[None], tuple[int, int, int, set[str]]] = {}
         submission_error: Exception | None = None
         try:
             for remote_pp_rank, layer_pairs in layer_pairs_by_pp_rank.items():
                 pp_metadata = remote_metadata.metadata_by_pp_rank[remote_pp_rank]
-                transfer_block_buckets, request_ids_by_remote_tp_rank = self._build_transfer_block_buckets(
+                transfer_block_buckets, request_ids_by_remote_rank = self._build_transfer_block_buckets(
                     pp_metadata,
                     layer_pairs,
                     tp_rank_groups_by_pp_rank[remote_pp_rank],
+                    remote_metadata.pcp_size,
                     remote_metadata.dcp_size,
                     requests,
                     transfer_block_ids_by_spec,
                 )
-                for remote_tp_rank, transfer_entries_by_spec in transfer_block_buckets.items():
+                for (remote_pcp_rank, remote_tp_rank), transfer_entries_by_spec in transfer_block_buckets.items():
                     future = self.executor.submit(
                         self._execute_tp_transfer_bucket,
                         remote_pp_rank,
+                        remote_pcp_rank,
                         remote_tp_rank,
+                        remote_metadata.pcp_size,
                         remote_metadata.tp_size,
                         remote_metadata.dcp_size,
                         pp_metadata,
@@ -502,21 +552,23 @@ class MooncakePullRecvingThread(threading.Thread):
                     )
                     future_to_task[future] = (
                         remote_pp_rank,
+                        remote_pcp_rank,
                         remote_tp_rank,
-                        request_ids_by_remote_tp_rank[remote_tp_rank],
+                        request_ids_by_remote_rank[(remote_pcp_rank, remote_tp_rank)],
                     )
         except Exception as exc:
             submission_error = exc
 
         failed_request_ids: set[str] = set()
         for future in as_completed(future_to_task):
-            remote_pp_rank, remote_tp_rank, request_ids = future_to_task[future]
+            remote_pp_rank, remote_pcp_rank, remote_tp_rank, request_ids = future_to_task[future]
             try:
                 future.result()
             except Exception:
                 logger.exception(
-                    "Mooncake transfer task failed for remote PP rank %s, TP rank %s, requests=%s",
+                    "Mooncake transfer task failed for remote PP rank %s, PCP rank %s, TP rank %s, requests=%s",
                     remote_pp_rank,
+                    remote_pcp_rank,
                     remote_tp_rank,
                     sorted(request_ids),
                 )
@@ -538,6 +590,7 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_metadata: MooncakePPTransferMetadata,
         layer_pairs: list[tuple[int, int]],
         tp_rank_groups_by_layer: dict[tuple[int, int], list[list[int]]],
+        remote_pcp_size: int,
         remote_dcp_size: int,
         requests: dict[str, ReqMeta],
         transfer_block_ids_by_spec: dict[
@@ -548,22 +601,23 @@ class MooncakePullRecvingThread(threading.Thread):
             ],
         ],
     ) -> tuple[
-        dict[int, dict[int, dict[tuple[int, int], list[tuple[str, list[int], list[int]]]]]],
-        dict[int, set[str]],
+        dict[tuple[int, int], dict[int, dict[tuple[int, int], list[tuple[str, list[int], list[int]]]]]],
+        dict[tuple[int, int], set[str]],
     ]:
-        """Bucket one PP rank's requests by remote TP, spec index, and layer pair."""
-        # remote_tp_rank -> local_spec_index -> (local_layer_index, remote_layer_index) ->
+        """Bucket one PP rank's requests by PCP replica, TP, spec, and layer."""
+        # (remote_pcp_rank, remote_tp_rank) -> local_spec_index ->
+        # (local_layer_index, remote_layer_index) ->
         # [(request_id, local_kernel_block_ids, remote_kernel_block_ids), ...]
         transfer_block_buckets: dict[
-            int,
+            tuple[int, int],
             dict[
                 int,
                 dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
             ],
         ] = {}
-        # remote_tp_rank -> requests with at least one transfer entry in its
-        # bucket; used to attribute a failed TP task to affected requests only.
-        request_ids_by_remote_tp_rank: dict[int, set[str]] = {}
+        # (remote_pcp_rank, remote_tp_rank) -> requests with at least one
+        # transfer entry in the bucket.
+        request_ids_by_remote_rank: dict[tuple[int, int], set[str]] = {}
         for selection_index, (request_id, request_metadata) in enumerate(requests.items()):
             request_block_ids_by_spec = transfer_block_ids_by_spec.setdefault(request_id, {})
             for local_layer_index, remote_layer_index in layer_pairs:
@@ -611,14 +665,19 @@ class MooncakePullRecvingThread(threading.Thread):
                     )
                     request_block_ids_by_spec[cache_key] = transfer_block_ids
 
-                for remote_tp_rank, local_block_ids, remote_block_ids in transfer_block_ids:
-                    request_ids_by_remote_tp_rank.setdefault(remote_tp_rank, set()).add(request_id)
-                    transfer_entries_by_spec = transfer_block_buckets.setdefault(remote_tp_rank, {})
+                for remote_worker_rank, local_block_ids, remote_block_ids in transfer_block_ids:
+                    remote_tp_rank, remote_pcp_rank = divmod(
+                        remote_worker_rank,
+                        remote_pcp_size,
+                    )
+                    remote_rank = (remote_pcp_rank, remote_tp_rank)
+                    request_ids_by_remote_rank.setdefault(remote_rank, set()).add(request_id)
+                    transfer_entries_by_spec = transfer_block_buckets.setdefault(remote_rank, {})
                     transfer_entries_by_layer = transfer_entries_by_spec.setdefault(spec_index, {})
                     transfer_entries_by_layer.setdefault(layer_pair, []).append(
                         (request_id, local_block_ids, remote_block_ids)
                     )
-        return transfer_block_buckets, request_ids_by_remote_tp_rank
+        return transfer_block_buckets, request_ids_by_remote_rank
 
     @staticmethod
     def _expand_block_ids(block_ids: list[int], scale: int) -> list[int]:
@@ -652,12 +711,36 @@ class MooncakePullRecvingThread(threading.Thread):
         selection_index: int,
     ) -> list[tuple[int, list[int], list[int]]]:
         """Pair remote TP ranks with local and remote kernel block IDs."""
+        is_replicated_sfa_indexer = isinstance(spec, AscendSFAIndexerCacheSpec) and (
+            local_block_size_scale > 1 or remote_block_size_scale > 1
+        )
         is_dcp_transfer = (
             (self.dcp_size > 1 or remote_dcp_size > 1)
             and isinstance(spec, FullAttentionSpec)
-            and not isinstance(spec, AscendSFAIndexerCacheSpec)
+            and not is_replicated_sfa_indexer
         )
-        if isinstance(spec, SlidingWindowSpec):
+        if is_circular_kv_cache_spec(spec):
+            if len(local_group_block_ids) != 1 or len(remote_group_block_ids) != 1:
+                raise ValueError(
+                    "Mooncake circular cache requires exactly one block per request: "
+                    f"request={request_id!r}, local={local_group_block_ids}, "
+                    f"remote={remote_group_block_ids}"
+                )
+            local_kernel_block_ids = self._expand_block_ids(
+                local_group_block_ids,
+                local_block_size_scale,
+            )
+            remote_kernel_block_ids = self._expand_block_ids(
+                remote_group_block_ids,
+                remote_block_size_scale,
+            )
+            if len(local_kernel_block_ids) != len(remote_kernel_block_ids):
+                raise ValueError(
+                    "Mooncake circular cache requires equal P/D physical block counts: "
+                    f"request={request_id!r}, local={len(local_kernel_block_ids)}, "
+                    f"remote={len(remote_kernel_block_ids)}"
+                )
+        elif isinstance(spec, SlidingWindowSpec):
             assert local_block_size == remote_block_size, "Mooncake SWA requires the same P/D logical block size."
             local_unhashed_start_idx = len(local_full_group_block_ids) - len(local_group_block_ids)
             local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
@@ -711,14 +794,18 @@ class MooncakePullRecvingThread(threading.Thread):
                         )
                         remote_tp_ranks = [remote_tp_rank]
                     else:
-                        if len(candidate_tp_ranks) != remote_dcp_size:
+                        if len(candidate_tp_ranks) % remote_dcp_size != 0:
                             raise ValueError(
-                                "Mooncake DCP candidate rank count must equal remote DCP size: "
+                                "Mooncake DCP candidate rank count must be a multiple of remote DCP size: "
                                 f"ranks={candidate_tp_ranks}, remote_dcp={remote_dcp_size}"
                             )
-                        remote_tp_ranks = candidate_tp_ranks
+                        num_remote_replicas = len(candidate_tp_ranks) // remote_dcp_size
+                        replica_index = selection_index % num_remote_replicas
+                        replica_start = replica_index * remote_dcp_size
+                        remote_tp_ranks = candidate_tp_ranks[replica_start : replica_start + remote_dcp_size]
 
-                    # remote_tp_rank -> (local_kernel_block_ids,
+                    # remote worker rank (TP-major, PCP-minor) ->
+                    # (local_kernel_block_ids,
                     #                    remote_kernel_block_ids).
                     # DCP remapping can split one logical request across ranks.
                     block_ids_by_remote_tp_rank: dict[int, tuple[list[int], list[int]]] = {}
@@ -800,6 +887,7 @@ class MooncakePullRecvingThread(threading.Thread):
     def _append_mamba_transfer_addresses(
         self,
         spec: MambaSpec,
+        remote_pcp_rank: int,
         remote_tp_rank: int,
         remote_tp_size: int,
         transfer_entries_by_layer: dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
@@ -829,7 +917,7 @@ class MooncakePullRecvingThread(threading.Thread):
                     f"Mooncake Mamba local TP {self.tp_rank} does not belong to remote TP {remote_tp_rank}"
                 )
 
-        remote_tp_metadata = remote_metadata.metadata_by_tp_rank[remote_tp_rank]
+        remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
         for (local_layer_index, remote_layer_index), transfer_entries in transfer_entries_by_layer.items():
             local_base_addrs = self.kv_caches_base_addr[local_layer_index]
             remote_base_addrs = remote_tp_metadata.kv_caches_base_addr[remote_layer_index]
@@ -995,6 +1083,8 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_inner_offset: int = 0,
     ) -> None:
         """Append addresses from block groups prepared for one request."""
+        if transfer_len <= 0:
+            return
         for local_block_group, remote_block_group in zip(local_block_groups, remote_block_groups):
             src_list.append(local_base_addr + local_block_group[0] * local_block_stride + local_inner_offset)
             dst_list.append(remote_base_addr + remote_block_group[0] * remote_block_stride + remote_inner_offset)
@@ -1003,7 +1093,9 @@ class MooncakePullRecvingThread(threading.Thread):
     def _append_spec_transfer_addresses(
         self,
         spec_index: int,
+        remote_pcp_rank: int,
         remote_tp_rank: int,
+        remote_pcp_size: int,
         remote_tp_size: int,
         remote_dcp_size: int,
         transfer_entries_by_layer: dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
@@ -1017,6 +1109,7 @@ class MooncakePullRecvingThread(threading.Thread):
         if isinstance(spec, MambaSpec):
             self._append_mamba_transfer_addresses(
                 spec,
+                remote_pcp_rank,
                 remote_tp_rank,
                 remote_tp_size,
                 transfer_entries_by_layer,
@@ -1055,8 +1148,8 @@ class MooncakePullRecvingThread(threading.Thread):
             request_id: group_concurrent_contiguous(local_block_ids, remote_block_ids)
             for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
         }
-        remote_tp_metadata = remote_metadata.metadata_by_tp_rank[remote_tp_rank]
-        transfer_whole_block = isinstance(
+        remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
+        transfer_whole_block = is_circular_kv_cache_spec(spec) or isinstance(
             spec,
             (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec),
         )
@@ -1117,15 +1210,19 @@ class MooncakePullRecvingThread(threading.Thread):
         total_num_kv_heads = self._infer_total_num_kv_heads(
             local_num_kv_heads=local_num_heads,
             remote_num_kv_heads=remote_num_heads,
+            local_pcp_size=self.pcp_size,
+            remote_pcp_size=remote_pcp_size,
             remote_tp_size=remote_tp_size,
             local_dcp_size=local_attention_dcp_size,
             remote_dcp_size=remote_attention_dcp_size,
             fixed_total_num_kv_heads=None,
         )
-        local_head_tp_size = self.tp_size // local_attention_dcp_size
-        remote_head_tp_size = remote_tp_size // remote_attention_dcp_size
-        local_head_tp_rank = self.tp_rank // local_attention_dcp_size
-        remote_head_tp_rank = remote_tp_rank // remote_attention_dcp_size
+        local_dcp_tp_size = 1 if local_attention_dcp_size == 1 else local_attention_dcp_size // self.pcp_size
+        remote_dcp_tp_size = 1 if remote_attention_dcp_size == 1 else remote_attention_dcp_size // remote_pcp_size
+        local_head_tp_size = self.tp_size // local_dcp_tp_size
+        remote_head_tp_size = remote_tp_size // remote_dcp_tp_size
+        local_head_tp_rank = self.tp_rank // local_dcp_tp_size
+        remote_head_tp_rank = remote_tp_rank // remote_dcp_tp_size
         local_head_start, local_head_end = self._get_head_interval(
             local_head_tp_rank, local_head_tp_size, total_num_kv_heads
         )
@@ -1222,7 +1319,9 @@ class MooncakePullRecvingThread(threading.Thread):
     def _execute_tp_transfer_bucket(
         self,
         remote_pp_rank: int,
+        remote_pcp_rank: int,
         remote_tp_rank: int,
+        remote_pcp_size: int,
         remote_tp_size: int,
         remote_dcp_size: int,
         remote_metadata: MooncakePPTransferMetadata,
@@ -1231,7 +1330,7 @@ class MooncakePullRecvingThread(threading.Thread):
             dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
         ],
     ) -> None:
-        """Calculate addresses and execute one remote PP/TP transfer bucket.
+        """Calculate addresses and execute one remote PP/PCP/TP transfer bucket.
 
         ``transfer_entries_by_spec`` maps local spec index to layer-index pairs,
         then to ``(request_id, local_block_ids, remote_block_ids)`` records.
@@ -1242,7 +1341,9 @@ class MooncakePullRecvingThread(threading.Thread):
         for spec_index, transfer_entries_by_layer in transfer_entries_by_spec.items():
             self._append_spec_transfer_addresses(
                 spec_index=spec_index,
+                remote_pcp_rank=remote_pcp_rank,
                 remote_tp_rank=remote_tp_rank,
+                remote_pcp_size=remote_pcp_size,
                 remote_tp_size=remote_tp_size,
                 remote_dcp_size=remote_dcp_size,
                 transfer_entries_by_layer=transfer_entries_by_layer,
@@ -1254,7 +1355,7 @@ class MooncakePullRecvingThread(threading.Thread):
 
         if not src_list:
             return
-        tp_metadata = remote_metadata.metadata_by_tp_rank[remote_tp_rank]
+        tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
         session_id = f"{tp_metadata.local_ip}:{tp_metadata.te_rpc_port}"
         request_ids = sorted(
             {
@@ -1268,7 +1369,8 @@ class MooncakePullRecvingThread(threading.Thread):
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
             raise RuntimeError(
-                f"Mooncake KV transfer failed for remote PP rank {remote_pp_rank}, TP rank {remote_tp_rank}, ret={ret}"
+                "Mooncake KV transfer failed for remote "
+                f"PP/PCP/TP rank {remote_pp_rank}/{remote_pcp_rank}/{remote_tp_rank}, ret={ret}"
             )
         transfer_elapsed_ms = (time.perf_counter() - transfer_start_time) * 1000
         logger.info(
@@ -1295,26 +1397,57 @@ class MooncakePullRecvingThread(threading.Thread):
             )
         if not metadata.metadata_by_pp_rank:
             raise ValueError("Mooncake producer scheduler returned no PP metadata")
-        if metadata.pcp_size != 1:
-            raise ValueError(f"Mooncake pull temporarily requires remote pcp_size=1, got {metadata.pcp_size}")
-
-        empty_pp_ranks = [
-            pp_rank
-            for pp_rank, pp_metadata in metadata.metadata_by_pp_rank.items()
-            if not pp_metadata.metadata_by_tp_rank
-        ]
-        if empty_pp_ranks:
+        expected_pp_ranks = set(range(metadata.pp_size))
+        if set(metadata.metadata_by_pp_rank) != expected_pp_ranks:
             raise ValueError(
-                f"Mooncake producer scheduler returned no TP metadata for PP ranks {sorted(empty_pp_ranks)}"
+                "Mooncake producer scheduler returned incomplete PP ranks: "
+                f"expected {sorted(expected_pp_ranks)}, got {sorted(metadata.metadata_by_pp_rank)}"
             )
+        if metadata.pcp_size <= 0:
+            raise ValueError(f"Mooncake producer returned invalid PCP size {metadata.pcp_size}")
+
+        empty_pcp_ranks = [
+            (pp_rank, pcp_rank)
+            for pp_rank, pp_metadata in metadata.metadata_by_pp_rank.items()
+            for pcp_rank, pcp_metadata in pp_metadata.metadata_by_pcp_rank.items()
+            if not pcp_metadata.metadata_by_tp_rank
+        ]
+        if empty_pcp_ranks:
+            raise ValueError(
+                f"Mooncake producer scheduler returned no TP metadata for PP/PCP ranks {sorted(empty_pcp_ranks)}"
+            )
+        expected_pcp_ranks = set(range(metadata.pcp_size))
+        invalid_pcp_layouts = {
+            pp_rank: sorted(pp_metadata.metadata_by_pcp_rank)
+            for pp_rank, pp_metadata in metadata.metadata_by_pp_rank.items()
+            if set(pp_metadata.metadata_by_pcp_rank) != expected_pcp_ranks
+        }
+        if invalid_pcp_layouts:
+            raise ValueError(
+                "Mooncake producer scheduler returned incomplete PCP ranks: "
+                f"expected {sorted(expected_pcp_ranks)}, got {invalid_pcp_layouts}"
+            )
+        expected_tp_ranks = set(range(metadata.tp_size))
         invalid_tp_ranks = {
             tp_rank
             for pp_metadata in metadata.metadata_by_pp_rank.values()
-            for tp_rank in pp_metadata.metadata_by_tp_rank
+            for pcp_metadata in pp_metadata.metadata_by_pcp_rank.values()
+            for tp_rank in pcp_metadata.metadata_by_tp_rank
             if tp_rank < 0 or tp_rank >= metadata.tp_size
         }
         if invalid_tp_ranks:
             raise ValueError(f"Mooncake producer scheduler returned invalid TP ranks {sorted(invalid_tp_ranks)}")
+        incomplete_tp_layouts = {
+            (pp_rank, pcp_rank): sorted(pcp_metadata.metadata_by_tp_rank)
+            for pp_rank, pp_metadata in metadata.metadata_by_pp_rank.items()
+            for pcp_rank, pcp_metadata in pp_metadata.metadata_by_pcp_rank.items()
+            if set(pcp_metadata.metadata_by_tp_rank) != expected_tp_ranks
+        }
+        if incomplete_tp_layouts:
+            raise ValueError(
+                "Mooncake producer scheduler returned incomplete TP ranks: "
+                f"expected {sorted(expected_tp_ranks)}, got {incomplete_tp_layouts}"
+            )
 
     def _get_remote_metadata(
         self,

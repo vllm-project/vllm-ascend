@@ -20,7 +20,8 @@ from vllm_ascend._310p.worker.v2.model_state import (
 )
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
@@ -92,20 +93,7 @@ def test_kv_zeroing_uses_narrow_310p_gate(
         kv_cache_groups=[SimpleNamespace(is_eagle_group=uses_eagle_block_drop)],
     )
 
-    with patch.object(model_runner_module, "vllm_version_is", return_value=False):
-        assert runner._needs_kv_cache_zeroing_310p(kv_cache_config) is expected
-
-
-def test_kv_zeroing_matches_v028_gate() -> None:
-    runner = object.__new__(NPUModelRunner310V2)
-    runner.speculative_config = SimpleNamespace(num_speculative_tokens=2)
-    kv_cache_config = SimpleNamespace(
-        has_mamba_layers=True,
-        kv_cache_groups=[SimpleNamespace(is_eagle_group=True)],
-    )
-
-    with patch.object(model_runner_module, "vllm_version_is", return_value=True):
-        assert runner._needs_kv_cache_zeroing_310p(kv_cache_config)
+    assert runner._needs_kv_cache_zeroing_310p(kv_cache_config) is expected
 
 
 def test_update_requests_filters_unneeded_upstream_zeroing() -> None:
@@ -172,19 +160,23 @@ def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     state = object.__new__(Ascend310PMambaHybridModelState)
     state.max_num_reqs = 4
     state._align_mode = False
+    recover_state = object()
     config = object()
     model = object()
     encoder_cache = object()
     device = torch.device("cpu")
+
+    def init_parent(self, *_args):
+        self.recoverssm = recover_state
+
     with (
-        patch.object(AscendMambaHybridModelState, "__init__") as parent_init,
+        patch.object(AscendMambaHybridModelState, "__init__", side_effect=init_parent, autospec=True) as parent_init,
         patch.object(Ascend310PMambaHybridModelState, "_replace_310p_rope_state") as replace_rope,
-        patch("vllm_ascend._310p.worker.v2.model_state.vllm_version_is", return_value=True),
     ):
         Ascend310PMambaHybridModelState.__init__(state, config, model, encoder_cache, device)
     parent_init.assert_called_once_with(state, config, model, encoder_cache, device)
     replace_rope.assert_called_once_with(encoder_cache)
-    assert state.recoverssm is None
+    assert state.recoverssm is recover_state
     assert isinstance(state._capture_seq_lens_by_ptr, dict)
 
 
@@ -199,7 +191,10 @@ def test_init_model_state_routes_qwen35_hybrid_to_310p() -> None:
     expected = object()
 
     with (
-        patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=True),
+        patch(
+            "vllm_ascend.worker.v2.model_states.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType._310P),
+        ),
         patch(
             "vllm_ascend._310p.worker.v2.model_state.Ascend310PMambaHybridModelState",
             return_value=expected,
@@ -255,7 +250,7 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=160,
-                shared_by=[layer_name],
+                # Both supported versions use the #51718 layer descriptor.
                 layers=[layer_name],
             )
         ],
@@ -278,10 +273,6 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
     assert states[0].untyped_storage().nbytes() == 160
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.28.0"),
-    reason="vLLM #51718 only changed main descriptors",
-)
 def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
     class FakeMambaSpec:
         block_size = 1
@@ -305,7 +296,6 @@ def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=4096,
-                shared_by=layer_names,
                 layers=layer_names,
             )
         ],
@@ -519,12 +509,16 @@ def test_config_accepts_mtp_and_rejects_non_mtp() -> None:
     [
         ("speculative_config", object(), "only supported via MTP"),
         ("kv_transfer_config", object(), "KV cache transfer"),
-        ("lora_config", object(), "LoRA"),
     ],
 )
 def test_config_rejects_out_of_scope_features(field, value, message) -> None:
     with pytest.raises(NotImplementedError, match=message):
         NPUModelRunner310V2._validate_config(_make_vllm_config(**{field: value}))
+
+
+def test_config_accepts_lora() -> None:
+    """310P MRv2 supports LoRA; gate must not reject lora_config."""
+    NPUModelRunner310V2._validate_config(_make_vllm_config(lora_config=object()))
 
 
 def test_copy_kv_cache_blocks_flattens_mamba_lists() -> None:
@@ -766,7 +760,7 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=8192,
-                shared_by=["model.layers.0.self_attn"],
+                # Both supported versions use the #51718 layer descriptor.
                 layers=["model.layers.0.self_attn"],
             )
         ],
@@ -796,10 +790,6 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     assert all(allocation[3] == model_runner_module.ACL_FORMAT_FRACTAL_NZ for allocation in allocations)
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.28.0"),
-    reason="vLLM #51718 only changed main descriptors",
-)
 def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
     class FakeAttentionSpec:
         block_size = 128
@@ -844,7 +834,6 @@ def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=spec.page_size_bytes * 100,
-                shared_by=layer_names,
                 layers=layer_names,
             )
         ],

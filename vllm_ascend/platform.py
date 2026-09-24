@@ -58,10 +58,12 @@ from vllm_ascend.utils import (
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
+    from vllm_ascend.ascend_config import AscendConfig
 else:
     ModelConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
+    AscendConfig = None
 
 # Keep Breakable CUDAGraph opt-in on Ascend. Upstream may auto-enable it
 # for selected architectures when the environment variable is absent.
@@ -73,8 +75,6 @@ logger.info_once(
 )
 
 _CUSTOM_OP_REGISTERED = False
-# Delete after the driver is released; temporarily hard-coded to 4
-MAX_REDUCED_CAPTURE_SIZES = 4
 
 
 class NPUPlatform(Platform):
@@ -335,9 +335,12 @@ class NPUPlatform(Platform):
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
 
-        default_max_cg_capture_size = _get_default_max_cudagraph_capture_size(vllm_config)
-        if default_max_cg_capture_size is not None:
-            vllm_config.compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size
+        # TODO: Remove this memory-saving capture-size override and its ceiling
+        # restoration once MC2 is no longer used.
+        reduced_cg_cap = _get_reduced_cg_cap(vllm_config)
+        if reduced_cg_cap is not None:
+            vllm_config.compilation_config.max_cudagraph_capture_size = reduced_cg_cap
+            vllm_config.compilation_config.reduced_cg_cap = reduced_cg_cap
 
     def num_compute_units(cls, device_id: int = 0) -> int:
         """Return the number of Cube Cores on the NPU device.
@@ -1041,6 +1044,19 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
             )
             vllm_config.scheduler_config = recompute_scheduler_config
 
+    # Checked here, not in AscendConfig: MultiConnector children re-validate the config
+    # with per-child copies that cannot see sibling connectors.
+    kv_transfer_config = vllm_config.kv_transfer_config
+    offload_missing = kv_transfer_config is None or not kv_transfer_config.has_connector("PreemptOffloadConnector")
+    # Only a real split (size > 1) needs the offload guarantee, mirroring the runner gate.
+    ftpc = ascend_config.finegrained_tp_config
+    if offload_missing and (ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1):
+        raise AssertionError(
+            "oproj_tensor_parallel_size / mlp_tensor_parallel_size require PreemptOffloadConnector "
+            "(via MultiConnector): a preempted request must not return to the prefill node, "
+            "whose recomputed KV loses precision."
+        )
+
 
 def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
     kv_transfer_config = vllm_config.kv_transfer_config
@@ -1051,7 +1067,7 @@ def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
             raise AssertionError("Hybrid models do not support recompute mode kv load failure policy now.")
 
 
-def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
+def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConfig) -> None:
     """Update compilation / cudagraph modes.
 
     Syncs the Ascend compilation config into additional_config, then derives
@@ -1077,7 +1093,26 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
         )
 
     # Update compilation mode in some cases
-    enforce_eager = getattr(model_config, "enforce_eager", False)
+    enforce_eager: bool = getattr(model_config, "enforce_eager", False)
+
+    # Update cudagraph_mode in some cases (read ascend_config.xlite_graph_config)
+    if (xlite_config := ascend_config.xlite_graph_config).enabled:
+        spec_config = vllm_config.speculative_config
+        mixed_mode = CUDAGraphMode.NONE if xlite_config.full_mode else compilation_config.cudagraph_mode.mixed_mode()
+        decode_mode = CUDAGraphMode.NONE if spec_config is None else compilation_config.cudagraph_mode.decode_mode()
+        if not decode_mode or mixed_mode == decode_mode:
+            compilation_config.cudagraph_mode = cudagraph_mode = mixed_mode
+        else:
+            compilation_config.cudagraph_mode = cudagraph_mode = CUDAGraphMode((decode_mode.value, mixed_mode.value))
+        if spec_config and spec_config.enforce_eager is None and cudagraph_mode:
+            spec_config.enforce_eager = enforce_eager
+        enforce_eager = enforce_eager or not cudagraph_mode or xlite_config.full_mode or not cudagraph_mode.mixed_mode()
+        model_config.enforce_eager = enforce_eager
+        logger.info(
+            "Xlite graph enabled; falling back `compilation_config.cudagraph_mode` to %s (enforce_eager: %s)",
+            compilation_config.cudagraph_mode,
+            enforce_eager,
+        )
 
     if enforce_eager:
         logger.info("Compilation disabled, using eager mode by default")
@@ -1091,18 +1126,6 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
             compilation_config.mode,
         )
         compilation_config.mode = CompilationMode.NONE
-
-    # Update cudagraph_mode in some cases (read ascend_config.xlite_graph_config)
-    xlite_graph_config = ascend_config.xlite_graph_config
-    if xlite_graph_config.enabled:
-        if xlite_graph_config.full_mode and vllm_config.speculative_config is None:
-            logger.info("ACLGraph has been disabled when speculation is disabled in xlite full mode")
-            enforce_eager = True
-            model_config.enforce_eager = True
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-        else:
-            logger.info("Falling back to FULL_DECODE_ONLY under xlite decode-only mode")
-            compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
 
     # Encoder-decoder models currently only support PIECEWISE mode
     # TODO(Jian Li): Confirm this behavior and explain why
@@ -1144,6 +1167,16 @@ def _setup_compile_backend(
     if additional_config is None:
         vllm_config.additional_config = {}
         additional_config = vllm_config.additional_config
+
+    reduced_cg_cap = getattr(compilation_config, "reduced_cg_cap", None)
+    if reduced_cg_cap is not None:
+        # Add the off-stride default before upstream rebuilds and truncates the list.
+        reduced_cg_cap = min(reduced_cg_cap, vllm_config.scheduler_config.max_num_batched_tokens)
+        compilation_config.cudagraph_capture_sizes = sorted(
+            set(compilation_config.cudagraph_capture_sizes or []) | {reduced_cg_cap}
+        )
+        compilation_config.max_cudagraph_capture_size = None
+        delattr(compilation_config, "reduced_cg_cap")
 
     # Recompute cudagraph sizes before extending splitting_ops (honors the
     # current max / size inputs after the mode adjustments above).
@@ -1202,9 +1235,6 @@ def _setup_compile_backend(
                 "vllm::dsa_forward",
             ]
         )
-        # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
-        if get_current_hardware_profile().supports(HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES):
-            _prune_reduced_capture_sizes(vllm_config)
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
@@ -1212,22 +1242,12 @@ def _setup_compile_backend(
         # Don't split the FX graph for static kernel; it would compile multiple times.
         compilation_config.splitting_ops = []
     else:
-        logger.info("%s cudagraph_mode is not support on NPU. falling back to NONE", compilation_config.cudagraph_mode)
+        logger.info("cudagraph_mode %s is unsupported on NPU; falling back to NONE.", compilation_config.cudagraph_mode)
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         compilation_config.mode = CompilationMode.NONE
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
-
-    # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
-    if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and os.environ.get("ASCEND_LAUNCH_BLOCKING", "0") == "1":
-        raise ValueError(
-            "ACL graph is incompatible with ASCEND_LAUNCH_BLOCKING=1. "
-            "Please unset ASCEND_LAUNCH_BLOCKING or set it to 0. If you "
-            "need ASCEND_LAUNCH_BLOCKING for debugging, consider other methods — "
-            "for example, check the plog files (default: $HOME/ascend/log/debug) "
-            "for more information about runtime errors."
-        )
 
 
 def _setup_worker_and_scheduler(
@@ -1383,8 +1403,8 @@ def _validate_fa3_backend(key, _attn_selector_config):
     return True
 
 
-def _get_default_max_cudagraph_capture_size(vllm_config: VllmConfig) -> int | None:
-    """Mirror the default-max branch in vLLM's `_set_cudagraph_sizes()`.
+def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
+    """Return Ascend's reduced capture cap, or None to preserve explicit settings.
 
     This helper corresponds to the upstream block under
     "determine the initial max_cudagraph_capture_size" when
@@ -1448,25 +1468,6 @@ def _config_deprecated_logging():
             warnings_logger.addHandler(handler)
 
     warnings_logger.propagate = False
-
-
-def _prune_reduced_capture_sizes(vllm_config):
-    original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
-    if not original_sizes:
-        return
-    if len(original_sizes) <= MAX_REDUCED_CAPTURE_SIZES:
-        return
-    step = (len(original_sizes) - 1) / (MAX_REDUCED_CAPTURE_SIZES - 1)
-    indices = [round(i * step) for i in range(MAX_REDUCED_CAPTURE_SIZES)]
-    indices[0], indices[-1] = 0, len(original_sizes) - 1
-    sampled_sizes = [original_sizes[i] for i in indices]
-    update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
-    logger.warning(
-        "Adjusted ACL graph batch sizes for model: %d → %d sizes due to HDK incompatibility"
-        "and this warning will be cleared soon.",
-        len(original_sizes),
-        MAX_REDUCED_CAPTURE_SIZES,
-    )
 
 
 def _get_recompute_scheduler_cls(

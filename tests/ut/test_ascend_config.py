@@ -24,16 +24,20 @@ from unittest.mock import patch
 
 from vllm.config import KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 
 from tests.ut.base import TestBase
+from tests.ut.kvpp_utils import make_kvpp_config
 from vllm_ascend.ascend_config import (
     AscendCompilationConfig,
     AscendConfig,
     AscendFusionConfig,
+    AscendWarmupConfig,
     DynamicSpecConfig,
     DyntraLBConfig,
     EplbConfig,
     FinegrainedTPConfig,
+    KVPPConfig,
     ProfilingChunkConfig,
     RejectionSamplerConfig,
     RlConfig,
@@ -564,7 +568,7 @@ class TestAscendConfig(TestBase):
     )
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_disable_npugraph_ex_on_310p(
-        self, mock_fix_incompatible_config, mock_is_310p, mock_warning
+        self, mock_fix_incompatible_config, mock_hardware_profile, mock_warning
     ):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
@@ -598,34 +602,6 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
 
         self.assertTrue(ascend_config.msmonitor_use_daemon)
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.logger.warning")
-    def test_flashcomm_config_warns(self, mock_warning):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {"enable_flashcomm1": True}
-        init_ascend_config(test_vllm_config)
-
-        warning_messages = [call.args[0] for call in mock_warning.call_args_list]
-        self.assertIn(
-            "FlashComm is deprecated; remove enable_flashcomm1 and "
-            "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead",
-            warning_messages,
-        )
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.logger.warning")
-    def test_flashcomm_environment_warns(self, mock_warning):
-        test_vllm_config = VllmConfig()
-        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}, clear=True):
-            init_ascend_config(test_vllm_config)
-
-        warning_messages = [call.args[0] for call in mock_warning.call_args_list]
-        self.assertIn(
-            "FlashComm is deprecated; remove enable_flashcomm1 and "
-            "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead",
-            warning_messages,
-        )
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -949,6 +925,13 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaises(ValueError):
             AscendFusionConfig(unknown_key=1)
 
+    def test_ascend_warmup_config_bool_lax_and_forbid(self):
+        cfg = AscendWarmupConfig(enable_early_kernel_warmup="true", enable_early_nz_warmup="false")
+        self.assertTrue(cfg.enable_early_kernel_warmup)
+        self.assertFalse(cfg.enable_early_nz_warmup)
+        with self.assertRaises(ValueError):
+            AscendWarmupConfig(unknown_key=1)
+
     def test_ascend_compilation_config_bool_lax_and_forbid(self):
         cfg = AscendCompilationConfig(enable_npugraph_ex="false")
         self.assertFalse(cfg.enable_npugraph_ex)
@@ -993,12 +976,121 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaisesRegex(ValueError, "lmhead_tensor_parallel_size must be non-negative"):
             FinegrainedTPConfig(lmhead_tensor_parallel_size=-1)
 
+    def _oproj_tp_vllm_config(
+        self,
+        max_num_batched_tokens=8192,
+        max_num_seqs=256,
+        num_speculative_tokens=0,
+        max_cudagraph_capture_size=512,
+        cudagraph_capture_sizes=None,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        prefill_context_parallel_size=1,
+    ):
+        speculative_config = None
+        if num_speculative_tokens:
+            speculative_config = SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
+        return SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=1,
+                data_parallel_size=8,
+                prefill_context_parallel_size=prefill_context_parallel_size,
+            ),
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=cudagraph_mode,
+                max_cudagraph_capture_size=max_cudagraph_capture_size,
+                cudagraph_capture_sizes=cudagraph_capture_sizes,
+            ),
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens, max_num_seqs=max_num_seqs),
+            speculative_config=speculative_config,
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            model_config=SimpleNamespace(is_moe=True),
+        )
+
+    def test_oproj_tp_requires_graph_mode(self):
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        # VllmConfig.__post_init__ normalizes enforce_eager into NONE, so this
+        # single check covers both spellings of "no graph mode".
+        with self.assertRaisesRegex(AssertionError, "only supported in graph mode"):
+            config._validate_preconditions(self._oproj_tp_vllm_config(cudagraph_mode=CUDAGraphMode.NONE))
+
+    def test_oproj_tp_rejects_pcp(self):
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        with self.assertRaisesRegex(AssertionError, "not supported with prefill_context_parallel_size"):
+            config._validate_preconditions(self._oproj_tp_vllm_config(prefill_context_parallel_size=2))
+
+    def test_oproj_tp_size_one_skips_the_checks(self):
+        # Size 1 requests no split: no exchange groups to align, so the preconditions do not apply.
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=1)
+        config._validate_preconditions(self._oproj_tp_vllm_config(cudagraph_mode=CUDAGraphMode.NONE))
+        self.assertEqual(config.oproj_tensor_parallel_size, 1)
+
+    def test_oproj_tp_capture_bound_check(self):
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        config._validate_preconditions(self._oproj_tp_vllm_config())
+        # max_num_batched_tokens can cap the step below the capture bound.
+        config._validate_preconditions(self._oproj_tp_vllm_config(max_num_batched_tokens=512))
+        self.assertEqual(config.oproj_tensor_parallel_size, 2)
+        # 300 reqs x decode_query_len 2 (spec window) = 600 > 512: disabled with a warning.
+        config._validate_preconditions(self._oproj_tp_vllm_config(max_num_seqs=300, num_speculative_tokens=1))
+        self.assertEqual(config.oproj_tensor_parallel_size, 0)
+        # An explicit capture size that covers the step keeps the knob on.
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        config._validate_preconditions(
+            self._oproj_tp_vllm_config(max_num_seqs=300, num_speculative_tokens=1, max_cudagraph_capture_size=1024)
+        )
+        self.assertEqual(config.oproj_tensor_parallel_size, 2)
+        # Before _set_cudagraph_sizes backfills it, an explicit sizes list is the bound.
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        config._validate_preconditions(
+            self._oproj_tp_vllm_config(max_cudagraph_capture_size=None, cudagraph_capture_sizes=[8, 16, 512])
+        )
+        self.assertEqual(config.oproj_tensor_parallel_size, 2)
+
+    def test_mlp_tp_capture_bound_check(self):
+        config = FinegrainedTPConfig(mlp_tensor_parallel_size=2)
+        config._validate_preconditions(self._oproj_tp_vllm_config())
+        self.assertEqual(config.mlp_tensor_parallel_size, 2)
+        # The step bound is knob-independent, so an oversized step disables both knobs together.
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2, mlp_tensor_parallel_size=4)
+        config._validate_preconditions(self._oproj_tp_vllm_config(max_num_seqs=300, num_speculative_tokens=1))
+        self.assertEqual(config.oproj_tensor_parallel_size, 0)
+        self.assertEqual(config.mlp_tensor_parallel_size, 0)
+
     def test_eplb_config_int_field_lax(self):
         cfg = EplbConfig(eplb_policy_type="2")
         self.assertEqual(cfg.eplb_policy_type, 2)
 
 
 class TestUpstreamConfigCompatibility(TestBase):
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_a5_megamoe_minimax_config_and_existing_guards(self, _mock_profile):
+        text_config = SimpleNamespace(hidden_size=6144, intermediate_size=3072, num_experts_per_tok=4)
+        model_config = SimpleNamespace(
+            architectures=["MiniMaxM3SparseForCausalLM"],
+            hf_text_config=text_config,
+            get_num_experts=lambda: 128,
+        )
+        parallel_config = SimpleNamespace(world_size_across_dp=8, pipeline_parallel_size=1)
+        vc = SimpleNamespace(model_config=model_config, parallel_config=parallel_config)
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+
+        for field, value in (("hidden_size", 896), ("intermediate_size", 4096), ("num_experts_per_tok", 33)):
+            with self.subTest(field=field), patch.object(text_config, field, value):
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        for world_size in (1, 3):
+            with self.subTest(world_size=world_size), patch.object(parallel_config, "world_size_across_dp", world_size):
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+
+        model_config.architectures = ["Qwen3_5MoeForConditionalGeneration"]
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        text_config.moe_intermediate_size = 3072
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        text_config.moe_intermediate_size = 1024
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+
     def test_megamoe_model_config_constraints(self):
         supported = SimpleNamespace(
             model_config=SimpleNamespace(
@@ -1020,6 +1112,16 @@ class TestUpstreamConfigCompatibility(TestBase):
 
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(supported))
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(unsupported))
+
+        minimax_m3 = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(
+                    hidden_size=6144,
+                    intermediate_size=3072,
+                )
+            )
+        )
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(minimax_m3))
 
     @patch(
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
@@ -1182,6 +1284,65 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_minimax_m3_rejects_fused_mc2_dispatch_ffn_combine(self, mock_fix):
+        vc = VllmConfig()
+        vc.model_config.architectures = ["MiniMaxM3SparseForCausalLM"]
+        vc.additional_config = {"enable_fused_mc2": 1}
+
+        with self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"):
+            init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_minimax_m3_allows_fused_mc2_mode_2_megamoe(self, mock_fix):
+        def _fake_find_spec(name, *args, **kwargs):
+            if name == "cann_ops_transformer":
+                return object()
+            return real_find_spec(name, *args, **kwargs)
+
+        vc = VllmConfig()
+        vc.model_config.architectures = ["MiniMaxM3SparseForCausalLM"]
+        vc.model_config.hf_text_config = SimpleNamespace(
+            hidden_size=6144,
+            intermediate_size=3072,
+        )
+        vc.additional_config = {"enable_fused_mc2": 2}
+
+        with patch("vllm_ascend.ascend_config.importlib.util.find_spec", side_effect=_fake_find_spec):
+            config = init_ascend_config(vc)
+
+        self.assertEqual(config.enable_fused_mc2, 1)
+        self.assertTrue(is_mega_moe_supported())
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_minimax_m3_derivation_initializes_unknown_megamoe_support(self, mock_fix):
+        vc = VllmConfig()
+        vc.model_config.architectures = ["MiniMaxM3SparseForCausalLM"]
+        config = init_ascend_config(vc)
+        # Exercise a custom entry point with normalized MC2 mode and an
+        # uninitialized capability cache, outside the usual factory ordering.
+        config.enable_fused_mc2 = 1
+        with (
+            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None),
+            patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),
+            patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True),
+        ):
+            config.derive_and_validate(vc)
+            self.assertEqual(config.enable_fused_mc2, 1)
+            self.assertTrue(is_mega_moe_supported())
+
+        # An explicitly disabled cache must stay disabled even with CANN
+        # installed: MiniMax cannot use dispatch_ffn_combine.
+        with (
+            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", False),
+            patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),
+            self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"),
+        ):
+            config.derive_and_validate(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_converged_bypass_fields_are_validated(self, mock_fix):
         vc = VllmConfig()
         vc.additional_config = {
@@ -1195,6 +1356,42 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertFalse(config.enable_dsa_cp)
         self.assertTrue(config.enable_pcp_o_proj_weight_sharding)
         self.assertEqual(config.draft_window_size, 4096)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_reduce_sample_configuration_compatibility(self, mock_fix):
+        cases: tuple[tuple[dict[str, Any], int, str | None, str | None], ...] = (
+            (
+                {
+                    "finegrained_tp_config": {"lmhead_tensor_parallel_size": 2},
+                    "recompute_scheduler_enable": True,
+                },
+                1,
+                None,
+                "finegrained_tp_config.lmhead_tensor_parallel_size",
+            ),
+            ({}, 2, None, "enable_pcp_embedding_lmhead_weight_sharding"),
+            ({"enable_pcp_embedding_lmhead_weight_sharding": False}, 1, "kv_producer", "PD-disaggregated"),
+            ({}, 1, None, None),
+            ({"enable_pcp_embedding_lmhead_weight_sharding": False}, 2, None, None),
+        )
+        for additional_config, pcp_size, kv_role, error in cases:
+            with self.subTest(pcp_size=pcp_size, kv_role=kv_role, error=error):
+                clear_ascend_config()
+                vc = VllmConfig()
+                vc.parallel_config.prefill_context_parallel_size = pcp_size
+                vc.additional_config = {"enable_reduce_sample": True, **additional_config}
+                if kv_role is not None:
+                    vc.kv_transfer_config = KVTransferConfig(
+                        kv_connector="MooncakeConnectorV1",
+                        kv_role=kv_role,
+                    )
+
+                if error is None:
+                    self.assertTrue(init_ascend_config(vc).enable_reduce_sample)
+                else:
+                    with self.assertRaisesRegex(ValueError, error):
+                        init_ascend_config(vc)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -1378,21 +1575,29 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         mock_uses_sfa,
     ):
         cases = (
-            (True, True, "kv_producer", True),
-            (False, True, "kv_producer", False),
-            (True, False, "kv_producer", False),
-            (True, True, "kv_consumer", False),
-            (True, True, "kv_both", False),
-            (True, True, None, False),
+            (None, True, True, "kv_producer", True),
+            (False, True, True, "kv_producer", False),
+            (True, False, True, "kv_producer", False),
+            (True, True, False, "kv_producer", False),
+            (True, True, True, "kv_consumer", False),
+            (True, True, True, "kv_both", False),
+            (True, True, True, None, False),
         )
-        for uses_sfa, enable_li_c8, kv_role, expected in cases:
-            with self.subTest(uses_sfa=uses_sfa, enable_li_c8=enable_li_c8, kv_role=kv_role):
+        for reshape_optim, uses_sfa, enable_li_c8, kv_role, expected in cases:
+            with self.subTest(
+                reshape_optim=reshape_optim,
+                uses_sfa=uses_sfa,
+                enable_li_c8=enable_li_c8,
+                kv_role=kv_role,
+            ):
                 mock_uses_sfa.return_value = uses_sfa
                 vc = VllmConfig()
                 vc.additional_config = {
                     "refresh": True,
                     "enable_sparse_li_c8": enable_li_c8,
                 }
+                if reshape_optim is not None:
+                    vc.additional_config["c8_enable_reshape_optim"] = reshape_optim
                 # enable_sparse_li_c8 is derived from indexer_kv_dtype (see
                 # init_ascend_config); the per-case flag is expressed there.
                 vc.attention_config.indexer_kv_dtype = "int8" if enable_li_c8 else "auto"
@@ -1558,6 +1763,25 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
 
 class TestKVPPConfig(TestBase):
+    def test_graph_modes(self):
+        from types import SimpleNamespace
+
+        from vllm.config import CUDAGraphMode
+
+        from tests.ut.kvpp_utils import make_kvpp_config
+        from vllm_ascend.ascend_config import KVPPConfig
+
+        for mode in CUDAGraphMode:
+            with self.subTest(mode=mode):
+                config = make_kvpp_config()
+                config.model_config.enforce_eager = False
+                config.compilation_config = SimpleNamespace(cudagraph_mode=mode)
+                if mode == CUDAGraphMode.PIECEWISE:
+                    KVPPConfig.from_vllm_config(config).validate(config)
+                else:
+                    with self.assertRaisesRegex(ValueError, "PIECEWISE"):
+                        KVPPConfig.from_vllm_config(config).validate(config)
+
     def test_enable_switch_uses_tp_size(self):
         from tests.ut.kvpp_utils import make_kvpp_config
         from vllm_ascend.ascend_config import KVPPConfig
@@ -1590,10 +1814,9 @@ class TestKVPPConfig(TestBase):
         KVPPConfig.from_vllm_config(config).validate(config)
         restrictions = (
             ("parallel_config", "decode_context_parallel_size", 2, "DCP"),
-            ("model_config", "enforce_eager", False, "eager"),
             ("model_config", "use_mla", False, "MLA"),
             ("model_config", "is_hybrid", True, "MLA"),
-            ("speculative_config", "method", "dspark", "mtp"),
+            ("speculative_config", "method", "eagle3", "mtp"),
             ("speculative_config", "num_speculative_tokens_per_batch_size", {1: 2}, "fixed"),
         )
         for section, field, value, message in restrictions:
@@ -1604,6 +1827,18 @@ class TestKVPPConfig(TestBase):
                 # Reach KVPP validation through the real platform entry point.
                 with self.assertRaisesRegex(ValueError, message):
                     _validate_parallel_config(config)
+
+    def test_dspark_accepts_fixed_length_and_rejects_dynamic_verification(self):
+        config = make_kvpp_config()
+        config.speculative_config.method = "dspark"
+        KVPPConfig.from_vllm_config(config).validate(config)
+        config.speculative_config.enable_adaptive_verification = True
+        with self.assertRaisesRegex(ValueError, "adaptive verification"):
+            KVPPConfig.from_vllm_config(config).validate(config)
+        config.speculative_config.enable_adaptive_verification = False
+        config.additional_config["dynamic_spec_config"] = {"method": "dspark"}
+        with self.assertRaisesRegex(ValueError, "dynamic speculative lengths"):
+            KVPPConfig.from_vllm_config(config).validate(config)
 
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_config_factory_keeps_kvpp_enabled(self, _check_config):

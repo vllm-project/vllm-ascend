@@ -222,6 +222,7 @@ nav:
         - tutorials/models/Qwen3.6-35B-A3B.md
         - tutorials/models/Qwen3.8-2.4T-A95B.md
         - tutorials/models/Qwen3.8-27B.md
+        - tutorials/models/Qwen3.8-Flash-Next.md
         - tutorials/models/DeepSeek-V3.1.md
         - tutorials/models/DeepSeek-V3.2.md
         - tutorials/models/DeepSeek-V4-Flash.md
@@ -291,6 +292,7 @@ nav:
         - user_guide/feature_guide/epd_disaggregation.md
         - user_guide/feature_guide/kv_pool.md
         - user_guide/feature_guide/mooncake_layerwise_adaptation_and_optimization.md
+        - user_guide/feature_guide/mooncake_hybrid_attention.md
         - user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md
         - user_guide/feature_guide/kvpp.md
         - user_guide/feature_guide/kv_cache_cpu_offload.md

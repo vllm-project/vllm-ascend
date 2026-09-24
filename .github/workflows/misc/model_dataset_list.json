@@ -512,6 +512,8 @@
             "openbmb/MiniCPM-V-4_5",
             "opendatalab/MinerU2.5-2509-1.2B",
             "popowww/MiniMax-M2.5-Eagle3",
+            "rainney/AEON-DFlash-Qwen3.6-35B-A3B",
+            "rainney/Qwen3.6-27B-DSpark",
             "rhymes-ai/Aria",
             "sentence-transformers/all-MiniLM-L12-v2",
             "unsloth/DeepSeek-V3.1-BF16",
@@ -624,7 +626,9 @@
         "310p": [
             "vllm-ascend/Qwen3-8B-w8a8sc-310-vllm-tp1",
             "vllm-ascend/Qwen3-14B-w8a8sc-310-vllm-tp1",
-            "vllm-ascend/Qwen3-32B-w8a8sc-310-vllm-tp4"
+            "vllm-ascend/Qwen3-32B-w8a8sc-310-vllm-tp4",
+            "Qwen/Qwen3.5-2B",
+            "vllm-ascend/Qwen3-VL-8B-Instruct-w8a8sc-310-vllm-tp1"
         ]
     },
     "datasets": [

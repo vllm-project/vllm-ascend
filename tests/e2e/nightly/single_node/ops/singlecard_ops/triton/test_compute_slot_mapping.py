@@ -13,7 +13,6 @@ from vllm.v1.worker.gpu.block_table import (
 from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel as ascend_compute_slot_mappings_kernel,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.block_table import (
     AscendBlockTables,
 )
@@ -98,44 +97,14 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
         **kernel_kwargs,
         BLOCK_TABLE_WINDOW_SIZE=block_table_window_size,
     )
-    if vllm_version_is("0.28.0"):
-        # Release's reference kernel has no separate KV/kernel-size arguments.
-        # Resolve CP positions first, then use its CP=1 physical-slot mapping.
-        for group_id, kv_block_size in enumerate(kv_block_sizes.tolist()):
-            virtual_block_size = kv_block_size * cp_size
-            virtual_offsets = positions % virtual_block_size
-            is_local = virtual_offsets // cp_interleave % cp_size == cp_rank
-            local_positions = (
-                positions // virtual_block_size * kv_block_size
-                + virtual_offsets // (cp_interleave * cp_size) * cp_interleave
-                + virtual_offsets % cp_interleave
-            )
-            ref_compute_slot_mappings_kernel[(1, idx_mapping.shape[0] + 1)](
-                max_num_tokens,
-                idx_mapping,
-                query_start_loc,
-                local_positions,
-                block_table_ptrs[group_id:],
-                block_table_strides[group_id:],
-                kernel_block_sizes[group_id:],
-                ref_slot_mappings[group_id:],
-                ref_slot_mappings.stride(0),
-                0,
-                CP_SIZE=1,
-                CP_INTERLEAVE=1,
-                PAD_ID=-1,
-                TRITON_BLOCK_SIZE=1024,
-            )
-            ref_slot_mappings[group_id, : positions.numel()].masked_fill_(~is_local, -1)
-    else:
-        ref_args: tuple[Any, ...] = kernel_args + (torch.ones(num_groups, dtype=torch.bool, device=device),)
-        ref_compute_slot_mappings_kernel[grid](
-            *ref_args,
-            ref_slot_mappings,
-            ref_slot_mappings.stride(0),
-            cp_rank,
-            **kernel_kwargs,
-        )
+    ref_args: tuple[Any, ...] = kernel_args + (torch.ones(num_groups, dtype=torch.bool, device=device),)
+    ref_compute_slot_mappings_kernel[grid](
+        *ref_args,
+        ref_slot_mappings,
+        ref_slot_mappings.stride(0),
+        cp_rank,
+        **kernel_kwargs,
+    )
 
     torch.testing.assert_close(slot_mappings, ref_slot_mappings)
 
@@ -162,8 +131,7 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
     block_tables.cp_interleave = 1
     block_tables._triton_block_size = 1024
     block_tables._block_table_window_size = 512
-    if not vllm_version_is("0.28.0"):
-        block_tables.slot_mapping_enabled = torch.tensor([True], dtype=torch.bool, device=device)
+    block_tables.slot_mapping_enabled = torch.tensor([True], dtype=torch.bool, device=device)
 
     out = torch.full((1, 12), 777, dtype=torch.int32, device=device)
     result = block_tables.compute_slot_mappings(

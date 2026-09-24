@@ -25,6 +25,8 @@ FROM ${CANN_QUAY_URL}:${CANN_VERSION}-310p-ubuntu22.04-py3.12
 # Build-time arguments (declared once at the top of the stage for clarity).
 # PIP_INDEX_URL (optional): Primary pip index mirror URL for Python packages.
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+# PUBLIC_PIP_INDEX_URL (optional): Public pip index used to restore config after internal-mirror builds.
+ARG PUBLIC_PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 # MOONCAKE_INDEX_URL (optional): Extra pip index URL for the mooncake-transfer-engine package.
 ARG MOONCAKE_INDEX_URL="https://mirrors.aliyun.com/pypi/web/simple"
 # PYTORCH_INDEX_URL (optional): Extra pip index URL for PyTorch wheels.
@@ -40,7 +42,7 @@ ARG PIP_TRUSTED_HOST=""
 # VLLM_REPO (optional): Git repository URL of vLLM.
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 # VLLM_TAG (optional): vLLM release tag to clone when VLLM_COMMIT is empty.
-ARG VLLM_TAG=v0.28.0
+ARG VLLM_TAG=v0.30.0
 # VLLM_COMMIT (optional): Exact vLLM commit to build; empty to fall back to VLLM_TAG.
 ARG VLLM_COMMIT=""
 # SOC_VERSION (optional): Ascend SoC version used for custom kernel compilation.
@@ -65,10 +67,12 @@ ARG DAILY_DEPS_MODE="torch_npu_only"
 WORKDIR /workspace
 
 RUN if [ -n "$APTMIRROR" ]; then \
+        cp /etc/apt/sources.list /etc/apt/sources.list.bak && \
         sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list; \
     fi && \
     apt-get update -y && \
     apt-get install -y python3-pip git vim wget curl protobuf-compiler libprotobuf-dev net-tools gcc g++ cmake numactl libnuma-dev libjemalloc2 pciutils && \
+    if [ -n "$APTMIRROR" ]; then mv /etc/apt/sources.list.bak /etc/apt/sources.list; fi && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
@@ -79,12 +83,12 @@ RUN pip config set global.index-url ${PIP_INDEX_URL} && \
     python3 -m pip cache purge
 
 # Install vLLM
-RUN if [ -n "$VLLM_COMMIT" ]; then \
+RUN if [ -n "$GIT_PROXY" ]; then git config --global url."${GIT_PROXY}https://github.com/".insteadOf https://github.com/; fi && \
+    if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
       git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO "$VLLM_COMMIT" && \
       git -C /vllm-workspace/vllm checkout FETCH_HEAD; \
     else \
-      if [ -n "$GIT_PROXY" ]; then git config --global url."${GIT_PROXY}https://github.com/".insteadOf https://github.com/; fi && \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
 
@@ -108,8 +112,6 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     python3 -m pip cache purge
 
 # Install _rust_tool_parser for the Rust frontend.
-ENV RUSTUP_DIST_SERVER=$RUSTUP_DIST_SERVER \
-    RUSTUP_UPDATE_ROOT=$RUSTUP_UPDATE_ROOT
 # When an internal RUSTUP_DIST_SERVER mirror is provided (CI builds), pre-install
 # rustup via the rustup-init.sh bootstrap from the mirror so build_rust.sh
 # doesn't reach the public https://sh.rustup.rs (unreachable from build
@@ -142,6 +144,8 @@ RUN if [ -n "$GIT_PROXY" ] || [ -n "$CRATES_IO_INDEX" ]; then \
     fi
 RUN cd /vllm-workspace/vllm && \
     export PROTOC_INCLUDE=/usr/include && \
+    if [ -n "${RUSTUP_DIST_SERVER}" ]; then export RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER}"; fi && \
+    if [ -n "${RUSTUP_UPDATE_ROOT}" ]; then export RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT}"; fi && \
     python3 -m pip install setuptools-rust && \
     ./build_rust.sh
 
@@ -196,6 +200,16 @@ RUN if [ "$BUILD_TYPE" = "daily" ]; then \
     else \
         echo "Building release version without daily packages"; \
     fi && rm -f /tmp/install_daily_deps.sh
+
+# Restore public package sources in the final image.
+# Only builds that used internal mirrors (CI) need this: their build-args
+# (PIP_INDEX_URL, GIT_PROXY, CRATES_IO_INDEX) point to cluster-internal hosts
+# that are unreachable from the published image. This step resets pip/cargo/git
+# to public defaults; the guard below skips it entirely for default builds.
+# The script ships with the repo and is already copied in by `COPY .` above.
+RUN if [ -n "$GIT_PROXY" ] || [ -n "$CRATES_IO_INDEX" ] || [ "$PIP_INDEX_URL" != "$PUBLIC_PIP_INDEX_URL" ]; then \
+        bash /vllm-workspace/vllm-ascend/.github/workflows/scripts/restore_public_sources.sh; \
+    fi
 
 # Set entrypoint and default command
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

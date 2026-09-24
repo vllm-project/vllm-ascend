@@ -89,9 +89,15 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is  # noqa: E402
+from vllm_ascend.utils import get_kv_cache_tensor_layers  # noqa: E402
 
+# Keep the freshly imported Mooncake modules active.  D2RH tests import the
+# shared connector before this module is collected; restoring that stale
+# module here would leave the test classes bound to one module object while
+# patch() resolves targets through another, so all mocks would silently miss.
 for _k, _v in _saved_modules.items():
+    if _k.startswith(f"{_kv_xfer}.kv_p2p"):
+        continue
     sys.modules[_k] = _v
 
 GET_META_MSG = b"get_meta_msg"
@@ -105,7 +111,7 @@ def make_mock_kv_caches() -> dict[str, Any]:
 
 def make_mock_kv_cache_tensor(size: int, layer_names: list[str]) -> types.SimpleNamespace:
     """Build the descriptor renamed by vLLM #51718 for the active lane."""
-    layer_field = "shared_by" if vllm_version_is("0.28.0") else "layers"
+    layer_field = "layers"
     return types.SimpleNamespace(size=size, **{layer_field: layer_names})
 
 
@@ -407,17 +413,13 @@ class TestMooncakeTransferGroups(unittest.TestCase):
             get_kv_cache_tensor_layers(tensor)[0]: tensor.size for tensor in allocated_config.kv_cache_tensors
         }
         self.assertEqual(allocated_config.num_blocks, num_blocks)
-        if vllm_version_is("0.28.0"):
-            self.assertEqual(allocated_sizes[main_layer], main_spec.page_size_bytes * num_blocks)
-            self.assertEqual(allocated_sizes[index_layer], index_spec.page_size_bytes * num_blocks)
-        else:
-            # vLLM #51718: on main every layer tensor in a KV cache group shares
-            # one allocation sized by the group's total bytes-per-block
-            # (UniformTypeKVCacheSpecs sums the per-layer page sizes), so each
-            # tensor.size is the sum of the two page sizes times num_blocks.
-            group_bytes_per_block = main_spec.page_size_bytes + index_spec.page_size_bytes
-            self.assertEqual(allocated_sizes[main_layer], group_bytes_per_block * num_blocks)
-            self.assertEqual(allocated_sizes[index_layer], group_bytes_per_block * num_blocks)
+        # vLLM #51718: on main every layer tensor in a KV cache group shares
+        # one allocation sized by the group's total bytes-per-block
+        # (UniformTypeKVCacheSpecs sums the per-layer page sizes), so each
+        # tensor.size is the sum of the two page sizes times num_blocks.
+        group_bytes_per_block = main_spec.page_size_bytes + index_spec.page_size_bytes
+        self.assertEqual(allocated_sizes[main_layer], group_bytes_per_block * num_blocks)
+        self.assertEqual(allocated_sizes[index_layer], group_bytes_per_block * num_blocks)
 
         kv_cache_config = MockKVCacheConfig(
             kv_cache_groups=[
@@ -1754,6 +1756,9 @@ class TestMainThreadLoop(unittest.TestCase):
 class MockVllmConfig:
     def __init__(self):
         self.model_config = MagicMock()
+        # vLLM main reads attention_config.hisparse_config in the KV cache
+        # config helpers; Ascend does not enable HiSparse.
+        self.attention_config = types.SimpleNamespace(indexer_kv_dtype="auto", hisparse_config=None)
         self.parallel_config = MagicMock()
         self.cache_config = MagicMock()
         self.kv_transfer_config = MagicMock()
@@ -2710,6 +2715,31 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         ptrs, lengths = worker._get_registered_kv_tensor_buffers({layer_name: logical_tensor})
 
         self.assertEqual(ptrs, [aligned_tensor.data_ptr()])
+        self.assertEqual(lengths, [tensor_size])
+
+    def test_registered_hybrid_buffers_deduplicate_shared_backing(self):
+        alignment = 2 * 1024 * 1024
+        tensor_size = 4 * alignment
+        raw_tensor = torch.empty(tensor_size + alignment, dtype=torch.uint8)
+        aligned_offset = (-raw_tensor.data_ptr()) % alignment
+        backing = raw_tensor[aligned_offset : aligned_offset + tensor_size]
+        layer_names = [
+            "model.layers.3.self_attn",
+            "model.layers.0.linear_attn",
+            "model.layers.1.linear_attn",
+            "model.layers.2.linear_attn",
+        ]
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_cache_config = types.SimpleNamespace(
+            kv_cache_tensors=[make_mock_kv_cache_tensor(tensor_size, [layer_name]) for layer_name in layer_names]
+        )
+
+        ptrs, lengths = worker._get_registered_kv_tensor_buffers(
+            {layer_name: backing[index * alignment :] for index, layer_name in enumerate(layer_names)}
+        )
+
+        self.assertEqual(ptrs, [backing.data_ptr()])
         self.assertEqual(lengths, [tensor_size])
 
     def test_registered_mtp_buffer_ignores_aligned_stale_group_padding(self):

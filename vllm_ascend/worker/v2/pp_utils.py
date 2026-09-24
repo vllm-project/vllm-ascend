@@ -11,14 +11,9 @@ from typing import TYPE_CHECKING, Protocol
 from unittest.mock import patch
 
 import torch
-import vllm
 import vllm.envs as vllm_envs
-from packaging.version import Version
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
-
-from vllm_ascend import envs
-from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -28,16 +23,13 @@ _PP_TRANSPORT_PREFIX = "pp_transport"
 
 
 def use_legacy_spec_pp() -> bool:
-    """True when the paired vLLM needs Ascend's legacy Spec+PP transport.
+    """Whether Ascend's legacy Spec+PP transport workaround is required.
 
-    This is the Spec+PP workaround for vLLM 0.28/0.29 only; vLLM 0.30+
-    ships the upstream PP sampled-token protocol natively and skips
-    every call site gated on this flag.  The entire legacy path (this
-    flag, patch_spec_pp.py, the loader bypasses) will be deleted once
-    the release trains move to 0.30+."""
-    version = Version(envs.VLLM_VERSION or vllm.__version__)
-    # Also recognize untagged 0.28 CPU builds via the existing version helper.
-    return version.release[:2] in ((0, 28), (0, 29)) or vllm_version_is("0.28.0")
+    The supported release (v0.30.0) and the pinned main commit share the
+    upstream sampled-token protocol, so the Ascend transport and loader
+    bypasses are no longer used.
+    """
+    return False
 
 
 class _PPAuxHiddenStateModel(Protocol):

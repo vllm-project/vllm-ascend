@@ -490,8 +490,14 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         self.assertFalse(call_kwargs["return_softmax_lse"])
 
     def test_prolog_v3_enables_packed_int8_kv_cache(self):
+        self._check_prolog_v3_enables_packed_kv_cache(AscendW8A8DynamicLinearMethod)
+
+    def test_prolog_v3_mxfp8_c8_uses_cann_with_k3_op_registered(self):
+        self._check_prolog_v3_enables_packed_kv_cache(AscendW8A8MXFP8DynamicLinearMethod)
+
+    def _check_prolog_v3_enables_packed_kv_cache(self, quant_type):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        impl._quant_type = AscendW8A8DynamicLinearMethod
+        impl._quant_type = quant_type
         impl.enable_sparse_sfa_c8 = True
         impl.has_indexer = True
         impl.sfa_qsfa_tile_size = 128
@@ -510,10 +516,25 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         impl.dequant_scale_w_dq = torch.empty(1)
         impl.dequant_scale_w_uq_qr = torch.empty(1)
         impl.dequant_scale_w_dkv_kr = torch.empty(1)
-        k_cache = torch.empty(4, 16, 1, get_sfa_qsfa_packed_head_dim(128, 16), dtype=torch.int8)
+        impl.weight_dq_scale = torch.ones(1, dtype=torch.uint8)
+        impl.weight_uq_qr_scale = torch.ones(1, dtype=torch.uint8)
+        impl.weight_dkv_kr_scale = torch.ones(1, dtype=torch.uint8)
+        is_mxfp8 = quant_type is AscendW8A8MXFP8DynamicLinearMethod
+        cache_dtype = torch.float8_e4m3fn if is_mxfp8 else torch.int8
+        k_cache = torch.empty(4, 16, 1, get_sfa_qsfa_packed_head_dim(128, 16), dtype=cache_dtype)
         dsa_k_cache = torch.empty(4, 16, 1, 128, dtype=torch.bfloat16)
 
         with (
+            patch(
+                "torch.ops._C_ascend.npu_mla_prolog_v3_k3",
+                create=True,
+                side_effect=AssertionError("C8 per-tile must use CANN's MLAPO v3"),
+            ),
+            patch(
+                "torch_npu.npu_dynamic_mx_quant",
+                create=True,
+                return_value=(torch.empty(2, 8, dtype=torch.float8_e4m3fn), torch.ones(2, 1, dtype=torch.uint8)),
+            ),
             patch(
                 "vllm_ascend.attention.sfa_v1.torch_npu.npu_dynamic_quant",
                 create=True,
@@ -534,6 +555,8 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
             )
 
         call_kwargs = mock_prolog.call_args.kwargs
+        mock_prolog.assert_called_once()
+        self.assertEqual(call_kwargs["weight_quant_mode"], 3 if is_mxfp8 else 2)
         self.assertIs(call_kwargs["kv_cache"], k_cache)
         self.assertIs(call_kwargs["kr_cache"], impl.sfa_qsfa_kr_cache_dummy)
         self.assertEqual(call_kwargs["kv_cache_quant_mode"], 3)
@@ -1181,7 +1204,7 @@ class TestAscendSFAImpl(TestBase):
                 with (
                     patch.object(sfa_v1, "wait_for_kv_layer_from_connector"),
                     patch.object(sfa_v1, "notify_kv_cache_written"),
-                    patch.object(sfa_v1, "record_attention_compute_start"),
+                    patch.object(sfa_v1, "attention_transfer_window"),
                     patch.object(sfa_v1, "maybe_save_kv_layer_to_connector"),
                 ):
                     self.assertIs(self.impl.forward("layer", hidden, (hidden,), metadata, output), output)

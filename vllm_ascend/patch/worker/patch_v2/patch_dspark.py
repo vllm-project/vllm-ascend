@@ -63,13 +63,13 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
     draft_model_config = speculative_config.draft_model_config
     inherits_target_quant = draft_model_config.model == vllm_config.model_config.model
     spec_pp_support = resolve_spec_pp_support(vllm_config)
-    # Legacy Spec+PP loader bypass (0.28/0.29 only); 0.30+ needs no patching.
+    # Legacy Spec+PP loader bypass, retained behind the release selector; the
+    # supported release uses the native protocol so this is currently inactive.
     bypass_pp_guard = spec_pp_support is not None and use_legacy_spec_pp()
     if bypass_pp_guard:
-        # The legacy loader binds these names at module import.
+        # Release binds get_pp_group globally and imports _should_share locally.
         original_eagle_should_share = eagle_utils._should_share
         original_get_pp_group = dspark_utils.get_pp_group
-        original_dspark_should_share = dspark_utils._should_share
         single_rank_pp_group = SimpleNamespace(world_size=1)
         dspark_utils.get_pp_group = lambda: single_rank_pp_group
 
@@ -83,7 +83,6 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
             return original_eagle_should_share(eagle, flag, draft, target)
 
         eagle_utils._should_share = should_share
-        dspark_utils._should_share = should_share
     if inherits_target_quant:
         model_utils.get_draft_quant_config = lambda _vllm_config: vllm_config.quant_config
     try:
@@ -100,7 +99,6 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         if bypass_pp_guard:
             eagle_utils._should_share = original_eagle_should_share
             dspark_utils.get_pp_group = original_get_pp_group
-            dspark_utils._should_share = original_dspark_should_share
 
 
 # The speculator binds ``load_dspark_model`` by name at import time, so both

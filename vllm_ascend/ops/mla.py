@@ -26,13 +26,13 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.mla_v1 import AscendMLAAttention
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 
 
@@ -173,8 +173,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.v_head_dim = v_head_dim
         self.prefix = prefix
         # Goes through the property setter above; mla_attn is not created yet,
-        # so only the backing value is stored here. MLAAttention below receives
-        # the same value and initializes the impl consistently.
+        # so only the backing value is stored here. AscendMLAAttention below
+        # receives the same value and initializes the impl consistently.
         self.skip_topk = skip_topk
         # This is an upstream CUDA indexer hint. Ascend accepts it to preserve
         # constructor compatibility, but its indexer does not consume it.
@@ -186,7 +186,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             ascend_indexer = IndexerWrapper(mla_modules.indexer, self.qk_rope_head_dim)
         else:
             ascend_indexer = None
-        self.mla_attn = MLAAttention(
+        # AscendMLAAttention opts into upstream's PCP+DCP guard by setting the
+        # ``supports_pcp_dcp`` ClassVar on the Ascend backend layer (see
+        # vllm_ascend.attention.mla_v1) instead of mutating the shared upstream
+        # MLAAttention class.
+        self.mla_attn = AscendMLAAttention(
             num_heads=num_heads,
             scale=scale,
             qk_nope_head_dim=self.qk_nope_head_dim,
@@ -228,8 +232,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 
             if not isinstance(self.mla_attn.impl, AscendSFAImpl):
+                # Both supported vLLM versions dispatch to the impl here.
                 original_process_weights(act_dtype)
-            self.mla_attn.impl.process_weights_after_loading(act_dtype)
+            else:
+                # SFA disposes kv_b_proj, so bypass upstream's dense packing.
+                self.mla_attn.impl.process_weights_after_loading(act_dtype)
 
         self.mla_attn.process_weights_after_loading = wrapped_process_weights
 
