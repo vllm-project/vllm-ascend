@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+
 from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 
 ACCURACY_CASES = [
