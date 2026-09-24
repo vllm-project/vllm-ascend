@@ -22,7 +22,7 @@ Data plane (see zsc-sfa-kv-offload-merge-plan.md):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, NamedTuple, TypeVar
+from typing import Any, NamedTuple, TypeVar, cast
 
 import numpy as np
 import torch
@@ -389,6 +389,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
                 ("copy_lengths", metadata.copy_sfa_tail_lengths),
             ):
                 buffer = getattr(self, "copy_sfa_" + name)[step, :descriptor_count]
+                assert values is not None
                 buffer.copy_((values[None] * self.copy_sfa_token_bytes).reshape(-1))
                 setattr(metadata, "copy_sfa_" + name, buffer)
             metadata.copy_sfa_copy_count = upload("copy_count", [descriptor_count])
@@ -432,7 +433,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         **kwargs: Any,
     ) -> AscendSFAOffloadMetadata:
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
-        return self._populate_offload_metadata(metadata, common_attn_metadata)
+        return self._populate_offload_metadata(cast(AscendSFAOffloadMetadata, metadata), common_attn_metadata)
 
     def build_for_drafting(
         self,
@@ -445,7 +446,9 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
             draft_index,
             **kwargs,
         )
-        return self._populate_offload_metadata(metadata, common_attn_metadata, draft_index)
+        return self._populate_offload_metadata(
+            cast(AscendSFAOffloadMetadata, metadata), common_attn_metadata, draft_index
+        )
 
 
 class AscendSFAKVOffloadImpl(AscendSFAImpl):
@@ -492,7 +495,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         self.use_fused_overlap = offload_cfg.use_fused_overlap
         self.use_fused_copy_sfa = offload_cfg.use_fused_copy_sfa
         self.lim_indexer_owner = self
-        self._copy_sfa_metadata = None
+        self._copy_sfa_metadata: AscendSFAOffloadMetadata | None = None
         if self.use_fused_copy_sfa:
             if self.enable_sparse_li_c8:
                 raise NotImplementedError("Fused Copy-SFA offload does not support sparse LI C8 serving yet")
@@ -641,9 +644,10 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         layer_name,
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: M,
+        attn_metadata: AscendSFAMetadata,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        attn_metadata = cast(AscendSFAOffloadMetadata, attn_metadata)
         self._current_layer_name = layer_name
         self._copy_sfa_metadata = attn_metadata
         if self.use_fused_copy_sfa and attn_metadata is not None and not attn_metadata.fused_copy_sfa_enabled:
@@ -663,6 +667,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
 
     def _lim_select(self, query, weights, indexer, indexer_metadata):
         metadata = self._copy_sfa_metadata
+        assert metadata is not None and metadata.copy_sfa_pool_entries is not None
         count = metadata.copy_sfa_pool_entries.numel()
         tokens = metadata.num_decode_tokens
         request_state = metadata.lim_request_state
@@ -675,6 +680,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             self.lim_query_scale = torch.empty(
                 (self.lim_topk_src.shape[0], query.shape[1]), dtype=torch.float32, device=query.device
             )
+        assert self.lim_query_scale is not None
         torch.ops._C_ascend.npu_fused_lightning_indexer_manage(
             weights[:tokens].contiguous(),
             self.lim_query_scale[:tokens],
@@ -815,8 +821,9 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         sin: torch.Tensor,
         kv_cache: tuple,
         slots: torch.Tensor,
-        attn_metadata: M,
+        attn_metadata: AscendSFAMetadata,
     ):
+        attn_metadata = cast(AscendSFAOffloadMetadata, attn_metadata)
         if self._is_decode_only(attn_metadata):
             k_nope, k_pe = self._compute_kv_only(kv_no_split, cos, sin)
             manager = get_sparse_kv_offload_manager()
@@ -825,6 +832,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             if attn_metadata.fused_copy_sfa_enabled:
                 layer_id = manager._get_offload_layer_id(layer_name)
                 device_slots = attn_metadata.copy_sfa_device_slots
+                assert device_slots is not None
                 for cache_tensor, value in (
                     (manager.topk_buffers_k[layer_id], k_nope),
                     (manager.topk_buffers_v[layer_id], k_pe),

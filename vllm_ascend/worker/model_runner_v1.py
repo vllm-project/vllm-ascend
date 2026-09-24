@@ -4523,7 +4523,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.sparse_kv_offload_enabled and self.sparse_kv_offload_config.use_fused_copy_sfa:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 
-            owners = {}
+            owners: dict[int, AscendSFAKVOffloadImpl] = {}
             for layer in self.compilation_config.static_forward_context.values():
                 impl = getattr(layer, "impl", None)
                 if not isinstance(impl, AscendSFAKVOffloadImpl):

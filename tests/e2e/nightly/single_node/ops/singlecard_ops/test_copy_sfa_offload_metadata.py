@@ -434,10 +434,10 @@ def test_pool_ownership_survives_compaction_and_dummy_run():
 
     slots = np.zeros(4, dtype=np.int32)
     generations = np.zeros(4, dtype=np.int64)
-    request_slots = {}
+    request_slots: dict[str, int] = {}
     generation = 0
-    slot_generations = {}
-    last_prefixes = {}
+    slot_generations: dict[int, int] = {}
+    last_prefixes: dict[int, int] = {}
 
     def prepare(req_ids, *, dummy=False):
         nonlocal request_slots, generation
