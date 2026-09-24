@@ -959,6 +959,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 runner.model_config = config.model_config
                 runner.use_sparse = packed
                 runner.c8_k_cache_dtype = torch.int8
+                runner.c8_cache_dtype = torch.int8
                 runner._kv_cache_spec_attn_group_iterator = lambda specs=specs, layers=layers: [
                     SimpleNamespace(kv_cache_spec=spec, layer_names=[name], backend=layers[name].get_attn_backend())
                     for name, spec in specs.items()
@@ -1982,6 +1983,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.use_sparse = True
         runner.block_size = 16
         runner.c8_k_cache_dtype = torch.int8
+        runner.c8_cache_dtype = torch.int8
         runner.c8_k_scale_cache_dtype = torch.float16
         runner._get_attention_kv_cache_dims = lambda _layer_name, _spec: (512, 64)
         runner.sparse_kv_offload_enabled = False
@@ -2110,6 +2112,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.block_size = 16
         runner.kv_cache_dtype = torch.bfloat16
         runner.c8_k_cache_dtype = torch.float8_e4m3fn
+        runner.c8_cache_dtype = torch.float8_e4m3fn
         runner.c8_k_scale_cache_dtype = torch.float32
         runner.shared_kv_cache_layers = {}
         runner.ascend_config = MagicMock()
