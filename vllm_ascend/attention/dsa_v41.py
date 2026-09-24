@@ -1111,6 +1111,16 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
         context = vllm_config.compilation_config.static_forward_context
         context[prefix] = self
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...]) -> None:
+        """Bind one allocated slot view, keeping the ``kv_cache[0]`` contract.
+
+        The MRV2 reshape delivers the raw per-layer allocation -- a tensor, or
+        a (kv, scale) tuple for the indexer -- while every V4.1 consumer
+        (SWA/long-KV/indexer/compressor state) indexes ``kv_cache[0]``, the
+        model_runner_v1 binding convention.
+        """
+        self.kv_cache = [kv_cache]
+
     def get_kv_cache_spec(self, vllm_config):
         return self.spec
 
