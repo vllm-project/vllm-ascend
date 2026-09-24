@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Engram projection and gate for the rotated Ascend checkpoint."""
+"""Engram projection and gate for BF16 and rotated Ascend checkpoints."""
 
 import torch
 from torch import nn
@@ -9,7 +9,7 @@ from .common import engram_gate
 
 
 class AscendEngram(nn.Module):
-    """Consume rows prepared by the v1 runner using the existing rotated-checkpoint gate."""
+    """Consume rows prepared by the v1 runner in the checkpoint residual basis."""
 
     def __init__(self, config) -> None:
         super().__init__()
@@ -30,7 +30,7 @@ class AscendEngram(nn.Module):
         hidden_states: torch.Tensor,
         rows: torch.Tensor,
         token_mask: torch.Tensor,
-        rotation: torch.Tensor,
+        rotation: torch.Tensor | None,
     ) -> torch.Tensor:
         kv = self.wkv(rows)
         key, value = kv.split([self.hc_mult * self.dim, self.dim], -1)
