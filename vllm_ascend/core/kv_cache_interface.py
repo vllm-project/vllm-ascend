@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from typing import Any
 
 import torch
 from typing_extensions import Self
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, VllmConfig
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
@@ -63,6 +66,100 @@ def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
     return bool(getattr(kv_cache_spec, "prefix_cacheable", True)) and bool(
         getattr(kv_cache_spec, "participates_in_prefix_caching", True)
     )
+
+
+def declared_kwarg(owner: type, name: str, value: Any) -> dict[str, Any]:
+    """Spell one optional field out for a constructor that declares it.
+
+    Used for the fields upstream adds to the sliding-window specs and their
+    caches over time -- ``extra_retained_tokens`` on the spec, ``bounded_replay``
+    on both the spec and the SWA cache (vLLM #56227). Naming such a keyword
+    unconditionally is a ``TypeError`` on a lane that does not have it, and this
+    repository supports two: main, which grows the fields, and the release tag,
+    which never does. Probing the owner keeps that decision in one place.
+    """
+    return {name: value} if name in inspect.signature(owner).parameters else {}
+
+
+# The architectures bounded replay was written for. Upstream wires the feature
+# into ``vllm/models/deepseek_v41/`` alone -- the DeepSeek-V4 tree never reads
+# the switch -- so the architecture name is the honest test for "this model may
+# replay". Both of this project's spellings for the target are listed: missing
+# the one a checkpoint declares is a switch that can never be turned on.
+#
+# The DSpark draft is deliberately left out. Its SWA cache is a different class
+# (``DeepseekV41DSparkSWACache``) that does not carry the field, so a draft
+# checkpoint would pass a gate that then replays nothing.
+BOUNDED_REPLAY_ARCHITECTURES = frozenset(
+    {
+        "DeepseekV41ForCausalLM",  # this repository's registry key
+        "DeepseekV41ForConditionalGeneration",  # the VL spelling
+    }
+)
+
+
+def supports_bounded_replay(model_config: Any) -> bool:
+    """Whether this model is one the feature was written for."""
+    architectures = getattr(model_config, "architectures", None) or ()
+    return any(architecture in BOUNDED_REPLAY_ARCHITECTURES for architecture in architectures)
+
+
+def resolve_bounded_replay(vllm_config: VllmConfig, cache_config: CacheConfig | None) -> bool:
+    """Whether a sliding-window layer may declare a replay window.
+
+    The switch and both guards are upstream's (vLLM #56227), re-decided here
+    because the layer upstream applies them in -- its own SWA attention layer --
+    is the one Ascend replaces. The Ascend scheduler conditions, the ones that
+    cannot rewind a prefix hit at all, are decided in ``platform.py`` before any
+    layer exists: they turn the switch itself off, so this reads the result.
+
+    It reads that switch and nothing else, deliberately: a V4.1 model that does
+    not turn it off in its cache config replays.
+
+    There is no capability guard beside them. Keeping a replayed window off the
+    blocks below ``replay_start`` -- whose KV the sliding-window group does not
+    hold, those positions having been retired to the null block -- is the
+    operator's job now: band mode reads ``ori_topk_length`` as the per-token
+    visible length and floors the window's left edge with it. See
+    ``build_replay_swa_visible_lens`` in ``attention/dsa_v41.py`` for the read
+    side and ``npu_sparse_flash_mla``'s band path for the clamp.
+    """
+    if not supports_bounded_replay(getattr(vllm_config, "model_config", None)):
+        # Upstream wires the feature into the DeepSeek-V4.1 tree only -- the V4
+        # tree's attention layer never reads the switch -- so a V4 model is
+        # silent here too: the feature is not part of this model, and no user
+        # can have turned it on for it.
+        return False
+    if not getattr(cache_config, "swa_bounded_replay", False):
+        # Absent from the release lane, where the feature does not exist at all:
+        # no switch to turn on, no spec field for the flag to reach, so there is
+        # nothing to warn about. Probed rather than read, so the lane does not
+        # have to be named here.
+        return False
+    if getattr(vllm_config, "use_v2_model_runner", False):
+        # Upstream's guard, for the opposite reason: upstream keeps the switch
+        # off because only its V2 runner skips the paged-KV writes of replayed
+        # tokens, while on Ascend only the V1 runner *pads* them. Under V2
+        # nothing would, and the replayed positions would be rewritten in blocks
+        # still shared with every other request that hit the same prefix.
+        logger.warning_once(
+            "SWA bounded replay needs model runner V1 on Ascend (only it pads the replayed slots); "
+            "the sliding-window cache takes part in prefix caching instead."
+        )
+        return False
+    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+        # Upstream's condition and wording: the PAD pass walks the batch the
+        # rank was handed, which under PCP is not the batch the scheduler
+        # rewound. The runner guard above already covers it today -- Ascend
+        # rejects PCP on the V1 runner at startup -- but for a different reason,
+        # so this has to be stated separately for the day that is lifted.
+        logger.warning_once(
+            "SWA bounded replay is off under prefill context parallelism (the replayed tokens' slot "
+            "padding knows the rank-local batch only); the sliding-window cache takes part in prefix "
+            "caching instead."
+        )
+        return False
+    return True
 
 
 def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
@@ -263,16 +360,32 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         compress_ratio_set = set(spec.compress_ratio for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
+        # ``extra_retained_tokens`` belongs to ``SlidingWindowSpec`` and
+        # ``bounded_replay`` arrives with vLLM #56227. This override builds the
+        # merged spec from scratch rather than through the parent's ``merge``,
+        # so it has to carry both across itself, and dropping either is silent:
+        # the first leaves a multi-layer group with a narrower window than its
+        # layers asked for, the second leaves it replaying nothing. ``None`` is
+        # what a lane without the field reads back, and is not carried.
+        extra_retained_set = set(getattr(spec, "extra_retained_tokens", None) for spec in specs)
+        bounded_replay_set = set(getattr(spec, "bounded_replay", None) for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(compress_ratio_set) == 1
             and len(model_version_set) == 1
             and len(sliding_window_set) == 1
+            and len(extra_retained_set) == 1
+            and len(bounded_replay_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, compress ratio, model version and sliding "
-            "window size."
+            "quantization method, compress ratio, model version, sliding "
+            "window size, retained token count and replay policy."
         )
+        carried_kwargs: dict[str, Any] = {}
+        if None not in bounded_replay_set:
+            carried_kwargs.update(declared_kwarg(cls, "bounded_replay", bounded_replay_set.pop()))
+        if None not in extra_retained_set:
+            carried_kwargs.update(declared_kwarg(cls, "extra_retained_tokens", extra_retained_set.pop()))
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -283,6 +396,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            **carried_kwargs,
         )
 
 
