@@ -9,8 +9,8 @@ by decode slot mapping; padded negative slots are skipped.
 import torch
 
 try:
-    import triton
-    import triton.language as tl
+    import triton  # type: ignore[import-untyped]
+    import triton.language as tl  # type: ignore[import-untyped]
 except ImportError:
     triton = None
     tl = None

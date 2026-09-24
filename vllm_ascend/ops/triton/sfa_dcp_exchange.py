@@ -7,8 +7,8 @@ import torch.distributed as dist
 from vllm_ascend.ops.triton.sfa_dcp_merge import fused_merge
 
 try:
-    import triton
-    import triton.language as tl
+    import triton  # type: ignore[import-untyped]
+    import triton.language as tl  # type: ignore[import-untyped]
 except ImportError:
     triton = None
     tl = None

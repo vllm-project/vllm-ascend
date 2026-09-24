@@ -8,9 +8,9 @@ import math
 import torch
 
 try:
-    import triton
-    import triton.language as tl
-    from triton.language.extra.cann import extension
+    import triton  # type: ignore[import-untyped]
+    import triton.language as tl  # type: ignore[import-untyped]
+    from triton.language.extra.cann import extension  # type: ignore[import-untyped]
 
     from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 

@@ -4,8 +4,8 @@
 import torch
 
 try:
-    import triton
-    import triton.language as tl
+    import triton  # type: ignore[import-untyped]
+    import triton.language as tl  # type: ignore[import-untyped]
 
     from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 except ImportError:
