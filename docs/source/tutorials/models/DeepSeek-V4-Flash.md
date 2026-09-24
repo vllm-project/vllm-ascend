@@ -22,7 +22,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 ### 3.1 Model Weight
 
 - `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp)
-- For Ascend 950DT servers, use the original [`DeepSeek-V4-Flash-0731`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) weights released by DeepSeek on Hugging Face. The Attention weights use MXFP8, while the MoE weights use MXFP4 with 4-bit weights and 8-bit activation computation (W4A8). No Ascend-specific quantization or weight conversion is required. Both the mixed-deployment example in Section 5.1 and the intra-server 1P1D example in Section 5.2.3 use one Ascend 950DT server (96GB × 8). The mixed deployment uses four NPUs, while the 1P1D deployment assigns four NPUs to Prefill and four NPUs to Decode.
+- For Ascend 950DT servers, use the original [`DeepSeek-V4-Flash-0731`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) weights released by DeepSeek on Hugging Face. The Attention weights use MXFP8, while the MoE weights use MXFP4 with 4-bit weights and 8-bit activation computation (W4A8). No Ascend-specific quantization or weight conversion is required. Both the mixed-deployment example in Section 5.1 and the intra-server 1P1D example in Section 5.2.3 use two Ascend 950DT servers (96GB × 8). The mixed deployment uses four NPUs, while the 1P1D deployment assigns one server to Prefill and one server to Decode.
 
 - DeepSeek released new DeepSeek-V4-Flash-DSpark weights on July 31, 2026. Download the quantized `DeepSeek-V4-Flash-0731-w8a8` weight from [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8).
 
@@ -387,7 +387,7 @@ Key Parameter Descriptions:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--block-size` sets the KV cache block size. To enable the experimental 4k prefix cache hit support, change it from `128` to `32`.
 - `--quantization ascend` enables Ascend quantization for the W8A8 model used in the A2 and A3 configurations. The original DeepSeek-V4-Flash-0731 weights used on Ascend 950DT do not require this option.
-- `--speculative-config` configures speculative decoding to accelerate inference. Use `mtp` for Multi-Token Prediction (MTP), `deepseek_mtp` for the native Ascend 950DT mixed-deployment example, and `dspark` for DSpark models. When using DSpark, `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`).
+- `--speculative-config` configures speculative decoding to accelerate inference. Use `mtp` for Multi-Token Prediction (MTP), and `dspark` for DSpark models. When using DSpark, `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`).
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
 - `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, `enable_dsa_cp` enables DSA context parallelism, `enable_shared_expert_dp` enables data parallelism for shared experts, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput.
 - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`: Controls the retention interval, in tokens, for prefix-cache checkpoints of hybrid attention layers. It is applicable to DeepSeek-V4 and takes effect only when prefix caching is enabled. Under KV-cache pressure, it can improve the effective prefix-cache hit rate for reusable long prefixes. The value must be a non-negative multiple of `--block-size`; for DeepSeek-V4-Flash, 128 times `--block-size` is recommended. Set it to `4096` when `--block-size` is `32`, or `16384` when `--block-size` is `128`.
@@ -1130,7 +1130,7 @@ Before you start, please:
 
 #### 5.2.3 Ascend 950DT Series PD Separation Deployment
 
-This section shows an 1P1D deployment on two Ascend 950DT server (96GB × 8). The Prefill instance uses `DP1/TP8` with dsa_cp enabled, and the Decode instance uses `DP8/TP1`. You can add Prefill or Decode instances as needed based on the workload's input/output characteristics and service requirements. An expert-parallel size (`ep_size`) of 8 is recommended for each instance. The `prefill` and `decode` parallel settings in `--kv-transfer-config` must match the actual engine settings after scaling.
+This section shows an 1P1D deployment on two Ascend 950DT servers (96GB × 8). The Prefill instance uses `DP1/TP8` with dsa_cp enabled, and the Decode instance uses `DP8/TP1`. You can add Prefill or Decode instances as needed based on the workload's input/output characteristics and service requirements. An expert-parallel size (`ep_size`) of 8 is recommended for each instance. The `prefill` and `decode` parallel settings in `--kv-transfer-config` must match the actual engine settings after scaling.
 
 Before starting the service, mount `/etc/hixlep/` into the container and replace `nic_name`, `local_ip`, and the model path with values from your environment.
 
@@ -1370,32 +1370,6 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ### 9.1 Recommended Configurations
 
-> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
-
-#### Table 1: Scenario Overview
-
-> `*Total NPUs` indicates the total number of NPUs used across all nodes.
-
-|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
-|--------|---------------|-----------|---------------|-------------------|
-|High Throughput|Single-Node Mixed|16 (A3)|DeepSeek-V4-Flash-w8a8-mtp|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|High Throughput / Long Context (1M)|Single-Node Mixed|4 (Ascend 950DT)|DeepSeek-V4-Flash-0731|Use dp4 tp1 with expert parallelism|
-|High Throughput|1P1D deployment|32 (A3)|DeepSeek-V4-Flash-w8a8-mtp|dp16 tp1 on both P and D nodes; balanced latency and throughput|
-|Long Context (1M)|Single-Node (A3)|8 (A3)|DeepSeek-V4-Flash-w8a8-mtp|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|Long Context (1M)|1P1D deployment|32 (A3)|DeepSeek-V4-Flash-w8a8-mtp|dp16 tp1 on both P and D nodes; balanced latency and throughput|
-|Long Context (1M)|1P1D deployment|8 (Ascend 950DT)|DeepSeek-V4-Flash-0731|Split one Ascend 950DT server into P and D groups; both groups use dp4 tp1|
-
-#### Table 2: Detailed Node Configuration
-
-|Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max Model Len|MTP Speculation Num|
-|--------|-------------|-----|--|--|------------|----------------------|--------------|--------------------|
-|High Throughput (A3)|Server / Single Machine|8|4|4|64|10240|1048576|1|
-|Single-Node Mixed (Ascend 950DT)|Server / Single Machine|4|1|4|64|4096|1048576|1|
-|Long Context (1M, A3)|Server / Single Machine|8|4|4|64|10240|1048576|1|
-|PD Separation (A3)|Server-P Node|8|4|4|16|8192|1048576|1|
-|PD Separation (A3)|Server-D Node|8|1|16|60|120|1048576|1|
-|PD Separation (Ascend 950DT)|Prefill Group|4|1|4|8|3072|1048576|1|
-|PD Separation (Ascend 950DT)|Decode Group|4|1|4|56|256|1048576|1|
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
 ### 9.2 Tuning Guidelines
