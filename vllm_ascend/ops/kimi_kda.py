@@ -26,6 +26,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend import envs
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -181,6 +182,12 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             )(f"{prefix}.in_proj_qkvgfab")
         )
         super().__init__(config, vllm_config, prefix)
+        # Upper bound of per-request query length in spec-decode decode steps,
+        # consumed by CausalConv1dV2's maxQueryLen attribute (1 when spec
+        # decoding is disabled).
+        self._conv_max_query_len = 1 + (
+            getattr(getattr(vllm_config, "speculative_config", None), "num_speculative_tokens", 0) or 0
+        )
         self.uses_mixed_projection = uses_mixed_projection
         if uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
@@ -377,8 +384,32 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         *,
         run_mode: int,
         num_accepted_tokens: torch.Tensor | None = None,
+        max_query_len: int = 1,
     ) -> torch.Tensor:
         output = torch.empty_like(mixed_qkv)
+        # CausalConv1dV2 fast path (aclnnCausalConv1dV2, ported from PR #16468):
+        # dim-last layout, host-metadata friendly, spec-decode aware.
+        if envs.VLLM_ASCEND_ENABLE_CAUSAL_CONV1D_V2:
+            initial = None
+            if initial_state_mode is not None:
+                initial = (
+                    initial_state_mode if initial_state_mode.dtype == torch.bool else initial_state_mode.to(torch.int32)
+                )
+            return torch.ops._C_ascend.npu_causal_conv1d_custom(
+                output,
+                mixed_qkv,
+                conv_weights_t,
+                conv_state,
+                None,
+                query_start_loc.to(torch.int32).contiguous(),
+                cache_indices.to(torch.int32),
+                initial,
+                None if num_accepted_tokens is None else num_accepted_tokens.to(torch.int32).contiguous(),
+                1,
+                PAD_SLOT_ID,
+                run_mode,
+                mixed_qkv.shape[0] if run_mode == 0 else max_query_len,
+            )
         # Consume the operator's declared output alias. Returning ``output``
         # independently would let graph functionalization treat the custom-op
         # result as dead and expose the uninitialized allocation instead.
@@ -567,6 +598,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 None,
                 run_mode=1,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
+                max_query_len=self._conv_max_query_len,
             )
             q_spec, k_spec, v_spec = (
                 rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim) for x in mixed_spec.chunk(3, dim=-1)

@@ -166,6 +166,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "transpose_kv_cache_by_block"
         "copy_and_expand_eagle_inputs"
         "causal_conv1d"
+        "causal_conv1d_v2"
         "lightning_indexer_quant"
         "compressor"
         "compressor_metadata"
