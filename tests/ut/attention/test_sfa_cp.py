@@ -32,6 +32,7 @@ from vllm_ascend.attention.sfa_v1 import (
     PreprocessType,
     SFAForwardContext,
 )
+from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.weight_switch import (
     WeightSwitchConfig,
     WeightSwitchGatherSpec,
@@ -437,7 +438,7 @@ def test_sfa_pcp_dcp_only_overrides_main_cache_slot_mapping() -> None:
 
 def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
-    attn_metadata = SimpleNamespace(num_decode_tokens=1)
+    attn_metadata = SimpleNamespace(num_decode_tokens=1, num_prefills=1)
     kv_no_split = torch.arange(6, dtype=torch.float32).view(2, 3)
     cos = torch.arange(2, dtype=torch.float32).view(2, 1)
     sin = cos + 10
@@ -949,3 +950,178 @@ def test_sfa_dcp_slot_mapping_matches_parallel_layout(impl_cls, num_prefills, nu
     else:
         assert result.tolist() == [3200, -1]
         assert result.data_ptr() == full_slots.data_ptr()
+
+
+@pytest.mark.parametrize("is_kv_consumer,sfa_c8", [(False, False), (True, True)])
+def test_sfa_pcp_keeps_prolog_v3_enabled(is_kv_consumer, sfa_c8):
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    quant_cls = AscendW8A8DynamicLinearMethod
+    impl.fused_qkv_a_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=quant_cls.__new__(quant_cls)))
+    impl.q_proj = SimpleNamespace(_chunk_size=0)
+    impl.q_a_layernorm = object()
+    impl.kv_a_layernorm = object()
+    impl.qk_rope_head_dim = 64
+    impl.is_kv_consumer = is_kv_consumer
+    impl.enable_sparse_sfa_c8 = sfa_c8
+    impl.enable_mlapo = False
+    with patch.object(impl, "_try_enable_type", return_value=True) as prepare_weights:
+        assert impl._resolve_preprocess_type(torch.bfloat16) == PreprocessType.PROLOG_V3
+    prepare_weights.assert_called_once_with(PreprocessType.PROLOG_V3, torch.bfloat16)
+
+
+@pytest.mark.parametrize(
+    "cache_dtype,pcp_size,rank,num_decode_tokens",
+    [
+        (torch.bfloat16, 2, 0, 0),
+        (torch.bfloat16, 4, 3, 2),
+        (torch.bfloat16, 2, 1, 4),
+        (torch.int8, 2, 0, 0),
+        (torch.int8, 2, 1, 2),
+        (torch.float8_e4m3fn, 2, 1, 2),
+        (torch.int8, 2, 0, 4),
+    ],
+)
+def test_sfa_pcp_prolog_gathers_only_prefill_kv(cache_dtype, pcp_size, rank, num_decode_tokens):
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    c8 = impl.enable_sparse_sfa_c8 = cache_dtype != torch.bfloat16
+    num_tokens, width = 4, 656 if c8 else 5
+    cache = (
+        (torch.empty((2, 8, 1, width), dtype=cache_dtype), torch.empty((2, 8, 1, 128)))
+        if c8
+        else (torch.empty((2, 8, 1, 3)), torch.empty((2, 8, 1, 2)))
+    )
+    hidden = torch.zeros((num_tokens, 1))
+    slots = torch.stack([torch.arange(num_tokens) + i * num_tokens for i in range(pcp_size)])
+    slots[:, :num_decode_tokens] = torch.arange(num_decode_tokens)
+    rows = num_tokens - num_decode_tokens
+    if rows:
+        slots[:, -1] = -1
+    dtype = torch.int8 if c8 else cache[0].dtype
+    gathered = (torch.arange(pcp_size * rows * width) % 256 - 128).to(dtype).view(-1, width)
+    packed = gathered[rank * rows : (rank + 1) * rows]
+    group = SimpleNamespace(world_size=pcp_size, rank_in_group=rank, all_gather=Mock(return_value=gathered))
+    # Returning this exact tuple also preserves local Q and quantized Q scales.
+    output = (hidden, hidden + 1, hidden + 2, (hidden + 3, hidden + 4))
+    with (
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group", return_value=group),
+        patch.object(AscendSFAImpl, "_sfa_preprocess_prolog_v3", return_value=output) as prolog,
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.copy_pcp_kv_cache", return_value=packed) as read,
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.reshape_and_cache") as write,
+    ):
+        result = impl._sfa_preprocess_prolog_v3(
+            hidden,
+            cache,
+            hidden,
+            hidden,
+            slots.flatten(),
+            attn_metadata=SimpleNamespace(num_decode_tokens=num_decode_tokens, num_prefills=int(rows > 0)),
+        )
+    assert result is output
+    assert prolog.call_args.args[0] is hidden
+    torch.testing.assert_close(prolog.call_args.args[4], slots[rank])
+    if not rows:
+        read.assert_not_called()
+        group.all_gather.assert_not_called()
+        write.assert_not_called()
+        return
+    read.assert_called_once()
+    main_cache, local_slots = read.call_args.args  # No custom-kernel write call.
+    assert len(main_cache) == (1 if c8 else 2)
+    assert main_cache[0] is cache[0]
+    torch.testing.assert_close(local_slots, slots[rank, num_decode_tokens:])
+    group.all_gather.assert_called_once_with(packed, dim=0)
+    write.assert_called_once()
+    args = write.call_args.kwargs
+    torch.testing.assert_close(args["slot_mapping"], slots[:, num_decode_tokens:].flatten())
+    if c8:
+        assert args["key"] is args["value"] and args["key_cache"] is args["value_cache"]
+        assert args["key_cache"].dtype == torch.int8
+        assert args["key_cache"].data_ptr() == cache[0].data_ptr()
+        torch.testing.assert_close(args["key"], gathered.unsqueeze(1), rtol=0, atol=0)
+    else:
+        assert args["key_cache"] is cache[0] and args["value_cache"] is cache[1]
+        torch.testing.assert_close(args["key"], gathered[:, :3].unsqueeze(1))
+        torch.testing.assert_close(args["value"], gathered[:, 3:].unsqueeze(1))
+
+
+@pytest.mark.parametrize("use_pcp", [False, True])
+@pytest.mark.parametrize(
+    "query_lens,flags,actual,threshold,capture,expected_without,expected_with",
+    [
+        ([1], [True], 1, 1, False, (1, 0, 1), (0, 1, 0)),
+        ([1, 1, 1], [False, True, True], 3, 1, False, (3, 0, 3), (1, 2, 1)),
+        ([1, 8], [False, True], 9, 1, False, (1, 1, 1), (1, 1, 1)),
+        ([1, 1, 1, 1], [False, False], 2, 1, True, (4, 0, 2), (4, 0, 2)),
+        ([4, 4, 4, 4], [False, False], 8, 4, True, (4, 0, 8), (4, 0, 8)),
+        ([1, 2, 0], [False, True], 3, 1, False, (1, 2, 1), (1, 2, 1)),
+        ([], [], 0, 1, False, (0, 0, 0), (0, 0, 0)),
+    ],
+)
+def test_sfa_split_counts_with_and_without_pcp(
+    use_pcp, query_lens, flags, actual, threshold, capture, expected_without, expected_with
+):
+    builder = AscendSFAMetadataBuilder.__new__(AscendSFAMetadataBuilder)
+    builder.speculative_config = None
+    builder.use_pcp = use_pcp
+    builder.decode_threshold = threshold
+    builder.nope = False
+    builder.kernel_block_size = 128
+    builder.metadata_cls = AscendSFAMetadata
+    builder.model_config = SimpleNamespace(get_head_size=lambda: 64)
+    builder.attn_mask_builder = SimpleNamespace(get_attention_mask=lambda *_: None)
+    offsets = torch.tensor([0] + list(torch.tensor(query_lens).cumsum(0).tolist()), dtype=torch.int32)
+    total, n = sum(query_lens), len(query_lens)
+    seqs = torch.full((n,), 100, dtype=torch.int32)
+    common = SimpleNamespace(
+        context_parallel_metadata=None,
+        num_reqs=n,
+        num_actual_tokens=actual,
+        num_input_tokens=total,
+        block_table_tensor=torch.zeros((n, 1), dtype=torch.int32),
+        slot_mapping=torch.arange(total),
+        positions=torch.arange(total),
+        query_start_loc=offsets,
+        query_start_loc_cpu=offsets,
+        seq_lens=seqs,
+        _seq_lens_cpu=seqs,
+        seq_lens_cpu=seqs,
+        causal=True,
+        max_query_len=max(query_lens, default=0),
+        max_seq_len=100,
+        decode_token_per_req=threshold,
+        is_prefilling=torch.tensor(flags, dtype=torch.bool),
+        attn_state=AscendAttentionState.DecodeOnly if capture else AscendAttentionState.ChunkedPrefill,
+    )
+    with (
+        patch("vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled", return_value=False),
+        patch(
+            "vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla",
+            return_value=(torch.ones(total, 64), torch.zeros(total, 64)),
+        ),
+    ):
+        meta = builder.build_for_cudagraph_capture(common) if capture else builder.build(0, common)
+    assert (meta.num_decodes, meta.num_prefills, meta.num_decode_tokens) == (
+        expected_with if use_pcp else expected_without
+    )
+
+
+def test_sfa_pcp_padded_decode_skips_kv_gather():
+    num_decode_tokens = 2
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    num_input_tokens = num_decode_tokens * 2
+    hidden = torch.zeros((num_input_tokens, 3))
+    slots = torch.cat((torch.arange(num_decode_tokens), torch.full((num_decode_tokens,), -1)))
+    cache = (torch.empty(0), torch.empty(0))
+    metadata = SimpleNamespace(num_decode_tokens=num_decode_tokens, num_prefills=0)
+    output = (hidden, hidden, hidden, None)
+    with (
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group") as group,
+        patch("vllm_ascend.attention.context_parallel.sfa_cp._gather_prefill_cache_inputs") as gather,
+        patch.object(AscendSFAImpl, "_sfa_preprocess_prolog_v3", return_value=output),
+        patch.object(AscendSFAImpl, "exec_kv", return_value="written") as base_write,
+    ):
+        assert impl._sfa_preprocess_prolog_v3(hidden, cache, hidden, hidden, slots, attn_metadata=metadata) is output
+        assert impl.exec_kv(hidden, hidden, hidden, cache, slots, metadata) == "written"
+    group.assert_not_called()
+    gather.assert_not_called()
+    torch.testing.assert_close(base_write.call_args.args[4], slots)

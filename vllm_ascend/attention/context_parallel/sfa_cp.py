@@ -40,6 +40,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
 from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
@@ -168,6 +169,61 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         assert attn_metadata.pcp_slot_mapping is not None
         return attn_metadata.pcp_slot_mapping
 
+    def _sfa_preprocess_prolog_v3(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        *,
+        attn_metadata: M | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
+    ]:
+        assert attn_metadata is not None, "PCP PROLOG_V3 requires attention metadata."
+        num_tokens = hidden_states.shape[0]
+        num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        # Graph padding is not included in num_decode_tokens.
+        if attn_metadata.num_prefills == 0:
+            return super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, slot_mapping[:num_tokens])
+        group = get_pcp_group()
+        rank_slots = slot_mapping[: group.world_size * num_tokens].view(group.world_size, num_tokens)
+        local_slots = rank_slots[group.rank_in_group].contiguous()
+        result = super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, local_slots)
+        # Same stream orders the fused cache write, pack, collective and scatter.
+        # C8 packs quantized K, BF16 RoPE and scales into the first cache.
+        # The remaining tensors belong to the indexer and synchronize separately.
+        main_cache = kv_cache[:1] if self.enable_sparse_sfa_c8 else kv_cache[:2]
+        packed = copy_pcp_kv_cache(main_cache, local_slots[num_decode_tokens:])
+        gathered = group.all_gather(packed, dim=0)
+        global_slots = rank_slots[:, num_decode_tokens:].reshape(-1)
+        if self.enable_sparse_sfa_c8 and global_slots.numel():
+            # Preserve packed K, RoPE and scale bytes, including FP8 storage.
+            # The paired scatter writes the same payload to the same cache.
+            packed_kv = gathered.unsqueeze(1)
+            cache_bytes = main_cache[0].view(torch.int8)
+            DeviceOperator.reshape_and_cache(
+                key=packed_kv,
+                value=packed_kv,
+                key_cache=cache_bytes,
+                value_cache=cache_bytes,
+                slot_mapping=global_slots,
+            )
+        elif global_slots.numel():
+            k_nope, k_pe = gathered.split([kv_cache[0].shape[-1], kv_cache[1].shape[-1]], dim=-1)
+            DeviceOperator.reshape_and_cache(
+                key=k_nope.unsqueeze(1),
+                value=k_pe.unsqueeze(1),
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_mapping=global_slots,
+            )
+        return result
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -177,6 +233,8 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
+        if attn_metadata.num_prefills == 0:
+            return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots[: kv_no_split.shape[0]], attn_metadata)
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
         (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs((kv_no_split, cos, sin), slots, num_decode_tokens)
         assert slots.numel() == kv_no_split.shape[0], (
