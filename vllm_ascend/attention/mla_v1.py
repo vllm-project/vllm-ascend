@@ -1,6 +1,6 @@
 from copy import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -10,6 +10,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_pcp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
     MLACommonMetadataBuilder,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -119,6 +120,20 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
+
+
+class AscendMLAAttention(MLAAttention):
+    """Ascend ``MLAAttention`` layer.
+
+    Upstream gates PCP+DCP on the layer ``supports_pcp_dcp`` ClassVar (default
+    False) inside ``__init__``, so the Ascend opt-in must live on the class
+    (mirroring upstream ``DeepseekV32Attention``) rather than being assigned
+    onto the shared upstream ``MLAAttention``. PCP+DCP is implemented by the
+    Ascend attention impls (AscendMlaDCPImpl / AscendSFAPCPDCPImpl) selected
+    by the Ascend backends.
+    """
+
+    supports_pcp_dcp: ClassVar[bool] = True
 
 
 @dataclass
@@ -1653,14 +1668,23 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         attn_output_shape: tuple | None = None
         if (
-            attn_metadata.attn_state
-            in [
-                AscendAttentionState.SpecDecoding,
-                AscendAttentionState.ChunkedPrefill,
-                AscendAttentionState.DecodeOnly,
-                AscendAttentionState.PrefillNoCache,  # for extremely short prefills
-            ]
-            and self.speculative_config is not None
+            (
+                attn_metadata.attn_state
+                in [
+                    AscendAttentionState.SpecDecoding,
+                    AscendAttentionState.ChunkedPrefill,
+                    AscendAttentionState.DecodeOnly,
+                    AscendAttentionState.PrefillNoCache,  # for extremely short prefills
+                ]
+                and self.speculative_config is not None
+            )
+            # vLLM main (#56181) restructured the draft decode metadata flow;
+            # the draft decode graph capture then records a non-TND layout,
+            # while replay still passes cumulative actual_seq_lengths_q. Force
+            # TND for the draft (its metadata uses cumulative lengths). Use the
+            # forward-context flag, not self.is_draft_model: the draft MLA impl
+            # shares the target's vllm_config, so runner_type is "generate".
+            or _EXTRA_CTX.is_draft_model
         ):
             # The right part layout indicates the layout of the attention
             # output. It is set to NTD to avoid the need for a transpose

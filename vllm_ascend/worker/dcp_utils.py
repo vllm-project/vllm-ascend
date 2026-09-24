@@ -15,7 +15,7 @@
 # limitations under the License.
 
 import copy
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +31,7 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.utils import AttentionGroup
 
 
 @dataclass(frozen=True)
@@ -119,20 +120,73 @@ class DCPManager:
             pin_memory=pin_memory,
         )
         self.mtp_slot_mapping: torch.Tensor | None = None
-        self.dcp_mtp_attn_mask = CpuGpuBuffer(
-            (
-                max_num_reqs,
-                self.decode_threshold,
-                vllm_config.model_config.max_model_len,
-            ),
-            dtype=torch.bool,
-            device=device,
-            pin_memory=pin_memory,
-        )
+        # MLA handles causality with history/current split attention.
+        self.dcp_mtp_attn_mask = None
+        if dcp_world_size > 1 and self.speculative_config and not vllm_config.model_config.use_mla:
+            self.dcp_mtp_attn_mask = CpuGpuBuffer(
+                (
+                    max_num_reqs,
+                    self.decode_threshold,
+                    vllm_config.model_config.max_model_len,
+                ),
+                dtype=torch.bool,
+                device=device,
+                pin_memory=pin_memory,
+            )
         self.async_rebuild_req_indices: np.ndarray | None = None
         self.async_rebuild_cu_num_tokens: np.ndarray | None = None
         self.async_rebuild_num_tokens = 0
         self.long_seq_metadata: Any | None = None
+
+    def prepare_draft_dcp_metadata_inputs(
+        self,
+        target_seq_lens_cpu: torch.Tensor,
+        is_prefilling: torch.Tensor,
+        num_reqs: int,
+        num_reqs_padded: int,
+        step: int,
+        max_model_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Prepare common CPU lengths and decode flags for a DCP draft.
+
+        MTP passes its draft step; parallel block drafters such as DSpark pass
+        the full query-block width. SFA shares this preparation but consumes
+        device-local lengths in its attention backend.
+        """
+        # Preserve the existing CPU progression without rejection correction.
+        seq_lens_cpu = torch.clamp(target_seq_lens_cpu[:num_reqs_padded] + step, max=max_model_len)
+        seq_lens_cpu[num_reqs:].fill_(0)
+        draft_is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool)
+        if step <= 0:
+            draft_is_prefilling[:num_reqs].copy_(is_prefilling[:num_reqs])
+            return seq_lens_cpu, draft_is_prefilling
+
+        return seq_lens_cpu, draft_is_prefilling
+
+    def prepare_dcp_local_seq_lens_cpu(self, seq_lens_cpu: torch.Tensor) -> torch.Tensor:
+        """Partition the supplied global CPU lengths for this DCP rank."""
+        return get_dcp_local_seq_lens(
+            seq_lens_cpu,
+            dcp_size=self.dcp_world_size,
+            dcp_rank=self.dcp_world_rank,
+            cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+        )
+
+    def prepare_common_attn_metadata(self, common_attn_metadata: Any) -> None:
+        """Refresh device and CPU local lengths from their global mirrors."""
+        common_attn_metadata.dcp_local_seq_lens = get_dcp_local_seq_lens(
+            common_attn_metadata.seq_lens[: common_attn_metadata.num_reqs],
+            dcp_size=self.dcp_world_size,
+            dcp_rank=self.dcp_world_rank,
+            cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+        )
+        seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+        if seq_lens_cpu is None:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        assert seq_lens_cpu is not None
+        common_attn_metadata.dcp_local_seq_lens_cpu = self.prepare_dcp_local_seq_lens_cpu(
+            seq_lens_cpu[: common_attn_metadata.num_reqs]
+        )
 
     def classify_decode_request_mask(
         self,
@@ -511,36 +565,42 @@ class DCPManager:
             cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
         )
 
-    def prepare_dspark_first_pass_cp_metadata(
+    def prepare_parallel_draft_metadata(
         self,
         common_attn_metadata: Any,
-        num_query_per_req: int,
-    ) -> tuple[None, None]:
-        """Build DCP metadata for DSpark's parallel draft query block.
+        draft_attn_groups: Sequence["AttentionGroup"],
+    ) -> None:
+        """Refresh DCP metadata after a parallel drafter replaces the query block."""
+        from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-        DSpark has already extended ``seq_lens`` by the complete draft query
-        width at this point. Its proposer marks every draft query as decode:
-        context KV is stored separately, and attention reads the query block
-        back from the paged cache. Retain the complete sequence length even
-        when the originating target batch contains prefill requests.
+        if common_attn_metadata.is_prefilling is not None:
+            common_attn_metadata.is_prefilling.fill_(False)
+        # Target query metadata no longer describes this parallel draft block.
+        common_attn_metadata.context_parallel_metadata = None
+        self.prepare_common_attn_metadata(common_attn_metadata)
+        if any(not isinstance(group.kv_cache_spec, MLAAttentionSpec) for group in draft_attn_groups):
+            self.prepare_legacy_dcp_metadata(common_attn_metadata)
+
+    def prepare_legacy_dcp_metadata(self, common_attn_metadata: Any) -> None:
+        """Publish the all-rank lengths still consumed by the GQA backend.
+
+        The producer has already advanced the global lengths and query offsets.
+        MLA/SFA consume the common local-length fields instead.
         """
         from vllm_ascend.attention.utils import AscendDCPMetadata
 
-        seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
+        seq_lens_cpu = common_attn_metadata._seq_lens_cpu
         if seq_lens_cpu is None:
-            seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
-        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_cpu)
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        assert seq_lens_cpu is not None
+        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_cpu[: common_attn_metadata.num_reqs])
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         common_attn_metadata.context_parallel_metadata = AscendDCPMetadata(
             num_computed_tokens_of_dcp=local_seq_lens.numpy(),
-            query_lens_cpu=torch.full(
-                (common_attn_metadata.num_reqs,),
-                num_query_per_req,
-                dtype=torch.int32,
-            ),
-            max_query_len=num_query_per_req,
+            query_lens_cpu=query_start_loc_cpu[1:] - query_start_loc_cpu[:-1],
+            max_query_len=common_attn_metadata.max_query_len,
             dcp_mtp_attn_mask=None,
         )
-        return None, None
 
     @staticmethod
     def _is_mla_kv_cache_spec(kv_cache_spec: Any) -> bool:
@@ -568,58 +628,39 @@ class DCPManager:
         draft_index: int,
         seq_lens_cpu: torch.Tensor | None = None,
     ) -> None:
-        """Prepare draft-local DCP metadata before the backend metadata build.
+        """Prepare decode classification and backend-specific draft DCP metadata.
 
-        The first draft pass can be a prefill. Later MTP passes are one-token
-        decodes, so they must not reuse the prefill classification fields from
-        that pass. Clone the nested metadata to keep draft steps independent
-        while retaining the DCP MTP mask and other per-batch state.
+        The proposer has already advanced the common sequence lengths for this
+        step. Publish their local CPU lengths for MLA; other backends still
+        use the per-step legacy DCP metadata below.
         """
+        if common_attn_metadata.is_prefilling is not None:
+            common_attn_metadata.is_prefilling = torch.zeros_like(common_attn_metadata.is_prefilling)
+
+        if self._is_mla_kv_cache_spec(kv_cache_spec):
+            self.prepare_common_attn_metadata(common_attn_metadata)
+            # Do not let the first pass's query lengths override this decode
+            # step's query_start_loc_cpu and max_query_len in the shared split.
+            common_attn_metadata.context_parallel_metadata = None
+            return
+
         dcp_metadata = common_attn_metadata.context_parallel_metadata
         assert dcp_metadata is not None, "DCP metadata must be populated for speculative drafting."
-
         dcp_metadata = copy.copy(dcp_metadata)
-        original_query_lens_cpu = dcp_metadata.query_lens_cpu
-        original_is_prefilling = common_attn_metadata.is_prefilling
+        # Subsequent draft steps have one query per request; the per-step KV
+        # lengths already exclude future keys. The verify mask describes the
+        # previous multi-token batch and must not be reused here.
+        dcp_metadata.dcp_mtp_attn_mask = None
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         dcp_metadata.query_lens_cpu = query_lens_cpu
         dcp_metadata.max_query_len = int(query_lens_cpu.max().item()) if query_lens_cpu.numel() else 0
 
-        is_mla = self._is_mla_kv_cache_spec(kv_cache_spec)
-        if is_mla:
-            if dcp_metadata.draft_base_seq_lens is None:
-                # MLA draft history is consumed on the host to build the DCP
-                # MTP attention mask below. Keep it on CPU instead of moving the
-                # per-rank DCP lengths to NPU and copying the summed result back.
-                local_seq_lens = torch.as_tensor(dcp_metadata.num_computed_tokens_of_dcp)
-                draft_base_seq_lens = local_seq_lens.sum(dim=-1)
-                if original_is_prefilling is not None:
-                    is_prefilling = original_is_prefilling[: draft_base_seq_lens.shape[0]]
-                    prefill_query_lens = original_query_lens_cpu[: draft_base_seq_lens.shape[0]].to(
-                        dtype=draft_base_seq_lens.dtype
-                    )
-                    draft_base_seq_lens = draft_base_seq_lens + torch.where(
-                        is_prefilling,
-                        prefill_query_lens,
-                        0,
-                    )
-                dcp_metadata.draft_base_seq_lens = draft_base_seq_lens
-            seq_lens_for_dcp = dcp_metadata.draft_base_seq_lens
-        else:
-            seq_lens_for_dcp = seq_lens_cpu if seq_lens_cpu is not None else seq_lens
+        seq_lens_for_dcp = seq_lens_cpu if seq_lens_cpu is not None else seq_lens
         local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
-        if is_mla:
-            dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens.numpy()
-        else:
-            dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
+        dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
         dcp_metadata.draft_cp_seq_len = local_seq_lens[:, self.dcp_world_rank]
-        if is_mla:
-            dcp_metadata.dcp_mtp_attn_mask = None
         common_attn_metadata.context_parallel_metadata = dcp_metadata
-
-        if common_attn_metadata.is_prefilling is not None:
-            common_attn_metadata.is_prefilling = torch.zeros_like(common_attn_metadata.is_prefilling)
 
     def update_spec_decode_drafting_cp_metadata(
         self,
@@ -695,6 +736,7 @@ class DCPManager:
         )
 
         if self.speculative_config and not self.vllm_config.model_config.use_mla:
+            assert self.dcp_mtp_attn_mask is not None
             if self.num_decode_reqs > 0:
                 decode_scheduled = num_scheduled_tokens[: self.num_decode_reqs]
                 if fixed_decode_seq_lens_cpu is not None:
@@ -733,6 +775,7 @@ class DCPManager:
             cp_kv_cache_interleave_size=interleave_size,
         )
         valid = k_lens > 0
+        assert self.dcp_mtp_attn_mask is not None
         output = self.dcp_mtp_attn_mask.cpu[:num_decode_reqs]
         output.zero_()
         if not valid.any():

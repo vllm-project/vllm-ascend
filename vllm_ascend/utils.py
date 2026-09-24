@@ -59,16 +59,6 @@ FP8_METHOD = "fp8"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
 
-_SHARED_BACKING_KV_CONNECTORS = frozenset(
-    {
-        "ExampleHiddenStatesConnector",
-        "MooncakeConnectorV1",
-        "MooncakeConnectorV2",
-        "MooncakeHybridConnector",
-        "MooncakePullConnector",
-    }
-)
-
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
@@ -92,13 +82,6 @@ _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
 _IS_ROT_WEIGHT_USED = None
-
-
-def kv_transfer_supports_shared_backing(kv_transfer_config: Any | None) -> bool:
-    """Whether a KV connector can consume standardized shared backing."""
-    if kv_transfer_config is None:
-        return True
-    return getattr(kv_transfer_config, "kv_connector", None) in _SHARED_BACKING_KV_CONNECTORS
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -212,6 +195,7 @@ def clear_enable_sp():
     enable_dsa_cp.cache_clear()
     enable_dsa_cp_full_o_proj.cache_clear()
     enable_pcp_o_proj_weight_sharding.cache_clear()
+    enable_pcp_embedding_lmhead_weight_sharding.cache_clear()
     _libc_getenv.cache_clear()
 
 
@@ -241,14 +225,7 @@ def is_rc_device() -> bool:
     return _IS_RC_DEVICE
 
 
-def _mark_op_side_effectful(op: Any) -> None:
-    torch.fx.node.has_side_effect(op)
-    default_overload = getattr(op, "default", None)
-    if default_overload is not None:
-        torch.fx.node.has_side_effect(default_overload)
-
-
-def _ensure_device_print_registered() -> None:
+def register_device_print() -> None:
     global _DEVICE_PRINT_OP_REGISTERED
 
     if _DEVICE_PRINT_OP_REGISTERED:
@@ -261,9 +238,10 @@ def _ensure_device_print_registered() -> None:
         )
 
     try:
-        # Mark device_print ops side-effectful so FX/Inductor does not DCE or reorder these debug callbacks.
-        _mark_op_side_effectful(torch.ops._C_ascend.device_print)
-        _mark_op_side_effectful(torch.ops._C_ascend.device_print_tensor)
+        from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
+
+        _register_effectful_op(torch.ops._C_ascend.device_print.default, _EffectType.ORDERED)
+        _register_effectful_op(torch.ops._C_ascend.device_print_tensor.default, _EffectType.ORDERED)
         _DEVICE_PRINT_OP_REGISTERED = True
     except AttributeError as exc:
         raise RuntimeError(
@@ -285,7 +263,8 @@ def device_print(
 
     Supported usage:
 
-        >>> from vllm_ascend.utils import device_print
+        >>> from vllm_ascend.utils import device_print, register_device_print
+        >>> register_device_print()
         >>> device_print(x)
         >>> device_print("already formatted text")
         >>> device_print(7)
@@ -307,8 +286,6 @@ def device_print(
         >>> device_print(f"x = {x}")
         >>> device_print("x = " + str(x))
     """
-    _ensure_device_print_registered()
-
     if isinstance(value, torch.Tensor):
         torch.ops._C_ascend.device_print_tensor(value)
     elif isinstance(value, (str, int, float, bool, torch.dtype, torch.device, torch.Size)):
@@ -657,30 +634,25 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 
 
-def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
-    """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES."""
+def setup_ascend_local_comm_res(user_device_id: int, kv_transfer_config: Any | None) -> None:
+    """Load the physical NPU endpoint config after binding a runtime device.
+
+    user_device_id must be the ordinal passed to torch.npu.set_device, not
+    the vLLM local rank. Endpoint filenames use host physical device IDs.
+    """
     if kv_transfer_config is None:
         return
-
-    visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
-    if visible_devices is None:
-        from vllm_ascend.cpu_binding import DeviceInfo
-
-        devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info()])
-    else:
-        devices = [int(x) for x in visible_devices.split(",") if x.strip()]
 
     extra_config = kv_transfer_config.kv_connector_extra_config or {}
     local_comm_res_path = extra_config.get("ascend_local_comm_res_path")
     if not local_comm_res_path:
         return
 
-    if not devices:
-        raise ValueError("No NPU devices found or specified in ASCEND_RT_VISIBLE_DEVICES.")
-    if local_rank < 0 or local_rank >= len(devices):
-        raise ValueError(f"local_rank {local_rank} is out of bounds for the available NPU devices: {devices}")
+    # Import lazily: the platform module also imports utils.
+    from vllm.platforms import current_platform
 
-    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{devices[local_rank]}.json")
+    npu_id = current_platform.visible_device_id_to_physical_device_id(user_device_id)
+    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{npu_id}.json")
     try:
         with open(local_comm_res_file) as f:
             data = json.load(f)
@@ -706,7 +678,7 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        # Strip any PEP 440 local version segment (e.g. "0.29.0+empty" built
+        # Strip any PEP 440 local version segment (e.g. "0.30.0+empty" built
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
         parsed = Version(vllm_version)
@@ -871,10 +843,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RoutedExperts": AscendRoutedExperts,
         "GateLinear": AscendGateLinear,
     }
-    if not vllm_version_is("0.29.0"):
-        from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
+    from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
 
-        REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
+    REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
 
     if vllm_config is None:
         try:
@@ -1517,6 +1488,14 @@ def enable_pcp_o_proj_weight_sharding() -> bool:
     from vllm_ascend.ascend_config import get_ascend_config
 
     return get_ascend_config().enable_pcp_o_proj_weight_sharding
+
+
+@lru_cache(maxsize=1)
+def enable_pcp_embedding_lmhead_weight_sharding() -> bool:
+    """Whether PCP shards embedding and LM Head weights."""
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().enable_pcp_embedding_lmhead_weight_sharding
 
 
 @lru_cache(maxsize=1)

@@ -675,6 +675,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
         if not layer_names:
             raise ValueError("DSV4 compressor metadata builder requires at least one layer name")
+        self.layer_names = list(layer_names)
         # vLLM assigns the builder result to every layer in an attention group.
         self.cache_group_key = layer_names[0]
         self.hadamard = None
@@ -1314,9 +1315,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         if self.num_prefills:
-            cos, sin = get_cos_and_sin_dsa(input_positions)
+            cos, sin = get_cos_and_sin_dsa(input_positions, layer_names=self.layer_names)
         else:
-            cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True, draft_index=draft_index)
+            cos, sin = get_cos_and_sin_dsa(
+                input_positions,
+                use_cache=True,
+                draft_index=draft_index,
+                layer_names=self.layer_names,
+            )
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         assert self.spec_slot_mapping is not None
         self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = get_dsa_attn_kv_plan(

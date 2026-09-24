@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pcp_group,
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -82,6 +83,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_cache_family,
     get_partial_block_index,
     infer_cache_transfer_granularity,
+    infer_cacheable_group_ids,
     infer_dcp_mismatch_info,
     infer_group_block_sizes,
     infer_group_cache_families,
@@ -164,10 +166,11 @@ class KVPoolWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
-        self.pp_rank = (parallel_config.rank // self.tp_size) % self.pp_size
+        self.pp_rank = get_pp_group().rank_in_group if self.pp_size > 1 else 0
 
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+        self.kvpp_rank = self.pcp_rank * self.tp_size + self.tp_rank
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.model_name = model_config.model.split("/")[-1]
@@ -222,17 +225,22 @@ class KVPoolWorker:
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
+        self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
+        cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
+        if self.use_layerwise and len(cacheable_block_sizes) != len(self.original_block_size):
+            raise ValueError("AscendStore private KV state requires non-layerwise transfer")
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
-            requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
+            requested_hash_block_size if requested_hash_block_size is not None else min(cacheable_block_sizes)
         ) * self.dcp_size
-        for group_block_size in self.grouped_block_size:
+        for group_id in self.cacheable_group_ids:
+            group_block_size = self.grouped_block_size[group_id]
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self.block_size = self.grouped_block_size[0]
-        self.lcm_block_size = math.lcm(*self.grouped_block_size)
+        self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.layerwise_keys = (
             self.layerwise_protocol.bind_layerwise_keys(
@@ -248,7 +256,7 @@ class KVPoolWorker:
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
-            self.grouped_block_size, self.lcm_block_size, range(self.num_kv_cache_groups)
+            self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
         )
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
         self.layerwise_max_transfer_blocks = int(extra_config.get("layerwise_max_transfer_blocks", 0))
@@ -280,7 +288,7 @@ class KVPoolWorker:
             self.put_step = 1
         if self.use_kvpp:
             # Every owner saves all blocks of its layer shard, including its MTP replica.
-            self.head_or_tp_rank = self.tp_rank
+            self.head_or_tp_rank = self.kvpp_rank
             self.put_step = 1
         self.my_key_index = (
             self.pcp_rank * self.dcp_size * (self.tp_size // self.put_step)
@@ -456,6 +464,7 @@ class KVPoolWorker:
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
         self._global_to_local_layer: dict[int, int] = {}
         self._layerwise_reuse_layout: LayerwiseReuseLayout | None = None
+        self._recurrent_layers: set[int] = set()
         # Defaults for partial initialization (unit tests construct the worker
         # without the full _init_parallelism_info path).
         if not hasattr(self, "layerwise_key_layers"):
@@ -498,6 +507,12 @@ class KVPoolWorker:
                 self._global_to_local_layer = {
                     global_layer: local_layer for local_layer, global_layer in enumerate(sorted(physical_layers))
                 }
+                if getattr(self, "use_layerwise", False) or self.use_layerwise_transfer:
+                    self._recurrent_layers = {
+                        self._global_to_local_layer[self._extract_physical_layer_index(name)]
+                        for name, spec in get_layerwise_kv_cache_specs(self.kv_cache_config).items()
+                        if isinstance(spec, MambaSpec)
+                    }
                 effective_num_layers = max(self.num_layers, len(physical_layers))
                 if effective_num_layers != self.num_layers:
                     logger.info(
@@ -779,8 +794,9 @@ class KVPoolWorker:
                     self.grouped_block_size,
                     self.tp_rank,
                     self.tp_size,
-                    self.pcp_rank,
-                    self.pcp_size,
+                    # KVPP owners hold different layers, not PCP replicas.
+                    0 if self.use_kvpp else self.pcp_rank,
+                    1 if self.use_kvpp else self.pcp_size,
                     self.dcp_size,
                     self.put_step,
                     self.kv_role,
@@ -996,7 +1012,9 @@ class KVPoolWorker:
         self.kv_caches = kv_caches
         if self.use_kvpp:
             owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
-            kv_caches = {name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.tp_rank)}
+            kv_caches = {
+                name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.kvpp_rank)
+            }
             self.kv_caches = kv_caches
         self.group_kv_cache_families: dict[int, str] = {
             group_id: get_group_cache_family(self.kv_cache_group_families, group_id)
@@ -1959,8 +1977,8 @@ class KVPoolWorker:
             if groups is None:
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return groups
-        physical_layer = local_layer + self.layerwise_key_layer_offset
-        return self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
+        # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
+        return self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
 
     def _layerwise_key_batches(self, keys: list[str]) -> list[list[str]]:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
@@ -2480,11 +2498,11 @@ class KVPoolWorker:
         final layer's save at the end of every step, which implies every earlier
         layer committed, so publication is still complete before the step ends.
 
-        ``full`` drains both queues to zero and is the right mode for teardown
-        paths, where the transfer threads must be quiescent before sessions are
-        released.
+        ``full`` drains the selected queues to zero, defaulting to both queues
+        for teardown. Step completion passes ``drain_recv=False`` to wait only
+        for outstanding PUTs.
         """
-        if full:
+        if full and drain_recv is None:
             drain_recv = True
         elif drain_recv is None:
             drain_recv = self.layerwise_protocol.fence_drains_recv()
@@ -2546,7 +2564,10 @@ class KVPoolWorker:
             self.kv_recv_thread.raise_if_failed()
             if getattr(self, "block_key_hybrid", False):
                 layer_id = self.current_layer
-                gate.on_start = lambda: self._submit_attention_save(layer_id)
+                # Conv/recurrent state is updated inside attention, after this
+                # entry event. Preserve its post-compute save hook.
+                if layer_id not in self._recurrent_layers:
+                    gate.on_start = lambda: self._submit_attention_save(layer_id)
                 gate.on_finish = self._finish_attention_window
             if getattr(self, "block_key_hybrid", False) and self.next_layer_to_submit <= self.current_layer:
                 # An unprefetched demand load must not race earlier collectives.
@@ -2609,23 +2630,21 @@ class KVPoolWorker:
         assert self.kv_send_thread is not None
         send_thread = self.kv_send_thread
         send_thread.raise_if_failed()
-        if self.current_layer in getattr(self, "_attention_saved_layers", set()):
-            if self.current_layer == num_local - 1:
-                self._wait_for_final_layer_save(num_local, send_thread)
-            self.current_layer += 1
-            return
-        self.sync_save_events[self.current_layer].record()
-        if self.layer_save_tasks[self.current_layer]:
-            for task in self.layer_save_tasks[self.current_layer]:
-                for block_range in task.block_ranges:
-                    send_thread.add_stored_request(block_range.request.req_id)
-            send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
-        else:
-            self.layer_save_finished_events[self.current_layer].set()
+        if self.current_layer not in self._attention_saved_layers:
+            self.sync_save_events[self.current_layer].record()
+            if self.layer_save_tasks[self.current_layer]:
+                for task in self.layer_save_tasks[self.current_layer]:
+                    for block_range in task.block_ranges:
+                        send_thread.add_stored_request(block_range.request.req_id)
+                send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
+            else:
+                self.layer_save_finished_events[self.current_layer].set()
+        if self.block_key_hybrid:
+            # Recurrent and record-only paths do not exit an attention window.
+            self._finish_attention_window()
         if self.current_layer == num_local - 1:
             self._wait_for_final_layer_save(num_local, send_thread)
-
-        self.current_layer = self.current_layer + 1
+        self.current_layer += 1
 
     def _wait_for_final_layer_save(self, num_local: int, send_thread: KVTransferThread) -> None:
         """Keep layerwise source buffers alive until the step's last PUT commits."""
@@ -2635,7 +2654,11 @@ class KVPoolWorker:
             send_thread.raise_if_failed()
             logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
         send_thread.raise_if_failed()
-        if self.use_block_key_layerwise:
+        if self.block_key_hybrid:
+            # An empty final layer signals completion without waiting for PUTs
+            # from earlier layers. Drain those before the next step reuses KV.
+            self._drain_attention_transfers(drain_recv=False, full=True)
+        elif self.use_block_key_layerwise:
             # An empty final layer sets its event on the compute thread, ahead
             # of earlier queued PUTs. Drain at the step boundary before source
             # blocks can be reused. Layer-to-layer overlap remains unchanged.
@@ -3166,7 +3189,7 @@ class KVPoolWorker:
 
     def get_group_tp_size(self, kv_cache_group_id: int):
         if self.use_kvpp:
-            return self.tp_size
+            return self.tp_size * self.pcp_size
         if self.tp_mismatch:
             return self.effective_tp_size
         if self.group_uses_align_state[kv_cache_group_id]:
