@@ -1233,6 +1233,19 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_encoder_cache()
 
     def execute_dummy_batch(self) -> None:
+        # Idle DP ranks skip execute_model; still run lockstep runtime_config sync
+        # (allow_arm=False so manual_trigger is not consumed on a dummy wave).
+        rg = getattr(self.model_runner, "runtime_guard", None)
+        if rg is not None:
+            try:
+                rg.sync_for_step(allow_arm=False)
+            except Exception:
+                from vllm_ascend.logger import init_logger_ascend
+
+                init_logger_ascend(__name__).warning(
+                    "[runtime_guard soft-fail] execute_dummy_batch sync_for_step failed",
+                    exc_info=True,
+                )
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)

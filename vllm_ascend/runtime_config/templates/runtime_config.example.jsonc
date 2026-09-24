@@ -1,0 +1,86 @@
+{
+  // Runtime control plane (logging, detectors, incident actions).
+  // Default path: <cwd>/runtime/config/runtime_config.json
+  // Hot-reload: additional_config.runtime_config_reload_interval > 0
+  // Comments and trailing commas are allowed (JSONC).
+
+  "sync_mode": "broadcast",
+  "reload_interval_seconds": 0,
+
+  // Incident actions taken on any detector alert ("report" always available).
+  "actions": {
+    "defaults": {
+      "on_trigger": ["report"]
+    },
+    // ActionQueue capacity at process bind (not resized on hot-reload).
+    "queue_max_size": 64
+  },
+
+  "ascend_log": {
+    "level": "INFO",
+    "debug": [],
+    "modules": {}
+  },
+
+  "log": {
+    "print_output_on_finish": false
+  },
+
+  "dump": {
+    "auto_max_times": 0,
+    "auto_cooldown_seconds": 300,
+    // Prefer 1 (one shot). true / large N = continuous — not recommended.
+    // false | true (continuous, discouraged) | N waves. In-memory -- per arm; JSON cleared only at 0.
+    // Multi-DP one file: each DP may dump up to N times while file still shows N.
+    "manual_dump": false,
+    // Skip dump_kv when free space < estimated payload + this headroom (5 GiB).
+    "free_headroom_bytes": 5368709120
+  },
+
+  "report": {
+    "save_sensitive_info": false,
+    "decode_token_ids": true,
+    "max_prompt_token_ids": 1000,
+    "max_output_token_ids": 1000,
+    "include_block_ids": true,
+    // Max JSON reports per (incident_type, req_id). Default 1.
+    // Reaching the cap stops detection for that request (all detectors).
+    // Keep "report" in on_trigger (default) so this path can fire.
+    "max_per_req": 1
+  },
+
+  "detector": {
+    "token_repeat": {
+      "enabled": false,
+      "window": 32,
+      "repeat_sum_threshold": 64,
+      "min_tokens": 32,
+      "consecutive_hits": 1,
+      "ignore_token_ids": []
+    },
+    "spec_acceptance": {
+      "enabled": false,
+      "window": 10,
+      "low_threshold": 0.3,
+      "len_low_threshold": 1.4,
+      "high_threshold": 0.96,
+      "len_high_threshold": 2.8,
+      "short_log_interval_seconds": 2.0
+    },
+    "output_substring": {
+      "enabled": false,
+      "patterns": [],
+      "add_special_tokens": false,
+      "match_prefix": false
+    },
+    "logits_finite": {
+      "enabled": false,
+      "deferred_queue_max": 256
+    },
+    // Control-plane for dump.manual_dump / manual_trigger incidents.
+    // dump_kv is always injected; scope is forced to all_requests.
+    "manual_trigger": {
+      "on_trigger": ["report", "dump_kv"]
+    }
+  }
+}
