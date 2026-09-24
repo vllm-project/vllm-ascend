@@ -47,9 +47,8 @@ def test_v41_hc_pre_dispatches_fused_operator_with_pre_mix():
         create=True,
         return_value=expected,
     ) as op:
-        actual = layer.hc_pre(x, hc_fn, hc_scale, hc_base, pre_mix)
+        y, post, comb, mix = layer.hc_pre(x, hc_fn, hc_scale, hc_base, pre_mix)
 
-    assert actual is expected
     op.assert_called_once_with(
         x,
         hc_fn,
@@ -61,6 +60,19 @@ def test_v41_hc_pre_dispatches_fused_operator_with_pre_mix():
         norm_eps=1e-6,
         hc_eps=1e-6,
     )
+    assert post is expected[1]
+    assert comb is expected[2]
+
+    # The A5 kernel leaves the mixing coefficients unwritten and collapses the
+    # streams by its own weights instead of the supplied mix, so both come back
+    # from the layer rather than from the operator.
+    flat = x.flatten(-2).float()
+    rsqrt = torch.rsqrt(flat.square().mean(-1, keepdim=True) + layer.norm_eps)
+    expected_mix = (
+        torch.sigmoid(torch.nn.functional.linear(flat, hc_fn[:4]) * rsqrt * hc_scale[0] + hc_base[:4]) + layer.hc_eps
+    )
+    torch.testing.assert_close(mix, expected_mix)
+    torch.testing.assert_close(y, (pre_mix.unsqueeze(-1) * x.float()).sum(-2).to(x.dtype))
 
 
 def test_v41_forward_threads_pre_mix_through_fused_hc_pre():

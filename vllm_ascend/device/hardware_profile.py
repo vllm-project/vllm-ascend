@@ -369,3 +369,14 @@ def get_current_hardware_profile() -> HardwareProfile:
     """Return the profile selected by the current device configuration."""
 
     return _CURRENT_HARDWARE_PROFILE
+
+
+def builds_scatter_nd_update_sk() -> bool:
+    """Return whether this SoC's custom-op package contains ``scatter_nd_update_sk``.
+
+    ``csrc/build_aclnn.sh`` builds that op for ascend910b and ascend910_93 only,
+    because ``csrc/moe/scatter_nd_update_sk/op_kernel`` ships an arch22 kernel
+    and no arch35 one. ``DSV4_COMPRESSED_CACHE`` is declared for the 950 family
+    alone, so its absence selects exactly the SoCs that do build the op.
+    """
+    return not get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)

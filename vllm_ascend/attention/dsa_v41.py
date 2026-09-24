@@ -13,9 +13,9 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+import torch_npu
 from torch import nn
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -27,12 +27,18 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
+from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+)
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    builds_scatter_nd_update_sk,
+    get_current_hardware_profile,
 )
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
@@ -47,9 +53,36 @@ from vllm_ascend.worker.device_metadata import (
 
 V41_METADATA_BUFFER_SIZE = 1024
 
+_CACHED_V41_KV_PLAN = None
 
-@eager_break_during_capture
-def dsa_v41_forward(
+
+def cache_v41_attn_kv_plan(vllm_config):
+    """Pin the V4.1 KV dtype and remember the plan the engine was built with."""
+    global _CACHED_V41_KV_PLAN
+    from vllm_ascend.models.deepseek_v41.cache_config import pin_v41_attn_kv_dtype
+
+    pin_v41_attn_kv_dtype(vllm_config)
+    _CACHED_V41_KV_PLAN = get_dsa_attn_kv_plan(vllm_config)
+    return _CACHED_V41_KV_PLAN
+
+
+def current_v41_attn_kv_plan():
+    if _CACHED_V41_KV_PLAN is not None:
+        return _CACHED_V41_KV_PLAN
+    return get_dsa_attn_kv_plan(get_current_vllm_config())
+
+
+def v41_multistream_preprocess_enabled() -> bool:
+    """Whether V4.1 should overlap Q Vector work with KV Cube work.
+
+    DSV4F keeps the config flag: V4.1 stores through scatter_cache_sk.
+    """
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return bool(get_ascend_config().multistream_dsv4_dsa_overlap)
+
+
+def _dsa_v41_forward_impl(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
@@ -58,6 +91,25 @@ def dsa_v41_forward(
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
     attn.v41_impl.forward(attn, None, hidden_states, output)
+
+
+def dsa_v41_forward(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Re-run V4.1 attention each decode step under BreakableACLGraph."""
+    try:
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    except Exception:
+        return _dsa_v41_forward_impl(hidden_states, output, layer_name)
+
+    capture = BreakableCUDAGraphCapture.current()
+    if capture is None or not getattr(capture, "_capturing", False):
+        return _dsa_v41_forward_impl(hidden_states, output, layer_name)
+
+    hs, out, name = hidden_states, output, layer_name
+    return capture.add_eager(lambda: _dsa_v41_forward_impl(hs, out, name))
 
 
 def dsa_v41_forward_fake(
@@ -140,6 +192,9 @@ class AscendDSAV41Metadata(AttentionMetadata):
     c2_metadata_group_id: int | None = None
     global_metadata: "AscendDSAV41Metadata | None" = None
     cp_token_range: tuple[int, int, int, int] | None = None
+    even_plan: dict[str, Any] | None = None
+    cmp_topk_length: torch.Tensor | None = None
+    skip_device_metadata_wait: bool = False
 
 
 @dataclass(frozen=True)
@@ -204,6 +259,32 @@ def _request_counts(common: Any, num_reqs: int):
     return num_decodes, num_decode_tokens, num_prefills, num_prefill_tokens
 
 
+def flat_row_store(cache: torch.Tensor, indices: torch.Tensor, updates: torch.Tensor) -> None:
+    """Store rows through a contiguous view of the whole slot backing.
+
+    ``cache`` is a per-page strided view: page ``b`` begins ``b *
+    cache.stride(0)`` elements into the plane and row ``r`` of that page a
+    further ``r * width``. The slot page is aligned so that stride is a whole
+    number of rows wherever this path is used, which makes ``[block, offset]``
+    equivalent to the single row ``block * rows_per_page + offset`` of one
+    contiguous tensor over the same storage. The view stops at the last page's
+    payload so a plane sitting at a non-zero page offset cannot run past the
+    end of the backing.
+    """
+    num_pages, payload_rows, width = cache.shape
+    page_stride = cache.stride(0)
+    if cache.stride(1) != width or cache.stride(2) != 1 or page_stride % width:
+        raise NotImplementedError(
+            "V4.1 cannot flatten this cache plane for the dense store: "
+            f"stride {cache.stride()} is not a row multiple of width {width}."
+        )
+    rows_per_page = page_stride // width
+    flat = cache.as_strided(((num_pages - 1) * rows_per_page + payload_rows, width), (width, 1))
+    blocks, offsets = indices[:, 0], indices[:, 1]
+    rows = torch.where(blocks >= 0, blocks * rows_per_page + offsets, torch.full_like(blocks, -1))
+    torch_npu.npu_scatter_nd_update_(flat, rows.unsqueeze(-1).to(torch.int64).contiguous(), updates)
+
+
 def scatter_cache_sk(
     cache: torch.Tensor,
     slot_mapping: torch.Tensor,
@@ -216,10 +297,92 @@ def scatter_cache_sk(
     the plane shape. ``npu_scatter_nd_update_sk`` preserves that stride and
     treats the builder's ``[-1, -1]`` coordinates as skipped rows, matching V4.
     """
+    if slot_mapping.ndim != 2 or slot_mapping.shape[-1] != 2:
+        raise ValueError(
+            f"V4.1 fused cache store requires builder-prepared [T, 2] slot_mapping, got {tuple(slot_mapping.shape)}"
+        )
     cache = cache.squeeze(-2)
     indices = slot_mapping[: values.shape[0]]
     updates = values.to(cache.dtype).contiguous()
-    torch.ops._C_ascend.npu_scatter_nd_update_sk(cache, indices, updates)
+    if builds_scatter_nd_update_sk():
+        torch.ops._C_ascend.npu_scatter_nd_update_sk(cache, indices, updates)
+        return
+    flat_row_store(cache, indices, updates)
+
+
+def store_attn_kv(cache: torch.Tensor, slot_mapping: torch.Tensor, values: torch.Tensor) -> None:
+    """Write SWA / long-KV with the A5 plan: FP8 uses kv_compress_epilog."""
+    plan = current_v41_attn_kv_plan()
+    if not plan.uses_kv_compress_epilog:
+        scatter_cache_sk(cache, slot_mapping, values)
+        return
+    slots = slot_mapping[: values.shape[0]]
+    if slots.ndim == 2 and slots.shape[-1] == 2:
+        blocks = slots[:, 0]
+        offsets = slots[:, 1]
+        page = int(cache.shape[1])
+        valid = blocks >= 0
+        flat = torch.where(
+            valid,
+            blocks.to(torch.int32) * page + offsets.to(torch.int32),
+            torch.full_like(blocks, -1, dtype=torch.int32),
+        )
+    else:
+        flat = slots.to(torch.int32)
+    try:
+        cache.view(-1, 1, cache.shape[-1])
+    except RuntimeError:
+        # V4.1 SWA/long-KV are views into a larger layer slot, so the page
+        # stride is not head_dim+128. Quantize into a packed scratch, then
+        # store through the stride-aware scatter.
+        packed = torch.zeros(
+            (values.shape[0], 1, cache.shape[-1]),
+            dtype=cache.dtype,
+            device=cache.device,
+        )
+        seq = torch.arange(values.shape[0], device=values.device, dtype=torch.int32)
+        plan.dsa_kv_compress_scatter(packed, values, seq)
+        scatter_cache_sk(cache, slot_mapping, packed.squeeze(1))
+        return
+    plan.dsa_kv_compress_scatter(cache, values, flat)
+
+
+def _even_query_plan(query_start_loc_cpu, num_reqs: int):
+    """Return gather indices that make every request's packed query span even.
+
+    A5 CSA traps (AI core 507015) whenever a request presents an odd number of
+    packed queries, decode's single row included. Duplicating the span's last
+    query keeps ``seqused_kv`` and the KV cache untouched, so the extra row only
+    recomputes an existing position and is dropped from the output.
+
+    The plan is derived from host coordinates because the attention forward runs
+    inside decode graph capture, where reading a device tensor is not allowed.
+    """
+    qsl = [int(x) for x in query_start_loc_cpu[: num_reqs + 1].tolist()]
+    src: list[int] = []
+    keep: list[int] = []
+    padded_qsl = [0]
+    max_query_len = 0
+    for i in range(num_reqs):
+        start, end = qsl[i], qsl[i + 1]
+        qlen = end - start
+        for row in range(start, end):
+            keep.append(len(src))
+            src.append(row)
+        extra = qlen % 2
+        if extra:
+            src.append(end - 1)
+        padded_qsl.append(padded_qsl[-1] + qlen + extra)
+        max_query_len = max(max_query_len, qlen + extra)
+    if len(src) == qsl[num_reqs]:
+        return None
+    return {
+        "src": src,
+        "keep": keep,
+        "padded_qsl": padded_qsl,
+        "padded_len": len(src),
+        "max_query_len": max_query_len,
+    }
 
 
 def pad_sparse_indices(indices: torch.Tensor, topk: int) -> torch.Tensor:
@@ -278,6 +441,39 @@ class AscendDSAV41Impl:
         )
         return kv.squeeze(1)
 
+    @staticmethod
+    def _project_q_kv(attn, hidden_states, cos, sin):
+        q_a = attn.wq_a(hidden_states)
+        qr = attn.q_norm(q_a)
+        q = attn.wq_b(qr).unflatten(-1, (attn.n_local_heads, attn.head_dim))
+        kv = attn.kv_norm(attn.wkv(hidden_states))
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            q.unsqueeze(1),
+            cos,
+            sin,
+            rotary_mode="interleave",
+            partial_slice=[attn.nope_head_dim, attn.head_dim],
+        )
+        kv = kv.view(-1, 1, attn.head_dim)
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            kv.unsqueeze(1),
+            cos,
+            sin,
+            rotary_mode="interleave",
+            partial_slice=[attn.nope_head_dim, attn.head_dim],
+        )
+        return q.to(hidden_states.dtype), qr, kv.squeeze(1)
+
+    def preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
+        """Project Q/KV and populate this layer's SWA cache on the current stream."""
+        q, qr, kv = self._project_q_kv(attn, hidden_states, cos, sin)
+        scatter_cache_sk(
+            attn.dsa_attn.swa_cache_layer.kv_cache[0],
+            swa_metadata.slot_mapping,
+            kv,
+        )
+        return q, qr
+
     def _update_caches(self, attn, hidden_states, metadata):
         if hidden_states.shape[0] == 0:
             return
@@ -293,8 +489,10 @@ class AscendDSAV41Impl:
         pass
 
     def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
-        hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
-        q, qr = self.multistream_preprocess(attn, hidden_states, cos, sin, metadata.swa)
+        # Do not slice by the Python num_actual_tokens: decode ACLGraph capture
+        # freezes that integer. DSV4F runs the full hidden_states row count.
+        preprocess = self.multistream_preprocess if v41_multistream_preprocess_enabled() else self.preprocess
+        q, qr = preprocess(attn, hidden_states, cos, sin, metadata.swa)
         if self.role.is_kv_source:
             self._write_compressed_source(attn, hidden_states, positions, cos, sin, metadata)
         return q, qr
@@ -436,7 +634,6 @@ class AscendDSAV41Impl:
         )
 
     def _select_sparse_indices(self, attn, hidden_states, qr, positions, cos, sin, metadata):
-        hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
         if not self.role.has_long_context:
             return None
         shared = attn.shared_state
@@ -474,6 +671,90 @@ class AscendDSAV41Impl:
             shared.candidates[: candidates.shape[0]].copy_(candidates)
         return shared.topk_indices[: selected.shape[0]]
 
+    def _forward_attention_per_request(
+        self,
+        attn,
+        q,
+        metadata,
+        run_sfm,
+        *,
+        num_reqs,
+        has_compressed,
+        cmp_topk,
+        seq_lens,
+        ori_block_table,
+        cmp_block_table,
+        cmp_seq_lens,
+        cmp_residual,
+        cmp_indices,
+        cmp_topk_length,
+        masking,
+    ):
+        """Issue one SparseFlashMla call per request.
+
+        Packing several requests into one TND batch does not keep them
+        independent: only the request at row 0 is computed from its own rows,
+        and every later request comes back changed by whatever preceded it.
+        A batch of identical requests is unaffected, which is why this only
+        shows up once concurrent requests carry different content. Calling the
+        operator once per request makes every request the first one.
+        """
+        qsl_cpu = metadata.swa.query_start_loc_cpu
+        offsets = [0]
+        for i in range(num_reqs):
+            qlen = int(qsl_cpu[i + 1]) - int(qsl_cpu[i])
+            offsets.append(offsets[-1] + qlen + (qlen % 2))
+
+        ori_indices = metadata.swa.ori_sparse_indices
+        ori_lengths = metadata.swa.ori_topk_length
+        output = torch.empty_like(q)
+        span = torch.empty(2, dtype=torch.int32, device=q.device)
+        for i in range(num_reqs):
+            lo, hi = offsets[i], offsets[i + 1]
+            if hi <= lo:
+                continue
+            seq = seq_lens[i : i + 1]
+            cmp_seq = cmp_seq_lens[i : i + 1] if cmp_seq_lens is not None else None
+            topk_len = cmp_topk_length[lo:hi] if cmp_topk_length is not None else None
+            span[0], span[1] = 0, hi - lo
+            one = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
+                attn.n_local_heads,
+                1,
+                attn.head_dim,
+                cu_seqlens_q=span,
+                seqused_ori_kv=seq,
+                seqused_cmp_kv=cmp_seq,
+                cmp_residual_kv=cmp_residual[i : i + 1] if cmp_residual is not None else None,
+                batch_size=1,
+                max_seqlen_q=hi - lo,
+                max_seqlen_ori_kv=int(seq.max().item()),
+                max_seqlen_cmp_kv=int(cmp_seq.max().item()) if cmp_seq is not None else 0,
+                ori_topk=ori_indices.shape[-1] if ori_indices is not None else 0,
+                ori_topk_length=ori_lengths[lo:hi] if ori_lengths is not None else None,
+                cmp_topk=cmp_topk if has_compressed else 0,
+                cmp_topk_length=topk_len,
+                layout_q="TND",
+                layout_kv="PA_BBND",
+                has_ori_kv=True,
+                has_cmp_kv=has_compressed,
+                **masking,
+            )
+            output[lo:hi] = run_sfm(
+                q[lo:hi],
+                span,
+                seq,
+                ori_block_table[i : i + 1],
+                cmp_block_table[i : i + 1] if cmp_block_table is not None else None,
+                cmp_seq,
+                cmp_residual[i : i + 1] if cmp_residual is not None else None,
+                cmp_indices[lo:hi] if cmp_indices is not None else None,
+                topk_len,
+                ori_indices[lo:hi] if ori_indices is not None else None,
+                ori_lengths[lo:hi] if ori_lengths is not None else None,
+                one,
+            )
+        return output
+
     def _forward_attention(self, attn, q, metadata, compressed_indices, *, source_cache=None):
         """Run SparseFlashMla with the same PA metadata for both operator stages."""
         if source_cache is None and self.role.has_long_context:
@@ -484,50 +765,121 @@ class AscendDSAV41Impl:
         query_start_loc = metadata.swa.query_start_loc[: num_reqs + 1]
         seq_lens = metadata.swa.seq_lens[:num_reqs]
         ori_block_table = metadata.swa.block_table[:num_reqs]
+        keep = getattr(metadata, "_odd_prefill_keep", None)
+        even_plan = metadata.swa.even_plan
+        positions = metadata.positions
+        if even_plan is not None:
+            q = q.index_select(0, even_plan["src"])
+            if compressed_indices is not None:
+                compressed_indices = compressed_indices.index_select(0, even_plan["src"])
+            positions = positions.index_select(0, even_plan["src"])
+            query_start_loc = even_plan["query_start_loc"]
         cmp_block_table = None
         cmp_seq_lens = None
         cmp_residual = None
         cmp_indices = None
+        cmp_topk_length = None
         cmp_topk = 0
         if has_compressed:
+            if source_cache is None or metadata.attention is None or compressed_indices is None:
+                raise RuntimeError("V4.1 compressed attention is missing KV or TopK metadata")
             cmp_block_table = metadata.attention.block_table[:num_reqs]
             cmp_seq_lens = metadata.attention.cache_seq_lens[:num_reqs]
             cmp_residual = metadata.attention.cmp_residual
             cmp_topk = self.topology.index_topk
+            if cmp_topk not in (512, 1024):
+                raise ValueError(f"SparseFlashMla only supports TopK 512 or 1024, got {cmp_topk}")
             cmp_indices = pad_sparse_indices(compressed_indices, cmp_topk)
+            # DSV4F computes this from live positions inside forward so ACLGraph
+            # replay re-runs the div instead of a capture-time constant.
+            cmp_positions = positions[: cmp_indices.shape[0]]
+            cmp_topk_length = (
+                torch.div(cmp_positions + 1, ratio, rounding_mode="floor")
+                .clamp_(min=0, max=cmp_topk)
+                .to(torch.int32)
+                .unsqueeze(-1)
+            )
 
         operator_metadata = metadata.attention if has_compressed else metadata.swa
         op_metadata = operator_metadata.smla_metadata
+        if op_metadata is None:
+            raise RuntimeError(f"V4.1 ratio-{ratio} SMLA metadata was not built")
         wait_for_device_metadata(
             DeviceMetadataStage.ATTENTION,
             id(op_metadata),
         )
-        output, _ = torch.ops._C_ascend.npu_sparse_flash_mla(
-            q,
-            ori_kv=attn.dsa_attn.swa_cache_layer.kv_cache[0],
-            cmp_kv=source_cache,
-            ori_sparse_indices=metadata.swa.ori_sparse_indices,
-            ori_topk_length=metadata.swa.ori_topk_length,
-            cmp_sparse_indices=cmp_indices,
-            ori_block_table=ori_block_table,
-            cmp_block_table=cmp_block_table,
-            cu_seqlens_q=query_start_loc,
-            seqused_ori_kv=seq_lens,
-            seqused_cmp_kv=cmp_seq_lens,
-            cmp_residual_kv=cmp_residual,
-            sinks=attn.attn_sink,
-            metadata=op_metadata,
-            softmax_scale=attn.softmax_scale,
+        masking = dict(
             cmp_ratio=ratio,
             ori_mask_mode=metadata.swa.ori_mask_mode,
             cmp_mask_mode=3 if has_compressed else 0,
             ori_win_left=metadata.swa.ori_win_left,
             ori_win_right=metadata.swa.ori_win_right,
-            layout_q="TND",
-            layout_kv="PA_BBND",
-            topk_value_mode=1,
-            return_softmax_lse=False,
         )
+
+        def run_sfm(rows, cu, seq, ori_bt, cmp_bt, cmp_seq, cmp_res, indices, topk_len, ori_idx, ori_len, op_meta):
+            out, _ = torch.ops._C_ascend.npu_sparse_flash_mla(
+                rows,
+                ori_kv=attn.dsa_attn.swa_cache_layer.kv_cache[0],
+                cmp_kv=source_cache if has_compressed else None,
+                cmp_sparse_indices=indices,
+                cmp_topk_length=topk_len,
+                ori_block_table=ori_bt,
+                cmp_block_table=cmp_bt,
+                cu_seqlens_q=cu,
+                seqused_ori_kv=seq,
+                seqused_cmp_kv=cmp_seq,
+                cmp_residual_kv=cmp_res,
+                sinks=attn.attn_sink,
+                metadata=op_meta,
+                softmax_scale=attn.softmax_scale,
+                ori_sparse_indices=ori_idx,
+                ori_topk_length=ori_len,
+                layout_q="TND",
+                layout_kv="PA_BBND",
+                topk_value_mode=1,
+                return_softmax_lse=False,
+                **masking,
+            )
+            return out
+
+        if num_reqs > 1:
+            output = self._forward_attention_per_request(
+                attn,
+                q,
+                metadata,
+                run_sfm,
+                num_reqs=num_reqs,
+                has_compressed=has_compressed,
+                cmp_topk=cmp_topk,
+                seq_lens=seq_lens,
+                ori_block_table=ori_block_table,
+                cmp_block_table=cmp_block_table,
+                cmp_seq_lens=cmp_seq_lens,
+                cmp_residual=cmp_residual,
+                cmp_indices=cmp_indices,
+                cmp_topk_length=cmp_topk_length,
+                masking=masking,
+            )
+        else:
+            output = run_sfm(
+                q,
+                query_start_loc,
+                seq_lens,
+                ori_block_table,
+                cmp_block_table,
+                cmp_seq_lens,
+                cmp_residual,
+                cmp_indices,
+                cmp_topk_length,
+                metadata.swa.ori_sparse_indices,
+                metadata.swa.ori_topk_length,
+                op_metadata,
+            )
+        if even_plan is not None:
+            output = output.index_select(0, even_plan["keep"])
+        if keep is not None:
+            # The padding is appended, so the real rows are a prefix.
+            output = output[:keep]
         return output
 
     @staticmethod
@@ -547,24 +899,47 @@ class AscendDSAV41Impl:
             return output
         metadata = self._get_layer_metadata(forward_context.attn_metadata)
         self._prepare_inputs_and_caches(attn, hidden_states, metadata, forward_context.attn_metadata)
-        num_tokens = metadata.swa.num_actual_tokens
-        if num_tokens:
-            positions = metadata.positions[:num_tokens]
-            cos, sin = metadata.rope(attn.rotary_emb.layername, num_tokens)
+        num_reqs = metadata.swa.num_reqs
+        # Never branch on a host .item() here: decode graph capture freezes it.
+        # DSV4F uses the builder's token count or the packed hidden row count.
+        target_tokens = int(
+            getattr(metadata.swa, "num_input_tokens", 0)
+            or getattr(metadata.swa, "num_actual_tokens", 0)
+            or hidden_states.shape[0]
+        )
+        qsl_cpu = getattr(metadata.swa, "query_start_loc_cpu", None)
+        if qsl_cpu is not None and qsl_cpu.shape[0] > num_reqs:
+            target_tokens = max(target_tokens, int(qsl_cpu[num_reqs]))
+        orig_rows = hidden_states.shape[0]
+        keep = None
+        if target_tokens > orig_rows:
+            extra = target_tokens - orig_rows
+            hidden_states = torch.cat(
+                [hidden_states, hidden_states[-1:].expand(extra, *hidden_states.shape[1:])],
+                dim=0,
+            )
+            keep = orig_rows
+        object.__setattr__(metadata, "_odd_prefill_keep", keep)
+        if metadata.swa.num_actual_tokens:
+            positions = metadata.positions[: hidden_states.shape[0]]
+            cos, sin = metadata.rope(attn.rotary_emb.layername, hidden_states.shape[0])
             q, qr = self._prepare_queries(attn, hidden_states, positions, cos, sin, metadata)
             compressed_indices = self._select_sparse_indices(attn, hidden_states, qr, positions, cos, sin, metadata)
             attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
+            n_out = attention_output.shape[0]
             torch.ops._C_ascend.inplace_partial_rotary_mul(
                 attention_output.unsqueeze(1),
-                cos,
-                -sin,
+                cos[:n_out],
+                -sin[:n_out],
                 rotary_mode="interleave",
                 partial_slice=[attn.nope_head_dim, attn.head_dim],
             )
+            if attention_output.shape[0] != output.shape[0]:
+                attention_output = attention_output[: output.shape[0]]
         else:
             heads = attn.n_heads if getattr(attn, "enable_dsa_cp", False) else attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
-        self._project_output(attn, attention_output, hidden_states, metadata, projected=output)
+        self._project_output(attn, attention_output, hidden_states[: output.shape[0]], metadata, projected=output)
         return output
 
 
@@ -580,6 +955,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         build_compressor_metadata=True,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        cache_v41_attn_kv_plan(vllm_config)
         max_tokens = getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 4096)
         max_reqs = getattr(vllm_config.scheduler_config, "max_num_seqs", 256)
         self._supports_device_ops = getattr(device, "type", "cpu") != "cpu"
@@ -608,6 +984,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._c2_ring_metadata = torch.zeros(5 * compressor_reqs, dtype=torch.int32, device=device)
         self._c2_complete_mask = torch.zeros(compressor_tokens, dtype=torch.bool, device=device)
         self._c2_source_positions = torch.zeros(compressor_tokens, dtype=torch.int64, device=device)
+        # Every request may contribute one duplicated query row.
+        self._even_src = torch.zeros(max_tokens + max_reqs, dtype=torch.int64, device=device)
+        self._even_keep = torch.zeros(max_tokens, dtype=torch.int64, device=device)
+        self._even_qsl = torch.zeros(max_reqs + 1, dtype=torch.int32, device=device)
+        self._positions = torch.zeros(max_tokens + max_reqs, dtype=torch.int64, device=device)
+        self._cmp_topk_length = torch.zeros((max_tokens + max_reqs, 1), dtype=torch.int32, device=device)
         text_config = vllm_config.model_config.hf_text_config
         rope_dim = int(
             _config_value(
@@ -688,6 +1070,31 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             run()
         return buffer
 
+    def _publish_even_plan(self, query_start_loc_cpu, num_reqs: int):
+        """Copy the even-query gather plan into the builder's own buffers.
+
+        Decode graph replay reuses the addresses recorded during capture, so the
+        plan has to live in buffers that every later step refills in place.
+        """
+        if not self._supports_device_ops:
+            return None
+        plan = _even_query_plan(query_start_loc_cpu, num_reqs)
+        if plan is None:
+            return None
+        padded_len = plan["padded_len"]
+        keep_len = len(plan["keep"])
+        qsl_len = len(plan["padded_qsl"])
+        self._even_src[:padded_len].copy_(torch.tensor(plan["src"], dtype=torch.int64))
+        self._even_keep[:keep_len].copy_(torch.tensor(plan["keep"], dtype=torch.int64))
+        self._even_qsl[:qsl_len].copy_(torch.tensor(plan["padded_qsl"], dtype=torch.int32))
+        return {
+            "src": self._even_src[:padded_len],
+            "keep": self._even_keep[:keep_len],
+            "query_start_loc": self._even_qsl[:qsl_len],
+            "padded_len": padded_len,
+            "max_query_len": plan["max_query_len"],
+        }
+
     def _build_batch_metadata(self, common, num_reqs, num_actual_reqs, num_input_tokens):
         self._seq_lens[:num_reqs].copy_(common.seq_lens[:num_reqs])
         if num_actual_reqs < num_reqs:
@@ -699,12 +1106,18 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         if seq_lens_cpu is not None:
             max_seq_len = int(seq_lens_cpu[:num_actual_reqs].max().item()) if num_actual_reqs else 0
         num_decodes, num_decode_tokens, num_prefills, num_prefill_tokens = _request_counts(common, num_reqs)
+        # DSV4F keeps a view of the runner positions tensor. Copying into a
+        # builder-owned buffer lets FULL decode graphs constant-fold TopK=0.
         positions = common.positions
         if positions is not None:
             positions = positions[:num_input_tokens].long()
+        qsl_cpu = getattr(common, "query_start_loc_cpu", None)
+        if qsl_cpu is None:
+            qsl_cpu = common.query_start_loc[: num_reqs + 1].detach().to("cpu")
         return dict(
             query_start_loc=common.query_start_loc[: num_reqs + 1],
-            query_start_loc_cpu=getattr(common, "query_start_loc_cpu", None),
+            query_start_loc_cpu=qsl_cpu,
+            even_plan=self._publish_even_plan(qsl_cpu, num_reqs),
             seq_lens=self._seq_lens[:num_reqs],
             seq_lens_cpu=seq_lens_cpu,
             positions=positions,
@@ -811,7 +1224,15 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             compressed_lengths = batch_shared.get("lengths:c2")
             if compressed_lengths is None:
                 torch.div(seq_lens, ratio, rounding_mode="floor", out=self._cache_seq_lens[:num_reqs])
-                torch.remainder(seq_lens, ratio, out=self._cmp_residual[:num_reqs])
+                # A5 CSA traps (AI core 507015) whenever the compressed stream
+                # carries a residual token, which is every odd sequence length.
+                # That token is always the newest one and therefore inside the
+                # 128-token sliding window, so both the indexer and attention
+                # can treat the compressed cache as exactly seq // 2 entries.
+                if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+                    self._cmp_residual[:num_reqs].zero_()
+                else:
+                    torch.remainder(seq_lens, ratio, out=self._cmp_residual[:num_reqs])
                 compressed_lengths = (self._cache_seq_lens[:num_reqs], self._cmp_residual[:num_reqs])
                 batch_shared["lengths:c2"] = compressed_lengths
             coordinates["cache_seq_lens"], cmp_residual_buffer = compressed_lengths
@@ -836,7 +1257,11 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         index_topk = int(_config_value(text_config, "index_topk"))
         ori_sparse_indices = kwargs.get("ori_sparse_indices")
         noncausal = not bool(getattr(common, "causal", True))
-        if noncausal and ori_sparse_indices is None:
+        # Sparse-ori masking returns NaNs from A5 draft layers even when layer 0
+        # is finite. The sliding window already spans the draft block there, so
+        # band masking selects the same rows without a TopK list.
+        use_sparse_ori = noncausal and builds_scatter_nd_update_sk()
+        if use_sparse_ori and ori_sparse_indices is None:
             ori_sparse_indices, _ = build_dspark_swa_indices(
                 common.block_table_tensor[:num_reqs],
                 self.vllm_config.speculative_config.num_speculative_tokens,
@@ -849,10 +1274,10 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             )
         ori_topk_length = (
             (ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
-            if ori_sparse_indices is not None and noncausal
+            if ori_sparse_indices is not None and use_sparse_ori
             else None
         )
-        ori_mask_mode = 0 if noncausal else 4
+        ori_mask_mode = 0 if use_sparse_ori else 4
         ori_win_left = max(0, window_size - 1)
         ori_win_right = 0
         operator_ratio = 0 if cache_kind == "swa" else ratio
@@ -863,27 +1288,49 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             has_compressed = operator_ratio in (1, 2)
             cmp_seq_lens = coordinates["cache_seq_lens"] if has_compressed else None
             cmp_residual = cmp_residual_buffer
+            # The indexer fills unused TopK slots with -1. Without an explicit
+            # per-token count the kernel walks all cmp_topk slots and gathers
+            # whatever those rows hold, which is stale KV once blocks recycle.
+            cmp_topk_length_buf = None
+            op_positions = coordinates.get("positions")
+            even_plan_pre = coordinates.get("even_plan")
+            if even_plan_pre is not None and op_positions is not None:
+                op_positions = op_positions.index_select(0, even_plan_pre["src"])
+            if has_compressed and op_positions is not None:
+                cmp_topk_length_buf = (
+                    torch.div(op_positions + 1, max(operator_ratio, 1), rounding_mode="floor")
+                    .clamp_(min=0, max=index_topk)
+                    .to(torch.int32)
+                    .unsqueeze(-1)
+                )
 
             def build_smla_metadata() -> None:
                 # Keep graph event frontiers stable even when this CP rank has no query.
                 if num_actual_tokens == 0:
                     self._smla_metadata.zero_()
                     return
+                even_plan = coordinates.get("even_plan")
+                op_query_start_loc = common.query_start_loc[: num_reqs + 1].int()
+                op_max_query_len = int(getattr(common, "max_query_len", 0))
+                if even_plan is not None:
+                    op_query_start_loc = even_plan["query_start_loc"]
+                    op_max_query_len = even_plan["max_query_len"]
                 value = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
                     n_local_heads,
                     1,
                     head_dim,
-                    cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int(),
+                    cu_seqlens_q=op_query_start_loc,
                     seqused_ori_kv=seq_lens,
                     seqused_cmp_kv=cmp_seq_lens,
                     cmp_residual_kv=cmp_residual,
                     batch_size=num_reqs,
-                    max_seqlen_q=int(getattr(common, "max_query_len", 0)),
+                    max_seqlen_q=op_max_query_len,
                     max_seqlen_ori_kv=int(getattr(common, "max_seq_len", 0)),
                     max_seqlen_cmp_kv=(coordinates["max_cache_seq_len"] if has_compressed else 0),
                     ori_topk=ori_sparse_indices.shape[-1] if ori_sparse_indices is not None else 0,
                     ori_topk_length=ori_topk_length,
                     cmp_topk=index_topk if has_compressed else 0,
+                    cmp_topk_length=cmp_topk_length_buf,
                     cmp_ratio=operator_ratio,
                     ori_mask_mode=ori_mask_mode,
                     cmp_mask_mode=3 if has_compressed else 0,
@@ -914,11 +1361,11 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     int(_config_value(text_config, "index_head_dim")),
                     index_topk,
                     2,
-                    cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int(),
+                    cu_seqlens_q=coordinates["query_start_loc"][: num_reqs + 1].int(),
                     seqused_k=coordinates["cache_seq_lens"],
                     cmp_residual_k=residual,
                     batch_size=num_reqs,
-                    max_seqlen_q=int(getattr(common, "max_query_len", 0)),
+                    max_seqlen_q=int(coordinates.get("odd_max_query_len") or getattr(common, "max_query_len", 0) or 0),
                     max_seqlen_k=coordinates["max_cache_seq_len"],
                     layout_q="TND",
                     layout_k="PA_BBND",
@@ -1017,6 +1464,23 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 c2_source_cos = self._c2_source_cos[:num_input_tokens]
                 c2_source_sin = self._c2_source_sin[:num_input_tokens]
             c2_metadata_group_id = id(self._c2_complete_mask)
+        cmp_topk_length = None
+        if positions is not None and ratio in (1, 2) and index_topk:
+            topk_pos = positions
+            even_plan = coordinates.get("even_plan")
+            if even_plan is not None:
+                topk_pos = topk_pos.index_select(0, even_plan["src"])
+            n_topk = topk_pos.shape[0]
+            torch.div(
+                topk_pos + 1,
+                ratio,
+                rounding_mode="floor",
+                out=self._cmp_topk_length[:n_topk, 0],
+            )
+            self._cmp_topk_length[:n_topk, 0].clamp_(min=0, max=index_topk)
+            cmp_topk_length = self._cmp_topk_length[:n_topk]
+        coordinates["cmp_topk_length"] = cmp_topk_length
+        coordinates["skip_device_metadata_wait"] = bool(full_graph_mode)
         return AscendDSAV41Metadata(
             block_table=common.block_table_tensor[:num_reqs],
             slot_mapping=slots,

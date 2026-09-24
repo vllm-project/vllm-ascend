@@ -105,18 +105,19 @@ try:
     # from_import_sweep: the GLM vision tower is imported during model
     # registration, before this patch runs, so its from-import already
     # holds a direct reference to the CUDA kernel. Rebinding the defining
-    # module is not enough; rebind every module that captured the name.
+    # module is not enough; rebind every vLLM module that captured the name.
+    # Read __dict__ only: getattr() on transformers lazy modules prints
+    # alias-deprecation spam for every image processor.
     import sys as _sys
 
-    for _m in list(_sys.modules.values()):
-        try:
-            if getattr(_m, "fused_q_kv_rmsnorm", None) not in (None, _npu_fused_q_kv_rmsnorm):
-                _m.fused_q_kv_rmsnorm = _npu_fused_q_kv_rmsnorm  # type: ignore[attr-defined]
-        except Exception:
-            # Lazy loaders, frozen modules and C extensions may refuse the
-            # attribute read or the assignment. Skipping them keeps the sweep
-            # going for the modules that do hold the CUDA kernel.
+    for _name, _m in list(_sys.modules.items()):
+        if not _name.startswith(("vllm.", "vllm_ascend")):
             continue
+        _d = getattr(_m, "__dict__", None)
+        if _d is None:
+            continue
+        if _d.get("fused_q_kv_rmsnorm") not in (None, _npu_fused_q_kv_rmsnorm):
+            _d["fused_q_kv_rmsnorm"] = _npu_fused_q_kv_rmsnorm
 except ImportError:
     pass
 
@@ -149,7 +150,7 @@ if not HAS_TRITON:
         v = conv_output[:, 2 * H * K :].reshape(L, HV, V)
 
         if apply_l2norm:
-            # x / sqrt(sum(x^2) + eps) — matches Triton kernel, in fp32
+            # x / sqrt(sum(x^2) + eps), matching the Triton kernel, in fp32
             def _l2norm(t):
                 t_f = t.float()
                 return (t_f / torch.sqrt((t_f * t_f).sum(-1, keepdim=True) + 1e-6)).to(t.dtype)
@@ -360,15 +361,15 @@ try:
 
     _gis_mod.gather_initial_states = _npu_gather_initial_states
     _scs_mod.scatter_states = _npu_scatter_states
-    for _m in list(_sys_ms.modules.values()):
-        try:
-            if getattr(_m, "gather_initial_states", None) not in (None, _npu_gather_initial_states):
-                _m.gather_initial_states = _npu_gather_initial_states  # type: ignore[attr-defined]
-            if getattr(_m, "scatter_states", None) not in (None, _npu_scatter_states):
-                _m.scatter_states = _npu_scatter_states  # type: ignore[attr-defined]
-        except Exception:
-            # Same reasoning as the vision-tower sweep above: a module that
-            # rejects attribute access must not stop the remaining rebinds.
+    for _name, _m in list(_sys_ms.modules.items()):
+        if not _name.startswith(("vllm.", "vllm_ascend")):
             continue
+        _d = getattr(_m, "__dict__", None)
+        if _d is None:
+            continue
+        if _d.get("gather_initial_states") not in (None, _npu_gather_initial_states):
+            _d["gather_initial_states"] = _npu_gather_initial_states
+        if _d.get("scatter_states") not in (None, _npu_scatter_states):
+            _d["scatter_states"] = _npu_scatter_states
 except ImportError:
     pass

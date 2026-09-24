@@ -264,6 +264,14 @@ struct OffsetCalculatorImpl<FORMAT, FormatCategory::GM_Q_OUT_TND, ACTLEN_T> {
         gmLayout.MakeLayout(actualSeqLensQParser.GetTSize(), n2, g, d);
     }
 
+    template <bool HAS_SEQUSED>
+    __aicore__ inline void Init(uint32_t n2, uint32_t g, uint32_t d,
+                                const ActualSeqLensParser<ActualSeqLensMode::ACCUM, ACTLEN_T, HAS_SEQUSED> &parser)
+    {
+        actualSeqLensQParser.Init(parser.GetGm(), parser.GetActualLenDims());
+        gmLayout.MakeLayout(actualSeqLensQParser.GetTSize(), n2, g, d);
+    }
+
     __aicore__ inline uint64_t GetOffset(uint32_t bIdx, uint32_t n2Idx, uint32_t gIdx, uint32_t s1Idx, uint32_t dIdx)
     {
         uint64_t tIdx = actualSeqLensQParser.GetTBase(bIdx) + s1Idx;
@@ -409,6 +417,14 @@ struct OffsetCalculatorImpl<FORMAT, FormatCategory::GM_KV_TND, ACTLEN_T> {
                                 uint32_t actualLenKVDims)
     {
         actualSeqLensKVParser.Init(actualSeqLengthsGmKV, actualLenKVDims);
+        gmLayout.MakeLayout(actualSeqLensKVParser.GetTSize(), n2, d);
+    }
+
+    template <bool HAS_SEQUSED>
+    __aicore__ inline void Init(uint32_t n2, uint32_t d,
+                                const ActualSeqLensParser<ActualSeqLensMode::ACCUM, ACTLEN_T, HAS_SEQUSED> &parser)
+    {
+        actualSeqLensKVParser.Init(parser.GetGm(), parser.GetActualLenDims());
         gmLayout.MakeLayout(actualSeqLensKVParser.GetTSize(), n2, d);
     }
 

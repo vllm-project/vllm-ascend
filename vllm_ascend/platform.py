@@ -332,6 +332,7 @@ class NPUPlatform(Platform):
             from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
 
         _config_deprecated_logging()
+        _coerce_hf_rope_numeric_fields()
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
@@ -1417,6 +1418,60 @@ def _get_default_max_cudagraph_capture_size(vllm_config: VllmConfig) -> int | No
         decode_query_len += speculative_config.num_speculative_tokens
 
     return min(max_num_seqs * decode_query_len, 512)
+
+
+_ROPE_FLOAT_KEYS = (
+    "factor",
+    "beta_fast",
+    "beta_slow",
+    "attention_factor",
+    "low_freq_factor",
+    "high_freq_factor",
+)
+
+
+def _coerce_hf_rope_numeric_fields() -> None:
+    """DeepSeek config.json stores yarn factor/beta as ints; transformers 5+ warns.
+
+    Coerce those fields to float before validation so APIServer startup is not
+    flooded with type-check warnings. Values are unchanged (16 -> 16.0).
+    """
+    try:
+        import transformers.modeling_rope_utils as rope_utils
+    except Exception:
+        return
+
+    mixin = getattr(rope_utils, "RotaryEmbeddingConfigMixin", None)
+    if mixin is None:
+        return
+
+    def _coerce(params):
+        if not isinstance(params, dict):
+            return
+        for key in _ROPE_FLOAT_KEYS:
+            value = params.get(key)
+            if isinstance(value, int):
+                params[key] = float(value)
+
+    for method_name in (
+        "_validate_yarn_rope_parameters",
+        "_validate_linear_rope_parameters",
+        "_validate_dynamic_rope_parameters",
+        "_validate_llama3_rope_parameters",
+        "_validate_longrope_rope_parameters",
+    ):
+        orig = getattr(mixin, method_name, None)
+        if orig is None:
+            continue
+
+        def _wrap(fn):
+            def wrapped(self, rope_parameters, ignore_keys=None):
+                _coerce(rope_parameters)
+                return fn(self, rope_parameters, ignore_keys)
+
+            return wrapped
+
+        setattr(mixin, method_name, _wrap(orig))
 
 
 def _config_deprecated_logging():

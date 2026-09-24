@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -17,7 +17,7 @@ import vllm.envs as envs
 from safetensors import safe_open
 from torch import nn
 from transformers import PretrainedConfig
-from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -53,14 +53,19 @@ from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v41 import (
+    DeepseekV41CacheBackend,
     DeepseekV41CacheLayer,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
     sp_reduce_scatter,
     sp_shard,
+)
+from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4SWACache
+from vllm_ascend.models.deepseek_v41.cache_config import (
+    DeepseekV41FullSpec,
+    DeepseekV41SWASpec,
 )
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
@@ -545,29 +550,24 @@ def build_layer_plan(config: Any) -> DeepseekV41Topology:
     )
 
 
-class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
-    """Ascend SWA cache registered with the V4.1 allocator."""
+class AscendDeepseekV41SWACache(AscendDeepseekV4SWACache):
+    """V4 execution-compatible SWA plane participating in V4.1 grouping."""
 
-    def __init__(self, head_dim, window_size, dtype, prefix, cache_config):
-        from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
-
-        block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
-        spec = AscendSlidingWindowMLASpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=head_dim,
-            dtype=dtype,
-            sliding_window=window_size,
-            cache_dtype_str=cache_config.cache_dtype,
-            model_version="deepseek_v41",
-            alignment=None,
+    def get_kv_cache_spec(self, vllm_config):
+        spec = super().get_kv_cache_spec(vllm_config)
+        return DeepseekV41SWASpec(
+            block_size=spec.block_size,
+            num_kv_heads=spec.num_kv_heads,
+            head_size=spec.head_size,
+            dtype=spec.dtype,
+            sliding_window=spec.sliding_window,
+            cache_dtype_str=spec.cache_dtype_str,
+            model_version="deepseek_v4",
+            alignment=spec.alignment,
         )
-        super().__init__(get_current_vllm_config(), prefix, spec)
-        self.head_dim = head_dim
-        self.window_size = window_size
-        self.dtype = dtype
-        self.block_size = block_size
-        self.cache_config = cache_config
+
+    def get_attn_backend(self):
+        return DeepseekV41CacheBackend
 
 
 class DeepseekV41SWAAttention(nn.Module):
@@ -589,6 +589,9 @@ class DeepseekV41SWAAttention(nn.Module):
         *,
         use_yarn=False,
     ):
+        from vllm_ascend.models.deepseek_v41.cache_config import pin_v41_attn_kv_dtype
+
+        pin_v41_attn_kv_dtype(vllm_config)
         super().__init__()
         self.layer_idx = int(prefix.split(".")[-2])
         init_attention_projections(self, config, quant_config, prefix, reduce_results)
@@ -606,7 +609,7 @@ class DeepseekV41SWAAttention(nn.Module):
             base=config.compress_rope_theta if use_yarn else config.rope_theta,
             beta_fast=config.rope_parameters["beta_fast"],
             beta_slow=config.rope_parameters["beta_slow"],
-            original_max_position_embeddings=max_position_embeddings,
+            original_seq_len=(max_position_embeddings if use_yarn else 0),
             apply_yarn_scaling=use_yarn,
             rope_groups=["default"],
         )
@@ -701,14 +704,12 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
             self.long_kv_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.long_kv_cache",
-                AscendMLAAttentionSpec(
+                DeepseekV41FullSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=width,
                     dtype=torch.bfloat16,
                     tokens_per_state=role.compress_ratio,
-                    model_version="deepseek_v41",
-                    storage_block_size=block_size // role.compress_ratio,
                 ),
             )
         self.compressor = (
@@ -845,8 +846,21 @@ class DeepseekV41DecoderLayer(nn.Module):
     def hc_collapse(x, pre_mix):
         return (pre_mix.unsqueeze(-1) * x.float()).sum(-2).to(x.dtype)
 
+    def _hc_mixing_coefficients(self, x, hc_fn, hc_scale, hc_base):
+        """Recompute the next block's mixing coefficients.
+
+        HcPre declares its coefficient output as optional and leaves it
+        unwritten on A5, so reading it yields whatever was in the buffer. The
+        coefficients occupy the first ``hc_mult`` of the op's mix slots and take
+        the first entry of ``hc_scale``.
+        """
+        flat = x.flatten(-2).float()
+        rsqrt = torch.rsqrt(flat.square().mean(-1, keepdim=True) + self.norm_eps)
+        mixes = torch.nn.functional.linear(flat, hc_fn[: self.hc_mult]) * rsqrt
+        return torch.sigmoid(mixes * hc_scale[0] + hc_base[: self.hc_mult]) + self.hc_eps
+
     def hc_pre(self, x, hc_fn, hc_scale, hc_base, pre_mix=None):
-        return torch.ops._C_ascend.npu_hc_pre_v3(
+        y, post, comb_frag, _unwritten_pre = torch.ops._C_ascend.npu_hc_pre_v3(
             x,
             hc_fn,
             hc_scale,
@@ -857,14 +871,23 @@ class DeepseekV41DecoderLayer(nn.Module):
             norm_eps=self.norm_eps,
             hc_eps=self.hc_eps,
         )
+        mine = self._hc_mixing_coefficients(x, hc_fn, hc_scale, hc_base)
+        if pre_mix is not None:
+            # HcPre ignores the supplied mix on A5 and folds its own coefficients
+            # into `y`, which collapses the incoming streams by the wrong
+            # weights. Combine them here instead; this is the same reduction
+            # `hc_collapse` performs.
+            y = (pre_mix.unsqueeze(-1) * x.float()).sum(-2).to(x.dtype)
+        return y, post, comb_frag, mine
 
     def hc_post(self, x, residual, post, comb):
-        return torch.ops._C_ascend.npu_hc_post(
+        out = torch.ops._C_ascend.npu_hc_post(
             x.unsqueeze(0),
             residual.unsqueeze(0),
             post.unsqueeze(0),
             comb.unsqueeze(0),
         ).squeeze(0)
+        return out
 
     def forward(
         self,
@@ -1023,9 +1046,13 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         )
         self.register_buffer("engram_rotation", torch.eye(32), persistent=False)
         if engram_enabled(config):
-            if vllm_config.load_config.load_format != "dummy":
+            quarot_path = Path(self.engram_root) / "optional/quarot.safetensors"
+            # The rotation lives under optional/ and released
+            # DeepSeek-V4.1-Flash ships without it; an unrotated checkpoint
+            # keeps the identity this buffer is initialized to.
+            if vllm_config.load_config.load_format != "dummy" and quarot_path.is_file():
                 with torch.device("cpu"):
-                    with safe_open(Path(self.engram_root) / "optional/quarot.safetensors", framework="pt") as file:
+                    with safe_open(quarot_path, framework="pt") as file:
                         rotation = file.get_tensor("global_rotation")
                     block = rotation[:32, :32].contiguous()
                 self.engram_rotation.copy_(block)
@@ -1352,8 +1379,38 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         if not engram_enabled(self.model.config):
             return self._load_model_weights((name, tensor) for name, tensor in weights if ".engram." not in name)
-        loaded = self._load_model_weights((name, tensor) for name, tensor in weights if self._is_milestone_weight(name))
-        return loaded
+        # engram.wkv is F8_E4M3 with an F8_E8M0 scale while the projection is
+        # bf16, so the pair is resolved here rather than copied.
+        engram_loaded: set[str] = set()
+        pending_wkv: dict[int, dict[str, torch.Tensor]] = {}
+
+        def commit_engram_wkv(layer_id: int) -> None:
+            pieces = pending_wkv.get(layer_id)
+            if pieces is None or "weight" not in pieces or "scale" not in pieces:
+                return
+            from vllm_ascend.quantization.methods.w8a8.fp8_block import resolve_block_scales
+
+            parameter_name = f"model.layers.{layer_id}.engram.wkv.weight"
+            param = self.get_parameter(parameter_name)
+            resolved = resolve_block_scales(pieces["weight"], pieces["scale"].to(torch.float32), 32, 32, torch.bfloat16)
+            if resolved.shape != param.shape:
+                raise ValueError(f"Unexpected Engram wkv shape for layer {layer_id}: {tuple(resolved.shape)}")
+            param.data.copy_(resolved.to(device=param.device, dtype=param.dtype))
+            engram_loaded.add(parameter_name)
+            pending_wkv.pop(layer_id, None)
+
+        def milestone_weights() -> Iterator[tuple[str, torch.Tensor]]:
+            for name, tensor in weights:
+                if ".engram.wkv." in name:
+                    layer_id = int(name.removeprefix("model.").split(".")[1])
+                    pending_wkv.setdefault(layer_id, {})["scale" if name.endswith(".scale") else "weight"] = tensor
+                    commit_engram_wkv(layer_id)
+                    continue
+                if self._is_milestone_weight(name):
+                    yield name, tensor
+
+        loaded = self._load_model_weights(milestone_weights())
+        return loaded | engram_loaded
 
     def set_moe_parameters(self):
         self.expert_weights = []
@@ -1426,6 +1483,26 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         )
 
         params_dict = dict(self.named_parameters())
+
+        def _resolve_param_name(name: str) -> str:
+            """Bridge the two scale conventions.
+
+            Block-FP8 linears register ``weight_scale_inv`` while MXFP8 and fused
+            experts register ``weight_scale``; which one a layer owns depends on
+            the checkpoint block size, so names have to be resolved per layer.
+            """
+            if name in params_dict:
+                return name
+            if name.endswith(".weight_scale"):
+                alt = name + "_inv"
+                if alt in params_dict:
+                    return alt
+            if name.endswith(".weight_scale_inv"):
+                alt = name[: -len("_inv")]
+                if alt in params_dict:
+                    return alt
+            return name
+
         loaded_params: set[str] = set()
 
         tp_rank = get_tensor_model_parallel_rank()
@@ -1468,7 +1545,9 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             if ".attn_norm." in name:
                 name = name.replace(".attn_norm.", ".input_layernorm.")
             if name.endswith(".scale"):
-                name = name.replace(".scale", ".weight_scale")
+                base = name[: -len(".scale")]
+                inv_name = base + ".weight_scale_inv"
+                name = inv_name if inv_name in params_dict else base + ".weight_scale"
 
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -1483,13 +1562,14 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             # Hash-router layers route text tokens through ``tid2eid`` and keep
             # ``e_score_correction_bias`` unset, but the checkpoint still ships
             # a router bias for them. Skip it instead of raising a KeyError.
-            if name.endswith(".gate.e_score_correction_bias") and name not in params_dict:
+            if name.endswith(".gate.e_score_correction_bias") and _resolve_param_name(name) not in params_dict:
+                pass
                 continue
 
             if "sink" in name:
                 if is_pp_missing_parameter(name, self):
                     continue
-                param = params_dict[name]
+                param = params_dict[_resolve_param_name(name)]
                 if enable_dsa_cp():
                     param.data.copy_(loaded_weight)
                 else:
@@ -1511,7 +1591,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                 # name will be updated to mlp.experts[0].gate_up_proj, which
                 # will then be updated below in expert_params_mapping
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if ("mlp.experts." in name) and name not in params_dict:
+                if ("mlp.experts." in name) and _resolve_param_name(name) not in params_dict:
                     continue
                 if is_fusion_moe_shared_experts_layer:
                     continue
@@ -1520,18 +1600,18 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                 # QKV fusion is optional, fall back to normal
                 # weight loading if it's not enabled
                 # if go with fusion option, then update name
-                if (param_name == "fused_qkv_a_proj") and name_mapped not in params_dict:
+                if (param_name == "fused_qkv_a_proj") and _resolve_param_name(name_mapped) not in params_dict:
                     continue
                 else:
                     name = name_mapped
                 # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+                if name.endswith(".bias") and _resolve_param_name(name) not in params_dict:
                     continue
 
                 if is_pp_missing_parameter(name, self):
                     continue
 
-                param = params_dict[name]
+                param = params_dict[_resolve_param_name(name)]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
@@ -1594,7 +1674,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                         if is_pp_missing_parameter(name_mapped, self):
                             continue
 
-                        param = params_dict[name_mapped]
+                        param = params_dict[_resolve_param_name(name_mapped)]
                         # We should ask the weight loader to return success or
                         # not here since otherwise we may skip experts with
                         # other available replicas.
@@ -1621,18 +1701,18 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                             continue
 
                         # Skip loading extra bias for GPTQ models.
-                        if name.endswith(".bias") and name not in params_dict:
+                        if name.endswith(".bias") and _resolve_param_name(name) not in params_dict:
                             continue
 
                         # Remapping the name of FP8 kv-scale.
-                        name = maybe_remap_kv_scale_name(name, params_dict)
+                        name = maybe_remap_kv_scale_name(_resolve_param_name(name), params_dict)
                         if name is None:
                             continue
 
                         if is_pp_missing_parameter(name, self):
                             continue
 
-                        param = params_dict[name]
+                        param = params_dict[_resolve_param_name(name)]
                         weight_loader = getattr(param, "weight_loader", default_weight_loader)
                         weight_loader(param, loaded_weight)
             if not is_fusion_moe_shared_experts_layer:

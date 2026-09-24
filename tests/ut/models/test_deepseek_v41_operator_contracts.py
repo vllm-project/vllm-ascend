@@ -17,7 +17,8 @@ def test_deepseek_v41_model_call_sites_use_compiled_operator_layouts():
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in ("npu_sparse_flash_mla", "npu_sparse_flash_mla_metadata")
     ]
-    assert len(calls) == 2
+    # Batched metadata, per-request metadata, and the attention call itself.
+    assert len(calls) == 3
     for call in calls:
         layouts = {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords if kw.arg in ("layout_q", "layout_kv")}
         assert layouts == {"layout_q": "TND", "layout_kv": "PA_BBND"}

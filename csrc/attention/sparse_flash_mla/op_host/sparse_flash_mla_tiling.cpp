@@ -533,18 +533,15 @@ ge::graphStatus SMLAInfoParser::GetSMLATemplateMode()
             perfMode_ = SMLATemplateMode::HCA_TEMPLATE_MODE;
         } else if (opParamInfo_.cmpKv.desc == nullptr && opParamInfo_.cmpSparseIndices.tensor == nullptr) {
             if (opParamInfo_.oriSparseIndices.tensor != nullptr) {
-                // A2A3此处dspark用 SWA_TEMPLATE_MODE+hasOri判断；给A5留ORI_SPARSE_TEMPLATE_MODE分支
-                if (IsA5Arch(npuArch_)) {
-                    perfMode_ = SMLATemplateMode::ORI_SPARSE_TEMPLATE_MODE;
-                } else {
-                    // DSpark: oriMaskMode=0 + ori_sparse_indices on SWA kernel path.
-                    if (opParamInfo_.oriMaskMode == nullptr || *opParamInfo_.oriMaskMode != 0U) {
-                        OP_LOGE(opName_, "SWA ori sparse (DSpark) requires oriMaskMode 0, but got %u.",
-                                opParamInfo_.oriMaskMode != nullptr ? *opParamInfo_.oriMaskMode : UINT32_MAX);
-                        return ge::GRAPH_FAILED;
-                    }
-                    perfMode_ = SMLATemplateMode::SWA_TEMPLATE_MODE;
+                // The 950 pack only ships SWA and CSA kernels, and the guard below
+                // rejects every other template. DSpark (ori_sparse_indices,
+                // oriMaskMode=0, no cmp_kv) reuses the SWA template there as well.
+                if (opParamInfo_.oriMaskMode == nullptr || *opParamInfo_.oriMaskMode != 0U) {
+                    OP_LOGE(opName_, "SWA ori sparse (DSpark) requires oriMaskMode 0, but got %u.",
+                            opParamInfo_.oriMaskMode != nullptr ? *opParamInfo_.oriMaskMode : UINT32_MAX);
+                    return ge::GRAPH_FAILED;
                 }
+                perfMode_ = SMLATemplateMode::SWA_TEMPLATE_MODE;
             } else {
                 perfMode_ = SMLATemplateMode::SWA_TEMPLATE_MODE;
             }

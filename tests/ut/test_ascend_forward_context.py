@@ -448,9 +448,10 @@ def test_select_moe_comm_method_a3_mc2_invalid_hidden_size(
 @pytest.mark.parametrize(
     ("num_tokens", "world_size", "top_k_experts", "expected"),
     [
-        (128, 4, 2, MoECommType.MC2),
+        # A5 has no working MC2/AllToAll dispatch, so both collapse to AllGather.
+        (128, 4, 2, MoECommType.ALLGATHER),
         (129, 2, 4, MoECommType.ALLGATHER),
-        (129, 8, 4, MoECommType.ALLTOALL),
+        (129, 8, 4, MoECommType.ALLGATHER),
     ],
 )
 def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_experts, expected):
@@ -491,7 +492,10 @@ def test_select_moe_comm_method_a5_preserves_draft_quant_guard(monkeypatch, num_
     vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
     expected = MoECommType.FUSED_MC2
     if draft_quant == QuantType.NONE:
-        expected = MoECommType.MC2 if num_tokens <= 128 else MoECommType.ALLTOALL
+        # The guard still keeps an unquantized draft off MegaMoE, but on A5 it
+        # lands on AllGather: MC2 and AllToAll both dispatch through
+        # aclnnMoeDistributeDispatchV4, which A5 rejects with 561000.
+        expected = MoECommType.ALLGATHER
     assert (
         afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=draft_quant)
         == expected

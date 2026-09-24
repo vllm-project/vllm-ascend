@@ -121,7 +121,9 @@ def _mx_quantize(resolved: torch.Tensor, scale_alg: int) -> tuple[torch.Tensor, 
 
 
 def _supports_mx_regroup(in_features: int, group_size: int) -> bool:
-    return in_features % group_size == 0
+    # CANN MX quant requires the reduction dim to be a multiple of 128, which
+    # is stricter than the MX group size (32).
+    return in_features % group_size == 0 and in_features % 128 == 0
 
 
 def _is_absorbed_by_attention(layer: torch.nn.Module) -> bool:
@@ -214,8 +216,8 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
 
         if self.mxfp8_method is not None and not _supports_mx_regroup(resolved.shape[1], self.mxfp8_method.group_size):
             logger.warning_once(
-                "Reduction dim %d of %s is not a multiple of the MXFP8 group size %d; serving this "
-                "layer in %s instead of MXFP8.",
+                "Reduction dim %d of %s does not satisfy MXFP8 regrouping (needs a multiple of the "
+                "group size %d and of 128); serving this layer in %s instead of MXFP8.",
                 resolved.shape[1],
                 getattr(layer, "prefix", "the linear layer"),
                 self.mxfp8_method.group_size,
@@ -321,8 +323,8 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
             _supports_mx_regroup(getattr(layer, name).shape[-1], self.mxfp8_method.group_size) for name in weight_names
         ):
             logger.warning_once(
-                "Expert reduction dims of %s are not all multiples of the MXFP8 group size %d; "
-                "serving this layer in %s instead of MXFP8.",
+                "Expert reduction dims of %s do not all satisfy MXFP8 regrouping (each needs a "
+                "multiple of the group size %d and of 128); serving this layer in %s instead of MXFP8.",
                 getattr(layer, "prefix", "the fused MoE layer"),
                 self.mxfp8_method.group_size,
                 self.model_dtype,
