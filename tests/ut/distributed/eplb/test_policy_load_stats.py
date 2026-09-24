@@ -14,9 +14,7 @@ from vllm_ascend.distributed.eplb.state import AscendEplbState
 
 
 def _custom_policy():
-    return SimpleNamespace(
-        prepare_local_load_stats=lambda samples: PreparedLoadStats(samples)
-    )
+    return SimpleNamespace(prepare_local_load_stats=lambda samples: PreparedLoadStats(samples))
 
 
 def _model_state(**kwargs):
@@ -50,12 +48,8 @@ def test_step_keeps_skipped_samples_on_shared_time_axis(monkeypatch):
     state._should_collect_local_load = True
     state.step()
 
-    torch.testing.assert_close(
-        state._local_load_collection_mask, torch.tensor([0, 1])
-    )
-    torch.testing.assert_close(
-        state._physical_load_sample_slots, torch.tensor([-1, 1])
-    )
+    torch.testing.assert_close(state._local_load_collection_mask, torch.tensor([0, 1]))
+    torch.testing.assert_close(state._physical_load_sample_slots, torch.tensor([-1, 1]))
     assert state._num_recorded_load_steps == 2
     assert upstream_step.call_count == 2
 
@@ -87,18 +81,14 @@ def test_collect_global_load_stats_maps_physical_to_logical(monkeypatch):
     monkeypatch.setattr(
         state_module,
         "get_eplb_group",
-        lambda: SimpleNamespace(
-            cpu_group=cpu_group, device_group=device_group
-        ),
+        lambda: SimpleNamespace(cpu_group=cpu_group, device_group=device_group),
     )
     all_reduce = MagicMock()
     monkeypatch.setattr(state_module, "all_reduce", all_reduce)
     model_state = _model_state(
         model=SimpleNamespace(num_logical_experts=2),
         physical_to_logical_map=torch.tensor([[1, 0, 1]]),
-        expert_load_window=torch.tensor(
-            [[[2, 3, 5]], [[7, 11, 13]], [[17, 19, 23]]]
-        ),
+        expert_load_window=torch.tensor([[[2, 3, 5]], [[7, 11, 13]], [[17, 19, 23]]]),
     )
     state = AscendEplbState.__new__(AscendEplbState)
     state.policy = _custom_policy()

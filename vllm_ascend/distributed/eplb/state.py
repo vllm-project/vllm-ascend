@@ -133,9 +133,7 @@ class AscendEplbState(_eplb_state.EplbState):
         finally:
             EXPERT_MAPPING_EP_SIZE.reset(token)
         if self.uses_custom_load_stats:
-            self._initialize_load_stats_state(
-                self.model_states[model_config.compute_hash()]
-            )
+            self._initialize_load_stats_state(self.model_states[model_config.compute_hash()])
 
     def _initialize_load_stats_state(self, model_state: Any) -> None:
         model_state._load_mapping_generation = 0
@@ -159,8 +157,7 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def _discard_samples_from_old_mapping(self) -> None:
         mapping_changed = any(
-            state._load_mapping_generation
-            != state._observed_load_mapping_generation
+            state._load_mapping_generation != state._observed_load_mapping_generation
             for state in self.model_states.values()
         )
         if not mapping_changed:
@@ -171,15 +168,11 @@ class AscendEplbState(_eplb_state.EplbState):
         self._load_stats_window_start_index = 0
         self._load_stats_window_write_index = 0
         for state in self.model_states.values():
-            state._observed_load_mapping_generation = (
-                state._load_mapping_generation
-            )
+            state._observed_load_mapping_generation = state._load_mapping_generation
 
     def _ordered_load_step_indices(self) -> torch.Tensor:
         indices = torch.arange(self.expert_load_window_size, dtype=torch.long)
-        return (
-            indices + self._load_stats_window_start_index
-        ) % self.expert_load_window_size
+        return (indices + self._load_stats_window_start_index) % self.expert_load_window_size
 
     @staticmethod
     def _map_physical_stats_to_logical(
@@ -188,25 +181,19 @@ class AscendEplbState(_eplb_state.EplbState):
     ) -> PreparedLoadStats:
         values = physical_stats.values
         num_logical_experts = model_state.model.num_logical_experts
-        invalid_expert = torch.full_like(
-            model_state.physical_to_logical_map, num_logical_experts
-        )
+        invalid_expert = torch.full_like(model_state.physical_to_logical_map, num_logical_experts)
         logical_indices = torch.where(
             model_state.physical_to_logical_map >= 0,
             model_state.physical_to_logical_map,
             invalid_expert,
         ).long()
-        logical_values = values.new_zeros(
-            (*values.shape[:-1], num_logical_experts + 1)
-        )
+        logical_values = values.new_zeros((*values.shape[:-1], num_logical_experts + 1))
         logical_values.scatter_add_(
             -1,
             logical_indices.unsqueeze(0).expand(values.shape[0], -1, -1),
             values,
         )
-        return PreparedLoadStats(
-            logical_values[..., :-1], physical_stats.sample_counts
-        )
+        return PreparedLoadStats(logical_values[..., :-1], physical_stats.sample_counts)
 
     def step(
         self,
@@ -215,9 +202,7 @@ class AscendEplbState(_eplb_state.EplbState):
         log_stats: bool = False,
     ) -> None:
         """Advance the custom time axis alongside the upstream load window."""
-        is_sampling = (
-            self._is_load_sampling_step and not is_dummy and not is_profile
-        )
+        is_sampling = self._is_load_sampling_step and not is_dummy and not is_profile
         should_collect = self._should_collect_local_load
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
@@ -227,18 +212,14 @@ class AscendEplbState(_eplb_state.EplbState):
                 index = self._load_stats_window_write_index
                 has_sample = is_sampling and should_collect
                 self._local_load_collection_mask[index] = has_sample
-                self._physical_load_sample_slots[index] = (
-                    self.expert_load_window_step if has_sample else -1
-                )
+                self._physical_load_sample_slots[index] = self.expert_load_window_step if has_sample else -1
                 if self._num_recorded_load_steps < self.expert_load_window_size:
                     self._num_recorded_load_steps += 1
                 else:
                     self._load_stats_window_start_index = (
                         self._load_stats_window_start_index + 1
                     ) % self.expert_load_window_size
-                self._load_stats_window_write_index = (
-                    index + 1
-                ) % self.expert_load_window_size
+                self._load_stats_window_write_index = (index + 1) % self.expert_load_window_size
         super().step(
             is_dummy=is_dummy,
             is_profile=is_profile,
@@ -249,13 +230,9 @@ class AscendEplbState(_eplb_state.EplbState):
         self,
     ) -> dict[str, PreparedLoadStats] | None:
         """Prepare and reduce policy statistics on a shared time axis."""
-        prepare_load_stats = getattr(
-            self.policy, "prepare_local_load_stats", None
-        )
+        prepare_load_stats = getattr(self.policy, "prepare_local_load_stats", None)
         if prepare_load_stats is None:
-            raise TypeError(
-                "The selected EPLB policy does not prepare load statistics"
-            )
+            raise TypeError("The selected EPLB policy does not prepare load statistics")
         self._discard_samples_from_old_mapping()
         if self._num_recorded_load_steps == 0:
             return None
@@ -280,23 +257,12 @@ class AscendEplbState(_eplb_state.EplbState):
             local_mask = physical_slots >= 0
             if local_mask.any():
                 device_mask = local_mask.to(physical_samples.device)
-                device_slots = physical_slots[local_mask].to(
-                    physical_samples.device
-                )
-                physical_samples[device_mask] = (
-                    model_state.expert_load_window.index_select(
-                        0, device_slots
-                    )
-                )
+                device_slots = physical_slots[local_mask].to(physical_samples.device)
+                physical_samples[device_mask] = model_state.expert_load_window.index_select(0, device_slots)
             physical_stats = prepare_load_stats(physical_samples)
-            local_stats[model_key] = self._map_physical_stats_to_logical(
-                model_state, physical_stats
-            )
+            local_stats[model_key] = self._map_physical_stats_to_logical(model_state, physical_stats)
 
-        flat_values = [
-            stats.values.reshape(-1, stats.values.shape[-1])
-            for stats in local_stats.values()
-        ]
+        flat_values = [stats.values.reshape(-1, stats.values.shape[-1]) for stats in local_stats.values()]
         row_counts = [values.shape[0] for values in flat_values]
         reduced = torch.cat(flat_values)
         all_reduce(reduced, group=group.device_group)
@@ -309,14 +275,10 @@ class AscendEplbState(_eplb_state.EplbState):
             for index, (model_key, stats) in enumerate(local_stats.items())
         }
 
-    def publish_async_load_stats(
-        self, global_load_stats: dict[str, PreparedLoadStats]
-    ) -> None:
+    def publish_async_load_stats(self, global_load_stats: dict[str, PreparedLoadStats]) -> None:
         """Publish one complete statistics snapshot to the async worker."""
         if global_load_stats.keys() != self.model_states.keys():
-            raise ValueError(
-                "Load statistics must contain exactly one entry per EPLB model"
-            )
+            raise ValueError("Load statistics must contain exactly one entry per EPLB model")
         num_gpus = get_eplb_group().device_group.size()
         num_nodes = get_node_count()
         if num_gpus % num_nodes:
@@ -368,10 +330,7 @@ class AscendEplbState(_eplb_state.EplbState):
         rank_mapping: dict[int, int] | None = None,
     ) -> torch.Tensor | None:
         use_custom_async_stats = (
-            self.is_async
-            and not is_profile
-            and rank_mapping is None
-            and self.uses_custom_load_stats
+            self.is_async and not is_profile and rank_mapping is None and self.uses_custom_load_stats
         )
         should_gate = (
             hasattr(self, "_has_fresh_recorded_load")
