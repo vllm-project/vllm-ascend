@@ -21,6 +21,7 @@ Data plane (see zsc-sfa-kv-offload-merge-plan.md):
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, NamedTuple, TypeVar
 
 import numpy as np
@@ -57,7 +58,44 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.utils import enable_dsa_cp
 
-M = TypeVar("M", bound=AscendSFAMetadata)
+
+@dataclass
+class AscendSFAOffloadMetadata(AscendSFAMetadata):
+    """SFA metadata extended with fused Copy-SFA and LIM inputs."""
+
+    # Fused Copy-SFA inputs are contiguous NPU tensors. No exact CPU length mirror is
+    # required, including after speculative-token rejection.
+    fused_copy_sfa_enabled: bool = False
+    copy_sfa_query_ends: torch.Tensor | None = None
+    copy_sfa_seq_lens: torch.Tensor | None = None
+    copy_sfa_prefix_lens: torch.Tensor | None = None
+    copy_sfa_cache_tokens: torch.Tensor | None = None
+    copy_sfa_logical_lens: torch.Tensor | None = None
+    # Only draft step 0 populates this extent; later MTP steps use its saved
+    # implementation buffers. Target metadata leaves it unset.
+    copy_sfa_reuse_logical_lens: torch.Tensor | None = None
+    copy_sfa_pool_entries: torch.Tensor | None = None
+    lim_request_state: torch.Tensor | None = None
+    # Per-batch-row topk row slots, populated for every batch (prefill
+    # included) so exec_kv can D2D prefill KV into the rows at chunk end.
+    copy_sfa_prefill_pool_slots: torch.Tensor | None = None
+    copy_sfa_hbm_block_table: torch.Tensor | None = None
+    copy_sfa_source_block_table: torch.Tensor | None = None
+    copy_sfa_tail_src: torch.Tensor | None = None
+    copy_sfa_tail_dst: torch.Tensor | None = None
+    copy_sfa_tail_lengths: torch.Tensor | None = None
+    copy_sfa_device_slots: torch.Tensor | None = None
+    copy_sfa_copy_src_offsets: torch.Tensor | None = None
+    copy_sfa_copy_dst_offsets: torch.Tensor | None = None
+    copy_sfa_copy_lengths: torch.Tensor | None = None
+    copy_sfa_copy_count: torch.Tensor | None = None
+    # PD consumer: connector already D2D'd the prefill tail. Graph replay must
+    # not re-issue that H2D. Eager restore on prefix rollback uses the same
+    # copy descriptors outside the captured path.
+    copy_sfa_skip_tail_restore: bool = False
+
+
+M = TypeVar("M", bound=AscendSFAOffloadMetadata)
 _FSA_SELECTION_STATUS_ALIGNMENT = 8
 
 
@@ -119,7 +157,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
-        metadata_cls: type[AscendSFAMetadata] | None = None,
+        metadata_cls: type[AscendSFAOffloadMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
         super().__init__(
@@ -127,7 +165,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
             layer_names,
             vllm_config,
             device,
-            metadata_cls,
+            metadata_cls if metadata_cls is not None else AscendSFAOffloadMetadata,
             supports_dcp_with_varlen,
         )
         cfg = get_ascend_config().sparse_kv_offload_config
@@ -216,10 +254,10 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
 
     def _populate_offload_metadata(
         self,
-        metadata: AscendSFAMetadata,
+        metadata: AscendSFAOffloadMetadata,
         common_attn_metadata: AscendCommonAttentionMetadata,
         draft_index: int | None = None,
-    ) -> AscendSFAMetadata:
+    ) -> AscendSFAOffloadMetadata:
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
@@ -392,7 +430,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
         **kwargs: Any,
-    ) -> AscendSFAMetadata:
+    ) -> AscendSFAOffloadMetadata:
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
         return self._populate_offload_metadata(metadata, common_attn_metadata)
 
@@ -401,7 +439,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         common_attn_metadata: AscendCommonAttentionMetadata,
         draft_index: int,
         **kwargs: Any,
-    ) -> AscendSFAMetadata:
+    ) -> AscendSFAOffloadMetadata:
         metadata = super().build_for_drafting(
             common_attn_metadata,
             draft_index,

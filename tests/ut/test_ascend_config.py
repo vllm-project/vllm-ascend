@@ -785,6 +785,34 @@ class TestSparseKVOffloadConfig(TestBase):
         self.assertFalse(config.keep_device_kv_cache)
         self.assertTrue(config.use_fused_overlap)
 
+    def test_fused_copy_sfa_rejects_dspark(self):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            use_v2_model_runner=False,
+            speculative_config=SimpleNamespace(method="dspark", num_speculative_tokens=3),
+        )
+        with self.assertRaisesRegex(ValueError, "fused_copy_sfa does not support DSpark"):
+            SparseKVOffloadConfig.from_additional_config(
+                vllm_config,
+                {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 8192},
+            )
+
+        # The restriction is specific to fused Copy-SFA; baseline offload is unchanged.
+        config = SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
+        self.assertFalse(config.use_fused_copy_sfa)
+        vllm_config.speculative_config.method = "mtp"
+        config = SparseKVOffloadConfig.from_additional_config(
+            vllm_config,
+            {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 8192},
+        )
+        self.assertTrue(config.use_fused_copy_sfa)
+
     def test_unknown_key_is_rejected_even_when_disabled(self):
         with self.assertRaises(ValueError):
             SparseKVOffloadConfig.from_additional_config(SimpleNamespace(), {"unknown_option": False})

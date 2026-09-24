@@ -441,36 +441,6 @@ class AscendSFAMetadata:
     # by AscendSFAKVOffloadMetadataBuilder.
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
-    # Fused Copy-SFA inputs are contiguous NPU tensors. No exact CPU length mirror is
-    # required, including after speculative-token rejection.
-    fused_copy_sfa_enabled: bool = False
-    copy_sfa_query_ends: torch.Tensor | None = None
-    copy_sfa_seq_lens: torch.Tensor | None = None
-    copy_sfa_prefix_lens: torch.Tensor | None = None
-    copy_sfa_cache_tokens: torch.Tensor | None = None
-    copy_sfa_logical_lens: torch.Tensor | None = None
-    # Only draft step 0 populates this extent; later MTP steps use its saved
-    # implementation buffers. Target metadata leaves it unset.
-    copy_sfa_reuse_logical_lens: torch.Tensor | None = None
-    copy_sfa_pool_entries: torch.Tensor | None = None
-    lim_request_state: torch.Tensor | None = None
-    # Per-batch-row topk row slots, populated for every batch (prefill
-    # included) so exec_kv can D2D prefill KV into the rows at chunk end.
-    copy_sfa_prefill_pool_slots: torch.Tensor | None = None
-    copy_sfa_hbm_block_table: torch.Tensor | None = None
-    copy_sfa_source_block_table: torch.Tensor | None = None
-    copy_sfa_tail_src: torch.Tensor | None = None
-    copy_sfa_tail_dst: torch.Tensor | None = None
-    copy_sfa_tail_lengths: torch.Tensor | None = None
-    copy_sfa_device_slots: torch.Tensor | None = None
-    copy_sfa_copy_src_offsets: torch.Tensor | None = None
-    copy_sfa_copy_dst_offsets: torch.Tensor | None = None
-    copy_sfa_copy_lengths: torch.Tensor | None = None
-    copy_sfa_copy_count: torch.Tensor | None = None
-    # PD consumer: connector already D2D'd the prefill tail. Graph replay must
-    # not re-issue that H2D. Eager restore on prefix rollback uses the same
-    # copy descriptors outside the captured path.
-    copy_sfa_skip_tail_restore: bool = False
     positions: torch.Tensor | None = None
     query_start_loc: torch.Tensor | None = None
     max_query_len: int = 0

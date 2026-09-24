@@ -61,10 +61,10 @@ from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
-from vllm_ascend.spec_decode.mtp import compact_mtp_topk_indices
 from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
     _maybe_eager_context,
+    compact_mtp_topk_indices,
     patch_tensor_parallel_group,
 )
 from vllm_ascend.utils import _is_glm_model, check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph
