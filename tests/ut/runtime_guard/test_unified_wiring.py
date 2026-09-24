@@ -128,11 +128,15 @@ def test_runners_call_run_sample_phase():
     """Source contract: v1/v2 sample_tokens must invoke the orchestrator."""
     from pathlib import Path
 
-    root = Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker"
-    v1 = (root / "model_runner_v1.py").read_text(encoding="utf-8")
-    v2 = (root / "v2" / "model_runner.py").read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parents[3] / "vllm_ascend"
+    v1 = (root / "worker" / "model_runner_v1.py").read_text(encoding="utf-8")
+    v2 = (root / "worker" / "v2" / "model_runner.py").read_text(encoding="utf-8")
+    hooks = (root / "observability" / "runtime_guard" / "hooks.py").read_text(encoding="utf-8")
+    # v1 keeps the orchestration inline (different kwargs shape).
     assert "run_sample_phase(" in v1
-    assert "run_sample_phase(" in v2
+    # v2 routes it through the shared decorator.
+    assert "run_sample_phase(" in hooks
+    assert "@runtime_guard_sample_tokens" in v2
     assert "_rg_spec_num_sampled" in v2
 
 

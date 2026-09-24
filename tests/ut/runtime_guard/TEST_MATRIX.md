@@ -54,6 +54,7 @@ Priorities: **P0** every PR / smoke; **P1** full suite; **P2** env-dependent.
 | **A2** Empty `block_ids` never full-cache D2H | **Yes** | `test_detectors_and_kv.py` |
 | **A3** Soft-fail bad JSON | **Yes** | `tests/ut/runtime_config/test_runtime_config_core.py` |
 | Hot-path gate / idle sync correctness | **Yes** | `test_hot_path_overhead.py` (no wall-clock) |
+| Guard decorator wiring (v1/v2 step sync, v2 sample-phase hooks, inference-mode inner placement) | **Yes** | `test_hooks.py` |
 | Live NPU TPS / wall-clock microbench | **No** | Out of this product tree (manual Ascend runs) |
 
 CI proves **functional isolation** and detector/report/dump contracts.  

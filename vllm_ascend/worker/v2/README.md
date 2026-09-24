@@ -7,6 +7,16 @@ to get specific plans.
 
 ## Gaps with vLLM (To Be Addressed)
 
+- [ ] `model_runner._rg_*` runtime_guard hooks
+
+    Why: The wave sync / sample-phase guard orchestration lives in
+    `vllm_ascend/observability/runtime_guard/hooks.py` decorators
+    (`@runtime_guard_step` shared with v1, `@runtime_guard_sample_tokens`
+    v2-only). The runner keeps only the functional, guard-independent hooks
+    (`_rg_before_sample_phase` / `_rg_sample_phase_result` /
+    `_rg_after_sample_phase`). Track this hook protocol when the upstream
+    `GPUModelRunner.execute_model` / `sample_tokens` contract changes.
+
 - [ ] `set_cos_and_sin` & `update_cos_sin`
 
     Why: DeepSeek-like models (mla) still need cos/sin setting and updating in model_runner. These should be removed when mla can solve cos/sin internally.

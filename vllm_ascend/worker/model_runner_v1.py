@@ -112,6 +112,7 @@ from vllm.v1.worker.gpu_model_runner import (
     nans_to_dict,
 )
 
+from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_step
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
 from vllm_ascend.observability.runtime_guard.runner_bridge import (
     AscendAsyncGPUModelRunnerOutput,
@@ -2196,26 +2197,16 @@ class NPUModelRunner(GPUModelRunner):
                 return self.model.compute_logits(sample_hidden_states)
         return self.model.compute_logits(sample_hidden_states)
 
+    # runtime_guard_step must stay INNER (below @torch.inference_mode()) so the
+    # wave sync keeps running inside the inference-mode context.
     @torch.inference_mode()
+    @runtime_guard_step
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        allow_arm = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0) > 0
-        runtime_guard = getattr(self, "runtime_guard", None)
-        if runtime_guard is not None:
-            runtime_guard.sync_for_step(
-                scheduler_output=scheduler_output,
-                allow_arm=allow_arm,
-            )
-        try:
-            return self._execute_model_after_sync(scheduler_output, intermediate_tensors)
-        finally:
-            # Collectives must stay lockstep — do not soft-fail this gate.
-            # No-sample / early return: do not burn manual_dump.
-            if runtime_guard is not None and self.execute_model_state is None:
-                runtime_guard.end_of_wave_sync(allow_arm=False)
+        return self._execute_model_after_sync(scheduler_output, intermediate_tensors)
 
     def _execute_model_after_sync(
         self,

@@ -63,12 +63,13 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
-from vllm_ascend.observability.runtime_guard.runner_bridge import (
-    maybe_wrap_v2_async_output,
-    need_pre_sample_hook,
-    wrap_compute_logits_for_pre_sample,
+from vllm_ascend.observability.runtime_guard.hooks import (
+    SamplePhasePreState,
+    runtime_guard_sample_tokens,
+    runtime_guard_step,
 )
+from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
+from vllm_ascend.observability.runtime_guard.runner_bridge import maybe_wrap_v2_async_output
 from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
@@ -258,7 +259,12 @@ class NPUModelRunner(GPUModelRunner):
             pcp_manager._sampling_hidden_restored = True
         self.execute_model_state = state
 
+    @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
+        return super().sample_tokens(grammar_output)
+
+    def _rg_before_sample_phase(self) -> SamplePhasePreState:
+        """Functional pre-sample work + ephemeral-state peek (before the pop)."""
         pcp_manager = self.pcp_manager
         if pcp_manager is not None and not self.is_last_pp_rank and self.execute_model_state is not None:
             assert isinstance(pcp_manager, AscendPCPManager)
@@ -283,60 +289,32 @@ class NPUModelRunner(GPUModelRunner):
         # Cleared each step; filled by postprocess_sampled during sample_fn.
         self._rg_spec_sampled_tokens = None
         self._rg_spec_num_sampled = None
-        # Capture bound super() before nested sample_fn (zero-arg super fails in nested fn).
-        _super_sample_tokens = super().sample_tokens
+        return SamplePhasePreState(input_batch=input_batch, finished_req_ids=finished_req_ids)
 
-        # ``__new__`` UTs omit ``runtime_guard``; keep the pre-guard sample path.
-        runtime_guard = getattr(self, "runtime_guard", None)
-        if runtime_guard is None:
-            return _super_sample_tokens(grammar_output)
-
-        def sample_fn() -> SamplePhaseResult:
-            with (
-                wrap_compute_logits_for_pre_sample(self, input_batch)
-                if need_pre_sample_hook(runtime_guard)
-                else nullcontext()
-            ):
-                output = _super_sample_tokens(grammar_output)
-
-            req_ids = list(getattr(input_batch, "req_ids", None) or [])
-            sampled = self._rg_spec_sampled_tokens
-            # AsyncOutput.sampled_token_ids is padded D2H numpy until get_output()
-            # trims with num_sampled. run_sample_phase defers check_after_sample
-            # for AsyncModelRunnerOutput; AscendAsyncOutput.get_output appends
-            # the trimmed rows (W2-3 / D-11 token_repeat false positive).
-            return SamplePhaseResult(
-                scheduler_output=getattr(self, "_rg_scheduler_output", None),
-                input_batch=input_batch,
-                model_runner_output=output,
-                sampler_output=SimpleNamespace(sampled_token_ids=sampled),
-                valid_sampled_token_ids=getattr(output, "sampled_token_ids", None),
-                req_ids_output_copy=req_ids,
-                invalid_req_indices=None,
-                finished_req_ids=finished_req_ids,
-            )
-
-        def accepted_token_nums_fn(_result: SamplePhaseResult):
-            return self._rg_spec_num_sampled
-
-        use_async = bool(getattr(self, "use_async_scheduling", False))
-        speculative_config = getattr(self, "speculative_config", None)
-        result, _ = runtime_guard.run_sample_phase(
-            sample_fn=sample_fn,
-            speculative_config=speculative_config,
-            need_accepted_tokens=False,
-            use_async=use_async,
-            accepted_token_nums_fn=accepted_token_nums_fn
-            if speculative_config is not None
-            else None,
+    def _rg_sample_phase_result(self, output, pre: SamplePhasePreState) -> SamplePhaseResult:
+        """Guard-visible result of one sample phase (reads postprocess stashes)."""
+        req_ids = list(getattr(pre.input_batch, "req_ids", None) or [])
+        # AsyncOutput.sampled_token_ids is padded D2H numpy until get_output()
+        # trims with num_sampled. run_sample_phase defers check_after_sample
+        # for AsyncModelRunnerOutput; AscendAsyncOutput.get_output appends
+        # the trimmed rows (W2-3 / D-11 token_repeat false positive).
+        return SamplePhaseResult(
+            scheduler_output=getattr(self, "_rg_scheduler_output", None),
+            input_batch=pre.input_batch,
+            model_runner_output=output,
+            sampler_output=SimpleNamespace(sampled_token_ids=self._rg_spec_sampled_tokens),
+            valid_sampled_token_ids=getattr(output, "sampled_token_ids", None),
+            req_ids_output_copy=req_ids,
+            invalid_req_indices=None,
+            finished_req_ids=pre.finished_req_ids,
         )
 
+    def _rg_after_sample_phase(self, output, guard):
+        """Functional sample tail (spec-PP broadcast) + guard async-output wrap."""
         if self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
             self.pp_handler.broadcast_drafts()
-
-        output = result.model_runner_output
-        if runtime_guard.needs_sample_phase_hooks():
+        if guard is not None and guard.needs_sample_phase_hooks():
             output = maybe_wrap_v2_async_output(output, self)
         return output
 
@@ -378,7 +356,10 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.model_state.kvpp_runtime = self.kvpp
 
+    # runtime_guard_step must stay INNER (below @torch.inference_mode()) so the
+    # wave sync keeps running inside the inference-mode context.
     @torch.inference_mode()
+    @runtime_guard_step
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
@@ -403,36 +384,18 @@ class NPUModelRunner(GPUModelRunner):
             assert kv_connector_metadata is not None
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
-        # v1 parity: dummy waves never arm — manual_dump is not burned and the
-        # wave counter does not advance (advance(allow_arm=False) is a no-op).
-        # ``__new__`` UTs omit ``runtime_guard``; skip hooks when unbound.
-        runtime_guard = getattr(self, "runtime_guard", None)
-        allow_arm = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0) > 0
-        if runtime_guard is not None:
-            runtime_guard.sync_for_step(
-                scheduler_output=scheduler_output,
-                allow_arm=allow_arm,
-            )
-        self._rg_scheduler_output = scheduler_output
-
-        try:
-            self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-                context_len=context_len,
-                valid_dummy_state_slots=valid_dummy_state_slots,
-            )
-            self.model_state.kvpp_is_dummy_run = False
-            self.kvpp.complete_forward()
-        finally:
-            # Collectives must stay lockstep — do not soft-fail this gate.
-            # No-sample / early return: do not burn manual_dump.
-            if runtime_guard is not None and (dummy_run or self.execute_model_state is None):
-                runtime_guard.end_of_wave_sync(allow_arm=False)
+        self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
+        output = super().execute_model(
+            scheduler_output,
+            intermediate_tensors=intermediate_tensors,
+            dummy_run=dummy_run,
+            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+            is_profile=is_profile,
+            context_len=context_len,
+            valid_dummy_state_slots=valid_dummy_state_slots,
+        )
+        self.model_state.kvpp_is_dummy_run = False
+        self.kvpp.complete_forward()
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,
