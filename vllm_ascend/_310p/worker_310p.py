@@ -24,6 +24,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
+from vllm_ascend._310p.compilation.acl_graph import apply_310p_aclgraph_patches
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.utils import is_rc_device
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
@@ -31,6 +32,11 @@ from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 class NPUWorker310(NPUWorker):
     def _create_model_runner(self):
+        # 310P-only: rebind MRV1 ACLGraphWrapper sites before model wrap/capture.
+        # Deferred from import time so CPU UTs that merely import this module do
+        # not mutate shared mainline ACLGraphWrapper behavior.
+        apply_310p_aclgraph_patches()
+
         if self.use_v2_model_runner:
             from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 
