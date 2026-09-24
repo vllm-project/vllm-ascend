@@ -1087,9 +1087,9 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     assert attn_utils.build_attn_state(pooling_encoder, seq, 2, seq, seq) is state.PrefillNoCache
     assert attn_utils.build_attn_state(pooling_other, seq, 2, seq, seq) is state.PrefillCacheHit
     assert attn_utils.build_attn_state(no_spec, seq, 2, seq, seq) is state.PrefillNoCache
-    assert attn_utils.build_attn_state(mtp, seq, 2, ones, ones) is state.SpecDecoding
+    assert attn_utils.build_attn_state(mtp, seq, 2, ones, ones) is state.DecodeOnly
     assert attn_utils.build_attn_state(no_spec, seq, 2, ones, ones) is state.DecodeOnly
-    assert attn_utils.build_attn_state(mtp, seq, 2, scheduled, ones) is state.SpecDecoding
+    assert attn_utils.build_attn_state(mtp, seq, 2, scheduled, ones) is state.ChunkedPrefill
     assert attn_utils.build_attn_state(eagle, seq, 2, scheduled, ones) is state.ChunkedPrefill
     assert attn_utils.build_attn_state(chunked, seq, 2, scheduled, scheduled) is state.ChunkedPrefill
     assert attn_utils.build_attn_state(no_spec, seq, 2, scheduled, scheduled) is state.PrefillCacheHit

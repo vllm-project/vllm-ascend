@@ -203,6 +203,7 @@ class NPUModelRunner310(NPUModelRunner):
     def _build_attention_metadata(self, *args: Any, **kwargs: Any):
         # Parent dummy_run assigns ChunkedPrefill for non-MLA MTP (910B FIA graph).
         # 310P must capture SpecDecoding + splitfuse for SpecDecoding uniform decode graphs.
+        # TODO: Migrate 310P MTP graph capture and replay before dropping SpecDecoding.
         if self._spec_dummy_capture:
             self.attn_state = AscendAttentionState.SpecDecoding
         return super()._build_attention_metadata(*args, **kwargs)
@@ -248,6 +249,7 @@ class NPUModelRunner310(NPUModelRunner):
             and not np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0)
             and np.all(num_scheduled_tokens == self.uniform_decode_query_len)
         ):
+            # TODO: Retire this state with the 310P MTP splitfuse graph path.
             attn_state = AscendAttentionState.SpecDecoding
             self.attn_state = attn_state
         return attn_state

@@ -97,6 +97,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                 kwargs["max_query_len"] = max_query_len
             batch = orig_make_dummy(num_reqs, num_tokens, input_buffers_arg, **kwargs)
             if num_reqs > 0 and (num_tokens // num_reqs) > 1:
+                # TODO: Migrate 310P draft-prefill capture before dropping SpecDecoding.
                 batch.attn_state = AscendAttentionState.SpecDecoding
             return batch
 
