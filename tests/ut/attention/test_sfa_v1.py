@@ -406,6 +406,7 @@ class TestAscendSFACacheComposition(TestBase):
             True,
             False,
             False,
+            "v1",
         )
 
         self.assertIs(result, expected_topk)
@@ -445,6 +446,7 @@ class TestAscendSFACacheComposition(TestBase):
             False,
             True,
             True,
+            "v1",
         )
 
         self.assertIs(result, expected_topk)
@@ -460,6 +462,58 @@ class TestAscendSFACacheComposition(TestBase):
             sparse_count=2048,
             sparse_mode=3,
         )
+
+    def test_pivot_indexer_v2_uses_v2_metadata_and_operator(self):
+        expected_topk = torch.zeros(4, 1, 2048, dtype=torch.int32)
+        metadata = torch.zeros(1024, dtype=torch.int32)
+        q_li = torch.zeros(4, 32, 128, dtype=torch.bfloat16)
+        key_cache = torch.zeros(64, 128, 1, 128, dtype=torch.bfloat16)
+        weights = torch.zeros(4, 32, dtype=torch.bfloat16)
+        block_table = torch.arange(64, dtype=torch.int32).view(1, -1)
+        query_lengths = torch.tensor([4], dtype=torch.int32)
+        key_lengths = torch.tensor([8192], dtype=torch.int32)
+
+        with (
+            patch(
+                "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_v2_metadata",
+                create=True,
+                return_value=metadata,
+            ) as mock_metadata,
+            patch(
+                "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_v2",
+                create=True,
+                return_value=(expected_topk, torch.empty(0)),
+            ) as mock_indexer,
+        ):
+            result = BaseDeviceAdaptor.indexer_select_post_process(
+                q_li,
+                None,
+                None,
+                weights,
+                (key_cache,),
+                0,
+                1,
+                SimpleNamespace(block_table=block_table),
+                query_lengths,
+                key_lengths,
+                False,
+                False,
+                True,
+                "v2",
+            )
+
+        self.assertIs(result, expected_topk)
+        metadata_args = mock_metadata.call_args
+        self.assertEqual(metadata_args.args, (32, 1, 128, 2048))
+        self.assertTrue(torch.equal(metadata_args.kwargs["cu_seqlens_q"], torch.tensor([0, 4])))
+        self.assertEqual(metadata_args.kwargs["max_seqlen_k"], 8192)
+        operator_args = mock_indexer.call_args
+        self.assertIs(operator_args.args[0], q_li)
+        self.assertIs(operator_args.args[1], key_cache)
+        self.assertEqual(operator_args.args[2].dtype, torch.float32)
+        self.assertEqual(operator_args.args[3], 2048)
+        self.assertIs(operator_args.kwargs["metadata"], metadata)
+        self.assertEqual(operator_args.kwargs["layout_k"], "PA_BBND")
 
     def test_pivot_indexer_is_rejected_on_a5(self):
         with self.assertRaisesRegex(RuntimeError, "supported only on Ascend 910B/910_93"):
@@ -477,6 +531,7 @@ class TestAscendSFACacheComposition(TestBase):
                 False,
                 False,
                 True,
+                "v1",
             )
 
 
@@ -710,6 +765,7 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer.wq_b = MagicMock(return_value=(torch.randn(num_tokens, n_head * head_dim), None))
         indexer.use_torch_npu_lightning_indexer = False
         indexer.enable_pivot_lightning_indexer = False
+        indexer.pivot_lightning_indexer_backend = "v1"
         indexer.k_cache = SimpleNamespace(kv_cache=torch.zeros(2, 16, 1, 128))
         indexer._pcp_active = False
         indexer._dsa_cp_active = False

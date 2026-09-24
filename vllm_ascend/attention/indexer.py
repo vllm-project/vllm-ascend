@@ -184,6 +184,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         self.enable_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(self.k_cache.prefix)
         self.enable_pivot_lightning_indexer = get_ascend_config().enable_pivot_lightning_indexer
+        self.pivot_lightning_indexer_backend = get_ascend_config().pivot_lightning_indexer_backend
         if self.enable_sparse_li_c8 and self.enable_pivot_lightning_indexer:
             raise ValueError(
                 "enable_pivot_lightning_indexer requires a BF16/FP16 indexer cache; "
@@ -498,6 +499,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             self.enable_sparse_li_c8,
             self.use_torch_npu_lightning_indexer,
             self.enable_pivot_lightning_indexer,
+            self.pivot_lightning_indexer_backend,
         )
 
 
