@@ -54,6 +54,22 @@ Unless stated otherwise, these optimizations are selected automatically for the 
 
 ### Deprecation and Configuration Changes
 
+- **Upcoming model deprecations**: The following models are planned for deprecation from the actively maintained model set. Once this takes effect, their CI and nightly test coverage will no longer be maintained, and the latest `main` branch will no longer receive model-specific compatibility fixes or feature maintenance for them. This does not affect their availability in the earlier releases and release candidates that include them, where they received extensive functional and performance validation. Users can continue deploying those versions and use them as a base for custom development and model-specific extensions:
+    - DeepSeek-R1
+    - DeepSeek-R1-0528
+    - DeepSeek-V3.1
+    - DeepSeek-V3.2
+    - GLM-4.7
+    - GLM-5
+    - Hy3-preview
+    - Kimi-K2-Thinking
+    - Kimi-K2.5
+    - MiniMax-M2.5
+    - MiniMax-M2.7
+    - Qwen3-235B-A22B
+    - Qwen3-VL-235B-A22B-Instruct
+    - Qwen3-32B
+    - QwQ-32B
 - Enabling `additional_config.enable_dsa_cp` now emits an advance deprecation warning. Starting with v0.29.0, DSA-CP will be deprecated for Model Runner V2 deployments; Prefill Context Parallelism (PCP) will provide full coverage and replace it. The Model Runner V1 path will remain available until Model Runner V1 is removed, after which DSA-CP will be removed completely. DSA-CP behavior is unchanged in v0.27.1rc1. [#15890](https://github.com/vllm-project/vllm-ascend/pull/15890)
 - `finegrained_tp_config.olora_tensor_parallel_size` is deprecated in the v0.27.x release line and has already been removed from `main`; it will be unavailable starting with the v0.28.x release line. Remove this key before upgrading. This only removes the unused DeepSeek V4 oLoRA tensor-parallel switch; the model architecture field `o_lora_rank`, standard LoRA adapters, and the other fine-grained TP settings are unaffected. [#15857](https://github.com/vllm-project/vllm-ascend/pull/15857)
 - For v0.27.1rc1, release images do not preload jemalloc globally. This is a release-specific image configuration and does not announce removal in future releases; jemalloc remains installed and can be enabled explicitly when required. [#17146](https://github.com/vllm-project/vllm-ascend/pull/17146)
