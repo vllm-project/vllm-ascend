@@ -87,8 +87,6 @@ templates:
       - "1024"
       - --max-model-len
       - "133120"
-      - --kv-cache-dtype
-      - "int8"
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
@@ -154,8 +152,6 @@ templates:
       - "1024"
       - --max-model-len
       - "133120"
-      - --kv-cache-dtype
-      - "int8"
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
@@ -225,8 +221,6 @@ templates:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
-      - --kv-cache-dtype
-      - "int8"
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
@@ -293,8 +287,6 @@ templates:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
-      - --kv-cache-dtype
-      - "int8"
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
