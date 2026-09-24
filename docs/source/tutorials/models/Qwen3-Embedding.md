@@ -105,6 +105,11 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
+=== "950DT Products (A5)"
+
+    Follow the [950DT Products container instructions](../../getting_started/quick_start.md#quick-start-atlas-950dt-container)
+    to select the Ubuntu or openEuler A5 image and start the container.
+
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
 ### 4.2 Source Code Installation
@@ -124,6 +129,18 @@ If you want to deploy multi-node environment, you need to set up environment on 
     # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-Embedding-0.6B  \
       --served-model-name Qwen/Qwen3-Embedding-0.6B  \
+      --runner pooling \
+      --port 8000 \
+      --max-model-len 1024
+    ```
+
+=== "950DT Products (A5)"
+
+    > **Validation status:** This example has not yet been validated on A5. Validate the target workload before using it in production.
+
+    ```shell
+    vllm serve Qwen/Qwen3-Embedding-0.6B \
+      --served-model-name Qwen/Qwen3-Embedding-0.6B \
       --runner pooling \
       --port 8000 \
       --max-model-len 1024

@@ -104,6 +104,11 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
+=== "950DT Products (A5)"
+
+    Follow the [950DT Products container instructions](../../getting_started/quick_start.md#quick-start-atlas-950dt-container)
+    to select the Ubuntu or openEuler A5 image and start the container.
+
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
 ### 4.2 Source Code Installation
@@ -154,6 +159,20 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
     ```shell
     #!/bin/sh
     # Ensure the model path matches the directory recorded during download
+    vllm serve Qwen/Qwen3-VL-Reranker-2B \
+        --served-model-name Qwen/Qwen3-VL-Reranker-2B \
+        --runner pooling \
+        --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
+        --chat-template ./qwen3_vl_reranker.jinja \
+        --port 8000 \
+        --max-model-len 1024
+    ```
+
+=== "950DT Products (A5)"
+
+    > **Validation status:** This example has not yet been validated on A5, including multimodal requests. Validate the target workload before using it in production.
+
+    ```shell
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
         --served-model-name Qwen/Qwen3-VL-Reranker-2B \
         --runner pooling \

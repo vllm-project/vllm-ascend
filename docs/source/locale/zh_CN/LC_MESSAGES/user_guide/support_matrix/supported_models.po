@@ -46,6 +46,24 @@ msgstr "## 纯文本语言模型"
 msgid "### Pooling Models"
 msgstr "### 池化模型"
 
+msgid "=== \"950DT Products (A5)\""
+msgstr "=== \"950DT 产品（A5）\""
+
+msgid "| Model                | Support | Note                                  | Supported Hardware | W8A8 | Doc |"
+msgstr "| 模型                 | 支持    | 备注                                  | 支持的硬件         | W8A8 | 文档 |"
+
+msgid "    | Qwen3-Embedding       | 🟡      | A5 validation is pending              | 950DT Products     | 🟡   | [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md) |"
+msgstr "    | Qwen3-Embedding       | 🟡      | A5 验证待完成                         | 950DT 产品         | 🟡   | [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md) |"
+
+msgid "    | Qwen3-VL-Embedding    | 🟡      | A5 validation is pending              | 950DT Products     | 🟡   | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |"
+msgstr "    | Qwen3-VL-Embedding    | 🟡      | A5 验证待完成                         | 950DT 产品         | 🟡   | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |"
+
+msgid "    | Qwen3-Reranker        | 🟡      | A5 validation is pending              | 950DT Products     | 🟡   | [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md) |"
+msgstr "    | Qwen3-Reranker        | 🟡      | A5 验证待完成                         | 950DT 产品         | 🟡   | [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md) |"
+
+msgid "    | Qwen3-VL-Reranker     | 🟡      | A5 validation is pending              | 950DT Products     | 🟡   | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |"
+msgstr "    | Qwen3-VL-Reranker     | 🟡      | A5 验证待完成                         | 950DT 产品         | 🟡   | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |"
+
 msgid "## Multimodal Language Models"
 msgstr "## 多模态语言模型"
 

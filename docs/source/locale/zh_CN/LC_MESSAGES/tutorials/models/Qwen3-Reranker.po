@@ -68,6 +68,17 @@ msgstr "=== \"A3 系列\""
 msgid "=== \"A2 series\""
 msgstr "=== \"A2 系列\""
 
+msgid "=== \"950DT Products (A5)\""
+msgstr "=== \"950DT 产品（A5）\""
+
+msgid ""
+"Follow the [950DT Products container instructions](../../getting_started/quick_start.md#quick-start-atlas-950dt-container)\n"
+"    to select the Ubuntu or openEuler A5 image and start the container."
+msgstr "请按照 [950DT 产品容器说明](../../getting_started/quick_start.md#quick-start-atlas-950dt-container) 选择 Ubuntu 或 openEuler A5 镜像并启动容器。"
+
+msgid "> **Validation status:** This example has not yet been validated on A5. Validate the target workload before using it in production."
+msgstr "> **验证状态：** 此示例尚未在 A5 上验证。生产使用前，请先验证目标工作负载。"
+
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动 Docker 镜像。"
 
