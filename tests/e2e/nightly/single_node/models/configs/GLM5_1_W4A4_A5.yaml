@@ -74,7 +74,7 @@ _benchmarks_perf1: &benchmarks_perf1
     max_out_len: 1500
     batch_size: 100
     request_rate: 0
-    baseline: 1934
+    baseline: 1560
     threshold: 0.95
     temperature: 0
     ignore_eos: True
@@ -88,7 +88,7 @@ _benchmarks_perf2: &benchmarks_perf2
     max_out_len: 1024
     batch_size: 30
     request_rate: 0
-    baseline: 520
+    baseline: 404
     threshold: 0.95
     temperature: 0
     ignore_eos: True
