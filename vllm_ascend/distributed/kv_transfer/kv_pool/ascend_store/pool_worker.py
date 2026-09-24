@@ -106,10 +106,9 @@ from vllm_ascend.distributed.utils import (
 LAYERWISE_READ_LEASE_TTL_MS = 5 * 60 * 1000
 
 # A partial snapshot can be visible to readers before the rank responsible for
-# saving it has published its final layer. Peers can enter the next step while
-# the saving rank is still copying: allow rank skew without a TP-wide barrier.
+# saving it has published its final layer.
 MEMCACHE_UNMATCHED_STATE = -3101
-PARTIAL_LEASE_WAIT_TIMEOUT_S = 1.0
+PARTIAL_LEASE_RETRY_COUNT = 10
 PARTIAL_LEASE_RETRY_INTERVAL_S = 0.001
 SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
 
@@ -1878,16 +1877,8 @@ class KVPoolWorker:
                         block_idx = block_indices[gva_index]
                         if lease_res == MEMCACHE_UNMATCHED_STATE and block_idx == partial_block_index:
                             partial_key = keys[gva_index]
-                            deadline = time.monotonic() + PARTIAL_LEASE_WAIT_TIMEOUT_S
-                            while lease_res == MEMCACHE_UNMATCHED_STATE:
-                                remaining = deadline - time.monotonic()
-                                if remaining <= 0:
-                                    break
-                                time.sleep(min(PARTIAL_LEASE_RETRY_INTERVAL_S, remaining))
-                                # A descheduled reader must not start another
-                                # lease RPC after its publication wait expires.
-                                if time.monotonic() >= deadline:
-                                    break
+                            for retry in range(1, PARTIAL_LEASE_RETRY_COUNT + 1):
+                                time.sleep(PARTIAL_LEASE_RETRY_INTERVAL_S)
                                 retry_results = self.m_store.batch_add_lease(
                                     [partial_key],
                                     LAYERWISE_READ_LEASE_TTL_MS,
@@ -1898,6 +1889,8 @@ class KVPoolWorker:
                                         f"unexpected number of results: {len(retry_results)}"
                                     )
                                 lease_res = retry_results[0]
+                                if lease_res != MEMCACHE_UNMATCHED_STATE:
+                                    break
                         block_id = int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else None
                         if lease_res == 0:
                             leased_keys.append(keys[gva_index])
