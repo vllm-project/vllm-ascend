@@ -944,7 +944,16 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int64)
     routed_experts.router = SimpleNamespace(
         _select_experts=MagicMock(return_value=(topk_weights, topk_ids)),
-        eplb_state=SimpleNamespace(expert_load_view=expert_load) if v2_eplb else None,
+        eplb_state=(
+            SimpleNamespace(
+                expert_load_view=expert_load,
+                should_record_tensor=torch.tensor(False),
+                local_expert_count=2,
+                local_expert_start=2,
+            )
+            if v2_eplb
+            else None
+        ),
     )
     routed_experts.top_k = 2
     routed_experts.renormalize = True
