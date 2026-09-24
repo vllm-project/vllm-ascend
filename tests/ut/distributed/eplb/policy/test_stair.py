@@ -46,6 +46,20 @@ class TestStairLoadStatistics(unittest.TestCase):
         torch.testing.assert_close(prepared.values[0], samples[:2].sum(dim=0))
         torch.testing.assert_close(prepared.values[1], samples[2:].sum(dim=0))
 
+    @patch.object(StairEplbPolicy, "gated_layer_imbalance", return_value=None)
+    def test_prepared_bin_sums_are_converted_to_weighted_means(self, gated_layer_imbalance):
+        StairEplbPolicy.plan_rebalance(
+            np.array([[[2.0, 4.0]], [[9.0, 3.0]]]),
+            np.array([[[0], [1]]]),
+            np.array([np.nan]),
+            np.array([0, 0]),
+            StairConfig(),
+            sample_counts=np.array([2, 3]),
+        )
+
+        np.testing.assert_allclose(gated_layer_imbalance.call_args.args[0], [[1.0, 2.0], [3.0, 1.0]])
+        np.testing.assert_array_equal(gated_layer_imbalance.call_args.args[1], [2, 3])
+
     def test_weighted_moments_use_covariance(self):
         samples = np.array([[1.0, 4.0], [3.0, 2.0]])
         weights = np.array([2, 1])
