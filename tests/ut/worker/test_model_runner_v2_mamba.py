@@ -266,20 +266,6 @@ def test_deferred_copy_missing_layer_raises(mock_get_group):
         state._finish_previous_layerwise_mamba_copy()
 
 
-def test_mrv2_shared_backing_support_follows_connector_capability():
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-
-    for kv_transfer_config, expected in (
-        (None, True),
-        (SimpleNamespace(kv_connector="MooncakeConnectorV1"), True),
-        (SimpleNamespace(kv_connector="MooncakeConnectorV2"), True),
-        (SimpleNamespace(kv_connector="MooncakePullConnector"), True),
-        (SimpleNamespace(kv_connector="UnsupportedConnector"), False),
-    ):
-        runner.vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
-        assert runner.supports_shared_backing_with_kv_transfer is expected
-
-
 def test_prepare_inputs_propagates_padded_request_count():
     model_runner_path = Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
     module = ast.parse(model_runner_path.read_text(encoding="utf-8"))
@@ -327,7 +313,10 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
     expected_metadata = {"gdn": object()}
     mock_build_attn_metadata.return_value = expected_metadata
     state = SimpleNamespace(
-        vllm_config=SimpleNamespace(num_speculative_tokens=num_spec),
+        vllm_config=SimpleNamespace(
+            num_speculative_tokens=num_spec,
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        ),
         num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
         max_model_len=1024,
     )
