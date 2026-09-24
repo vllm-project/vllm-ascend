@@ -38,6 +38,22 @@ def _checkpoint_position(request):
     return getattr(request, "mamba_checkpoint_position", None)
 
 
+def _starts_from_output(output):
+    """Map req_id -> first token position of this pass's scheduled chunk."""
+    starts = {req_data.req_id: req_data.num_computed_tokens for req_data in output.scheduled_new_reqs}
+    cached_reqs = output.scheduled_cached_reqs
+    starts.update(
+        dict(
+            zip(
+                cached_reqs.req_ids,
+                cached_reqs.num_computed_tokens,
+                strict=True,
+            )
+        )
+    )
+    return starts
+
+
 def _checkpoint_machinery(scheduler):
     """Return (kv_cache_manager, dispatched) when the coordinator supports
     the feature, else (None, None)."""
@@ -52,17 +68,7 @@ def _checkpoint_machinery(scheduler):
 
 
 def _record_dispatched(self, output, dispatched):
-    starts = {req_data.req_id: req_data.num_computed_tokens for req_data in output.scheduled_new_reqs}
-    cached_reqs = output.scheduled_cached_reqs
-    starts.update(
-        dict(
-            zip(
-                cached_reqs.req_ids,
-                cached_reqs.num_computed_tokens,
-                strict=True,
-            )
-        )
-    )
+    starts = _starts_from_output(output)
     for req_id, num_scheduled in output.num_scheduled_tokens.items():
         request = self.requests.get(req_id)
         cp = _checkpoint_position(request) if request is not None else None
@@ -97,24 +103,19 @@ def _checkpoint_aware_schedule(self, *args, **kwargs):
 
 @functools.wraps(_original_update_from_output)
 def _checkpoint_aware_update_from_output(self, scheduler_output, model_runner_output, *args, **kwargs):
-    result = _original_update_from_output(self, scheduler_output, model_runner_output, *args, **kwargs)
     kvc, _ = _checkpoint_machinery(self)
     if kvc is None:
-        return result
-    starts = {req_data.req_id: req_data.num_computed_tokens for req_data in scheduler_output.scheduled_new_reqs}
-    cached_reqs = scheduler_output.scheduled_cached_reqs
-    starts.update(
-        dict(
-            zip(
-                cached_reqs.req_ids,
-                cached_reqs.num_computed_tokens,
-                strict=True,
-            )
-        )
-    )
+        return _original_update_from_output(self, scheduler_output, model_runner_output, *args, **kwargs)
+    # Snapshot the checkpoint positions (and chunk starts) before the
+    # original call: it removes finished requests from self.requests, and a
+    # producer whose final chunk ends exactly at the checkpoint would
+    # otherwise be missed — its entry never published and its consumers
+    # left waiting indefinitely.
+    positions = {req_id: _checkpoint_position(request) for req_id, request in self.requests.items()}
+    starts = _starts_from_output(scheduler_output)
+    result = _original_update_from_output(self, scheduler_output, model_runner_output, *args, **kwargs)
     for req_id, num_scheduled in scheduler_output.num_scheduled_tokens.items():
-        request = self.requests.get(req_id)
-        cp = _checkpoint_position(request) if request is not None else None
+        cp = positions.get(req_id)
         start = starts.get(req_id)
         if cp is not None and start is not None and start + num_scheduled == cp:
             # Runs after the forward that committed the snapshot state.
