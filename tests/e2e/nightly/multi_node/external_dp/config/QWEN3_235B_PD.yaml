@@ -52,6 +52,7 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_USE_V1: "1"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
   ASCEND_A3_ENABLE: "1"
   ACL_OP_INIT_MODE: "1"
@@ -146,6 +147,9 @@ templates:
       - --async-scheduling
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[6,12,18]}'
+      - --enable-eplb
+      - --eplb-config
+      - '{"window_size":4000,"step_interval":200,"num_redundant_experts":0,"use_async":true}'
       - --additional-config
       - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"enable_mlapo":true}'
       - --kv-transfer-config
@@ -187,6 +191,9 @@ templates:
       - --async-scheduling
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[6,12,18]}'
+      - --enable-eplb
+      - --eplb-config
+      - '{"window_size":4000,"step_interval":200,"num_redundant_experts":0,"use_async":true}'
       - --additional-config
       - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"enable_mlapo":true}'
       - --kv-transfer-config

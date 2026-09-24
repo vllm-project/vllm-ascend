@@ -8,7 +8,6 @@ _envs: &envs
   HCCL_BUFFSIZE: "1024"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   SERVER_PORT: "DEFAULT_PORT"
-  VLLM_USE_V2_MODEL_RUNNER: "1"
 
 _server_cmd: &server_cmd
   - "--quantization"
@@ -20,7 +19,7 @@ _server_cmd: &server_cmd
   - "--enable-expert-parallel"
   - "--enable-eplb"
   - "--eplb-config"
-  - '{"window_size": 600, "step_interval": 50, "num_redundant_experts": 16, "use_async": true, "log_balancedness": true, "log_balancedness_interval": 1}'
+  - '{"window_size": 600, "step_interval": 50, "num_redundant_experts": 16, "use_async": true, "log_balancedness": false}'
   - "--port"
   - "$SERVER_PORT"
   - "--max-model-len"

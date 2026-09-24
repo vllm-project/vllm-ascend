@@ -21,6 +21,22 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 
 @pytest.fixture(autouse=True)
+def _pin_v1_mla_model_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep this V1 MLA kernel check off the default MRv2 extra-context path.
+
+    The test writes ``num_tokens`` onto the real ``ForwardContext``. Default V2
+    would read it from ``additional_kwargs`` instead, leaving the value unset.
+    """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setattr("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", False, raising=False)
+    monkeypatch.setattr(
+        "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
+        False,
+        raising=False,
+    )
+
+
+@pytest.fixture(autouse=True)
 def default_vllm_config():
     mock_config = MagicMock()
     mock_config.compilation_config = MagicMock()
