@@ -164,11 +164,12 @@ templates:
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
 
 benchmarks:
-  case_type: accuracy
-  dataset_path: vllm-ascend/gsm8k
-  request_conf: vllm_api_general_chat
-  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-  max_out_len: 32768
-  batch_size: 32
-  baseline: 100
-  threshold: 20
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 32768
+    batch_size: 32
+    baseline: 100
+    threshold: 20
