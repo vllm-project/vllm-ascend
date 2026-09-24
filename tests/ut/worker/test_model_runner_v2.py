@@ -778,6 +778,22 @@ def test_prepare_inputs_common_path():
     np.testing.assert_array_equal(runner.input_buffers.seq_lens_cpu[:2], np.array([3, 4], dtype=np.int32))
 
 
+def test_prepare_inputs_keeps_global_requests_for_smaller_pcp_graph():
+    runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner(full_cg=True)
+    runner.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+    scheduler_output.num_scheduled_tokens = {"r0": 1, "r1": 1}
+    batch_req_state.num_tokens = 2
+    batch_req_state.num_scheduled_tokens = np.ones(2, dtype=np.int32)
+    batch_req_state.has_prefill = False
+    batch_req_state.is_prefilling_np = np.zeros(2, dtype=np.bool_)
+    batch_desc.num_tokens = batch_desc.num_reqs = 1
+
+    _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc)
+
+    # Global metadata must retain both requests until PCP partitions it.
+    assert runner.input_buffers.query_start_loc[:3].tolist() == [0, 1, 2]
+
+
 def test_prepare_inputs_covers_draft_full_dcp_pp_and_rswa():
     runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner(
         draft=True, full_cg=True, use_dcp=True, use_pp=True, rswa=True, speculator=True

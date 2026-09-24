@@ -1214,16 +1214,19 @@ def _make_decode_sharding_config():
     "architecture",
     ["DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM", "DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM"],
 )
-def test_decode_sharding_config_accepts_supported_models(architecture):
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
+def test_decode_sharding_config_accepts_supported_models(architecture, graph_mode):
     config, vc = _make_decode_sharding_config()
     vc.model_config.architectures = [architecture]
+    vc.compilation_config.cudagraph_mode = graph_mode
     config._validate_pcp_decode_sharding(vc)
 
 
 @pytest.mark.parametrize(
     "target,field,value,error",
     [
-        ("compilation_config", "cudagraph_mode", CUDAGraphMode.FULL_DECODE_ONLY, "eager execution"),
+        ("compilation_config", "cudagraph_mode", CUDAGraphMode.PIECEWISE, "FULL_DECODE_ONLY"),
+        ("compilation_config", "cudagraph_mode", CUDAGraphMode.FULL_AND_PIECEWISE, "FULL_DECODE_ONLY"),
         ("vc", "speculative_config", object(), "speculative decoding"),
         ("model_config", "use_mla", False, "DeepSeek V2/V3/V3.2"),
         ("model_config", "is_hybrid", True, "DeepSeek V2/V3/V3.2"),

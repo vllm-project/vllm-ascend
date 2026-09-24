@@ -20,6 +20,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC4StateBackend,
@@ -561,7 +562,16 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
         return SimpleNamespace(common_attn_metadata=common_attn_metadata)
 
 
-def _make_dsa_metadata_groups():
+class _RecordingDSACPMetadataBuilder(AscendDSACPMetadataBuilder):
+    __init__ = _RecordingDSAMetadataBuilder.__init__
+    build = _RecordingDSAMetadataBuilder.build
+
+    def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
+        self.for_cudagraph_capture = True
+        return super().build_for_cudagraph_capture(common_attn_metadata, **kwargs)
+
+
+def _make_dsa_metadata_groups(builder_cls=_RecordingDSAMetadataBuilder):
     layer_names = [
         "model.layers.0.self_attn.compressor",
         "model.layers.0.self_attn.indexer",
@@ -578,7 +588,7 @@ def _make_dsa_metadata_groups():
                 layer_names=[layer_name],
                 kv_cache_spec=spec,
                 kv_cache_group_id=group_id,
-                metadata_builders=[_RecordingDSAMetadataBuilder(calls)],
+                metadata_builders=[builder_cls(calls)],
             )
         ]
         for group_id, (layer_name, spec) in enumerate(zip(layer_names, specs))
@@ -678,14 +688,16 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
         ("pcp_runtime", CUDAGraphMode.NONE, False, 2, 8),
     ],
 )
+@pytest.mark.parametrize("builder_cls", [_RecordingDSAMetadataBuilder, _RecordingDSACPMetadataBuilder])
 def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     caller,
     cudagraph_mode,
     for_capture,
     pcp_size,
     expected_input_tokens,
+    builder_cls,
 ):
-    layer_names, specs, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
+    layer_names, specs, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups(builder_cls)
     block_tables = (
         torch.zeros((4, 1), dtype=torch.int32),
         torch.zeros((4, 1), dtype=torch.int32),

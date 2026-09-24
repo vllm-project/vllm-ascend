@@ -1861,6 +1861,7 @@ def test_pcp_metadata_builds_from_manager_global_view(shard_decode, is_prefillin
     builder._pcp_world_size = 2
     builder._pcp_rank = 1
     builder._shard_decode_requests = shard_decode
+    builder.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE))
     builder._hidden_restore_idx_buffer = torch.empty(8, dtype=torch.int64)
     builder.model_config = SimpleNamespace(get_head_size=lambda: 512)
 
@@ -2331,3 +2332,80 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             output[:local_num_actual_tokens],
             attention_output.view(local_num_actual_tokens, 2),
         )
+
+
+@pytest.mark.parametrize("local_tokens,actual_tokens", [(1, 1), (2, 3), (4, 7)])
+def test_sharded_graph_global_capacity_and_addresses(local_tokens, actual_tokens):
+    from dataclasses import replace
+
+    from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+
+    builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
+    builder._pcp_world_size = 2
+    builder.vllm_config = SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=8))
+    builder._graph_global_buffers = {}
+    buffers = AscendInputBuffers(8, 16, torch.device("cpu"))
+    with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
+        dummy = AscendInputBatch.make_dummy(local_tokens, local_tokens, buffers)
+    capture_context = AscendPCPAttentionContext(
+        global_batch=dummy,
+        global_block_tables=(torch.zeros((8, 2), dtype=torch.int32),),
+        global_slot_mappings=torch.full((1, 16), -1, dtype=torch.int32),
+        hidden_restore_idx=torch.arange(local_tokens),
+    )
+    local_common = SimpleNamespace(num_input_tokens=local_tokens)
+    capture = builder._pad_sharded_graph_context(capture_context, local_common)
+    assert capture.global_batch.num_tokens_after_padding == local_tokens * 2
+    addresses = (
+        capture.global_batch.positions.data_ptr(),
+        capture.global_batch.seq_lens.data_ptr(),
+        capture.global_batch.query_start_loc.data_ptr(),
+        capture.global_block_tables[0].data_ptr(),
+    )
+    real = replace(
+        dummy,
+        is_dummy=False,
+        num_tokens=actual_tokens,
+        num_reqs=actual_tokens,
+        positions=torch.arange(100, 100 + actual_tokens),
+        seq_lens=torch.arange(101, 101 + actual_tokens, dtype=torch.int32),
+        seq_lens_np=np.arange(101, 101 + actual_tokens, dtype=np.int32),
+    )
+    context = replace(
+        capture_context,
+        global_batch=real,
+        global_slot_mappings=torch.arange(actual_tokens).unsqueeze(0),
+        hidden_restore_idx=torch.arange(actual_tokens),
+    )
+    replay = builder._pad_sharded_graph_context(context, local_common)
+    assert addresses == (
+        replay.global_batch.positions.data_ptr(),
+        replay.global_batch.seq_lens.data_ptr(),
+        replay.global_batch.query_start_loc.data_ptr(),
+        replay.global_block_tables[0].data_ptr(),
+    )
+    assert replay.global_batch.positions[:actual_tokens].tolist() == list(range(100, 100 + actual_tokens))
+    assert replay.global_batch.seq_lens[actual_tokens:].count_nonzero() == 0
+    assert (replay.global_slot_mappings[:, actual_tokens:] == -1).all()
+    assert replay.global_batch.query_start_loc.tolist() == list(range(local_tokens * 2 + 1))
+
+
+def test_sharded_graph_global_rope_is_independent_and_refreshed():
+    from vllm_ascend.ops.rope_dsv4 import RopeDataProxy
+
+    builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
+    builder.vllm_config = SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=8))
+    builder._graph_global_rope = {}
+    cos = torch.arange(12, dtype=torch.float32).view(3, 1, 1, 4)
+    sin = cos + 100
+    req = SimpleNamespace(cos=RopeDataProxy({"rope": {"default": (cos, sin)}}, True), sin=None)
+    builder._stabilize_global_rope(SimpleNamespace(req_metadata=req))
+    captured_cos, captured_sin = req.cos._data["rope"]["default"]
+    assert captured_cos.data_ptr() != cos.data_ptr()
+    cos.add_(10)
+    sin.add_(20)
+    req.cos = RopeDataProxy({"rope": {"default": (cos, sin)}}, True)
+    builder._stabilize_global_rope(SimpleNamespace(req_metadata=req))
+    assert req.cos._data["rope"]["default"][0].data_ptr() == captured_cos.data_ptr()
+    torch.testing.assert_close(captured_cos, cos)
+    torch.testing.assert_close(captured_sin, sin)

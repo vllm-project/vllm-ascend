@@ -452,7 +452,9 @@ class NPUModelRunner(GPUModelRunner):
         # Get query_start_loc.
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
-        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        # The graph descriptor describes a PCP-local batch; build global
+        # sampling/cache metadata before partitioning into those local shapes.
+        num_reqs_padded = max(num_reqs, batch_desc.num_reqs or 0)
         query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])
@@ -468,7 +470,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs,
                 query_start_loc_np,
                 batch_desc.cg_mode,
-                batch_desc.num_reqs,
+                num_reqs_padded,
             )
 
         query_start_loc = self.input_buffers.query_start_loc
