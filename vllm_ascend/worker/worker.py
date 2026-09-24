@@ -49,13 +49,14 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+from vllm.v1.core.kv_cache_utils import get_kv_cache_groups, unify_hybrid_kv_cache_specs
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
@@ -74,6 +75,7 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
     create_kvpp_cache_allocation_plan,
+    register_kvpp_draft_layers,
 )
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
@@ -96,8 +98,10 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     check_ascend_device_type,
+    enable_custom_op,
     enable_sp,
     register_ascend_customop,
+    register_device_print,
     setup_ascend_local_comm_res,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -427,6 +431,9 @@ class NPUWorker(WorkerBase):
 
         torch.npu.set_device(device)
 
+        if enable_custom_op():
+            register_device_print()
+
         # Import _inductor for graph mode execution with triton
         # This lazy import avoids torch_npu re-initialization in patch
         # Note that this should be imported after torch.npu.set_device
@@ -440,7 +447,7 @@ class NPUWorker(WorkerBase):
         torch.npu.empty_cache()
 
         if get_current_hardware_profile().supports(HardwareCapability.LOCAL_KV_COMM_RESOURCE):
-            setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
+            setup_ascend_local_comm_res(visible_device_index, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot(device=device)
@@ -699,7 +706,6 @@ class NPUWorker(WorkerBase):
             and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
-            and getattr(model_runner, "supports_shared_backing_with_kv_transfer", False)
             and not getattr(model_runner, "use_sparse", False)
             and not getattr(model_runner, "use_compress", False)
         ):
@@ -778,6 +784,8 @@ class NPUWorker(WorkerBase):
             self.profiler.step()
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        if self.use_v2_model_runner and self.model_runner.is_pooling_model and output is None:
+            output = self.model_runner.pool()  # type: ignore
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
@@ -926,13 +934,16 @@ class NPUWorker(WorkerBase):
         # may cause performance degradation at runtime.
         if get_current_hardware_profile().supports(HardwareCapability.ATB_WARMUP):
             self._warm_up_atb()
-        # Bind after warmup so hot allocations are already materialized on the
-        # worker process before migratepages/taskset run.
+        # Keep thread affinity after warmup and capture. Engram HOST_UVA tables
+        # are already registered here; process-wide migration must not revisit
+        # their pinned backing, which may also be shared across NUMA nodes.
         if get_ascend_config().enable_cpu_binding:
+            engram_config = getattr(self.vllm_config, "engram_config", None)
             try:
                 bind_cpus(
                     self.local_rank,
                     npu_id=current_platform.device_id_to_physical_device_id(self.local_rank),
+                    migrate_memory=not (engram_config is not None and engram_config.cpu_offload),
                 )
             except Exception as e:
                 logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
@@ -1095,7 +1106,26 @@ class NPUWorker(WorkerBase):
             )
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
         if kvpp_config.size > 1:
-            kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
+            register_kvpp_draft_layers(
+                self.vllm_config,
+                self.model_runner,
+                kv_cache_spec,
+                is_last_pp_rank=get_pp_group().is_last_rank,
+            )
+            speculative_config = self.vllm_config.speculative_config
+            if (
+                speculative_config is not None
+                and speculative_config.method == "dspark"
+                and any(isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
+            ):
+                # Use the same full-allocation specs for KVPP budgeting and
+                # the engine's cache groups. Attention compute stays windowed.
+                kv_cache_spec = dict(kv_cache_spec)
+                unify_hybrid_kv_cache_specs(kv_cache_spec)
+            kvpp_rank = (
+                get_pcp_group().rank_in_group * self.vllm_config.parallel_config.tensor_parallel_size
+                + get_tp_group().rank_in_group
+            )
             self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
                 self.vllm_config,
                 kv_cache_spec,

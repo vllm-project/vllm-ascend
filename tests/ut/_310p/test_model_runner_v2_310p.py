@@ -93,20 +93,7 @@ def test_kv_zeroing_uses_narrow_310p_gate(
         kv_cache_groups=[SimpleNamespace(is_eagle_group=uses_eagle_block_drop)],
     )
 
-    with patch.object(model_runner_module, "vllm_version_is", return_value=False):
-        assert runner._needs_kv_cache_zeroing_310p(kv_cache_config) is expected
-
-
-def test_kv_zeroing_matches_v029_gate() -> None:
-    runner = object.__new__(NPUModelRunner310V2)
-    runner.speculative_config = SimpleNamespace(num_speculative_tokens=2)
-    kv_cache_config = SimpleNamespace(
-        has_mamba_layers=True,
-        kv_cache_groups=[SimpleNamespace(is_eagle_group=True)],
-    )
-
-    with patch.object(model_runner_module, "vllm_version_is", return_value=True):
-        assert runner._needs_kv_cache_zeroing_310p(kv_cache_config)
+    assert runner._needs_kv_cache_zeroing_310p(kv_cache_config) is expected
 
 
 def test_update_requests_filters_unneeded_upstream_zeroing() -> None:
@@ -522,12 +509,16 @@ def test_config_accepts_mtp_and_rejects_non_mtp() -> None:
     [
         ("speculative_config", object(), "only supported via MTP"),
         ("kv_transfer_config", object(), "KV cache transfer"),
-        ("lora_config", object(), "LoRA"),
     ],
 )
 def test_config_rejects_out_of_scope_features(field, value, message) -> None:
     with pytest.raises(NotImplementedError, match=message):
         NPUModelRunner310V2._validate_config(_make_vllm_config(**{field: value}))
+
+
+def test_config_accepts_lora() -> None:
+    """310P MRv2 supports LoRA; gate must not reject lora_config."""
+    NPUModelRunner310V2._validate_config(_make_vllm_config(lora_config=object()))
 
 
 def test_copy_kv_cache_blocks_flattens_mamba_lists() -> None:

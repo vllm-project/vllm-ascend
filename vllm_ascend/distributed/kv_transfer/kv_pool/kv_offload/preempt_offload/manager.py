@@ -11,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     KVCacheCoordinator,
@@ -22,6 +23,7 @@ from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformType
 from vllm.v1.outputs import KVConnectorOutput
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.metadata import (
+    MambaConvLoadMeta,
     PreemptOffloadMetadata,
     PreemptOffloadWorkerMetadata,
 )
@@ -49,6 +51,7 @@ class PreemptedRequestState:
     store_event: int | None = None
     load_event: int | None = None
     load_transfer_meta: TransferMeta | None = None
+    load_mamba_conv_meta: list[MambaConvLoadMeta] | None = None
     load_start_tokens: int = 0
     ready: bool = False
     finished: bool = False
@@ -83,6 +86,7 @@ class PreemptOffloadScheduler:
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         self._group_is_sliding_window = self._get_group_is_sliding_window(kv_cache_config)
         self._group_is_mamba = self._get_group_is_mamba(kv_cache_config)
+        self._group_has_mamba_conv = self._get_group_has_mamba_conv(kv_cache_config)
         self.enable_kv_cache_events = (
             vllm_config.kv_events_config is not None and vllm_config.kv_events_config.enable_kv_cache_events
         )
@@ -150,6 +154,26 @@ class PreemptOffloadScheduler:
             else:
                 group_is_mamba.append(isinstance(group.kv_cache_spec, MambaSpec))
         return group_is_mamba
+
+    @staticmethod
+    def _get_group_has_mamba_conv(kv_cache_config: "KVCacheConfig") -> list[bool]:
+        conv_backends = {
+            MambaAttentionBackendEnum.MAMBA1,
+            MambaAttentionBackendEnum.MAMBA2,
+            MambaAttentionBackendEnum.SHORT_CONV,
+            MambaAttentionBackendEnum.GDN_ATTN,
+        }
+        group_has_mamba_conv: list[bool] = []
+        for group in kv_cache_config.kv_cache_groups:
+            specs = (
+                group.kv_cache_spec.kv_cache_specs.values()
+                if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+                else (group.kv_cache_spec,)
+            )
+            group_has_mamba_conv.append(
+                any(isinstance(spec, MambaSpec) and spec.mamba_type in conv_backends for spec in specs)
+            )
+        return group_has_mamba_conv
 
     @staticmethod
     def _derive_cpu_config(
@@ -391,7 +415,6 @@ class PreemptOffloadScheduler:
             len(store_cpu_block_ids),
             not waiting_for_store,
         )
-
         return True
 
     def _prepare_preempt_store_specs(
@@ -437,11 +460,54 @@ class PreemptOffloadScheduler:
 
         gpu_block_ids: list[int] = []
         cpu_block_ids: list[int] = []
+        mamba_conv_loads: list[MambaConvLoadMeta] = []
         for g, group_cpu_ids in enumerate(state.cpu_block_ids):
             if self._group_is_mamba[g]:
                 accept_token_idx = self.num_spec_tokens - (state.num_computed_tokens - request.num_tokens + 1)
-                cpu_block_ids.append(group_cpu_ids[accept_token_idx])
-                gpu_block_ids.append(block_ids_by_group[g][0])
+                group_gpu_ids = block_ids_by_group[g]
+                state_block_idx = len(group_gpu_ids) - self.num_spec_tokens - 1
+                cpu_block_id = group_cpu_ids[accept_token_idx] if 0 <= accept_token_idx < len(group_cpu_ids) else 0
+                gpu_block_id = group_gpu_ids[state_block_idx] if 0 <= state_block_idx < len(group_gpu_ids) else 0
+                if cpu_block_id <= 0 or gpu_block_id <= 0:
+                    raise RuntimeError(
+                        "Invalid recompute H2D Mamba block mapping: "
+                        f"req_id={request.request_id}, group={g}, "
+                        f"cpu={cpu_block_id}@{accept_token_idx}, "
+                        f"gpu={gpu_block_id}@{state_block_idx}"
+                    )
+                cpu_block_ids.append(cpu_block_id)
+                gpu_block_ids.append(gpu_block_id)
+
+                if not self._group_has_mamba_conv[g]:
+                    continue
+
+                # Keep the proven temporal/SSM restore above unchanged. Conv
+                # candidates live in the running-state block and require a
+                # separate accepted-token shift. If postprocess_mamba already
+                # crossed a cache boundary, only the residual in-block shift
+                # remains to be applied during resume.
+                mamba_block_size = self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
+                num_tokens_running_state = request.num_tokens - 1 - accept_token_idx
+                accepted_state_position = request.num_tokens - 1
+                aligned_accepted_state_position = (accepted_state_position // mamba_block_size) * mamba_block_size
+                conv_source_offset = accept_token_idx
+                if aligned_accepted_state_position >= num_tokens_running_state:
+                    conv_source_offset = accepted_state_position - aligned_accepted_state_position
+
+                conv_cpu_block_id = group_cpu_ids[0] if group_cpu_ids else 0
+                if conv_cpu_block_id <= 0:
+                    raise RuntimeError(
+                        "Invalid recompute H2D Mamba Conv mapping: "
+                        f"req_id={request.request_id}, group={g}, "
+                        f"cpu={conv_cpu_block_id}@0"
+                    )
+                mamba_conv_loads.append(
+                    MambaConvLoadMeta(
+                        gpu_block_id=gpu_block_id,
+                        cpu_block_id=conv_cpu_block_id,
+                        source_offset=conv_source_offset,
+                    )
+                )
             else:
                 group_block_size = self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
                 start_block = load_start_tokens // group_block_size
@@ -494,6 +560,7 @@ class PreemptOffloadScheduler:
         assert self._gpu_block_pool is not None
         self._gpu_block_pool.touch([self._gpu_block_pool.blocks[block_id] for block_id in gpu_block_ids])
         state.load_transfer_meta = TransferMeta(gpu_block_ids, cpu_block_ids)
+        state.load_mamba_conv_meta = mamba_conv_loads
         logger.info(
             "Prepared preempt offload H2D load for request %s: tokens=[%d, %d), blocks=%d.",
             request.request_id,
@@ -521,12 +588,14 @@ class PreemptOffloadScheduler:
         load_event = -1
         load_gpu: list[int] = []
         load_cpu: list[int] = []
+        load_mamba_conv: list[MambaConvLoadMeta] = []
         load_req_ids: list[str] = []
         for req_id, state in self._preempted_req_states.items():
             if state.load_transfer_meta is None or state.load_event is not None:
                 continue
             load_gpu.extend(state.load_transfer_meta.gpu_block_ids)
             load_cpu.extend(state.load_transfer_meta.cpu_block_ids)
+            load_mamba_conv.extend(state.load_mamba_conv_meta or [])
             load_req_ids.append(req_id)
 
         if load_req_ids:
@@ -544,6 +613,7 @@ class PreemptOffloadScheduler:
             preempt_load_event=load_event,
             preempt_load_gpu_blocks=load_gpu,
             preempt_load_cpu_blocks=load_cpu,
+            preempt_load_mamba_conv=load_mamba_conv,
             preempt_load_event_to_reqs=self._preempt_load_event_to_reqs,
         )
 

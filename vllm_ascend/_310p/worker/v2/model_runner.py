@@ -52,7 +52,7 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, vllm_version_is
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
@@ -202,9 +202,6 @@ class NPUModelRunner310V2(NPUModelRunner):
             raise NotImplementedError("KV cache transfer is not supported by model runner v2 on 310P.")
         # Prefix caching is supported: 310P MRv2 reuses CPU Ascend310PBlockTables /
         # PrefillCacheHit→splitfuse (attention_v1) and hybrid Mamba page sizing below.
-        # TODO: Support LoRA in the next 310P MRV2 iteration.
-        if vllm_config.lora_config is not None:
-            raise NotImplementedError("LoRA is not supported by model runner v2 on 310P.")
 
     def _prepare_inputs_310p(
         self,
@@ -248,6 +245,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_reqs,
             num_scheduled_tokens,
             num_valid_tokens,
+            kv_cache_config=self.kv_cache_config,
         )
         idx_mapping_np = self._idx_mapping.np[:num_reqs]
         idx_mapping_np[:] = np.fromiter(
@@ -386,7 +384,6 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_computed_tokens_np=self.req_states.num_computed_tokens_np[idx_mapping_np],
             prefill_len_np=prefill_len_np,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
-            **({"max_seq_len_np": None} if vllm_version_is("0.29.0") else {}),
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
@@ -455,6 +452,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_reqs,
             num_scheduled,
             num_scheduled,
+            kv_cache_config=self.kv_cache_config,
         )
         # Avoid importing AscendAttentionState at module top (heavy attention_v1).
         return attn_state.name in ("PrefillCacheHit", "ChunkedPrefill")
@@ -533,6 +531,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_reqs,
             num_scheduled,
             num_valid_tokens,
+            kv_cache_config=self.kv_cache_config,
         )
         from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
@@ -802,10 +801,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         spec_config = self.speculative_config
         if spec_config is None:
             return False
-        if vllm_version_is("0.29.0"):
-            uses_eagle_block_drop = any(group.is_eagle_group for group in kv_cache_config.kv_cache_groups)
-        else:
-            uses_eagle_block_drop = spec_config.use_eagle_block_drop()
+        uses_eagle_block_drop = spec_config.use_eagle_block_drop()
         return bool(
             kv_cache_config.has_mamba_layers and uses_eagle_block_drop and spec_config.num_speculative_tokens > 1
         )

@@ -21,6 +21,17 @@ from vllm_ascend.core.recompute_scheduler import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _oproj_tp_config(monkeypatch):
+    # _preempt_or_recompute reads the live AscendConfig singleton; default it to off.
+    finegrained_tp_config = SimpleNamespace(oproj_tensor_parallel_size=0, mlp_tensor_parallel_size=0)
+    monkeypatch.setattr(
+        "vllm_ascend.core.recompute_scheduler.get_ascend_config",
+        lambda: SimpleNamespace(finegrained_tp_config=finegrained_tp_config),
+    )
+    return finegrained_tp_config
+
+
 def _make_preempt_scheduler(*, connector=None):
     scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
     scheduler.connector = connector
@@ -138,6 +149,38 @@ def test_preempt_offload_failure_sends_request_back_to_p():
     warning.assert_called_once()
     upstream_preempt.assert_not_called()
     scheduler.finish_requests.assert_called_once()
+
+
+def test_preempt_offload_failure_aborts_under_oproj_tp(_oproj_tp_config):
+    _oproj_tp_config.oproj_tensor_parallel_size = 2
+    connector = MagicMock()
+    connector.update_state_before_preempt.return_value = False
+    scheduler = _make_preempt_scheduler(connector=connector)
+    request = SimpleNamespace(
+        request_id="req-1",
+        client_index=0,
+        num_computed_tokens=17,
+    )
+    scheduler.finish_requests = MagicMock(return_value=[request])
+
+    with (
+        patch.object(Scheduler, "_preempt_request") as upstream_preempt,
+        patch("vllm_ascend.core.recompute_scheduler.logger.error") as error,
+    ):
+        locally_preempted = scheduler._preempt_or_recompute(
+            request,
+            1.5,
+        )
+
+    assert not locally_preempted
+    error.assert_called_once()
+    upstream_preempt.assert_not_called()
+    scheduler.finish_requests.assert_called_once_with(
+        "req-1",
+        RequestStatus.FINISHED_ABORTED,
+    )
+    # Not recorded for recomputation: the request must not be sent back to P.
+    assert scheduler._recomputed_reqs == []
 
 
 def test_reset_preemption_skips_offload():

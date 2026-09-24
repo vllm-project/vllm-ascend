@@ -412,7 +412,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl = MagicMock()
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
-        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+        with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn):
             mock_tp_size.return_value = 2
             mock_vllm_config = MagicMock(spec=VllmConfig)
             mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=True)
@@ -454,7 +454,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
                 mock_mla_attn.impl.fused_qkv_a_proj = fused_qkv_a_proj
                 mock_mla_attn.impl.q_proj = q_proj
 
-                with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+                with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn):
                     mock_tp_size.return_value = 2
                     mock_vllm_config = MagicMock(spec=VllmConfig)
                     mock_vllm_config.model_config.hf_text_config = MagicMock(
@@ -508,7 +508,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl = MagicMock()
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
-        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+        with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn):
             attn = AscendMultiHeadLatentAttention(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_heads,
@@ -587,7 +587,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
         with (
-            patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn) as mock_mla_attn_cls,
+            patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn) as mock_mla_attn_cls,
             patch("vllm_ascend.ops.mla.IndexerWrapper"),
         ):
             mock_tp_size.return_value = 2
