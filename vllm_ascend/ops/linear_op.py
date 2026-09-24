@@ -122,6 +122,7 @@ class DCPGroupColumnParallelOp(CustomColumnParallelOp):
 
     def apply_impl(self, input_):
         # Every rank already has the group's full Q heads. No output gather.
+        assert self.quant_method is not None
         bias = None if self.skip_bias_add else self.layer.bias
         output = self.quant_method.apply(self.layer, input_, bias)
         return output, self.layer.bias if self.skip_bias_add else None
