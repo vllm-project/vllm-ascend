@@ -16,10 +16,9 @@ speculative decoding. These designs reduce the global KV cache footprint to
 one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
 a continuously adjustable reasoning effort from 1 to 100.
 
-vLLM Ascend supports W8A8 Prefill-Decode (PD) disaggregated deployment on two
-Atlas 800 A3 servers. One server runs the Prefill engines and the other runs
-the Decode engines. A single A3 server can use Engram host offload as described
-below.
+vLLM Ascend supports W8A8 deployment on Atlas 800 A3 and A2 servers. This
+guide provides a single-node colocated A3 configuration and a two-node A3
+Prefill-Decode (PD) disaggregated configuration.
 
 ## 2 Supported Features
 
@@ -28,9 +27,11 @@ for the complete support matrix and the
 [Feature Guide](../../user_guide/feature_guide/index.md) for feature
 configuration.
 
-The PD configuration in this guide uses W8A8 weights, INT8 Engram storage,
-DP4/TP4 on the Prefill node, DP8/TP2 on the Decode node, DSpark speculative
-decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode. It uses model runner V1.
+The A3 configurations in this guide use W8A8 weights and INT8 Engram storage.
+The single-node colocated configuration uses DP4/TP4. The PD configuration
+uses DP4/TP4 on the Prefill node, DP8/TP2 on the Decode node, DSpark
+speculative decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode. Both use
+model runner V1.
 
 ## 3 Prerequisites
 
@@ -49,8 +50,14 @@ every server; the examples use `<YOUR_MODEL_PATH>`.
 Alternatively, use [ModelSlim](https://github.com/Ascend/msmodelslim) to
 prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
 
-The 1P1D deployment requires two Atlas 800 A3 servers. Each server has 8 NPUs
-with 128GB memory per NPU and exposes 16 logical devices to the container.
+Use one of the following hardware configurations:
+
+- **A3 single-node colocated**: one Atlas 800 A3 server with 8 NPUs and 128GB
+  memory per NPU. The server exposes 16 logical devices to the container.
+- **A3 1P1D**: two Atlas 800 A3 servers with the same device configuration.
+- **A2 series**: four Atlas 800 A2 servers. Each server has 8 NPUs with 64GB
+  memory per NPU and exposes 8 devices to the container. Its deployment
+  configuration is retained unchanged in this update.
 
 Store the checkpoint in a shared directory or copy it to the same absolute
 path on every server.
@@ -66,7 +73,9 @@ interfaces, and the service ports must not be blocked.
 
 ### 4.1 Docker Image Installation
 
-An A3 server exposes 16 logical devices. Run this command on both A3 servers.
+#### A3 series
+
+An A3 server exposes 16 logical devices. Run this command on every A3 server.
 
 ```shell
 export IMAGE=quay.io/ascend/vllm-ascend:deepseek-v4.1-flash-a3
@@ -109,6 +118,43 @@ docker run --rm -it \
   "$IMAGE" bash
 ```
 
+#### A2 series
+
+An A2 server exposes 8 devices. Run this command on all four A2 servers.
+
+```shell
+export IMAGE=quay.io/ascend/vllm-ascend:deepseek-v4.1-flash
+export MODEL_ROOT="/data/weights"
+
+docker pull "$IMAGE"
+
+docker run --rm -it \
+  --name deepseek-v41 \
+  --net=host \
+  --shm-size=512g \
+  --privileged=true \
+  --device /dev/davinci0 \
+  --device /dev/davinci1 \
+  --device /dev/davinci2 \
+  --device /dev/davinci3 \
+  --device /dev/davinci4 \
+  --device /dev/davinci5 \
+  --device /dev/davinci6 \
+  --device /dev/davinci7 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm \
+  --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /etc/hccn.conf:/etc/hccn.conf \
+  -v "$MODEL_ROOT:$MODEL_ROOT" \
+  "$IMAGE" bash
+```
+
 Change `MODEL_ROOT` if the checkpoint is stored elsewhere. Keep the same
 absolute path inside and outside every container.
 
@@ -121,7 +167,80 @@ and use the `main` branch with the matching vLLM revision recorded in
 
 ## 5 Online Service Deployment
 
-### 5.1 A3 1P1D PD Separation Deployment
+### 5.1 A3 Single-Node Colocated Deployment
+
+This configuration runs Prefill and Decode on one Atlas 800 A3 server. It
+uses DP4/TP4 across all 16 logical devices, expert parallelism, Engram host
+offload, asynchronous scheduling, and `FULL_DECODE_ONLY` ACL Graph.
+
+Set `MODEL_PATH` to the local checkpoint path.
+
+```shell
+#!/usr/bin/env bash
+
+export VLLM_RPC_TIMEOUT=3600000
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+export HCCL_EXEC_TIMEOUT=204
+export HCCL_CONNECT_TIMEOUT=120
+
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export HCCL_BUFFSIZE=1024
+export TASK_QUEUE_ENABLE=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+MODEL_PATH="/mnt/share/DeepSeek-V4.1-Flash-W8A8-no-wq-wkv"
+
+vllm serve "$MODEL_PATH" \
+    --host 0.0.0.0 \
+    --port 8900 \
+    --max-model-len 150000 \
+    --max-num-batched-tokens 8192 \
+    --served-model-name dsv41 \
+    --gpu-memory-utilization 0.9 \
+    --max-num-seqs 32 \
+    --data-parallel-size 4 \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --tokenizer-mode deepseek_v41 \
+    --reasoning-parser deepseek_v41 \
+    --tool-call-parser deepseek_v41 \
+    --enable-auto-tool-choice \
+    --safetensors-load-strategy lazy \
+    --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+    --quantization ascend \
+    --block-size 128 \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --async-scheduling \
+    --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+    --additional-config '{
+        "ascend_compilation_config":{
+            "enable_npugraph_ex":true,
+            "enable_static_kernel":false
+        },
+        "enable_cpu_binding":true,
+        "enable_fused_mc2":1,
+        "enable_dsa_cp":true,
+        "enable_flashcomm1":true,
+        "enable_shared_expert_dp":true
+    }'
+```
+
+Key parameters:
+
+- `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
+  Engram table in host memory and lets local DP ranks share the host-memory
+  allocation. Ensure that the server has enough host memory for the compressed
+  Engram shards and runtime allocations.
+- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` captures the
+  Decode path while Prefill remains outside the captured graph.
+- `enable_fused_mc2`, `enable_dsa_cp`, `enable_flashcomm1`, and
+  `enable_shared_expert_dp` enable the A3 MoE and communication optimizations
+  used by this configuration.
+
+### 5.2 A3 1P1D PD Separation Deployment
 
 This example uses two Atlas 800 A3 servers. The Prefill node runs four DP
 ranks with TP4 (DP4/TP4), and the Decode node runs eight DP ranks with TP2
@@ -129,7 +248,7 @@ ranks with TP4 (DP4/TP4), and the Decode node runs eight DP ranks with TP2
 servers. Mooncake transfers KV cache from the Prefill engines to the Decode
 engines.
 
-#### 5.1.1 Prepare the DP Launcher
+#### 5.2.1 Prepare the DP Launcher
 
 Save the following script as `launch_online_dp.py` on both nodes. It divides
 the node's visible devices among local DP ranks and starts one vLLM process per
@@ -211,7 +330,7 @@ The launcher arguments are:
 | `--dp-rpc-port` | DP coordination port. It must be unused and reachable within the node group. |
 | `--vllm-start-port` | First API port; the launcher increments it for each local DP rank. |
 
-#### 5.1.2 Start the Prefill Node
+#### 5.2.2 Start the Prefill Node
 
 On the Prefill node, save the following script as `run_dp_template.sh`. Replace
 `xx.xx.xx.1` and `xxxx` with the Prefill node's service IP and network
@@ -304,7 +423,7 @@ python launch_online_dp.py \
     --vllm-start-port 7100
 ```
 
-#### 5.1.3 Start the Decode Node
+#### 5.2.3 Start the Decode Node
 
 On the Decode node, save the following script as `run_dp_template.sh`. Replace
 `xx.xx.xx.2` and `xxxx` with the Decode node's service IP and network
@@ -398,7 +517,7 @@ python launch_online_dp.py \
     --vllm-start-port 7100
 ```
 
-#### 5.1.4 Deploy the PD Proxy
+#### 5.2.4 Deploy the PD Proxy
 
 After all Prefill and Decode engines are ready, deploy the proxy as described
 in [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
@@ -406,7 +525,7 @@ Configure the proxy with Prefill endpoints `xx.xx.xx.1:7100` through
 `xx.xx.xx.1:7103` and Decode endpoints `xx.xx.xx.2:7100` through
 `xx.xx.xx.2:7107`.
 
-#### 5.1.5 Key Parameter Descriptions
+#### 5.2.5 Key Parameter Descriptions
 
 - `--data-parallel-size` and `--tensor-parallel-size` define DP4/TP4 on
   Prefill and DP8/TP2 on Decode. Their product must be 16 on each A3 node.
@@ -443,12 +562,85 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
-### 5.2 Service Verification
+### 5.3 A2 Multi-Node Colocated Deployment
 
-Set the proxy address, then verify the health endpoint:
+The existing A2 configuration is retained unchanged in this update. It uses
+four Atlas 800 A2 servers with one local DP rank per server and a global
+DP4/TP8/EP32 topology.
+
+Run this script on all four A2 servers. Set `NODE_RANK` to `0`, `1`, `2`, or
+`3` on the corresponding node. Set `NODE0_IP` to the IP address of Node 0 and
+set `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` for each node.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+NODE_RANK=0
+NODE0_IP="<NODE0_IP>"
+LOCAL_IP="<LOCAL_IP>"
+NIC_NAME="<NETWORK_INTERFACE>"
+MODEL_PATH="<YOUR_MODEL_PATH>"
+
+# Allow time for weight loading and graph capture on large models.
+export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
+export HCCL_IF_IP="$LOCAL_IP"
+export GLOO_SOCKET_IFNAME="$NIC_NAME"
+export TP_SOCKET_IFNAME="$NIC_NAME"
+export HCCL_SOCKET_IFNAME="$NIC_NAME"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
+  export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
+
+HEADLESS_ARGS=()
+if [[ "$NODE_RANK" != "0" ]]; then
+  HEADLESS_ARGS+=(--headless --data-parallel-start-rank "$NODE_RANK")
+fi
+
+vllm serve "$MODEL_PATH" \
+  --host 0.0.0.0 \
+  --port 8000 \
+  "${HEADLESS_ARGS[@]}" \
+  --data-parallel-address "$NODE0_IP" \
+  --data-parallel-rpc-port 13399 \
+  --data-parallel-size 4 \
+  --data-parallel-size-local 1 \
+  --tensor-parallel-size 8 \
+  --enable-expert-parallel \
+  --served-model-name deepseek-v41 \
+  --max-model-len 1048576 \
+  --max-num-batched-tokens 4096 \
+  --max-num-seqs 32 \
+  --gpu-memory-utilization 0.90 \
+  --block-size 128 \
+  --tokenizer-mode deepseek_v41 \
+  --reasoning-parser deepseek_v41 \
+  --tool-call-parser deepseek_v41 \
+  --enable-auto-tool-choice \
+  --trust-remote-code \
+  --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+  --safetensors-load-strategy lazy \
+  --quantization ascend \
+  --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
+  --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+```
+
+Omit `--data-parallel-start-rank` on Node 0. Start Node 0 first, followed by
+Nodes 1 through 3. Only Node 0 exposes the API endpoint. Each server contributes
+one TP8 rank to the global DP4 topology.
+
+### 5.4 Service Verification
+
+Set the endpoint for the selected deployment, then verify the health endpoint.
+Use `http://<A3_IP>:8900` for A3 single-node colocated deployment,
+`http://<PROXY_IP>:<PROXY_PORT>` for A3 PD deployment, or
+`http://<A2_NODE0_IP>:8000` for the retained A2 deployment.
 
 ```shell
-export SERVICE_URL="http://<PROXY_IP>:<PROXY_PORT>"
+export SERVICE_URL="http://<SERVICE_IP>:<SERVICE_PORT>"
 
 curl -sS -o /dev/null -w 'HTTP %{http_code}\n' \
   "$SERVICE_URL/health"
@@ -467,46 +659,16 @@ curl -sS "$SERVICE_URL/v1/models" | \
   jq '{object, models: [.data[] | {id, object}]}'
 ```
 
-The response must contain a model entry whose `id` is `dsv41`.
-
-### 5.3 Single A3 with Engram Host Offload
-
-Keep the INT8 Engram weights and their scale tensors available in the
-checkpoint. `--safetensors-load-strategy lazy`
-is required to avoid eagerly materializing the entire table on each rank.
-
-For a single A3, use TP8/DP2/EP16 across all 16 logical devices with both
-DP replicas local (`--data-parallel-size 2 --data-parallel-size-local 2`).
-Keep model runner V1, `FULL_DECODE_ONLY`, and DSpark with eager draft execution.
-Use INT8 Engram tables and turn the offload on through vLLM's Engram config.
-This needs a vLLM that provides `--engram-config`; without it the tables stay
-on the device:
-
-```bash
---engram-config '{"cpu_offload": true, "dp_shared_memory": true}'
-```
-
-With `cpu_offload` the shard stays in host memory, is registered with
-`aclrtHostRegisterV2`, and the NPU gather kernel reads it through the device
-address `aclrtHostGetDevicePointer` returns, so the offloaded table needs
-neither an H2D copy nor a host-side gather.
-
-Start with 4 sequences per DP replica, 512 batched tokens, 131072 model
-length, and 1 GiB of KV cache per rank, with prefix caching disabled.
-Ensure enough host RAM for all compressed Engram shards and runtime memory;
-CPU/NUMA page migration can add several minutes to startup.
-
-This configuration passed model loading, decode graph capture, natural-text
-requests, and mixed-length concurrent request smoke tests. These checks do
-not establish dataset accuracy or performance. Other Engram storage formats
-and model runner V2 are not covered by this smoke validation.
+The response must contain a model entry whose `id` matches the configured
+`--served-model-name`: `dsv41` for the A3 examples and `deepseek-v41` for the
+retained A2 example.
 
 ## 6 Functional Verification
 
 ### 6.1 Text Request
 
 ```shell
-export SERVICE_URL="http://<PROXY_IP>:<PROXY_PORT>"
+export SERVICE_URL="http://<SERVICE_IP>:<SERVICE_PORT>"
 
 curl -sS "$SERVICE_URL/v1/chat/completions" \
   -H 'Content-Type: application/json' \
@@ -526,12 +688,12 @@ true
 
 ### 6.2 Image Request
 
-Set `IMAGE_URL` to an HTTP(S) image URL reachable from the Prefill node, and send a
-multimodal request:
+Set `IMAGE_URL` to an HTTP(S) image URL reachable from the node that executes
+Prefill, and send a multimodal request:
 
 ```shell
 export IMAGE_URL="<YOUR_IMAGE_URL>"
-export SERVICE_URL="http://<PROXY_IP>:<PROXY_PORT>"
+export SERVICE_URL="http://<SERVICE_IP>:<SERVICE_PORT>"
 
 curl -sS "$SERVICE_URL/v1/chat/completions" \
   -H 'Content-Type: application/json' \
@@ -572,12 +734,12 @@ No production performance baseline is published for this configuration.
 
 ## 9 Performance Tuning
 
-The values in Section 5.1 are a validated starting point rather than globally
+The values in Sections 5.1 and 5.2 are starting points rather than globally
 optimal settings. Tune `--max-num-seqs`, `--max-num-batched-tokens`, and
 `--gpu-memory-utilization` together for the target input length, image sizes,
-output length, and concurrency. Keep the documented Prefill DP4/TP4 and Decode
-DP8/TP2 layouts, `--block-size 128`, and Decode `FULL_DECODE_ONLY` mode until
-an alternative configuration has been validated.
+output length, and concurrency. Keep DP4/TP4 for A3 single-node deployment,
+or Prefill DP4/TP4 and Decode DP8/TP2 for A3 PD deployment, until an
+alternative configuration has been validated.
 
 ## 10 FAQ
 
@@ -597,10 +759,11 @@ For common environment, installation, and parameter issues, refer to the
 
 ## 11 Limitations
 
-- The documented PD deployment uses two Atlas 800 A3 servers and an Ascend
-  W8A8 checkpoint with INT8 Engram storage.
-- Colocated multi-node deployment, A2 deployment, pipeline parallelism, and
-  model runner V2 are not covered by this guide.
+- The documented A3 deployments use either one server in colocated mode or two
+  servers in 1P1D mode, with an Ascend W8A8 checkpoint and INT8 Engram storage.
+- The A2 configuration is retained unchanged and is not revalidated by this
+  update. Its revised configuration will be documented separately.
+- Pipeline parallelism and model runner V2 are not covered by this guide.
 - DSpark draft execution runs in eager mode while the target model uses
   `FULL_DECODE_ONLY` ACL Graph.
 - Production performance qualification and task-level accuracy evaluation are
