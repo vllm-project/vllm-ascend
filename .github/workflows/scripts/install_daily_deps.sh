@@ -64,25 +64,29 @@ rm -rf /tmp/torch_npu
 
 # ---- mfcli kernel install ----
 # Install the memfabric kernel for the target SoC. Only A5 and A3 require it;
-case "${SOC_VERSION:-}" in
-    ascend950dt_9582)
-        echo "Install memfabric kernel for A5..."
-        mfcli kernel install --soc-version A5
-        ;;
-    ascend910_9391)
-        echo "Install memfabric kernel for A3..."
-        mfcli kernel install --soc-version A3
-        ;;
-    *)
-        echo "Skip memfabric kernel install (SOC_VERSION=${SOC_VERSION:-})."
-        ;;
-esac
+if command -v mfcli &>/dev/null; then
+    case "${SOC_VERSION:-}" in
+        ascend950dt_9582)
+            echo "Install memfabric kernel for A5..."
+            mfcli kernel install --soc-version A5
+            ;;
+        ascend910_9391)
+            echo "Install memfabric kernel for A3..."
+            mfcli kernel install --soc-version A3
+            ;;
+        *)
+            echo "Skip memfabric kernel install (SOC_VERSION=${SOC_VERSION:-})."
+            ;;
+    esac
+else
+    echo "mfcli not found — skipping memfabric kernel install."
+fi
 
 # ---- triton-ascend ----
 # Controlled by INSTALL_TRITON_ASCEND env var (default: false).
 # Set INSTALL_TRITON_ASCEND=true to enable triton-ascend daily installation.
 echo "Install triton-ascend..."
 TRITON_ASCEND_URL="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/Triton_Innersource/B_Version/${TRITON_ASCEND_VERSION}/triton_ascend-${TRITON_ASCEND_PACKAGE_VERSION}-cp312-cp312-manylinux_2_27_${ARCH}.manylinux_2_28_${ARCH}.whl"
-python3 -m pip install "$TRITON_ASCEND_URL" --force-reinstall
+python3 -m pip install "$TRITON_ASCEND_URL" --force-reinstall --no-deps
 
 echo "Daily packages installation complete."
