@@ -19,9 +19,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, YaRNScalingRotaryEmbedding
+from vllm.config import set_current_vllm_config
+from vllm.model_executor.layers.rotary_embedding import (
+    Gemma4RotaryEmbedding,
+    RotaryEmbedding,
+    YaRNScalingRotaryEmbedding,
+)
 
 from vllm_ascend.ops.rotary_embedding import (
+    AscendGemma4RotaryEmbedding,
     AscendRotaryEmbedding,
     AscendYaRNRotaryEmbedding,
     rope_forward_oot,
@@ -170,6 +176,28 @@ def make_yarn_embedding(patch_init_side_effects):
                 scaling_factor=1.0,
                 dtype=DTYPE,
             )
+        return emb
+
+    return _factory
+
+
+@pytest.fixture()
+def make_gemma4_embedding(patch_init_side_effects):
+    """Factory for AscendGemma4RotaryEmbedding with parent __init__ suppressed."""
+
+    def _factory(use_mtp: bool = False, is_neox_style: bool = True):
+        spec_cfg = MagicMock(method="mtp") if use_mtp else None
+        patch_init_side_effects.return_value.speculative_config = spec_cfg
+
+        with patch("vllm_ascend.ops.rotary_embedding.Gemma4RotaryEmbedding.__init__") as mock_parent_init:
+            mock_parent_init.return_value = None
+            emb = AscendGemma4RotaryEmbedding.__new__(AscendGemma4RotaryEmbedding)
+            # Gemma4RotaryEmbedding always hands the base class rotary_dim=head_size
+            emb.head_size = HEAD_SIZE
+            emb.rotary_dim = HEAD_SIZE
+            emb.is_neox_style = is_neox_style
+            emb.cos_sin_cache = torch.zeros(MAX_POS, HEAD_SIZE)
+            AscendGemma4RotaryEmbedding.__init__(emb, HEAD_SIZE, ROTARY_DIM, MAX_POS, BASE, is_neox_style, DTYPE)
         return emb
 
     return _factory
@@ -364,4 +392,86 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
         """
         check_parent_init_signature_has_not_changed(
             YaRNScalingRotaryEmbedding.__init__, AscendYaRNRotaryEmbedding.__init__
+        )
+
+
+class TestAscendGemma4RotaryEmbedding:
+    @patch("vllm_ascend.ops.rotary_embedding.AscendRotaryEmbedding.forward_oot")
+    def test_delegates_to_ascend_rotary_forward_oot(self, mock_delegate, make_gemma4_embedding):
+        """forward_oot must delegate to AscendRotaryEmbedding.forward_oot and return its result."""
+        expected = MagicMock()
+        mock_delegate.return_value = expected
+
+        emb = make_gemma4_embedding()
+        positions, query, key = _make_tensors()
+
+        result = emb.forward_oot(positions, query, key)
+
+        mock_delegate.assert_called_once_with(emb, positions, query, key, None, None, None)
+        assert result is expected
+
+    @patch("vllm_ascend.ops.rotary_embedding.AscendRotaryEmbedding.forward_oot")
+    def test_all_args_forwarded_together(self, mock_delegate, make_gemma4_embedding):
+        mock_delegate.return_value = MagicMock()
+
+        emb = make_gemma4_embedding()
+        positions, query, key = _make_tensors()
+        offsets = torch.ones(SEQ_LEN, dtype=torch.long)
+
+        emb.forward_oot(
+            positions, query, key, offsets=offsets, is_neox_style_override=False, out_dtype=torch.float8_e4m3fn
+        )
+
+        mock_delegate.assert_called_once_with(emb, positions, query, key, offsets, False, torch.float8_e4m3fn)
+
+    @patch("vllm_ascend.ops.rotary_embedding.AscendRotaryEmbedding.forward_oot")
+    def test_q_only_call_forwards_none_key(self, mock_delegate, make_gemma4_embedding):
+        """KV-shared Gemma4 layers rotate q alone, passing key=None."""
+        mock_delegate.return_value = MagicMock()
+
+        emb = make_gemma4_embedding()
+        positions, query, _ = _make_tensors()
+
+        emb.forward_oot(positions, query, None)
+
+        mock_delegate.assert_called_once_with(emb, positions, query, None, None, None, None)
+
+    @pytest.mark.parametrize("use_mtp", [True, False])
+    def test_sets_use_mtp_read_by_the_delegate(self, use_mtp, make_gemma4_embedding):
+        """AscendRotaryEmbedding.forward_oot reads self.use_mtp, so __init__ must set it."""
+        emb = make_gemma4_embedding(use_mtp=use_mtp)
+
+        assert bool(emb.use_mtp) is use_mtp
+
+    def test_upstream_class_builds_override_with_proportional_cache(self):
+        """Gemma4RotaryEmbedding resolves to the Ascend override and keeps Gemma4's cos/sin cache.
+
+        The override exists so that the zero-padded inverse frequencies of
+        proportional RoPE still build the cache: the non-rotated pairs hold
+        cos=1 and sin=0, so a full-width rotation leaves them unchanged. The
+        fused q/k/v norm + RoPE kernel relies on that full-width cache.
+        """
+        partial_rotary_dim = HEAD_SIZE // 4
+        rope_angles = partial_rotary_dim // 2
+        vllm_config = MagicMock()
+        vllm_config.compilation_config.custom_ops = ["all"]
+
+        with set_current_vllm_config(vllm_config):
+            emb = Gemma4RotaryEmbedding(HEAD_SIZE, partial_rotary_dim, MAX_POS, BASE, True, DTYPE)
+
+        assert isinstance(emb, AscendGemma4RotaryEmbedding)
+        assert emb.rotary_dim == HEAD_SIZE
+        assert emb.cos_sin_cache.shape == (MAX_POS, HEAD_SIZE)
+        cos, sin = emb.cos_sin_cache.chunk(2, dim=-1)
+        torch.testing.assert_close(cos[:, rope_angles:], torch.ones_like(cos[:, rope_angles:]))
+        torch.testing.assert_close(sin[:, rope_angles:], torch.zeros_like(sin[:, rope_angles:]))
+
+    def test_parent_init_signature_has_not_changed(self):
+        """
+        Fail loudly if Gemma4RotaryEmbedding.__init__ adds, removes, or renames
+        parameters, so a developer knows to update AscendGemma4RotaryEmbedding
+        accordingly.
+        """
+        check_parent_init_signature_has_not_changed(
+            Gemma4RotaryEmbedding.__init__, AscendGemma4RotaryEmbedding.__init__
         )
