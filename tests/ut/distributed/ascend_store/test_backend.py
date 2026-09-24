@@ -1217,6 +1217,51 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             backend._pending_buffers = None
             return backend
 
+    def test_ssd_load_rewarms_via_registered_full_sized_npu_read(self):
+        b = self._make_backend()
+        ssd = SimpleNamespace(size=lambda: 64, type_list=lambda: [2], gva_list=lambda: [0])
+        resident = SimpleNamespace(size=lambda: 64, type_list=lambda: [2, 1], gva_list=lambda: [0, 4096])
+        b.store.batch_get_key_info.side_effect = [[ssd], [resident]]
+        b.store.batch_get_into.return_value = [0]
+        b.store.register_buffer.return_value = 0
+        scratch = SimpleNamespace(data_ptr=lambda: 8192)
+        with patch.object(memcache_module.torch, "empty", return_value=scratch):
+            self.assertEqual(b.batch_get_key_info(["ssd-key"], for_load=True), [resident])
+        keys, addresses, sizes, direction = b.store.batch_get_into.call_args.args
+        self.assertEqual(keys, ["ssd-key"])
+        self.assertEqual(sizes, [64])
+        self.assertGreater(addresses[0], 0)
+        self.assertEqual(direction, memcache_module.MmcDirect.COPY_G2L.value)
+        b.store.register_buffer.assert_called_once_with(8192, 64)
+        b.store.unregister_buffer.assert_called_once_with(8192, 64)
+
+    def test_scheduler_query_does_not_rewarm_ssd(self):
+        b = self._make_backend()
+        ssd = SimpleNamespace(size=lambda: 64, type_list=lambda: [2], gva_list=lambda: [0])
+        b.store.batch_get_key_info.return_value = [ssd]
+        self.assertEqual(b.batch_get_key_info(["ssd-key"]), [ssd])
+        b.store.batch_get_into.assert_not_called()
+
+    def test_ssd_with_resident_replica_does_not_copy_to_host(self):
+        b = self._make_backend()
+        info = SimpleNamespace(size=lambda: 64, type_list=lambda: [2, 1], gva_list=lambda: [0, 4096])
+        b.store.batch_get_key_info.return_value = [info]
+        self.assertEqual(b.batch_get_key_info(["resident-key"], for_load=True), [info])
+        b.store.batch_get_into.assert_not_called()
+
+    def test_ssd_rewarm_failure_is_not_a_successful_load(self):
+        b = self._make_backend()
+        ssd = SimpleNamespace(size=lambda: 64, type_list=lambda: [2], gva_list=lambda: [0])
+        b.store.batch_get_key_info.return_value = [ssd]
+        b.store.batch_get_into.return_value = [-1]
+        b.store.register_buffer.return_value = 0
+        with (
+            patch.object(memcache_module.torch, "empty", return_value=SimpleNamespace(data_ptr=lambda: 8192)),
+            self.assertRaisesRegex(RuntimeError, "SSD rewarm failed"),
+        ):
+            b.batch_get_key_info(["ssd-key"], for_load=True)
+        b.store.unregister_buffer.assert_called_once_with(8192, 64)
+
     def test_exists(self):
         b = self._make_backend()
         b.store.batch_is_exist.return_value = [1]

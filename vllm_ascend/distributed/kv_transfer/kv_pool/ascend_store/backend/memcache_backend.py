@@ -36,6 +36,7 @@ def _is_device_sdma() -> bool:
 
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
+MEMCACHE_SSD_MEDIA_TYPE = 2
 
 
 def _validate_device_ub_qos() -> None:
@@ -295,7 +296,7 @@ class MemcacheBackend(Backend):
         assert self.store is not None
         return self.store.batch_is_exist(keys)
 
-    def batch_get_key_info(self, keys: list[str]) -> list[Any]:
+    def batch_get_key_info(self, keys: list[str], *, for_load: bool = False) -> list[Any]:
         if self._lazy_init and not self._store_initialized:
             logger.debug(
                 "MemcacheBackend.batch_get_key_info called before store initialization; "
@@ -304,7 +305,39 @@ class MemcacheBackend(Backend):
             )
             return []
         assert self.store is not None
-        return self.store.batch_get_key_info(keys)
+        infos = self.store.batch_get_key_info(keys)
+        if not for_load:
+            return infos
+        if len(infos) != len(keys):
+            raise RuntimeError("Memcache key-info response length mismatch")
+        rewarmed = False
+        for key, info in zip(keys, infos, strict=True):
+            # MEDIA_SSD=2 has no directly readable GVA. Query and AddLease
+            # do not rewarm in the deployed SDK; only the regular Get path
+            # waits for SSD -> DRAM completion. Its API requires a full-size
+            # destination. UBoE does not enable host swap buffers by default,
+            # so use one registered temporary NPU blob at a time.
+            if (
+                info.size() <= 0
+                or MEMCACHE_SSD_MEDIA_TYPE not in info.type_list()
+                or any(gva > 0 for gva in info.gva_list())
+            ):
+                continue
+            size = info.size()
+            scratch = torch.empty(size, dtype=torch.uint8, device="npu")
+            address = scratch.data_ptr()
+            registered = self.store.register_buffer(address, size)
+            if registered != 0:
+                raise RuntimeError(f"Memcache SSD rewarm buffer registration failed: result={registered}")
+            try:
+                results = self.store.batch_get_into([key], [address], [size], MmcDirect.COPY_G2L.value)
+            finally:
+                self.store.unregister_buffer(address, size)
+            if results != [0]:
+                raise RuntimeError(f"Memcache SSD rewarm failed: key={key}, results={results}")
+            rewarmed = True
+            logger.debug("Memcache layerwise SSD rewarm completed key=%s bytes=%d", key, size)
+        return self.store.batch_get_key_info(keys) if rewarmed else infos
 
     def batch_is_readable(self, keys: list[str]) -> list[bool]:
         """Map valid MemCache GVA metadata to the common readability contract."""
