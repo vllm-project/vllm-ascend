@@ -46,8 +46,12 @@ except Exception:
 
 
 def _track_vllm_config(fuse_norm_quant=None, fuse_qknorm_rope=None, fuse_muls_add=None):
-    """带 fuse flags 的轨上 VllmConfig（bare + SimpleNamespace model_config）。"""
-    ascend: dict = {"compile_backend": "inductor"}
+    """带 fuse flags 的轨上 VllmConfig（bare + SimpleNamespace model_config）。
+
+    轨经上游正门（compilation_config.backend="inductor"）请求；fuse flags
+    仍走 additional_config 袋子（真配置语义，非选择机制）。
+    """
+    ascend: dict = {}
     for k, v in (
         ("fuse_norm_quant", fuse_norm_quant),
         ("fuse_qknorm_rope", fuse_qknorm_rope),
@@ -66,9 +70,10 @@ def _track_vllm_config(fuse_norm_quant=None, fuse_qknorm_rope=None, fuse_muls_ad
         hf_text_config=SimpleNamespace(routed_scaling_factor=2.5, rms_norm_eps=1e-6),
     )
     vllm_config.quant_config = None
+    vllm_config.compilation_config.backend = "inductor"
     vllm_config.additional_config = {"ascend_compilation_config": ascend}
     vllm_config.device_config.device_type = "npu"
-    # 跑真实早 hook：backend 改写 + 12 个上游 pass flag 钉 False（生产时序——
+    # 跑真实早 hook：12 个上游 pass flag 钉 False（生产时序——
     # 否则上游 PostGradPassManager.configure 会在 pass_config 融合 flag 为真时
     # 读 model_config.using_transformers_backend()，SimpleNamespace 无此方法）
     from vllm_ascend.platform import NPUPlatform

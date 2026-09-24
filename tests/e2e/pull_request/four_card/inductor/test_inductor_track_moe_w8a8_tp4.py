@@ -76,7 +76,9 @@ _BASE = dict(
 # with weight_nz_mode=1 pinned explicitly (guarding the BF16 tier's NZ flip).
 _NZ = {"weight_nz_mode": 1}
 _TRACK = dict(
-    additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}, **_NZ},
+    # front door (config refactor M1b): compilation_config.backend selects the track
+    additional_config={"ascend_compilation_config": dict(_NZ)},
+    compilation_config={"backend": "inductor"},
 )
 _EAGER_NZ = dict(additional_config=dict(_NZ))
 

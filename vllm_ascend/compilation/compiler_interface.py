@@ -58,24 +58,12 @@ def fusion_pass_compile(
 
     decompositions = select_decomp_table()
 
-    # torch>=2.10 vLLM defaults AOT compilation on; its AOTAutogradCache save path
-    # requires the inner compiler to return an inductor OutputCode, which our
-    # GraphModule-returning compile_inner can never satisfy (asserts at
-    # torch/_functorch/_aot_autograd/autograd_cache.py unwrap_output_code). Disable
-    # the cache for this track only — same mitigation as upstream InductorAdaptor
-    # (vllm/compilation/compiler_interface.py:609-618).
-    with torch._functorch.config.patch(
-        {
-            "enable_autograd_cache": False,
-            "enable_remote_autograd_cache": False,
-        }
-    ):
-        compiled_fn = compile_fx(
-            graph=graph,
-            example_inputs=example_inputs,
-            inner_compile=compile_inner,
-            decompositions=decompositions,
-        )
+    compiled_fn = compile_fx(
+        graph=graph,
+        example_inputs=example_inputs,
+        inner_compile=compile_inner,
+        decompositions=decompositions,
+    )
 
     return compiled_fn, None
 

@@ -56,7 +56,6 @@ _BASE = dict(
     max_num_seqs=16,
     tensor_parallel_size=2,
     gpu_memory_utilization=0.55,
-    additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
 )
 
 
@@ -70,11 +69,18 @@ def _cold_cache(subdir: str) -> None:
 def _run_track(runner_kwargs: dict):
     """Greedy-generate on the inductor track; return (final_cg, texts)."""
     from vllm import SamplingParams
+    from vllm.config.compilation import CompilationConfig
+
+    # front door (config refactor M1b): compilation_config.backend selects
+    # the track; merged into the caller-supplied cudagraph_mode profile.
+    runner_kwargs = dict(runner_kwargs)
+    compilation_config = runner_kwargs.pop("compilation_config", None) or CompilationConfig()
+    compilation_config.backend = "inductor"
 
     # VllmRunner: repo-conventional lifecycle whose __exit__ releases the
     # engine deterministically (raw LLM objects leak HBM across engines in
     # one process; one_card full_graphs.py runbook).
-    with VllmRunner(**_BASE, **runner_kwargs) as runner:
+    with VllmRunner(**_BASE, compilation_config=compilation_config, **runner_kwargs) as runner:
         # final_cg AFTER check_and_update_config applied the -O presets and
         # any step-6/7 adjustments (platform.py:733 logs the same value).
         try:

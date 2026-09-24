@@ -53,7 +53,8 @@ _BASE = dict(
 # Default profile: NO explicit cudagraph_mode — the -O2 preset resolves it to
 # FULL_AND_PIECEWISE on the engine config (asserted below).
 _TRACK = dict(
-    additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
+    # front door (config refactor M1b): compilation_config.backend selects the track
+    compilation_config={"backend": "inductor"},
 )
 
 # workspace root: vllm-ascend sits directly beneath it (…/v1)

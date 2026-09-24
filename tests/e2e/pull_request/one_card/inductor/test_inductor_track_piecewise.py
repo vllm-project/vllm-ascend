@@ -43,8 +43,9 @@ def test_inductor_track_piecewise_capture_replay():
             dtype="bfloat16",
             max_model_len=4096,
             max_num_seqs=16,
-            compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.PIECEWISE),
-            additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
+            # front door (config refactor M1b): compilation_config.backend
+            # selects the track
+            compilation_config=CompilationConfig(backend="inductor", cudagraph_mode=CUDAGraphMode.PIECEWISE),
         )
         outs = llm.generate(
             ["The capital of France is"],

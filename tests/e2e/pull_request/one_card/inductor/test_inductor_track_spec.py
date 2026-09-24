@@ -3,7 +3,7 @@ inductor compile-backend track — spec-on eager vs spec-on track parity gates.
 
 The platform layer wires 11 speculative methods with no code gate against the
 track, but only ngram_gpu had a recorded track adaptation (probe level); the
-in-repo spec_decode acceptance tests never set compile_backend="inductor".
+in-repo spec_decode acceptance tests never set compilation_config.backend="inductor".
 This file closes the verification gap for four locally-weighted representative
 methods (function check/03 P0 #2):
 
@@ -133,11 +133,15 @@ def test_inductor_track_spec_matches_eager(method):
 
     from vllm import SamplingParams
 
+    from vllm.config.compilation import CompilationConfig
+
     greedy = SamplingParams(max_tokens=MAX_TOKENS, temperature=0.0)
     kwargs = _track_kwargs(method)
-    track = dict(
-        additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
-    )
+    # front door (config refactor M1b): compilation_config.backend selects
+    # the track; merged into the per-method cudagraph_mode profile.
+    cg = kwargs.pop("compilation_config", None) or CompilationConfig()
+    cg.backend = "inductor"
+    track = dict(compilation_config=cg)
 
     with VllmRunner(enforce_eager=True, **kwargs) as runner:
         eager_outs = runner.model.generate(PROMPTS, greedy)

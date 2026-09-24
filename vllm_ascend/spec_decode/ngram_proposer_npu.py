@@ -4,25 +4,14 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import NgramProposerGPU
 
 class AscendNgramProposerNPU(NgramProposerGPU):
     def __init__(self, vllm_config, device: torch.device, runner):
-        # Stage-4 #7/A2 (R17): do NOT call super().__init__(). The upstream
-        # constructor builds a bare VllmConfig (no additional_config) whose
-        # __post_init__ re-runs check_and_update_config and rebuilds the
-        # AscendConfig singleton trackless, wiping the engine's compile-track
-        # state for the main model's compiles (and its own _dummy_run compile
-        # then reads the legacy pass_key, which is not a registered torch
-        # config key on the inductor track -> AttributeError). This subclass
-        # is a stub — propose/dummy_run/load_model are all no-ops and the
-        # real ngram_gpu path is the runner-side triton_ngram_spec_decode
-        # integration — so only the scalar attributes the runner reads need
-        # to be set, sourced from the ENGINE config directly.
-        spec = vllm_config.speculative_config
-        self.vllm_config = vllm_config
-        self.min_n = spec.prompt_lookup_min
-        self.max_n = spec.prompt_lookup_max
-        self.k = spec.num_speculative_tokens
-        self.max_model_len = vllm_config.model_config.max_model_len
-        self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        self.device = device
+        # Config refactor (09 §5.2 #10, 2026-09-18 讨论三十八裁决): the
+        # stage-4 stub is removed — with the compile_backend enum gone the
+        # AscendConfig singleton carries no track identity (a bare re-init
+        # flips only value-semantic fields, the community-era state that
+        # never reported problems), and the no-arg pass hooks read the
+        # upstream per-engine global (rebinding-immune), so the upstream
+        # constructor's bare-VllmConfig rebuild is harmless again.
+        super().__init__(vllm_config, device=device)
 
     def load_model(self, *args, **kwargs):
         # No model to load.

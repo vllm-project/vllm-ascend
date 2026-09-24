@@ -63,13 +63,18 @@ class AscendCompilationConfig:
     downgrades (disable npugraph_ex / static_kernel) and the
     static_kernel→npugraph_ex dependency check are applied in an ``after``
     model_validator.
+
+    The config refactor (09_重构说明书 §三) removed the compile_backend enum:
+    the inductor track is selected through the upstream front door
+    (compilation_config.backend), and the legacy fusion_pass / npugraph_ex
+    resolution is the plain community ``enable_npugraph_ex`` boolean plus the
+    cudagraph-mode filtering in the platform's step 7 — exactly the boundary
+    tree (9e3caae09) behavior. The side-door key was never given a
+    compatibility window (user ruling, 2026-09-19): it is an unknown key,
+    rejected by ``extra="forbid"`` like any other typo.
     """
 
-    # None = "not set by the user": the compile_backend enum resolves it below,
-    # so enum defaults can be told apart from an explicit True/False (e.g. the
-    # minimal {"compile_backend": "inductor"} usage must not trip the
-    # inductor/npugraph_ex conflict check).
-    enable_npugraph_ex: bool | None = None
+    enable_npugraph_ex: bool = True
     enable_static_kernel: bool = False
     fuse_norm_quant: bool = True
     fuse_qknorm_rope: bool = True
@@ -84,35 +89,9 @@ class AscendCompilationConfig:
     # accepted behind this explicit flag (default-off also honors the original
     # hold-design 3.2 "first version off, enable experiment-driven" promise).
     fuse_norm_quant_dynamic: bool = False
-    # "auto" keeps the existing npugraph_ex / fusion_pass inference unchanged
-    # (resolved enable_npugraph_ex True/False selects between them).
-    # "fusion_pass" / "npugraph_ex" pin one of the two legacy tracks.
-    # "inductor" enables the inductor compile-backend track: per-piece
-    # compilation goes through upstream vLLM's InductorAdaptor (compile_fx)
-    # with torch_npu's triton_experimental inductor backend. Incompatible with
-    # enforce_eager=True and -O0 (both disable compilation entirely) and with
-    # an explicit enable_npugraph_ex=True.
-    compile_backend: Literal["auto", "fusion_pass", "npugraph_ex", "inductor"] = "auto"
 
     @model_validator(mode="after")
     def _apply_unsupported_hardware_downgrade_and_static_kernel_check(self):
-        # Resolve the compile_backend enum into the effective npugraph_ex bool
-        # BEFORE the hardware downgrade below, so downstream consumers always
-        # read a concrete bool (they never see the None sentinel).
-        if self.compile_backend == "inductor":
-            if self.enable_npugraph_ex is True:
-                raise ValueError(
-                    "ascend_compilation_config.compile_backend='inductor' is incompatible with "
-                    "enable_npugraph_ex=True: the inductor track does not use npugraph_ex."
-                )
-            self.enable_npugraph_ex = False
-        elif self.compile_backend == "fusion_pass":
-            self.enable_npugraph_ex = False
-        elif self.compile_backend == "npugraph_ex":
-            self.enable_npugraph_ex = True
-        elif self.enable_npugraph_ex is None:  # "auto" with no explicit bool
-            self.enable_npugraph_ex = True
-
         from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
         if not get_current_hardware_profile().supports(HardwareCapability.NPUGRAPH_EX):

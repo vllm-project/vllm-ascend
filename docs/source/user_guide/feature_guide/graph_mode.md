@@ -44,10 +44,12 @@ The default graph path on Ascend involves two stages: **compile-time optimizatio
 | PIECEWISE | Fusion pass only | ACLGraph capture/replay | Disabled |
 | NONE | None | Eager execution | Disabled |
 
-**Inductor compile-backend track** (`ascend_compilation_config.compile_backend="inductor"`):
-the compile-time column of the matrix above is replaced by upstream vLLM's
-Inductor compilation (compile_fx) with torch_npu's `triton_experimental`
-backend, while the runtime column (ACLGraph capture/replay) stays the same.
+**Inductor compile-backend track** (`-cc.backend inductor`, i.e.
+`compilation_config.backend="inductor"` — the upstream front door, same entry
+CUDA users use): the compile-time column of the matrix above is replaced by
+upstream vLLM's Inductor compilation (compile_fx) with torch_npu's
+`triton_experimental` backend, while the runtime column (ACLGraph
+capture/replay) stays the same.
 When `cudagraph_mode` is not set, the track follows the `-O` presets exactly
 like upstream (`-O1` → PIECEWISE, `-O2`/`-O3` → FULL_AND_PIECEWISE — uniform
 decode batches get the full-graph path by default); an explicit `NONE` keeps
@@ -57,8 +59,9 @@ and captures a full graph for uniform decode batches, while `FULL` /
 `FULL_DECODE_ONLY` compile the whole model as a single graph
 (`splitting_ops=[]`, attention stays inside the compiled graph) and capture
 one full graph per batch size (decode-only for `FULL_DECODE_ONLY`; mixed
-batches then run the compiled graph ungraphed). See
-`ascend_compilation_config.compile_backend` in
+batches then run the compiled graph ungraphed). The backend variant is selected with the
+`TORCHINDUCTOR_NPU_BACKEND` environment variable (the track default-pins
+`triton_experimental`); see
 [additional_config](../configuration/additional_config.md).
 
 **Breakable CUDAGraph** (`VLLM_USE_BREAKABLE_CUDAGRAPH`): upstream semantics —

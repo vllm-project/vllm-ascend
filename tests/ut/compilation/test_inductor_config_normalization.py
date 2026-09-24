@@ -62,13 +62,12 @@ class NormalizationTestBase(TestBase):
         super().tearDown()
 
     @staticmethod
-    def _make_stubs(compile_backend: str = "inductor", inductor_compile_config=None):
+    def _make_stubs(inductor_compile_config=None):
         compilation_config = CompilationConfig(backend="inductor")
         if inductor_compile_config is not None:
             compilation_config.inductor_compile_config = dict(inductor_compile_config)
         vllm_config = SimpleNamespace(compilation_config=compilation_config)
-        ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(compile_backend=compile_backend))
-        return vllm_config, ascend_config
+        return vllm_config
 
 
 class TestLegalKeySet(NormalizationTestBase):
@@ -130,6 +129,22 @@ class TestUnknownKeys(NormalizationTestBase):
         config = {"npu_backend": "triton_experimental"}
         self.assertEqual(_normalize_inductor_config(config), config)
 
+    def test_npu_backend_warns_q5(self):
+        """Q-5 (09 §六, 2026-09-18 ruling): the key stays legal (someone may
+        rely on passing validation) but never takes effect on vLLM's piecewise
+        path — compile_fx is called directly, without the wrapper that
+        resolves npu_backend. Point at TORCHINDUCTOR_NPU_BACKEND."""
+        import logging
+
+        from vllm_ascend.platform import _normalize_inductor_config
+
+        with self.assertLogs("vllm", level=logging.WARNING) as logs:
+            result = _normalize_inductor_config({"npu_backend": "triton_experimental"})
+        joined = "\n".join(logs.output)
+        self.assertIn("does not take effect", joined)
+        self.assertIn("TORCHINDUCTOR_NPU_BACKEND", joined)
+        self.assertEqual(result, {"npu_backend": "triton_experimental"})
+
     def test_none_is_a_noop(self):
         from vllm_ascend.platform import _normalize_inductor_config
 
@@ -183,11 +198,11 @@ class TestHookIntegration(NormalizationTestBase):
     def test_hook_normalizes_inductor_compile_config(self):
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config, ascend_config = self._make_stubs(
+        vllm_config = self._make_stubs(
             inductor_compile_config={"bogus_key": 1, "shape_padding": True, "npu_backend": "triton_experimental"}
         )
         with self.assertLogs("vllm", level=logging.WARNING):
-            NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+            NPUPlatform._setup_inductor_track_envs(vllm_config)
         self.assertEqual(
             vllm_config.compilation_config.inductor_compile_config,
             {"shape_padding": False, "npu_backend": "triton_experimental"},
@@ -196,9 +211,9 @@ class TestHookIntegration(NormalizationTestBase):
     def test_hook_raises_on_split_reductions(self):
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config, ascend_config = self._make_stubs(inductor_compile_config={"split_reductions": True})
+        vllm_config = self._make_stubs(inductor_compile_config={"split_reductions": True})
         with self.assertRaises(ValueError):
-            NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+            NPUPlatform._setup_inductor_track_envs(vllm_config)
 
     def test_hook_overrides_vllm_combo_kernels_default(self):
         """Defense in depth: a fresh CompilationConfig(backend="inductor")
@@ -207,10 +222,10 @@ class TestHookIntegration(NormalizationTestBase):
         it off."""
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config, ascend_config = self._make_stubs()
+        vllm_config = self._make_stubs()
         self.assertTrue(vllm_config.compilation_config.inductor_compile_config["combo_kernels"])
         with self.assertLogs("vllm", level=logging.WARNING):
-            NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+            NPUPlatform._setup_inductor_track_envs(vllm_config)
         cc = vllm_config.compilation_config
         self.assertFalse(cc.inductor_compile_config["combo_kernels"])
         self.assertFalse(cc.inductor_compile_config["benchmark_combo_kernel"])

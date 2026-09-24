@@ -1,13 +1,17 @@
-"""Unit tests for the inductor compile-backend track (stage1 design).
+"""Unit tests for the inductor compile-backend track (config refactor M1a).
 
-Covers (stage design/stage1/04_测试与验收.md §T1 + stage2 rev B):
-  1. track predicate ``_inductor_track_enabled``
-  2. pass_key / get_pass_manager_cls switch (AscendConfig singleton — per-engine
-     scoped, no env carrier to leak or clean up)
-  3. early-hook derived defaults ``NPUPlatform._apply_inductor_track_defaults``
-  4. late-hook env setup ``NPUPlatform._setup_inductor_track_envs``
-  5. ``_setup_compile_backend`` cg=NONE guard (track keeps VLLM_COMPILE)
-  6. fail-fast on incompatible user options (enforce_eager / -O0 / standalone=1 / MEGA=1)
+Covers (stage design/vllm config refactor/02_设计方案.md §四):
+  1. upstream front-door trigger: compilation_config.backend == "inductor"
+     (requested state; the early hook runs before the -O presets)
+  2. side-door key never existed (user ruling 2026-09-19):
+     ascend_compilation_config.compile_backend is rejected as an unknown
+     key by extra="forbid" - no translation, no warning, no pointer
+  3. pass_key / get_pass_manager_cls switch (upstream per-engine global
+     get_current_vllm_config_or_none — rebinding-immune, nearest-window-wins)
+  4. early-hook derived defaults ``NPUPlatform._apply_inductor_track_defaults``
+  5. late-hook env setup ``NPUPlatform._setup_inductor_track_envs``
+  6. ``_setup_compile_backend`` cg=NONE guard (track keeps VLLM_COMPILE)
+  7. fail-fast on incompatible user options (enforce_eager / -O0 / standalone=1 / MEGA=1)
 
 Config-level only: no NPU device is initialized.
 """
@@ -60,88 +64,117 @@ class TrackTestBase(TestBase):
         super().tearDown()
 
     @staticmethod
-    def _make_vllm_config(compile_backend: str = "auto") -> VllmConfig:
-        """Bare VllmConfig with the track switch in additional_config.
+    def _make_vllm_config(track: bool = False) -> VllmConfig:
+        """Bare VllmConfig with the inductor track requested through the
+        upstream front door (compilation_config.backend).
 
         check_and_update_config is patched out (see test_graph_fusion_pass_manager.py),
-        so the late hook does not run here; the early hook sees additional_config
-        during VllmConfig.__post_init__ only if device_type already resolves to npu.
+        so the late hook does not run here. A bare VllmConfig on the NPU
+        platform leaves compilation_config.backend resolved to the
+        AscendCompiler qualname (upstream fill) — the track-off default.
         """
         with patch("vllm_ascend.platform.NPUPlatform.check_and_update_config"):
             vllm_config = VllmConfig()
         # A bare VllmConfig() has model_config=None; the early hook's guard
         # (mirroring check_and_update_config) skips such configs.
         vllm_config.model_config = SimpleNamespace(enforce_eager=False)
-        vllm_config.additional_config = {"ascend_compilation_config": {"compile_backend": compile_backend}}
+        if track:
+            vllm_config.compilation_config.backend = "inductor"
         vllm_config.device_config.device_type = "npu"
         return vllm_config
 
 
-class TestInductorTrackPredicate(TrackTestBase):
-    def test_disabled_by_default(self):
-        from vllm_ascend.platform import _inductor_track_enabled
+class TestSidecarKeyNeverExisted(TrackTestBase):
+    """User ruling (2026-09-19): no compatibility window for the removed
+    side door — ascend_compilation_config.compile_backend behaves as a key
+    that was never invented. Setting it (any value, front door set or not)
+    is rejected by AscendCompilationConfig's extra="forbid" like any other
+    unknown key, at init_ascend_config time."""
 
-        self.assertFalse(_inductor_track_enabled(self._make_vllm_config("auto")))
-        vllm_config = self._make_vllm_config("auto")
-        vllm_config.additional_config = None
-        self.assertFalse(_inductor_track_enabled(vllm_config))
+    def _init_with_sidecar_key(self):
+        from vllm_ascend.ascend_config import init_ascend_config
 
-    def test_enabled_when_compile_backend_is_inductor(self):
-        from vllm_ascend.platform import _inductor_track_enabled
+        vllm_config = self._make_vllm_config(track=True)
+        vllm_config.additional_config = {
+            "ascend_compilation_config": {"compile_backend": "inductor"}
+        }
+        return init_ascend_config(vllm_config)
 
-        self.assertTrue(_inductor_track_enabled(self._make_vllm_config("inductor")))
+    def test_sidecar_key_rejected_as_unknown(self):
+        with self.assertRaises(Exception) as ctx:
+            self._init_with_sidecar_key()
+        message = str(ctx.exception)
+        self.assertIn("compile_backend", message)
+        # the plain unknown-key rejection — no translation, no pointer,
+        # no warning path
+        self.assertNotIn("-cc.backend", message)
 
 
 class TestPassKeySwitch(TrackTestBase):
-    """Stage2 rev B: the pass switch reads the AscendConfig singleton
-    (refreshed per engine by init_ascend_config) instead of an env carrier —
-    per-engine scoping with nothing to leak or clean up."""
+    """Refactor 09 §2.5 ruling (d): the pass switch reads the upstream
+    per-engine global (get_current_vllm_config_or_none) instead of the
+    AscendConfig singleton — rebinding-immune. Equivalence map from the
+    stage2 singleton semantics: per-engine scoping is now the
+    set_current_vllm_config window (worker/model construction is wrapped,
+    vllm/v1/worker/worker_base.py), and the window exit restores legacy
+    for the next engine — nearest window wins when nested (H9-③)."""
 
     def setUp(self):
         super().setUp()
-        from vllm_ascend.ascend_config import clear_ascend_config
+        from vllm.config.vllm import get_current_vllm_config_or_none
 
-        clear_ascend_config()
+        # Module-level global (not a contextvar): a misbehaving earlier test
+        # leaking its window would silently flip every assertion below.
+        self.assertIsNone(get_current_vllm_config_or_none())
 
-    def tearDown(self):
-        from vllm_ascend.ascend_config import clear_ascend_config
-
-        clear_ascend_config()
-        super().tearDown()
-
-    def _init_engine(self, compile_backend: str = "auto"):
-        from vllm_ascend.ascend_config import init_ascend_config
-
-        vllm_config = self._make_vllm_config(compile_backend)
-        init_ascend_config(vllm_config)
+    @staticmethod
+    def _platform():
+        return __import__("vllm_ascend.platform", fromlist=["NPUPlatform"]).NPUPlatform()
 
     def test_uninitialized_keeps_ascend_pass_machinery(self):
-        platform = __import__("vllm_ascend.platform", fromlist=["NPUPlatform"]).NPUPlatform()
+        platform = self._platform()
         self.assertEqual(platform.pass_key, COMPILATION_PASS_KEY)
         self.assertEqual(platform.get_pass_manager_cls(), _ASCEND_PASS_MANAGER)
 
     def test_track_engine_switches_to_upstream_pass_machinery(self):
-        self._init_engine("inductor")
-        platform = __import__("vllm_ascend.platform", fromlist=["NPUPlatform"]).NPUPlatform()
-        self.assertEqual(platform.pass_key, _UPSTREAM_PASS_KEY)
-        self.assertEqual(platform.get_pass_manager_cls(), _UPSTREAM_PASS_MANAGER)
+        from vllm.config.vllm import set_current_vllm_config
 
-    def test_track_off_engine_reverts_after_track_on_engine(self):
-        """Red line (总纲 §〇): a track-off engine after a track-on engine in
-        the same process must observe the legacy pass machinery — guaranteed
-        by the singleton refresh, no cleanup needed."""
-        self._init_engine("inductor")
-        self._init_engine("auto")
-        platform = __import__("vllm_ascend.platform", fromlist=["NPUPlatform"]).NPUPlatform()
-        self.assertEqual(platform.pass_key, COMPILATION_PASS_KEY)
-        self.assertEqual(platform.get_pass_manager_cls(), _ASCEND_PASS_MANAGER)
+        with set_current_vllm_config(self._make_vllm_config(track=True)):
+            platform = self._platform()
+            self.assertEqual(platform.pass_key, _UPSTREAM_PASS_KEY)
+            self.assertEqual(platform.get_pass_manager_cls(), _UPSTREAM_PASS_MANAGER)
+
+    def test_track_off_window_reverts_after_track_on_window(self):
+        """Red line (总纲 §〇): after a track-on window closes, the global is
+        gone and a track-off engine observes the legacy pass machinery."""
+        from vllm.config.vllm import get_current_vllm_config_or_none, set_current_vllm_config
+
+        with set_current_vllm_config(self._make_vllm_config(track=True)):
+            pass
+        self.assertIsNone(get_current_vllm_config_or_none())
+        with set_current_vllm_config(self._make_vllm_config(track=False)):
+            platform = self._platform()
+            self.assertEqual(platform.pass_key, COMPILATION_PASS_KEY)
+            self.assertEqual(platform.get_pass_manager_cls(), _ASCEND_PASS_MANAGER)
+
+    def test_nearest_window_wins_when_nested(self):
+        """H9-③: with two engines alive (nested windows), the most recently
+        entered window is what the no-arg pass hooks observe."""
+        from vllm.config.vllm import set_current_vllm_config
+
+        with set_current_vllm_config(self._make_vllm_config(track=False)):
+            with set_current_vllm_config(self._make_vllm_config(track=True)):
+                platform = self._platform()
+                self.assertEqual(platform.pass_key, _UPSTREAM_PASS_KEY)
+            platform = self._platform()
+            self.assertEqual(platform.pass_key, COMPILATION_PASS_KEY)
 
 
 class TestApplyInductorTrackDefaults(TrackTestBase):
     def test_track_off_is_a_noop(self):
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config = self._make_vllm_config("auto")
+        vllm_config = self._make_vllm_config(track=False)
         backend_before = vllm_config.compilation_config.backend
         NPUPlatform._apply_inductor_track_defaults(vllm_config)
         cc = vllm_config.compilation_config
@@ -156,7 +189,7 @@ class TestApplyInductorTrackDefaults(TrackTestBase):
         O2/O3 -> FULL_AND_PIECEWISE, upstream semantics)."""
         from vllm_ascend.platform import NPUPlatform, _INDUCTOR_TRACK_PASS_FLAGS_OFF
 
-        vllm_config = self._make_vllm_config("inductor")
+        vllm_config = self._make_vllm_config(track=True)
         # Early-hook timing: -O presets have not filled cudagraph_mode yet.
         vllm_config.compilation_config.cudagraph_mode = None
         NPUPlatform._apply_inductor_track_defaults(vllm_config)
@@ -170,8 +203,10 @@ class TestApplyInductorTrackDefaults(TrackTestBase):
             self.assertFalse(getattr(cc.pass_config, flag), flag)
 
     def test_track_on_core_derives_custom_ops_none(self):
-        """Full-chain: with the switch present at VllmConfig construction time,
-        the early hook rewrites backend before vLLM core derives custom_ops."""
+        """Full-chain: with the front door set at VllmConfig construction
+        time, vLLM core derives the CUDA-same defaults from
+        compilation_config.backend natively (the hook only pins off the
+        NPU-unsupported ones)."""
         with patch(
             "vllm_ascend.platform.NPUPlatform.check_and_update_config"
         ), patch(
@@ -179,7 +214,7 @@ class TestApplyInductorTrackDefaults(TrackTestBase):
             return_value=None,
         ):
             vllm_config = VllmConfig(
-                additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
+                compilation_config=CompilationConfig(backend="inductor"),
             )
         if vllm_config.device_config.device_type != "npu":
             self.skipTest("current_platform did not resolve to npu")
@@ -191,46 +226,43 @@ class TestApplyInductorTrackDefaults(TrackTestBase):
         # Debt 2: default -O2 journey — the presets now own the track default.
         self.assertEqual(cc.cudagraph_mode, CUDAGraphMode.FULL_AND_PIECEWISE)
 
-    def test_track_on_rejects_enforce_eager(self):
+    def test_track_on_with_enforce_eager_is_inert_upstream_semantics(self):
+        """User ruling 2026-09-19 (born-upstream lens): enforce_eager with
+        the front door is inert exactly like CUDA — vLLM core forces mode
+        NONE; the stage-1 raise guarded the side-door half-configured world
+        and is gone with it. The hook still applies its pinning unchanged."""
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config = self._make_vllm_config("inductor")
+        vllm_config = self._make_vllm_config(track=True)
         vllm_config.model_config.enforce_eager = True
-        with self.assertRaises(ValueError):
-            NPUPlatform._apply_inductor_track_defaults(vllm_config)
-
-    def test_track_on_rejects_o0(self):
-        from vllm_ascend.platform import NPUPlatform
-
-        vllm_config = self._make_vllm_config("inductor")
-        vllm_config.optimization_level = OptimizationLevel.O0
-        with self.assertRaises(ValueError):
-            NPUPlatform._apply_inductor_track_defaults(vllm_config)
+        NPUPlatform._apply_inductor_track_defaults(vllm_config)  # no raise
+        self.assertFalse(vllm_config.compilation_config.inductor_compile_config["combo_kernels"])
 
     def test_non_npu_device_is_skipped(self):
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config = self._make_vllm_config("inductor")
+        vllm_config = self._make_vllm_config(track=True)
         vllm_config.device_config.device_type = "cuda"
         NPUPlatform._apply_inductor_track_defaults(vllm_config)
-        self.assertNotEqual(vllm_config.compilation_config.backend, "inductor")
+        # The hook must not apply any track default on a foreign device:
+        # the upstream-default combo keys stay True (unpinned).
+        cc = vllm_config.compilation_config
+        self.assertTrue(cc.inductor_compile_config["combo_kernels"])
+        self.assertTrue(cc.inductor_compile_config["benchmark_combo_kernel"])
 
 
 class TestSetupInductorTrackEnvs(TrackTestBase):
     @staticmethod
-    def _make_stubs(compile_backend: str = "inductor", backend: str | None = None):
-        compilation_config = CompilationConfig() if backend is None else CompilationConfig(backend=backend)
+    def _make_stubs(track: bool = True):
+        compilation_config = CompilationConfig(backend="inductor") if track else CompilationConfig()
         vllm_config = SimpleNamespace(compilation_config=compilation_config)
-        ascend_config = SimpleNamespace(
-            ascend_compilation_config=SimpleNamespace(compile_backend=compile_backend)
-        )
-        return vllm_config, ascend_config
+        return vllm_config
 
     def test_track_off_writes_no_env(self):
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config, ascend_config = self._make_stubs(compile_backend="auto")
-        NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+        vllm_config = self._make_stubs(track=False)
+        NPUPlatform._setup_inductor_track_envs(vllm_config)
         for name in _TRACK_ENV_VARS:
             self.assertNotIn(name, os.environ, name)
 
@@ -238,25 +270,25 @@ class TestSetupInductorTrackEnvs(TrackTestBase):
         from vllm_ascend.platform import NPUPlatform
 
         os.environ["TORCHINDUCTOR_NPU_BACKEND"] = "default"
-        vllm_config, ascend_config = self._make_stubs()
-        NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+        vllm_config = self._make_stubs()
+        NPUPlatform._setup_inductor_track_envs(vllm_config)
         self.assertEqual(os.environ["TORCHINDUCTOR_NPU_BACKEND"], "default")
 
     def test_track_on_rejects_standalone_1(self):
         from vllm_ascend.platform import NPUPlatform
 
         os.environ["VLLM_USE_STANDALONE_COMPILE"] = "1"
-        vllm_config, ascend_config = self._make_stubs()
+        vllm_config = self._make_stubs()
         with self.assertRaises(ValueError):
-            NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+            NPUPlatform._setup_inductor_track_envs(vllm_config)
 
     def test_track_on_rejects_mega_aot_1(self):
         from vllm_ascend.platform import NPUPlatform
 
         os.environ["VLLM_USE_MEGA_AOT_ARTIFACT"] = "1"
-        vllm_config, ascend_config = self._make_stubs()
+        vllm_config = self._make_stubs()
         with self.assertRaises(ValueError):
-            NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+            NPUPlatform._setup_inductor_track_envs(vllm_config)
 
     def test_track_on_warns_when_breakable_wins(self):
         """Debt 1 (ledger 13): upstream semantics — breakable wins, the track is
@@ -269,9 +301,9 @@ class TestSetupInductorTrackEnvs(TrackTestBase):
         from vllm_ascend.platform import NPUPlatform
 
         os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-        vllm_config, ascend_config = self._make_stubs()
+        vllm_config = self._make_stubs()
         with self.assertLogs("vllm", level=logging.WARNING) as logs:
-            NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+            NPUPlatform._setup_inductor_track_envs(vllm_config)
         joined = "\n".join(logs.output)
         self.assertIn("VLLM_USE_BREAKABLE_CUDAGRAPH wins", joined)
         self.assertIn("inductor track is inert", joined)
@@ -283,16 +315,16 @@ class TestSetupInductorTrackEnvs(TrackTestBase):
         from vllm_ascend.platform import NPUPlatform
 
         os.environ["VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE"] = "1"
-        vllm_config, ascend_config = self._make_stubs()
-        NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+        vllm_config = self._make_stubs()
+        NPUPlatform._setup_inductor_track_envs(vllm_config)
         self.assertEqual(os.environ["VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE"], "1")
 
     def test_user_aot_compile_1_is_kept(self):
         from vllm_ascend.platform import NPUPlatform
 
         os.environ["VLLM_USE_AOT_COMPILE"] = "1"
-        vllm_config, ascend_config = self._make_stubs()
-        NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+        vllm_config = self._make_stubs()
+        NPUPlatform._setup_inductor_track_envs(vllm_config)
         self.assertEqual(os.environ["VLLM_USE_AOT_COMPILE"], "1")
         # MEGA is still pinned off: it requires the standalone path.
         self.assertEqual(os.environ["VLLM_USE_MEGA_AOT_ARTIFACT"], "0")
@@ -317,7 +349,7 @@ class TestAscendPostGradPassManager(TrackTestBase):
             # off; a bare config leaves them on and PostGradPassManager.configure
             # then references CUDA-gated fusion classes (R2 NameError).
             vllm_config = VllmConfig(
-                additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
+                compilation_config=CompilationConfig(backend="inductor"),
             )
         if vllm_config.device_config.device_type != "npu":
             self.skipTest("current_platform did not resolve to npu")
@@ -331,48 +363,6 @@ class TestAscendPostGradPassManager(TrackTestBase):
         # clone_elimination) needs a real PassContext and is exercised
         # end-to-end by the T2 smoke run instead.
         self.assertTrue(manager.fix_functionalization.uuid())
-
-
-class TestCompileBackendEnum(TrackTestBase):
-    """Stage2: compile_backend four-value enum + enable_npugraph_ex sentinel."""
-
-    def _config(self, **kwargs):
-        from vllm_ascend.ascend_config import AscendCompilationConfig
-
-        return AscendCompilationConfig(**kwargs)
-
-    def test_auto_default_resolves_npugraph_ex_true(self):
-        config = self._config()
-        self.assertEqual(config.compile_backend, "auto")
-        self.assertTrue(config.enable_npugraph_ex)
-
-    def test_inductor_resolves_false_and_keeps_minimal_usage(self):
-        config = self._config(compile_backend="inductor")
-        self.assertFalse(config.enable_npugraph_ex)
-
-    def test_inductor_with_explicit_npugraph_ex_raises(self):
-        with self.assertRaises(ValueError):
-            self._config(compile_backend="inductor", enable_npugraph_ex=True)
-
-    def test_fusion_pass_resolves_false(self):
-        self.assertFalse(self._config(compile_backend="fusion_pass").enable_npugraph_ex)
-
-    def test_npugraph_ex_resolves_true(self):
-        self.assertTrue(self._config(compile_backend="npugraph_ex").enable_npugraph_ex)
-
-    def test_auto_keeps_explicit_bool(self):
-        self.assertFalse(self._config(enable_npugraph_ex=False).enable_npugraph_ex)
-        self.assertTrue(self._config(enable_npugraph_ex=True).enable_npugraph_ex)
-
-    def test_invalid_value_rejected(self):
-        with self.assertRaises(ValueError):
-            self._config(compile_backend="bogus")
-
-    def test_reparse_idempotent(self):
-        # additional_config writeback carries the resolved bool; re-parsing
-        # (as workers do) must not trip the conflict check again.
-        config = self._config(compile_backend="inductor", enable_npugraph_ex=False)
-        self.assertFalse(config.enable_npugraph_ex)
 
 
 class TestTrackCudagraphMode(TrackTestBase):
@@ -397,7 +387,7 @@ class TestTrackCudagraphMode(TrackTestBase):
                 ):
                     vllm_config = VllmConfig(
                         optimization_level=level,
-                        additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
+                        compilation_config=CompilationConfig(backend="inductor"),
                     )
                 if vllm_config.device_config.device_type != "npu":
                     self.skipTest("current_platform did not resolve to npu")
@@ -406,7 +396,7 @@ class TestTrackCudagraphMode(TrackTestBase):
     def test_explicit_none_kept(self):
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config = self._make_vllm_config("inductor")
+        vllm_config = self._make_vllm_config(track=True)
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         NPUPlatform._apply_inductor_track_defaults(vllm_config)
         self.assertEqual(vllm_config.compilation_config.cudagraph_mode, CUDAGraphMode.NONE)
@@ -425,7 +415,7 @@ class TestTrackCudagraphMode(TrackTestBase):
             CUDAGraphMode.FULL_DECODE_ONLY,
         ):
             with self.subTest(mode=mode):
-                vllm_config = self._make_vllm_config("inductor")
+                vllm_config = self._make_vllm_config(track=True)
                 vllm_config.compilation_config.cudagraph_mode = mode
                 NPUPlatform._apply_inductor_track_defaults(vllm_config)
                 self.assertEqual(vllm_config.compilation_config.cudagraph_mode, mode)
@@ -447,8 +437,7 @@ class TestTrackCudagraphMode(TrackTestBase):
                 ):
                     vllm_config = VllmConfig(
                         optimization_level=OptimizationLevel.O2,
-                        compilation_config=CompilationConfig(cudagraph_mode=mode),
-                        additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
+                        compilation_config=CompilationConfig(cudagraph_mode=mode, backend="inductor"),
                     )
                 if vllm_config.device_config.device_type != "npu":
                     self.skipTest("current_platform did not resolve to npu")
@@ -467,14 +456,13 @@ class TestTrackFullFamilyBranches(TrackTestBase):
 
     @staticmethod
     def _make_stub(cg) -> SimpleNamespace:
-        compilation_config = CompilationConfig()
+        compilation_config = CompilationConfig(backend="inductor")
         compilation_config.mode = CompilationMode.VLLM_COMPILE
         compilation_config.cudagraph_mode = cg
         return SimpleNamespace(
             compilation_config=compilation_config,
             additional_config={
                 "ascend_compilation_config": {
-                    "compile_backend": "inductor",
                     # step-6 (_update_compilation_modes) 已把解析后的 False 同步进来
                     "enable_npugraph_ex": False,
                     "enable_static_kernel": False,
@@ -520,56 +508,6 @@ class TestTrackFullFamilyBranches(TrackTestBase):
                 self.assertFalse(vllm_config.additional_config["ascend_compilation_config"]["enable_npugraph_ex"])
 
 
-class TestNpugraphExTrackGuard(TrackTestBase):
-    """Stage2: explicit compile_backend='npugraph_ex' needs full-graph modes."""
-
-    @staticmethod
-    def _make_stub(compile_backend: str, cg) -> SimpleNamespace:
-        compilation_config = CompilationConfig()
-        compilation_config.mode = CompilationMode.VLLM_COMPILE
-        compilation_config.cudagraph_mode = cg
-        return SimpleNamespace(
-            compilation_config=compilation_config,
-            additional_config={
-                "ascend_compilation_config": {
-                    "compile_backend": compile_backend,
-                    "enable_npugraph_ex": True,
-                    "enable_static_kernel": False,
-                }
-            },
-            model_config=SimpleNamespace(enforce_eager=False),
-            parallel_config=SimpleNamespace(
-                all2all_backend="flashinfer_all2allv",
-                tensor_parallel_size=1,
-                data_parallel_size=1,
-            ),
-            _set_cudagraph_sizes=lambda: None,
-        )
-
-    def _run(self, compile_backend: str, cg):
-        from vllm_ascend.platform import _setup_compile_backend
-
-        vllm_config = self._make_stub(compile_backend, cg)
-        with patch("vllm_ascend.platform.enable_sp", return_value=False):
-            _setup_compile_backend(
-                vllm_config,
-                compile_backend="vllm_ascend.compilation.compiler_interface.AscendCompiler",
-            )
-        return vllm_config
-
-    def test_npugraph_ex_with_cg_none_raises(self):
-        with self.assertRaises(ValueError):
-            self._run("npugraph_ex", CUDAGraphMode.NONE)
-
-    def test_npugraph_ex_with_cg_full_ok(self):
-        vllm_config = self._run("npugraph_ex", CUDAGraphMode.FULL)
-        self.assertEqual(vllm_config.compilation_config.cudagraph_mode, CUDAGraphMode.FULL)
-
-    def test_auto_with_cg_none_unchanged(self):
-        vllm_config = self._run("auto", CUDAGraphMode.NONE)
-        self.assertEqual(vllm_config.compilation_config.mode, CompilationMode.NONE)
-
-
 class TestRngWarn(TrackTestBase):
     """Stage2: bernoulli-family RNG under graph capture warns (03 R2')."""
 
@@ -602,15 +540,14 @@ class TestRngWarn(TrackTestBase):
 
 class TestSetupCompileBackendGuard(TrackTestBase):
     @staticmethod
-    def _make_stub(compile_backend: str) -> SimpleNamespace:
-        compilation_config = CompilationConfig()
+    def _make_stub(track: bool) -> SimpleNamespace:
+        compilation_config = CompilationConfig(backend="inductor") if track else CompilationConfig()
         compilation_config.mode = CompilationMode.VLLM_COMPILE
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         return SimpleNamespace(
             compilation_config=compilation_config,
             additional_config={
                 "ascend_compilation_config": {
-                    "compile_backend": compile_backend,
                     "enable_npugraph_ex": True,
                     "enable_static_kernel": False,
                 }
@@ -624,10 +561,10 @@ class TestSetupCompileBackendGuard(TrackTestBase):
             _set_cudagraph_sizes=lambda: None,
         )
 
-    def _run(self, compile_backend: str):
+    def _run(self, track: bool):
         from vllm_ascend.platform import _setup_compile_backend
 
-        vllm_config = self._make_stub(compile_backend)
+        vllm_config = self._make_stub(track)
         with patch("vllm_ascend.platform.enable_sp", return_value=False):
             _setup_compile_backend(
                 vllm_config,
@@ -636,12 +573,12 @@ class TestSetupCompileBackendGuard(TrackTestBase):
         return vllm_config
 
     def test_track_off_keeps_current_behavior_mode_forced_none(self):
-        vllm_config = self._run("auto")
+        vllm_config = self._run(track=False)
         self.assertEqual(vllm_config.compilation_config.mode, CompilationMode.NONE)
         self.assertFalse(vllm_config.additional_config["ascend_compilation_config"]["enable_npugraph_ex"])
 
     def test_track_on_keeps_vllm_compile(self):
-        vllm_config = self._run("inductor")
+        vllm_config = self._run(track=True)
         self.assertEqual(vllm_config.compilation_config.mode, CompilationMode.VLLM_COMPILE)
         self.assertFalse(vllm_config.additional_config["ascend_compilation_config"]["enable_npugraph_ex"])
         self.assertFalse(vllm_config.additional_config["ascend_compilation_config"]["enable_static_kernel"])

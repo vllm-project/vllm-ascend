@@ -1240,36 +1240,3 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         )
 
 
-class TestSingletonResilience(TestBase):
-    """Stage-4 #7/A1+A2 (R8 experiment / #65 / R17): the AscendConfig
-    singleton must survive drafter-style bare re-inits and stay in sync with
-    step-7 forced-key writes."""
-
-    def setUp(self):
-        clear_ascend_config()
-
-    def tearDown(self):
-        clear_ascend_config()
-
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_forced_keys_sync_to_singleton(self, _):
-        from vllm_ascend.platform import _sync_forced_compile_keys_to_singleton
-
-        test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {"ascend_compilation_config": {"enable_npugraph_ex": True}}
-        ascend_config = init_ascend_config(test_vllm_config)
-        self.assertTrue(ascend_config.ascend_compilation_config.enable_npugraph_ex)
-
-        # step-7 style forced write touches the raw dict only; without the
-        # sync, an inproc re-init with the SAME object hits the identity
-        # cache and keeps the stale True singleton (the #65 split).
-        acc_dict = test_vllm_config.additional_config["ascend_compilation_config"]
-        acc_dict["enable_npugraph_ex"] = False
-        acc_dict["enable_static_kernel"] = False
-        _sync_forced_compile_keys_to_singleton(test_vllm_config, ascend_config)
-
-        cached = init_ascend_config(test_vllm_config)
-        self.assertIs(cached, ascend_config)
-        self.assertFalse(cached.ascend_compilation_config.enable_npugraph_ex)
-        self.assertFalse(cached.ascend_compilation_config.enable_static_kernel)
-

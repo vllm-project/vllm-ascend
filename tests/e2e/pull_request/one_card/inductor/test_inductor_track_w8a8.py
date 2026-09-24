@@ -39,7 +39,8 @@ pytestmark = [
 # Explicit PIECEWISE: this file guards the W8A8 fusion chain, not the graph
 # family — pin the stage3-verified shape (debt-2 refactor moved the track
 # default to the -O presets, O2 -> FULL_AND_PIECEWISE).
-_TRACK_CG = CompilationConfig(cudagraph_mode=CUDAGraphMode.PIECEWISE)
+# front door (config refactor M1b): compilation_config.backend selects the track
+_TRACK_CG = CompilationConfig(backend="inductor", cudagraph_mode=CUDAGraphMode.PIECEWISE)
 
 
 def _track_kwargs(weight_nz_mode: int) -> dict:
@@ -49,7 +50,6 @@ def _track_kwargs(weight_nz_mode: int) -> dict:
         "max_model_len": 1024,
         "compilation_config": _TRACK_CG,
         "additional_config": {
-            "ascend_compilation_config": {"compile_backend": "inductor"},
             "weight_nz_mode": weight_nz_mode,
         },
     }
@@ -100,7 +100,6 @@ def test_w8a8_fusion_match_table_recorded():
         gpu_memory_utilization=0.55,
         compilation_config=_TRACK_CG,
         additional_config={
-            "ascend_compilation_config": {"compile_backend": "inductor"},
             "weight_nz_mode": 0,
         },
     )
@@ -143,7 +142,6 @@ def test_w8a8_dynamic_fusion_match_table():
         compilation_config=_TRACK_CG,
         additional_config={
             "ascend_compilation_config": {
-                "compile_backend": "inductor",
                 # 方案 A (U-approved): the dynamic fusion variants are opt-in —
                 # default-off keeps greedy output token-identical to eager.
                 "fuse_norm_quant_dynamic": True,
@@ -195,7 +193,6 @@ def test_w8a8_static_fusion_match_table():
         max_num_seqs=4,
         compilation_config=_TRACK_CG,
         additional_config={
-            "ascend_compilation_config": {"compile_backend": "inductor"},
             "weight_nz_mode": 0,
         },
     )
@@ -239,7 +236,6 @@ def test_w8a8_8b_inductor_track_default_cg_gate():
         max_num_seqs=4,
         gpu_memory_utilization=0.85,
         additional_config={
-            "ascend_compilation_config": {"compile_backend": "inductor"},
             "weight_nz_mode": 0,
         },
     )
@@ -298,7 +294,6 @@ def test_w8a8_8b_inductor_track_default_cg_matches_eager():
         max_num_seqs=4,
         gpu_memory_utilization=0.85,
         additional_config={
-            "ascend_compilation_config": {"compile_backend": "inductor"},
             "weight_nz_mode": 0,
         },
     )

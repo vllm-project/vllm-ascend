@@ -67,7 +67,8 @@ _BASE = dict(
 # Default profile (04 §T2): NO explicit cudagraph_mode — the -O2 preset
 # resolves it to FULL_AND_PIECEWISE on the engine config.
 _TRACK = dict(
-    additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
+    # front door (config refactor M1b): compilation_config.backend selects the track
+    compilation_config={"backend": "inductor"},
 )
 
 # T0c-1 magnitude (explicit-PIECEWISE probe, 12 output_code merged over ranks)

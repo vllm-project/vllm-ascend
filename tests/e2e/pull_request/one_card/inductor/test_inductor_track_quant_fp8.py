@@ -42,7 +42,8 @@ _BASE = dict(
 )
 
 _TRACK = dict(
-    additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
+    # front door (config refactor M1b): compilation_config.backend selects the track
+    compilation_config={"backend": "inductor"},
 )
 
 
