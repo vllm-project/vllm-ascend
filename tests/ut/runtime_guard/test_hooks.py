@@ -209,22 +209,13 @@ class _SampleRunner:
 
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
-        # Mirrors the runner: functional hooks bracket the parent call, so
-        # deleting the decorator leaves this path intact.
-        self._prepare_sample_tokens()
+        # Mirrors the runner: original functional body — the decorator only
+        # adds guard orchestration around it.
         self.order.append("body")
-        output = SimpleNamespace(sampled_token_ids=[[7]])
-        return self._finalize_sample_tokens(output)
-
-    def _prepare_sample_tokens(self):
-        self.order.append("prepare")
-
-    def _finalize_sample_tokens(self, output):
-        self.order.append("finalize")
-        return output
+        return SimpleNamespace(sampled_token_ids=[[7]])
 
 
-def test_sample_tokens_orchestrates_hooks_in_order():
+def test_sample_tokens_orchestrates_guard_around_body():
     guard = MagicMock()
     guard.runtime_config = None  # need_pre_sample_hook -> False
     guard.needs_sample_phase_hooks.return_value = False
@@ -238,8 +229,9 @@ def test_sample_tokens_orchestrates_hooks_in_order():
 
     out = runner.sample_tokens("grammar")
     assert out.sampled_token_ids == [[7]]
-    # prepare -> body (inside sample_fn) -> finalize; result built in hooks
-    assert runner.order == ["prepare", "body", "finalize"]
+    # Body ran exactly once, inside the guard's sample_fn; result assembled
+    # in hooks, not on the runner.
+    assert runner.order == ["body"]
     assert runner.run_phase_kwargs == {
         "speculative_config": None,
         "need_accepted_tokens": False,
@@ -269,10 +261,10 @@ def test_sample_tokens_passes_accepted_token_nums_fn_for_spec():
     assert get_postprocess_sampled(runner) == ([[1]], [3])
 
 
-def test_sample_tokens_guardless_runs_functional_hooks():
+def test_sample_tokens_guardless_is_bare_method_call():
     runner = _SampleRunner(None)
 
     out = runner.sample_tokens("grammar")
     assert out.sampled_token_ids == [[7]]
-    # Neutral prepare/finalize still run without the guard.
-    assert runner.order == ["prepare", "body", "finalize"]
+    # Guardless path is a bare method call — zero guard work.
+    assert runner.order == ["body"]

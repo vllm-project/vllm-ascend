@@ -259,19 +259,6 @@ class NPUModelRunner(GPUModelRunner):
 
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
-        # Functional Ascend hooks bracket the parent call; the decorator is
-        # pure observability — deleting it leaves this path byte-identical
-        # (worker execute_dummy_batch pattern).
-        self._prepare_sample_tokens()
-        output = super().sample_tokens(grammar_output)
-        return self._finalize_sample_tokens(output)
-
-    def _prepare_sample_tokens(self) -> None:
-        """Ascend prep before parent ``sample_tokens`` pops ``execute_model_state``.
-
-        Neutral hook used with or without runtime_guard: PCP global-batch swap
-        for non-last PP ranks, and replicated-draft target restore.
-        """
         pcp_manager = self.pcp_manager
         if pcp_manager is not None and not self.is_last_pp_rank and self.execute_model_state is not None:
             assert isinstance(pcp_manager, AscendPCPManager)
@@ -288,9 +275,7 @@ class NPUModelRunner(GPUModelRunner):
         if pcp_manager is not None and isinstance(pcp_manager, AscendPCPManager):
             pcp_manager._sampling_hidden_restored = False
         self._restore_replicated_draft_target_states()
-
-    def _finalize_sample_tokens(self, output):
-        """Ascend sample tail (spec-PP draft broadcast). Guard-independent."""
+        output = super().sample_tokens(grammar_output)
         if self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
             self.pp_handler.broadcast_drafts()

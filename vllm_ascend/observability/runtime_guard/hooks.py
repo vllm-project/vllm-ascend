@@ -20,11 +20,9 @@
 Goal: keep ModelRunner/Worker free of runtime_guard types and ``_rg_*``
 protocol methods, and keep every decorator pure observability — deleting
 any of them must leave the functional path byte-identical (worker
-``execute_dummy_batch`` pattern). Functional Ascend hooks are called by
-the decorated methods themselves:
-
-- ``_prepare_sample_tokens()`` — PCP / draft restore before parent pops state
-- ``_finalize_sample_tokens(output)`` — e.g. spec-PP draft broadcast
+``execute_dummy_batch`` pattern): the decorated methods keep their
+original functional bodies, and the decorators only add wave sync /
+sample-phase orchestration around them.
 
 SamplePhaseResult construction, pre-sample logits wrap, and async-output wrap
 live only here (and in ``runner_bridge``).
@@ -140,10 +138,10 @@ def _build_sample_phase_result(runner: Any, output: Any, input_batch: Any, finis
 def runtime_guard_sample_tokens(sample_tokens_fn):
     """Guard orchestration for v2 ``sample_tokens`` — pure observability.
 
-    Worker pattern: the decorated method owns its functional Ascend hooks
-    (``_prepare_sample_tokens()`` before / ``_finalize_sample_tokens(output)``
-    after the parent call), so deleting this decorator leaves the functional
-    path byte-identical. This wrapper only adds guard orchestration:
+    Worker pattern: the decorated method keeps its original functional body
+    (PCP swap, spec-PP draft broadcast), so deleting this decorator restores
+    the pre-guard method byte-identically. This wrapper only adds guard
+    orchestration:
 
     - guardless → bare method call (zero guard work);
     - guard → ``run_sample_phase`` around the method, reading the
@@ -159,10 +157,10 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
 
         note_postprocess_sampled(self, None, None)  # clear prior-step stash
         # Peek before the method pops execute_model_state (inside the parent
-        # sample_tokens). The runner's PCP swap in _prepare_sample_tokens runs
-        # on non-last-PP ranks only; the detection rank (last-PP TP0) — the
-        # only consumer of these fields — is unaffected by the swap, so
-        # peeking before the method is equivalent to peeking after prepare.
+        # sample_tokens). The method's PCP swap rewrites input_batch on
+        # non-last-PP ranks only; the detection rank (last-PP TP0) — the only
+        # consumer of these fields — is unaffected, so peeking before the
+        # method is equivalent to peeking after the swap.
         input_batch, finished_req_ids = _peek_sample_pre_state(self)
 
         def sample_fn() -> SamplePhaseResult:
