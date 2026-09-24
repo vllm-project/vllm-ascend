@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -14,6 +15,7 @@ from vllm.v1.worker.gpu.eplb_utils import EPLBController
 from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.distributed.eplb.policy.factory import create_eplb_policy
 from vllm_ascend.distributed.eplb.state import AscendEplbState
+from vllm_ascend.eplb.timing import EplbDeviceTimingWindow
 
 
 def is_eplb_load_collection_phase_matched(
@@ -50,6 +52,10 @@ class AscendEPLBController(EPLBController):
             else create_eplb_policy(parallel_config.eplb_config.policy, ascend_eplb_config.stair_config)
         )
         self._load_collection_phase_matched = True
+        timing_enabled = parallel_config.eplb_config.log_balancedness and device.type != "cpu"
+        timing_window = getattr(parallel_config.eplb_config, "log_balancedness_interval", 1)
+        self._prepare_timing = EplbDeviceTimingWindow("v2_prepare", timing_window) if timing_enabled else None
+        self._step_timing = EplbDeviceTimingWindow("v2_step", timing_window) if timing_enabled else None
 
     def prepare_load(self) -> None:
         self.state = None
@@ -69,23 +75,30 @@ class AscendEPLBController(EPLBController):
         num_unpadded_tokens: int,
         ubatch_slices: list | None = None,
     ) -> None:
-        state = self.state
-        if state is None or not self.parallel_config.enable_eplb:
-            return
-        if not state.uses_custom_load_stats:
-            state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
-            return
-        # Operator-provided counts make the upstream unpadded-token tensor unused.
-        if state.should_record_tensor is not None:
-            is_load_sampling_step = state._should_record_current_step(
-                log_stats=self.parallel_config.eplb_config.log_balancedness
-            )
-            should_collect_local_load = is_load_sampling_step and self._load_collection_phase_matched
-            state.should_record_tensor.fill_(should_collect_local_load)
-            state._is_load_sampling_step = is_load_sampling_step
-            state._should_collect_local_load = should_collect_local_load
-            if should_collect_local_load:
-                state._has_fresh_recorded_load = True
+        timing_context = self._prepare_timing.measure() if self._prepare_timing is not None else nullcontext()
+        with timing_context:
+            state = self.state
+            if state is None or not self.parallel_config.enable_eplb:
+                return
+            if not state.uses_custom_load_stats:
+                state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
+                return
+            # Operator-provided counts make the upstream unpadded-token tensor unused.
+            if state.should_record_tensor is not None:
+                is_load_sampling_step = state._should_record_current_step(
+                    log_stats=self.parallel_config.eplb_config.log_balancedness
+                )
+                should_collect_local_load = is_load_sampling_step and self._load_collection_phase_matched
+                state.should_record_tensor.fill_(should_collect_local_load)
+                state._is_load_sampling_step = is_load_sampling_step
+                state._should_collect_local_load = should_collect_local_load
+                if should_collect_local_load:
+                    state._has_fresh_recorded_load = True
+
+    def step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
+        timing_context = self._step_timing.measure() if self._step_timing is not None else nullcontext()
+        with timing_context:
+            super().step(is_dummy=is_dummy, is_profile=is_profile)
 
     def setup_from_mapping(
         self,

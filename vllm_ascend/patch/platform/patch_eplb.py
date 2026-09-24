@@ -381,18 +381,34 @@ def _wrap_async_worker(original_worker):
                     if int(flag.item()) != eplb_cpu_group.size():
                         model_state.rebalanced = False
                         break
-                    metadata = _async_worker.transfer_layer(
-                        old_layer_indices=old_mapping[layer_idx],
-                        new_layer_indices=new_mapping[layer_idx],
-                        expert_weights=model_state.model.expert_weights[layer_idx],
-                        expert_weights_buffer=model_state.expert_buffer,
-                        communicator=model_state.communicator,
-                        ep_group=eplb_group,
-                        is_profile=is_profile,
-                        cuda_stream=cuda_stream,
-                        layer_idx=layer_idx,
-                    )
+                    transfer_started_at = perf_counter()
+                    timing_enabled = state.parallel_config.eplb_config.log_balancedness
+                    start_event = torch.Event(enable_timing=True) if timing_enabled else None
+                    end_event = torch.Event(enable_timing=True) if timing_enabled else None
+                    with torch.cuda.stream(cuda_stream):
+                        if start_event is not None:
+                            start_event.record()
+                        metadata = _async_worker.transfer_layer(
+                            old_layer_indices=old_mapping[layer_idx],
+                            new_layer_indices=new_mapping[layer_idx],
+                            expert_weights=model_state.model.expert_weights[layer_idx],
+                            expert_weights_buffer=model_state.expert_buffer,
+                            communicator=model_state.communicator,
+                            ep_group=eplb_group,
+                            is_profile=is_profile,
+                            cuda_stream=cuda_stream,
+                            layer_idx=layer_idx,
+                        )
+                        if end_event is not None:
+                            end_event.record()
                     cuda_stream.synchronize()
+                    total_ms = (perf_counter() - transfer_started_at) * 1000
+                    model_state.communicator.__dict__.setdefault("_eplb_transfer_total_timings", []).append(total_ms)
+                    if start_event is not None:
+                        device_ms = start_event.elapsed_time(end_event)
+                        model_state.communicator.__dict__.setdefault("_eplb_transfer_device_timings", []).append(
+                            device_ms
+                        )
                     consumed_event = _async_worker.CpuGpuEvent()
                     model_state.pending_result = _AscendAsyncLayerResult(
                         layer_idx,
@@ -468,6 +484,7 @@ def _wrap_rearrange_timing(original_rearrange):
         for model_state in state.model_states.values():
             model_state._eplb_stats_ms = (perf_counter() - started_at) * 1000
             model_state._eplb_stats_device_ms = device_ms
+            model_state._eplb_timing_enabled = timing_enabled
         return result
 
     setattr(_rearrange, _PATCH_MARKER, True)
@@ -496,6 +513,11 @@ def _wrap_move_to_workspace(original_move):
         commit_started_at = perf_counter()
         bound = move_signature.bind(*args, **kwargs)
         model_state = bound.arguments["model_state"]
+        timing_enabled = getattr(model_state, "_eplb_timing_enabled", False)
+        commit_start_event = torch.Event(enable_timing=True) if timing_enabled else None
+        commit_end_event = torch.Event(enable_timing=True) if timing_enabled else None
+        if commit_start_event is not None:
+            commit_start_event.record()
         pending_result = model_state.pending_result
         layer_idx = pending_result.layer_idx if pending_result is not None else None
         is_last_result = (
@@ -524,6 +546,11 @@ def _wrap_move_to_workspace(original_move):
                     predicted_ratio = full_target.predicted_mean_ratios[layer_idx]
                     if np.isfinite(predicted_ratio):
                         model_state._last_committed_mean_ratios[layer_idx] = predicted_ratio
+            if commit_end_event is not None:
+                commit_end_event.record()
+                model_state.__dict__.setdefault("_eplb_commit_device_events", []).append(
+                    (commit_start_event, commit_end_event)
+                )
             model_state._eplb_commit_ms = (
                 getattr(model_state, "_eplb_commit_ms", 0.0) + (perf_counter() - commit_started_at) * 1000
             )
@@ -560,25 +587,46 @@ def _wrap_move_to_workspace(original_move):
                             )
                 plan_name, plan_ms = getattr(model_state, "_eplb_plan_timing", ("unknown", 0.0))
                 transfer_timings = getattr(model_state.communicator, "_eplb_transfer_timings", [])
+                transfer_total_timings = getattr(model_state.communicator, "_eplb_transfer_total_timings", [])
+                transfer_device_timings = getattr(model_state.communicator, "_eplb_transfer_device_timings", [])
+                commit_device_events = getattr(model_state, "_eplb_commit_device_events", [])
+                if commit_device_events:
+                    commit_device_events[-1][1].synchronize()
+                commit_device_ms = sum(start.elapsed_time(end) for start, end in commit_device_events)
                 logger.info(
-                    "EPLB phase timing: model=%s rank=%d policy=%s stats_ms=%.3f stats_device_ms=%.3f plan_ms=%.3f "
-                    "transfer_ms=%.3f transfer_layers=%d ready_poll_ms=%.3f ready_polls=%d commit_ms=%.3f",
+                    "EPLB phase timing: model=%s rank=%d policy=%s stats_gate_ms=%.3f stats_ms=%.3f "
+                    "stats_device_ms=%.3f stats_mask_ms=%.3f stats_prepare_ms=%.3f stats_reduce_ms=%.3f "
+                    "stats_reduce_device_ms=%.3f stats_publish_ms=%.3f plan_ms=%.3f transfer_enqueue_ms=%.3f "
+                    "transfer_total_ms=%.3f transfer_device_ms=%.3f transfer_layers=%d ready_poll_ms=%.3f "
+                    "ready_polls=%d commit_ms=%.3f commit_device_ms=%.3f",
                     model_state.model_name,
                     bound.arguments["ep_rank"],
                     plan_name,
+                    getattr(model_state, "_eplb_stats_gate_ms", 0.0),
                     getattr(model_state, "_eplb_stats_ms", 0.0),
                     getattr(model_state, "_eplb_stats_device_ms", 0.0),
+                    getattr(model_state, "_eplb_stats_mask_ms", 0.0),
+                    getattr(model_state, "_eplb_stats_prepare_ms", 0.0),
+                    getattr(model_state, "_eplb_stats_reduce_ms", 0.0),
+                    getattr(model_state, "_eplb_stats_reduce_device_ms", 0.0),
+                    getattr(model_state, "_eplb_stats_publish_ms", 0.0),
                     plan_ms,
                     sum(transfer_timings),
+                    sum(transfer_total_timings),
+                    sum(transfer_device_timings),
                     len(transfer_timings),
                     getattr(model_state, "_eplb_ready_poll_ms", 0.0),
                     getattr(model_state, "_eplb_ready_poll_count", 0),
                     model_state._eplb_commit_ms,
+                    commit_device_ms,
                 )
                 model_state._eplb_ready_poll_count = 0
                 model_state._eplb_ready_poll_ms = 0.0
                 model_state._eplb_commit_ms = 0.0
+                model_state.__dict__.pop("_eplb_commit_device_events", None)
                 model_state.communicator.__dict__.pop("_eplb_transfer_timings", None)
+                model_state.communicator.__dict__.pop("_eplb_transfer_total_timings", None)
+                model_state.communicator.__dict__.pop("_eplb_transfer_device_timings", None)
         finally:
             if pending_result is not None and consumed_event is not None:
                 pending_result.consumed_event = consumed_event

@@ -379,6 +379,7 @@ def test_async_worker_only_publishes_changed_layers(monkeypatch, changed_layer):
     state = SimpleNamespace(
         rearrange_event=SimpleNamespace(wait=wait_for_cycle),
         model_states={"model": model_state},
+        parallel_config=SimpleNamespace(eplb_config=SimpleNamespace(log_balancedness=False)),
     )
     worker = patch_eplb._wrap_async_worker(MagicMock())
 

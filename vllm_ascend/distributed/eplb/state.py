@@ -287,13 +287,16 @@ class AscendEplbState(_eplb_state.EplbState):
         if self._num_recorded_load_steps == 0:
             return None
         eplb_group = get_eplb_group()
+        mask_started_at = time.perf_counter()
         step_indices = self._ordered_load_step_indices()
         collecting_rank_counts = self._local_load_collection_mask[step_indices].clone()
         # Rank-local phases may differ; every rank filters the same time axis.
         all_reduce(collecting_rank_counts, group=eplb_group.cpu_group)
         included_sample_mask = collecting_rank_counts > 0
+        self._eplb_stats_mask_ms = (time.perf_counter() - mask_started_at) * 1000
         if not included_sample_mask.any():
             return None
+        prepare_started_at = time.perf_counter()
         local_stats = {}
         for model_key, model_state in self.model_states.items():
             included_steps = step_indices[included_sample_mask]
@@ -311,7 +314,19 @@ class AscendEplbState(_eplb_state.EplbState):
         flat_values = [stats.values.reshape(-1, stats.values.shape[-1]) for stats in local_stats.values()]
         shapes = [values.shape for values in flat_values]
         concatenated = torch.cat(flat_values, dim=0)
+        self._eplb_stats_prepare_ms = (time.perf_counter() - prepare_started_at) * 1000
+        eplb_config = getattr(getattr(self, "parallel_config", None), "eplb_config", None)
+        timing_enabled = bool(getattr(eplb_config, "log_balancedness", False))
+        reduce_start_event = torch.Event(enable_timing=True) if timing_enabled else None
+        reduce_end_event = torch.Event(enable_timing=True) if timing_enabled else None
+        if reduce_start_event is not None:
+            reduce_start_event.record()
+        reduce_started_at = time.perf_counter()
         all_reduce(concatenated, group=eplb_group.device_group)
+        self._eplb_stats_reduce_ms = (time.perf_counter() - reduce_started_at) * 1000
+        if reduce_end_event is not None:
+            reduce_end_event.record()
+            self._eplb_stats_reduce_events = (reduce_start_event, reduce_end_event)
         global_values = list(concatenated.split([shape[0] for shape in shapes]))
         return {
             model_key: PreparedLoadStats(global_values[index].reshape(stats.values.shape), stats.sample_counts)
@@ -382,8 +397,12 @@ class AscendEplbState(_eplb_state.EplbState):
             and rank_mapping is None
             and not self.parallel_config.enable_elastic_ep
         )
-        if should_gate and not self._has_global_fresh_recorded_load():
-            return None
+        gate_started_at = time.perf_counter()
+        if should_gate:
+            has_fresh_load = self._has_global_fresh_recorded_load()
+            self._eplb_stats_gate_ms = (time.perf_counter() - gate_started_at) * 1000
+            if not has_fresh_load:
+                return None
 
         if use_custom_async_stats:
             eplb_config = getattr(self.parallel_config, "eplb_config", None)
@@ -395,15 +414,28 @@ class AscendEplbState(_eplb_state.EplbState):
             started_at = time.perf_counter()
             global_load_stats = self.collect_global_load_stats()
             if global_load_stats is not None:
+                publish_started_at = time.perf_counter()
                 self.publish_async_load_stats(global_load_stats)
+                publish_ms = (time.perf_counter() - publish_started_at) * 1000
                 device_ms = 0.0
+                reduce_device_ms = 0.0
                 if end_event is not None:
                     end_event.record()
                     end_event.synchronize()
                     device_ms = start_event.elapsed_time(end_event)
+                    reduce_events = getattr(self, "_eplb_stats_reduce_events", None)
+                    if reduce_events is not None:
+                        reduce_device_ms = reduce_events[0].elapsed_time(reduce_events[1])
                 for model_state in self.model_states.values():
+                    model_state._eplb_timing_enabled = timing_enabled
                     model_state._eplb_stats_ms = (time.perf_counter() - started_at) * 1000
                     model_state._eplb_stats_device_ms = device_ms
+                    model_state._eplb_stats_gate_ms = getattr(self, "_eplb_stats_gate_ms", 0.0)
+                    model_state._eplb_stats_mask_ms = self._eplb_stats_mask_ms
+                    model_state._eplb_stats_prepare_ms = self._eplb_stats_prepare_ms
+                    model_state._eplb_stats_reduce_ms = self._eplb_stats_reduce_ms
+                    model_state._eplb_stats_reduce_device_ms = reduce_device_ms
+                    model_state._eplb_stats_publish_ms = publish_ms
             result = None
         else:
             result = super().rearrange(
