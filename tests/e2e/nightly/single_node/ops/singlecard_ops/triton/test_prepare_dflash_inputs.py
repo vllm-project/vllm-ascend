@@ -69,14 +69,14 @@ ACCURACY_CASES = [
         "parallel_drafting_token_id": 234,
     },
     {
-        # The second request rejects its entire context; its query restarts
-        # from its own first position, not the first request's last position.
-        "name": "fully_rejected_context_after_another_request",
+        # The second request retains only its first context token after
+        # rejecting the speculative suffix, independently of the first request.
+        "name": "one_valid_context_after_another_request",
         "req_lens": [2, 5],
         "position_starts": [0, 7],
         "idx_mapping": [0, 1],
-        "num_sampled": [1, 0],
-        "num_rejected": [0, 5],
+        "num_sampled": [1, 1],
+        "num_rejected": [0, 4],
         "max_num_reqs": 4,
         "max_num_tokens": 16,
         "max_model_len": 64,
@@ -104,7 +104,7 @@ ACCURACY_CASES = [
         "position_starts": [0, 32, 64, 96],
         "idx_mapping": [3, 0, 7, 2],
         "num_sampled": [1, 0, 1, 0],
-        "num_rejected": [0, 1, 2, 3],
+        "num_rejected": [0, 0, 2, 0],
         "max_num_reqs": 8,
         "max_num_tokens": 128,
         "max_model_len": 256,
@@ -314,7 +314,8 @@ def _build_inputs(case, device):
     num_rejected_values = case.get("num_rejected", [0] * num_reqs)
     assert len(num_sampled_values) == num_reqs
     assert len(num_rejected_values) == num_reqs
-    assert all(0 <= rejected <= length for rejected, length in zip(num_rejected_values, req_lens))
+    assert all(0 <= rejected < length for rejected, length in zip(num_rejected_values, req_lens))
+    assert all(sampled > 0 or rejected == 0 for sampled, rejected in zip(num_sampled_values, num_rejected_values))
 
     num_sampled = torch.tensor(num_sampled_values, dtype=torch.int32, device=device)
     num_rejected = torch.tensor(num_rejected_values, dtype=torch.int32, device=device)

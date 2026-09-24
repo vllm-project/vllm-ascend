@@ -15,9 +15,10 @@
       `ctx_start = query_start_loc[req]`,
       `ctx_end = query_start_loc[req + 1]`,
       `valid_ctx_end = ctx_end - num_rejected[req]`,
-      `last_valid_pos = positions[valid_ctx_end - 1]` when context remains;
-      after full rejection, `last_valid_pos = positions[ctx_start] - 1`
-      so the next query starts at this request's first position.
+      `last_valid_pos = positions[valid_ctx_end - 1]`. The upstream sampling
+      path retains at least one context token per request. For an unexpected
+      fully rejected span, the optimized kernel defensively uses
+      `positions[ctx_start] - 1` instead of reading the preceding request.
     - Context/query KV slot:
       `logical_block = min(position // (block_size * cp_size), block_table_stride - 1)`,
       `physical_block = block_table[req, logical_block]`,
@@ -99,7 +100,7 @@
 - `input_batch.positions` is int64. Every position used for KV lookup must resolve to a valid logical block; the implementation clamps the logical block index to `block_table_stride - 1`.
 - `input_batch.idx_mapping` contains at least `num_reqs` request-state indices, and each active value must index a valid entry in the persistent request-state buffers.
 - `input_batch.num_scheduled_tokens` contains one host-side scheduled-token count per request. Its maximum is used by the launcher to select Context parallelism and `BLOCK_SIZE`.
-- `num_sampled` and `num_rejected` are int32 and contain at least `num_reqs` entries. For every request, `0 <= num_rejected[req] <= ctx_len[req]`.
+- `num_sampled` and `num_rejected` are int32 and contain at least `num_reqs` entries. The upstream DFlash path supplies `0 <= num_rejected[req] < ctx_len[req]`; when `num_sampled[req] == 0` during chunked prefill, `num_rejected[req] == 0`.
 - `last_sampled`, `next_prefill_tokens`, `input_temperature`, and `input_seeds` contain at least `max_num_reqs` request-state entries.
 - `block_table` is int32 with shape `[max_num_reqs, max_num_blocks]`; `block_size > 0`.
 - `query_slot_mapping` and `context_slot_mapping` are int32. Query/context positions and `sample_indices`/`sample_pos` are int64. `sample_idx_mapping` is int32.
