@@ -143,6 +143,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Qwen3.5-Dense | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-Dense](../../tutorials/models/Qwen3.5-Dense.md) |
     | Qwen3.5-35B-A3B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
     | Qwen3.6-27B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
+    | Qwen3.8-Flash-Next | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.8-Flash-Next](../../tutorials/models/Qwen3.8-Flash-Next.md) |
     | Qwen3.6-35B-A3B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
     | PaddleOCR-VL | ✅ |  | ❌ | Atlas inference products | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 16k | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) |
     | Qwen3-ASR | ✅ |  | ❌ | Atlas inference products | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | 🟡 | ❌ | ✅ | ✅ | 4096 | [Qwen3-ASR-1.7B](../../tutorials/models/Qwen3-ASR-1.7B.md) |
