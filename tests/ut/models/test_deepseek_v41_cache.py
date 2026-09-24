@@ -42,6 +42,7 @@ from vllm_ascend.attention.dsa_v41 import (
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
+    declared_kwarg,
     get_storage_block_size,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
@@ -53,7 +54,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     make_cache_groups,
 )
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
-from vllm_ascend.models.deepseek_v41.model import build_layer_plan
+from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, build_layer_plan
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage
 
 
@@ -1554,3 +1555,202 @@ def test_dspark_v41_noncausal_metadata_preserves_full_visible_block(runtime, mon
     torch.testing.assert_close(local.ori_sparse_indices, full.ori_sparse_indices[rank : rank + 1])
     assert local.seq_lens.tolist() == ([first_seq_len, 0] if rank < 3 else [0, 0])
     assert local.ori_mask_mode == 0
+
+
+# --- SWA bounded replay: the read side's floor (vLLM #56227) ------------------
+#
+# A replayed request recomputes the hit's last window, so the sliding-window
+# group holds no KV of its own below ``replay_start``: those blocks were retired
+# and replaced by the null block, whose KV upstream documents as all-zero. The
+# window therefore has to be floored there, through ``ori_topk_length``, since
+# the operator bounds a window with one scalar for the whole call.
+
+
+REPLAY_WINDOW = 32  # upstream's own SWA geometry
+REPLAY_START = 64  # a 96-token hit, whose last window is recomputed
+REPLAY_SEQ_LEN = 100
+
+
+def _replay_common(replay_starts, *, query_lens, seq_lens):
+    """A prefill batch, whose requests replay whatever ``replay_starts`` says."""
+    query_start_loc = torch.tensor([0, *query_lens], dtype=torch.int32).cumsum(0).to(torch.int32)
+    return _cp_common().replace(
+        slot_mapping=torch.full((sum(query_lens),), -1, dtype=torch.int64),
+        block_table_tensor=torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.int32),
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
+        seq_lens_cpu=torch.tensor(seq_lens, dtype=torch.int32),
+        num_reqs=len(seq_lens),
+        num_actual_tokens=sum(query_lens),
+        num_input_tokens=sum(query_lens),
+        max_query_len=max(query_lens),
+        max_seq_len=max(seq_lens),
+        positions=torch.cat([torch.arange(seq - qlen, seq) for seq, qlen in zip(seq_lens, query_lens)]),
+        is_prefilling=torch.tensor([True] * len(seq_lens)),
+        causal=True,
+        replay_start=None if replay_starts is None else torch.tensor(replay_starts, dtype=torch.int32),
+    )
+
+
+def _swa_builder(runtime, window=REPLAY_WINDOW):
+    # The builder reads the window off the model config, which is the same value
+    # the operator's own band uses, so the two cannot drift; the spec is only
+    # there for the cache geometry. Set both to the geometry under test.
+    runtime.model_config.hf_text_config.sliding_window = window
+    spec = AscendSlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=window,
+        cache_dtype_str="bfloat16",
+        model_version="deepseek_v41",
+    )
+    return AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
+
+
+def _expected_lens(window: int, replay_start: int, positions) -> list[int]:
+    """Upstream's row, as a count: ``position - max(position - window + 1, replay_start) + 1``."""
+    return [p - max(p - window + 1, replay_start, 0) + 1 for p in positions]
+
+
+def _built_lens(metadata) -> list[int]:
+    return metadata.ori_topk_length[:, 0].tolist()
+
+
+def test_a_replayed_window_is_floored_at_the_replay_start(runtime):
+    """The floor is the whole point: below ``replay_start`` the sliding-window
+    group holds nothing, so no count may cover it."""
+    builder = _swa_builder(runtime)
+    query_len = REPLAY_SEQ_LEN - REPLAY_START
+    common = _replay_common([REPLAY_START], query_lens=[query_len], seq_lens=[REPLAY_SEQ_LEN])
+
+    metadata = builder.build(0, common)
+
+    positions = range(REPLAY_START, REPLAY_SEQ_LEN)
+    assert _built_lens(metadata) == _expected_lens(REPLAY_WINDOW, REPLAY_START, positions)
+    # The first replayed token sees itself and nothing else: the rest of the
+    # window it would have asked for is below the replay start.
+    assert _built_lens(metadata)[0] == 1
+    # Rows stay floored while the query is inside the window it is rebuilding,
+    # and are the full window once it has run past it.
+    assert _built_lens(metadata)[REPLAY_WINDOW - 1] == REPLAY_WINDOW
+    assert _built_lens(metadata)[REPLAY_WINDOW] == REPLAY_WINDOW
+    # The band is still what bounds the window from above, and nothing else
+    # about the call changed.
+    assert metadata.ori_mask_mode == 4
+    assert metadata.ori_win_left == REPLAY_WINDOW - 1
+    assert metadata.ori_sparse_indices is None
+
+
+def test_a_window_that_drifts_between_the_spec_and_the_config_is_rejected(runtime):
+    """The write side pads out the spec's window and this mask floors on the text
+    config's. Both are read from the model today, so they agree -- but they are
+    two sources, and a drift would pad one window while bounding another, which
+    shows up as precision rather than as a failure. The builder refuses it."""
+    builder = _swa_builder(runtime)
+    runtime.model_config.hf_text_config.sliding_window = REPLAY_WINDOW + 1
+    common = _replay_common([REPLAY_START], query_lens=[REPLAY_SEQ_LEN - REPLAY_START], seq_lens=[REPLAY_SEQ_LEN])
+
+    with pytest.raises(AssertionError):
+        builder.build(0, common)
+
+
+def test_only_the_request_that_replays_is_floored(runtime):
+    """A replay step is one step of a batch: the requests that are not replaying
+    have a lower bound of zero, and their count is the one the operator's own
+    band would have produced."""
+    builder = _swa_builder(runtime)
+    common = _replay_common(
+        [REPLAY_START, 0],
+        query_lens=[REPLAY_SEQ_LEN - REPLAY_START, 5],
+        seq_lens=[REPLAY_SEQ_LEN, 20],
+    )
+
+    metadata = builder.build(0, common)
+
+    lens = _built_lens(metadata)
+    assert lens[: REPLAY_SEQ_LEN - REPLAY_START] == _expected_lens(
+        REPLAY_WINDOW, REPLAY_START, range(REPLAY_START, REPLAY_SEQ_LEN)
+    )
+    assert lens[REPLAY_SEQ_LEN - REPLAY_START :] == _expected_lens(REPLAY_WINDOW, 0, range(15, 20))
+
+
+@pytest.mark.parametrize("drop_field", [False, True])
+def test_a_step_that_does_not_replay_reports_no_length(runtime, drop_field):
+    """The runner reports "nothing replays" as ``None`` rather than as zeros, and
+    a lane without the field does not report at all. Both have to leave the
+    operator exactly as it was configured before this feature."""
+    builder = _swa_builder(runtime)
+    common = _replay_common(None, query_lens=[REPLAY_SEQ_LEN], seq_lens=[REPLAY_SEQ_LEN])
+    if drop_field:
+        del common.replay_start
+
+    metadata = builder.build(0, common)
+
+    assert metadata.ori_topk_length is None
+    assert metadata.ori_sparse_indices is None
+    assert metadata.ori_mask_mode == 4
+
+
+def test_an_all_zero_replay_start_reproduces_the_band(runtime):
+    """The builder cannot tell zeros from a real replay without reading a device
+    tensor, and must not: the runner's ``None`` is the only "does not replay".
+    So an all-zero vector has to be *equivalent* to the band rather than skipped
+    -- which is what makes this a floor and nothing else."""
+    builder = _swa_builder(runtime)
+    common = _replay_common([0], query_lens=[6], seq_lens=[REPLAY_SEQ_LEN])
+
+    metadata = builder.build(0, common)
+
+    assert _built_lens(metadata) == _expected_lens(REPLAY_WINDOW, 0, range(REPLAY_SEQ_LEN - 6, REPLAY_SEQ_LEN))
+
+
+def test_only_the_sliding_window_group_carries_the_length(runtime):
+    """The length is read off the sliding-window group's metadata whichever
+    group's loop ranges the layer is handed, so no other group has any use for
+    it -- and a long-KV group that reported one would be masking a window it
+    does not read."""
+    long_kv = AscendDSAV41MetadataBuilder(
+        AscendMLAAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+            tokens_per_state=2,
+            model_version="deepseek_v41",
+            storage_block_size=64,
+        ),
+        [],
+        runtime,
+        torch.device("cpu"),
+    )
+    common = _replay_common([REPLAY_START], query_lens=[4], seq_lens=[REPLAY_SEQ_LEN])
+
+    metadata = long_kv.build(0, common)
+
+    assert metadata.ori_topk_length is None
+    assert metadata.ori_mask_mode == 4
+
+
+def test_the_swa_cache_carries_the_replay_flag_into_its_spec():
+    """Where the switch becomes a spec field, and the field becomes the two
+    properties the scheduler and the worker read. On a lane pinned before
+    #56227 there is no field to carry, and then there is no flag either."""
+    if not declared_kwarg(AscendSlidingWindowMLASpec, "bounded_replay", True):
+        pytest.skip("bounded_replay is absent from this baseline's SlidingWindowMLASpec.")
+
+    cache = AscendDeepseekV41SWACache(
+        head_dim=8,
+        window_size=REPLAY_WINDOW,
+        dtype=torch.bfloat16,
+        prefix="model.layers.0.self_attn.swa_cache",
+        cache_config=SimpleNamespace(block_size=64, cache_dtype="bfloat16"),
+        bounded_replay=True,
+    )
+
+    spec = cache.get_kv_cache_spec(None)
+    assert spec.bounded_replay
+    assert not spec.prefix_cacheable
+    assert spec.prefix_replay_tokens == REPLAY_WINDOW
