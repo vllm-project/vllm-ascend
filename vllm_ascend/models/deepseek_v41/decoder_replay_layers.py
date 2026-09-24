@@ -124,7 +124,7 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
     else:
         model.decoder_replay_start = cut + 1
         logger.info_once(
-            "Ascend decoder bounded replay: layers %d-%d keep each prefill's last %d tokens.",
+            "Ascend MRV2 decoder bounded replay: layers %d-%d keep each prefill's last %d tokens.",
             cut + 1,
             model.end_layer - 1,
             model.config.sliding_window,

@@ -247,6 +247,7 @@ def test_v41_dspark_propagates_delayed_mix_and_collapses_final_stream():
     torch.nn.Module.__init__(model)
     model.hc_mult = 2
     model.needs_moe_input_ids = False
+    model.decoder_replay_layers = None
     model.use_sequence_parallel_moe = False
     model.embed_tokens = torch.nn.Embedding(4, 3)
     seen = []
