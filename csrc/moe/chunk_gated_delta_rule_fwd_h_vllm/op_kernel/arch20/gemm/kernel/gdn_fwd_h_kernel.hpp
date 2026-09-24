@@ -286,62 +286,12 @@ public:
     }
 
     __aicore__ inline void ProcessUnifiedCore() {
-        // The 1:2 task type launches two subblock instances per core with
-        // SEPARATE UBs: they duplicated every cube mmad and could only hand
-        // data to the epilogues through GM (a UB-resident v_work reached
-        // subblock 0 chunk-shifted). Run everything on instance 0; the
-        // epilogues are hardcoded to a single subblock to match. Changing the
-        // task type itself breaks the generated tilingkey wrapper, so gate at
-        // runtime instead.
-        if (AscendC::GetSubBlockIdx() != 0) {
-            return;
-        }
+        // NOTE: the runtime registers this binary with mixType=0 (plain launch),
+        // so exactly one instance runs per core and GetSubBlockIdx() is NOT
+        // meaningful here -- an early-return gate on it killed every core once
+        // the host stack was rebuilt. The epilogues are hardcoded to a single
+        // subblock; no gate is needed.
         EpilogueGDNFwdHVnew epilogueGDNFwdHVnew(resource);
-
-        if (useInitialState) {
-            AscendC::LocalTensor<ElementInitialState> stateUbTensorPing = resource.ubBuf.template GetBufferByByte<ElementInitialState>(0);
-            AscendC::LocalTensor<ElementInitialState> stateUbTensorPong = resource.ubBuf.template GetBufferByByte<ElementInitialState>(96 * 1024);
-            AscendC::LocalTensor<ElementH> hUbTensorPing = resource.ubBuf.template GetBufferByByte<ElementH>(64 * 1024);
-            AscendC::LocalTensor<ElementH> hUbTensorPong = resource.ubBuf.template GetBufferByByte<ElementH>(160 * 1024);
-            uint32_t totalChunks = isVariedLen ? cubeBlockScheduler.totalChunks : ((seqlen + chunkSize - 1) / chunkSize);
-            uint32_t stateBlockSize = kHeadDim * vHeadDim;
-            uint32_t pingpongFlag = 1;
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
-            for (uint32_t shapeBatchIdx = 0; shapeBatchIdx < shapeBatch; shapeBatchIdx++) {
-                for (uint32_t vHeadIdx = 0; vHeadIdx < vNumHead; vHeadIdx++) {
-                    for (uint32_t tokenBatchIdx = 0; tokenBatchIdx < cubeBlockScheduler.tokenBatch; tokenBatchIdx++) {
-                        uint32_t batchIdx = isVariedLen ? tokenBatchIdx : shapeBatchIdx;
-                        uint32_t chunkOffset = isVariedLen ? gmNumChunks.GetValue(tokenBatchIdx) : 0;
-                        uint32_t initialStateOffset = (batchIdx * vNumHead + vHeadIdx) * stateBlockSize;
-                        uint32_t hOffset = (shapeBatchIdx * vNumHead * totalChunks + vHeadIdx * totalChunks + chunkOffset) * stateBlockSize;
-                        AscendC::LocalTensor<ElementInitialState> stateUbTensor = pingpongFlag ? stateUbTensorPing : stateUbTensorPong;
-                        AscendC::LocalTensor<ElementH> hUbTensor = pingpongFlag ? hUbTensorPing : hUbTensorPong;
-                        auto event_id = pingpongFlag ? EVENT_ID1 : EVENT_ID0;
-                        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
-                        if constexpr(!std::is_same<ElementInitialState, ElementH>::value) {
-                            AscendC::DataCopy(stateUbTensor, gmInitialState[initialStateOffset], stateBlockSize);
-                            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_id);
-                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_id);
-                            AscendC::Cast(hUbTensor, stateUbTensor, AscendC::RoundMode::CAST_NONE, stateBlockSize);
-                            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(event_id);
-                            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(event_id);
-                            AscendC::DataCopy(gmH[hOffset], hUbTensor, stateBlockSize);
-                        } else {
-                            AscendC::DataCopy(stateUbTensor, gmInitialState[initialStateOffset], stateBlockSize);
-                            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
-                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
-                            AscendC::DataCopy(gmH[hOffset], stateUbTensor, stateBlockSize);
-                        }
-                        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
-                        pingpongFlag = 1 - pingpongFlag;
-                    }
-                }
-            }
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
-        }
-
         while (cubeBlockScheduler.isRunning) {
             cubeBlockScheduler.InitTask();
             GDNFwdHOffsets& stage1Offsets = cubeBlockScheduler.GetStage1Offsets();
@@ -356,18 +306,13 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
                 if (stage1Offsets.isInitialState) {
-                    // Chunk 0: seed the resident bank from gmH (same Nd2Nz the
-                    // old GM path used, just landing in the bank).
-                    AscendC::Nd2NzParams ph;
-                    ph.ndNum = 1;
-                    ph.nValue = kHeadDim;  ph.dValue = vHeadDim;
-                    ph.srcNdMatrixStride = 0;
-                    ph.srcDValue = vHeadDim;
-                    ph.dstNzC0Stride = (kHeadDim + 15) / 16 * 16;
-                    ph.dstNzNStride = 1;  ph.dstNzMatrixStride = 0;
+                    // Chunk 0: the host pre-fills h slot 0 with the zN image of
+                    // initial_state (or leaves the zeros the binding allocates),
+                    // so seeding the resident bank is one flat 48 KB burst.
                     auto bank = resource.l1Buf.template GetBufferByByte<half>(
                         HRES_L1_OFFSET + stage1Offsets.slot * HRES_L1_SLOT);
-                    AscendC::DataCopy(bank, gmH[stage1Offsets.hSrcOffset], ph);
+                    AscendC::DataCopy(bank, gmH[stage1Offsets.hSrcOffset],
+                                      kHeadDim * vHeadDim);
                 }
                 M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/false,
                                    /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/true>(
@@ -501,15 +446,17 @@ public:
                                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
                             }
                         } else {
-                            DeformatNzToNd<half>(UB_UPD_NDOUT, UB_UPD_H16, mActual, vHeadDim);
-                            AscendC::LocalTensor<ElementH> ndOut =
-                                resource.ubBuf.template GetBufferByByte<ElementH>(UB_UPD_NDOUT);
-                            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
-                            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
-                            AscendC::DataCopy(gmH[stage2Offsets.hDstOffset + mOff * vHeadDim],
-                                              ndOut, elems);
-                            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
-                            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                            // gmH carries zN f16: store the resident tile's rows
+                            // straight into the zN image, one strided descriptor,
+                            // no deformat. (V already drained by the ev2 pair
+                            // before the writeback; MTE3 in-order after it.)
+                            AscendC::DataCopyParams hp;
+                            hp.blockCount = static_cast<uint16_t>(nFr);
+                            hp.blockLen = static_cast<uint16_t>(mActual);
+                            hp.srcStride = 0;
+                            hp.dstStride = static_cast<uint16_t>(kR - mActual);
+                            AscendC::DataCopy(gmH[stage2Offsets.hDstOffset + mOff * 16],
+                                              h16, hp);
                         }
                     }
                 }
