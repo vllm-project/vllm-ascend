@@ -42,6 +42,8 @@ class RuntimeGuardBusMixin:
 
     # Defined on RuntimeGuardDumpMixin / RuntimeGuardProcessor.
     _claim_dump_jobs_to_deferred_via_tp: Any
+    _drop_pending_dump_jobs: Any
+    _refund_dropped_dump_arms: Any
 
     def _refresh_config_body(self) -> bool:
         # Wave-head: 1×AR([config_due, dump_due]) + per-lane bcasts.
@@ -113,52 +115,58 @@ class RuntimeGuardBusMixin:
                 is_src = bool(getattr(sync_group, "is_first_rank", False))
             dump_due_local = bool(is_src and dump_jobs)
         elif hasattr(self, "_kv_dump_jobs"):
-            self._kv_dump_jobs.clear()
-
-        config_due, dump_due = sync_due_bits(sync_group, [config_due_local, dump_due_local])
-
-        changed = False
-        leader_changed = [False]
-
-        def _build_config() -> dict[str, Any]:
-            payload, ch = cfg.build_config_sync_payload()
-            leader_changed[0] = ch
-            return payload
-
-        if cfg.hot_reload_enabled:
-            config_payload = broadcast_when_due(
-                sync_group,
-                due=config_due,
-                build_payload=_build_config if sync_group.is_first_rank else None,
-                src=0,
-            )
-            if config_due and isinstance(config_payload, dict):
-                try:
-                    changed = cfg.apply_config_sync_payload(
-                        config_payload,
-                        is_leader=bool(sync_group.is_first_rank),
-                        leader_changed=leader_changed[0],
-                    )
-                    if changed:
-                        self._apply_config_cascade()
-                except Exception as exc:
-                    logger.warning(
-                        "[runtime_guard sync] config apply soft-failed error=%s",
-                        exc,
-                    )
-                    changed = False
+            self._drop_pending_dump_jobs()
 
         try:
-            src_rank = int(sync_group.rank_in_group)
-        except Exception:
-            src_rank = 0 if bool(getattr(sync_group, "is_first_rank", False)) else 1
+            config_due, dump_due = sync_due_bits(sync_group, [config_due_local, dump_due_local])
 
-        jobs = broadcast_when_due(
-            sync_group,
-            due=dump_due,
-            payload=dump_jobs if src_rank == 0 else None,
-            src=0,
-        )
+            changed = False
+            leader_changed = [False]
+
+            def _build_config() -> dict[str, Any]:
+                payload, ch = cfg.build_config_sync_payload()
+                leader_changed[0] = ch
+                return payload
+
+            if cfg.hot_reload_enabled:
+                config_payload = broadcast_when_due(
+                    sync_group,
+                    due=config_due,
+                    build_payload=_build_config if sync_group.is_first_rank else None,
+                    src=0,
+                )
+                if config_due and isinstance(config_payload, dict):
+                    try:
+                        changed = cfg.apply_config_sync_payload(
+                            config_payload,
+                            is_leader=bool(sync_group.is_first_rank),
+                            leader_changed=leader_changed[0],
+                        )
+                        if changed:
+                            self._apply_config_cascade()
+                    except Exception as exc:
+                        logger.warning(
+                            "[runtime_guard sync] config apply soft-failed error=%s",
+                            exc,
+                        )
+                        changed = False
+
+            try:
+                src_rank = int(sync_group.rank_in_group)
+            except Exception:
+                src_rank = 0 if bool(getattr(sync_group, "is_first_rank", False)) else 1
+
+            jobs = broadcast_when_due(
+                sync_group,
+                due=dump_due,
+                payload=dump_jobs if src_rank == 0 else None,
+                src=0,
+            )
+        except Exception:
+            # A collective failure dropped the handed-off pending jobs (cleared
+            # above); refund their arms before the wave-head soft-fail sees it.
+            self._refund_dropped_dump_arms(dump_jobs)
+            raise
         if dump_due and can_dump and jobs:
             self._deferred_kv_dump_jobs.extend(list(jobs))
 

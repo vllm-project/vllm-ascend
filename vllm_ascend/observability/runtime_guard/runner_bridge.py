@@ -88,12 +88,13 @@ def wrap_compute_logits_for_pre_sample(runner: Any, input_batch: Any):
     try:
         yield
     finally:
+        # had_instance_attr: restore the saved override. Otherwise the wrapped
+        # bound method sits in __dict__ (set unconditionally above) — delete it
+        # so the class method is restored.
         if had_instance_attr:
             model.compute_logits = orig
         elif "compute_logits" in getattr(model, "__dict__", {}):
             del model.compute_logits
-        else:
-            model.compute_logits = orig
 
 
 def is_async_output_rank() -> bool:

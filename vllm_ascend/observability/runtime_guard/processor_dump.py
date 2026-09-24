@@ -78,6 +78,46 @@ class RuntimeGuardDumpMixin:
         pending.append(dict(job))
         return True
 
+    def _refund_dropped_dump_arms(self, jobs: list[dict[str, Any]]) -> None:
+        """TP0: give back one quota unit per dropped arm that never D2H'd.
+
+        One arm = one ``try_consume`` at ``DumpKvAction.prepare`` time (all jobs
+        of an arm share ``arm_id``); mirrors the end-of-wave refund in
+        ``_run_kv_dumps`` for arms that produced no snapshot. Quota lives on
+        the arming rank (action leader = last-PP TP0), so other ranks must not
+        refund.
+        """
+        quota = getattr(self, "quota", None)
+        if quota is None or not jobs:
+            return
+        try:
+            is_tp0 = runner_tp_rank(self.runner) == 0
+        except Exception:
+            is_tp0 = True
+        if not is_tp0:
+            return
+        arms = {str(j.get("arm_id") or f"job-{id(j)}") for j in jobs if j.get("consume_quota")}
+        for _arm in arms:
+            quota.refund(consume_quota=True)
+        if arms:
+            logger.info(
+                "[runtime_guard dump_kv] refunded %d dropped dump arm(s) (no D2H)",
+                len(arms),
+            )
+
+    def _drop_pending_dump_jobs(self) -> None:
+        """Drop local pending dump jobs, refunding their quota arms.
+
+        Used when the jobs can never D2H anymore: dump hot-disabled between
+        arm and the next wave-head, or a wave-head bus failure after the
+        queue was handed off.
+        """
+        if not hasattr(self, "_kv_dump_jobs"):
+            return
+        jobs = list(self._kv_dump_jobs or [])
+        self._kv_dump_jobs.clear()
+        self._refund_dropped_dump_arms(jobs)
+
     def end_of_wave_sync(self, *, allow_arm: bool = True) -> None:
         """End-of-wave: deferred auto D2H + local manual dump (no dump AR).
 
@@ -96,18 +136,17 @@ class RuntimeGuardDumpMixin:
 
         When dump is inactive, all dump ranks observe the same
         ``dump_enabled()`` gate and skip the TP due-vector all_reduce (stray
-        local jobs are dropped). While dump is active, an empty local queue on
-        non-TP0 must still join the bus — only TP0 enqueues — so an empty
-        due-AR remains required for lockstep.
+        local jobs are dropped — refunding their arms: quota was consumed at
+        arm time). While dump is active, an empty local queue on non-TP0 must
+        still join the bus — only TP0 enqueues — so an empty due-AR remains
+        required for lockstep.
         """
         if not should_dump_kv_on_rank():
-            if hasattr(self, "_kv_dump_jobs"):
-                self._kv_dump_jobs.clear()
+            self._drop_pending_dump_jobs()
             return
         # Shared config gate (identical on every rank after sync): skip TP bus.
         if not self.runtime_config.dump_enabled():
-            if hasattr(self, "_kv_dump_jobs"):
-                self._kv_dump_jobs.clear()
+            self._drop_pending_dump_jobs()
             return
         payload = list(getattr(self, "_kv_dump_jobs", None) or [])
         if hasattr(self, "_kv_dump_jobs"):
@@ -128,12 +167,18 @@ class RuntimeGuardDumpMixin:
         except Exception:
             rank = 0
 
-        jobs = sync_task_bus(
-            tp_group,
-            due_local=bool(rank == 0 and payload),
-            payload=payload if rank == 0 else None,
-            src=0,
-        )
+        try:
+            jobs = sync_task_bus(
+                tp_group,
+                due_local=bool(rank == 0 and payload),
+                payload=payload if rank == 0 else None,
+                src=0,
+            )
+        except Exception:
+            # Bus failure: payload dropped with no D2H — refund before the
+            # caller's soft-fail swallows the exception.
+            self._refund_dropped_dump_arms(payload)
+            raise
         if jobs:
             self._deferred_kv_dump_jobs.extend(list(jobs))
 

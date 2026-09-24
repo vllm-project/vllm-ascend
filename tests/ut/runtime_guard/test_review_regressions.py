@@ -2012,3 +2012,194 @@ def test_v27e_print_output_skips_non_last_pp_tp0(monkeypatch):
     RuntimeGuardReportMixin._maybe_print_output_on_finish(p, ["r1"], io_mgr)
     p._get_detector_tokenizer.assert_not_called()
     io_mgr.snapshot.assert_not_called()
+
+
+# ------------------------------------------- V28 dump-drop quota refunds
+# Quota is consumed at arm time (DumpKvAction.prepare); any drop path that
+# discards pending jobs without a D2H must give the unit back (once per arm).
+
+
+def _claim_drop_processor(*, dump_enabled: bool, tp_rank: int, jobs: list) -> RuntimeGuardProcessor:
+    p = object.__new__(RuntimeGuardProcessor)
+    p.runner = SimpleNamespace()
+    p.runtime_config = MagicMock()
+    p.runtime_config.dump_enabled.return_value = dump_enabled
+    p._kv_dump_jobs = jobs
+    p._deferred_kv_dump_jobs = []
+    p.quota = MagicMock()
+    p._tp_rank = tp_rank
+    return p
+
+
+def test_v28a_dump_disabled_drop_refunds_once_per_arm(monkeypatch):
+    from vllm_ascend.observability.runtime_guard import processor_dump
+
+    monkeypatch.setattr(processor_dump, "should_dump_kv_on_rank", lambda: True)
+    monkeypatch.setattr(processor_dump, "runner_tp_rank", lambda _r: 0)
+
+    p = _claim_drop_processor(
+        dump_enabled=False,
+        tp_rank=0,
+        jobs=[
+            {"req_id": "r1", "consume_quota": True, "arm_id": "arm-1", "wave": 3},
+            {"req_id": "r2", "consume_quota": True, "arm_id": "arm-1", "wave": 3},
+            {"req_id": "r3", "consume_quota": False, "arm_id": "arm-2", "wave": 3},
+        ],
+    )
+    RuntimeGuardProcessor._claim_dump_jobs_to_deferred_via_tp(p)
+    # One arm = one try_consume → exactly one refund (not per job, not for free jobs).
+    p.quota.refund.assert_called_once_with(consume_quota=True)
+    assert p._kv_dump_jobs == []
+    assert p._deferred_kv_dump_jobs == []
+
+
+def test_v28b_dump_disabled_non_tp0_drops_without_refund(monkeypatch):
+    """Quota lives on the arming rank (TP0); peers must not double-refund."""
+    from vllm_ascend.observability.runtime_guard import processor_dump
+
+    monkeypatch.setattr(processor_dump, "should_dump_kv_on_rank", lambda: True)
+    monkeypatch.setattr(processor_dump, "runner_tp_rank", lambda _r: 1)
+
+    p = _claim_drop_processor(
+        dump_enabled=False,
+        tp_rank=1,
+        jobs=[{"req_id": "r1", "consume_quota": True, "arm_id": "arm-1"}],
+    )
+    RuntimeGuardProcessor._claim_dump_jobs_to_deferred_via_tp(p)
+    p.quota.refund.assert_not_called()
+    assert p._kv_dump_jobs == []
+
+
+def test_v28c_claim_bus_failure_refunds_and_raises(monkeypatch):
+    from vllm_ascend.observability.runtime_guard import processor_dump
+
+    monkeypatch.setattr(processor_dump, "should_dump_kv_on_rank", lambda: True)
+    monkeypatch.setattr(processor_dump, "runner_tp_rank", lambda _r: 0)
+    monkeypatch.setattr(
+        processor_dump,
+        "get_tp_group",
+        lambda: SimpleNamespace(world_size=2, rank_in_group=0),
+    )
+    monkeypatch.setattr(
+        processor_dump,
+        "sync_task_bus",
+        MagicMock(side_effect=RuntimeError("hccl down")),
+    )
+
+    p = _claim_drop_processor(
+        dump_enabled=True,
+        tp_rank=0,
+        jobs=[{"req_id": "r1", "consume_quota": True, "arm_id": "arm-1"}],
+    )
+    with pytest.raises(RuntimeError, match="hccl down"):
+        RuntimeGuardProcessor._claim_dump_jobs_to_deferred_via_tp(p)
+    p.quota.refund.assert_called_once_with(consume_quota=True)
+    assert p._kv_dump_jobs == []
+    assert p._deferred_kv_dump_jobs == []
+
+
+def test_v28d_merged_bus_collective_failure_refunds_handed_off_jobs():
+    from vllm_ascend.observability.runtime_guard.processor_bus import RuntimeGuardBusMixin
+
+    refunded: list[list] = []
+    cfg = MagicMock()
+    cfg.hot_reload_enabled = False
+    proc = SimpleNamespace(
+        runner=SimpleNamespace(),
+        runtime_config=cfg,
+        _kv_dump_jobs=[{"req_id": "r1", "consume_quota": True, "arm_id": "arm-1"}],
+        _deferred_kv_dump_jobs=[],
+        _apply_config_cascade=MagicMock(),
+        _refund_dropped_dump_arms=lambda jobs: refunded.append(list(jobs)),
+    )
+    group = SimpleNamespace(world_size=2, cpu_group=object(), is_first_rank=True, rank_in_group=0)
+    with (
+        patch(
+            "vllm_ascend.observability.runtime_guard.processor_bus.should_dump_kv_on_rank",
+            return_value=True,
+        ),
+        # _wave_head_merged_bus imports sync_due_bits at call time.
+        patch(
+            "vllm_ascend.observability.runtime_config._task_bus.sync_due_bits",
+            side_effect=RuntimeError("bus down"),
+        ),
+        pytest.raises(RuntimeError, match="bus down"),
+    ):
+        RuntimeGuardBusMixin._wave_head_merged_bus(proc, group)
+    # Jobs were cleared for the bus; the collective failed → refund their arms.
+    assert refunded == [[{"req_id": "r1", "consume_quota": True, "arm_id": "arm-1"}]]
+    assert proc._kv_dump_jobs == []
+    assert proc._deferred_kv_dump_jobs == []
+
+
+def test_v28e_static_idle_drop_refunds_quota(monkeypatch):
+    """Static-idle clear (dump inactive, no reload) must refund armed arms."""
+    from vllm_ascend.observability.runtime_guard import processor_dump
+
+    monkeypatch.setattr(processor_dump, "runner_tp_rank", lambda _r: 0)
+
+    p = object.__new__(RuntimeGuardProcessor)
+    p.runner = SimpleNamespace()
+    p.wave_tracker = MagicMock()
+    p.runtime_config = MagicMock()
+    p.runtime_config.manual_trigger.return_value = False
+    p.runtime_config.needs_sample_phase_hooks.return_value = False
+    p.runtime_config.hot_reload_enabled = False
+    p.runtime_config.dump_enabled.return_value = False
+    p.quota = MagicMock()
+    p._kv_dump_jobs = [{"req_id": "r1", "consume_quota": True, "arm_id": "arm-1"}]
+    p._deferred_kv_dump_jobs = []
+    p._end_of_wave_sync_if_no_sample = MagicMock()
+
+    RuntimeGuardProcessor.sync_for_step(p, allow_arm=True)
+    p.quota.refund.assert_called_once_with(consume_quota=True)
+    assert p._kv_dump_jobs == []
+
+
+# ------------------------------------------------- V29 (reap finished index)
+
+
+def test_v29a_reap_scans_finished_index_only():
+    """Live reqs must not be visited by the reap sweep (O(finished) index)."""
+    from vllm_ascend.observability.runtime_guard.request_state import RequestGuardStore
+
+    RequestGuardStore.reset_for_tests()
+    try:
+        store = RequestGuardStore.get()
+        store.get_or_create("live-1")
+        store.get_or_create("live-2")
+        store.append_output_ids("live-1", [1])
+        store.mark_finished(["fin-1"], wave=1)
+
+        assert store.list_reapable(current_wave=1) == ["fin-1"]
+
+        store.clear("fin-1")
+        # Reap empties the index; live reqs never surface there.
+        assert store.list_reapable(current_wave=2) == []
+    finally:
+        RequestGuardStore.reset_for_tests()
+
+
+def test_v29b_finished_index_survives_reuse_cycle():
+    """mark → reap → id reuse → mark again must keep the index consistent."""
+    from vllm_ascend.observability.runtime_guard.request_state import RequestGuardStore
+
+    RequestGuardStore.reset_for_tests()
+    try:
+        store = RequestGuardStore.get()
+        store.get_or_create("r1")
+        store.mark_finished(["r1"], wave=1)
+        assert store.list_reapable(current_wave=1) == ["r1"]
+        store.clear("r1")
+
+        # Same id reused by a new live request, then finishing again.
+        # (get_or_create, not append: appending right after clear stamps a
+        # post-reap zombie as finished — covered by the v27a zombie test.)
+        store.get_or_create("r1")
+        assert store.list_reapable(current_wave=5) == []
+        store.mark_finished(["r1"], wave=5)
+        assert store.list_reapable(current_wave=5) == ["r1"]
+        store.clear("r1")
+        assert store.list_reapable(current_wave=9) == []
+    finally:
+        RequestGuardStore.reset_for_tests()

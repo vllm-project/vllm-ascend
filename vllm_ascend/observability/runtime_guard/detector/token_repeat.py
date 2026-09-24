@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from vllm_ascend.logger import init_logger_ascend
+from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
 from vllm_ascend.observability.runtime_config._validate import normalize_ignore_token_ids
 from vllm_ascend.observability.runtime_config.config import RuntimeConfig
 from vllm_ascend.observability.runtime_guard.detector.base import ConfigBackedDetector, resolve_batch_req_ids
@@ -109,10 +110,14 @@ class TokenRepeatDetector(ConfigBackedDetector):
         runner: Any | None = None,
     ) -> None:
         super().__init__(runtime_config=runtime_config, runner=runner, enabled=False)
-        self._window = 32
-        self._repeat_sum_threshold = 64
-        self._min_tokens = 32
-        self._consecutive_hits_thresh = 1
+        # Single source of defaults: runtime_config JSON schema (_DEFAULTS).
+        # These fields refresh from config on bind / hot-reload; the literals
+        # only cover a detector constructed without a runtime_config.
+        _section = _DEFAULTS["detector"]["token_repeat"]
+        self._window = int(_section["window"])
+        self._repeat_sum_threshold = int(_section["repeat_sum_threshold"])
+        self._min_tokens = int(_section["min_tokens"])
+        self._consecutive_hits_thresh = int(_section["consecutive_hits"])
         self._ignore_token_ids: frozenset[int] = frozenset()
         self._states: dict[str, TokenRepeatState] = {}
         # How many cumulative output ids have already been pushed for each req.

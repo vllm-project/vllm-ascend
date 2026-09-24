@@ -270,7 +270,9 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 if cfg.dump_enabled():
                     self._claim_dump_jobs_to_deferred_via_tp()
                 elif getattr(self, "_kv_dump_jobs", None):
-                    self._kv_dump_jobs.clear()
+                    # Dump inactive: drop with per-arm refund (quota was
+                    # consumed at arm time; no D2H will happen).
+                    self._drop_pending_dump_jobs()
                 self._end_of_wave_sync_if_no_sample(allow_arm=False)
                 return
             self.refresh_config(scheduler_output=scheduler_output)
@@ -498,19 +500,18 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         # Async state update callback (between mark_finished and check_after_spec)
         if need_accepted_tokens and async_state_update_fn is not None:
             async_state_update_fn(result)
-        # Hook 4: check_after_spec (spec only)
+        # Hook 4: check_after_spec (spec only). Gate here to skip the
+        # accepted_token_nums_fn callback when detection is off; soft-fail
+        # lives inside check_after_spec itself.
         if speculative_config is not None and self.should_check_after_spec():
             if accepted_token_nums_fn is not None:
                 accepted_token_nums = accepted_token_nums_fn(result)
             else:
                 accepted_token_nums = None
-            self._soft_fail(
-                "check_after_spec",
-                lambda: self.check_after_spec(
-                    sampled_tokens=result.sampler_output.sampled_token_ids,
-                    accepted_token_nums=accepted_token_nums,
-                    req_ids=result.req_ids_output_copy,
-                ),
+            self.check_after_spec(
+                sampled_tokens=result.sampler_output.sampled_token_ids,
+                accepted_token_nums=accepted_token_nums,
+                req_ids=result.req_ids_output_copy,
             )
         # Async path: routed_experts computed BEFORE wave stamp
         routed_experts_result = None

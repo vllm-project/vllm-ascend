@@ -93,6 +93,10 @@ class RequestGuardStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._by_req: dict[str, RequestGuardState] = {}
+        # Finished-but-not-yet-reaped ids (subset of ``_by_req`` keys) so the
+        # per-step reap scan is O(finished) instead of O(all requests).
+        # Invariant (under ``_lock``): rid in _finished ⇔ state.finished.
+        self._finished: set[str] = set()
         # Soft deps (snapshot wave cache, …): called after state is popped.
         self._on_clear: list[Callable[[str], None]] = []
         self.max_deferred_waves = MAX_DEFERRED_REAP_WAVES
@@ -179,6 +183,7 @@ class RequestGuardStore:
                     state = RequestGuardState(req_id=rid)
                     self._by_req[rid] = state
                 state.finished = True
+                self._finished.add(rid)
                 if state.finish_mark_wave is None:
                     state.finish_mark_wave = w
 
@@ -249,12 +254,15 @@ class RequestGuardStore:
         return True
 
     def list_reapable(self, *, current_wave: int) -> list[str]:
-        """Finished reqs whose drain probe is clear (or past defer cap)."""
+        """Finished reqs whose drain probe is clear (or past defer cap).
+
+        Scans only the finished index (O(finished)), not every live request.
+        """
         w = int(current_wave)
         with self._lock:
             out: list[str] = []
-            for rid, state in self._by_req.items():
-                if state.finished and self._ready_to_reap_locked(state, current_wave=w):
+            for rid in self._finished:
+                if self._ready_to_reap_locked(self._by_req[rid], current_wave=w):
                     out.append(rid)
             return out
 
@@ -273,6 +281,7 @@ class RequestGuardStore:
         with self._lock:
             state = self._by_req.pop(rid, None)
             if state is not None:
+                self._finished.discard(rid)
                 self._note_reaped_locked(rid)
             hooks = list(self._on_clear)
         for hook in hooks:
@@ -312,6 +321,7 @@ class RequestGuardStore:
                     # S14/R1: clear() already ran; stamp finished so list_reapable
                     # can reap this zombie instead of leaving finished=False forever.
                     state.finished = True
+                    self._finished.add(rid)
                     self._reaped_set.discard(rid)
                 self._by_req[rid] = state
             if state.last_append_chunk == chunk:

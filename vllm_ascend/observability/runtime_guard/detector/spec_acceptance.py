@@ -25,6 +25,7 @@ import torch
 from vllm.distributed.parallel_state import get_pp_group
 
 from vllm_ascend.logger import init_logger_ascend
+from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
 from vllm_ascend.observability.runtime_guard.detector.base import ConfigBackedDetector, resolve_batch_req_ids
 from vllm_ascend.observability.runtime_guard.incident import Incident
 from vllm_ascend.observability.runtime_guard.io_snapshot import output_token_count_for_request
@@ -51,14 +52,18 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         super().__init__(runtime_config=runtime_config, runner=runner, enabled=False)
         # Per-req sliding window: (accepted_draft, draft_len, sampled_ids, accepted_ids)
         self._history: dict[str, deque[tuple[int, int, list[int], list[int]]]] = defaultdict(deque)
-        self._window = 10
-        self._low_threshold = 0.3
-        self._len_low_threshold = 1.4
-        self._high_threshold = 0.96
-        self._len_high_threshold = 2.8
+        # Single source of defaults: runtime_config JSON schema (_DEFAULTS).
+        # These fields refresh from config on bind / hot-reload; the literals
+        # only cover a detector constructed without a runtime_config.
+        _section = _DEFAULTS["detector"]["spec_acceptance"]
+        self._window = int(_section["window"])
+        self._low_threshold = float(_section["low_threshold"])
+        self._len_low_threshold = float(_section["len_low_threshold"])
+        self._high_threshold = float(_section["high_threshold"])
+        self._len_high_threshold = float(_section["len_high_threshold"])
         # Throttle INFO short logs (per req) so TP0 is not flooded.
         self._short_log_ts: dict[str, float] = {}
-        self._short_log_interval_s = 2.0
+        self._short_log_interval_s = float(_section["short_log_interval_seconds"])
         # Live knobs from runtime_config JSON only.
         if runtime_config is not None:
             self.refresh_from_config()
@@ -94,14 +99,13 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         ``skip_req_ids`` (optional): requests to skip (stopped after
         ``report.max_per_req``). Batch index alignment is preserved for the rest.
         """
+        runner = self._runner
         if not self._precheck():
-            runner = self._runner
             if runner_tp_rank(runner) == 0:
                 logger.info_once(
                     "[runtime_guard: spec short] skip: detector.spec_acceptance.enabled=false in live runtime config"
                 )
             return []
-        runner = self._runner
         if runner is None:
             return []
         # Spec check needs speculative decoding, not only MambaSpec

@@ -207,13 +207,15 @@ class DetectorManager:
             RequestIoSnapshotManager.get().append_batch(resolved_ids, sampled_token_ids)
 
         alerts: list[Incident] = []
-        if resolved_ids and all(rid in skip for rid in resolved_ids if rid):
-            alerts.extend(self._logits_finite_det.check_deferred(skip_req_ids=skip))
-            return alerts, None
-
         alerts.extend(self._logits_finite_det.check_deferred(skip_req_ids=skip))
 
-        if not resolved_ids or not self.any_after_sample_cpu_enabled():
+        # CPU snapshot only when there is something left to detect: no reqs,
+        # CPU detectors off, or every req already stop-detected (max_per_req).
+        if (
+            not resolved_ids
+            or not self.any_after_sample_cpu_enabled()
+            or all(rid in skip for rid in resolved_ids if rid)
+        ):
             return alerts, None
 
         snap = AfterSampleCpuSnapshot(
