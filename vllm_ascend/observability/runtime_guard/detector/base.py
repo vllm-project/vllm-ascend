@@ -25,17 +25,6 @@ if TYPE_CHECKING:
     from vllm_ascend.observability.runtime_config.config import RuntimeConfig
 
 
-def detector_section_getter(section: Any) -> Callable[[str, Any], Any]:
-    """``dict.get``-like accessor for a detector config section or object."""
-    if isinstance(section, dict):
-        return section.get
-
-    def _getattr_get(key: str, default: Any = None) -> Any:
-        return getattr(section, key, default)
-
-    return _getattr_get
-
-
 def resolve_batch_req_ids(runner: Any, req_ids: list[str] | None) -> list[str]:
     """Pass-through when the caller provides ids; else read the runner batch.
 
@@ -103,11 +92,10 @@ class ConfigBackedDetector(AnomalyDetector):
             section = self._runtime_config.detector
         self._apply_detector_section(section)
 
-    def _apply_detector_section(self, section: Any) -> None:
-        getter = detector_section_getter(section)
+    def _apply_detector_section(self, section: dict[str, Any]) -> None:
         if self.enable_key:
-            self._enabled = bool(getter(self.enable_key, self._enabled))
-        self._apply_detector_values(getter)
+            self._enabled = bool(section.get(self.enable_key, self._enabled))
+        self._apply_detector_values(section.get)
 
     def _apply_detector_values(self, getter: Callable[[str, Any], Any]) -> None:
         raise NotImplementedError(f"{type(self).__name__} must implement _apply_detector_values")
