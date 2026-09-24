@@ -31,6 +31,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
@@ -511,6 +512,7 @@ class NPUPlatform(Platform):
 
         # 10.Set pytorch NPU allocator env (vllm_config)
         _set_pytorch_npu_alloc_env(vllm_config)
+        _validate_flash_mla_config(vllm_config)
 
     @classmethod
     def set_additional_forward_context(
@@ -637,6 +639,48 @@ class NPUPlatform(Platform):
             "sinks": sinks,
             "dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg,
         }
+
+
+def _validate_flash_mla_config(vllm_config: VllmConfig) -> None:
+    """Reject configurations outside the opt-in external A5 MLA contract."""
+
+    if not envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+        return
+
+    from vllm_ascend.device.device_config import is_950
+
+    model_config = vllm_config.model_config
+    parallel_config = vllm_config.parallel_config
+    cache_config = vllm_config.cache_config
+    errors: list[str] = []
+    if not is_950():
+        errors.append("the installed Ascend target must be A5")
+    if not vllm_config.use_v2_model_runner:
+        errors.append("MRV2 must be enabled")
+    # Hybrid K3 dispatches KDA separately; this contract applies to MLA only.
+    if not model_config.use_mla:
+        errors.append("the model must use MLA")
+    if model_uses_sfa_sparse(model_config):
+        errors.append("sparse/SFA attention is unsupported")
+    if model_config.dtype != torch.bfloat16:
+        errors.append(f"model dtype must be BF16, got {model_config.dtype}")
+    if cache_config.cache_dtype not in ("auto", "bfloat16", torch.bfloat16):
+        errors.append(f"KV cache dtype must resolve to unquantized BF16, got {cache_config.cache_dtype}")
+    if parallel_config.prefill_context_parallel_size != 1:
+        errors.append("PCP size must be 1")
+    if parallel_config.decode_context_parallel_size != 1:
+        errors.append("external FlashMLA requires DCP=1 until history/current and draft topology validation")
+    if KVPPConfig.from_vllm_config(vllm_config).size != 1:
+        errors.append("KV layer parallelism is unsupported")
+    if vllm_config.speculative_config is not None and vllm_config.speculative_config.method != "dspark":
+        errors.append("this integration currently wires DSpark speculative decoding only")
+    if vllm_config.kv_transfer_config is not None:
+        errors.append("PD/KV-transfer execution is unsupported")
+
+    if errors:
+        raise ValueError(
+            "VLLM_ASCEND_ENABLE_FLASH_MLA=1 violates the A5 MRV2 FlashMLA contract: " + "; ".join(errors) + "."
+        )
 
 
 def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
