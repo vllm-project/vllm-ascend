@@ -218,6 +218,18 @@ aclnnStatus CheckSingleParamSmla(int64_t batchSize, int64_t maxSeqlenQ, int64_t 
                                                       "must be in [0, 3, 4]");
                 return ACLNN_ERR_PARAM_INVALID;
             }
+            // ori_topk is reserved on this side too: band carries its left bound
+            // through ori_topk_length, and the metadata kernel reads that tensor
+            // as a top-k count whenever ori_topk is non-zero -- it would size the
+            // schedule from a visible length. The non-Ascend950 branch states the
+            // same coupling; only this direction holds on both, since a -1 window
+            // is legal here.
+            if (oriMaskMode == static_cast<int64_t>(SparseModeSmla::BAND) && oriTopk != 0) {
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                    SMLA_ACLNN_OP_NAME, "ori_topk", std::to_string(oriTopk),
+                    "When has_ori_kv is true and ori_mask_mode is 4 (band), the value of ori_topk must be 0");
+                return ACLNN_ERR_PARAM_INVALID;
+            }
             // A5 treats -1 as unlimited window
             if (oriWinLeft < -1 || oriWinRight < -1) {
                 OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
