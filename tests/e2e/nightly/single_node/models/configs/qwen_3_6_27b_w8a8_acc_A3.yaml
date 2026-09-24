@@ -79,3 +79,4 @@ test_cases:
       - "--enable-prefix-caching"
     benchmarks:
       <<: *benchmarks_acc
+
