@@ -375,9 +375,16 @@ ge::graphStatus DequantSituQuantTiling::CheckInputShapesBF16()
     OP_CHECK_IF(context_->GetOptionalInputShape(INDEX_IN_QUANT_OFFSET) != nullptr,
                 OP_LOGE(context_->GetNodeName(), "quant_offset must be absent for bfloat16 x"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(context_->GetOptionalInputShape(INDEX_IN_GROUP_INDEX) != nullptr,
-                OP_LOGE(context_->GetNodeName(), "group_index must be absent for bfloat16 x"),
-                return ge::GRAPH_FAILED);
+    auto groupIndexShapePtr = context_->GetOptionalInputShape(INDEX_IN_GROUP_INDEX);
+    hasGroupIndex_ = (groupIndexShapePtr != nullptr);
+    expertNum_ = 1;
+    if (hasGroupIndex_) {
+        const gert::Shape groupIndexShape = groupIndexShapePtr->GetStorageShape();
+        OP_CHECK_IF(groupIndexShape.GetDimNum() != 1 || groupIndexShape.GetDim(0) <= 0,
+                    OP_LOGE(context_->GetNodeName(), "group_index must be a non-empty 1-D tensor"),
+                    return ge::GRAPH_FAILED);
+        expertNum_ = static_cast<uint32_t>(groupIndexShape.GetDim(0));
+    }
 
     // check output shapes
     auto yShapePtr = context_->GetOutputShape(0);
@@ -410,8 +417,8 @@ ge::graphStatus DequantSituQuantTiling::CheckInputShapesBF16()
     tilingData.set_quantScaleIsEmpty(1);
     tilingData.set_quantOffsetIsEmpty(1);
     tilingData.set_quantIsOne(0);
-    tilingData.set_expertNum(1);
-    tilingData.set_hasGroupIndex(0);
+    tilingData.set_expertNum(expertNum_);
+    tilingData.set_hasGroupIndex(hasGroupIndex_ ? 1 : 0);
     tilingData.set_hasActivationScale(0);
     tilingData.set_isPreDequantized(1);
     tilingData.set_inputWidth(static_cast<uint32_t>(inDimy));

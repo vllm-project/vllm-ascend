@@ -755,9 +755,9 @@ public:
             if (hasBias_) {
                 biasGm_.SetGlobalBuffer((__gm__ float*)bias, expertNum_ * inputWidth_);
             }
-            if (hasGroupIndex_) {
-                groupIndexGm_.SetGlobalBuffer((__gm__ int64_t*)groupIndex, expertNum_);
-            }
+        }
+        if (hasGroupIndex_) {
+            groupIndexGm_.SetGlobalBuffer((__gm__ int64_t*)groupIndex, expertNum_);
         }
         yGm_.SetGlobalBuffer((__gm__ int8_t*)y, rowLen_ * outputWidth_);
         scaleGm_.SetGlobalBuffer((__gm__ float*)scale, rowLen_);
@@ -784,13 +784,25 @@ public:
             return;
         }
 
-        if constexpr (!std::is_same_v<XType, int32_t>) {
+        if (!hasGroupIndex_) {
             ProcessGroup(0, rowLen_, 0);
             return;
         }
 
-        if (!hasGroupIndex_) {
-            ProcessGroup(0, rowLen_, 0);
+        if constexpr (!std::is_same_v<XType, int32_t>) {
+            // BF16 GMM output may retain the dispatch buffer capacity. Only
+            // the leading sum(group_index) rows contain routed tokens.
+            int64_t validRows = 0;
+            for (int64_t expertIdx = 0; expertIdx < expertNum_ && validRows < rowLen_; ++expertIdx) {
+                const int64_t requestedRows = groupIndexGm_.GetValue(expertIdx);
+                const int64_t remainingRows = rowLen_ - validRows;
+                if (requestedRows > 0) {
+                    validRows += requestedRows > remainingRows ? remainingRows : requestedRows;
+                }
+            }
+            if (validRows > 0) {
+                ProcessGroup(0, validRows, 0);
+            }
             return;
         }
 
