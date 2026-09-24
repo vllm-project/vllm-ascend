@@ -160,13 +160,15 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
     @functools.wraps(sample_tokens_fn)
     def wrapper(self, grammar_output):
         _call_prepare_sample_tokens(self)
-        note_postprocess_sampled(self, None, None)  # clear prior-step stash
-        input_batch, finished_req_ids = _peek_sample_pre_state(self)
 
         guard = getattr(self, "runtime_guard", None)
         if guard is None:
             output = sample_tokens_fn(self, grammar_output)
             return _call_finalize_sample_tokens(self, output)
+
+        note_postprocess_sampled(self, None, None)  # clear prior-step stash
+        # Peek before parent sample_tokens pops execute_model_state.
+        input_batch, finished_req_ids = _peek_sample_pre_state(self)
 
         def sample_fn() -> SamplePhaseResult:
             with (
