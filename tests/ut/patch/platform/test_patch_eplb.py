@@ -237,7 +237,7 @@ def test_async_worker_only_publishes_changed_layers(monkeypatch, changed_layer):
     new_mapping = old_mapping.clone()
     if changed_layer is not None:
         new_mapping[changed_layer] = torch.tensor([1, 0])
-    published = []
+    published: list[SimpleNamespace] = []
     model_state = SimpleNamespace(
         communicator=MagicMock(),
         physical_to_logical_map=old_mapping,

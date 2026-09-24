@@ -61,11 +61,11 @@ def test_pinned_staging_buffers_are_reused_between_transfers(communicator, monke
     monkeypatch.setattr(torch, "empty_like", empty_like)
     tensor = torch.zeros((2, 3), dtype=torch.float32)
 
-    first_transfer = {}
+    first_transfer: dict[tuple[torch.dtype, tuple[int, ...]], int] = {}
     assert communicator._acquire_staging_buffer(tensor, first_transfer) is allocated[0]
     assert communicator._acquire_staging_buffer(tensor, first_transfer) is allocated[1]
 
-    second_transfer = {}
+    second_transfer: dict[tuple[torch.dtype, tuple[int, ...]], int] = {}
     assert communicator._acquire_staging_buffer(tensor, second_transfer) is allocated[0]
     assert empty_like.call_count == 2
     empty_like.assert_called_with(tensor, device="cpu", pin_memory=True)

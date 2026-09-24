@@ -230,7 +230,7 @@ def _wrap_async_transfer(original_transfer):
         values = bound.arguments
         communicator = values["communicator"]
         full_target = getattr(communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, None)
-        if not _has_explicit_sources(full_target):
+        if full_target is None or not _has_explicit_sources(full_target):
             return original_transfer(*bound.args, **bound.kwargs)
         layer_idx = values["layer_idx"]
         try:
