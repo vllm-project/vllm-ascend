@@ -192,7 +192,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
     @staticmethod
     def _candidate_group_budgets(center_budget: int, min_budget: int, max_budget: int, budget_radius: int) -> list[int]:
         """Enumerate valid budgets from nearest to farthest from the center."""
-        budgets = []
+        budgets: list[int] = []
         for distance in range(budget_radius + 1):
             values = (center_budget,) if distance == 0 else (center_budget - distance, center_budget + distance)
             budgets.extend(value for value in values if min_budget <= value <= max_budget)
