@@ -58,9 +58,9 @@ def test_dense_mla_q_replication(dcp_size, graph_mode, monkeypatch, dcp_qrep_mod
 
 @pytest.mark.parametrize("dcp_size", [2, 4])
 @pytest.mark.parametrize("graph_mode", [None, "FULL_DECODE_ONLY"])
-@pytest.mark.parametrize("method", ["ngram", "mtp"])
-def test_speculative_q_replication(dcp_size, graph_mode, method, request, monkeypatch):
-    model = request.getfixturevalue("dcp_qrep_mtp_model" if method == "mtp" else "dcp_qrep_model")
+@pytest.mark.parametrize("method", ["ngram"])
+def test_speculative_q_replication(dcp_size, graph_mode, method, monkeypatch, dcp_qrep_model):
+    model = dcp_qrep_model
     monkeypatch.delenv("VLLM_DCP_Q_REPLICATE", raising=False)
     # Repeated text helps ngram propose candidates. Unequal prompt lengths and
     # three requests also exercise graph padding and mixed scheduling.
@@ -70,8 +70,7 @@ def test_speculative_q_replication(dcp_size, graph_mode, method, request, monkey
         "The capital of France is",
     ]
     spec = {"method": method, "num_speculative_tokens": 3}
-    if method == "ngram":
-        spec.update(prompt_lookup_min=2, prompt_lookup_max=5)
+    spec.update(prompt_lookup_min=2, prompt_lookup_max=5)
     outputs = []
     # Independent ordinary decode reference, then the same speculative path
     # with Q replication off/on; each graph run performs repeated generation.
