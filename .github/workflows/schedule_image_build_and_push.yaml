@@ -25,47 +25,45 @@ on:
     types: [ labeled ]
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Docker tag for build results (mutually exclusive with branch)'
+      docker_ref:
+        description: 'Docker source: main/releases/* are branches; v* and tag:main are tags; use none for commit mode.'
         default: "none"
         required: false
         type: choice
         options:
-          - main
-          - v0.26.0rc1
-          - v0.23.0
-          - v0.23.0rc1
-          - v0.22.1rc1
-          - v0.21.0rc1
-          - v0.20.2rc1
-          - none
-      branch:
-        description: 'Docker branch for build results (mutually exclusive with tag)'
-        default: "none"
-        required: false
-        type: choice
-        options:
-          - main
-          - releases/v0.27.1rc
-          - releases/v0.26.0rc
-          - releases/v0.25.1rc
-          - releases/v0.24.0rc
-          - releases/v0.23.0
-          - releases/v0.22.1rc
-          - releases/v0.21.0rc
-          - releases/v0.20.2rc
-          - releases/v0.18.0
-          - none
+          - 'main'
+          - 'releases/v0.27.1rc'
+          - 'releases/v0.26.0rc'
+          - 'releases/v0.25.1rc'
+          - 'releases/v0.24.0rc'
+          - 'releases/v0.23.0'
+          - 'releases/v0.22.1rc'
+          - 'releases/v0.21.0rc'
+          - 'releases/v0.20.2rc'
+          - 'releases/v0.18.0'
+          - 'tag:main'
+          - 'v0.26.0rc1'
+          - 'v0.23.0'
+          - 'v0.23.0rc1'
+          - 'v0.22.1rc1'
+          - 'v0.21.0rc1'
+          - 'v0.20.2rc1'
+          - 'none'
       vllm_commit:
-        description: 'vLLM commit hash or release tag, e.g. v0.29.0 (must be paired with vllm_ascend_commit; mutually exclusive with tag/branch). Image will be pushed only to SWR temp repo.'
+        description: 'vLLM commit hash or release tag, e.g. v0.29.0. Pair with vllm_ascend_commit and set docker_ref to none.'
         required: false
         default: ''
         type: string
       vllm_ascend_commit:
-        description: 'vllm-ascend commit hash (must be paired with vllm_commit; mutually exclusive with tag/branch). Image will be pushed only to SWR temp repo.'
+        description: 'vllm-ascend commit hash. Pair with vllm_commit and set docker_ref to none.'
         required: false
         default: ''
         type: string
+      publish_nightly_main:
+        description: 'Daily commit mode only: also publish release-compatible nightly-main tags.'
+        required: false
+        default: false
+        type: boolean
       build_type:
         description: 'Build type (release/daily)'
         required: false
@@ -157,8 +155,8 @@ jobs:
       # ======================================================================
       
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
-      workflow_dispatch_tag: ${{ inputs.tag != 'none' && inputs.tag || '' }}
-      branch_ref: ${{ inputs.branch != 'none' && inputs.branch || '' }}
+      workflow_dispatch_tag: ${{ inputs.docker_ref == 'tag:main' && 'main' || (startsWith(inputs.docker_ref, 'v') && inputs.docker_ref || '') }}
+      branch_ref: ${{ (inputs.docker_ref == 'main' || startsWith(inputs.docker_ref, 'releases/')) && inputs.docker_ref || '' }}
       schedule_tag_pattern: 'main'
       build_type: ${{ needs.setup-matrix.outputs.build_type }}
       cann_version: ${{ fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1] }}
@@ -185,8 +183,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch'
         && inputs.vllm_commit != ''
         && inputs.vllm_ascend_commit != ''
-        && inputs.tag == 'none'
-        && inputs.branch == 'none' }}
+        && inputs.docker_ref == 'none' }}
     strategy:
       fail-fast: false
       max-parallel: 8
@@ -203,7 +200,8 @@ jobs:
       swr_registry: 'swr.cn-north-12.myhuaweicloud.com'
       swr_temp_repo: ${{ needs.setup-matrix.outputs.build_type == 'daily' && 'swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-atlas-temp' || 'swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-atlas-temp' }}
       should_push: true
-      temp_only: true
+      temp_only: ${{ needs.setup-matrix.outputs.build_type == 'daily' && !inputs.publish_nightly_main }}
+      publish_nightly_main: ${{ inputs.publish_nightly_main }}
       vllm_commit: ${{ inputs.vllm_commit }}
       vllm_ascend_commit: ${{ inputs.vllm_ascend_commit }}
       workflow_dispatch_tag: ''

@@ -64,6 +64,11 @@ on:
         required: false
         type: boolean
         default: false
+      publish_nightly_main:
+        description: 'If true, daily builds also publish release-compatible nightly-main tags.'
+        required: false
+        type: boolean
+        default: false
       build_type:
         description: 'Build type (release/daily)'
         required: false
@@ -535,17 +540,15 @@ jobs:
           #    - inputs.tag=main       --> vllm-ascend:main[-suffix]
           #    - inputs.tag=v0.16.0rc1 --> vllm-ascend:v0.16.0rc1[-suffix]
           tags: |
-            # In daily mode, only the CANN-versioned daily tag is published; the pep440,
-            # schedule and workflow_dispatch_tag rules would emit bare/plain tags
-            # (e.g. main-310p, nightly-main-310p) without date info, so they are disabled
-            # for daily builds only.
+            # Daily builds normally publish only the CANN-versioned tag. Commit-mode
+            # promotion can instead publish the release-compatible nightly-main tag.
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }},enable=${{ inputs.build_type != 'daily' }}
             type=schedule,pattern=${{ steps.tag_pattern.outputs.pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }},enable=${{ inputs.build_type != 'daily' }}
             type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' && inputs.build_type != 'daily' }},suffix=${{ env.SUFFIX }}
             type=raw,value=${{ steps.tag_pattern.outputs.pattern }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
             
             # ===== New: Daily scenario specific tags =====
-            type=raw,value=${{ steps.daily_tags.outputs.daily_tag }},enable=${{ inputs.build_type == 'daily' }}
+            type=raw,value=${{ steps.daily_tags.outputs.daily_tag }},enable=${{ inputs.build_type == 'daily' && !inputs.publish_nightly_main }}
             # =============================================
           flavor:
             latest=false
@@ -578,12 +581,12 @@ jobs:
           echo "Current tags:"
           echo "$TAGS"
 
-          # For daily builds, skip the plain schedule tag (e.g. nightly-main-310p-openeuler)
-          # because it's redundant with the daily tag that includes CANN version + date
+          # Daily builds skip the plain tag unless explicitly promoted for the
+          # release-compatible nightly-ci pipeline.
           UNWANTED_TAG="nightly-${SCHEDULE_TAG_PATTERN}${SUFFIX}"
 
           for tag in $TAGS; do
-            if [ "$BUILD_TYPE" = "daily" ] && [ "$tag" = "${{ env.SWR_REPO }}:${UNWANTED_TAG}" ]; then
+            if [ "$BUILD_TYPE" = "daily" ] && [ "${{ inputs.publish_nightly_main }}" != "true" ] && [ "$tag" = "${{ env.SWR_REPO }}:${UNWANTED_TAG}" ]; then
               echo "Skipping unwanted schedule tag: $tag"
               continue
             fi
