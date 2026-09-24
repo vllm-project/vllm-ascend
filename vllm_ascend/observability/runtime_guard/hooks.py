@@ -172,9 +172,7 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
             need_accepted_tokens=False,
             use_async=bool(getattr(self, "use_async_scheduling", False)),
             accepted_token_nums_fn=(
-                (lambda _result: self._rg_spec_num_sampled)
-                if speculative_config is not None
-                else None
+                (lambda _result: self._rg_spec_num_sampled) if speculative_config is not None else None
             ),
         )
         return self._rg_after_sample_phase(result.model_runner_output, guard)

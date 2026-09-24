@@ -9,6 +9,7 @@ from vllm_ascend.observability.runtime_guard.runner_bridge import (
     check_before_sample_from_batch,
     wrap_compute_logits_for_pre_sample,
 )
+
 from ._helpers import bare_processor
 
 

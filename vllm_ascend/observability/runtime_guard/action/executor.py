@@ -51,9 +51,7 @@ class ActionExecutor:
         self._quota = quota
         self._kv_reader = KvCacheReader(runner)
         self._queue = (
-            action_queue
-            if action_queue is not None
-            else ActionQueue(maxsize=runtime_config.action_queue_max_size())
+            action_queue if action_queue is not None else ActionQueue(maxsize=runtime_config.action_queue_max_size())
         )
 
     @property

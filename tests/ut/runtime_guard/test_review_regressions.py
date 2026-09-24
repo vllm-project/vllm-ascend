@@ -53,8 +53,9 @@ from vllm_ascend.observability.runtime_guard.detector.manager import DetectorMan
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.observability.runtime_guard.report import dumps_report_json
 from vllm_ascend.observability.runtime_guard.runner_bridge import AscendAsyncOutput
-from ._helpers import bare_processor as _bare_processor
 from vllm_ascend.observability.runtime_guard.wave_tracker import WaveTracker
+
+from ._helpers import bare_processor as _bare_processor
 
 # ---------------------------------------------------------------- V2 (P0-5)
 

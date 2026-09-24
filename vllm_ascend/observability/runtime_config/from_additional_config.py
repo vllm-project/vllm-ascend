@@ -53,9 +53,7 @@ def build_runtime_config_from_additional(additional_config: dict[str, Any]) -> R
     """Validate runtime_* keys, construct :class:`RuntimeConfig`, start non-worker reload."""
     raw_path = additional_config.get("runtime_config_path") or additional_config.get("runtime-config")
     if raw_path is not None and not isinstance(raw_path, str):
-        raise ValueError(
-            f"additional_config.runtime_config_path must be a string, got {type(raw_path).__name__}."
-        )
+        raise ValueError(f"additional_config.runtime_config_path must be a string, got {type(raw_path).__name__}.")
 
     raw_reload = additional_config.get("runtime_config_reload_interval")
     if raw_reload is None:
@@ -74,21 +72,15 @@ def build_runtime_config_from_additional(additional_config: dict[str, Any]) -> R
 
     raw_overlay = additional_config.get("runtime_config")
     if raw_overlay is not None and not isinstance(raw_overlay, dict):
-        raise ValueError(
-            f"additional_config.runtime_config must be a dict, got {type(raw_overlay).__name__}."
-        )
+        raise ValueError(f"additional_config.runtime_config must be a dict, got {type(raw_overlay).__name__}.")
 
     raw_report_dir = additional_config.get("runtime_report_dir")
     if raw_report_dir is not None and not isinstance(raw_report_dir, str):
-        raise ValueError(
-            f"additional_config.runtime_report_dir must be a string, got {type(raw_report_dir).__name__}."
-        )
+        raise ValueError(f"additional_config.runtime_report_dir must be a string, got {type(raw_report_dir).__name__}.")
 
     raw_dump_dir = additional_config.get("runtime_dump_dir")
     if raw_dump_dir is not None and not isinstance(raw_dump_dir, str):
-        raise ValueError(
-            f"additional_config.runtime_dump_dir must be a string, got {type(raw_dump_dir).__name__}."
-        )
+        raise ValueError(f"additional_config.runtime_dump_dir must be a string, got {type(raw_dump_dir).__name__}.")
 
     runtime_cfg = RuntimeConfig(
         raw_path,

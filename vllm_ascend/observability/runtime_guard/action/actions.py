@@ -289,8 +289,7 @@ class DumpKvAction(Action):
         except Exception:
             ctx.quota.refund(consume_quota=ctx.incident.consume_quota)
             logger.exception(
-                "[runtime_guard dump_kv] prepare failed after consume; "
-                "refunded quota req_id=%s type=%s",
+                "[runtime_guard dump_kv] prepare failed after consume; refunded quota req_id=%s type=%s",
                 ctx.incident.req_id,
                 ctx.incident.incident_type,
             )

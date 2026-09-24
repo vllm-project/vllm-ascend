@@ -1680,6 +1680,8 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
 
     from vllm_ascend.observability.runtime_config.from_additional_config import (
         ADDITIONAL_CONFIG_STRIP_KEYS as _RUNTIME_CONFIG_STRIP_KEYS,
+    )
+    from vllm_ascend.observability.runtime_config.from_additional_config import (
         build_runtime_config_from_additional,
     )
 

@@ -74,9 +74,7 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         self._len_low_threshold = float(getter("len_low_threshold", self._len_low_threshold))
         self._high_threshold = float(getter("high_threshold", self._high_threshold))
         self._len_high_threshold = float(getter("len_high_threshold", self._len_high_threshold))
-        self._short_log_interval_s = float(
-            getter("short_log_interval_seconds", self._short_log_interval_s)
-        )
+        self._short_log_interval_s = float(getter("short_log_interval_seconds", self._short_log_interval_s))
 
     def clear_finished(self, req_id: str) -> None:
         self._history.pop(req_id, None)

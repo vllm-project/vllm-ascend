@@ -236,13 +236,15 @@ class RequestGuardStore:
         # Post-reap late append stamps finished=True without a mark (zombie).
         # Start the defer clock on first reap scan so max_deferred_waves can
         # still force-reap when cpu_jobs is stuck.
-        if state.finished and mark is None:
-            state.finish_mark_wave = int(current_wave)
-            mark = state.finish_mark_wave
+        if mark is None:
+            if not state.finished:
+                return True
+            mark = int(current_wave)
+            state.finish_mark_wave = mark
         if state.cpu_jobs > 0:
-            if int(current_wave) - int(mark) < int(self.max_deferred_waves):
+            if int(current_wave) - mark < int(self.max_deferred_waves):
                 return False
-        if int(current_wave) - int(mark) >= int(self.max_deferred_waves):
+        if int(current_wave) - mark >= int(self.max_deferred_waves):
             return True
         probe = self._drain_probe
         if probe is not None:

@@ -31,11 +31,7 @@ def test_guard_step_sits_below_inference_mode():
     """runtime_guard_step must be INNER: the wave sync runs in inference mode."""
     for rel in ("model_runner_v1.py", "v2/model_runner.py"):
         tree = ast.parse((_WORKER_ROOT / rel).read_text(encoding="utf-8"))
-        fns = [
-            n
-            for n in ast.walk(tree)
-            if isinstance(n, ast.FunctionDef) and n.name == "execute_model"
-        ]
+        fns = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "execute_model"]
         assert len(fns) == 1, rel
         assert _decorator_names(fns[0]) == ["inference_mode", "runtime_guard_step"], rel
 
@@ -186,9 +182,7 @@ def test_worker_dummy_batch_uses_idle_decorator():
     """NPUWorker must route the idle wave sync through the decorator."""
     src = (_WORKER_ROOT / "worker.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
-    fns = [
-        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "execute_dummy_batch"
-    ]
+    fns = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "execute_dummy_batch"]
     assert len(fns) == 1
     assert _decorator_names(fns[0]) == ["runtime_guard_idle_step"]
     # The lockstep sync itself lives in the hook, not in the worker body.
