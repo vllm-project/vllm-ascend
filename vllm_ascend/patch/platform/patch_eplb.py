@@ -23,6 +23,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
+from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.distributed.eplb.state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,
     EXPERT_MAPPING_EP_SIZE,
@@ -122,6 +123,7 @@ def _patch_eplb_policy_config() -> None:
     policy_field.default = "stair"
     validator.func = _validate_with_stair
     rebuild_dataclass(config_cls, force=True)
+    rebuild_dataclass(_parallel_config.ParallelConfig, force=True)
 
 
 def _wrap_communicator_factory(original_factory):
@@ -240,15 +242,51 @@ def _clear_transfer_target(communicator, target=None) -> None:
 
 def _wrap_async_rebalance(original_rebalance):
     rebalance_signature = signature(original_rebalance)
-    if "model_state" not in rebalance_signature.parameters:
-        raise RuntimeError("Unsupported vLLM EPLB contract: async rebalance has no model_state parameter.")
+    required = {
+        "model_state",
+        "eplb_state",
+        "physical_to_logical_map_cpu",
+        "stream",
+    }
+    if not required.issubset(rebalance_signature.parameters):
+        raise RuntimeError("Unsupported vLLM EPLB contract: asynchronous rebalance signature changed.")
 
     @wraps(original_rebalance)
     def _async_rebalance(*args, **kwargs):
         bound = rebalance_signature.bind(*args, **kwargs)
-        communicator = bound.arguments["model_state"].communicator
+        model_state = bound.arguments["model_state"]
+        eplb_state = bound.arguments["eplb_state"]
+        communicator = model_state.communicator
         _clear_transfer_target(communicator)
-        target = original_rebalance(*bound.args, **bound.kwargs)
+        prepared_stats = getattr(model_state, "_policy_load_stats", None)
+        eplb_stats = model_state.eplb_stats
+        prepared_stats_is_current = (
+            prepared_stats is not None
+            and eplb_stats is not None
+            and prepared_stats.values is eplb_stats.global_expert_load_window
+        )
+        if not prepared_stats_is_current:
+            target = original_rebalance(*bound.args, **bound.kwargs)
+        else:
+            with _async_worker.device_stream(bound.arguments["stream"]):
+                cpu_stats = PreparedLoadStats(
+                    prepared_stats.values.cpu(),
+                    prepared_stats.sample_counts,
+                )
+            current_mapping = bound.arguments["physical_to_logical_map_cpu"]
+            target = eplb_state.policy.rebalance_experts(
+                cpu_stats,
+                eplb_stats.num_replicas,
+                eplb_stats.num_groups,
+                eplb_stats.num_nodes,
+                eplb_stats.num_gpus,
+                current_mapping,
+                last_committed_mean_ratios=model_state._last_committed_mean_ratios,
+                rank_node_ids=eplb_state.get_rank_node_ids(),
+            )
+            if target.device.type != "cpu":
+                raise RuntimeError("EPLB policy returned a non-CPU expert mapping")
+            target.changed_layer_count = int((target != current_mapping).any(dim=1).sum().item())
         if _has_explicit_sources(target):
             setattr(communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, target)
         return target
@@ -451,6 +489,10 @@ def _wrap_move_to_workspace(original_move):
                 result = original_move(*bound.args, **bound.kwargs)
             if layer_idx is not None:
                 refresh_model_routing_tables(model_state, layer_idx)
+                if full_target is not None and hasattr(full_target, "predicted_mean_ratios"):
+                    predicted_ratio = full_target.predicted_mean_ratios[layer_idx]
+                    if np.isfinite(predicted_ratio):
+                        model_state._last_committed_mean_ratios[layer_idx] = predicted_ratio
             if is_last_result:
                 _clear_transfer_target(model_state.communicator)
                 if bound.arguments["ep_rank"] == 0:
@@ -464,12 +506,28 @@ def _wrap_move_to_workspace(original_move):
                         source_ranks = np.asarray(full_target.source_rank_ids)
                         destination_ranks = np.arange(source_ranks.shape[-2])[None, :, None]
                         rank_transfers = np.count_nonzero(source_ranks != destination_ranks)
-                        logger.info(
-                            "%s: model=%s rank_transfers=%d",
-                            ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-                            model_state.model_name,
-                            rank_transfers,
-                        )
+                        imbalance = getattr(full_target, "predicted_imbalance_summary", None)
+                        if imbalance is None:
+                            logger.info(
+                                "%s: model=%s rank_transfers=%d",
+                                ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                                model_state.model_name,
+                                rank_transfers,
+                            )
+                        else:
+                            mean_before, p95_before, mean_after, p95_after = imbalance
+                            logger.info(
+                                "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f "
+                                "changed_layers=%d rank_transfers=%d",
+                                ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                                model_state.model_name,
+                                mean_before,
+                                mean_after,
+                                p95_before,
+                                p95_after,
+                                full_target.changed_layer_count,
+                                rank_transfers,
+                            )
         finally:
             if pending_result is not None and consumed_event is not None:
                 pending_result.consumed_event = consumed_event
