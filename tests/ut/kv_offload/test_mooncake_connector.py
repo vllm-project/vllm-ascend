@@ -1803,6 +1803,10 @@ class MockRequest:
         self.kv_transfer_params = kv_transfer_params or {}
         self.status = status or "running"
         self.output_token_ids = [101, 102]
+        self.num_prompt_tokens: int = len(self.prompt_token_ids)
+        self._all_token_ids: list[int] = list(self.prompt_token_ids)
+        self.max_tokens: int = 8
+        self.prompt_embeds: torch.Tensor | None = None
 
 
 class MockKVCacheGroup:
