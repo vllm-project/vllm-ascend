@@ -224,6 +224,57 @@ class NPUPlatform(Platform):
         return "vllm_ascend.distributed.device_communicators.npu_communicator.NPUCommunicator"
 
     @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: "PrefixStore",
+        group_rank: int,
+        group_size: int,
+        timeout: "timedelta",
+    ) -> "ProcessGroup":
+        """Create a stateless HCCL process group.
+
+        Used by vLLM elastic EP to create standby groups that live outside
+        ``torch.distributed``'s global world state, so that groups can be
+        created, switched to, and destroyed during elastic scaling. Mirrors
+        the CUDA platform implementation (vllm/platforms/cuda.py) and the
+        proven direct-construction pattern from the netloader
+        (``vllm_ascend/model_loader/netloader/executor/netloader_pg.py``).
+        """
+        from datetime import timedelta as _timedelta
+
+        from torch.distributed import ProcessGroup, is_hccl_available
+        from torch.distributed.distributed_c10d import Backend
+        from torch_npu._C._distributed_c10d import ProcessGroupHCCL
+
+        if not is_hccl_available():
+            raise RuntimeError("HCCL is not available")
+        if backend != "hccl":
+            raise ValueError(
+                f"Unsupported stateless distributed backend on Ascend NPU: "
+                f"{backend}, expected 'hccl'"
+            )
+
+        hccl_backend = Backend("hccl")
+        pg: ProcessGroup = ProcessGroup(prefix_store, group_rank, group_size)
+        pg._set_default_backend(Backend.backend_type_map[hccl_backend])
+
+        pg_options = ProcessGroupHCCL.Options()
+        pg_options.is_high_priority_stream = False
+        pg_options._timeout = timeout or _timedelta(minutes=30)
+        pg_options.global_ranks_in_group = []
+
+        backend_class = ProcessGroupHCCL(
+            prefix_store, group_rank, group_size, pg_options
+        )
+        backend_class._set_sequence_number_for_group()
+
+        pg._register_backend(
+            torch.device("npu"), ProcessGroup.BackendType.CUSTOM, backend_class
+        )
+        return pg
+
+    @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         """
         Get piecewise backend class for piecewise graph.

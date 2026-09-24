@@ -44,19 +44,63 @@ class NPUCommunicator(DeviceCommunicatorBase):
         device: torch.device | None = None,
         device_group: dist.ProcessGroup | None = None,
         unique_name: str = "",
+        global_ranks: list[int] | None = None,
+        global_world_size: int | None = None,
         use_all2all: bool = False,
+        tcp_store_group=None,
     ):
         super().__init__(
             cpu_group,
             device,
             device_group,
             unique_name,
+            global_ranks,
+            global_world_size,
             use_all2all=use_all2all,
         )
-        self.device = torch.npu.current_device()
+        # TODO(hz): Refer to CudaCommunicator's implementation to integrate PyHcclCommunicator
+        # init device according to rank
+        # NOTE: keep the legacy behavior (bare device index) when no device
+        # is passed by the regular (non-stateless) GroupCoordinator path.
+        # StatelessGroupCoordinator passes a proper torch.device("npu:N").
+        if device is None:
+            self.device = torch.npu.current_device()
+        # `tcp_store_group` is accepted for signature compatibility with
+        # CudaCommunicator (StatelessGroupCoordinator passes it when
+        # building standby DP/EP groups for elastic EP); HCCL P2P goes
+        # through the device_group directly, so it is not stored.
+
         self.ca_comm = None
         # vLLM #53576 reads this CUDA-only communicator during graph capture.
         # Keep the shared coordinator protocol available without enabling the
         # FlashInfer PCIe IPC backend on NPU.
         self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()
+
+    def batch_isend_irecv(self, p2p_ops: list):
+        """Batch point-to-point ops over the (possibly stateless) HCCL group.
+
+        Mirrors CudaCommunicator.batch_isend_irecv, which batches ops
+        between ncclGroupStart/End. ProcessGroupHCCL has no group-start/end
+        batching, so we post all ops as async work first and wait at the
+        end, which preserves the non-deadlocking semantics of a batch
+        (both directions can be in flight simultaneously).
+        """
+        handles = []
+        for op in p2p_ops:
+            if op.op is torch.distributed.isend:
+                handles.append(
+                    torch.distributed.isend(
+                        op.tensor, op.group_peer, self.device_group
+                    )
+                )
+            elif op.op is torch.distributed.irecv:
+                handles.append(
+                    torch.distributed.irecv(
+                        op.tensor, op.group_peer, self.device_group
+                    )
+                )
+            else:
+                raise ValueError(f"Unsupported p2p op: {op.op}")
+        for handle in handles:
+            handle.wait()
