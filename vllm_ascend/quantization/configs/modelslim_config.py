@@ -640,6 +640,9 @@ class AscendModelSlimConfig(QuantizationConfig):
                 prefix_mapper=lambda name: self.quant_prefix_mapper(model_type, name),
             )
 
+        # Reused across mutually exclusive layer branches with different
+        # scheme protocols (linear, attention, and MoE).
+        scheme: Any
         if isinstance(layer, LinearBase):
             if quant_type is None:
                 # Delayed import to avoid circular import
