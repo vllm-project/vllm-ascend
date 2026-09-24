@@ -39,7 +39,7 @@ except ImportError:
     pytest.skip("fla_npu.ops.ascendc.recurrent_gated_delta_rule unavailable", allow_module_level=True)
 
 try:
-    import vllm_ascend.vllm_ascend_C  # type: ignore, noqa: F401
+    import vllm_ascend.vllm_ascend_C  # type: ignore # noqa: F401
 except ImportError:
     pytest.skip("vllm_ascend_C extension not built/importable", allow_module_level=True)
 
