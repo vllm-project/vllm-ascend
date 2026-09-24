@@ -147,6 +147,26 @@ def test_producer_allocator_layout():
     assert allocator.bounce_tensor is None
 
 
+def test_producer_allocator_zero_bounce_has_no_arena_or_padding():
+    allocator = AscendProducerAllocator(
+        staging_capacity=3 * _MIB,
+        bounce_capacity=0,
+    )
+    transfer = MagicMock()
+    transfer.register_memory.return_value = 0
+
+    allocator.prepare(torch.device("cpu"), transfer)
+
+    assert allocator.bounce_offset == 3 * _MIB
+    assert allocator.padding == 0
+    assert allocator.registered_capacity == 3 * _MIB
+    assert allocator.tensor is not None
+    assert allocator.tensor.nbytes == 3 * _MIB
+    assert allocator.bounce_tensor is None
+    assert allocator._free == [(0, 3 * _MIB)]
+    transfer.register_memory.assert_called_once_with(allocator.tensor)
+
+
 def test_producer_allocator_prepares_partitioned_slab():
     allocator = AscendProducerAllocator(
         staging_capacity=3 * _MIB,
