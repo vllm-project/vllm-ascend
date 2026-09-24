@@ -144,6 +144,7 @@ Combine **all `tp*` dirs under the same `req_id` + same `wave_*` on last PP** fo
     - **Auto single-request dump**: detect enqueue this wave, **next wave head** bcast, D2H at that wave end (+1 wave).
     - **manual_dump**: each last-PP TP dumps **locally** at wave end (no dump-job bcast).
     - **PP>1 (forced file) / file**: config local poll; auto dump at wave head TP drain → D2H at end.
+    - **Static idle** (`reload_interval=0`, no detectors / print / manual): skip config bus entirely; call the TP dump claim bus **only when** `dump_enabled` (shared gate so all ranks agree). Dump inactive → drop stray local jobs, no due-AR.
 - D2H timing: arm queues only; **same wave** at end of `run_sample_phase` (`check_after_sample` then) via `end_of_wave_sync`; when no sample this step, sync path uses the same end entry.
 
 ### 2.5 Logging switches and UCM

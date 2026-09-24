@@ -30,6 +30,8 @@ Worker: RuntimeGuardProcessor.bind(runner)
 
   ① execute_model (this call)
   │  sync_for_step()                    # wave head: config hot reload + dump list due bus
+  │                                      # static idle (reload=0, no detectors/print/manual):
+  │                                      #   skip config bus; claim TP dump bus only if dump_enabled
   │  │  ├─ broadcast∧PP==1: 1×AR([config_due,dump_due]) + per-lane bcast as needed
   │  │  └─ file / PP>1: local poll JSON; dump list via last-PP TP bus
   │  try:

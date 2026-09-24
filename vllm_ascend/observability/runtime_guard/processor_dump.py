@@ -92,8 +92,20 @@ class RuntimeGuardDumpMixin:
         self._maybe_fire_manual_local(allow_arm=allow_arm)
 
     def _claim_dump_jobs_to_deferred_via_tp(self) -> None:
-        """File/PP>1: move pending auto jobs through TP bus into deferred D2H."""
+        """File/PP>1: move pending auto jobs through TP bus into deferred D2H.
+
+        When dump is inactive, all dump ranks observe the same
+        ``dump_enabled()`` gate and skip the TP due-vector all_reduce (stray
+        local jobs are dropped). While dump is active, an empty local queue on
+        non-TP0 must still join the bus — only TP0 enqueues — so an empty
+        due-AR remains required for lockstep.
+        """
         if not should_dump_kv_on_rank():
+            if hasattr(self, "_kv_dump_jobs"):
+                self._kv_dump_jobs.clear()
+            return
+        # Shared config gate (identical on every rank after sync): skip TP bus.
+        if not self.runtime_config.dump_enabled():
             if hasattr(self, "_kv_dump_jobs"):
                 self._kv_dump_jobs.clear()
             return

@@ -116,6 +116,7 @@ def test_sync_for_step_skips_refresh_when_reload_off_idle(tmp_path: Path):
     assert cfg.hot_reload_enabled is False
     with (
         patch.object(RuntimeGuardProcessor, "refresh_config") as refresh,
+        patch.object(RuntimeGuardProcessor, "_claim_dump_jobs_to_deferred_via_tp") as claim,
         patch(
             "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
             side_effect=Exception("no pp"),
@@ -125,6 +126,30 @@ def test_sync_for_step_skips_refresh_when_reload_off_idle(tmp_path: Path):
         proc.sync_for_step(allow_arm=True, scheduler_output=None)
         proc.wave_tracker.advance.assert_called_once_with(allow_arm=True)
         refresh.assert_not_called()
+        # dump defaults off → skip TP claim bus entirely (lockstep).
+        claim.assert_not_called()
+    RuntimeGuardProcessor.reset_for_tests()
+
+
+def test_sync_for_step_claims_dump_when_idle_but_dump_on(tmp_path: Path):
+    """Static idle with dump active still claims (TP bus may run)."""
+    cfg = _cfg(tmp_path, reload=0.0)
+    cfg._data["dump"]["auto_max_times"] = 1
+    cfg._invalidate_hot_path_gates()
+    assert cfg.dump_enabled() is True
+    assert cfg.needs_sample_phase_hooks() is False
+    with (
+        patch.object(RuntimeGuardProcessor, "refresh_config") as refresh,
+        patch.object(RuntimeGuardProcessor, "_claim_dump_jobs_to_deferred_via_tp") as claim,
+        patch(
+            "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
+            side_effect=Exception("no pp"),
+        ),
+    ):
+        proc = _bind(cfg)
+        proc.sync_for_step(allow_arm=True, scheduler_output=None)
+        refresh.assert_not_called()
+        claim.assert_called_once()
     RuntimeGuardProcessor.reset_for_tests()
 
 

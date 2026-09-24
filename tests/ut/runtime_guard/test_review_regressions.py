@@ -957,11 +957,47 @@ def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
     assert list(shard.glob("*.pt"))
 
 
-def test_v18e_file_mode_claim_skips_object_broadcast_when_empty():
+def test_v18e_file_mode_claim_skips_tp_bus_when_dump_inactive():
+    """dump_enabled=False: all ranks skip TP due-AR (lockstep via shared gate)."""
     from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 
     proc = SimpleNamespace(
         runner=SimpleNamespace(),
+        runtime_config=SimpleNamespace(dump_enabled=lambda: False),
+        _kv_dump_jobs=[{"req_id": "stray"}],
+        _deferred_kv_dump_jobs=[],
+    )
+    tp = MagicMock()
+    tp.world_size = 2
+    tp.rank_in_group = 0
+    with (
+        patch(
+            "vllm_ascend.observability.runtime_guard.processor_dump.should_dump_kv_on_rank",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.observability.runtime_guard.processor_dump.get_tp_group",
+            return_value=tp,
+        ),
+        patch(
+            "vllm_ascend.observability.runtime_guard.processor_dump.sync_task_bus",
+        ) as bus,
+        patch("torch.distributed.all_reduce") as ar,
+    ):
+        RuntimeGuardProcessor._claim_dump_jobs_to_deferred_via_tp(proc)
+    bus.assert_not_called()
+    ar.assert_not_called()
+    assert proc._kv_dump_jobs == []
+    assert proc._deferred_kv_dump_jobs == []
+
+
+def test_v18e2_file_mode_claim_empty_still_joins_due_ar_when_dump_on():
+    """dump_enabled=True + empty queue: still due-AR (non-TP0 cannot see TP0 jobs)."""
+    from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
+
+    proc = SimpleNamespace(
+        runner=SimpleNamespace(),
+        runtime_config=SimpleNamespace(dump_enabled=lambda: True),
         _kv_dump_jobs=[],
         _deferred_kv_dump_jobs=[],
     )
@@ -979,9 +1015,10 @@ def test_v18e_file_mode_claim_skips_object_broadcast_when_empty():
             "vllm_ascend.observability.runtime_guard.processor_dump.get_tp_group",
             return_value=tp,
         ),
-        patch("torch.distributed.all_reduce"),
+        patch("torch.distributed.all_reduce") as ar,
     ):
         RuntimeGuardProcessor._claim_dump_jobs_to_deferred_via_tp(proc)
+    ar.assert_called_once()
     tp.broadcast_object.assert_not_called()
     assert proc._deferred_kv_dump_jobs == []
 

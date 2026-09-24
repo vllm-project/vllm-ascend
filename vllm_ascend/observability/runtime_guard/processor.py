@@ -265,8 +265,12 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             cfg = self.runtime_config
             idle = not cfg.manual_trigger() and not cfg.needs_sample_phase_hooks()
             if idle and not cfg.hot_reload_enabled:
-                # Static idle: deliver any leftover auto jobs without config bus.
-                self._claim_dump_jobs_to_deferred_via_tp()
+                # Static idle: no config bus. Claim leftover auto jobs only when
+                # dump is active (shared gate → all ranks take the same branch).
+                if cfg.dump_enabled():
+                    self._claim_dump_jobs_to_deferred_via_tp()
+                elif getattr(self, "_kv_dump_jobs", None):
+                    self._kv_dump_jobs.clear()
                 self._end_of_wave_sync_if_no_sample(allow_arm=False)
                 return
             self.refresh_config(scheduler_output=scheduler_output)
