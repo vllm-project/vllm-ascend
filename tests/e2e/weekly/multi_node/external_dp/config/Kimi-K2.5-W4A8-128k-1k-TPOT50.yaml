@@ -101,6 +101,8 @@ templates:
       - --no-enable-prefix-caching
       - --quantization
       - "ascend"
+      - --speculative-config
+      - '{"method": "eagle3", "model": "lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}'
       - --additional-config
       - '{"enable_shared_expert_dp": true,"enable_fused_mc2":1}'
       - --kv-transfer-config
@@ -140,6 +142,8 @@ templates:
       - --no-enable-prefix-caching
       - --quantization
       - "ascend"
+      - --speculative-config
+      - '{"method": "eagle3", "model": "lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}'
       - --additional-config
       - '{"enable_shared_expert_dp": true,"enable_fused_mc2":1}'
       - --kv-transfer-config
@@ -179,7 +183,7 @@ templates:
       - "ascend"
       - --no-enable-prefix-caching
       - --speculative-config
-      - '{"method": "eagle3", "model": "lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
+      - '{"method": "eagle3", "model": "lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}'
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --additional-config
@@ -221,7 +225,7 @@ templates:
       - "ascend"
       - --no-enable-prefix-caching
       - --speculative-config
-      - '{"method": "eagle3", "model": "lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
+      - '{"method": "eagle3", "model": "lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}'
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --additional-config
