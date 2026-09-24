@@ -68,7 +68,6 @@ Unless stated otherwise, these optimizations are selected automatically for the 
     - MiniMax-M2.7
     - Qwen3-235B-A22B
     - Qwen3-VL-235B-A22B-Instruct
-    - Qwen3-32B
     - QwQ-32B
 - Enabling `additional_config.enable_dsa_cp` now emits an advance deprecation warning. Starting with v0.29.0, DSA-CP will be deprecated for Model Runner V2 deployments; Prefill Context Parallelism (PCP) will provide full coverage and replace it. The Model Runner V1 path will remain available until Model Runner V1 is removed, after which DSA-CP will be removed completely. DSA-CP behavior is unchanged in v0.27.1rc1. [#15890](https://github.com/vllm-project/vllm-ascend/pull/15890)
 - `finegrained_tp_config.olora_tensor_parallel_size` is deprecated in the v0.27.x release line and has already been removed from `main`; it will be unavailable starting with the v0.28.x release line. Remove this key before upgrading. This only removes the unused DeepSeek V4 oLoRA tensor-parallel switch; the model architecture field `o_lora_rank`, standard LoRA adapters, and the other fine-grained TP settings are unaffected. [#15857](https://github.com/vllm-project/vllm-ascend/pull/15857)
