@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
 
@@ -270,6 +271,25 @@ class CompressAttentionManager(FullAttentionManager):
         return computed_blocks, hit_length
 
 
+def get_manager_class_for_kv_cache_spec(
+    kv_cache_spec: KVCacheSpec,
+) -> type[SingleTypeKVCacheManager]:
+    """Resolve vLLM 0.26 heterogeneous UniformType group managers."""
+    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+    from vllm_ascend.core.kv_cache_interface import AscendCircularBufferSpec
+
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        members = list(kv_cache_spec.kv_cache_specs.values())
+        if members and all(isinstance(spec, AscendCircularBufferSpec) for spec in members):
+            return CircularBufferManager
+        if members and all(isinstance(spec, FullAttentionSpec) for spec in members):
+            return FullAttentionManager
+    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+    assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
+    return manager_class
+
+
 def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
     max_in_flight_tokens: int | None = None,
@@ -294,12 +314,9 @@ def get_manager_for_kv_cache_spec(
     this value matches the pool sizer and makes admission consistent with the
     block budget actually held.
     """
-    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
-
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
-    assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
+    manager_class = get_manager_class_for_kv_cache_spec(kv_cache_spec)
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager
         if max_model_len is not None:
@@ -324,3 +341,115 @@ def get_manager_for_kv_cache_spec(
             )
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager
+
+
+class CircularBufferManager(FullAttentionManager):
+    """Own exactly one non-prefix-cacheable ring block per request."""
+
+    supports_fine_grained_hash_lookup: ClassVar[bool] = False
+
+    def _claim_ring_block(self, request_id: str) -> list[KVCacheBlock]:
+        req_blocks = self.req_to_blocks[request_id]
+        if req_blocks:
+            return []
+        new_blocks = self.block_pool.get_new_blocks(1)
+        req_blocks.extend(new_blocks)
+        if self._record_new_block_ids:
+            self.new_block_ids.extend(block.block_id for block in new_blocks)
+        return new_blocks
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+    ) -> int:
+        del (
+            num_tokens,
+            new_computed_blocks,
+            total_computed_tokens,
+            num_local_computed_tokens,
+            num_tokens_main_model,
+            apply_admission_cap,
+        )
+        return 0 if self.req_to_blocks.get(request_id) else 1
+
+    def allocate_new_blocks(self, request_id: str, num_tokens: int, num_tokens_main_model: int) -> list[KVCacheBlock]:
+        del num_tokens, num_tokens_main_model
+        return self._claim_ring_block(request_id)
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        del num_local_computed_tokens, num_external_computed_tokens
+        self._claim_ring_block(request_id)
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: BlockHashList,
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        drop_eagle_block: bool,
+        alignment_tokens: int,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        del (
+            block_hashes,
+            max_length,
+            block_pool,
+            kv_cache_spec,
+            drop_eagle_block,
+            alignment_tokens,
+            dcp_world_size,
+            pcp_world_size,
+        )
+        return tuple([] for _ in kv_cache_group_ids), 0
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+    ) -> None:
+        del request, num_tokens, retention_interval
+
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        del (
+            request_id,
+            new_computed_blocks,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+
+    def remove_skipped_blocks(
+        self,
+        request_id: str,
+        processed_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
+    ) -> None:
+        del request_id, processed_computed_tokens, num_prompt_tokens
+
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+        del running_request_id
+        return 0
+
+    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
+        del num_computed_tokens
+        return 0
