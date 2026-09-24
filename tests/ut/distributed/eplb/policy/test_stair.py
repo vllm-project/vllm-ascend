@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
+import torch
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
@@ -30,6 +32,19 @@ class TestStairLoadStatistics(unittest.TestCase):
         np.testing.assert_allclose(compressed[0], samples[:2].mean(axis=0))
         np.testing.assert_allclose(compressed[1], samples[2:].mean(axis=0))
         np.testing.assert_allclose(np.average(compressed, axis=0, weights=weights), samples.mean(axis=0))
+
+    def test_policy_prepares_weighted_load_sums(self):
+        policy = SimpleNamespace(
+            config=StairConfig(load_window_bins=2),
+            _load_bin_boundaries=StairEplbPolicy._load_bin_boundaries,
+        )
+        samples = torch.arange(20).reshape(5, 2, 2)
+
+        prepared = StairEplbPolicy.prepare_local_load_stats(policy, samples)
+
+        np.testing.assert_array_equal(prepared.sample_counts, [2, 3])
+        torch.testing.assert_close(prepared.values[0], samples[:2].sum(dim=0))
+        torch.testing.assert_close(prepared.values[1], samples[2:].sum(dim=0))
 
     def test_weighted_moments_use_covariance(self):
         samples = np.array([[1.0, 4.0], [3.0, 2.0]])
