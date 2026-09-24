@@ -42,7 +42,7 @@ def make_attention(impl):
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     with (
-        patch("vllm_ascend.ops.mla.MLAAttention", return_value=inner),
+        patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=inner),
         patch("vllm_ascend.ops.mla.get_current_vllm_config", return_value=config),
         patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size", return_value=1),
         patch("vllm_ascend.ops.mla.mark_fused_preprocess_weights"),

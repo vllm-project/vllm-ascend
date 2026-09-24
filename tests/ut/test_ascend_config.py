@@ -32,6 +32,7 @@ from vllm_ascend.ascend_config import (
     AscendCompilationConfig,
     AscendConfig,
     AscendFusionConfig,
+    AscendWarmupConfig,
     DynamicSpecConfig,
     DyntraLBConfig,
     EplbConfig,
@@ -924,6 +925,13 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaises(ValueError):
             AscendFusionConfig(unknown_key=1)
 
+    def test_ascend_warmup_config_bool_lax_and_forbid(self):
+        cfg = AscendWarmupConfig(enable_early_kernel_warmup="true", enable_early_nz_warmup="false")
+        self.assertTrue(cfg.enable_early_kernel_warmup)
+        self.assertFalse(cfg.enable_early_nz_warmup)
+        with self.assertRaises(ValueError):
+            AscendWarmupConfig(unknown_key=1)
+
     def test_ascend_compilation_config_bool_lax_and_forbid(self):
         cfg = AscendCompilationConfig(enable_npugraph_ex="false")
         self.assertFalse(cfg.enable_npugraph_ex)
@@ -1037,6 +1045,16 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             self._oproj_tp_vllm_config(max_cudagraph_capture_size=None, cudagraph_capture_sizes=[8, 16, 512])
         )
         self.assertEqual(config.oproj_tensor_parallel_size, 2)
+
+    def test_mlp_tp_capture_bound_check(self):
+        config = FinegrainedTPConfig(mlp_tensor_parallel_size=2)
+        config._validate_preconditions(self._oproj_tp_vllm_config())
+        self.assertEqual(config.mlp_tensor_parallel_size, 2)
+        # The step bound is knob-independent, so an oversized step disables both knobs together.
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2, mlp_tensor_parallel_size=4)
+        config._validate_preconditions(self._oproj_tp_vllm_config(max_num_seqs=300, num_speculative_tokens=1))
+        self.assertEqual(config.oproj_tensor_parallel_size, 0)
+        self.assertEqual(config.mlp_tensor_parallel_size, 0)
 
     def test_eplb_config_int_field_lax(self):
         cfg = EplbConfig(eplb_policy_type="2")
@@ -1344,7 +1362,10 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     def test_reduce_sample_configuration_compatibility(self, mock_fix):
         cases: tuple[tuple[dict[str, Any], int, str | None, str | None], ...] = (
             (
-                {"finegrained_tp_config": {"lmhead_tensor_parallel_size": 2}},
+                {
+                    "finegrained_tp_config": {"lmhead_tensor_parallel_size": 2},
+                    "recompute_scheduler_enable": True,
+                },
                 1,
                 None,
                 "finegrained_tp_config.lmhead_tensor_parallel_size",

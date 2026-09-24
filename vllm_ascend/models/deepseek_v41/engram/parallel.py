@@ -10,7 +10,9 @@ creating another communicator or modifying vLLM parallel state.
 import torch
 from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
-from vllm.models.deepseek_v4_1.common.engram import DEAD_ID
+
+# Upstream #56741 normalized the V4.1 model package name.
+from vllm.models.deepseek_v41.common.engram import DEAD_ID
 from vllm.triton_utils import tl, triton
 
 

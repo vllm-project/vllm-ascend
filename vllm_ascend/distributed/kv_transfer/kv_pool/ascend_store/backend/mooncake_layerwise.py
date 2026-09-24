@@ -194,8 +194,6 @@ def validate_topology(parallel_config: Any) -> None:
 
 
 def validate_runtime(*, use_hybrid: bool, has_recurrent_state: bool, tp_mismatch: bool) -> None:
-    if use_hybrid and has_recurrent_state:
-        raise ValueError("Mooncake hybrid layerwise does not yet support recurrent Mamba state")
     if tp_mismatch:
         raise ValueError("Mooncake layerwise does not yet support prefill/decode TP mismatch")
 

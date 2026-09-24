@@ -25,12 +25,14 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 import vllm
-from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.distributed import get_dcp_group
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -231,6 +233,7 @@ def build_attn_metadata(
     kv_cache_config: KVCacheConfig,
     dcp_local_seq_lens: torch.Tensor | None = None,
     # extra attributes for ascend npus.
+    parallel_config: ParallelConfig | None = None,
     seq_lens_np: np.ndarray | None = None,
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     num_computed_tokens_cpu: torch.Tensor | None = None,
@@ -255,6 +258,19 @@ def build_attn_metadata(
     seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
     if seq_lens_cpu_upper_bound is None:
         seq_lens_cpu_upper_bound = seq_lens_cpu
+
+    # Upstream prepares device-local lengths before building attention metadata.
+    # Ascend FIA also needs a CPU list. Partition the existing CPU view here,
+    # once per batch, without introducing a device-to-host synchronization.
+    dcp_local_seq_lens_cpu = None
+    if dcp_local_seq_lens is not None:
+        assert parallel_config is not None
+        dcp_local_seq_lens_cpu = get_dcp_local_seq_lens(
+            seq_lens_cpu,
+            dcp_size=parallel_config.decode_context_parallel_size,
+            dcp_rank=get_dcp_group().rank_in_group,
+            cp_kv_cache_interleave_size=parallel_config.cp_kv_cache_interleave_size,
+        )
 
     # Upstream speculative-decoding callers do not provide Ascend's separate
     # scheduled-token and padded-input-token counts. Without these fields,
@@ -309,6 +325,7 @@ def build_attn_metadata(
             max_seq_len=max_seq_len,
             causal=group_causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             **common_attn_metadata_extra_kwargs,
         )
 
@@ -367,11 +384,14 @@ def build_attn_state(
     num_reqs,
     num_scheduled_tokens,
     num_valid_tokens,
+    kv_cache_config: KVCacheConfig | None = None,
 ):
     """Build attention state for npu's attention backend."""
     if vllm_config.model_config.runner_type == "pooling":
+        if kv_cache_config is None:
+            raise RuntimeError("Pooling attention state requires KVCacheConfig.")
         if isinstance(
-            vllm_config.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+            kv_cache_config.kv_cache_groups[0].kv_cache_spec,
             EncoderOnlyAttentionSpec,
         ):
             attn_state = AscendAttentionState.PrefillNoCache
@@ -1232,7 +1252,9 @@ def build_attn_metadata_wrapper():
 
 
 @contextmanager
-def build_draft_attn_metadata_factory(positions, pad, is_prefilling, *, attn_state=None):
+def build_draft_attn_metadata_factory(
+    positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None
+):
     """Wrap build_attn_metadata with Ascend draft-model context.
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
@@ -1247,6 +1269,9 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling, *, attn_sta
         kwargs["positions"] = positions[:pad]
         kwargs["is_prefilling"] = is_prefilling
         kwargs["attn_state"] = attn_state
+        kwargs["parallel_config"] = parallel_config
+        if seq_lens_cpu is not None:
+            kwargs["seq_lens_np"] = seq_lens_cpu.numpy()
         return raw(*args, **kwargs)
 
     try:

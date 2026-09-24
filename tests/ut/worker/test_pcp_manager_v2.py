@@ -29,7 +29,6 @@ from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -237,19 +236,13 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     local_attn_state = object()
 
     with (
-        # This Triton helper is unrelated to PCP partitioning and has no CPU
-        # implementation. Stub only it; AscendPCPManager.partition_batch and
-        # PCPManager.partition_batch both execute unmocked below.
+        # Upstream main (#56888) moved the device copy to async_tensor_h2d and
+        # no longer imports prepare_pos_seq_lens / combine_sampled_and_draft_tokens
+        # into pcp_manager. Stub only the CPU-incompatible copy;
+        # AscendPCPManager.partition_batch and PCPManager.partition_batch both
+        # execute unmocked below.
         patch(
-            "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
-            return_value=None,
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
-            return_value=torch.zeros(2, dtype=torch.int64),
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
+            "vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d",
             side_effect=_mock_async_copy_to_cpu,
         ),
         patch(
@@ -265,20 +258,21 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(global_batch.seq_lens_np, np.array([18], dtype=np.int32))
     assert global_batch.attn_state == "global-attn-state"
 
-    # PCP=2 rank 0 owns the tail chunk then the head chunk; the real base
-    # implementation produces this local row order and pads to rank 1's size.
+    # PCP=2 rank 0 owns the head chunk then the tail chunk; the real base
+    # implementation produces this canonical local row order and pads to rank
+    # 1's size.
     assert result.req_ids == ["global-req", "global-req"]
     np.testing.assert_array_equal(result.idx_mapping_np, np.array([3, 3], dtype=np.int32))
-    np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([3, 5], dtype=np.int32))
-    np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 3, 8], dtype=np.int32))
+    np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([5, 3], dtype=np.int32))
+    np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 5, 8], dtype=np.int32))
     assert result.num_tokens == 8
     expected_num_tokens_after_padding = 12
     assert result.num_tokens_after_padding == expected_num_tokens_after_padding
-    assert torch.equal(result.input_ids[:8], torch.tensor([15, 16, 17, 0, 1, 2, 3, 4], dtype=torch.int32))
+    assert torch.equal(result.input_ids[:8], torch.tensor([0, 1, 2, 3, 4, 15, 16, 17], dtype=torch.int32))
 
     # dataclasses.replace() retains the global Ascend-only fields by default;
     # the override must refresh them from real PCP-local CPU rows.
-    expected_seq_lens = np.array([18, 5], dtype=np.int32)
+    expected_seq_lens = np.array([5, 18], dtype=np.int32)
     np.testing.assert_array_equal(result.seq_lens_np, expected_seq_lens)
     assert result.attn_state is local_attn_state
     build_attn_state.assert_called_once()
@@ -568,15 +562,7 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
 
     with (
         patch(
-            "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
-            return_value=None,
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
-            return_value=torch.zeros(1, dtype=torch.int64),
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
+            "vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d",
             side_effect=_mock_async_copy_to_cpu,
         ),
         patch(
@@ -829,29 +815,34 @@ def test_main2main_v2_overrides_accept_new_upstream_keywords() -> None:
 
 def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
     """Follow the PCP-local capture contract introduced by vLLM #53515/#53869."""
-    input_batch = object()
-    input_buffers = object()
+    input_batch = MagicMock()
+    input_buffers = MagicMock()
     input_block_tables = object()
     slot_mappings = torch.arange(8)
     slot_mappings_by_layer = object()
     attn_metadata = object()
-    block_tables = MagicMock()
+    block_tables = MagicMock(cp_size=1, cp_rank=0, cp_interleave=1)
     pcp_manager = MagicMock()
     pcp_manager.get_dummy_block_tables.return_value = input_block_tables
     pcp_manager.get_dummy_slot_mappings.return_value = slot_mappings
     model_state = MagicMock()
     model_state.prepare_attn.return_value = attn_metadata
     kv_cache_config = object()
+    dcp_local_seq_lens = object()
 
     with (
         patch(
-            "vllm_ascend.worker.v2.aclgraph_utils.cudagraph_utils.InputBatch.make_dummy",
+            "vllm_ascend.worker.v2.aclgraph_utils.AscendInputBatch.make_dummy",
             return_value=input_batch,
         ) as make_dummy,
         patch(
             "vllm_ascend.worker.v2.aclgraph_utils.cudagraph_utils.build_slot_mappings_by_layer",
             return_value=slot_mappings_by_layer,
         ),
+        patch(
+            "vllm_ascend.worker.v2.aclgraph_utils.maybe_prepare_dcp_local_seq_lens",
+            return_value=dcp_local_seq_lens,
+        ) as prepare_dcp_local_seq_lens,
     ):
         state = _prepare_pcp_inputs_to_capture(
             num_reqs=2,
@@ -872,6 +863,16 @@ def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
     block_tables.get_dummy_block_tables.assert_not_called()
     pcp_manager.get_dummy_block_tables.assert_called_once_with(2)
     pcp_manager.get_dummy_slot_mappings.assert_called_once_with(8)
+    prepare_dcp_local_seq_lens.assert_called_once_with(
+        input_buffers.dcp_local_seq_lens,
+        input_batch.seq_lens,
+        input_batch.num_reqs,
+        1,
+        0,
+        1,
+        num_reqs_padded=input_batch.num_reqs_after_padding,
+    )
+    assert input_batch.dcp_local_seq_lens is dcp_local_seq_lens
     model_state.prepare_attn.assert_called_once_with(
         input_batch,
         CUDAGraphMode.NONE,
@@ -920,11 +921,10 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.is_last_pp_rank = is_last_pp_rank
     runner.speculator = None
     runner.use_spec_pp = False
-    # vLLM main added these ExecuteModelState fields; v0.28.0 lacks them.
+    # vLLM main added these ExecuteModelState fields.
     state_kwargs: dict = {}
     state_kwargs["dp_sync"] = None
-    if not vllm_version_is("0.29.0"):
-        state_kwargs["cudagraph_stats"] = None
+    state_kwargs["cudagraph_stats"] = None
     runner.execute_model_state = vllm_model_runner.ExecuteModelState(
         input_batch=local_batch,
         attn_metadata=None,
