@@ -29,7 +29,7 @@ from vllm.config import CompilationConfig
 from tests.e2e.pull_request.utils import SPEC_DECODE_PROMPTS, _run_speculative_decoding
 
 QWEN36_MOE_MODEL = "Qwen/Qwen3.6-35B-A3B"
-QWEN36_DFLASH_DRAFT_MODEL = "rainney/AEON-DFlash-Qwen3.6-35B-A3B"
+QWEN36_DFLASH_DRAFT_MODEL = "z-lab/Qwen3.6-35B-A3B-DFlash"
 MODELS = [QWEN36_MOE_MODEL]
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
