@@ -176,6 +176,9 @@
 #       for EngineArgs conversion and `--engram-config` JSON parsing, then
 #       resolve DeepSeek V4.1 target configs through that subtype. Keep model,
 #       topology, load-format and DBO validation in the subtype.
+#       Skip this patch when vLLM does not provide EngramConfig. External DP
+#       locality is checked on the initialized DP group because its
+#       data_parallel_size_local counts engines per launcher.
 #    Related PR (if no, explain why):
 #       No Ascend upstream PR. The required generic Engram behavior is
 #       selectively backported from vLLM commit f84b0c4bce:
@@ -693,6 +696,26 @@
 #       before DSpark draft selection, or otherwise guarantees that rebuilding
 #       `model_arch_config` preserves the selected draft architecture.
 #
+#   3. `vllm.config.model.ModelConfig.verify_with_parallel_config`
+#    Why:
+#       The pinned vLLM revision propagates `enable_expert_parallel` to the
+#       draft parallel config (upstream #55914) but no longer disables it for
+#       dense drafts (upstream #56930 is not on this revision). Non-MoE draft
+#       models (e.g. Kimi K3 DSpark, VWN eagle3) then fail the
+#       `_verify_with_expert_parallelism` check in
+#       `ModelConfig.verify_with_parallel_config` and cannot start.
+#    How:
+#       Monkey-patch `verify_with_parallel_config` to skip the expert-parallel
+#       check when `runner_type == "draft"` and the model is not MoE. The target
+#       model EP check and MoE draft models are unaffected.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/55914
+#       https://github.com/vllm-project/vllm/pull/56930
+#    Future Plan:
+#       Remove this patch once the pinned vLLM revision disables expert
+#       parallelism for non-MoE draft models (upstream #56930) or exposes a
+#       backend-safe draft parallel config selection.
+#
 # ** 20. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
@@ -800,15 +823,13 @@
 #
 #   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
 #    Why:
-#       vLLM 0.28.0 rejects PCP+DP before Ascend MRV2 can validate it.
+#       vLLM 0.28.0 rejected PCP+DP before Ascend MRV2 could validate it.
 #    How:
-#       Only on Ascend MRV2 with DP>1, PCP>1 and DCP=1, temporarily mask
-#       PCP inside the original validator and restore it on every exit.
-#       Retain real DP validation and world_size; rebuild dependent Pydantic
-#       schemas once at import so nested configs use the same validator.
+#       Removed with the v0.30.0 boundary: the release-only validator override
+#       is no longer applied.
 #    Related PR: https://github.com/vllm-project/vllm/pull/54523
 #    Future Plan:
-#       Remove this workaround when vLLM 0.28.0 support is dropped.
+#       Re-add only if a supported pin rejects PCP+DP.
 #
 # * Worker Patch:
 # ========#
@@ -1541,30 +1562,21 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
 #    Why:
-#       vLLM v0.29.0 rejects PCP > 1 combined with DP > 1 in its shared
+#       The v0.29.0 release rejected PCP > 1 combined with DP > 1 in its shared
 #       validator, preventing Ascend's PCP+DP implementation from being reached.
 #       Upstream #54523 scopes this restriction to CUDA/ROCm instead; the pinned
 #       main already contains that fix.
 #    How:
-#       Apply only when vllm_version_is("0.29.0"). Preserve the release validator
-#       except for the PCP+DP rejection, without changing parameter values or
-#       bypassing other validation. Update the class method and Pydantic
-#       model-validator registration, then rebuild ParallelConfig,
-#       SpeculativeConfig, and VllmConfig in dependency order. SpeculativeConfig
-#       retains shared ParallelConfig schemas even through SkipValidation;
-#       rebuilding only the outer VllmConfig can restore the stale validator.
-#       Read parallel.current_platform dynamically to preserve the Ascend EPLB
-#       platform proxy installed by platform/patch_eplb.py.
+#       Removed with the v0.30.0 boundary: v0.30.0 equals the pinned main and
+#       already contains #54523, so no release-only validator override applies.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/54523/files
 #       Upstream commit: 7c2f1ff4958eaf0818405e9192c71608fe4a16b1.
 #       Release source: 98dff2a81d747d1dba01a47f939f48c3526d4206.
 #    Future Plan:
-#       Remove this patch and its platform import when v0.29.0 support is dropped
-#       and all supported pins contain #54523 or an equivalent backend-scoped
-#       check. If the supported release pin first receives a backport, remove
-#       it after verifying PCP+DP construction and execution, retained invalid-
-#       config rejection, and Ascend EPLB validation.
+#       Re-add only if a supported pin predates #54523 or an equivalent
+#       backend-scoped check, then verify PCP+DP construction and execution,
+#       retained invalid-config rejection, and Ascend EPLB validation.
 #
 #   2. `vllm.config.parallel.ParallelConfig.use_sequence_parallel_moe`
 #    Why:

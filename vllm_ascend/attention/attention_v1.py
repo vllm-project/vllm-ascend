@@ -547,7 +547,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
-        if self.kv_cache_dtype in [torch.float16, torch.bfloat16]:
+        # Note: Some embedding model weights are in float32 format.
+        if self.kv_cache_dtype in [torch.float16, torch.bfloat16, torch.float32]:
             self.enable_c8_quant = False
         else:
             if not self.enable_c8_quant:

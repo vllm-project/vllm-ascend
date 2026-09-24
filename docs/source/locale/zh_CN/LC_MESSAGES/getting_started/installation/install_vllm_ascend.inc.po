@@ -57,14 +57,6 @@ msgstr ""
 msgid "=== \"pip installation\""
 msgstr "=== \"pip 安装\""
 
-msgid ""
-"This installation method currently supports only **A2** builds and does not "
-"automatically support A3, Atlas 300I DUO, Atlas 200I Pro, or 950DT. For "
-"other hardware, use a prebuilt image, WheelNext, or a source installation."
-msgstr ""
-"此安装方法目前仅支持 **A2** 构建，不自动支持 A3、Atlas 300I DUO、Atlas 200I Pro 或 "
-"950DT。对于其他硬件，请使用预构建镜像、WheelNext 或源码安装。"
-
 msgid "??? tip \"If pip cannot verify the Huawei Cloud mirror certificate\""
 msgstr "??? tip \"如果 pip 无法验证华为云镜像证书\""
 
@@ -134,9 +126,6 @@ msgid ""
 "Finally, handle `triton` and `triton-ascend` according to the hardware:"
 msgstr "最后，根据硬件处理 `triton` 和 `triton-ascend`："
 
-msgid "=== \"A2 / A3 / 950DT\""
-msgstr "=== \"A2 / A3 / 950DT\""
-
 msgid ""
 "To ensure that Triton Ascend matches the current vLLM Ascend version, remove"
 " any existing `triton` and `triton-ascend` packages before installing the "
@@ -203,3 +192,15 @@ msgstr "对于 Ubuntu："
 
 msgid "For openEuler:"
 msgstr "对于 openEuler："
+
+msgid ""
+"This installation method currently supports only **A2** builds and does not "
+"automatically support A3, Atlas 300I DUO, Atlas 200I Pro, or 950DT Products."
+" For other hardware, use a prebuilt image, WheelNext, or a source "
+"installation."
+msgstr ""
+"此安装方式目前仅支持 **A2** 构建，不会自动支持 A3、Atlas 300I DUO、Atlas 200I Pro 或 Ascend "
+"950DT系列产品。对于其他硬件，请使用预构建镜像、WheelNext 或源码安装。"
+
+msgid "=== \"A2 / A3 / 950DT Products\""
+msgstr "=== \"A2 / A3 / Ascend 950DT系列产品\""
