@@ -107,7 +107,7 @@ permissions:
 jobs:
   setup-matrix:
     runs-on: linux-amd64-cpu-2-hk
-    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'image-build' }}
+    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'image-build' || true }}
     outputs:
       build_meta: ${{ steps.filter.outputs.build_meta }}
     steps:
@@ -143,8 +143,7 @@ jobs:
   image_build:
     name: ${{ matrix.build_meta.name }}
     needs: setup-matrix
-    if: ${{ !((github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'image-build')))
-        && !(github.event_name == 'workflow_dispatch' && inputs.vllm_commit != '' && inputs.vllm_ascend_commit != '') }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.vllm_commit != '' && inputs.vllm_ascend_commit != '') }}
     strategy:
       fail-fast: false
       max-parallel: 8
