@@ -12,6 +12,7 @@ import torch
 from torch.distributed import all_reduce
 from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
+from vllm.distributed.parallel_state import get_node_count
 
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
@@ -244,6 +245,97 @@ class AscendEplbState(_eplb_state.EplbState):
             log_stats=log_stats,
         )
 
+    def collect_global_load_stats(
+        self,
+    ) -> dict[str, PreparedLoadStats] | None:
+        """Prepare and reduce policy statistics on a shared time axis."""
+        prepare_load_stats = getattr(
+            self.policy, "prepare_local_load_stats", None
+        )
+        if prepare_load_stats is None:
+            raise TypeError(
+                "The selected EPLB policy does not prepare load statistics"
+            )
+        self._discard_samples_from_old_mapping()
+        if self._num_recorded_load_steps == 0:
+            return None
+
+        group = get_eplb_group()
+        step_indices = self._ordered_load_step_indices()
+        rank_counts = self._local_load_collection_mask[step_indices].clone()
+        all_reduce(rank_counts, group=group.cpu_group)
+        included_steps = step_indices[rank_counts > 0]
+        if included_steps.numel() == 0:
+            return None
+
+        local_stats: dict[str, PreparedLoadStats] = {}
+        for model_key, model_state in self.model_states.items():
+            physical_slots = self._physical_load_sample_slots[included_steps]
+            physical_samples = model_state.expert_load_window.new_zeros(
+                (
+                    included_steps.numel(),
+                    *model_state.expert_load_window.shape[1:],
+                )
+            )
+            local_mask = physical_slots >= 0
+            if local_mask.any():
+                device_mask = local_mask.to(physical_samples.device)
+                device_slots = physical_slots[local_mask].to(
+                    physical_samples.device
+                )
+                physical_samples[device_mask] = (
+                    model_state.expert_load_window.index_select(
+                        0, device_slots
+                    )
+                )
+            physical_stats = prepare_load_stats(physical_samples)
+            local_stats[model_key] = self._map_physical_stats_to_logical(
+                model_state, physical_stats
+            )
+
+        flat_values = [
+            stats.values.reshape(-1, stats.values.shape[-1])
+            for stats in local_stats.values()
+        ]
+        row_counts = [values.shape[0] for values in flat_values]
+        reduced = torch.cat(flat_values)
+        all_reduce(reduced, group=group.device_group)
+        split_values = reduced.split(row_counts)
+        return {
+            model_key: PreparedLoadStats(
+                split_values[index].reshape(stats.values.shape),
+                stats.sample_counts,
+            )
+            for index, (model_key, stats) in enumerate(local_stats.items())
+        }
+
+    def publish_async_load_stats(
+        self, global_load_stats: dict[str, PreparedLoadStats]
+    ) -> None:
+        """Publish one complete statistics snapshot to the async worker."""
+        if global_load_stats.keys() != self.model_states.keys():
+            raise ValueError(
+                "Load statistics must contain exactly one entry per EPLB model"
+            )
+        num_gpus = get_eplb_group().device_group.size()
+        num_nodes = get_node_count()
+        if num_gpus % num_nodes:
+            num_nodes = 1
+        for model_key, model_state in self.model_states.items():
+            load_stats = global_load_stats[model_key]
+            model_state._policy_load_stats = load_stats
+            model = model_state.model
+            model_state.eplb_stats = _eplb_state.EplbStats(
+                global_expert_load_window=load_stats.values,
+                num_replicas=model.num_physical_experts,
+                num_groups=model.num_expert_groups,
+                num_nodes=num_nodes,
+                num_gpus=num_gpus,
+            )
+        for model_state in self.model_states.values():
+            model_state.rebalanced = True
+        self.rearrange_event.record()
+
     def _has_global_fresh_recorded_load(self) -> bool:
         """Synchronize whether any EP rank recorded load since rearranging."""
         ep_group = get_ep_group()
@@ -275,6 +367,12 @@ class AscendEplbState(_eplb_state.EplbState):
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
     ) -> torch.Tensor | None:
+        use_custom_async_stats = (
+            self.is_async
+            and not is_profile
+            and rank_mapping is None
+            and self.uses_custom_load_stats
+        )
         should_gate = (
             hasattr(self, "_has_fresh_recorded_load")
             and not is_profile
@@ -284,10 +382,16 @@ class AscendEplbState(_eplb_state.EplbState):
         if should_gate and not self._has_global_fresh_recorded_load():
             return None
 
-        result = super().rearrange(
-            is_profile=is_profile,
-            rank_mapping=rank_mapping,
-        )
+        if use_custom_async_stats:
+            global_load_stats = self.collect_global_load_stats()
+            if global_load_stats is not None:
+                self.publish_async_load_stats(global_load_stats)
+            result = None
+        else:
+            result = super().rearrange(
+                is_profile=is_profile,
+                rank_mapping=rank_mapping,
+            )
         if not is_profile and not self.is_async:
             for model_state in self.model_states.values():
                 refresh_model_routing_tables(model_state)
@@ -317,6 +421,9 @@ class AscendEplbState(_eplb_state.EplbState):
                 raise TypeError("num_valid_physical_experts is required by the selected vLLM release mapping contract")
             from_mapping_kwargs["num_valid_physical_experts"] = num_valid_physical_experts
         state = super().from_mapping(**from_mapping_kwargs)
+        if state.uses_custom_load_stats:
+            for model_state in state.model_states.values():
+                state._initialize_load_stats_state(model_state)
         for model_state in state.model_states.values():
             refresh_model_routing_tables(model_state)
         return state
