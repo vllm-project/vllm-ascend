@@ -2,19 +2,16 @@
 
 ## v0.27.1rc1 - 2026.09.24
 
-This is the first release candidate of v0.27.1 for vLLM Ascend, aligned with upstream vLLM v0.27.1. This model-focused release adds Kimi-K3 support on Atlas 800 A3, MiniMax-M3 support on Atlas 800 A3 & 950DT Products, and new DeepSeek-V4-Flash support on 950DT Products. A2 was not sufficiently validated for this release and is not included in the support claim. Models and hardware combinations outside this declared scope are not part of the v0.27.1rc1 release validation. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
+This is the first release candidate of v0.27.1 for vLLM Ascend, aligned with upstream vLLM v0.27.1. This model-focused release adds MiniMax-M3 support on Atlas 800 A3 and 950DT Products, and new DeepSeek-V4-Flash support on 950DT Products. Other models and hardware combinations, such as Atlas 800 A2, were not sufficiently validated for this release. Models and hardware combinations outside this declared scope are not part of the v0.27.1rc1 release claim. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
 
 ### Highlights
 
-- **Kimi-K3 on Atlas 800 A3**: Added text and multimodal serving, MTP and DSpark speculative decoding, Prefix Cache, P/D serving, KDA/MLA execution, SiTU MoE, ModelSlim quantization adaptation, and DSpark with decode context parallelism. The release also fixes Atlas 800 A3 accuracy and stability regressions in KDA and sequence-parallel dense MLP execution. [#14454](https://github.com/vllm-project/vllm-ascend/pull/14454) [#16276](https://github.com/vllm-project/vllm-ascend/pull/16276) [#16180](https://github.com/vllm-project/vllm-ascend/pull/16180) [#16354](https://github.com/vllm-project/vllm-ascend/pull/16354) [#16445](https://github.com/vllm-project/vllm-ascend/pull/16445)
-- **MiniMax-M3 on Atlas 800 A3 & 950DT Products**: Added BF16, W8A8, and ModelOpt-compatible MXFP8 serving paths, with optimized MSA index-score, top-k, FlashDecoding, tensor-parallel communication, and the 950DT Products FP8 sparse-attention path. [#14412](https://github.com/vllm-project/vllm-ascend/pull/14412) [#14539](https://github.com/vllm-project/vllm-ascend/pull/14539) [#13142](https://github.com/vllm-project/vllm-ascend/pull/13142) [#13987](https://github.com/vllm-project/vllm-ascend/pull/13987) [#15897](https://github.com/vllm-project/vllm-ascend/pull/15897) [#15926](https://github.com/vllm-project/vllm-ascend/pull/15926)
+- **MiniMax-M3 on Atlas 800 A3 and 950DT Products**: Added BF16, W8A8, and ModelOpt-compatible MXFP8 serving paths, with optimized MSA index-score, top-k, FlashDecoding, tensor-parallel communication, and the 950DT Products FP8 sparse-attention path. [#14412](https://github.com/vllm-project/vllm-ascend/pull/14412) [#14539](https://github.com/vllm-project/vllm-ascend/pull/14539) [#13142](https://github.com/vllm-project/vllm-ascend/pull/13142) [#13987](https://github.com/vllm-project/vllm-ascend/pull/13987) [#15897](https://github.com/vllm-project/vllm-ascend/pull/15897) [#15926](https://github.com/vllm-project/vllm-ascend/pull/15926)
 - **DeepSeek-V4-Flash on 950DT Products**: Added the 950DT Products DSpark path and SparseFlashMla-based BF16 KV sparse attention, and improved Model Runner V2 DSpark, frontend rendering and tool streaming, DSA-CP execution, and layerwise KV-cache reuse. [#13506](https://github.com/vllm-project/vllm-ascend/pull/13506) [#13716](https://github.com/vllm-project/vllm-ascend/pull/13716) [#12968](https://github.com/vllm-project/vllm-ascend/pull/12968) [#16115](https://github.com/vllm-project/vllm-ascend/pull/16115) [#16021](https://github.com/vllm-project/vllm-ascend/pull/16021) [#17081](https://github.com/vllm-project/vllm-ascend/pull/17081)
 - **Speculative-decoding and serving stability**: Hardened sequence-length boundaries, empty-context handling, draft-state publication, rejection sampling, request token validation, and distributed MemCache initialization. [#16513](https://github.com/vllm-project/vllm-ascend/pull/16513) [#16720](https://github.com/vllm-project/vllm-ascend/pull/16720) [#17276](https://github.com/vllm-project/vllm-ascend/pull/17276) [#16215](https://github.com/vllm-project/vllm-ascend/pull/16215) [#16161](https://github.com/vllm-project/vllm-ascend/pull/16161) [#17308](https://github.com/vllm-project/vllm-ascend/pull/17308)
 
 ### Features
 
-- Added Kimi-K3 text and multimodal serving paths, MTP, DSpark speculative decoding, Prefix Cache, P/D serving, KDA/MLA attention, SiTU MoE, and ModelSlim quantization adaptation on Atlas 800 A3. [#14454](https://github.com/vllm-project/vllm-ascend/pull/14454)
-- Added Kimi-K3 DSpark support with decode context parallelism, including DCP-aware query-slot mapping and metadata preparation. [#16276](https://github.com/vllm-project/vllm-ascend/pull/16276)
 - Added a ModelOpt-compatible MXFP8 path for MiniMax-M3. With `--kv-cache-dtype fp8`, MSA and index caches use native FP8 E4M3 while dense GQA layers use BF16 unless explicitly configured otherwise. [#14412](https://github.com/vllm-project/vllm-ascend/pull/14412) [#15897](https://github.com/vllm-project/vllm-ascend/pull/15897) [#15926](https://github.com/vllm-project/vllm-ascend/pull/15926)
 - Added DeepSeek-V4-Flash DSpark and SparseFlashMla-based BF16 KV sparse attention on 950DT Products. [#13506](https://github.com/vllm-project/vllm-ascend/pull/13506) [#13716](https://github.com/vllm-project/vllm-ascend/pull/13716)
 - Added DeepSeek-V4-Flash layerwise KV-cache reuse support for physical layers with multiple main cache specifications. [#17081](https://github.com/vllm-project/vllm-ascend/pull/17081)
@@ -25,8 +22,7 @@ This is the first release candidate of v0.27.1 for vLLM Ascend, aligned with ups
 
 | Model | Supported hardware in v0.27.1rc1 | Release scope |
 | --- | --- | --- |
-| Kimi-K3 | Atlas 800 A3 | Text and multimodal serving, MTP, DSpark, Prefix Cache, P/D serving, KDA/MLA, and quantized deployment |
-| MiniMax-M3 | Atlas 800 A3 & 950DT Products | BF16, W8A8, MXFP8, multimodal serving, speculative decoding, P/D serving, and KV Cache Pool deployment |
+| MiniMax-M3 | Atlas 800 A3 and 950DT Products | BF16, W8A8, MXFP8, multimodal serving, speculative decoding, P/D serving, and KV Cache Pool deployment |
 | DeepSeek-V4-Flash | 950DT Products | DSpark, sparse attention, frontend and tool streaming, DSA-CP, and layerwise KV-cache reuse |
 
 - Integrated the AscendC MSA index-score operator into MiniMax-M3 prefill, decode, and speculative-decode paths. [#14539](https://github.com/vllm-project/vllm-ascend/pull/14539)
@@ -41,9 +37,7 @@ Unless stated otherwise, these optimizations are selected automatically for the 
 - Optimized MiniMax-M3 MSA index-score computation for prefill, decode, and speculative decode. [#14539](https://github.com/vllm-project/vllm-ascend/pull/14539)
 - Reworked MiniMax-M3 decode score computation and TP communication to exchange index queries and local top-k candidates instead of full index KV data. [#13142](https://github.com/vllm-project/vllm-ascend/pull/13142)
 - Reduced the MiniMax-M3 sparse-attention score operator cost and added FlashDecoding support. [#13987](https://github.com/vllm-project/vllm-ascend/pull/13987)
-- Overlapped Kimi-K3 KDA mixed-precision gate projection work with dynamic quantization and QKV computation while preserving the existing configuration. [#15978](https://github.com/vllm-project/vllm-ascend/pull/15978)
 - Overlapped shared-expert input/output collectives and projections with routed-expert computation in the supported MoE multistream path. [#15974](https://github.com/vllm-project/vllm-ascend/pull/15974)
-- Avoided token-count-specific Triton compilation variants in the Kimi-K3 attention-residual kernel. [#16006](https://github.com/vllm-project/vllm-ascend/pull/16006)
 - Built DeepSeek V4 compressor, indexer, sparse-attention, and DSpark metadata asynchronously on eligible Model Runner V1 paths. [#15776](https://github.com/vllm-project/vllm-ascend/pull/15776)
 - Improved DeepSeek V4 DSA-CP prefill execution by aligning sequence parallelism with the model and attention collectives. [#16021](https://github.com/vllm-project/vllm-ascend/pull/16021)
 - Prefetched two AscendStore layers by default to reduce layerwise KV Pool stalls. [#15797](https://github.com/vllm-project/vllm-ascend/pull/15797)
@@ -52,8 +46,9 @@ Unless stated otherwise, these optimizations are selected automatically for the 
 
 - **Upstream vLLM**: v0.27.1.
 - **Python**: >= 3.10, < 3.13; the release images use Python 3.12.
-- **Ascend HDK / CANN**: Use the v0.23.0 release configuration. Atlas 800 A3 requires HDK >= 26.0 (or HDK >= 25.5 with Mooncake >= v0.3.11) and CANN 9.0.0; 950DT Products require HDK >= 25.6 with Mooncake >= v0.3.11 and CANN 9.1.0.
-- **PyTorch / torch_npu**: 2.10.0 / 2.10.0.post4.
+- **Ascend HDK**: Use the v0.23.0 release configuration. Atlas 800 A3 requires HDK >= 26.0 (or HDK >= 25.5 with Mooncake >= v0.3.11); 950DT Products require HDK >= 25.6 with Mooncake >= v0.3.11.
+- **CANN**: 9.1.0.
+- **PTA (PyTorch / torch_npu)**: 2.10.0 / 2.10.0.post4.
 - **Triton Ascend**: 3.2.2.
 - **Mooncake**: 0.3.11.post1 in the release images.
 
@@ -61,17 +56,15 @@ Unless stated otherwise, these optimizations are selected automatically for the 
 
 - Enabling `additional_config.enable_dsa_cp` now emits an advance deprecation warning. Starting with v0.29.0, DSA-CP will be deprecated for Model Runner V2 deployments; Prefill Context Parallelism (PCP) will provide full coverage and replace it. The Model Runner V1 path will remain available until Model Runner V1 is removed, after which DSA-CP will be removed completely. DSA-CP behavior is unchanged in v0.27.1rc1. [#15890](https://github.com/vllm-project/vllm-ascend/pull/15890)
 - `finegrained_tp_config.olora_tensor_parallel_size` is deprecated in the v0.27.x release line and has already been removed from `main`; it will be unavailable starting with the v0.28.x release line. Remove this key before upgrading. This only removes the unused DeepSeek V4 oLoRA tensor-parallel switch; the model architecture field `o_lora_rank`, standard LoRA adapters, and the other fine-grained TP settings are unaffected. [#15857](https://github.com/vllm-project/vllm-ascend/pull/15857)
-- Release images keep jemalloc available without forcing a global preload; enable it explicitly when required. [#17146](https://github.com/vllm-project/vllm-ascend/pull/17146)
+- For v0.27.1rc1, release images do not preload jemalloc globally. This is a release-specific image configuration and does not announce removal in future releases; jemalloc remains installed and can be enabled explicitly when required. [#17146](https://github.com/vllm-project/vllm-ascend/pull/17146)
 
 ### Documentation
 
-- Added and updated the Kimi-K3 Atlas 800 A3 deployment and validation guide, including the required allocator configuration. [#14454](https://github.com/vllm-project/vllm-ascend/pull/14454) [#16008](https://github.com/vllm-project/vllm-ascend/pull/16008) [#17155](https://github.com/vllm-project/vllm-ascend/pull/17155)
 - Expanded the MiniMax-M3 guide with Atlas 800 A3 and 950DT Products standalone and P/D-disaggregated deployment, EAGLE3, KV Cache Pool, chunked prefill, Prefix Cache, multimodal, reasoning, and tool-calling guidance. [#13476](https://github.com/vllm-project/vllm-ascend/pull/13476) [#16173](https://github.com/vllm-project/vllm-ascend/pull/16173) [#16509](https://github.com/vllm-project/vllm-ascend/pull/16509) [#16987](https://github.com/vllm-project/vllm-ascend/pull/16987) [#17242](https://github.com/vllm-project/vllm-ascend/pull/17242)
-- Added 950DT Products model-matrix coverage and deployment guidance for DeepSeek-V4-Flash. [#17453](https://github.com/vllm-project/vllm-ascend/pull/17453)
+- Added 950DT Products model-matrix coverage and deployment guidance for DeepSeek-V4-Flash. [#17435](https://github.com/vllm-project/vllm-ascend/pull/17435)
 
 ### Stability and Bug Fixes
 
-- Fixed Kimi-K3 Atlas 800 A3 accuracy and stability issues in KDA padded-chunk workspace allocation, sequence-parallel dense MLP execution, and KDA preprocessing/output masking; also fixed DSpark KV grouping when Prefix Cache is disabled. [#16180](https://github.com/vllm-project/vllm-ascend/pull/16180) [#16354](https://github.com/vllm-project/vllm-ascend/pull/16354) [#16445](https://github.com/vllm-project/vllm-ascend/pull/16445) [#16147](https://github.com/vllm-project/vllm-ascend/pull/16147)
 - Corrected parallel-drafting sequence lengths and draft-model detection, handled empty DSpark context, skipped over-limit drafting without breaking DP collective alignment, and preserved tensor state for the following asynchronous step. [#15870](https://github.com/vllm-project/vllm-ascend/pull/15870) [#15977](https://github.com/vllm-project/vllm-ascend/pull/15977) [#16720](https://github.com/vllm-project/vllm-ascend/pull/16720) [#16513](https://github.com/vllm-project/vllm-ascend/pull/16513) [#17276](https://github.com/vllm-project/vllm-ascend/pull/17276)
 - Fixed out-of-bounds rejection-sampling address construction and reject invalid `stop_token_ids` or `allowed_token_ids` before device-side indexing. [#16215](https://github.com/vllm-project/vllm-ascend/pull/16215) [#16161](https://github.com/vllm-project/vllm-ascend/pull/16161)
 - Fixed DeepSeek V4 chat-template rendering, reasoning-effort compatibility, long tool-argument streaming, DSA-CP sequence-parallel execution, and a DSA-CP hang caused by stale host-side QLI bounds. [#16115](https://github.com/vllm-project/vllm-ascend/pull/16115) [#16021](https://github.com/vllm-project/vllm-ascend/pull/16021) [#16480](https://github.com/vllm-project/vllm-ascend/pull/16480)
@@ -83,7 +76,8 @@ Unless stated otherwise, these optimizations are selected automatically for the 
 
 - This is a model-focused release candidate. Only the model and hardware combinations in the table above are included in the v0.27.1rc1 release scope.
 - MiniMax-M3 EAGLE3 uses eager execution for the draft model in the validated P/D configurations; follow the updated deployment guide. [#17242](https://github.com/vllm-project/vllm-ascend/pull/17242)
-- The complete live validation and artifact status is maintained in the [release checklist](https://github.com/vllm-project/vllm-ascend/issues/16288).
+- The v0.27.1rc1 test report is maintained in [`tests/0.27.1rc_vllm-ascend_overall_conclusion_release_notes_EN.md`](https://github.com/vllm-project/vllm-ascend/blob/releases/v0.27.1rc/tests/0.27.1rc_vllm-ascend_overall_conclusion_release_notes_EN.md); see [#17517](https://github.com/vllm-project/vllm-ascend/pull/17517) for the report update.
+- The release and artifact status is maintained in the [release checklist](https://github.com/vllm-project/vllm-ascend/issues/16288).
 
 ## v0.23.0 - 2026.08.16
 
