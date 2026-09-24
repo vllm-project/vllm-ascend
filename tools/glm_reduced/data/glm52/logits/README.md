@@ -12,8 +12,9 @@ wrong ordering/input hashes, invalid token IDs, missing positions, NaN/Inf logit
 and incomplete worker execution fail the gate. CI never recalibrates or retries.
 
 `dataset.json` pins seed 20260922, the GSM8K test revision
-`3101c7d5072418e28b9008a6636bde82a006892c`, question indices, prompts, gold answers,
-tokens and causal prediction positions. Dataset provenance is
+`3101c7d5072418e28b9008a6636bde82a006892c`, question indices, prompt/gold-answer
+token IDs and causal prediction positions. Raw question/answer text is not
+stored in the fixture. Dataset provenance is
 [openai/grade-school-math](https://github.com/openai/grade-school-math), MIT licensed.
 `A1.json` contains argmax IDs extracted from the archived full-vocabulary float32
 A1 arrays **after checking each original array's SHA-256 and finite values**.

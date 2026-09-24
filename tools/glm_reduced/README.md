@@ -181,11 +181,11 @@ bootstraps a baseline. See [the fixture notes](data/glm52/perf/README.md).
   vllm + vllm_ascend NPU runtime; they exit with code 2 and a clear message
   when it is unavailable. Everything else — reduction, verification,
   comparison logic, CLI — is CPU-tested and requires `regex` without Torch or NPU dependencies.
-- Both runners drive the **text route only** (`prompt_token_ids`). For
-  GLM-4.1V / GLM-5.3-Flash this is valid partial coverage of the language
-  tower; it is NOT visual precision/performance coverage. A deterministic
-  image-input workload with fixed images/processors in the workload identity
-  would be required before claiming multimodal gates — not yet implemented.
+- Both runners drive the **text route only** (`prompt_token_ids`) and accept
+  only the registered non-Flash GLM5.x DSA checkpoint. They reject GLM-4.1V,
+  GLM-5.3-Flash and other unsupported families before measurement. The builder's
+  additional profiles do not constitute numerical or performance gates for
+  those families.
 
 ```bash
 # CI (cpu-ut partition discovers all of tests/ut automatically):
@@ -196,6 +196,22 @@ pytest tests/ut/tools/glm_reduced --confcutdir=tests/ut/tools/glm_reduced
 ```
 
 ## Relationship to existing coverage
+
+The independent dummy functional test in
+[PR #17433](https://github.com/vllm-project/vllm-ascend/pull/17433) follows the
+K3 pattern: it constructs local configs, initializes random weights, and checks
+execution without a checkpoint download. It does not use `tools/glm_reduced`,
+its fixtures or its baselines. Conversely, this builder and its gates do not
+import dummy-test helpers; neither change requires the other to merge first.
+
+`tests/e2e/pull_request/four_card/test_glm52_reduced_checkpoint.py` stays with
+the real-weight builder. It verifies TP4+EP eager startup/generation after
+preparing a locally cached W4A8 checkpoint, including the real checkpoint and
+quantization-metadata loading path that dummy initialization bypasses. A
+missing local source causes an explicit skip; such a skip is not validation
+of the builder or either TP8 gate. The logits gate and performance gate remain
+separate nightly cases, with the performance registration disabled until a
+matching runner baseline is qualified.
 
 `tests/e2e/pull_request/four_card/test_kimi_k3.py` is dummy-weight functional
 coverage for K3, not an accuracy/performance gate; this tool targets the

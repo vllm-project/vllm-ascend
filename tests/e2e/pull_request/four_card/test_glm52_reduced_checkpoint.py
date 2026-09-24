@@ -15,13 +15,16 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Four-card functional coverage for the layer-reduced GLM-5.2 W4A8 checkpoint.
+"""Four-card real-checkpoint loading coverage for reduced GLM-5.2 W4A8.
 
 The 78-layer source is resolved from the local ModelScope weight cache (no
 network access) and cropped to 11 main layers inside the test, so the test model
 construction stays local to the test. This is a functional startup/generation
 check, not an accuracy gate: it does not apply the TP8 numerical baseline and
-says nothing about GSM8K accuracy.
+says nothing about GSM8K accuracy. This test deliberately exercises real
+checkpoint/quantization metadata loading, which load_format="dummy" bypasses.
+It belongs with tools/glm_reduced and does not import the separate dummy
+functional test or require that test's PR to be merged.
 """
 
 from __future__ import annotations
@@ -74,7 +77,7 @@ def _reduced_checkpoint() -> Path:
     graph_mode="eager",
 )
 @wait_until_npu_memory_free()
-def test_glm52_reduced_tp4_eager_generates() -> None:
+def test_glm52_reduced_checkpoint_tp4_eager_generates() -> None:
     """The locally cropped 11-layer checkpoint starts at TP4 and generates tokens."""
     model = _reduced_checkpoint()
     with VllmRunner(
