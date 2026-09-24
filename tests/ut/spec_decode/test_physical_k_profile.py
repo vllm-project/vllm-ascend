@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from vllm_ascend.dynamic_spec import PHYSICAL_K_RECOMMEND_INTERVAL
 from vllm_ascend.worker.v2.spec_decode.physical_k_profile import (
     configure_physical_k_profiling,
     physical_k_profile_scope,
@@ -82,10 +83,18 @@ def test_profile_scope_is_nested_and_restored():
     assert profiling_physical_k() is None
 
 
-def test_small_config_does_not_profile_unused_lower_k():
+def test_small_config_profiles_all_non_empty_batch_buckets():
     manager = configure_physical_k_profiling(FakeManager(), config())
     cases = list(manager.batches_to_profile([8]))
-    assert [case["profile_physical_k"] for case in cases] == [4, 4]
+    buckets_by_k = {
+        physical_k: {
+            case["num_tokens"]
+            for case in cases
+            if case["profile_physical_k"] == physical_k
+        }
+        for physical_k in (3, 4)
+    }
+    assert buckets_by_k == {3: {1, 2, 4, 8}, 4: {1, 2, 4, 8}}
 
 
 def test_lower_k_profile_replays_are_sparse_but_max_k_is_unchanged():
@@ -99,7 +108,11 @@ def test_lower_k_profile_replays_are_sparse_but_max_k_is_unchanged():
     manager.batches_to_profile = MethodType(batches_to_profile, manager)
     manager = configure_physical_k_profiling(manager, config())
     cases = list(manager.batches_to_profile([8]))
-    assert [case["profile_physical_k"] for case in cases] == [3, 3, 4, 4, 4, 4, 4]
+    lower_k = [case for case in cases if case["profile_physical_k"] == 3]
+    max_k = [case for case in cases if case["profile_physical_k"] == 4]
+    assert len(lower_k) == 10
+    assert {case["num_tokens"] for case in lower_k} == {1, 2, 4, 8, 16}
+    assert len(max_k) == 11
 
 
 def test_profile_grid_extends_through_large_rl_batch_buckets():
@@ -115,7 +128,8 @@ def test_profile_grid_extends_through_large_rl_batch_buckets():
         }
         for physical_k in (3, 4)
     }
-    assert by_k == {3: {16, 32, 64}, 4: {8, 16, 32, 64}}
+    expected = {1, 2, 4, 8, 16, 32, 64}
+    assert by_k == {3: expected, 4: expected}
 
 
 def test_worker_recommends_k_from_profile_cost_and_confidence():
@@ -128,12 +142,26 @@ def test_worker_recommends_k_from_profile_cost_and_confidence():
     assert physical_k == 3
 
 
-def test_small_batch_skips_runtime_scoring():
+def test_small_batch_gets_runtime_recommendation():
     manager = profiled_manager(1.0, 10.0)
     per_req = {str(i): 5 for i in range(8)}
     drafts = {str(i): [1, 2, 3, 4] for i in range(8)}
     manager.get_num_tokens(per_req, drafts)
-    assert manager._physical_k_recommendation is None
+    assert manager._physical_k_recommendation == (8, 3)
+
+
+def test_runtime_scoring_is_throttled_per_batch_bucket():
+    manager = profiled_manager(1.0, 10.0)
+    per_req = {str(i): 5 for i in range(8)}
+    drafts = {str(i): [1, 2, 3, 4] for i in range(8)}
+
+    manager.get_num_tokens(per_req, drafts)
+    assert manager._physical_k_recommendation == (8, 3)
+    for _ in range(PHYSICAL_K_RECOMMEND_INTERVAL - 1):
+        manager.get_num_tokens(per_req, drafts)
+        assert manager._physical_k_recommendation is None
+    manager.get_num_tokens(per_req, drafts)
+    assert manager._physical_k_recommendation == (8, 3)
 
 
 def test_narrowed_runtime_width_does_not_replace_full_width_recommendation():
@@ -154,19 +182,23 @@ def test_cost_floor_rejects_shorter_k_dominated_by_wider_graph():
 
 def test_eager_target_samples_do_not_price_draft_k():
     manager = configure_physical_k_profiling(FakeManager(16), config())
-    list(manager.batches_to_profile([8]))
-    samples = [
-        SimpleNamespace(num_reqs=16, drafter_ms=1.0, physical_k=3, full_cudagraph=True),
-        SimpleNamespace(num_reqs=16, drafter_ms=100.0, physical_k=3, full_cudagraph=False),
-        SimpleNamespace(num_reqs=8, drafter_ms=2.0, physical_k=4, full_cudagraph=True),
-        SimpleNamespace(num_reqs=8, drafter_ms=2.0, physical_k=4, full_cudagraph=True),
-        SimpleNamespace(num_reqs=16, drafter_ms=2.0, physical_k=4, full_cudagraph=True),
-        SimpleNamespace(num_reqs=16, drafter_ms=200.0, physical_k=4, full_cudagraph=False),
-    ]
+    cases = list(manager.batches_to_profile([8]))
+    samples = []
+    for index, case in enumerate(cases):
+        physical_k = case["profile_physical_k"]
+        is_eager = index == 0 or index == len(cases) - 1
+        samples.append(
+            SimpleNamespace(
+                num_reqs=case["num_tokens"],
+                drafter_ms=1.0 if physical_k == 3 else 2.0,
+                physical_k=physical_k,
+                full_cudagraph=not is_eager,
+            )
+        )
     manager.set_initial_cost_curves(samples)
     assert manager._physical_k_draft_costs == {
-        3: {16: 1.0},
-        4: {8: 2.0, 16: 2.0},
+        3: {1: 1.0, 2: 1.0, 4: 1.0, 8: 1.0, 16: 1.0},
+        4: {1: 2.0, 2: 2.0, 4: 2.0, 8: 2.0, 16: 2.0},
     }
 
 
