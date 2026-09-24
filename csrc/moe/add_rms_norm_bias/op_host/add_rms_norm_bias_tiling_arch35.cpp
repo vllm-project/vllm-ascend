@@ -208,9 +208,9 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
         tiling.set_epsilon(*epsilon);
         tiling.set_avgFactor(avgFactor);
         tiling.set_nullptr_beta(hasBeta ? 0 : 1);
-        OPS_LOG_I(context,
-                "TilingData numCore: %u, ubSize: %lu, numRow: %lu, numCol: %lu, numColAlign: %lu, "
-                "blockFactor: %lu, rowFactor: %lu, binAddQuotient: %lu, "
+        OP_LOGI(context,
+                "TilingData numCore: %u, ubSize: %lu, numRow: %u, numCol: %u, numColAlign: %u, "
+                "blockFactor: %u, rowFactor: %u, binAddQuotient: %u, "
                 "epsilon: %f, avgFactor: %f",
                 numCore, ubSize, tiling.get_numRow(), tiling.get_numCol(), tiling.get_numColAlign(),
                 tiling.get_blockFactor(), tiling.get_rowFactor(), tiling.get_binAddQuotient(), tiling.get_epsilon(),
@@ -248,7 +248,7 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
         tiling.set_colBuferLength(colBuferLength);
         tiling.set_multiNNum(multiNNum);
         tiling.set_isNddma(isNddma);
-        OPS_LOG_I(context,
+        OP_LOGI(context,
                 "TilingData numCore: %u, ubSize: %lu, numRow: %u, numCol: %u, numColAlign: %u, colBuferLength: %u, "
                 "blockFactor: %u, rowFactor: %u, ubFactor: %u, "
                 "epsilon: %f, avgFactor: %f, ubLoop: %u, multiNNum: %u, isNddma: %u.",
