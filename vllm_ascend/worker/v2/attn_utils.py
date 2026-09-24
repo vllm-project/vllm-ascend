@@ -124,10 +124,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         c8_k_scale_cache_dtype = torch.float32
     elif c8_k_cache_dtype == torch.int8:
         c8_k_scale_cache_dtype = torch.float16
-    
-    c8_cache_dtype = kv_cache_dtype_str_to_dtype(
-        vllm_config.cache_config.cache_dtype, vllm_config.model_config
-    )
+
+    c8_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
 
     for layer_name, attn_module in attn_layers.items():
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
