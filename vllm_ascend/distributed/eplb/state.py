@@ -4,6 +4,7 @@
 """Ascend-owned extensions for the upstream EPLB state."""
 
 import inspect
+import time
 from contextvars import ContextVar
 from dataclasses import fields
 from typing import Any
@@ -359,6 +360,27 @@ class AscendEplbState(_eplb_state.EplbState):
         if not is_profile:
             self._has_fresh_recorded_load = False
         return result
+
+    def drain_async(self) -> None:
+        """Acknowledge changed-layer and no-op results through one lifecycle."""
+        if not self.is_async:
+            return
+        for model_state in self.model_states.values():
+            while model_state.rebalanced:
+                if self._all_ranks_result_ready(model_state):
+                    result = model_state.pending_result
+                    assert result is not None
+                    if getattr(
+                        result,
+                        "is_last_result",
+                        result.layer_idx
+                        == model_state.model.num_moe_layers - 1,
+                    ):
+                        model_state.rebalanced = False
+                    model_state.pending_result = None
+                    result.consumed_event.record()
+                else:
+                    time.sleep(0.001)
 
     @classmethod
     def from_mapping(

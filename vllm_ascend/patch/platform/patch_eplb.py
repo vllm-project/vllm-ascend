@@ -4,9 +4,12 @@
 """Narrow vLLM EPLB construction, execution, and commit adapters for Ascend."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from functools import wraps
 from inspect import signature
+from typing import Any
 
+import numpy as np
 import torch
 from vllm.config import parallel as _parallel_config
 from vllm.distributed.eplb import async_worker as _async_worker
@@ -19,6 +22,7 @@ from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
 from vllm_ascend.distributed.eplb.state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+    AscendEplbState,
     EXPERT_MAPPING_EP_SIZE,
     refresh_model_routing_tables,
 )
@@ -365,6 +369,18 @@ def _wrap_move_to_workspace(original_move):
         model_state = bound.arguments["model_state"]
         pending_result = model_state.pending_result
         layer_idx = pending_result.layer_idx if pending_result is not None else None
+        is_last_result = (
+            getattr(
+                pending_result,
+                "is_last_result",
+                layer_idx == model_state.model.num_moe_layers - 1,
+            )
+            if pending_result is not None
+            else False
+        )
+        full_target = getattr(
+            model_state.communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, None
+        )
 
         deferred_event = None
         consumed_event = None
@@ -373,18 +389,37 @@ def _wrap_move_to_workspace(original_move):
             deferred_event = _DeferredConsumedEvent(consumed_event)
             pending_result.consumed_event = deferred_event
         try:
-            result = original_move(*bound.args, **bound.kwargs)
+            move = (
+                _move_changed_layer_to_workspace
+                if isinstance(pending_result, _AscendAsyncLayerResult)
+                else original_move
+            )
+            result = move(*bound.args, **bound.kwargs)
             if layer_idx is not None:
                 refresh_model_routing_tables(model_state, layer_idx)
-                is_last_layer = layer_idx == model_state.model.num_moe_layers - 1
-                if is_last_layer:
-                    _clear_transfer_target(model_state.communicator)
-                if bound.arguments["ep_rank"] == 0 and is_last_layer:
-                    logger.info(
-                        "%s: model=%s",
-                        ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-                        model_state.model_name,
-                    )
+            if is_last_result:
+                _clear_transfer_target(model_state.communicator)
+                if bound.arguments["ep_rank"] == 0:
+                    if full_target is None:
+                        logger.info(
+                            "%s: model=%s",
+                            ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                            model_state.model_name,
+                        )
+                    else:
+                        source_ranks = np.asarray(full_target.source_rank_ids)
+                        destination_ranks = np.arange(source_ranks.shape[-2])[
+                            None, :, None
+                        ]
+                        rank_transfers = np.count_nonzero(
+                            source_ranks != destination_ranks
+                        )
+                        logger.info(
+                            "%s: model=%s rank_transfers=%d",
+                            ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                            model_state.model_name,
+                            rank_transfers,
+                        )
         finally:
             if pending_result is not None and consumed_event is not None:
                 pending_result.consumed_event = consumed_event
@@ -406,4 +441,5 @@ _patch_parallel_config()
 _patch_initial_expert_layout()
 _patch_communicator_factory()
 _patch_explicit_transfer_execution()
+_patch_changed_layer_transfer()
 _patch_async_move_to_workspace()
