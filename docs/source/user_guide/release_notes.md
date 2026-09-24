@@ -44,6 +44,8 @@ Unless stated otherwise, these optimizations are selected automatically for the 
 
 ### Dependencies
 
+Use the official v0.27.1rc1 release images to ensure that the required operator packages and matching dependency versions are installed.
+
 - **Upstream vLLM**: v0.27.1.
 - **Python**: >= 3.10, < 3.13; the release images use Python 3.12.
 - **Ascend HDK**: 26.1.1.
@@ -54,6 +56,7 @@ Unless stated otherwise, these optimizations are selected automatically for the 
 
 ### Deprecation and Configuration Changes
 
+- The parameters `enable_sparse_sfa_c8` and `enable_sparse_li_c8` will be deprecated in a future release. For KV cache quantization, we have aligned the configuration approach with the upstream community. Use `--kv-cache-dtype` and `--attention-config.indexer_kv_dtype` to specify quantization types.
 - **Upcoming model deprecations**: The following models are planned for deprecation from the actively maintained model set. Once this takes effect, their CI and nightly test coverage will no longer be maintained, and the latest `main` branch will no longer receive model-specific compatibility fixes or feature maintenance for them. This does not affect their availability in the earlier releases and release candidates that include them, where they received extensive functional and performance validation. Users can continue deploying those versions and use them as a base for custom development and model-specific extensions:
     - DeepSeek-R1
     - DeepSeek-R1-0528
