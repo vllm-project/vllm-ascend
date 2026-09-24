@@ -33,7 +33,7 @@ def test_native_quantization_and_cache_pipeline_routing(variant):
     scales = torch.full((rows,), 0.12345, dtype=torch.float32)
     caches = (torch.zeros(256, 128, dtype=torch.int8), torch.zeros(256, 1, dtype=torch.float16))
 
-    class Backend:
+    class Backend(SimpleNamespace):
         k_hadamard = torch.eye(128, dtype=torch.bfloat16)
 
     class OtherBackend(Backend):
@@ -64,7 +64,7 @@ def test_native_quantization_and_cache_pipeline_routing(variant):
         "get_tp_group": lambda: None,
     }
     future = ast.parse("from __future__ import annotations").body
-    exec(compile(ast.Module(body=future + methods, type_ignores=[]), str(source), "exec"), namespace)
+    exec(compile(ast.Module(body=[*future, *methods], type_ignores=[]), str(source), "exec"), namespace)
     state = OtherBackend() if variant == "subclass" else Backend()
     state._dcp_size = 1 if variant == "dcp1" else 8
     state._pcp_active, state._dsa_cp_active = variant == "pcp", variant == "dsa"

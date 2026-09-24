@@ -24,7 +24,7 @@ def test_empty_remap_preserves_shape_dtype_and_avoids_launch(shape):
 def test_generic_wrapper_routes_to_exact_integer_fallback(ranks, interleave, dtype):
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/triton/sparse_index_remap.py"
     tree = ast.parse(source.read_text())
-    functions = [
+    functions: list[ast.stmt] = [
         node
         for node in tree.body
         if isinstance(node, ast.FunctionDef)
