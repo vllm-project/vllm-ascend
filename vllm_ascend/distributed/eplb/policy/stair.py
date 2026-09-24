@@ -1048,14 +1048,16 @@ class StairEplbPolicy(AbstractEplbPolicy):
         current_rank_expert_ids: np.ndarray,
         plan: StairPlan,
         num_experts: int,
-        rank_pair_migration_limit: int,
+        rank_node_ids: np.ndarray,
+        rank_transfer_limit: int,
+        cross_node_transfer_limit: int,
     ) -> None:
         """Validate a fixed-shape plan against its current placement.
 
         Current and planned arrays are ``[layers, ranks, slots]``. Every source
         coordinate must own its target expert in the current placement;
-        retained experts must keep their rank and slot. Directed rank-pair
-        migration usage is counted independently for each layer. Predicted mean
+        retained experts must keep their rank and slot. Rank and cross-node
+        transfer usage is counted independently for each layer. Predicted mean
         ratios are ``[layers]``: changed layers require a finite value and
         unchanged layers require NaN.
         """
@@ -1069,10 +1071,14 @@ class StairEplbPolicy(AbstractEplbPolicy):
             raise ValueError("STAIR plan placement and source arrays must match the current placement shape")
         if not all(np.issubdtype(values.dtype, np.integer) for values in (target, source_ranks, source_slots)):
             raise ValueError("STAIR plan placement and source arrays must contain integers")
-        controls = num_experts, rank_pair_migration_limit
+        node_ids = np.asarray(rank_node_ids)
+        if node_ids.shape != (current.shape[1],) or not np.issubdtype(node_ids.dtype, np.integer):
+            raise ValueError("rank_node_ids must contain one integer per rank")
+        controls = num_experts, rank_transfer_limit, cross_node_transfer_limit
         invalid_type = any(isinstance(value, bool) or not isinstance(value, int) for value in controls)
-        if invalid_type or num_experts < 1 or rank_pair_migration_limit < 1:
-            raise ValueError("num_experts and rank_pair_migration_limit must be positive integers")
+        invalid_limits = rank_transfer_limit < -1 or rank_transfer_limit == 0 or cross_node_transfer_limit < -1
+        if invalid_type or num_experts < 1 or invalid_limits:
+            raise ValueError("STAIR expert count and transfer limits are invalid")
 
         ratios = np.asarray(plan.predicted_mean_ratios)
         if ratios.shape != (current.shape[0],) or not np.issubdtype(ratios.dtype, np.floating):
@@ -1097,7 +1103,10 @@ class StairEplbPolicy(AbstractEplbPolicy):
             if changed != has_candidate:
                 raise ValueError("predicted_mean_ratios must be finite for changed layers and NaN for unchanged layers")
 
-            pair_usage: dict[tuple[int, int], int] = {}
+            outgoing = np.zeros(current.shape[1], dtype=np.int64)
+            incoming = np.zeros(current.shape[1], dtype=np.int64)
+            cross_out: dict[int, int] = {}
+            cross_in: dict[int, int] = {}
             for dst_rank, target_experts in enumerate(target_layer):
                 current_slots = {int(expert): slot for slot, expert in enumerate(current_layer[dst_rank])}
                 for dst_slot, expert in enumerate(target_experts):
@@ -1110,7 +1119,18 @@ class StairEplbPolicy(AbstractEplbPolicy):
                         if (src_rank, src_slot, dst_slot) != (dst_rank, retained_slot, retained_slot):
                             raise ValueError("retained experts must keep their current rank and slot")
                         continue
-                    pair = (src_rank, dst_rank)
-                    pair_usage[pair] = pair_usage.get(pair, 0) + 1
-                    if pair_usage[pair] > rank_pair_migration_limit:
-                        raise ValueError("STAIR plan exceeds the directed rank-pair migration limit")
+                    outgoing[src_rank] += 1
+                    incoming[dst_rank] += 1
+                    if rank_transfer_limit != -1 and (
+                        outgoing[src_rank] > rank_transfer_limit or incoming[dst_rank] > rank_transfer_limit
+                    ):
+                        raise ValueError("STAIR plan exceeds a per-rank transfer limit")
+                    src_node, dst_node = int(node_ids[src_rank]), int(node_ids[dst_rank])
+                    if src_node != dst_node:
+                        cross_out[src_node] = cross_out.get(src_node, 0) + 1
+                        cross_in[dst_node] = cross_in.get(dst_node, 0) + 1
+                        if cross_node_transfer_limit != -1 and (
+                            cross_out[src_node] > cross_node_transfer_limit
+                            or cross_in[dst_node] > cross_node_transfer_limit
+                        ):
+                            raise ValueError("STAIR plan exceeds a per-node cross-node transfer limit")

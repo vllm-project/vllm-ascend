@@ -718,7 +718,18 @@ class TestStairLoadStatistics(unittest.TestCase):
             predicted_mean_ratios=np.array([1.0]),
         )
 
-        StairEplbPolicy.validate_plan(current, plan, num_experts=4, rank_pair_migration_limit=1)
+        StairEplbPolicy.validate_plan(current, plan, 4, np.zeros(2, dtype=np.int64), 1, 1)
+
+    def test_validate_plan_accepts_zero_redundancy_three_rank_cycle(self):
+        current = np.array([[[0], [1], [2]]])
+        plan = StairPlan(
+            rank_expert_ids=np.array([[[1], [2], [0]]]),
+            source_rank_ids=np.array([[[1], [2], [0]]]),
+            source_slot_ids=np.zeros_like(current),
+            predicted_mean_ratios=np.array([1.0]),
+        )
+
+        StairEplbPolicy.validate_plan(current, plan, 3, np.zeros(3, dtype=np.int64), 1, 1)
 
     def test_validate_plan_rejects_false_source_ownership(self):
         current = np.array([[[0, 1], [2, 3]]])
@@ -730,9 +741,9 @@ class TestStairLoadStatistics(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "does not own"):
-            StairEplbPolicy.validate_plan(current, plan, num_experts=4, rank_pair_migration_limit=1)
+            StairEplbPolicy.validate_plan(current, plan, 4, np.zeros(2, dtype=np.int64), 1, 1)
 
-    def test_validate_plan_rejects_invalid_controls_and_pair_limit(self):
+    def test_validate_plan_accepts_unlimited_transfer_budgets(self):
         current = np.array([[[0, 1], [2, 3], [4, 5]]])
         plan = StairPlan(
             rank_expert_ids=np.array([[[2, 3], [0, 1], [4, 5]]]),
@@ -741,9 +752,28 @@ class TestStairLoadStatistics(unittest.TestCase):
             predicted_mean_ratios=np.array([1.0]),
         )
 
-        for num_experts, pair_limit in ((6, 1), (6, 1.5), (6, np.nan), (6, np.inf), (6, True), (6.0, 1)):
-            with self.subTest(num_experts=num_experts, pair_limit=pair_limit), self.assertRaises(ValueError):
-                StairEplbPolicy.validate_plan(current, plan, num_experts, pair_limit)
+        StairEplbPolicy.validate_plan(current, plan, 6, np.arange(3), -1, -1)
+
+    def test_validate_plan_rejects_invalid_controls(self):
+        current = np.array([[[0, 1], [2, 3], [4, 5]]])
+        plan = StairPlan(
+            rank_expert_ids=np.array([[[2, 3], [0, 1], [4, 5]]]),
+            source_rank_ids=np.array([[[1, 1], [0, 0], [2, 2]]]),
+            source_slot_ids=np.array([[[0, 1], [0, 1], [0, 1]]]),
+            predicted_mean_ratios=np.array([1.0]),
+        )
+
+        invalid_controls = ((6.0, 1, 1), (6, 0, 1), (6, 1.5, 1), (6, 1, -2), (6, 1, True))
+        for num_experts, rank_limit, node_limit in invalid_controls:
+            with self.subTest(controls=(num_experts, rank_limit, node_limit)), self.assertRaises(ValueError):
+                StairEplbPolicy.validate_plan(
+                    current,
+                    plan,
+                    num_experts,
+                    np.zeros(3, dtype=np.int64),
+                    rank_limit,
+                    node_limit,
+                )
 
     def test_validate_plan_rejects_prediction_for_unchanged_layer(self):
         current = np.array([[[0], [1]]])
@@ -755,7 +785,7 @@ class TestStairLoadStatistics(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "finite for changed layers"):
-            StairEplbPolicy.validate_plan(current, plan, num_experts=2, rank_pair_migration_limit=1)
+            StairEplbPolicy.validate_plan(current, plan, 2, np.zeros(2, dtype=np.int64), 1, 1)
 
     def test_validate_plan_rejects_non_float_predictions(self):
         current = np.array([[[0], [1]]])
@@ -767,7 +797,7 @@ class TestStairLoadStatistics(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "floating-point"):
-            StairEplbPolicy.validate_plan(current, plan, num_experts=2, rank_pair_migration_limit=1)
+            StairEplbPolicy.validate_plan(current, plan, 2, np.zeros(2, dtype=np.int64), 1, 1)
 
     def test_statistics_reject_invalid_inputs(self):
         invalid_samples = np.array([[[1.0, -1.0]]])
