@@ -59,8 +59,10 @@ CATLASS_DEVICE constexpr uint32_t HmRoundUp16(uint32_t v) { return (v + 15) / 16
 ///   With B_FROM_L1, gmB/ldb are ignored and l1BOff must already hold the tile
 ///   in the zN layout the plain path's Nd2Nz would have produced (an earlier
 ///   body's GM->L1 load, a UB->L1 hand-off, or an L1-resident state).
+///   With B_NZ_GM, gmB already holds the tile as a zN image (the cross-op h
+///   format): the GM->L1 move is one flat burst, no Nd2Nz row walk.
 template <class ArchTag, bool B_COL_MAJOR = false, bool A_FROM_L1 = false, bool A_COL_MAJOR = false,
-          bool B_FROM_L1 = false>
+          bool B_FROM_L1 = false, bool B_NZ_GM = false>
 CATLASS_DEVICE void HandMmad(
     Catlass::Arch::Resource<ArchTag> &res,
     AscendC::GlobalTensor<half> const &gmA, uint32_t lda,
@@ -90,7 +92,10 @@ CATLASS_DEVICE void HandMmad(
         pa.dstNzNStride = 1;  pa.dstNzMatrixStride = 0;
         AscendC::DataCopy(l1A, gmA, pa);
     }
-    if constexpr (!B_FROM_L1) {
+    if constexpr (B_NZ_GM) {
+        static_assert(!B_COL_MAJOR && !B_FROM_L1, "B_NZ_GM is a plain zN image");
+        AscendC::DataCopy(l1B, gmB, kR * nR);
+    } else if constexpr (!B_FROM_L1) {
         // ColumnMajor source swaps the roles: dValue is the ROW count, nValue the
         // COLUMN count.
         AscendC::Nd2NzParams pb;
