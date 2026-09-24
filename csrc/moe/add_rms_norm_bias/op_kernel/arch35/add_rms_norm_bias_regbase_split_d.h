@@ -312,7 +312,7 @@ private:
     TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueX1;
     TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueX2;
     TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueGamma;
-    TQue<QuePosition::VECIN, BUFFER_NUM> inQueueBeta;
+    TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueBeta;
     TQue<QuePosition::VECOUT, DOUBLE_BUFFER_NUM> outQueueY;
     TQue<QuePosition::VECOUT, DOUBLE_BUFFER_NUM> outQueueX;
     TQue<QuePosition::VECOUT, DOUBLE_BUFFER_NUM> outQueueRstd;
