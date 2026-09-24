@@ -19,7 +19,7 @@ from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: igno
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.context_parallel.common_cp import (
     build_pcp_ordered_slot_mapping,
     get_cp_local_query_key_lens,
@@ -197,11 +197,13 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self.is_rope_neox_style = model_type not in ["glm_moe_dsa"]
         self.use_torch_npu_lightning_indexer = model_type in ["glm_moe_dsa"]
 
-        # Cache-write gathers for parallel layouts: PCP all-gathers the
-        # prefill region across the CP group, DSA-CP all-gathers the indexer
-        # k across the TP group. Both are no-ops in the base layout.
-        parallel_config = get_current_vllm_config().parallel_config
+        # PCP gathers prefill keys and, for sharded decode, every owner's
+        # decode keys. DSA-CP gathers indexer keys across TP. Both gathers
+        # are no-ops in the base layout.
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
         self._pcp_active = parallel_config.prefill_context_parallel_size > 1
+        self.pcp_shard_decode_requests = is_pcp_decode_sharding_enabled(vllm_config)
         self._dsa_cp_active = enable_dsa_cp()
 
         # The LI C8 Hadamard matrices are created while the sleep-mode weights
@@ -359,7 +361,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if self._pcp_active:
             tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
             gathered_tensors, slot_mapping = _gather_prefill_cache_inputs(
-                tensors, slot_mapping, indexer_metadata.num_decode_tokens
+                tensors,
+                slot_mapping,
+                indexer_metadata.num_decode_tokens,
+                shard_decode_requests=self.pcp_shard_decode_requests,
             )
             k_li = gathered_tensors[0]
             assert slot_mapping.numel() == k_li.shape[0], (
@@ -411,7 +416,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
         self.write_cache(k_li, k_li_scale, slot_mapping, indexer_attn_metadata=indexer_metadata)
-        if not compute_topk:
+        if not compute_topk or (self.pcp_shard_decode_requests and indexer_metadata.num_actual_tokens == 0):
             return None
 
         assert self.wk_weights_proj is not None
