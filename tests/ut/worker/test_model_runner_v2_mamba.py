@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+import vllm.v1.worker.gpu.cp_utils as _cp_utils
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -16,21 +17,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
-
-# Core renamed prepare_dcp_local_seq_lens to
-# maybe_prepare_dcp_local_seq_lens (short-circuits on dcp_size == 1 and
-# returns the padded view). vllm_ascend.worker.v2.model_runner still imports
-# the old name on the 0.29 lane, so stub it when the current core only ships
-# the new name. The 3 get_kv_cache_spec tests below never reach DCP, so a
-# no-op is sufficient.
-import vllm.v1.worker.gpu.cp_utils as _cp_utils
-
-if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(
-    _cp_utils, "maybe_prepare_dcp_local_seq_lens"
-):
-    _cp_utils.prepare_dcp_local_seq_lens = (
-        lambda dcp_local_seq_lens, seq_lens, num_reqs, dcp_size, dcp_rank, cp_interleave: None
-    )
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -46,6 +32,11 @@ from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
+
+if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(_cp_utils, "maybe_prepare_dcp_local_seq_lens"):
+    _cp_utils.prepare_dcp_local_seq_lens = (
+        lambda dcp_local_seq_lens, seq_lens, num_reqs, dcp_size, dcp_rank, cp_interleave: None
+    )
 
 
 def _mock_vllm_config():
