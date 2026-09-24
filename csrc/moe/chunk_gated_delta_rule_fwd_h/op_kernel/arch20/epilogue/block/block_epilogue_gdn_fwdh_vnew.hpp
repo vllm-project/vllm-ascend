@@ -132,10 +132,9 @@ public:
         AscendC::GlobalTensor<UElementInput> uInputThisSubBlock = uInput[offsetK];
 
 
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID4);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID6);
-
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID6);
+        // (V_MTE2 pairs dropped: reduce_flags fwd_h_v3 -- the g/u loads land in
+        // windows whose last V readers are ordered through the kept store
+        // fences of the previous call.)
         if constexpr(std::is_same<GElementInput, float>::value) {
             AscendC::DataCopy(gUbTensor, gInputThisSubBlock, mActual);
         } else {
@@ -169,9 +168,6 @@ public:
         AscendC::PipeBarrier<PIPE_V>();
 
 
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID4);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID4);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID4);
         
         AscendC::DataCopy(uUbTensor, uInputThisSubBlock, mActualThisSubBlock * nvActual);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID4);
@@ -201,10 +197,8 @@ public:
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
         AscendC::DataCopy(vnewdecayOutputThisSubBlock, vNewDecayUbTensor, mActualThisSubBlock * nvActual);
-
-        // Drain the vnewdecay GM store before the next call's V ops touch its buffer.
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+        // (Store drains dropped: reduce_flags proves the next call's V ops are
+        // ordered behind these stores through the stage-top MTE3_MTE2 drains.)
 
     }
 
