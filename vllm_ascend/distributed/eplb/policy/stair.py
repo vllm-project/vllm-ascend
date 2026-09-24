@@ -893,9 +893,9 @@ class StairEplbPolicy(AbstractEplbPolicy):
         rank_node_ids: np.ndarray,
         config: StairConfig,
     ) -> LayerPlan | None:
-        """Return the best mean-non-regressing placement for one layer.
+        """Return the best mean- and p95-non-regressing placement for one layer.
 
-        P95 is diagnostic and does not gate acceptance. The lowest predicted
+        Candidates may not regress mean or p95 imbalance. The lowest predicted
         mean ratio wins; ratios within the internal absolute tolerance are tied.
         Ties minimize cross-node migrations, same-node remote migrations,
         target expert IDs, source rank IDs, then source slot IDs. Return ``None``
@@ -908,15 +908,16 @@ class StairEplbPolicy(AbstractEplbPolicy):
         node_ids = np.asarray(rank_node_ids)
         num_ranks = current_placement.shape[0]
         scored_candidates = []
+        migration_feasibility_cache: dict[tuple[tuple[int, int], ...], bool] = {(): True}
 
-        replica_candidates = cls.replica_candidates(
+        replica_candidates = cls.incremental_replica_candidates(
             risks,
-            current_placement.size,
+            current_placement,
             num_ranks,
+            current_placement.size if config.rank_transfer_limit == -1 else num_ranks * config.rank_transfer_limit,
             num_stages=config.replica_search_num_stages,
             budget_radius=config.replica_search_radius,
             beam_size=config.replica_search_beam_size,
-            candidate_score=lambda replicas: float(np.max(risks / replicas)),
         )
         for replicas in replica_candidates:
             placement = cls.lpt_placement(
@@ -928,13 +929,18 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 config.z_score,
                 current_rank_expert_ids=current_placement,
                 rank_node_ids=node_ids,
-                rank_pair_migration_limit=config.rank_pair_migration_limit,
+                rank_transfer_limit=config.rank_transfer_limit,
+                cross_node_transfer_limit=config.cross_node_transfer_limit,
                 backtrack_limit=config.placement_search_backtrack_limit,
+                migration_feasibility_cache=migration_feasibility_cache,
             )
             if placement is None:
                 continue
             predicted_imbalance = cls.placement_imbalance(load_samples, sample_counts, placement.rank_expert_ids)
-            if predicted_imbalance.mean_ratio > current_imbalance.mean_ratio:
+            if (
+                predicted_imbalance.mean_ratio > current_imbalance.mean_ratio
+                or predicted_imbalance.p95_ratio > current_imbalance.p95_ratio
+            ):
                 continue
 
             dst_rank_ids = np.arange(num_ranks)[:, None]

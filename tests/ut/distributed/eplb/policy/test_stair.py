@@ -8,7 +8,7 @@ import numpy as np
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
-from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy, StairPlan
+from vllm_ascend.distributed.eplb.policy.stair import PlacementImbalance, PlacementPlan, StairEplbPolicy, StairPlan
 
 
 class TestStairLoadStatistics(unittest.TestCase):
@@ -573,6 +573,17 @@ class TestStairLoadStatistics(unittest.TestCase):
         np.testing.assert_array_equal(plan.placement.rank_expert_ids, [[0, 3], [2, 1]])
         self.assertEqual(plan.predicted_imbalance.mean_ratio, 1.0)
 
+    def test_plan_layer_can_disable_cross_node_improvement(self):
+        plan = StairEplbPolicy.plan_layer(
+            np.array([[8.0, 7.0, 6.0, 5.0]]),
+            np.ones(1, dtype=np.int64),
+            np.array([[0, 1], [2, 3]]),
+            np.array([0, 1]),
+            StairConfig(cross_node_transfer_limit=0),
+        )
+
+        self.assertIsNone(plan)
+
     def test_plan_layer_skips_noop(self):
         self.assertIsNone(
             StairEplbPolicy.plan_layer(
@@ -619,25 +630,30 @@ class TestStairLoadStatistics(unittest.TestCase):
 
         self.assertIsNone(plan)
 
-    def test_plan_layer_does_not_reject_p95_regression(self):
-        samples = np.array(
-            [
-                [16, 5, 2, 5],
-                [8, 16, 9, 1],
-                [6, 12, 16, 14],
-                [19, 3, 17, 1],
-                [11, 5, 4, 13],
-            ]
+    def test_plan_layer_rejects_p95_regression(self):
+        placement = PlacementPlan(
+            rank_expert_ids=np.array([[0, 2], [1, 3]]),
+            source_rank_ids=np.array([[0, 1], [0, 1]]),
+            source_slot_ids=np.array([[0, 0], [1, 1]]),
         )
-        sample_counts = np.array([2, 3, 2, 1, 4])
-        current = np.array([[0, 3], [1, 2]])
-        current_imbalance = StairEplbPolicy.placement_imbalance(samples, sample_counts, current)
+        with (
+            patch.object(StairEplbPolicy, "replica_candidates", return_value=[np.ones(4, dtype=np.int64)]),
+            patch.object(StairEplbPolicy, "lpt_placement", return_value=placement),
+            patch.object(
+                StairEplbPolicy,
+                "placement_imbalance",
+                side_effect=[PlacementImbalance(1.1, 1.0), PlacementImbalance(1.0, 1.1)],
+            ),
+        ):
+            plan = StairEplbPolicy.plan_layer(
+                np.ones((1, 4)),
+                np.ones(1, dtype=np.int64),
+                np.array([[0, 1], [2, 3]]),
+                np.array([0, 1]),
+                StairConfig(),
+            )
 
-        plan = StairEplbPolicy.plan_layer(samples, sample_counts, current, np.array([0, 1]), StairConfig())
-
-        self.assertIsNotNone(plan)
-        self.assertLess(plan.predicted_imbalance.mean_ratio, current_imbalance.mean_ratio)
-        self.assertGreater(plan.predicted_imbalance.p95_ratio, current_imbalance.p95_ratio)
+        self.assertIsNone(plan)
 
     def test_plan_rebalance_preserves_filtered_layers(self):
         samples = np.array(
