@@ -53,8 +53,6 @@ Qwen3-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model struc
 
 You can use the official all-in-one Docker image for Qwen3 MoE models.
 
-For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later `-310p` image).
-
 :::::{tab-set}
 
 ::::{tab-item} Atlas A3 inference products

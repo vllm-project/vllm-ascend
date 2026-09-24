@@ -4,11 +4,61 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+class TestDummyRunSlotInvalidation(unittest.TestCase):
+    def test_backend_metadata_sees_invalidated_dummy_slots(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.uniform_decode_query_len = 1
+        runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=8)
+        runner.dynamic_eplb = False
+        # use_cp is a read-only property derived from PCP and DCP sizes.
+        runner.pcp_size = 1
+        runner.dcp_size = 1
+        runner.speculative_config = None
+        runner.use_compress = True
+        runner._has_gdn = False
+
+        runner._determine_batch_execution_and_padding = MagicMock(
+            return_value=(CUDAGraphMode.NONE, SimpleNamespace(num_tokens=1, num_reqs=1), None, None, None)
+        )
+        runner._should_build_dummy_attn_metadata = MagicMock(return_value=True)
+        runner._get_cumsum_and_arange = MagicMock(return_value=np.array([1], dtype=np.int32))
+        runner._pad_query_start_loc_for_fia = MagicMock(return_value=1)
+
+        runner.optimistic_seq_lens_cpu = torch.zeros(8, dtype=torch.int32)
+        runner.seq_lens = MagicMock()
+        runner.query_pos = SimpleNamespace(np=np.zeros(8, dtype=np.int32))
+        runner.query_start_loc = SimpleNamespace(np=np.zeros(9, dtype=np.int32))
+        runner.positions = MagicMock()
+        runner._dsa_positions_cpu_buf = MagicMock()
+
+        slot_mappings = [torch.tensor([3]), torch.tensor([7])]
+        block_tables = MagicMock()
+        block_tables.__getitem__.side_effect = lambda index: SimpleNamespace(
+            slot_mapping=SimpleNamespace(gpu=slot_mappings[index])
+        )
+        runner.input_batch = SimpleNamespace(block_table=block_tables)
+        runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[object(), object()])
+
+        def check_slots_before_build(**_kwargs):
+            for slot_mapping in slot_mappings:
+                torch.testing.assert_close(slot_mapping, torch.full_like(slot_mapping, -1))
+            raise RuntimeError("metadata checked")
+
+        runner._build_attention_metadata = check_slots_before_build
+
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.copy_snapshot_to_gpu"),
+            self.assertRaisesRegex(RuntimeError, "metadata checked"),
+        ):
+            runner._dummy_run(1)
 
 
 class TestNPUModelRunnerAcceptedTokens(unittest.TestCase):

@@ -23,7 +23,7 @@ Download the [Eco-Tech/Kimi-K3-w4a8](https://www.modelscope.cn/models/Eco-Tech/K
 | Platform | Deployment | Topology |
 | --- | --- | --- |
 | 4 × Atlas 800 A3 (64G × 16) | Mixed Prefill/Decode deployment | DP4/TP16/EP64 |
-| 16 × Atlas 800 A3 (64G × 16) | Eight Prefill nodes and eight Decode nodes | DP8/TP16/PP1 on each side |
+| 16 × Atlas 800 A3 (64G × 16) | Eight Prefill nodes and eight Decode nodes | DP8/TP16 on each side |
 | 8 × Atlas 800 A2 (64G × 8) | Mixed Prefill/Decode deployment | DP8/TP8/EP64 |
 
 The checkpoint directory must contain the model configuration, tokenizer, image processor, and model weight files required by the published Kimi K3 package.
@@ -336,20 +336,9 @@ The service should return HTTP 200 and a `choices` field containing generated te
 
 #### 5.1.2 Sixteen-Node PD Separation Deployment
 
-The validated PD separation topology uses 16 Atlas 800 A3 (64G × 16) nodes: eight Prefill nodes and eight Decode nodes. Both sides use DP8/TP16/PP1. Prefill nodes additionally use a memcache-backed KV pool.
+The validated PD separation topology uses 16 Atlas 800 A3 (64G × 16) nodes: eight Prefill nodes and eight Decode nodes. Both sides use DP8/TP16.
 
-Refer to [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow and [KV Pool](../../user_guide/feature_guide/kv_pool.md) for memcache pool concepts.
-
-##### 5.1.2.1 Start the memcache MetaService
-
-Start one MetaService instance before the Prefill engines:
-
-```shell
-export MMC_META_CONFIG_PATH=<PATH_TO_MMC_META_CONF>
-python -c "from memcache_hybrid import MetaService; MetaService.main()"
-```
-
-`mmc-meta.conf` configures MetaService and `mmc-local.conf` is loaded by every Prefill inference process. Run `pip show memcache_hybrid` to locate the installed package, copy the example files from `memcache_hybrid/config/`, and adapt them to the target environment.
+Refer to [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow.
 
 ##### 5.1.2.2 Create the engine templates
 
@@ -386,10 +375,8 @@ export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=$1
-export ASCEND_ENABLE_USE_FABRIC_MEM=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export MMC_LOCAL_CONFIG_PATH=<PATH_TO_MMC_LOCAL_CONF>
 export PYTHONHASHSEED=0
 export ACL_OP_INIT_MODE=1
 
@@ -419,28 +406,18 @@ vllm serve <KIMI_K3_MODEL_PATH> \
     --limit-mm-per-prompt '{"vision_chunk": 2}' \
     --kv-transfer-config \
     '{
-      "kv_connector": "MultiConnector",
+      "kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_producer",
+      "kv_port": "'"$KV_PORT"'",
       "kv_connector_extra_config": {
-        "connectors": [
-          {
-            "kv_connector": "MooncakeConnectorV1",
-            "kv_role": "kv_producer",
-            "kv_port": "'"$KV_PORT"'",
-            "kv_connector_extra_config": {
-              "prefill": {"dp_size": 8, "tp_size": 16},
-              "decode": {"dp_size": 8, "tp_size": 16}
-            }
-          },
-          {
-            "kv_connector": "AscendStoreConnector",
-            "kv_role": "kv_producer",
-            "kv_connector_extra_config": {
-              "backend": "memcache",
-              "lookup_rpc_port": "0"
-            }
-          }
-        ]
+        "prefill": {
+            "dp_size": 8,
+            "tp_size": '"$7"'
+        },
+        "decode": {
+            "dp_size": 8,
+            "tp_size": '"$7"'
+        }
       }
     }'
 ```
@@ -477,7 +454,6 @@ export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=$1
-export ASCEND_ENABLE_USE_FABRIC_MEM=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 vllm serve <KIMI_K3_MODEL_PATH> \
@@ -510,8 +486,14 @@ vllm serve <KIMI_K3_MODEL_PATH> \
       "kv_role": "kv_consumer",
       "kv_port": "'"$KV_PORT"'",
       "kv_connector_extra_config": {
-        "prefill": {"dp_size": 8, "tp_size": 16},
-        "decode": {"dp_size": 8, "tp_size": 16}
+        "prefill": {
+            "dp_size": 8,
+            "tp_size": '"$7"'
+        },
+        "decode": {
+            "dp_size": 8,
+            "tp_size": '"$7"'
+        }
       }
     }'
 ```
@@ -521,13 +503,12 @@ vllm serve <KIMI_K3_MODEL_PATH> \
 
 ##### 5.1.2.3 Start the engines
 
-Deploy `launch_online_dp.py` and the corresponding engine template on every node. The following example starts one local DP rank in a DP8/TP16/PP1 group:
+Deploy `launch_online_dp.py` and the corresponding engine template on every node. The following example starts one local DP rank in a DP8/TP16 group:
 
 ```shell
 python launch_online_dp.py \
     --dp-size 8 \
     --tp-size 16 \
-    --pp-size 1 \
     --dp-size-local 1 \
     --dp-rank-start <LOCAL_DP_RANK> \
     --dp-address <PD_MASTER_IP> \
@@ -546,10 +527,8 @@ Key PD settings:
 | Topology | 8P8D | Eight Prefill and eight Decode nodes. |
 | `--dp-size` | `8` | Eight DP ranks on each side. |
 | `--tp-size` | `16` | Uses all 16 NPUs in a node. |
-| `--pp-size` | `1` | One pipeline stage per engine. |
 | `--dp-size-local` | `1` | One DP rank per node. |
 | `KV_PORT` | `36000` for P, `36200` for D | Separates producer and consumer KV traffic. |
-| `MMC_LOCAL_CONFIG_PATH` | Prefill only | Connects the producer to the memcache KV pool. |
 | `recompute_scheduler_enable` | `false` | Matches the validated Prefill and Decode configuration. |
 
 ### 5.2 Atlas 800 A2 Deployment
@@ -785,260 +764,51 @@ Production traffic should normally omit this header so that requests remain bala
 
 ## 7 Accuracy Evaluation
 
-The following evaluation procedure was validated with the four-node DP4/TP16/EP64 service.
+Here is one accuracy evaluation method for Kimi K3.
 
-### 7.1 Prepare the Evaluation Environment
+### Using AISBench
 
-The validation toolkit requires Python 3.12 or later:
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for the environment setup and evaluation procedure.
 
-```shell
-conda create -n kvv python=3.12
-conda activate kvv
-cd <KIMI_K3_EVALUATION_TOOLKIT>
-pip install -e .
-```
-
-Prepare these datasets:
-
-| Task | Description | Dataset |
-| --- | --- | --- |
-| MMMU Pro Vision | Ten-option multimodal visual question answering. | [MMMU/MMMU_Pro](https://huggingface.co/datasets/MMMU/MMMU_Pro) |
-| OCRBench | OCR and text-recognition evaluation. | [echo840/OCRBench](https://huggingface.co/datasets/echo840/OCRBench) |
-| ToolCall/KVVV | Tool-calling evaluation. | `toolcall_benchmark/` in the evaluation toolkit |
-
-All recorded evaluations use Thinking mode, preserve the reasoning output, set `reasoning_effort=max`, `temperature=1.0`, `top_p=1.0`, and run one epoch.
-
-| Benchmark | Max output tokens | Max connections |
-| --- | ---: | ---: |
-| OCRBench | 8192 | 16 |
-| MMMU Pro | 96000 | 16 |
-| ToolCall/KVVV | 32768 | 16 |
-
-### 7.2 Check the Service
-
-```shell
-conda activate kvv
-cd <KIMI_K3_EVALUATION_TOOLKIT>
-
-export KIMI_BASE_URL="http://<SERVICE_IP>:<SERVICE_PORT>/v1"
-export KIMI_API_KEY="EMPTY"
-export no_proxy="localhost,127.0.0.1,<SERVICE_IP>"
-export NO_PROXY="$no_proxy"
-export INSPECT_LOG_DIR=<INSPECT_LOG_DIRECTORY>
-
-curl --noproxy <SERVICE_IP> \
-    http://<SERVICE_IP>:<SERVICE_PORT>/v1/models
-
-python verify_params_k3.py \
-    --model "kimi-k3" \
-    --think-mode "opensource" \
-    --base-url "$KIMI_BASE_URL" \
-    --api-key "$KIMI_API_KEY" \
-    --all
-```
-
-All parameter checks must pass before running the benchmarks.
-
-### 7.3 Run OCRBench
-
-```shell
-python eval.py ocrbench \
-    --model "opensource/kimi-k3" \
-    --max-tokens 8192 \
-    --thinking \
-    --think-mode "opensource" \
-    --thinking-effort max \
-    --stream \
-    --max-connections 16 \
-    --temperature 1.0 \
-    --top-p 1.0
-```
-
-### 7.4 Run MMMU Pro
-
-```shell
-python eval.py mmmu \
-    --model "opensource/kimi-k3" \
-    --max-tokens 96000 \
-    --thinking \
-    --think-mode "opensource" \
-    --thinking-effort max \
-    --stream \
-    --max-connections 16 \
-    --temperature 1.0 \
-    --top-p 1.0
-```
-
-### 7.5 Run ToolCall/KVVV
-
-ToolCall uses the JSONL data in `toolcall_benchmark/`. For the long-context validation, restart the four-node service with the following master-node values:
-
-| Parameter | Standard mixed deployment | ToolCall validation |
-| --- | ---: | ---: |
-| `--max-num-seqs` | 16 | 4 |
-| `--max-model-len` | 131072 | 286720 |
-| `--max-num-batched-tokens` | 24576 | 8192 |
-| `--gpu-memory-utilization` | 0.9 | 0.97 |
-
-All other options match Section 5.1.1. Worker nodes also use these values and retain `--headless` plus their unique DP ranks.
-
-Run the benchmark:
-
-```shell
-python eval.py kimi_toolcall \
-    --model "opensource/kimi-k3" \
-    --max-tokens 32768 \
-    --thinking \
-    --think-mode "opensource" \
-    --thinking-effort max \
-    --stream \
-    --max-connections 16 \
-    --temperature 1.0 \
-    --top-p 1.0 \
-    --dataset toolcall_benchmark/toolcall_thinking_samples.jsonl
-```
-
-### 7.6 Inspect and Resume Evaluations
-
-```shell
-inspect view
-inspect view start --log-dir <INSPECT_LOG_DIRECTORY>
-inspect eval-retry logs/<EVALUATION_LOG>.eval
-```
-
-The evaluation toolkit retries rate-limit and network failures with exponential backoff. Non-network failures, including invalid model output, are recorded in the logs without retrying.
+2. Run AISBench against the Kimi K3 service and collect the generated result files. Keep the model and tokenizer revisions, chat template, sampling settings, dataset, and evaluator revision fixed when comparing results.
 
 ## 8 Performance Evaluation
 
-The following performance procedure uses the four-node DP4/TP16/EP64 service and AISBench.
+### Using AISBench
 
-### 8.1 Install AISBench
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for the environment setup and evaluation procedure.
 
-Run AISBench in a separate environment or container on the master node so the load generator does not affect the serving processes:
+### Using vLLM Benchmark
 
-```shell
-git clone https://github.com/AISBench/benchmark
-cd benchmark
-pip3 install -e ./ --use-pep517
-pip3 install -r requirements/api.txt
-pip3 install -r requirements/extra.txt
-pip3 install -r requirements/hf_vl_dependency.txt
-```
+Use `vllm bench serve` to measure the online serving performance of the Kimi K3 service. The following is a minimal example for eight 128k-input, 1k-output requests. Replace the service address, model path, dataset path, and result directory for the target environment.
 
-### 8.2 Performance Service Configuration
-
-Change these values from the standard Section 5.1.1 deployment on all four nodes:
-
-| Parameter | Standard deployment | Performance test |
-| --- | ---: | ---: |
-| `--max-model-len` | 131072 | 250000 |
-| `--max-num-batched-tokens` | 24576 | 8192 |
-| `--gpu-memory-utilization` | 0.9 | 0.95 |
-
-The master-node `vllm serve` command is:
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ```shell
-vllm serve <KIMI_K3_MODEL_PATH> \
-    --served-model-name kimi-k3 \
-    --port <SERVICE_PORT> \
-    --allowed-local-media-path / \
-    --trust-remote-code \
-    --tensor-parallel-size 16 \
-    --data-parallel-size 4 \
-    --data-parallel-size-local 1 \
-    --data-parallel-address <NODE0_LOCAL_IP> \
-    --data-parallel-rpc-port <DP_RPC_PORT> \
-    --enable-prefix-caching \
-    --enable-expert-parallel \
-    --max-num-seqs 16 \
-    --max-model-len 250000 \
-    --max-num-batched-tokens 8192 \
-    --gpu-memory-utilization 0.95 \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --mm-processor-cache-gb 0 \
-    --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
-    --mm-encoder-tp-mode data \
-    --limit-mm-per-prompt '{"vision_chunk": 2}' \
-    --enable-auto-tool-choice \
-    --reasoning-parser kimi_k3 \
-    --tool-call-parser kimi_k3
+export DATA_NUM=8
+export CONCURRENCY=8
+
+vllm bench serve \
+  --base-url http://<SERVICE_HOST>:<SERVICE_PORT> \
+  --endpoint /v1/completions \
+  --model kimi-k3 \
+  --tokenizer <KIMI_K3_MODEL_PATH> \
+  --tokenizer-mode kimi_k3 \
+  --trust-remote-code \
+  --dataset-name custom \
+  --dataset-path <DATASET_PATH> \
+  --custom-output-len 1024 \
+  --skip-chat-template \
+  --num-prompts ${DATA_NUM} \
+  --request-rate inf \
+  --max-concurrency ${CONCURRENCY} \
+  --ignore-eos \
+  --temperature 0 \
+  --seed 0 \
+  --disable-shuffle \
+  --save-result \
+  --result-dir <RESULT_DIR>
 ```
-
-Worker nodes use the same performance values and the worker-specific arguments from Section 5.1.1.
-
-### 8.3 Configure the Load Generator
-
-Before running `aisbench_test.py`, create its dataset directory and configure the validation helper:
-
-```shell
-mkdir -p <DATASET_DIRECTORY>
-```
-
-```python
-DATASET_PATH = "<DATASET_DIRECTORY>"
-WORK_PATH = "<AISBENCH_BENCHMARK_DIRECTORY>"
-MODEL_NAME = "kimi-k3"
-MODEL_PATH = "<KIMI_K3_MODEL_PATH>"
-HOST_IP = "<SERVICE_IP>"
-HOST_PORT = "<SERVICE_PORT>"
-DEFAULT_PERFORMANCE_TEST = "default_perf"
-OUTPUT_DIR = "./outputs/default"
-
-# Set the serving endpoints when collecting per-DP prefix-cache metrics.
-# PD deployments should list every relevant endpoint.
-POD_INFO = []
-```
-
-Disable proxies before the test:
-
-```shell
-env | grep -i proxy
-unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-```
-
-### 8.4 Run the Tests
-
-8K input, 1K output, and no prefix-cache hit:
-
-```shell
-python3 aisbench_test.py \
-    --input_len 8192 \
-    --output_len 1024 \
-    --data_num 16 \
-    --concurrency 4 \
-    --request_rate 0 \
-    --repeat_rate 0 \
-    --prefix_test
-```
-
-128K input, 1K output, and a 99% prefix-cache hit rate:
-
-```shell
-python3 aisbench_test.py \
-    --input_len 131024 \
-    --output_len 1024 \
-    --data_num 16 \
-    --concurrency 4 \
-    --request_rate 0 \
-    --dataset_type prefix_cache \
-    --repeat_rate 0.99 \
-    --prefix_test
-```
-
-`request_rate=0` sends requests as quickly as the configured concurrency permits. `repeat_rate=0.99` makes 99% of requests reuse the same prefix.
-
-### 8.5 Enabled Optimizations
-
-| Feature | Description |
-| --- | --- |
-| Chunked Prefill | Splits long prefill inputs into chunks to reduce per-step memory peaks. |
-| Asynchronous scheduling | Decouples scheduling and execution. |
-| Prefix Cache | Reuses KV state for repeated prefixes. |
-| DP + TP + EP | Combines data, tensor, and expert parallelism for the MoE model. |
-| ACL Graph | Uses `FULL_DECODE_ONLY` replay to reduce decode scheduling overhead. |
-| KDA + MLA cache management | Manages the heterogeneous recurrent and KV states. |
-| FlashComm1 | Enables communication optimization. |
-| CPU Binding | Reduces cross-core scheduling overhead. |
 
 ## 9 Performance Tuning
 

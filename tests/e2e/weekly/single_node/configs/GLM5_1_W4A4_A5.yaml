@@ -1,0 +1,71 @@
+
+
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+  TASK_QUEUE_ENABLE: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_DFS_CONFIG: "task_exception:off,inconsistent_check:off"
+  OMP_NUM_THREADS: "100"
+  OMP_PROC_BIND: "false"
+  HCCL_BUFFSIZE: "400"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
+  HCCL_INTRA_PCIE_ENABLE: "1"
+  HCCL_INTRA_ROCE_ENABLE: "0"
+  ASCEND_LAUNCH_BLOCKING: "0"
+  DYNAMIC_EPLB: "true"
+
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--distributed-executor-backend"
+  - "mp"
+  - "--tensor-parallel-size"
+  - "8"
+  - "--data-parallel-size"
+  - "1"
+  - "--seed"
+  - "1024"
+  - "--enable-expert-parallel"
+  - "--async-scheduling"
+  - "--max-num-seqs"
+  - "128"
+  - "--max-model-len"
+  - "142976"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--enable-prefix-caching"
+  - "--quantization"
+  - "ascend"
+  - "--enable-auto-tool-choice"
+  - "--tool-call-parser"
+  - "glm47"
+  - "--reasoning-parser"
+  - "glm45"
+  - "--gpu-memory-utilization"
+  - "0.95"
+  - "--compilation-config"
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  - "--trust-remote-code"
+  - "--hf-overrides"
+  - '{"use_index_cache": true,"index_topk_frep":4}'
+  - "--speculative-config"
+  - '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}'
+  - "--additional-config"
+  - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":"True","enable_sparse_c8":"True","enable_dsa_cp":true,"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":50,"algorithm_execution_interval":5,"eplb_policy_type":2,"num_redundant_experts":0}}'
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "GLM-5.1-w4a4c8-mxfp4"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd

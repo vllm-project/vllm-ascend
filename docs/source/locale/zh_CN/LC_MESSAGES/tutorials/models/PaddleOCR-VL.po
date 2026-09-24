@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-17 01:24+0000\n"
+"POT-Creation-Date: 2026-08-20 12:53+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -123,55 +123,47 @@ msgstr ""
 "根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
 "using-docker)。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:33
-msgid ""
-"For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a "
-"later `-310p` image)."
-msgstr ""
-"对于 Atlas 300I DUO，请使用 `vllm-ascend:nightly-releases-v0.23.0-310p`（或更新的 "
-"`-310p` 镜像）。"
-
 #: ../../source/tutorials/models/PaddleOCR-VL.md
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "A2 series"
 msgstr "A2 系列"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "Atlas 300I DUO"
 msgstr "Atlas 300I DUO"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:91
+#: ../../source/tutorials/models/PaddleOCR-VL.md:89
 msgid ""
 "After a successful docker run, you can verify the running container service "
 "by executing the `docker ps` command."
 msgstr "Docker 运行成功后，可以通过执行 `docker ps` 命令来验证正在运行的容器服务。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:93
+#: ../../source/tutorials/models/PaddleOCR-VL.md:91
 msgid "4.2 Source Code Installation"
 msgstr "4.2 源码安装"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:95
+#: ../../source/tutorials/models/PaddleOCR-VL.md:93
 msgid ""
 "If you don't want to use the docker image as above, you can also build all "
 "from source:"
 msgstr "如果您不想使用上述 Docker 镜像，也可以从源码构建所有内容："
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:97
+#: ../../source/tutorials/models/PaddleOCR-VL.md:95
 msgid ""
 "Install `vllm-ascend` from source, refer to "
 "[installation](../../installation.md)."
 msgstr "从源码安装 `vllm-ascend`，请参考[安装](../../installation.md)。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:99
+#: ../../source/tutorials/models/PaddleOCR-VL.md:97
 msgid "5 Online Service Deployment"
 msgstr "5 在线服务部署"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:101
+#: ../../source/tutorials/models/PaddleOCR-VL.md:99
 msgid "5.1 Single-Node Online Deployment"
 msgstr "5.1 单节点在线部署"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:103
+#: ../../source/tutorials/models/PaddleOCR-VL.md:101
 msgid ""
 "PaddleOCR-VL supports single-node single-card deployment on the A2 series "
 "and Atlas 300I DUO platform. Single-node deployment completes both Prefill "
@@ -180,11 +172,11 @@ msgstr ""
 "PaddleOCR-VL 支持在 A2 系列和 Atlas 300I DUO 平台上进行单节点单卡部署。单节点部署在同一节点内完成 Prefill 和 "
 "Decode。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:105
+#: ../../source/tutorials/models/PaddleOCR-VL.md:103
 msgid "Follow these steps to start the inference service:"
 msgstr "按照以下步骤启动推理服务："
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:107
+#: ../../source/tutorials/models/PaddleOCR-VL.md:105
 msgid ""
 "Prepare model weights: Ensure the model weights are accessible. With "
 "`VLLM_USE_MODELSCOPE=True`, the model will be loaded automatically from "
@@ -192,45 +184,45 @@ msgid ""
 msgstr ""
 "准备模型权重：确保模型权重可访问。设置 `VLLM_USE_MODELSCOPE=True` 后，模型将从 ModelScope 自动加载。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:108
+#: ../../source/tutorials/models/PaddleOCR-VL.md:106
 msgid ""
 "Set the `MODEL_PATH` environment variable to point to your model directory."
 msgstr "设置 `MODEL_PATH` 环境变量指向您的模型目录。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:109
+#: ../../source/tutorials/models/PaddleOCR-VL.md:107
 msgid "Create and execute the deployment script (save as `deploy.sh`)."
 msgstr "创建并执行部署脚本（保存为 `deploy.sh`）。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:111
+#: ../../source/tutorials/models/PaddleOCR-VL.md:109
 msgid "Startup Command:"
 msgstr "启动命令："
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:139
-#: ../../source/tutorials/models/PaddleOCR-VL.md:179
+#: ../../source/tutorials/models/PaddleOCR-VL.md:137
+#: ../../source/tutorials/models/PaddleOCR-VL.md:177
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:141
+#: ../../source/tutorials/models/PaddleOCR-VL.md:139
 msgid ""
 "`--max-num-batched-tokens` specifies the maximum number of tokens batched in"
 " a single forward pass. Adjust this parameter for throughput optimization."
 msgstr "`--max-num-batched-tokens` 指定单次前向传播中批处理的最大 token 数量。调整此参数以优化吞吐量。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:142
-#: ../../source/tutorials/models/PaddleOCR-VL.md:182
+#: ../../source/tutorials/models/PaddleOCR-VL.md:140
+#: ../../source/tutorials/models/PaddleOCR-VL.md:180
 msgid ""
 "`--no-enable-prefix-caching` indicates that prefix caching is disabled. To "
 "enable it, remove this option."
 msgstr "`--no-enable-prefix-caching` 表示禁用前缀缓存。要启用它，请移除该选项。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:143
-#: ../../source/tutorials/models/PaddleOCR-VL.md:183
+#: ../../source/tutorials/models/PaddleOCR-VL.md:141
+#: ../../source/tutorials/models/PaddleOCR-VL.md:181
 msgid ""
 "`--mm-processor-cache-gb` sets the size of the multimodal processor cache "
 "(in GB). A value of `0` disables caching."
 msgstr "`--mm-processor-cache-gb` 设置多模态处理器缓存的大小（以 GB 为单位）。值为 `0` 表示禁用缓存。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:144
+#: ../../source/tutorials/models/PaddleOCR-VL.md:142
 #, python-brace-format
 msgid ""
 "`--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` enables "
@@ -239,22 +231,22 @@ msgstr ""
 "`--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` "
 "启用全解码图编译以提升性能。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:145
+#: ../../source/tutorials/models/PaddleOCR-VL.md:143
 #, python-brace-format
 msgid ""
 "`--additional_config '{\"enable_cpu_binding\":true}'` enables CPU binding to"
 " improve performance."
 msgstr "`--additional_config '{\"enable_cpu_binding\":true}'` 启用 CPU 绑定以提升性能。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:173
+#: ../../source/tutorials/models/PaddleOCR-VL.md:171
 msgid "On Atlas 300I DUO:"
 msgstr "在 Atlas 300I DUO 上："
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:175
+#: ../../source/tutorials/models/PaddleOCR-VL.md:173
 msgid "Only `float16` dtype is supported."
 msgstr "仅支持 `float16` 数据类型。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:176
+#: ../../source/tutorials/models/PaddleOCR-VL.md:174
 msgid ""
 "Graph compilation (`--compilation-config`) requires **CANN version >= "
 "9.0.0**. If your CANN version is lower, please revert to eager mode by "
@@ -263,19 +255,19 @@ msgstr ""
 "图编译（`--compilation-config`）要求 **CANN 版本 >= 9.0.0**。如果您的 CANN 版本较低，请将 "
 "`--compilation-config` 参数替换为 `--enforce-eager` 以回退到 eager 模式。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:181
+#: ../../source/tutorials/models/PaddleOCR-VL.md:179
 msgid ""
 "`--max_model_len` specifies the maximum context length — that is, the sum of"
 " input and output tokens for a single request."
 msgstr "`--max_model_len` 指定最大上下文长度，即单个请求的输入和输出 token 之和。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:184
+#: ../../source/tutorials/models/PaddleOCR-VL.md:182
 msgid ""
 "`--dtype float16` specifies the model dtype. On Atlas 300I DUO, only "
 "`float16` is supported."
 msgstr "`--dtype float16` 指定模型的数据类型。在 Atlas 300I DUO 上，仅支持 `float16`。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:185
+#: ../../source/tutorials/models/PaddleOCR-VL.md:183
 #, python-brace-format
 msgid ""
 "`--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` enables "
@@ -287,7 +279,7 @@ msgstr ""
 "启用完整解码图编译以提升性能。在 Atlas 300I DUO 上，`--additional_config` 中图编译的 "
 "`fuse_norm_quant` 默认禁用。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:189
+#: ../../source/tutorials/models/PaddleOCR-VL.md:187
 msgid ""
 "Common Issues Tip: If you encounter startup issues, please refer to the "
 "[Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
@@ -296,23 +288,23 @@ msgstr ""
 "常见问题提示：如果遇到启动问题，请参考[公共 "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:191
+#: ../../source/tutorials/models/PaddleOCR-VL.md:189
 msgid "5.2 Multi-Node PD Separation Deployment"
 msgstr "5.2 多节点 PD 分离部署"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:193
+#: ../../source/tutorials/models/PaddleOCR-VL.md:191
 msgid "Not supported yet."
 msgstr "暂不支持。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:195
+#: ../../source/tutorials/models/PaddleOCR-VL.md:193
 msgid "5.3 Special Deployment Modes"
 msgstr "5.3 特殊部署模式"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:197
+#: ../../source/tutorials/models/PaddleOCR-VL.md:195
 msgid "5.3.1 Offline Inference with vLLM and PP-DocLayoutV2"
 msgstr "5.3.1 使用 vLLM 和 PP-DocLayoutV2 进行离线推理"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:199
+#: ../../source/tutorials/models/PaddleOCR-VL.md:197
 msgid ""
 "In the above example, we demonstrated how to use vLLM to infer the "
 "PaddleOCR-VL-0.9B model. Typically, we also need to integrate the PP-"
@@ -323,26 +315,26 @@ msgstr ""
 "在上面的示例中，我们演示了如何使用 vLLM 推理 PaddleOCR-VL-0.9B 模型。通常，我们还需要集成 PP-DocLayoutV2 "
 "模型，以充分发挥 PaddleOCR-VL 模型的能力，使其与官方 PaddlePaddle 文档提供的示例更加一致。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:202
+#: ../../source/tutorials/models/PaddleOCR-VL.md:200
 msgid ""
 "Use separate virtual environments for VLLM and PP-DocLayoutV2 to prevent "
 "dependency conflicts."
 msgstr "为 VLLM 和 PP-DocLayoutV2 使用独立的虚拟环境，以防止依赖冲突。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:212
+#: ../../source/tutorials/models/PaddleOCR-VL.md:210
 msgid ""
 "The A2 series device supports inference using the PaddlePaddle framework."
 msgstr "A2系列设备支持使用PaddlePaddle框架进行推理。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:214
+#: ../../source/tutorials/models/PaddleOCR-VL.md:212
 msgid "Pull the PaddlePaddle-compatible CANN image"
 msgstr "拉取兼容PaddlePaddle的CANN镜像"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:220
+#: ../../source/tutorials/models/PaddleOCR-VL.md:218
 msgid "Start the container using the following command:"
 msgstr "使用以下命令启动容器："
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:232
+#: ../../source/tutorials/models/PaddleOCR-VL.md:230
 msgid ""
 "Install "
 "[PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined)"
@@ -350,17 +342,17 @@ msgid ""
 msgstr ""
 "安装[PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined)和[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:243
+#: ../../source/tutorials/models/PaddleOCR-VL.md:241
 msgid "The OpenCV component may be missing:"
 msgstr "可能缺少OpenCV组件："
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:250
+#: ../../source/tutorials/models/PaddleOCR-VL.md:248
 msgid ""
 "CANN-8.0.0 does not support some versions of NumPy and OpenCV. It is "
 "recommended to install the specified versions."
 msgstr "CANN-8.0.0不支持某些版本的NumPy和OpenCV，建议安装指定版本。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:264
+#: ../../source/tutorials/models/PaddleOCR-VL.md:262
 msgid ""
 "The Atlas 300I DUO supports only the OM model inference. For details about "
 "the process, see the guide provided in "
@@ -371,41 +363,41 @@ msgstr ""
 "[ModelZoo](https://gitcode.com/Ascend/ModelZoo-"
 "PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2) 中提供的指南。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:268
+#: ../../source/tutorials/models/PaddleOCR-VL.md:266
 msgid ""
 "5.3.2 Using vLLM as the backend, combined with PP-DocLayoutV2 for offline "
 "inference"
 msgstr "5.3.2使用vLLM作为后端，结合PP-DocLayoutV2进行离线推理"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:288
+#: ../../source/tutorials/models/PaddleOCR-VL.md:286
 msgid "6 Functional Verification"
 msgstr "6 功能验证"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:290
+#: ../../source/tutorials/models/PaddleOCR-VL.md:288
 msgid "If your service starts successfully, you can see the info shown below:"
 msgstr "如果服务启动成功，您将看到如下信息："
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:298
+#: ../../source/tutorials/models/PaddleOCR-VL.md:296
 msgid ""
 "Once your server is started, you can use the OpenAI API client to make "
 "queries."
 msgstr "服务器启动后，您可以使用OpenAI API客户端进行查询。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:343
+#: ../../source/tutorials/models/PaddleOCR-VL.md:341
 msgid "Expected Result:"
 msgstr "预期结果："
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:345
+#: ../../source/tutorials/models/PaddleOCR-VL.md:343
 msgid ""
 "If you query the server successfully, you can see the info shown below "
 "(client):"
 msgstr "如果查询服务器成功，您将看到如下信息（客户端）："
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:361
+#: ../../source/tutorials/models/PaddleOCR-VL.md:359
 msgid "7 Accuracy Evaluation"
 msgstr "7 精度评估"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:363
+#: ../../source/tutorials/models/PaddleOCR-VL.md:361
 msgid ""
 "For the accuracy evaluation of PaddleOCR-VL, please refer to the official "
 "[ModelZoo](https://gitcode.com/Ascend/ModelZoo-"
@@ -415,11 +407,11 @@ msgstr ""
 "关于PaddleOCR-VL的精度评估，请参考官方[ModelZoo](https://gitcode.com/Ascend/ModelZoo-"
 "PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2)中的评估流程和结果。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:365
+#: ../../source/tutorials/models/PaddleOCR-VL.md:363
 msgid "8 Performance Evaluation"
 msgstr "8 性能评估"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:367
+#: ../../source/tutorials/models/PaddleOCR-VL.md:365
 msgid ""
 "For the performance evaluation of PaddleOCR-VL, please refer to the official"
 " [ModelZoo](https://gitcode.com/Ascend/ModelZoo-"
@@ -429,15 +421,15 @@ msgstr ""
 "关于PaddleOCR-VL的性能评估，请参考官方[ModelZoo](https://gitcode.com/Ascend/ModelZoo-"
 "PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2)中的基准测试方法和结果。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:369
+#: ../../source/tutorials/models/PaddleOCR-VL.md:367
 msgid "9 Performance Tuning"
 msgstr "9 性能调优"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:371
+#: ../../source/tutorials/models/PaddleOCR-VL.md:369
 msgid "9.1 Recommended Configurations"
 msgstr "9.1推荐配置"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:373
+#: ../../source/tutorials/models/PaddleOCR-VL.md:371
 msgid ""
 "**Note**: The following configurations are validated in specific test "
 "environments and are for reference only. The optimal configuration depends "
@@ -447,140 +439,140 @@ msgid ""
 msgstr ""
 "**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、精度要求和实际硬件规格等因素，建议根据实际情况参考第9.2节进行调优。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:375
+#: ../../source/tutorials/models/PaddleOCR-VL.md:373
 msgid ""
 "PaddleOCR-VL is a lightweight model that runs on a single NPU. The key "
 "tuning parameters differ between hardware platforms."
 msgstr "PaddleOCR-VL是一个轻量级模型，运行在单个NPU上。关键调优参数因硬件平台而异。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:377
+#: ../../source/tutorials/models/PaddleOCR-VL.md:375
 msgid "Table 1: Scenario Overview"
 msgstr "表1：场景概览"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "Scenario"
 msgstr "场景"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "Hardware"
 msgstr "硬件"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "*Total NPUs"
 msgstr "*NPU总数"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "Weight Version"
 msgstr "权重版本"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "Key Considerations"
 msgstr "关键注意事项"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "High Throughput"
 msgstr "高吞吐量"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "1"
 msgstr "1"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "PaddleOCR-VL-0.9B"
 msgstr "PaddleOCR-VL-0.9B"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "-"
 msgstr "-"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "Graph compilation requires **CANN >= 9.0.0**"
 msgstr "图编译需要**CANN >= 9.0.0**"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:384
+#: ../../source/tutorials/models/PaddleOCR-VL.md:382
 msgid ""
 "`*Total NPUs` indicates the total number of NPUs used across all nodes."
 msgstr "`*NPU总数`表示所有节点使用的NPU总数。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:386
+#: ../../source/tutorials/models/PaddleOCR-VL.md:384
 msgid "Table 2: Detailed Node Configuration"
 msgstr "表2：详细节点配置"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "Configuration"
 msgstr "配置"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "NPUs"
 msgstr "NPU"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "TP"
 msgstr "TP"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "DP"
 msgstr "DP"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "Max Model Len"
 msgstr "最大模型长度"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "Max Num Batched Tokens"
 msgstr "最大批量Token数"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "Graph Compilation"
 msgstr "图编译"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "dtype"
 msgstr "数据类型"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "A2 series / Single Machine"
 msgstr "A2系列/单机"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "—"
 msgstr "—"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "FULL_DECODE_ONLY"
 msgstr "FULL_DECODE_ONLY"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "bfloat16 (default)"
 msgstr "bfloat16（默认）"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "Atlas 300I DUO / Single Machine"
 msgstr "Atlas 300I DUO / 单机"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "FULL_DECODE_ONLY; otherwise enforce-eager"
 msgstr "FULL_DECODE_ONLY；否则使用enforce-eager"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:260
+#: ../../source/tutorials/models/PaddleOCR-VL.md:258
 msgid "float16"
 msgstr "float16"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:393
+#: ../../source/tutorials/models/PaddleOCR-VL.md:391
 msgid ""
 "For complete startup commands and parameter descriptions, please refer to "
 "the deployment examples in [Section 5.1](#51-single-node-online-deployment)."
 msgstr "完整的启动命令和参数说明请参考[第5.1节](#51-single-node-online-deployment)中的部署示例。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:395
+#: ../../source/tutorials/models/PaddleOCR-VL.md:393
 msgid "9.2 Tuning Guidelines"
 msgstr "9.2调优指南"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:397
+#: ../../source/tutorials/models/PaddleOCR-VL.md:395
 msgid "9.2.1 General Tuning Reference"
 msgstr "9.2.1通用调优参考"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:399
+#: ../../source/tutorials/models/PaddleOCR-VL.md:397
 msgid ""
 "For performance tuning, please refer to the [Public Performance Tuning "
 "Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
@@ -589,18 +581,18 @@ msgid ""
 msgstr ""
 "性能调优请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)中的通用调优方法，包括操作系统优化（jemalloc、tcmalloc）、`torch_npu`优化（内存和调度）以及CANN优化。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:401
+#: ../../source/tutorials/models/PaddleOCR-VL.md:399
 msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
 msgstr "详细功能描述请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:403
+#: ../../source/tutorials/models/PaddleOCR-VL.md:401
 msgid "10 FAQ"
 msgstr "10 常见问题"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:405
+#: ../../source/tutorials/models/PaddleOCR-VL.md:403
 msgid ""
 "For common environment, installation, and general parameter issues, please "
 "refer to the [Public "
@@ -609,11 +601,11 @@ msgid ""
 msgstr ""
 "常见环境、安装和通用参数问题请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅涵盖模型特定问题。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:407
+#: ../../source/tutorials/models/PaddleOCR-VL.md:405
 msgid "**Q: What are the deployment requirements for Atlas 300I DUO?**"
 msgstr "**问：Atlas 300I DUO 的部署要求是什么？**"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:409
+#: ../../source/tutorials/models/PaddleOCR-VL.md:407
 msgid ""
 "A: On Atlas 300I DUO, only `float16` dtype is supported. Graph compilation "
 "(`--compilation-config`) requires **CANN version >= 9.0.0**; if your CANN "
@@ -622,15 +614,22 @@ msgstr ""
 "答：在 Atlas 300I DUO 上，仅支持 `float16` 数据类型。图编译 （`--compilation-config`）要求 "
 "**CANN 版本 >= 9.0.0**；如果您的 CANN 版本较低，请改用 `--enforce-eager`。"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:411
+#: ../../source/tutorials/models/PaddleOCR-VL.md:409
 msgid ""
 "**Q: What should I do if I encounter dependency conflicts during "
 "installation on Atlas 300I DUO?**"
 msgstr "**问：在 Atlas 300I DUO 上安装过程中遇到依赖冲突该怎么办？**"
 
-#: ../../source/tutorials/models/PaddleOCR-VL.md:413
+#: ../../source/tutorials/models/PaddleOCR-VL.md:411
 msgid "A: Uninstall `triton` and `triton-ascend` before starting the service:"
 msgstr "答：在启动服务前卸载`triton`和`triton-ascend`："
 
 #~ msgid "Atlas inference products"
 #~ msgstr "Atlas 推理产品"
+
+#~ msgid ""
+#~ "For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a "
+#~ "later `-310p` image)."
+#~ msgstr ""
+#~ "对于 Atlas 300I DUO，请使用 `vllm-ascend:nightly-releases-v0.23.0-310p`（或更新的 "
+#~ "`-310p` 镜像）。"

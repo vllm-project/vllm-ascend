@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-07 10:56+0000\n"
+"POT-Creation-Date: 2026-08-20 12:53+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -21,8 +21,8 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:1
-msgid "DeepSeek-V3/3.1"
-msgstr "DeepSeek-V3/3.1"
+msgid "DeepSeek-V3 & 3.1"
+msgstr "DeepSeek-V3 与 3.1"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:3
 msgid "1 Introduction"
@@ -264,7 +264,7 @@ msgstr "启动命令："
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:282
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:465
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:997
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:993
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
 
@@ -322,7 +322,7 @@ msgstr "服务验证："
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:313
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:498
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1135
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1131
 msgid "Expected Result:"
 msgstr "预期结果："
 
@@ -525,7 +525,7 @@ msgid "Yes"
 msgstr "是"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:411
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "-"
 msgstr "-"
 
@@ -542,7 +542,7 @@ msgid "No"
 msgstr "否"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:411
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "1"
 msgstr "1"
 
@@ -633,7 +633,7 @@ msgstr "节点0(Decode)"
 msgid "Node 1(Decode)"
 msgstr "节点1(Decode)"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:851
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:847
 msgid "`run_dp_template.sh` script(Ascend 950DT)"
 msgstr "`run_dp_template.sh` 脚本(Ascend 950DT)"
 
@@ -645,13 +645,13 @@ msgstr "Prefill节点"
 msgid "Decode Node"
 msgstr "Decode节点"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:999
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:995
 msgid ""
 "`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization "
 "function on the prefill nodes."
 msgstr "`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`：在prefill节点上启用通信优化功能。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1000
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:996
 msgid ""
 "`VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can "
 "significantly improve performance but consumes more NPU memory. In the "
@@ -660,7 +660,7 @@ msgstr ""
 "`VLLM_ASCEND_ENABLE_MLAPO=1`：启用融合算子，可以显著提升性能但会消耗更多NPU内存。在Prefill-Decode "
 "(PD)分离场景中，仅在decode节点上启用MLAPO。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1001
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:997
 msgid ""
 "`recompute_scheduler_enable: true`: enables the recomputation scheduler. "
 "When the Key-Value Cache (KV Cache) of the decode node is insufficient, "
@@ -670,7 +670,7 @@ msgstr ""
 "`recompute_scheduler_enable: true`：启用重计算调度器。当decode节点的Key-Value Cache (KV "
 "Cache)不足时，请求将被发送到prefill节点以重新计算KV Cache。在PD分离场景中，仅在decode节点上启用此配置。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1002
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:998
 msgid ""
 "`multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) "
 "size is 1 or `enable_shared_expert_dp: true`, an additional stream is "
@@ -680,7 +680,7 @@ msgstr ""
 "`multistream_overlap_shared_expert: true`：当张量并行（TP）大小为1或 "
 "`enable_shared_expert_dp: true` 时，启用额外的流以重叠共享专家的计算过程，从而提高效率。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1003
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:999
 msgid ""
 "`lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of "
 "the decode node is 1, this parameter allows the TP size of the LMHead "
@@ -690,17 +690,17 @@ msgstr ""
 "`lmhead_tensor_parallel_size: "
 "16`：当解码节点的张量并行（TP）大小为1时，此参数允许LMHead嵌入层的TP大小大于1，用于减少LMHead嵌入层上每张卡的计算负载。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1005
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1001
 msgid "run server for each node:"
 msgstr "为每个节点运行服务器："
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1054
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1050
 msgid ""
 "Run the `proxy.sh` script on the prefill master node(The proxy.sh of the "
 "Ascend 950DT is consistent with the A3)"
 msgstr "在预填充主节点上运行 `proxy.sh` 脚本（Ascend 950DT 的 proxy.sh 与 A3 一致）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1056
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1052
 msgid ""
 "Run a proxy server on the same node with the prefiller service instance. You"
 " can get the proxy program in the repository's examples: "
@@ -712,18 +712,18 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1112
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1108
 msgid "Deployment Verification:"
 msgstr "部署验证："
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1114
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1110
 msgid ""
 "After the PD separation service is fully started, send a request through the"
 " proxy port on the prefill master node to verify that Prefill and Decode "
 "nodes are working correctly together:"
 msgstr "在PD分离服务完全启动后，通过预填充主节点上的代理端口发送请求，验证预填充节点和解码节点是否协同正常工作："
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1137
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1133
 msgid ""
 "The proxy returns HTTP 200 OK. The JSON response contains the `choices` "
 "field with the generated text, confirming that Prefill nodes have "
@@ -732,7 +732,7 @@ msgid ""
 msgstr ""
 "代理返回HTTP 200 OK。JSON响应中包含 `choices` 字段及生成的文本，确认预填充节点已成功处理提示词，解码节点已生成响应："
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1162
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1158
 msgid ""
 "Common Issues Tip: If you encounter issues with PD separation deployment, "
 "please refer to the [Public "
@@ -741,36 +741,36 @@ msgid ""
 msgstr ""
 "常见问题提示：如果遇到PD分离部署问题，请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)进行故障排查。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1164
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1160
 msgid "6 Functional Verification"
 msgstr "6 功能验证"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1166
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1162
 msgid ""
 "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1179
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1175
 msgid "7 Accuracy Evaluation"
 msgstr "7 精度评估"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1181
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1177
 msgid "Here is one accuracy evaluation method."
 msgstr "以下是一种精度评估方法。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1183
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1200
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1179
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1196
 msgid "Using AISBench"
 msgstr "使用AISBench"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1185
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1181
 msgid ""
 "Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
 msgstr ""
 "详情请参考[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1187
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1183
 msgid ""
 "After execution, you can get the result, here is the result of "
 "`DeepSeek-V3.1-w8a8-mtp-QuaRot` in `vllm-ascend:0.18.0` for reference only."
@@ -778,71 +778,71 @@ msgstr ""
 "执行后可获取结果，以下为 `vllm-ascend:0.18.0` 中 `DeepSeek-V3.1-w8a8-mtp-QuaRot` "
 "的结果，仅供参考。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "dataset"
 msgstr "数据集"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "version"
 msgstr "版本"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "metric"
 msgstr "指标"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "mode"
 msgstr "模式"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "vllm-api-general-chat"
 msgstr "vllm-api-general-chat"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "note"
 msgstr "备注"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "ceval"
 msgstr "ceval"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "accuracy"
 msgstr "准确率"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "gen"
 msgstr "生成"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "90.94"
 msgstr "90.94"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "1 Atlas 800 A3 (64GB × 16)"
 msgstr "1台Atlas 800 A3（64GB × 16）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "gsm8k"
 msgstr "gsm8k"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "96.28"
 msgstr "96.28"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1194
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1190
 msgid "Using Language Model Evaluation Harness"
 msgstr "使用Language Model Evaluation Harness"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1196
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1192
 msgid "Not test yet."
 msgstr "尚未测试。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1198
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1194
 msgid "8 Performance Evaluation"
 msgstr "8 性能评估"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1202
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1198
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -851,77 +851,77 @@ msgstr ""
 "详情请参考[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1204
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1200
 msgid "The performance result is:"
 msgstr "性能结果为："
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1206
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1202
 msgid "**Hardware**: A3-752T, 4 node"
 msgstr "**硬件**：A3-752T，4节点"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1208
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1204
 msgid "**Deployment**: 2P1D, Prefill node: DP2+TP8, Decode Node: DP32+TP1"
 msgstr "**部署**：2P1D，预填充节点：DP2+TP8，解码节点：DP32+TP1"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1210
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1206
 msgid "**Input/Output**: 3.5k/1.5k"
 msgstr "**输入/输出**：3.5k/1.5k"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1212
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1208
 msgid ""
 "**Performance**: TTFT = 6.16s, TPOT = 48.82ms, Average performance of each "
 "card is 478 TPS (Token Per Second)."
 msgstr "**性能**：TTFT = 6.16s，TPOT = 48.82ms，每张卡平均性能为478 TPS（每秒令牌数）。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1214
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1210
 msgid "Using vLLM Benchmark"
 msgstr "使用vLLM Benchmark"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1216
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1212
 msgid ""
 "Run performance evaluation of `DeepSeek-V3.1-w8a8-mtp-QuaRot` as an example."
 msgstr "以 `DeepSeek-V3.1-w8a8-mtp-QuaRot` 为例运行性能评估。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1218
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1214
 msgid ""
 "Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
 "more details."
 msgstr ""
 "更多详情请参考[vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1220
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1216
 msgid "There are three `vllm bench` subcommands:"
 msgstr "有三个 `vllm bench` 子命令："
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1222
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1218
 msgid "`latency`: Benchmark the latency of a single batch of requests."
 msgstr "`latency`：对单批次请求的延迟进行基准测试。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1223
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1219
 msgid "`serve`: Benchmark the online serving throughput."
 msgstr "`serve`：对在线服务吞吐量进行基准测试。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1224
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1220
 msgid "`throughput`: Benchmark offline inference throughput."
 msgstr "`throughput`：对离线推理吞吐量进行基准测试。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1226
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1222
 msgid "Take the `serve` as an example. Run the code as follows."
 msgstr "以 `serve` 为例，运行如下代码。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1232
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1228
 msgid "After several minutes, you can get the performance evaluation result."
 msgstr "几分钟后，您即可获得性能评估结果。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1234
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1230
 msgid "9 Performance Tuning"
 msgstr "9 性能调优"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1236
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1232
 msgid "9.1 Recommended Configurations"
 msgstr "9.1 推荐配置"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1238
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1234
 msgid ""
 "**Note**: The following configurations are validated in specific test "
 "environments and are for reference only. The optimal configuration depends "
@@ -931,229 +931,229 @@ msgid ""
 msgstr ""
 "**注意**：以下配置在特定测试环境中验证通过，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求以及部署机器配比等因素，建议根据实际情况参考第9.2节进行调优。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1240
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1236
 msgid "Table 1: Scenario Overview(A3)"
 msgstr "表1：场景概览（A3）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1242
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1238
 msgid ""
 "`*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
 "node = 1 Atlas 800 A3 server (64GB × 16 NPUs)."
 msgstr "`*Total NPUs`表示所有节点使用的NPU总数。1个节点 = 1台Atlas 800 A3服务器（64GB × 16个NPU）。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Scenario"
 msgstr "场景"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Deployment Mode"
 msgstr "部署模式"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "*Total NPUs"
 msgstr "*NPU总数"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Weight Version"
 msgstr "权重版本"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Key Considerations"
 msgstr "关键考量"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "High Throughput<br>(3.5K/16K input)"
 msgstr "高吞吐量<br>（3.5K/16K输入）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Single-Node Mixed"
 msgstr "单节点混合"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "16 (A3)"
 msgstr "16（A3）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "DeepSeek-V3.1-w4a8-perchannle"
 msgstr "DeepSeek-V3.1-w4a8-perchannle"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Use dp4 tp4 to balance memory capacity and compute efficiency"
 msgstr "使用dp4 tp4以平衡内存容量和计算效率"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Low Latency<br>(3.5K/16K input)"
 msgstr "低延迟<br>（3.5K/16K输入）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Use dp2 tp8 to balance memory capacity and compute efficiency"
 msgstr "使用dp2 tp8以平衡内存容量和计算效率"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "High Throughput / Low Latency<br>(64K input)"
 msgstr "高吞吐量/低延迟<br>（64K输入）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "High Throughput / Low Latency<br>(3.5K input)"
 msgstr "高吞吐量/低延迟<br>（3.5K输入）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "2P1D deployment"
 msgstr "2P1D部署"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "64 (A3)"
 msgstr "64（A3）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "High Throughput / Low Latency<br>(16K input)"
 msgstr "高吞吐量/低延迟<br>（16K输入）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Long Context<br>(64K input, no prefix cache)"
 msgstr "长上下文<br>（64K输入，无前缀缓存）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Use dp1 tp8 to balance memory capacity and compute efficiency"
 msgstr "使用dp1 tp8以平衡内存容量和计算效率"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1253
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1249
 msgid "Table 2: Detailed Node Configuration(A3)"
 msgstr "表2：详细节点配置（A3）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Configuration"
 msgstr "配置"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "NPUs"
 msgstr "NPU"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "TP"
 msgstr "TP"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "DP"
 msgstr "DP"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Max Model Len"
 msgstr "最大模型长度"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "MTP Speculation Num"
 msgstr "MTP推测数量"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "High Throughput (3.5K)"
 msgstr "高吞吐量（3.5K）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Server / Single Machine"
 msgstr "服务器/单机"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "16"
 msgstr "16"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "4"
 msgstr "4"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "39K"
 msgstr "39K"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "3"
 msgstr "3"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "High Throughput (16K)"
 msgstr "高吞吐量（16K）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "36K"
 msgstr "36K"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Low Latency (3.5K)"
 msgstr "低延迟（3.5K）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "8"
 msgstr "8"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "2"
 msgstr "2"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Low Latency (16K)"
 msgstr "低延迟（16K）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "High Throughput / Low Latency (64K)"
 msgstr "高吞吐/低延迟（64K）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "132K"
 msgstr "132K"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Server-P Node"
 msgstr "Server-P 节点"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Server-D Node"
 msgstr "Server-D 节点"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "Long Context (64K)"
 msgstr "长上下文（64K）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "1(PCP2DCP8)"
 msgstr "1(PCP2DCP8)"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1269
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1265
 msgid "Table 3: Scenario Overview(Ascend 950DT)"
 msgstr "表3：场景概览（Ascend 950DT）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1271
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1267
 msgid ""
 "`*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
 "node = 1 Atlas Ascend 950DT server (96G × 8 NPUs)."
 msgstr "`*总NPU数` 表示所有节点使用的NPU总数。1个节点 = 1台Atlas Ascend 950DT服务器（96G × 8 NPU）。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "8 (Ascend 950DT)"
 msgstr "8（Ascend 950DT）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "DeepseekV3.1-w8a8c8_attn"
 msgstr "DeepseekV3.1-w8a8c8_attn"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "64 (Ascend 950DT)"
 msgstr "64（Ascend 950DT）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1282
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1278
 msgid "Table 4: Detailed Node Configuration(Ascend 950DT)"
 msgstr "表4：详细节点配置（Ascend 950DT）"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1031
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1027
 msgid "32"
 msgstr "32"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1298
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1294
 msgid ""
 "For complete startup commands and parameter descriptions, please refer to "
 "the deployment examples in [Chapter 5](#5-online-service-deployment)."
 msgstr "完整的启动命令和参数说明请参考[第5章](#5-online-service-deployment)中的部署示例。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1300
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1296
 msgid ""
 "**Notice:** `max-model-len` and `max-num-seqs` need to be set according to "
 "the actual usage scenario. For other settings, please refer to the "
@@ -1162,11 +1162,11 @@ msgstr ""
 "**注意：** `max-model-len` 和 `max-num-seqs` "
 "需要根据实际使用场景设置，其他设置请参考**[部署](#5-online-service-deployment)**章节。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1303
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1299
 msgid "9.2 Tuning Guidelines"
 msgstr "9.2 调优指南"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1305
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1301
 msgid ""
 "Please refer to the [Public Performance Tuning "
 "Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
@@ -1174,18 +1174,18 @@ msgid ""
 msgstr ""
 "调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1307
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1303
 msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
 msgstr "详细特性说明请参考[特性指南](../../user_guide/support_matrix/feature_matrix.md)。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1309
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1305
 msgid "10 FAQ"
 msgstr "10 常见问题"
 
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:1311
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:1307
 msgid ""
 "For common environment, installation, and general parameter issues, please "
 "refer to the [Public "

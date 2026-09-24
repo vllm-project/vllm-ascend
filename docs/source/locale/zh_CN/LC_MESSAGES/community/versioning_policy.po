@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-17 01:24+0000\n"
+"POT-Creation-Date: 2026-08-20 12:53+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -148,6 +148,26 @@ msgid ">= 3.10, < 3.13"
 msgstr ">= 3.10, < 3.13"
 
 #: ../../source/community/versioning_policy.md
+msgid "9.1.0"
+msgstr "9.1.0"
+
+#: ../../source/community/versioning_policy.md
+msgid "2.10.0 / 2.10.0.post4"
+msgstr "2.10.0 / 2.10.0.post4"
+
+#: ../../source/community/versioning_policy.md
+msgid "3.2.2"
+msgstr "3.2.2"
+
+#: ../../source/community/versioning_policy.md
+msgid "v0.3.11.post1"
+msgstr "v0.3.11.post1"
+
+#: ../../source/community/versioning_policy.md
+msgid "v0.23.0rc1"
+msgstr "v0.23.0rc1"
+
+#: ../../source/community/versioning_policy.md
 msgid "9.0.1"
 msgstr "9.0.1"
 
@@ -158,14 +178,6 @@ msgstr "2.10.0 / 2.10.0.post2"
 #: ../../source/community/versioning_policy.md
 msgid "3.2.1"
 msgstr "3.2.1"
-
-#: ../../source/community/versioning_policy.md
-msgid "v0.3.11.post1"
-msgstr "v0.3.11.post1"
-
-#: ../../source/community/versioning_policy.md
-msgid "v0.23.0rc1"
-msgstr "v0.23.0rc1"
 
 #: ../../source/community/versioning_policy.md
 msgid "v0.22.1rc1"
@@ -537,8 +549,8 @@ msgid "Event"
 msgstr "事件"
 
 #: ../../source/community/versioning_policy.md:63
-msgid "2026.07.31"
-msgstr "2026.07.31"
+msgid "2026.08.16"
+msgstr "2026.08.16"
 
 #: ../../source/community/versioning_policy.md:63
 msgid "v0.23.0 Final release, v0.23.0"
@@ -1225,3 +1237,6 @@ msgstr ""
 "发布一个稳定版本，每月发布一个开发版本（即POC版本），每天发布一个夜间版本。PyPI 稳定版本**可以**用于 vLLM Ascend "
 "最终版本，月度开发版本**仅可**用于 vLLM Ascend RC 版本以进行快速迭代，而夜间版本**不能**用于任何 vLLM Ascend "
 "版本或分支。"
+
+#~ msgid "2026.07.31"
+#~ msgstr "2026.07.31"

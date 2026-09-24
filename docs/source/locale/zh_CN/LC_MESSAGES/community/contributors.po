@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-17 01:24+0000\n"
+"POT-Creation-Date: 2026-08-20 12:53+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -203,8 +203,8 @@ msgid ""
 msgstr "vLLM Ascend 的每个版本都离不开以下贡献者："
 
 #: ../../source/community/contributors.md:28
-msgid "Updated on 2026-07-31:"
-msgstr "更新于 2026-07-31："
+msgid "Updated on 2026-08-16:"
+msgstr "更新于2026-08-16："
 
 #: ../../source/community/contributors.md
 msgid "Number"
@@ -217,6 +217,122 @@ msgstr "贡献者"
 #: ../../source/community/contributors.md
 msgid "Commit ID"
 msgstr "提交 ID"
+
+#: ../../source/community/contributors.md
+msgid "518"
+msgstr "518"
+
+#: ../../source/community/contributors.md
+msgid "[@DavidJiang9](https://github.com/DavidJiang9)"
+msgstr "[@DavidJiang9](https://github.com/DavidJiang9)"
+
+#: ../../source/community/contributors.md
+msgid "2026/08/13"
+msgstr "2026/08/13"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[c10e1c0](https://github.com/vllm-project/vllm-"
+"ascend/commit/c10e1c01d51c533021ae4bc5eeebf784ae36dafc)"
+msgstr ""
+"[c10e1c0](https://github.com/vllm-project/vllm-"
+"ascend/commit/c10e1c01d51c533021ae4bc5eeebf784ae36dafc)"
+
+#: ../../source/community/contributors.md
+msgid "517"
+msgstr "517"
+
+#: ../../source/community/contributors.md
+msgid "[@hw-zhoutianyang](https://github.com/hw-zhoutianyang)"
+msgstr "[@hw-zhoutianyang](https://github.com/hw-zhoutianyang)"
+
+#: ../../source/community/contributors.md
+msgid "2026/08/12"
+msgstr "2026/08/12"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[6c47fb9](https://github.com/vllm-project/vllm-"
+"ascend/commit/6c47fb9e3ac8af04c873fce79318bc2afabf9188)"
+msgstr ""
+"[6c47fb9](https://github.com/vllm-project/vllm-"
+"ascend/commit/6c47fb9e3ac8af04c873fce79318bc2afabf9188)"
+
+#: ../../source/community/contributors.md
+msgid "516"
+msgstr "516"
+
+#: ../../source/community/contributors.md
+msgid "[@lrf-vm](https://github.com/lrf-vm)"
+msgstr "[@lrf-vm](https://github.com/lrf-vm)"
+
+#: ../../source/community/contributors.md
+msgid "2026/08/08"
+msgstr "2026/08/08"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[462154e](https://github.com/vllm-project/vllm-"
+"ascend/commit/462154e6cd99084d81b94fcfdf26b4aed2cac914)"
+msgstr ""
+"[462154e](https://github.com/vllm-project/vllm-"
+"ascend/commit/462154e6cd99084d81b94fcfdf26b4aed2cac914)"
+
+#: ../../source/community/contributors.md
+msgid "515"
+msgstr "515"
+
+#: ../../source/community/contributors.md
+msgid "[@voidvelocity](https://github.com/voidvelocity)"
+msgstr "[@voidvelocity](https://github.com/voidvelocity)"
+
+#: ../../source/community/contributors.md
+msgid "2026/08/07"
+msgstr "2026/08/07"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[60eacbe](https://github.com/vllm-project/vllm-"
+"ascend/commit/60eacbe8bd20ad9dcd7615896184110e556c0584)"
+msgstr ""
+"[60eacbe](https://github.com/vllm-project/vllm-"
+"ascend/commit/60eacbe8bd20ad9dcd7615896184110e556c0584)"
+
+#: ../../source/community/contributors.md
+msgid "514"
+msgstr "514"
+
+#: ../../source/community/contributors.md
+msgid "[@xqchen7](https://github.com/xqchen7)"
+msgstr "[@xqchen7](https://github.com/xqchen7)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[7c0f6e6](https://github.com/vllm-project/vllm-"
+"ascend/commit/7c0f6e6d8cc3134019ea6ebd71a3dad6733492e5)"
+msgstr ""
+"[7c0f6e6](https://github.com/vllm-project/vllm-"
+"ascend/commit/7c0f6e6d8cc3134019ea6ebd71a3dad6733492e5)"
+
+#: ../../source/community/contributors.md
+msgid "513"
+msgstr "513"
+
+#: ../../source/community/contributors.md
+msgid "[@Karryking3](https://github.com/Karryking3)"
+msgstr "[@Karryking3](https://github.com/Karryking3)"
+
+#: ../../source/community/contributors.md
+msgid "2026/08/06"
+msgstr "2026/08/06"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[bb630a6](https://github.com/vllm-project/vllm-"
+"ascend/commit/bb630a62a210059ba04041bdb952e3fca22f94df)"
+msgstr ""
+"[bb630a6](https://github.com/vllm-project/vllm-"
+"ascend/commit/bb630a62a210059ba04041bdb952e3fca22f94df)"
 
 #: ../../source/community/contributors.md
 msgid "512"

@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-17 01:24+0000\n"
+"POT-Creation-Date: 2026-09-02 03:12+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -140,7 +140,7 @@ msgid ""
 "310P table below for its requirements."
 msgstr "Atlas 300I DUO 使用其平台专属的 CANN 9.1.0 软件包；其要求请参阅下表中的 310P 部分。"
 
-#: ../../source/installation.md ../../source/installation.md:275
+#: ../../source/installation.md ../../source/installation.md:276
 msgid "Atlas 300I DUO"
 msgstr "Atlas 300I DUO"
 
@@ -278,11 +278,20 @@ msgstr "然后，您可以通过以下方式之一从**预构建的 wheel** 安�
 msgid "Original installation"
 msgstr "原始安装"
 
+#: ../../source/installation.md:172
+msgid ""
+"Currently, this installation method supports only A2. For A3, Atlas 300I "
+"DUO, Atlas 200I Pro, or 950DT, use a pre-built image, uv-wheelnext, or "
+"source installation."
+msgstr ""
+"目前，此安装方法仅支持A2。对于A3、Atlas 300I DUO、Atlas 200I Pro或950DT，请使用预构建镜像、uv-"
+"wheelnext或源码安装。"
+
 #: ../../source/installation.md
 msgid "uv-wheelnext installation"
 msgstr "uv-wheelnext 安装"
 
-#: ../../source/installation.md:191
+#: ../../source/installation.md:192
 msgid ""
 "The `uv-wheelnext` installation downloads only the delta on top of vllm, "
 "resulting in a smaller download size. First install `uv-wheelnext` to "
@@ -290,7 +299,7 @@ msgid ""
 msgstr ""
 "`uv-wheelnext` 安装仅下载 vllm 之上的增量部分，从而减小下载量。首先安装 `uv-wheelnext` 以支持增量 wheel："
 
-#: ../../source/installation.md:215
+#: ../../source/installation.md:216
 msgid ""
 "If you encounter errors during `uv pip install` (e.g., corrupted cache or "
 "stale package data), try clearing the uv cache first and then re-run the "
@@ -301,15 +310,15 @@ msgstr "如果在 `uv pip install` 过程中遇到错误（例如缓存损坏或
 msgid "Click here to see \"Build from source code\""
 msgstr "点击此处查看“从源代码构建”"
 
-#: ../../source/installation.md:224
+#: ../../source/installation.md:225
 msgid "or build from **source code**:"
 msgstr "或从**源代码**构建："
 
-#: ../../source/installation.md:227
+#: ../../source/installation.md:228
 msgid "To install `triton-ascend`, run:"
 msgstr "要安装 `triton-ascend`，请运行："
 
-#: ../../source/installation.md:229
+#: ../../source/installation.md:230
 msgid ""
 "pip install triton-ascend==3.2.2 --extra-index-url "
 "https://mirrors.huaweicloud.com/ascend/repos/pypi"
@@ -317,14 +326,14 @@ msgstr ""
 "pip install triton-ascend==3.2.2 --extra-index-url "
 "https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
-#: ../../source/installation.md:231
+#: ../../source/installation.md:232
 msgid ""
 "If you are installing via `uv`, make sure to install `triton-ascend` "
 "**last**, after all other packages have been installed, to avoid dependency "
 "resolution conflicts."
 msgstr "如果通过 `uv` 安装，请确保在所有其他包安装**之后**再安装 `triton-ascend`，以避免依赖解析冲突。"
 
-#: ../../source/installation.md:251
+#: ../../source/installation.md:252
 msgid ""
 "If you are building custom operators for Atlas A3, you should run `git "
 "submodule update --init --recursive` manually, or ensure your environment "
@@ -333,7 +342,7 @@ msgstr ""
 "如果为 Atlas A3 构建自定义算子，应手动运行 `git submodule update --init "
 "--recursive`，或确保您的环境可以访问互联网。"
 
-#: ../../source/installation.md:255
+#: ../../source/installation.md:256
 msgid ""
 "Atlas 300I DUO does not support `triton` or `triton-ascend`. Source "
 "installations can pull these packages as dependencies; remove them before "
@@ -342,7 +351,7 @@ msgstr ""
 "Atlas 300I DUO 不支持 `triton` 或 `triton-ascend`。源码安装可能会将这些包作为依赖项引入；在 Atlas "
 "300I DUO 上运行前请移除它们："
 
-#: ../../source/installation.md:264
+#: ../../source/installation.md:265
 msgid ""
 "To build custom operators, gcc/g++ higher than 8 and C++17 or higher are "
 "required. If you are using `pip install -e .` and encounter a TorchNPU "
@@ -357,7 +366,7 @@ msgstr ""
 "在系统环境中构建。如果在编译过程中遇到其他问题，可能是因为使用了意外的编译器，您可以在编译前在环境中导出 `CXX_COMPILER` 和 "
 "`C_COMPILER` 来指定您的 g++ 和 gcc 位置。"
 
-#: ../../source/installation.md:267
+#: ../../source/installation.md:268
 msgid ""
 "If you are building in a CPU-only environment where `npu-smi` is "
 "unavailable, you need to set `SOC_VERSION` before `pip install -e .` so the "
@@ -367,23 +376,23 @@ msgstr ""
 "如果在无法使用 `npu-smi` 的纯 CPU 环境中构建，您需要在 `pip install -e .` 之前设置 "
 "`SOC_VERSION`，以便构建过程能够针对正确的芯片。您可以参考 `Dockerfile*` 的默认值，例如："
 
-#: ../../source/installation.md:269
+#: ../../source/installation.md:270
 msgid "Atlas A2: `export SOC_VERSION=ascend910b1`"
 msgstr "Atlas A2：`export SOC_VERSION=ascend910b1`"
 
-#: ../../source/installation.md:270
+#: ../../source/installation.md:271
 msgid "Atlas A3: `export SOC_VERSION=ascend910_9391`"
 msgstr "Atlas A3：`export SOC_VERSION=ascend910_9391`"
 
-#: ../../source/installation.md:271
+#: ../../source/installation.md:272
 msgid "Atlas 300I DUO: `export SOC_VERSION=ascend310p1`"
 msgstr "Atlas 300I DUO：`export SOC_VERSION=ascend310p1`"
 
-#: ../../source/installation.md:272
+#: ../../source/installation.md:273
 msgid "Atlas 950DT: `export SOC_VERSION=ascend950dt_9582`"
 msgstr "Atlas 950DT：`export SOC_VERSION=ascend950dt_9582`"
 
-#: ../../source/installation.md:276
+#: ../../source/installation.md:277
 msgid ""
 "To enable the batch invariance feature, set `VLLM_BATCH_INVARIANT=1` before "
 "building vllm-ascend to install the batch invariance custom operator library"
@@ -396,11 +405,11 @@ msgstr ""
 "<https://github.com/vllm-project/vllm-"
 "ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>"
 
-#: ../../source/installation.md:280
+#: ../../source/installation.md:281
 msgid "Set up using Docker"
 msgstr "使用 Docker 设置"
 
-#: ../../source/installation.md:282
+#: ../../source/installation.md:283
 msgid ""
 "`vllm-ascend` offers Docker images for deployment. You can just pull the "
 "**prebuilt image** from the image repository [ascend/vllm-"
@@ -411,71 +420,71 @@ msgstr ""
 "ascend](https://quay.io/repository/ascend/vllm-ascend?tab=tags) "
 "拉取**预构建镜像**，并使用 bash 运行。"
 
-#: ../../source/installation.md:284
+#: ../../source/installation.md:285
 msgid "Supported images as following."
 msgstr "支持的镜像如下。"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "image name"
 msgstr "镜像名称"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "Hardware"
 msgstr "硬件"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "OS"
 msgstr "操作系统"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "vllm-ascend:{{ vllm_ascend_version }}"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "Atlas A2"
 msgstr "Atlas A2"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "Ubuntu"
 msgstr "Ubuntu"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "vllm-ascend:{{ vllm_ascend_version }}-openeuler"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-openeuler"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "openEuler"
 msgstr "openEuler"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "vllm-ascend:{{ vllm_ascend_version }}-a3"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-a3"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "Atlas A3"
 msgstr "Atlas A3"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "vllm-ascend:{{ vllm_ascend_version }}-310p"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-310p"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "vllm-ascend:{{ vllm_ascend_version }}-a5"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-a5"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "Atlas 950DT"
 msgstr "Atlas 950DT"
 
-#: ../../source/installation.md:275
+#: ../../source/installation.md:276
 msgid "vllm-ascend:{{ vllm_ascend_version }}-a5-openeuler"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-a5-openeuler"
 
@@ -483,7 +492,7 @@ msgstr "vllm-ascend:{{ vllm_ascend_version }}-a5-openeuler"
 msgid "Click here to see \"Build from Dockerfile\""
 msgstr "点击此处查看“从 Dockerfile 构建”"
 
-#: ../../source/installation.md:298
+#: ../../source/installation.md:299
 msgid "or build IMAGE from **source code**:"
 msgstr "或从**源代码**构建镜像："
 
@@ -491,7 +500,7 @@ msgstr "或从**源代码**构建镜像："
 msgid "A2/A3"
 msgstr "A2/A3"
 
-#: ../../source/installation.md:348
+#: ../../source/installation.md:349
 msgid "Adjust `/dev/davinci0` to the NPU you want to use."
 msgstr "将 `/dev/davinci0` 调整为您要使用的 NPU。"
 
@@ -499,7 +508,7 @@ msgstr "将 `/dev/davinci0` 调整为您要使用的 NPU。"
 msgid "Atlas 200I Pro"
 msgstr "Atlas 200I Pro"
 
-#: ../../source/installation.md:377
+#: ../../source/installation.md:378
 msgid ""
 "Atlas 200I Pro requires additional device nodes, driver libraries, and "
 "configuration files so that `npu-smi` and other driver commands work inside "
@@ -508,13 +517,13 @@ msgstr ""
 "Atlas 200I Pro 需要额外的设备节点、驱动库和配置文件，以便 `npu-smi` 和其他驱动命令在容器内正常工作。将 "
 "`/dev/davinci0` 调整为您要使用的 NPU。"
 
-#: ../../source/installation.md:410
+#: ../../source/installation.md:411
 msgid ""
 "For openEuler, keep the same command structure and make the following "
 "substitutions:"
 msgstr "对于 openEuler，保持相同的命令结构，并进行以下替换："
 
-#: ../../source/installation.md:412
+#: ../../source/installation.md:413
 msgid ""
 "Set `IMAGE` to `quay.io/ascend/vllm-"
 "ascend:|vllm_ascend_version|-310p-openeuler`."
@@ -522,11 +531,11 @@ msgstr ""
 "将 `IMAGE` 设置为 `quay.io/ascend/vllm-"
 "ascend:|vllm_ascend_version|-310p-openeuler`。"
 
-#: ../../source/installation.md:413
+#: ../../source/installation.md:414
 msgid "Add `-v /usr/lib64/libsemanage.so.2:/usr/lib64/libsemanage.so.2`."
 msgstr "添加 `-v /usr/lib64/libsemanage.so.2:/usr/lib64/libsemanage.so.2`。"
 
-#: ../../source/installation.md:414
+#: ../../source/installation.md:415
 msgid ""
 "Replace the `libyaml` mount with `-v "
 "/usr/lib64/libyaml-0.so.2.0.9:/usr/lib64/libyaml-0.so.2`."
@@ -534,7 +543,7 @@ msgstr ""
 "将 `libyaml` 挂载替换为 `-v "
 "/usr/lib64/libyaml-0.so.2.0.9:/usr/lib64/libyaml-0.so.2`。"
 
-#: ../../source/installation.md:418
+#: ../../source/installation.md:419
 msgid ""
 "The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in"
 " `/vllm-workspace` and installed in [development "
@@ -546,23 +555,23 @@ msgstr ""
 "workspace`，并以[开发模式](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)（`pip"
 " install -e`）安装，以帮助开发者立即进行修改，无需重新安装。"
 
-#: ../../source/installation.md:420
+#: ../../source/installation.md:421
 msgid "Extra information"
 msgstr "额外信息"
 
-#: ../../source/installation.md:422
+#: ../../source/installation.md:423
 msgid "Verify installation"
 msgstr "验证安装"
 
-#: ../../source/installation.md:424
+#: ../../source/installation.md:425
 msgid "Create and run a simple inference test. The `example.py` can be like:"
 msgstr "创建并运行一个简单的推理测试。`example.py` 可以如下所示："
 
-#: ../../source/installation.md:449
+#: ../../source/installation.md:450
 msgid "Then run:"
 msgstr "然后运行："
 
-#: ../../source/installation.md:455
+#: ../../source/installation.md:456
 msgid ""
 "If you encounter a connection error with Hugging Face (e.g., `We couldn't "
 "connect to 'https://huggingface.co' to load the files, and couldn't find "
@@ -573,7 +582,7 @@ msgstr ""
 " to load the files, and couldn't find them in the cached files.`），请运行以下命令以使用"
 " ModelScope 作为替代："
 
-#: ../../source/installation.md:464
+#: ../../source/installation.md:465
 #, python-format
 msgid ""
 "If you encounter custom-op security verification errors while running "
@@ -585,61 +594,61 @@ msgstr ""
 "如果在Atlas "
 "950DT上运行推理时遇到自定义算子安全校验错误，请参考[池化使能950DT和950PR的UB和UBoE](https://gitcode.com/Ascend/memcache/wiki/%E6%B1%A0%E5%8C%96%E4%BD%BF%E8%83%BD950DT%E5%92%8C950PR%E7%9A%84UB%E5%92%8CUBoE.md)并运行以下命令："
 
-#: ../../source/installation.md:466
+#: ../../source/installation.md:467
 msgid ""
 "Each NPU will prompt for confirmation when running the first command. You "
 "must manually enter `Y` for all of them."
 msgstr "每个NPU在运行第一条命令时都会提示确认。您必须手动为所有提示输入`Y`。"
 
-#: ../../source/installation.md:473
+#: ../../source/installation.md:474
 msgid "This section shows ascend platform is successfully detected in vllm:"
 msgstr "此部分显示 vllm 中成功检测到 ascend 平台："
 
-#: ../../source/installation.md:482
+#: ../../source/installation.md:483
 msgid "This section shows the final output:"
 msgstr "此部分显示最终输出："
 
-#: ../../source/installation.md:491
+#: ../../source/installation.md:492
 msgid ""
 "This section shows process exits after offline inference, and does not "
 "affect actual inference:"
 msgstr "此部分显示进程在离线推理后退出，不影响实际推理："
 
-#: ../../source/installation.md:500
+#: ../../source/installation.md:501
 msgid "Multi-node Deployment"
 msgstr "多节点部署"
 
-#: ../../source/installation.md:502
+#: ../../source/installation.md:503
 msgid "Verify Multi-Node Communication"
 msgstr "验证多节点通信"
 
-#: ../../source/installation.md:504
+#: ../../source/installation.md:505
 msgid ""
 "First, check physical layer connectivity, then verify each node, and finally"
 " verify the inter-node connectivity."
 msgstr "首先检查物理层连接，然后验证每个节点，最后验证节点间连接。"
 
-#: ../../source/installation.md:506
+#: ../../source/installation.md:507
 msgid "Physical Layer Requirements"
 msgstr "物理层要求"
 
-#: ../../source/installation.md:508
+#: ../../source/installation.md:509
 msgid ""
 "The physical machines must be located on the same LAN, with network "
 "connectivity."
 msgstr "物理机器必须位于同一局域网内，并具有网络连通性。"
 
-#: ../../source/installation.md:509
+#: ../../source/installation.md:510
 msgid ""
 "All NPUs are connected with optical modules, and the connection status must "
 "be normal."
 msgstr "所有 NPU 均通过光模块连接，且连接状态必须正常。"
 
-#: ../../source/installation.md:511
+#: ../../source/installation.md:512
 msgid "Each Node Verification"
 msgstr "每个节点验证"
 
-#: ../../source/installation.md:513
+#: ../../source/installation.md:514
 msgid ""
 "Execute the following commands on each node in sequence. The results must "
 "all be `success` and the status must be `UP`:"
@@ -657,33 +666,33 @@ msgstr "A3 系列"
 msgid "950DT series"
 msgstr "950DT 系列"
 
-#: ../../source/installation.md:577
+#: ../../source/installation.md:578
 msgid "Interconnect Verification"
 msgstr "互连验证"
 
-#: ../../source/installation.md:579
+#: ../../source/installation.md:580
 msgid "1. Get NPU IP Addresses"
 msgstr "1.获取 NPU IP 地址"
 
-#: ../../source/installation.md:610
+#: ../../source/installation.md:611
 msgid "2. Cross-Node PING Test"
 msgstr "2.跨节点 PING 测试"
 
-#: ../../source/installation.md:617
+#: ../../source/installation.md:618
 msgid "Atlas 950 Series Server Pre-check"
 msgstr "Atlas 950 系列服务器预检查"
 
-#: ../../source/installation.md:619
+#: ../../source/installation.md:620
 msgid ""
 "This pre-check applies only to Atlas 950 series servers. Other server series"
 " can skip it."
 msgstr "此预检查仅适用于 Atlas 950 系列服务器。其他服务器系列可跳过。"
 
-#: ../../source/installation.md:621
+#: ../../source/installation.md:622
 msgid "**Prepare HiXLEP configuration paths**"
 msgstr "**准备 HiXLEP 配置路径**"
 
-#: ../../source/installation.md:623
+#: ../../source/installation.md:624
 #, python-format
 msgid ""
 "When deploying an inference service on Atlas 950 series servers, verify on "
@@ -701,17 +710,17 @@ msgstr ""
 "配置文件生成指南](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md)"
 " 生成所需内容。生成 `/etc/hixlep` 时，请使用“D2D 场景”。"
 
-#: ../../source/installation.md:625
+#: ../../source/installation.md:626
 msgid "Run Container In Each Node"
 msgstr "在每个节点中运行容器"
 
-#: ../../source/installation.md:627
+#: ../../source/installation.md:628
 msgid ""
 "Using vLLM-ascend official container is more efficient to run multi-node "
 "environment."
 msgstr "使用 vLLM-ascend 官方容器可以更高效地运行多节点环境。"
 
-#: ../../source/installation.md:629
+#: ../../source/installation.md:630
 msgid ""
 "Run the following command to start the container in each node (You should "
 "download the weight to /root/.cache in advance):"
