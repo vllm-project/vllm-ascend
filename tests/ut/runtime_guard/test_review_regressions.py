@@ -1003,12 +1003,12 @@ def test_v18e_file_mode_claim_skips_tp_bus_when_dump_inactive():
     """dump_enabled=False: all ranks skip TP due-AR (lockstep via shared gate)."""
     from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 
-    proc = SimpleNamespace(
-        runner=SimpleNamespace(),
-        runtime_config=SimpleNamespace(dump_enabled=lambda: False),
-        _kv_dump_jobs=[{"req_id": "stray"}],
-        _deferred_kv_dump_jobs=[],
-    )
+    proc = object.__new__(RuntimeGuardProcessor)
+    proc.runner = SimpleNamespace()
+    proc.runtime_config = SimpleNamespace(dump_enabled=lambda: False)
+    proc._kv_dump_jobs = [{"req_id": "stray", "consume_quota": False}]
+    proc._deferred_kv_dump_jobs = []
+    proc.quota = MagicMock()
     tp = MagicMock()
     tp.world_size = 2
     tp.rank_in_group = 0
