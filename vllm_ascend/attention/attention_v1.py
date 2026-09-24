@@ -1504,6 +1504,36 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         return output
 
+    def _write_encoder_attention_output(
+        self,
+        output: torch.Tensor,
+        attn_output: torch.Tensor,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        """Copy the fused encoder attention result into the caller's buffer.
+
+        The fused operator always allocates its own result, so the pooling path
+        has to move it into ``output``; ``output[:num_tokens] = attn_output[
+        :num_tokens]`` expresses that as a copy of two host slices, and on A2
+        the slices cost more than the copy: measured in isolation at 40 us per
+        layer against 21 us for a plain ``copy_``, i.e. ~0.5 ms of a 28-layer
+        step. ``Attention.forward`` always sizes this buffer to the token count
+        it passes down, so the slices cover the whole tensor and the guarded
+        ``copy_`` is exactly equivalent.
+
+        Adopting the operator's buffer instead (``output.set_``) is *not* an
+        option: it rebinds the storage of a buffer that the piecewise cudagraph
+        boundary copies read from, which silently corrupts the next graph
+        segment (measured: worst_d_logit 0.0003 -> 11.45).
+        """
+        if attn_output is output:
+            return output
+        if attn_output.shape == output.shape and attn_output.dtype == output.dtype:
+            output.copy_(attn_output)
+            return output
+        output[:num_tokens] = attn_output[:num_tokens]
+        return output
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -1662,8 +1692,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # pooling model branch
         if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-            output[:num_tokens] = attn_output[:num_tokens]
-            return output
+            return self._write_encoder_attention_output(output, attn_output, num_tokens)
         if output_padded is not None:
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
         else:
@@ -1715,8 +1744,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             # pooling model branch
             if attn_metadata.model_runner_type == "pooling":
                 attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                output[:num_tokens] = attn_output[:num_tokens]
-                return output
+                return self._write_encoder_attention_output(output, attn_output, num_tokens)
 
             # When `modelrunnerv2` compiles the graph, the value of `attn_metadata.attn_state` is `None`;
             # therefore, the graph-mode condition needs to be evaluated earlier.
@@ -1748,8 +1776,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 # pooling model branch
                 if attn_metadata.model_runner_type == "pooling":
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
+                    return self._write_encoder_attention_output(output, attn_output, num_tokens)
                 if output_padded is not None:
                     attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
                 else:
@@ -1763,8 +1790,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 # pooling model branch
                 if attn_metadata.model_runner_type == "pooling":
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
+                    return self._write_encoder_attention_output(output, attn_output, num_tokens)
                 if _EXTRA_CTX.capturing:
                     attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                     output[:num_tokens] = attn_output[:num_tokens]
