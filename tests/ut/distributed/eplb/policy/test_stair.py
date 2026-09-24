@@ -6,6 +6,7 @@ import unittest
 import numpy as np
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
+from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 
 
