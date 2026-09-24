@@ -1197,6 +1197,38 @@ class TestCoreFunctionality(unittest.TestCase):
         mock_get_meta.assert_not_called()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_packed_group_addresses_pseudo_blocks(self, mock_get_meta):
+        # 8:1 packing: the local kernel block is 8192 bytes (1024 tokens) and
+        # each remote block is 1024 bytes (128 tokens). Pseudo-local ids are
+        # packing slices of a kernel block, so consecutive ids must land in
+        # consecutive slices of the SAME local kernel block, and the copies
+        # move one remote block (1024 bytes) each -- merging into one
+        # contiguous 2048-byte read of remote blocks 3..4.
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread.block_size = 1024
+            self.thread.block_size_scale = [[1]]
+            self.thread.block_len_per_addr = [[8192]]
+            self.thread.block_stride_per_addr = [[8192]]
+            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000]]}
+            self.thread.remote_block_size_scale["remote_engine"] = {6666: [[1]]}
+            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[1024]]
+            req = dict(self.test_req)
+            req["local_block_ids"] = ([8, 9],)
+            req["remote_block_ids"] = ([3, 4],)
+            req["remote_block_sizes"] = (128,)
+            self.thread._transfer_kv_cache_all_groups(req)
+        self.engine.batch_transfer_sync_read.assert_called_once()
+        call_args, _ = self.engine.batch_transfer_sync_read.call_args
+        src, dst, length = call_args[1], call_args[2], call_args[3]
+        # Pseudo-local id 8 is slice 0 of local kernel block 1: 0x1000 +
+        # 8 * 1024; remote block 3 is at 0x3000 + 3 * 1024.
+        self.assertEqual(src, [0x1000 + 8 * 1024])
+        self.assertEqual(dst, [0x3000 + 3 * 1024])
+        self.assertEqual(length, [2 * 1024])
+        mock_get_meta.assert_not_called()
+
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_sfa_metadata_plane_uses_cache_spec_type(self, mock_get_meta):
         metadata_layer_idx = self.thread.index_cache_plane_base + 3
         metadata_size = metadata_layer_idx + 1
@@ -3137,11 +3169,11 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     num_prompt_blocks=4,
                     num_computed_tokens=0,
                     remote_block_size=16,
+                    remote_block_sizes=(),
                     remote_engine_id=f"remote_bs_{dcp_rank}",
                     remote_host="localhost",
                     remote_multi_nodes_meta_mapping={},
                 )
-
                 ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_bs", cast(ReqMeta, meta))
 
                 self.assertEqual(len(ports), 2)
@@ -3191,11 +3223,11 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             num_prompt_blocks=6,
             num_computed_tokens=0,
             remote_block_size=16,
+            remote_block_sizes=(),
             remote_engine_id="remote_prefix_cp",
             remote_host="localhost",
             remote_multi_nodes_meta_mapping={},
         )
-
         ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_prefix_cp", cast(ReqMeta, meta))
 
         self.assertEqual(len(ports), 2)
@@ -3453,7 +3485,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 remote_host="localhost",
                                 remote_multi_nodes_meta_mapping={},
                             )
-
                             ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_pd", meta)
                             group_pulls = worker._get_group_pulls_metadata(
                                 "req_pd",
@@ -3503,11 +3534,11 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     num_prompt_blocks=5,
                     num_computed_tokens=0,
                     remote_block_size=16,
+                    remote_block_sizes=(),
                     remote_engine_id="prefill",
                     remote_host="localhost",
                     remote_multi_nodes_meta_mapping={},
                 )
-
                 ports, local_ids, remote_ids = worker._get_kv_split_metadata("req-dcp", cast(ReqMeta, meta))
                 group_pulls = worker._get_group_pulls_metadata("req-dcp", ports, 4, 31000, 1, 2)
 
@@ -3863,8 +3894,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             remote_host="localhost",
             remote_multi_nodes_meta_mapping=remote_mapping,
             remote_block_size=128,
+            remote_block_sizes=(),
         )
-
         ports, local_ids, remote_ids = worker._get_kv_split_metadata("issue-13934", cast(ReqMeta, meta))
 
         self.assertEqual(ports, [[31005]])
@@ -3925,6 +3956,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             remote_ptp_size=4,
             remote_multi_nodes_meta_mapping={},
             remote_block_size=16,
+            remote_block_sizes=(),
             local_block_ids=([10],),
             remote_block_ids=([30],),
             num_computed_tokens=0,
@@ -4001,8 +4033,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             remote_host="localhost",
             remote_multi_nodes_meta_mapping=remote_mapping,
             remote_block_size=16,
+            remote_block_sizes=(),
         )
-
         ports, _, _ = worker._get_kv_split_metadata("req_dp1", cast(ReqMeta, meta))
         remote_port_send_num = worker.remote_port_send_num[meta.remote_engine_id]
 
@@ -4184,6 +4216,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     remote_ptp_size=1,
                     remote_port=30000,
                     remote_block_size=16,
+                    remote_block_sizes=(),
                     local_block_ids=([20], [30]),
                     local_full_block_ids=([20], [30]),
                     remote_block_ids=([100, 101], [200, 201]),
@@ -4223,6 +4256,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 remote_ptp_size=prefill_tp,
                                 remote_port=30000,
                                 remote_block_size=16,
+                                remote_block_sizes=(),
                                 num_computed_tokens=0,
                                 num_prompt_blocks=prompt_blocks,
                                 remote_block_ids=(list(range(100, 100 + prompt_blocks)), [200]),
@@ -4278,6 +4312,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                         num_prompt_blocks=prompt_blocks,
                         num_computed_tokens=prefix_blocks * 16,
                         remote_block_size=16,
+                        remote_block_sizes=(),
                         remote_engine_id="sfa_p1_d8",
                         remote_host="localhost",
                         remote_multi_nodes_meta_mapping={},
@@ -4508,22 +4543,86 @@ class TestMooncakeConnectorWorkerKernelBlockIds(unittest.TestCase):
         self.assertEqual(local, [0, 1, 2, 3])
         self.assertEqual(remote, [80, 81, 82, 83])
 
-    def test_group_size_that_does_not_tile_kernel_falls_back_to_scalar(self):
-        # Producer resolved a smaller page than the local kernel granularity for
-        # this group (e.g. a 128-token sliding-window group against a 1024-token
-        # local kernel); adopting the group size would fail the kernel expansion,
-        # so the historical scalar behavior is kept.
+    def test_group_size_smaller_than_kernel_packs_remote_blocks(self):
+        # The dspark layout against a 1024-token consumer kernel: the
+        # producer's 128-token sliding-window blocks pack 8-per local kernel
+        # block. Local ids expand to the packing-slice index inside each
+        # kernel block; remote ids stay at their own granularity.
+        worker = self._make_worker(1024, [[1]])
+        spec = self._group_spec("SlidingWindowSpec", 0, 0)
+        meta = self._make_meta(
+            local_block_ids=([0, 1, 2],),
+            remote_block_ids=(tuple(range(16, 40)),),
+            remote_block_size=1024,
+            remote_block_sizes=(128,),
+        )
+        local, remote = worker._get_kernel_block_ids([0], meta, 0, spec)
+        # 3 local kernel blocks x 8 slices; 24 remote blocks fill them exactly.
+        self.assertEqual(local, list(range(24)))
+        self.assertEqual(remote, list(range(16, 40)))
+
+    def test_packed_group_skips_prefix_at_remote_granularity(self):
+        # A 1024-token prefix hit on D skips 1024 // 128 = 8 remote blocks.
         worker = self._make_worker(1024, [[1]])
         spec = self._group_spec("SlidingWindowSpec", 0, 0)
         meta = self._make_meta(
             local_block_ids=([0, 1],),
-            remote_block_ids=([1, 2],),
+            remote_block_ids=([8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],),
+            num_computed_tokens=1024,
+            remote_block_size=1024,
+            remote_block_sizes=(128,),
+        )
+        local, remote = worker._get_kernel_block_ids([0], meta, 0, spec)
+        self.assertEqual(local, list(range(8)))
+        self.assertEqual(remote, list(range(16, 24)))
+
+    def test_packed_group_trims_to_remote_tail(self):
+        # A partial remote tail (e.g. the P-side last block is not full)
+        # trims the pseudo-local list to the remote length.
+        worker = self._make_worker(1024, [[1]])
+        spec = self._group_spec("SlidingWindowSpec", 0, 0)
+        meta = self._make_meta(
+            local_block_ids=(
+                [
+                    0,
+                ],
+            ),
+            remote_block_ids=([3, 4],),
             remote_block_size=1024,
             remote_block_sizes=(128,),
         )
         local, remote = worker._get_kernel_block_ids([0], meta, 0, spec)
         self.assertEqual(local, [0, 1])
-        self.assertEqual(remote, [1, 2])
+        self.assertEqual(remote, [3, 4])
+
+    def test_packed_group_ignores_mamba_spec(self):
+        # Mamba state is not block-sharded; its ids pass through unchanged.
+        worker = self._make_worker(1024, [[1]])
+        spec = self._group_spec("MambaSpec", 0, 0)
+        meta = self._make_meta(
+            local_block_ids=([7],),
+            remote_block_ids=([11],),
+            remote_block_size=1024,
+            remote_block_sizes=(128,),
+        )
+        local, remote = worker._get_kernel_block_ids([0], meta, 0, spec)
+        self.assertEqual(local, [7])
+        self.assertEqual(remote, [11])
+
+    def test_group_size_that_tiles_neither_direction_falls_back_to_scalar(self):
+        # A group size that tiles neither the kernel nor the other way
+        # around (192 vs 1024) cannot be packed or expanded; the historical
+        # scalar behavior (and its loud assert) is kept.
+        worker = self._make_worker(1024, [[1]])
+        spec = self._group_spec("SlidingWindowSpec", 0, 0)
+        meta = self._make_meta(
+            local_block_ids=([0, 1],),
+            remote_block_ids=([1, 2],),
+            remote_block_size=192,
+            remote_block_sizes=(192,),
+        )
+        with self.assertRaises(AssertionError, msg="not divisible by kernel_size"):
+            worker._get_kernel_block_ids([0], meta, 0, spec)
 
     def test_missing_group_entry_falls_back_to_scalar(self):
         # A producer may report sizes for a subset of groups; ids beyond the
@@ -4539,22 +4638,6 @@ class TestMooncakeConnectorWorkerKernelBlockIds(unittest.TestCase):
         local, remote = worker._get_kernel_block_ids([1], meta, 1, spec)
         self.assertEqual(local, [0, 1, 2, 3])
         self.assertEqual(remote, [80, 81, 82, 83])
-
-    def test_group_fallback_keeps_scalar_assert(self):
-        # When the per-group size does not tile the kernel and the scalar
-        # also cannot tile it (e.g. a producer whose max physical size is
-        # 128 against a 1024-token consumer kernel), the fallback must keep
-        # the historical loud assertion rather than misplace blocks.
-        worker = self._make_worker(1024, [[1]])
-        spec = self._group_spec("SlidingWindowSpec", 0, 0)
-        meta = self._make_meta(
-            local_block_ids=([0, 1],),
-            remote_block_ids=([1, 2],),
-            remote_block_size=128,
-            remote_block_sizes=(128,),
-        )
-        with self.assertRaises(AssertionError, msg="not divisible by kernel_size"):
-            worker._get_kernel_block_ids([0], meta, 0, spec)
 
     def test_two_group_mixed_layout_expands_per_group(self):
         # The realistic dspark consumer: a 1024-token full-attention kernel
