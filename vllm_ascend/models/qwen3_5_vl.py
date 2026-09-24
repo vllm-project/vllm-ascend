@@ -21,7 +21,14 @@ grid; resize, patchify and rescale+normalize all run on the device.
 Normalize reuses vLLM's FusedInputNorm. smart_resize stays on the CPU so
 placeholder accounting is unchanged. Payload drops ~8x (uint8, no temporal
 replication).
+
+Set VLLM_ASCEND_VL_NPU_PREPROCESS=0 to disable the offload and keep the
+full stock CPU pipeline: the device-side preprocessing runs inside mixed
+prefill+decode steps and inflates TPOT for requests decoding alongside
+image prefills.
 """
+
+import os
 
 import torch
 import torch.nn.functional as F
@@ -46,6 +53,11 @@ from vllm.model_executor.models.vision import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
+
+# Kill switch for the NPU-side preprocessing offload. Read once at import so
+# the front-end (processor install, field config) and the workers (device-side
+# preprocessing, supports_mm_device_do_normalize) stay consistent.
+_VL_NPU_PREPROCESS = os.environ.get("VLLM_ASCEND_VL_NPU_PREPROCESS", "1").strip().lower() not in ("0", "false", "off")
 
 
 class AscendQwen2VLImageProcessor(Qwen2VLImageProcessor):
@@ -91,6 +103,8 @@ class AscendQwen2VLImageProcessor(Qwen2VLImageProcessor):
 class _AscendProcessorMixin:
     def get_hf_processor(self, **kwargs):
         processor = super().get_hf_processor(**kwargs)
+        if not _VL_NPU_PREPROCESS:
+            return processor
         if processor.image_processor.__class__ is not AscendQwen2VLImageProcessor:
             processor.image_processor.__class__ = AscendQwen2VLImageProcessor
         return processor
@@ -107,6 +121,8 @@ class AscendQwen3_5MoeProcessingInfo(_AscendProcessorMixin, Qwen3_5MoeProcessing
 class AscendQwen3_5VLProcessor(Qwen3VLMultiModalProcessor):
     def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
         config = dict(super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs))
+        if not _VL_NPU_PREPROCESS:
+            return config
         channel = self.info.get_hf_config().vision_config.in_channels
         image_hw = hf_inputs.get("image_hw", torch.empty((0, 2), dtype=torch.long))
         config["pixel_values"] = MultiModalFieldConfig.flat_from_sizes("image", image_hw.prod(-1) * channel)
@@ -117,7 +133,7 @@ class AscendQwen3_5VLProcessor(Qwen3VLMultiModalProcessor):
 class _AscendVLPreprocessMixin:
     """Device-side resize/patchify + normalize for Qwen3.5-VL."""
 
-    supports_mm_device_do_normalize = True
+    supports_mm_device_do_normalize = _VL_NPU_PREPROCESS
 
     def __init__(self, *, vllm_config, prefix="model"):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -189,6 +205,8 @@ class _AscendVLPreprocessMixin:
         path. Dicts already sliced by select_encoder_cudagraph_items carry 2-D
         patches (no image_hw) and fall through to the base implementation.
         """
+        if not _VL_NPU_PREPROCESS:
+            return super()._get_pixel_values_by_modality(mm_kwargs)
         if "image_hw" in mm_kwargs:
             grid_thw = mm_kwargs["image_grid_thw"]
             image_input = {
@@ -209,8 +227,11 @@ class _AscendVLPreprocessMixin:
             embeds = image_input["image_embeds"].type(self.visual.dtype)
             sizes = (grid_thw.prod(-1) // self._ms // self._ms).tolist()
             return embeds.split(sizes)
-        patches = self._resize_and_patchify(image_input, grid_thw)
-        pixel_values = self.input_norm(patches, self.visual.dtype)
+        if _VL_NPU_PREPROCESS:
+            patches = self._resize_and_patchify(image_input, grid_thw)
+            pixel_values = self.input_norm(patches, self.visual.dtype)
+        else:
+            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
         return self._run_visual(pixel_values, grid_thw)
 
     def _process_video_input(self, video_input):
@@ -219,7 +240,10 @@ class _AscendVLPreprocessMixin:
             embeds = video_input["video_embeds"].type(self.visual.dtype)
             sizes = (grid_thw.prod(-1) // self._ms // self._ms).tolist()
             return embeds.split(sizes)
-        pixel_values = self.input_norm(video_input["pixel_values_videos"], self.visual.dtype)
+        if _VL_NPU_PREPROCESS:
+            pixel_values = self.input_norm(video_input["pixel_values_videos"], self.visual.dtype)
+        else:
+            pixel_values = video_input["pixel_values_videos"].type(self.visual.dtype)
         return self._run_visual(pixel_values, grid_thw)
 
 
