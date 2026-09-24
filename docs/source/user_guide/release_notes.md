@@ -46,7 +46,7 @@ Unless stated otherwise, these optimizations are selected automatically for the 
 
 - **Upstream vLLM**: v0.27.1.
 - **Python**: >= 3.10, < 3.13; the release images use Python 3.12.
-- **Ascend HDK**: Use the v0.23.0 release configuration. Atlas 800 A3 requires HDK >= 26.0 (or HDK >= 25.5 with Mooncake >= v0.3.11); 950DT Products require HDK >= 25.6 with Mooncake >= v0.3.11.
+- **Ascend HDK**: Atlas 800 A3 requires HDK >= 26.0 (or HDK >= 25.5 with Mooncake >= v0.3.11); 950DT Products require HDK >= 25.6 with Mooncake >= v0.3.11.
 - **CANN**: 9.1.0.
 - **PTA (PyTorch / torch_npu)**: 2.10.0 / 2.10.0.post4.
 - **Triton Ascend**: 3.2.2.
