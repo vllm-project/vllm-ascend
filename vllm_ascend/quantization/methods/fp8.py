@@ -21,7 +21,7 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 
-from .base import QuantType
+from .base import QuantType, TPWeightGatherSpec
 from .registry import register_scheme
 from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod
 from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
@@ -35,6 +35,15 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     """
 
     model_dtype = None
+    tp_weight_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale"),
+    )
+    tp_weight_output_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale"),
+    )
+    supports_tp_weight_switch = True
 
     def __init__(self, quant_config):
         super().__init__()

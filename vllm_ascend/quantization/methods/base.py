@@ -23,6 +23,27 @@ from typing import Any
 import torch
 
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.quantization.tp_weight_switch import (
+    TPWeightGatherPart,
+    TPWeightGatherSpec,
+    TPWeightRepeatPart,
+    TPWeightRepeatSpec,
+    TPWeightSwitchMixin,
+    TPWeightSwitchState,
+)
+
+__all__ = [
+    "AscendAttentionScheme",
+    "AscendLinearScheme",
+    "AscendMoEScheme",
+    "QuantType",
+    "TPWeightGatherPart",
+    "TPWeightGatherSpec",
+    "TPWeightRepeatPart",
+    "TPWeightRepeatSpec",
+    "TPWeightSwitchMixin",
+    "TPWeightSwitchState",
+]
 
 
 def get_moe_num_logical_experts(
@@ -39,7 +60,7 @@ def get_moe_num_logical_experts(
     return int(num_experts - global_redundant_expert_num - num_shared_experts)
 
 
-class AscendLinearScheme(ABC):
+class AscendLinearScheme(TPWeightSwitchMixin, ABC):
     """Base class for all linear quantization schemes.
 
     Subclasses must implement get_weight() and apply() methods.
