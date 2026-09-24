@@ -2835,6 +2835,66 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(events, [])
         self.assertEqual(torch.count_nonzero(output).item(), 0)
 
+    def test_forward_preserves_projection_outputs_with_mixed_tokens(self):
+        from vllm_ascend.attention import mla_v1
+
+        class TupleProjection:
+            def __init__(self, weight=None):
+                self.inputs = []
+                self.weight = weight
+                if weight is not None:
+                    self.output_size = weight.shape[1]
+
+            def __call__(self, value):
+                self.inputs.append(value)
+                return (value if self.weight is None else value @ self.weight), None
+
+        self.impl.num_heads = 1
+        self.impl.v_head_dim = 2
+        self.impl.use_output_gate = False
+        self.impl.fa_quant_layer = False
+        self.impl.enable_mlapo = False
+        self.impl.use_mla_rope = True
+        self.impl._mla_preprocess = MagicMock(return_value=(DecodeMLAPreprocessResult(), PrefillMLAPreprocessResult()))
+        expected_attention_output = torch.tensor([[1.0, -2.0], [3.0, 4.0], [-5.0, 6.0], [0.0, 0.0]])
+        self.impl._forward_decode = MagicMock(return_value=expected_attention_output[:1])
+        self.impl._forward_prefill = MagicMock(return_value=expected_attention_output[1:3])
+        hidden_states = torch.randn(4, 4)
+        metadata = SimpleNamespace(
+            num_actual_tokens=3,
+            num_decodes=1,
+            num_prefills=1,
+            num_decode_tokens=1,
+        )
+        identity = TupleProjection()
+        identity_with_output_size = TupleProjection()
+        identity_with_output_size.output_size = 2
+        weight = torch.tensor([[1.0, 2.0, 0.0], [-1.0, 0.0, 3.0]])
+        for name, projection, expected in (
+            ("identity", identity, expected_attention_output),
+            ("identity_with_output_size", identity_with_output_size, expected_attention_output),
+            ("linear", TupleProjection(weight), expected_attention_output @ weight),
+        ):
+            with self.subTest(projection=name):
+                self.impl.o_proj = projection
+                output = torch.full_like(expected, torch.nan)
+                with (
+                    patch.object(mla_v1, "_EXTRA_CTX", SimpleNamespace(num_tokens=4)),
+                    patch.object(mla_v1, "maybe_save_kv_layer_to_connector"),
+                ):
+                    actual = self.impl.forward(
+                        "layer",
+                        hidden_states,
+                        (torch.zeros(1, 1, 2),),
+                        metadata,
+                        output,
+                    )
+
+                self.assertIs(actual, output)
+                self.assertEqual(len(projection.inputs), 1)
+                torch.testing.assert_close(projection.inputs[0], expected_attention_output)
+                torch.testing.assert_close(output, expected)
+
     def test_mla_preprocess(self):
         batch_size = 4
         seq_len = 8

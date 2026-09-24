@@ -32,12 +32,13 @@ from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
-def test_register_customop_selects_gdn_before_import(device_type):
+def test_register_customop_selects_stateful_ops_before_import(device_type):
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
 
     if device_type == AscendDeviceType._310P:
         expected_gdn = AscendGatedDeltaNetAttention310
     else:
+        from vllm_ascend.ops.bailing_moe_v3_kda import AscendBailingMoeV3KimiDeltaAttention
         from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 
         expected_gdn = AscendGatedDeltaNetAttention
@@ -46,7 +47,8 @@ def test_register_customop_selects_gdn_before_import(device_type):
 
     def guarded_import(name, *args, **kwargs):
         if device_type == AscendDeviceType._310P and (
-            name == "vllm_ascend.ops.gdn" or name == "fla_npu" or name.startswith("fla_npu.")
+            name in ("vllm_ascend.ops.gdn", "vllm_ascend.ops.bailing_moe_v3_kda", "vllm_ascend.ops.kda", "fla_npu")
+            or name.startswith("fla_npu.")
         ):
             raise ModuleNotFoundError(f"Unexpected 310P dependency: {name}", name=name)
         return original_import(name, *args, **kwargs)
@@ -61,6 +63,13 @@ def test_register_customop_selects_gdn_before_import(device_type):
         utils.register_ascend_customop()
         assert utils.REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] is expected_gdn
         register.assert_any_call(_decorated_op_cls=expected_gdn, name="GatedDeltaNetAttention")
+        if device_type == AscendDeviceType._310P:
+            assert "BailingMoeV3KimiDeltaAttention" not in utils.REGISTERED_ASCEND_OPS
+        else:
+            assert utils.REGISTERED_ASCEND_OPS["BailingMoeV3KimiDeltaAttention"] is AscendBailingMoeV3KimiDeltaAttention
+            register.assert_any_call(
+                _decorated_op_cls=AscendBailingMoeV3KimiDeltaAttention, name="BailingMoeV3KimiDeltaAttention"
+            )
         assert register.call_count == len(utils.REGISTERED_ASCEND_OPS)
         utils.register_ascend_customop()
         assert register.call_count == len(utils.REGISTERED_ASCEND_OPS)
@@ -408,11 +417,17 @@ class TestUtils(TestBase):
     def test_register_ascend_customop(
         self, mock_ascend_rmsnorm, mock_ascend_silu_and_mul, mock_ascend_quick_gelu, mock_customop
     ):
+        from vllm_ascend.ops.bailing_moe_v3_kda import AscendBailingMoeV3KimiDeltaAttention
+
         utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
         self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertIs(
+            utils.REGISTERED_ASCEND_OPS["BailingMoeV3KimiDeltaAttention"],
+            AscendBailingMoeV3KimiDeltaAttention,
+        )
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
@@ -780,11 +795,44 @@ def test_check_gdn_layer_supports_kimi_linear_config_property():
     assert utils.check_gdn_layer(vllm_config) is True
 
 
-def test_check_gdn_layer_supports_nested_layer_types():
-    hf_config = SimpleNamespace(text_config=SimpleNamespace(layer_types=["linear_attention"]))
+@pytest.mark.parametrize("outer_layer_types", [None, ["full_attention"]])
+def test_check_gdn_layer_supports_nested_layer_types(outer_layer_types):
+    hf_config = SimpleNamespace(
+        layer_types=outer_layer_types,
+        text_config=SimpleNamespace(layer_types=["linear_attention"]),
+    )
     vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
 
     assert utils.check_gdn_layer(vllm_config) is True
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("capabilities", [{}, {"layer_types": None, "is_linear_attn": None}])
+def test_check_gdn_layer_supports_bailing_v3_without_capability_fields(nested, capabilities):
+    text_config = SimpleNamespace(architectures=["BailingMoeV3ForCausalLM"], **capabilities)
+    hf_config = SimpleNamespace(text_config=text_config) if nested else text_config
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+@pytest.mark.parametrize("architectures", [None, []])
+def test_check_gdn_layer_returns_false_without_architecture_or_capabilities(architectures):
+    hf_config = SimpleNamespace(architectures=architectures)
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    assert utils.check_gdn_layer(vllm_config) is False
+
+
+@pytest.mark.parametrize(
+    "architecture",
+    ["BailingMoeForCausalLM", "BailingMoeV2ForCausalLM", "BailingMoeV2_5ForCausalLM", "BailingMoeV3MTPModel"],
+)
+def test_check_gdn_layer_does_not_match_other_bailing_architectures(architecture: str):
+    hf_config = SimpleNamespace(architectures=[architecture])
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    assert utils.check_gdn_layer(vllm_config) is False
 
 
 def test_check_gdn_layer_supports_qwen3_next_config():
