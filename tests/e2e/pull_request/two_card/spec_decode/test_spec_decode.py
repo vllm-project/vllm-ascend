@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -770,7 +771,7 @@ def test_qwen36_35b_dspark_spec_decoding(
         },
         compilation_config=compilation_config,
     ) as runner:
-        runner.model.generate(prompts, sampling_params)
+        outputs = runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
 
     acceptance_per_pos = calculate_acceptance_per_pos(
@@ -778,6 +779,17 @@ def test_qwen36_35b_dspark_spec_decoding(
         num_speculative_tokens,
         Counter,
         Vector,
+    )
+    print(
+        "ROUTER_DIAGNOSTIC_RESULT="
+        + json.dumps(
+            {
+                "acceptance_per_pos": acceptance_per_pos,
+                "token_ids": [list(output.outputs[0].token_ids) for output in outputs],
+                "prompt_token_ids": [list(output.prompt_token_ids) for output in outputs],
+            }
+        ),
+        flush=True,
     )
     golden = [0.78, 0.61, 0.49, 0.39, 0.33, 0.29, 0.25]
     match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
