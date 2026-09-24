@@ -552,8 +552,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
         candidates_by_demand = [
             sorted(
                 expert_sources[expert],
-                key=lambda src_rank, dst_node=compact_node_ids[dst_rank]: (
-                    compact_node_ids[src_rank] != dst_node,
+                key=lambda src_rank: (
+                    compact_node_ids[src_rank] != compact_node_ids[dst_rank],
                     src_rank,
                 ),
             )
@@ -831,11 +831,11 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 if expert_is_incoming:
                     incoming_demands.append((rank_id, expert))
                     incoming_counts[rank_id] += 1
-                sources_are_feasible = True
+                sources_are_feasible: bool = True
                 if expert_is_incoming:
                     migration_key = tuple(sorted(incoming_demands))
-                    sources_are_feasible = migration_feasibility_cache.get(migration_key)
-                    if sources_are_feasible is None:
+                    cached_feasibility = migration_feasibility_cache.get(migration_key)
+                    if cached_feasibility is None:
                         sources_are_feasible = cls._has_feasible_migration_sources(
                             incoming_demands,
                             rank_transfer_limit,
@@ -845,6 +845,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
                             num_nodes,
                         )
                         migration_feasibility_cache[migration_key] = sources_are_feasible
+                    else:
+                        sources_are_feasible = cached_feasibility
                 budget_exhausted = (
                     sources_are_feasible and decision.tried_feasible_choice and backtracks_used == backtrack_limit
                 )
