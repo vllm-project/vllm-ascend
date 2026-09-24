@@ -16,7 +16,7 @@
 #
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
@@ -30,7 +30,30 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     RequestTracker,
     get_block_hashes,
+    resolve_request_hash_block_size,
 )
+
+
+class TestRequestHashBlockSize(unittest.TestCase):
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store."
+        "config_data.kv_cache_utils.resolve_kv_cache_block_sizes"
+    )
+    def test_uses_vllm_resolver(self, resolver):
+        vllm_config = object()
+        kv_cache_config = object()
+        resolver.return_value = (128, 8)
+
+        self.assertEqual(resolve_request_hash_block_size(vllm_config, kv_cache_config, 128), 8)
+        resolver.assert_called_once_with(kv_cache_config, vllm_config)
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store."
+        "config_data.kv_cache_utils.resolve_kv_cache_block_sizes"
+    )
+    def test_falls_back_without_kv_cache_config(self, resolver):
+        self.assertEqual(resolve_request_hash_block_size(object(), None, 128), 128)
+        resolver.assert_not_called()
 
 
 class TestKeyMetadata(unittest.TestCase):
