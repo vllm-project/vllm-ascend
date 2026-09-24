@@ -51,6 +51,10 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_kda/recurrent_kda_torch_adpt.h"
+#include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
+#include "attention/attn_res_fwd_with_add/attn_res_fwd_with_add_torch_adpt.h"
+#include "attention/attn_res_fwd_fused/attn_res_fwd_fused_torch_adpt.h"
+#include "attention/attn_res_fwd_prefill/attn_res_fwd_prefill_torch_adpt.h"
 #include "attention/chunk_kda_fwd/chunk_kda_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum/kda_gate_cumsum_torch_adpt.h"
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
@@ -2847,6 +2851,28 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "bool use_beta_sigmoid_in_kernel=False, bool allow_neg_eigval=False, "
         "bool safe_gate=True, float lower_bound=-5.0) -> Tensor output");
     ops.impl("recurrent_kda", torch::kPrivateUse1, &vllm_ascend::recurrent_kda);
+
+    ops.def(
+        "attn_res_fwd(Tensor prefix_sum, Tensor block_residual, Tensor proj_weight, "
+        "Tensor norm_weight, float norm_eps=1e-5) -> Tensor output");
+    ops.impl("attn_res_fwd", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd);
+    ops.def(
+        "attn_res_fwd_with_add(Tensor prefix_sum, Tensor addend, Tensor block_residual, "
+        "Tensor proj_weight, Tensor norm_weight, float norm_eps=1e-5) -> (Tensor, Tensor)");
+    ops.impl("attn_res_fwd_with_add", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd_with_add);
+    ops.def(
+        "attn_res_fwd.fused(Tensor(b) prefix_sum, Tensor? addend, Tensor(a!) block_residual, "
+        "Tensor proj_weight, Tensor norm_weight, float norm_eps, int num_valid_blocks, "
+        "Tensor? output_norm_weight=None, float output_norm_eps=1e-5, int block_write_idx=-1, "
+        "bool return_materialized=False, bool mix=True) -> (Tensor(c), Tensor(b), Tensor(c))");
+    ops.impl("attn_res_fwd.fused", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd_fused);
+    ops.def(
+        "attn_res_fwd.fused_prefill(Tensor(b) prefix_sum, Tensor? addend, Tensor(a!) block_residual, "
+        "Tensor proj_weight, Tensor norm_weight, float norm_eps, int num_valid_blocks, "
+        "Tensor? output_norm_weight=None, float output_norm_eps=1e-5, int block_write_idx=-1, "
+        "bool return_materialized=False, bool mix=True) -> (Tensor(c), Tensor(b), Tensor(c))");
+    ops.impl("attn_res_fwd.fused_prefill", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd_fused_prefill);
+    ops.impl("attn_res_fwd.fused_prefill", torch::kMeta, &vllm_ascend::attn_res_fwd_fused_prefill_meta);
 
     ops.def(
         "dequant_situ_quant(Tensor x, "
