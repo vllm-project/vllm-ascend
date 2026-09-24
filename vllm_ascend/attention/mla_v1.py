@@ -512,7 +512,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             not self.flash_unabsorbed_prefill
             or self.dcp_enabled
             or self.pcp_enabled
-            or not self.use_mla_rope
             or not common_attn_metadata.causal
             or contexts is None
         ):
@@ -1024,11 +1023,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             reason = "requires the BD KV cache layout"
         elif self.pcp_enabled or enable_dcp():
             reason = "requires PCP1/DCP1"
-        elif not self.use_mla_rope:
-            reason = "requires MLA RoPE"
-        elif self.head_padding:
-            reason = f"requires an unpadded head count, got {self.num_heads} padded to {self.num_heads_padded}"
         else:
+            # `head_padding` is not a gate here: it exists for the FIA ops that
+            # require a power-of-two query head count, and this lane never touches
+            # `num_heads_padded`. Its operands come from `mla_preprocess_prefill`
+            # (`self.q_proj`, unpadded) and are handed to the operator at
+            # `self.num_heads`, so a padded layer still runs this prefill
+            # unpadded while its decode lane keeps padding for FIA v2.
             try:
                 from cann_ops_transformer.ops import flash_attn_metadata
             except ImportError as exc:
