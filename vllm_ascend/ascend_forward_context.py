@@ -125,6 +125,7 @@ def set_ascend_forward_context(
         "batch_descriptor": batch_descriptor,
         "skip_compiled": skip_compiled,
     }
+
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
         forward_context.draft_attn_metadatas = draft_attn_metadatas
@@ -132,11 +133,12 @@ def set_ascend_forward_context(
         forward_context.input_ids = input_ids
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
-
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
         moe_comm_type = select_moe_comm_method(
             max_num_tokens,
             vllm_config,
+            attn_metadata=attn_metadata,
+            in_profile_run=in_profile_run,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -290,14 +292,23 @@ def _select_a2_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
 ) -> MoECommType:
     num_experts = vllm_config.model_config.get_num_experts()
     ep_world_size = (
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
     )
     num_experts_per_device = num_experts // ep_world_size
+
+    is_prefill = attn_metadata is not None and getattr(attn_metadata, "num_prefills", 0) > 0
+
+    if (is_prefill or in_profile_run) and get_ascend_config().enable_fused_mc2 == 1:
+        return MoECommType.FUSED_MC2
+
     if num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
         return MoECommType.MC2
+
     return MoECommType.ALLGATHER
 
 
@@ -337,7 +348,7 @@ def _select_a5_moe_comm_method(
     return MoECommType.ALLTOALL
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
+def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, attn_metadata: Any = None, in_profile_run: bool = False) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, and token count.
 
@@ -364,9 +375,8 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
     Returns:
         MoECommType | None: The selected MoE communication method.
     """
-    if not is_moe_model(vllm_config):
-        return None
-
+    # if not is_moe_model(vllm_config):
+    #     return None
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
     lora_config = getattr(vllm_config, "lora_config", None)
@@ -379,7 +389,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
         # forward and _dummy_run during profile_run.
         moe_comm_type = MoECommType.ALLTOALL
     elif soc_version == AscendDeviceType.A2:
-        moe_comm_type = _select_a2_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
+        moe_comm_type = _select_a2_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity, attn_metadata, in_profile_run)
     elif soc_version == AscendDeviceType.A3:
         moe_comm_type = _select_a3_moe_comm_method(
             num_tokens,
