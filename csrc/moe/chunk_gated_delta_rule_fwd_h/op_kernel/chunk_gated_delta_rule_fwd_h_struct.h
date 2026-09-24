@@ -38,6 +38,10 @@ struct ChunkGatedDeltaRuleFwdHTilingData {
     int64_t dataType;
     int64_t gDataType;
     int64_t stateDataType;
+    // Keep in lockstep with TILING_DATA_FIELD_DEF order in the host tiling.h --
+    // hasGk was added there (Kimi K3) without this mirror, which shifted every
+    // later field and made the 310P kernel read garbage tiling.
+    bool hasGk;
     int64_t isVariedLen;
     int64_t shapeBatch;
     int64_t tokenBatch;

@@ -2071,6 +2071,34 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h(
         final_state_out = at::empty({1}, k.options());
     }
 
+    // 310P NZ h contract: h slot 0 carries the zN(K,V) f16 image of
+    // initial_state (zeros otherwise); the kernel seeds its L1-resident state
+    // bank from it with one flat burst and never reads initial_state itself.
+    // Harmless on other SoCs, whose kernels overwrite slot 0 in their own
+    // layout before use.
+    if (initial_state_.defined() && K % 16 == 0 && V % 16 == 0) {
+        auto nz = initial_state_.to(k.scalar_type())
+                      .reshape({-1, HV, K / 16, 16, V / 16, 16})
+                      .permute({0, 1, 4, 2, 3, 5})
+                      .reshape({-1, HV, K, V});
+        if (cu_seqlens.has_value()) {
+            auto cs = cu_seqlens.value();
+            int64_t off = 0;
+            int64_t bi = 0;
+            for (int64_t i = 0; i + 1 < (int64_t)cs.size(); ++i) {
+                int64_t len = cs[i + 1] - cs[i];
+                if (len <= 0) {
+                    continue;
+                }
+                h_out.select(0, 0).select(1, off).copy_(nz.select(0, bi));
+                bi++;
+                off += (len + chunk_size_ - 1) / chunk_size_;
+            }
+        } else {
+            h_out.select(2, 0).copy_(nz);
+        }
+    }
+
     bool save_new_value_ = save_new_value.value_or(true);
     bool use_exp2_ = use_exp2.value_or(false);
     bool transpose_state_layout_ = transpose_state_layout.value_or(false);

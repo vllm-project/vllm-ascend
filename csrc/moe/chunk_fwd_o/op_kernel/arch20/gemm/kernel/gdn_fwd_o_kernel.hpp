@@ -479,8 +479,11 @@ public:
 
                 // CUBE2: h_work = q @ h.  A (the Q tile) is already in L1 -- the
                 // previous body's Cube1 loaded the identical tile -- so gmA/lda are
-                // unused and no GM re-read happens.
-                M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true>(
+                // unused and no GM re-read happens. B (the h tile) arrives as a zN
+                // image from chunk_gated_delta_rule_fwd_h: one flat 48 KB burst.
+                M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true,
+                                   /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/false,
+                                   /*B_NZ_GM=*/true>(
                     resource,
                     gmQ[prevOffsets.qkOffset], kHeadDim,
                     gmH[prevOffsets.hOffset], vHeadDim,

@@ -26,15 +26,18 @@
 using namespace Catlass;
 
 #if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
-// 310P keeps the arch20 kernel ABI: no TileShapes/kGated templates and no gk path.
-// The per-key param.json omits the optional gk input, so the generated wrapper
-// calls this entry WITHOUT it -- the old 13-param signature only ever compiled
-// through a stale wrapper in /root/atc_data/kernel_cache.
+// 310P keeps the arch20 kernel ABI: no TileShapes/kGated templates; gk is
+// accepted and ignored. The launch blob is built from the def (13 pointers,
+// including the optional gk slot), so this signature MUST carry gk and the
+// per-key param.json must be regenerated from the same def -- a stale json
+// without gk shifts every argument after g by one slot (the kernel then reads
+// its tiling from the workspace pointer and exits doing nothing).
 extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd_h(GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g,
-                                                         GM_ADDR inital_state, GM_ADDR cu_seqlens,
+                                                         GM_ADDR gk, GM_ADDR inital_state, GM_ADDR cu_seqlens,
                                                          GM_ADDR chunk_indices, GM_ADDR h, GM_ADDR v_new,
                                                          GM_ADDR final_state, GM_ADDR workspace, GM_ADDR tiling)
 {
+    (void)gk;
     // 310P binary codegen cannot register non-default tiling keys here; host forces key 0.
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
 
