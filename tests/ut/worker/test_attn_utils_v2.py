@@ -369,6 +369,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         additional_config={},
         attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
         model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
             hf_config=SimpleNamespace(
                 compress_ratios=[4],
                 model_type="deepseek_v4",
