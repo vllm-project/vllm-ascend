@@ -89,7 +89,7 @@ Using `--no-build-isolation` can bypass build-environment resolution, so run
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
-| 2026.09.10 | Release candidates, v0.27.1rc1            |
+| 2026.09.24 | Release candidates, v0.27.1rc1            |
 | 2026.08.16 | v0.23.0 Final release, v0.23.0            |
 | 2026.07.20 | Release candidates, v0.23.0rc1            |
 | 2026.06.30 | Release candidates, v0.22.1rc1            |
