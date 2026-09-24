@@ -118,8 +118,9 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     monkeypatch.setattr(torch.ops._C_ascend, "npu_causal_conv1d_custom", conv, raising=False)
     calls = []
 
-    def recurrent(q, k, v, gate, beta, state, starts, indices, *args):
+    def recurrent(q, k, v, gate, beta, state, starts, indices, *args, **kwargs):
         calls.append("recurrent")
+        assert kwargs.get("output_buffer") is None
         assert q.shape[1] == (2 if speculative else 1)
         torch.testing.assert_close(starts, torch.tensor([0, q.shape[1]]))
         return q * 2
@@ -157,3 +158,66 @@ def test_unsupported_conv_width_is_rejected_before_execution(monkeypatch, width,
     )
     with pytest.raises(ValueError, match="causal-conv requires"):
         model_kda.Glm5NextLinearAttention(config, vllm_config)
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer"
+    layer.local_num_heads = 1
+    layer.head_dim = layer.local_projection_size = 128
+    layer.kda_lower_bound = -4.0
+    layer._conv_state_dim_first = False
+    layer.kv_cache = (torch.zeros(8, 3, 384), torch.zeros(8, 1, 128, 128))
+    layer._merged_conv_weight = torch.ones(4, 384)
+    layer.A_log = torch.zeros(1)
+    layer.dt_bias = torch.zeros(128)
+    starts = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+    ids = torch.tensor([2, 4, 6], dtype=torch.int32)
+    metadata = object.__new__(model_kda.GDNAttentionMetadata)
+    for key, value in dict(
+        non_spec_query_start_loc=starts,
+        non_spec_state_indices_tensor=ids,
+        num_actual_tokens=0 if empty else 4,
+        spec_sequence_masks=None,
+        spec_query_start_loc=None,
+        spec_state_indices_tensor=None,
+        spec_token_indx=None,
+        non_spec_token_indx=None,
+        num_accepted_tokens=None,
+        num_spec_decodes=0,
+        num_prefills=0,
+        num_decodes=0 if empty else 3,
+        num_decode_tokens=3,
+        non_spec_decode_metadata=SimpleNamespace(
+            causal_conv1d=SimpleNamespace(query_start_loc=starts, cache_indices=ids[:, None])
+        ),
+    ).items():
+        setattr(metadata, key, value)
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
+    monkeypatch.setattr(model_kda, "causal_conv1d", lambda x, *args, **kwargs: x)
+    target = torch.full((1, 8, 1, 128), float("nan"))
+    calls = []
+
+    def recurrent(q, k, v, gate, beta, state, ends, slots, *args, output_buffer=None):
+        assert output_buffer is target
+        # The old zero/copy chain must not overwrite the direct destination.
+        assert torch.isnan(target).all()
+        assert ends.data_ptr() == starts.data_ptr()
+        assert slots is ids and state is layer.kv_cache[1]
+        target.zero_()
+        target[:, :3].copy_(q[:, :3] * 2)
+        calls.append(True)
+        return target
+
+    monkeypatch.setattr(model_kda, "recurrent_kda", recurrent)
+    qkv = torch.arange(4 * 384, dtype=torch.float32).reshape(4, 384)
+    layer._forward(qkv, torch.zeros(1, 4, 1, 128), torch.zeros(1, 4, 1), target)
+    if empty:
+        assert calls == []
+        assert torch.count_nonzero(target) == 0
+        return
+    assert calls == [True]
+    torch.testing.assert_close(target[0, :3, 0], qkv[:3, :128] * 2)
+    assert torch.count_nonzero(target[:, 3:]) == 0

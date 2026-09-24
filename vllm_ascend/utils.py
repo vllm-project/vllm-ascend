@@ -71,6 +71,8 @@ _CP_CHUNKEDPREFILL_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
+SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME = "sleep_lifecycle_anchor"
+SLEEP_LIFECYCLE_ANCHOR_BUFFER_SIZE = 1
 _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
@@ -1106,6 +1108,8 @@ def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
     # result in memory misalignment problems.
     if group_name and "mc2" in group_name:
         return None
+    if group_name == SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME:
+        return {"hccl_buffer_size": SLEEP_LIFECYCLE_ANCHOR_BUFFER_SIZE}
     hccl_config_map = {
         "dp": {"hccl_buffer_size": calculate_dp_buffer_size()},
         "dynamic_eplb": {"hccl_buffer_size": _DYNAMIC_EPLB_BUFFER_SIZE},
@@ -1772,3 +1776,14 @@ def use_updatable_graph(
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 
     return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)
+
+
+def _is_glm_model(model_config) -> bool:
+    """Return True if the target model belongs to the GLM series.
+
+    Detection is based on the model_type string (covers glm, chatglm, glm4,
+    glm4_moe, glm4_moe_lite, glm4_1v, glm_ocr, glm_moe_dsa, etc).
+    """
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    model_type = getattr(hf_text_config, "model_type", "") or ""
+    return "glm" in str(model_type).lower()

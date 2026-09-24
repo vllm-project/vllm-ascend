@@ -524,6 +524,24 @@ at::Tensor npu_fused_sparse_attention_overlap_meta(
     return at::empty_symint(out_sizes, query.options().dtype(query.dtype()));
 }
 
+void npu_fused_lightning_indexer_manage_meta(
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+    at::Tensor)
+{
+}
+
+void npu_fused_scatter_copy_sparse_flash_attention_meta(
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, at::Tensor, at::Tensor, const at::Tensor&,
+    const at::Tensor&, double, at::Tensor)
+{
+}
+
 std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
     const at::Tensor& x,
     int64_t k,
@@ -2120,6 +2138,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
     // Fused sparse attention overlap
     ops.impl("npu_fused_sparse_attention_overlap", &vllm_ascend::meta::npu_fused_sparse_attention_overlap_meta);
+    // Fused lightning indexer manage
+    ops.impl("npu_fused_lightning_indexer_manage",
+             &vllm_ascend::meta::npu_fused_lightning_indexer_manage_meta);
+    // Fused copy and sparse flash attention for MTP
+    ops.impl("npu_fused_scatter_copy_sparse_flash_attention",
+             &vllm_ascend::meta::npu_fused_scatter_copy_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
     // Moe_gating_top_k
