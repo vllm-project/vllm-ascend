@@ -191,7 +191,11 @@ class TestStairLoadStatistics(unittest.TestCase):
                         )
 
     def test_replica_search_scores_only_final_candidates(self):
-        calls = []
+        calls: list[tuple[object, ...]] = []
+
+        def record_score(value: np.ndarray) -> float:
+            calls.append(tuple(value))
+            return float(np.square(value).sum())
 
         candidates = StairEplbPolicy.replica_candidates(
             np.arange(8.0, 0.0, -1.0),
@@ -200,7 +204,7 @@ class TestStairLoadStatistics(unittest.TestCase):
             num_stages=4,
             budget_radius=4,
             beam_size=8,
-            candidate_score=lambda value: calls.append(tuple(value)) or float(np.square(value).sum()),
+            candidate_score=record_score,
         )
 
         self.assertEqual(len(calls), len(candidates))
