@@ -620,6 +620,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     "[spec_decode/base] Target model has no accessible lm_head;"
                     " MTP layers keep their own shared_head weights."
                 )
+            elif callable(share_lm_head := getattr(self.model, "share_lm_head", None)):
+                # Bailing V3 uses the shared head directly in compute_logits.
+                share_lm_head(target_lm_head)
             else:
                 # Comparing weights only tells the two heads apart when the draft
                 # actually loaded one. A checkpoint that ships no MTP head leaves

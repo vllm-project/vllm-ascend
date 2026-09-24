@@ -2191,7 +2191,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         if gate is not None:
             o_proj_input.mul_(torch.sigmoid(gate))
         # O proj
-        output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
+        if hasattr(self.o_proj, "output_size"):
+            output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
+        else:
+            # Bailing/Ling V3 keeps the dense projection outside the MLA
+            # wrapper and supplies an identity projection whose forward only
+            # accepts the input tensor.
+            output[...] = self.o_proj(o_proj_input)[0]
 
         del o_proj_input
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))

@@ -2670,6 +2670,52 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(events, [])
         self.assertEqual(torch.count_nonzero(output).item(), 0)
 
+    def test_forward_calls_identity_projection_without_prefill_keyword(self):
+        from vllm_ascend.attention import mla_v1
+
+        class IdentityProjection:
+            def __init__(self):
+                self.inputs = []
+
+            def __call__(self, value):
+                self.inputs.append(value)
+                return value, None
+
+        identity_projection = IdentityProjection()
+        self.impl.num_heads = 1
+        self.impl.v_head_dim = 2
+        self.impl.use_output_gate = False
+        self.impl.fa_quant_layer = False
+        self.impl.enable_mlapo = False
+        self.impl.use_mla_rope = True
+        self.impl.o_proj = identity_projection
+        self.impl._mla_preprocess = MagicMock(return_value=(None, None))
+        hidden_states = torch.randn(2, 4)
+        output = torch.full((2, 2), torch.nan)
+        metadata = SimpleNamespace(
+            num_actual_tokens=2,
+            num_decodes=0,
+            num_prefills=0,
+            num_decode_tokens=0,
+        )
+
+        with (
+            patch.object(mla_v1, "_EXTRA_CTX", SimpleNamespace(num_tokens=2)),
+            patch.object(mla_v1, "maybe_save_kv_layer_to_connector"),
+        ):
+            actual = self.impl.forward(
+                "layer",
+                hidden_states,
+                (torch.zeros(1, 1, 2),),
+                metadata,
+                output,
+            )
+
+        self.assertIs(actual, output)
+        self.assertEqual(len(identity_projection.inputs), 1)
+        self.assertEqual(identity_projection.inputs[0].shape, (2, 2))
+        self.assertEqual(torch.count_nonzero(output).item(), 0)
+
     def test_mla_preprocess(self):
         batch_size = 4
         seq_len = 8

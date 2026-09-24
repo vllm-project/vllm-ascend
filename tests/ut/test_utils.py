@@ -359,11 +359,17 @@ class TestUtils(TestBase):
     def test_register_ascend_customop(
         self, mock_ascend_rmsnorm, mock_ascend_silu_and_mul, mock_ascend_quick_gelu, mock_customop
     ):
+        from vllm_ascend.ops.bailing_moe_v3_kda import AscendBailingMoeV3KimiDeltaAttention
+
         utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
         self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertIs(
+            utils.REGISTERED_ASCEND_OPS["BailingMoeV3KimiDeltaAttention"],
+            AscendBailingMoeV3KimiDeltaAttention,
+        )
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
@@ -729,6 +735,24 @@ def test_check_gdn_layer_supports_nested_layer_types():
     vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
 
     assert utils.check_gdn_layer(vllm_config) is True
+
+
+def test_check_gdn_layer_supports_official_bailing_v3_architecture():
+    hf_config = SimpleNamespace(architectures=["BailingMoeV3ForCausalLM"])
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+@pytest.mark.parametrize(
+    "architecture",
+    ["BailingMoeForCausalLM", "BailingMoeV2ForCausalLM"],
+)
+def test_check_gdn_layer_does_not_match_other_bailing_architectures(architecture: str):
+    hf_config = SimpleNamespace(architectures=[architecture])
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    assert utils.check_gdn_layer(vllm_config) is False
 
 
 def test_check_gdn_layer_supports_qwen3_next_config():
