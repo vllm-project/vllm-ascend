@@ -19,9 +19,12 @@ from vllm_ascend.attention.mla_v1 import (
     AscendMLAPrefillMetadata,
     ChunkedContextMetadata,
     DecodeMLAPreprocessResult,
+    KIMI_K3_PROLOG_FULL_INT8_QUANT,
+    KIMI_K3_PROLOG_NO_QUANT,
     PrefillMLAPreprocessResult,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 
 
 class TestAscendMLABackend(TestBase):
@@ -1211,6 +1214,232 @@ class TestAscendMLAImpl(TestBase):
             use_mla_rope=False,
         )
         torch.testing.assert_close(output, projected)
+
+    def test_kimi_k3_prolog_v3_decode_uses_empty_rope_and_paged_caches(self):
+        self.impl.kimi_k3_prolog_v3_enabled = True
+        self.impl.num_heads = 2
+        self.impl.kv_lora_rank = 4
+        self.impl.qk_rope_head_dim = 3
+        self.impl.kimi_k3_weight_dq = torch.empty(1)
+        self.impl.kimi_k3_weight_uq_qr = torch.empty(1)
+        self.impl.kimi_k3_weight_uk = torch.empty(1)
+        self.impl.kimi_k3_weight_dkv_kr = torch.empty(1)
+        self.impl.q_a_layernorm = SimpleNamespace(
+            weight=SimpleNamespace(data=torch.ones(1)),
+            variance_epsilon=1e-6,
+        )
+        self.impl.kv_a_layernorm = SimpleNamespace(
+            weight=SimpleNamespace(data=torch.ones(1)),
+            variance_epsilon=1e-5,
+        )
+        hidden_states = torch.randn(2, 8)
+        kv_cache = (
+            torch.zeros(2, 4, 1, self.impl.kv_lora_rank),
+            torch.zeros(2, 4, 1, self.impl.qk_rope_head_dim),
+        )
+        attn_metadata = SimpleNamespace(
+            num_prefills=0,
+            num_decode_tokens=2,
+            slot_mapping=torch.tensor([3, 7], dtype=torch.int32),
+        )
+        ql_nope = torch.randn(2, self.impl.num_heads, self.impl.kv_lora_rank)
+        q_pe = torch.randn(2, self.impl.num_heads, self.impl.qk_rope_head_dim)
+        dequant_scale = torch.empty(0)
+
+        with (
+            patch(
+                "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                side_effect=lambda value, enabled: value,
+            ),
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_mla_prolog_v3",
+                return_value=(ql_nope, q_pe, dequant_scale, torch.empty(0), torch.empty(0)),
+                create=True,
+            ) as mock_prolog,
+        ):
+            result = self.impl._try_kimi_k3_prolog_v3_decode(
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+                need_gather_q_kv=False,
+            )
+
+        assert result is not None
+        self.assertIs(result.k_nope, kv_cache[0])
+        self.assertIs(result.k_pe, kv_cache[1])
+        torch.testing.assert_close(result.ql_nope, ql_nope)
+        torch.testing.assert_close(result.q_pe, q_pe)
+        call_args = mock_prolog.call_args
+        self.assertEqual(call_args.args[7].numel(), 0)
+        self.assertEqual(call_args.args[8].numel(), 0)
+        self.assertEqual(call_args.kwargs["cache_mode"], "PA_BSND")
+        self.assertEqual(call_args.kwargs["cache_index"].dtype, torch.int64)
+        torch.testing.assert_close(call_args.kwargs["cache_index"], torch.tensor([3, 7], dtype=torch.int64))
+
+    def test_kimi_k3_prolog_v3_w8a8_decode_quantizes_input_and_passes_scales(self):
+        self.impl.kimi_k3_prolog_v3_enabled = True
+        self.impl.kimi_k3_prolog_v3_weight_quant_mode = KIMI_K3_PROLOG_FULL_INT8_QUANT
+        self.impl.num_heads = 2
+        self.impl.kv_lora_rank = 4
+        self.impl.qk_rope_head_dim = 3
+        self.impl.kimi_k3_weight_dq = torch.empty(1, dtype=torch.int8)
+        self.impl.kimi_k3_weight_uq_qr = torch.empty(1, dtype=torch.int8)
+        self.impl.kimi_k3_weight_uk = torch.empty(1)
+        self.impl.kimi_k3_weight_dkv_kr = torch.empty(1, dtype=torch.int8)
+        self.impl.kimi_k3_dequant_scale_w_dq = torch.ones(1, 4)
+        self.impl.kimi_k3_dequant_scale_w_uq_qr = torch.ones(1, 8)
+        self.impl.kimi_k3_dequant_scale_w_dkv_kr = torch.ones(1, 7)
+        self.impl.q_a_layernorm = SimpleNamespace(
+            weight=SimpleNamespace(data=torch.ones(1)),
+            variance_epsilon=1e-6,
+        )
+        self.impl.kv_a_layernorm = SimpleNamespace(
+            weight=SimpleNamespace(data=torch.ones(1)),
+            variance_epsilon=1e-5,
+        )
+        hidden_states = torch.randn(2, 8)
+        quantized_token_x = torch.randint(-128, 127, (2, 8), dtype=torch.int8)
+        dequant_scale_x = torch.ones(2)
+        kv_cache = (
+            torch.zeros(2, 4, 1, self.impl.kv_lora_rank),
+            torch.zeros(2, 4, 1, self.impl.qk_rope_head_dim),
+        )
+        attn_metadata = SimpleNamespace(
+            num_prefills=0,
+            num_decode_tokens=2,
+            slot_mapping=torch.tensor([3, 7], dtype=torch.int32),
+        )
+        ql_nope = torch.randn(2, self.impl.num_heads, self.impl.kv_lora_rank)
+        q_pe = torch.randn(2, self.impl.num_heads, self.impl.qk_rope_head_dim)
+
+        with (
+            patch(
+                "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                side_effect=lambda value, enabled: value,
+            ),
+            patch(
+                "vllm_ascend.attention.mla_v1.torch_npu.npu_dynamic_quant",
+                return_value=(quantized_token_x, dequant_scale_x),
+            ) as mock_dynamic_quant,
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_mla_prolog_v3",
+                return_value=(ql_nope, q_pe, torch.empty(0), torch.empty(0), torch.empty(0)),
+                create=True,
+            ) as mock_prolog,
+        ):
+            result = self.impl._try_kimi_k3_prolog_v3_decode(
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+                need_gather_q_kv=False,
+            )
+
+        assert result is not None
+        mock_dynamic_quant.assert_called_once_with(hidden_states.contiguous())
+        call_args = mock_prolog.call_args
+        self.assertIs(call_args.args[0], quantized_token_x)
+        self.assertEqual(call_args.kwargs["weight_quant_mode"], KIMI_K3_PROLOG_FULL_INT8_QUANT)
+        self.assertEqual(call_args.kwargs["kv_cache_quant_mode"], KIMI_K3_PROLOG_NO_QUANT)
+        torch.testing.assert_close(call_args.kwargs["dequant_scale_x"], dequant_scale_x.view(-1, 1))
+        self.assertIs(call_args.kwargs["dequant_scale_w_dq"], self.impl.kimi_k3_dequant_scale_w_dq)
+        self.assertIs(call_args.kwargs["dequant_scale_w_uq_qr"], self.impl.kimi_k3_dequant_scale_w_uq_qr)
+        self.assertIs(call_args.kwargs["dequant_scale_w_dkv_kr"], self.impl.kimi_k3_dequant_scale_w_dkv_kr)
+
+    def test_kimi_k3_prolog_v3_accepts_only_matching_w8a8_dynamic_linears(self):
+        quant_method = AscendW8A8DynamicLinearMethod()
+        self.impl.fused_qkv_a_proj = SimpleNamespace(
+            quant_method=SimpleNamespace(quant_method=quant_method),
+        )
+        self.impl.q_proj = SimpleNamespace(
+            quant_method=SimpleNamespace(quant_method=quant_method),
+        )
+
+        self.assertEqual(self.impl._get_kimi_k3_prolog_v3_weight_quant_mode(), KIMI_K3_PROLOG_FULL_INT8_QUANT)
+
+        self.impl.q_proj = SimpleNamespace(quant_method=UnquantizedLinearMethod())
+        self.assertIsNone(self.impl._get_kimi_k3_prolog_v3_weight_quant_mode())
+
+    def test_kimi_k3_prolog_v3_w8a8_prepares_nz_weights_and_scales(self):
+        self.impl.kimi_k3_prolog_v3_weight_quant_mode = KIMI_K3_PROLOG_FULL_INT8_QUANT
+        self.impl.q_lora_rank = 2
+        fused_weight = torch.arange(20, dtype=torch.int8).view(4, 5)
+        self.impl.fused_qkv_a_proj = SimpleNamespace(
+            weight=SimpleNamespace(data=fused_weight),
+            weight_scale=torch.tensor([0.5, 0.25, 0.125, 0.0625, 0.03125]),
+        )
+        q_proj_weight = torch.arange(12, dtype=torch.int8).view(4, 3)
+        self.impl.q_proj = SimpleNamespace(
+            weight=SimpleNamespace(data=q_proj_weight),
+            weight_scale=SimpleNamespace(data=torch.tensor([0.5, 0.25, 0.125])),
+        )
+        self.impl.W_UK_T = torch.ones(1, 1, 1)
+        self.impl.q_a_layernorm = object()
+        self.impl.kv_a_layernorm = object()
+
+        with patch(
+            "vllm_ascend.attention.mla_v1.torch_npu.npu_format_cast",
+            side_effect=lambda tensor, _: tensor,
+        ):
+            self.impl._prepare_kimi_k3_prolog_v3_weights()
+
+        torch.testing.assert_close(self.impl.kimi_k3_weight_dq, fused_weight[:, :2])
+        torch.testing.assert_close(self.impl.kimi_k3_weight_dkv_kr, fused_weight[:, 2:])
+        torch.testing.assert_close(self.impl.kimi_k3_weight_uq_qr, q_proj_weight)
+        torch.testing.assert_close(
+            self.impl.kimi_k3_dequant_scale_w_dq,
+            torch.tensor([[0.5, 0.25]], dtype=torch.float),
+        )
+        torch.testing.assert_close(
+            self.impl.kimi_k3_dequant_scale_w_dkv_kr,
+            torch.tensor([[0.125, 0.0625, 0.03125]], dtype=torch.float),
+        )
+        torch.testing.assert_close(
+            self.impl.kimi_k3_dequant_scale_w_uq_qr,
+            torch.tensor([[0.5, 0.25, 0.125]], dtype=torch.float),
+        )
+
+    def test_kimi_k3_prolog_v3_skips_prefill(self):
+        self.impl.kimi_k3_prolog_v3_enabled = True
+        attn_metadata = SimpleNamespace(
+            num_prefills=1,
+            num_decode_tokens=1,
+            slot_mapping=torch.tensor([0], dtype=torch.int32),
+        )
+
+        with patch.object(torch.ops._C_ascend, "npu_mla_prolog_v3", create=True) as mock_prolog:
+            result = self.impl._try_kimi_k3_prolog_v3_decode(
+                torch.randn(1, 8),
+                (torch.empty(1), torch.empty(1)),
+                attn_metadata,
+                need_gather_q_kv=False,
+            )
+
+        self.assertIsNone(result)
+        mock_prolog.assert_not_called()
+
+    def test_mla_preprocess_returns_kimi_k3_prolog_v3_decode_result(self):
+        decode_result = DecodeMLAPreprocessResult(
+            ql_nope=torch.empty(1),
+            q_pe=torch.empty(1),
+            k_nope=torch.empty(1),
+            k_pe=torch.empty(1),
+        )
+        self.impl._try_kimi_k3_prolog_v3_decode = MagicMock(return_value=decode_result)
+        attn_metadata = SimpleNamespace(num_decodes=1, num_prefills=0, num_decode_tokens=1)
+
+        with patch("vllm_ascend.attention.mla_v1.notify_kv_cache_written") as mock_notify:
+            result = self.impl._mla_preprocess(
+                "model.layers.0.self_attn.attn",
+                torch.empty(1, 8),
+                (torch.empty(1), torch.empty(1)),
+                attn_metadata,
+                need_gather_q_kv=False,
+            )
+
+        self.assertEqual(result, (decode_result, None))
+        mock_notify.assert_called_once_with("model.layers.0.self_attn.attn")
 
     @patch("vllm_ascend.attention.mla_v1.maybe_save_kv_layer_to_connector")
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
