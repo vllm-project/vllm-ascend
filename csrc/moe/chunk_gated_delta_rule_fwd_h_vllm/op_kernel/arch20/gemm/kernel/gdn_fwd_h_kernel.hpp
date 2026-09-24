@@ -237,11 +237,14 @@ public:
     }
 
     __aicore__ inline void ProcessUnifiedCore() {
-        // NOTE: the runtime registers this binary with mixType=0 (plain launch),
-        // so exactly one instance runs per core and GetSubBlockIdx() is NOT
-        // meaningful here -- an early-return gate on it killed every core once
-        // the host stack was rebuilt. The epilogues are hardcoded to a single
-        // subblock; no gate is needed.
+        // This integration branch still uses the legacy 310P generated wrapper
+        // and KERNEL_TYPE_MIX_AIC_1_2.  Its two subblocks have separate UBs and
+        // would otherwise duplicate every hand-mmad.  The newer upstream base
+        // used by PR #17422 registers this binary as a plain launch and removed
+        // the guard; retain it until this branch migrates that runtime ABI.
+        if (AscendC::GetSubBlockIdx() != 0) {
+            return;
+        }
         EpilogueGDNFwdHVnew epilogueGDNFwdHVnew(resource);
         while (cubeBlockScheduler.isRunning) {
             cubeBlockScheduler.InitTask();
