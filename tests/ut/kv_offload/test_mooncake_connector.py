@@ -4217,7 +4217,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
                         worker.kv_recv_thread.add_request.assert_called_once()
                         receive = worker.kv_recv_thread.add_request.call_args.kwargs
-                        empty_ids = ([], []) if sparse else ([],)
+                        empty_ids: tuple[list[int], ...] = ([], []) if sparse else ([],)
                         self.assertEqual(receive["local_block_ids"], empty_ids)
                         self.assertEqual(receive["remote_block_ids"], empty_ids)
                         self.assertEqual(receive["remote_handshake_port"], 30000 + remote_pcp_size - 1)
