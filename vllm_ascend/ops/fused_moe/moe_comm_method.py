@@ -52,7 +52,7 @@ _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 def _moe_config_key(moe_comm_type: MoECommType, moe_config: FusedMoEConfig) -> tuple[int, ...]:
     """Return the execution shape that owns mutable MoE comm state."""
     _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
-    return tuple(moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
+    return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
 
 
 def get_moe_comm_method(
