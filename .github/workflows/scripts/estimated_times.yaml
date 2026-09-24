@@ -138,6 +138,8 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_gemma4.py: 420
   tests/e2e/pull_request/four_card/test_minimax_m3.py: 300
   tests/e2e/pull_request/four_card/test_kimi_k3.py: 360
+  # Provisional scheduling estimate; calibrate after clean-runtime A3 validation.
+  tests/e2e/pull_request/four_card/test_glm5_3_flash.py: 1800
   tests/e2e/pull_request/one_card/test_attention_v1_precision.py: 540
   tests/e2e/pull_request/one_card/test_mla_precision.py: 190
   tests/e2e/pull_request/one_card/test_sfa_v1_precision.py: 120
