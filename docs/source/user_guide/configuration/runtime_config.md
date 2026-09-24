@@ -10,7 +10,7 @@ Startup keys (`runtime_config_path`, `runtime_config_reload_interval`, overlay d
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `sync_mode` | str | `"broadcast"` | `"broadcast"` (PP==1: end-of-wave `all_reduce([config_due, dump_due])` + per-lane broadcast) or `"file"` (each rank polls). **PP>1 always forces `file`**. |
+| `sync_mode` | str | `"broadcast"` | `"broadcast"` (PP==1: **wave-head** `all_reduce([config_due, dump_due])` + per-lane broadcast) or `"file"` (each rank polls). **PP>1 always forces `file`**: earlier PP stages may be idle or on a dummy batch in the same step, so a config broadcast that spans PP ranks deadlocks; each rank polls JSON instead, and dump still uses last-PP TP `all_reduce` only. |
 | `reload_interval_seconds` | number | `0` | Display only; effective interval is `runtime_config_reload_interval` at process start |
 | `actions` | object | see below | Default incident actions |
 | `dump` | object | see below | Auto dump quota and manual dump controls |

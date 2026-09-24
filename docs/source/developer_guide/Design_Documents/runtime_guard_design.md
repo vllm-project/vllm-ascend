@@ -109,6 +109,17 @@ step N  wave head: if broadcast∧PP==1 → merged AR+bcast; else file(+TP dump 
 On the sync path, after-sample armed jobs can D2H in the same wave; async `get_output` and ActionQueue CPU alerts often land on the next wave flush. Requests already `mark_finished` this step still skip dump via the finished gate.  
 When a complete `.pt` is not produced, relevant ranks write `{dump_root}/<type>/<req_id>/wave_<N>/[rank_tag/]dump_skipped.json` (`reason` + `stage=arm|drain`).
 
+Cross-wave auto dump (+1) in one glance:
+
+```text
+wave N     detect (last-PP TP0) → queue dump job (no D2H yet)
+wave N+1   wave head: sync dump list (broadcast / TP claim)
+           → prepare / forward
+           → wave tail end_of_wave_sync: each last-PP TP local D2H
+```
+
+Config hot-reload applies at wave head of the wave that receives it (same-wave detection). Manual dump skips the job bus and D2H's locally at that wave's tail.
+
 On disk:
 
 ```text
@@ -229,8 +240,10 @@ With `report.save_sensitive_info=true`, persist prompt/output token ids (truncat
 
 | Runner | bind | Main hooks |
 |--------|------|----------|
-| v1 | `model_runner_v1.py` ctor | `sync_for_step`, `run_sample_phase` (after_sample, etc.), pre-sample wrap, async `AscendAsync*` |
-| v2 | `worker/v2/model_runner.py` ctor | same |
+| v1 | `model_runner_v1.py` ctor | `@runtime_guard_step` on `execute_model`; sample still calls `run_sample_phase` inline |
+| v2 | `worker/v2/model_runner.py` ctor | `@runtime_guard_step` + `@runtime_guard_sample_tokens`; runner keeps `_rg_*` functional hooks only |
+
+Shared decorators live in `observability/runtime_guard/hooks.py` (must sit **inside** `@torch.inference_mode()`). They own wave sync / sample-phase orchestration so v1/v2 worker diffs stay thin on upstream bumps.
 
 Idle DP: `worker.execute_dummy_batch` calls `sync_for_step(allow_arm=False)` to align config hot reload with busy ranks.
 
