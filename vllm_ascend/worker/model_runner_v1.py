@@ -168,6 +168,7 @@ from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.eplb.timing import EplbDeviceTimingWindow, measure_eplb_device_calls
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
@@ -541,6 +542,17 @@ class NPUModelRunner(GPUModelRunner):
         self.use_aclgraph = self._use_aclgraph()
 
         eplb_config = self.ascend_config.eplb_config
+        timing_config = getattr(self.parallel_config, "eplb_config", None)
+        self._eplb_forward_timing = (
+            EplbDeviceTimingWindow("v1_forward", timing_config.log_balancedness_interval)
+            if timing_config is not None and timing_config.log_balancedness
+            else None
+        )
+        self._eplb_execute_timing = (
+            EplbDeviceTimingWindow("v1_execute", timing_config.log_balancedness_interval)
+            if timing_config is not None and timing_config.log_balancedness
+            else None
+        )
         self.dynamic_eplb = eplb_config.dynamic_eplb
         self.eplb_enable = self.dynamic_eplb or (eplb_config.expert_map_path is not None)
         if self.dynamic_eplb:
@@ -2164,6 +2176,7 @@ class NPUModelRunner(GPUModelRunner):
         return cut_tokens
 
     @torch.inference_mode()
+    @measure_eplb_device_calls("_eplb_execute_timing")
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -3078,13 +3091,19 @@ class NPUModelRunner(GPUModelRunner):
         }
         run_model = partial(self.model, **model_inputs)
 
-        if self.enable_enpu:
-            # The soft segmentation scenario requires event.record first, then event.wait
-            self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
-            hidden_states = run_model()
-        else:
-            hidden_states = run_model()
-            self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
+        timing_context = (
+            self._eplb_forward_timing.measure()
+            if self._eplb_forward_timing is not None and not forward_context.capturing
+            else nullcontext()
+        )
+        with timing_context:
+            if self.enable_enpu:
+                # The soft segmentation scenario requires event.record first, then event.wait
+                self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
+                hidden_states = run_model()
+            else:
+                hidden_states = run_model()
+                self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
 
         return hidden_states
 

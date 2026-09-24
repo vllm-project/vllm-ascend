@@ -25,6 +25,7 @@ from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.forward_context import get_forward_context
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -58,6 +59,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.eplb.timing import EplbDeviceTimingWindow, measure_eplb_device_calls
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.utils import disable_compilation
@@ -129,6 +131,17 @@ class NPUModelRunner(GPUModelRunner):
             device,
             ascend_eplb_config=(self.ascend_config.eplb_config if parallel_config.enable_eplb else None),
         )
+        timing_config = getattr(parallel_config, "eplb_config", None)
+        self._eplb_forward_timing = (
+            EplbDeviceTimingWindow("v2_forward", timing_config.log_balancedness_interval)
+            if timing_config is not None and timing_config.log_balancedness
+            else None
+        )
+        self._eplb_execute_timing = (
+            EplbDeviceTimingWindow("v2_execute", timing_config.log_balancedness_interval)
+            if timing_config is not None and timing_config.log_balancedness
+            else None
+        )
 
         self.update_stream = None
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
@@ -195,6 +208,13 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
+
+    def _model_forward(self, *args, **kwargs):
+        forward_context = get_forward_context()
+        if self._eplb_forward_timing is None or forward_context is None or forward_context.capturing:
+            return super()._model_forward(*args, **kwargs)
+        with self._eplb_forward_timing.measure():
+            return super()._model_forward(*args, **kwargs)
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
@@ -288,6 +308,7 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_runtime = self.kvpp
 
     @torch.inference_mode()
+    @measure_eplb_device_calls("_eplb_execute_timing")
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
