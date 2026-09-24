@@ -1002,6 +1002,8 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     monkeypatch.setattr(routed_experts_module, "get_current_vllm_config", lambda: None)
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 3)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
+    record_expert_tokens = MagicMock()
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
 
     result = routed_experts.forward_impl(
         hidden_states=hidden_states,
@@ -1043,6 +1045,7 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     )
     expected_load = torch.zeros_like(expert_load)
     torch.testing.assert_close(expert_load, expected_load)
+    assert record_expert_tokens.call_count == int(v2_eplb)
     moe_comm_method.finalize.assert_called_once_with(
         hidden_states=routed_out,
         reduce_results=False,
