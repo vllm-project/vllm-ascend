@@ -1812,3 +1812,84 @@ def test_v26b_cpu_detect_dropped_not_inline():
     finally:
         gate.set()
         q.stop()
+
+
+# ------------------------------------------- V27 safety audit fixes
+
+
+def test_v27a_print_output_uses_runner_tp_rank(monkeypatch):
+    """v1 runners often lack tp_rank; must not print on every TP via getattr→0."""
+    from vllm_ascend.runtime_guard.processor_report import RuntimeGuardReportMixin
+
+    calls: list[int] = []
+
+    def _fake_tp_rank(_runner):
+        calls.append(1)
+        return 1  # non-TP0
+
+    monkeypatch.setattr(
+        "vllm_ascend.runtime_guard.processor_report.runner_tp_rank",
+        _fake_tp_rank,
+    )
+    p = object.__new__(RuntimeGuardProcessor)
+    p.runner = SimpleNamespace()  # no tp_rank attr
+    p.runtime_config = MagicMock()
+    p._get_detector_tokenizer = MagicMock(side_effect=AssertionError("must not decode"))
+    RuntimeGuardReportMixin._maybe_print_output_on_finish(p, ["r1"], MagicMock())
+    assert calls == [1]
+    p._get_detector_tokenizer.assert_not_called()
+
+
+def test_v27b_dump_prepare_exception_refunds_quota():
+    from vllm_ascend.runtime_guard.action.actions import DumpKvAction
+    from vllm_ascend.runtime_guard.incident import Incident
+
+    rc = _ConsumeRecorder(remaining=2)
+    kv_reader = MagicMock()
+    quota = _quota_stub()
+    ctx = _dump_ctx(
+        Incident(
+            incident_type="token_repeat",
+            req_id="r1",
+            consume_quota=True,
+            block_ids=[0],
+        ),
+        rc,
+        kv_reader,
+        quota,
+    )
+    ctx.runner.runtime_guard.queue_kv_dump.side_effect = RuntimeError("boom")
+    with (
+        patch(
+            "vllm_ascend.runtime_guard.action.actions.runner_tp_rank",
+            return_value=0,
+        ),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        DumpKvAction().prepare(ctx)
+    quota.try_consume.assert_called_once_with(consume_quota=True)
+    quota.refund.assert_called_once_with(consume_quota=True)
+
+
+def test_v27c_zombie_with_stuck_cpu_jobs_force_reaps():
+    """Post-reap late append: finished + mark=None + cpu_jobs must not stick forever."""
+    from vllm_ascend.runtime_guard.request_state import RequestGuardStore
+
+    RequestGuardStore.reset_for_tests()
+    try:
+        store = RequestGuardStore.get()
+        store.max_deferred_waves = 2
+        store.get_or_create("z1")
+        store.clear("z1")  # populate reaped ring
+        store.append_output_ids("z1", [7, 8])
+        state = store.get_state("z1")
+        assert state is not None
+        assert state.finished is True
+        assert state.finish_mark_wave is None
+        store.add_cpu_jobs(["z1"])
+        assert store.list_reapable(current_wave=10) == []  # stamps mark=10
+        assert state.finish_mark_wave == 10
+        assert store.list_reapable(current_wave=11) == []  # still within defer
+        assert store.list_reapable(current_wave=12) == ["z1"]  # force-reap
+    finally:
+        RequestGuardStore.reset_for_tests()

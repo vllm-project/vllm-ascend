@@ -51,8 +51,6 @@ def _bind(cfg: RuntimeConfig, *, runner: MagicMock | None = None) -> RuntimeGuar
     def _init(self, r):
         self.runner = r
         self.runtime_config = cfg
-        self.manual_triggers = MagicMock()
-        self.manual_triggers.consume_once.return_value = None
         self.action_executor = MagicMock()
         self.action_executor.apply_runtime_config = MagicMock()
         self.detectors = MagicMock()
@@ -127,7 +125,6 @@ def test_sync_for_step_skips_refresh_when_reload_off_idle(tmp_path: Path):
         proc.sync_for_step(allow_arm=True, scheduler_output=None)
         proc.wave_tracker.advance.assert_called_once_with(allow_arm=True)
         refresh.assert_not_called()
-        proc.manual_triggers.consume_once.assert_not_called()
     RuntimeGuardProcessor.reset_for_tests()
 
 

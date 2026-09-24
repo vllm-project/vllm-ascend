@@ -31,9 +31,6 @@ MAX_DEFERRED_REAP_WAVES = 8
 # recreate in append_output_ids can be stamped finished=True for reap.
 REAPED_RING_MAX = 1024
 
-# Throttle repeated "manual_dump deferred (allow_arm=False)" warnings.
-MANUAL_TRIGGER_WARN_INTERVAL_S = 60.0
-
 # Same (incident_type, req_id) on-disk write backoff (wave-based, not wall-clock).
 # After the 1st write, next needs +64 waves; then +128, +256, … (doubles).
 # Cap is ``report.max_per_req`` (RuntimeConfig).

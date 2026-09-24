@@ -228,10 +228,16 @@ class RequestGuardStore:
         # Defer-cap first: a finished req must not linger past it even if the
         # drain probe is stuck (dropped AsyncOutput / dead consumer).
         mark = state.finish_mark_wave
+        # Post-reap late append stamps finished=True without a mark (zombie).
+        # Start the defer clock on first reap scan so max_deferred_waves can
+        # still force-reap when cpu_jobs is stuck.
+        if state.finished and mark is None:
+            state.finish_mark_wave = int(current_wave)
+            mark = state.finish_mark_wave
         if state.cpu_jobs > 0:
-            if mark is None or int(current_wave) - int(mark) < int(self.max_deferred_waves):
+            if int(current_wave) - int(mark) < int(self.max_deferred_waves):
                 return False
-        if mark is not None and int(current_wave) - int(mark) >= int(self.max_deferred_waves):
+        if int(current_wave) - int(mark) >= int(self.max_deferred_waves):
             return True
         probe = self._drain_probe
         if probe is not None:

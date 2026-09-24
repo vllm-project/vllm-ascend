@@ -259,30 +259,42 @@ class DumpKvAction(Action):
             )
             return DumpKvPrepared(skip=_dump_skip_kwargs(ctx, reason="quota_or_cooldown_blocked"))
 
-        queued_ids = _queue_kv_dumps(ctx, targets)
-        if not queued_ids:
+        # Refund on any exception after a successful consume so soft-fail in
+        # ActionExecutor does not leave auto quota / cooldown stuck.
+        try:
+            queued_ids = _queue_kv_dumps(ctx, targets)
+            if not queued_ids:
+                ctx.quota.refund(consume_quota=ctx.incident.consume_quota)
+                logger.warning(
+                    "[runtime_guard dump_kv] queue failed; refunded quota req_id=%s type=%s",
+                    ctx.incident.req_id,
+                    ctx.incident.incident_type,
+                )
+                return DumpKvPrepared(
+                    skip=_dump_skip_kwargs(
+                        ctx,
+                        reason="queue_failed",
+                        detail={"n_targets": len(targets)},
+                    )
+                )
+            infos = _build_request_infos_for_targets(
+                ctx,
+                [(r, b) for r, b in targets if r in queued_ids],
+            )
+            if not infos:
+                return None
+            # manual_dump count is always consumed in ``_handle_manual_trigger``
+            # after an armed wave (success or dump_skipped marker).
+            return DumpKvPrepared(request_infos=infos)
+        except Exception:
             ctx.quota.refund(consume_quota=ctx.incident.consume_quota)
-            logger.warning(
-                "[runtime_guard dump_kv] queue failed; refunded quota req_id=%s type=%s",
+            logger.exception(
+                "[runtime_guard dump_kv] prepare failed after consume; "
+                "refunded quota req_id=%s type=%s",
                 ctx.incident.req_id,
                 ctx.incident.incident_type,
             )
-            return DumpKvPrepared(
-                skip=_dump_skip_kwargs(
-                    ctx,
-                    reason="queue_failed",
-                    detail={"n_targets": len(targets)},
-                )
-            )
-        infos = _build_request_infos_for_targets(
-            ctx,
-            [(r, b) for r, b in targets if r in queued_ids],
-        )
-        if not infos:
-            return None
-        # manual_dump count is always consumed in ``_handle_manual_trigger``
-        # after an armed wave (success or dump_skipped marker).
-        return DumpKvPrepared(request_infos=infos)
+            raise
 
     def commit(self, prepared: DumpKvPrepared) -> None:
         if prepared.skip is not None:

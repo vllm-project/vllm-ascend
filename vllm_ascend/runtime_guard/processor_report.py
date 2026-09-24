@@ -33,6 +33,7 @@ from vllm_ascend.runtime_guard.manual_trigger import (
 )
 from vllm_ascend.runtime_guard.rank_gate import (
     is_action_leader_rank,
+    runner_tp_rank,
     should_dump_kv_on_rank,
 )
 from vllm_ascend.runtime_guard.token_utils import decode_token_ids, load_model_tokenizer
@@ -142,11 +143,8 @@ class RuntimeGuardReportMixin:
         ``output_token_count=0`` / empty text if nothing was appended after
         enable. See ``RuntimeConfig.log_print_output_on_finish``.
         """
-        runner = self.runner
-        try:
-            if int(getattr(runner, "tp_rank", 0)) != 0:
-                return
-        except Exception:
+        # v1 runners often lack ``tp_rank``; getattr→0 would print on every TP.
+        if runner_tp_rank(self.runner) != 0:
             return
         tokenizer = self._get_detector_tokenizer()
         max_ids = self.runtime_config.report_max_output_token_ids()

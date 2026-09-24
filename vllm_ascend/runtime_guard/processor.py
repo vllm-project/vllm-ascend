@@ -35,7 +35,6 @@ from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.runtime_guard.action.executor import ActionExecutor
 from vllm_ascend.runtime_guard.detector.manager import DetectorManager
 from vllm_ascend.runtime_guard.io_snapshot import RequestIoSnapshotManager
-from vllm_ascend.runtime_guard.manual_trigger import ManualTriggerManager
 from vllm_ascend.runtime_guard.processor_bus import RuntimeGuardBusMixin
 from vllm_ascend.runtime_guard.processor_dump import RuntimeGuardDumpMixin
 from vllm_ascend.runtime_guard.processor_report import RuntimeGuardReportMixin
@@ -162,7 +161,6 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self.action_executor.start()
         self._report_tokenizer: Any | None = None
         self._report_tokenizer_failed = False
-        self.manual_triggers = ManualTriggerManager(runtime_config=runtime_config, runner=runner)
         self._scheduler_output_for_step: Any | None = None
         self._kv_dump_jobs: list[dict[str, Any]] = []
         # Auto dump jobs delivered at wave-head bcast; D2H runs at end-of-wave
@@ -187,7 +185,6 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self.runner = runner
         self.runtime_config = runtime_config
         self.action_executor.rebind_runner(runner, runtime_config=runtime_config)
-        self.manual_triggers.rebind_runner(runner)
         self.detectors.rebind_runner(runner)
         # Tokenizer may differ across runners; force lazy reload.
         self._report_tokenizer = None
