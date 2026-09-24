@@ -32,6 +32,7 @@ IDs map to review findings:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import threading
@@ -1895,27 +1896,22 @@ def test_v26b_cpu_detect_dropped_not_inline():
 # ------------------------------------------- V27 safety audit fixes
 
 
-def test_v27a_print_output_uses_runner_tp_rank(monkeypatch):
-    """v1 runners often lack tp_rank; must not print on every TP via getattr→0."""
+def test_v27a_print_output_skips_non_tp0_rank(monkeypatch):
+    """Non-TP0 must not print; the gate reads process groups, not runner attrs."""
+    from vllm_ascend.observability.runtime_guard import rank_gate
     from vllm_ascend.observability.runtime_guard.processor_report import RuntimeGuardReportMixin
 
-    calls: list[int] = []
+    monkeypatch.setattr(rank_gate, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True))
+    monkeypatch.setattr(rank_gate, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=1))
 
-    def _fake_tp_rank(_runner):
-        calls.append(1)
-        return 1  # non-TP0
-
-    monkeypatch.setattr(
-        "vllm_ascend.observability.runtime_guard.processor_report.runner_tp_rank",
-        _fake_tp_rank,
-    )
     p = object.__new__(RuntimeGuardProcessor)
-    p.runner = SimpleNamespace()  # no tp_rank attr
+    p.runner = SimpleNamespace()  # no tp_rank attr — gate must not trust it
     p.runtime_config = MagicMock()
     p._get_detector_tokenizer = MagicMock(side_effect=AssertionError("must not decode"))
-    RuntimeGuardReportMixin._maybe_print_output_on_finish(p, ["r1"], MagicMock())
-    assert calls == [1]
+    io_mgr = MagicMock()
+    RuntimeGuardReportMixin._maybe_print_output_on_finish(p, ["r1"], io_mgr)
     p._get_detector_tokenizer.assert_not_called()
+    io_mgr.snapshot.assert_not_called()
 
 
 def test_v27b_dump_prepare_exception_refunds_quota():
@@ -1971,3 +1967,48 @@ def test_v27c_zombie_with_stuck_cpu_jobs_force_reaps():
         assert store.list_reapable(current_wave=12) == ["z1"]  # force-reap
     finally:
         RequestGuardStore.reset_for_tests()
+
+
+def test_v27d_print_output_tp0_last_pp_snapshots_processor_runner(monkeypatch, caplog):
+    """Regression: snapshot must use the processor's runner (was bare ``runner`` NameError)."""
+    from vllm_ascend.observability.runtime_guard import rank_gate
+    from vllm_ascend.observability.runtime_guard.processor_report import RuntimeGuardReportMixin
+
+    monkeypatch.setattr(rank_gate, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True))
+    monkeypatch.setattr(rank_gate, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=0))
+
+    p = object.__new__(RuntimeGuardProcessor)
+    p.runner = SimpleNamespace()  # no tp_rank attr — TP rank comes from the group
+    p.runtime_config = MagicMock()
+    p.runtime_config.report_max_output_token_ids.return_value = 2
+    p._get_detector_tokenizer = MagicMock(return_value=None)  # tokenizer unavailable
+
+    io_mgr = MagicMock()
+    io_mgr.snapshot.return_value = SimpleNamespace(output_token_ids=[1, 2, 3], output_token_count=3)
+    with caplog.at_level(logging.INFO, logger="vllm_ascend.observability.runtime_guard.processor_report"):
+        RuntimeGuardReportMixin._maybe_print_output_on_finish(p, ["r1", ""], io_mgr)
+
+    # Pre-fix this raised NameError (bare ``runner``); the snapshot must receive
+    # the processor's runner, and empty ids must be skipped.
+    io_mgr.snapshot.assert_called_once_with(p.runner, "r1", None, include_token_ids=True, use_cache=False)
+    assert any("output_token_count=3" in r.message for r in caplog.records)
+    assert any("truncated=True" in r.message for r in caplog.records)
+    assert any("<tokenizer unavailable>" in r.message for r in caplog.records)
+
+
+def test_v27e_print_output_skips_non_last_pp_tp0(monkeypatch):
+    """TP0 on a non-last PP rank must not print (no cumulative IO there)."""
+    from vllm_ascend.observability.runtime_guard import rank_gate
+    from vllm_ascend.observability.runtime_guard.processor_report import RuntimeGuardReportMixin
+
+    monkeypatch.setattr(rank_gate, "get_pp_group", lambda: SimpleNamespace(is_last_rank=False))
+    monkeypatch.setattr(rank_gate, "get_tp_group", lambda: SimpleNamespace(world_size=1, rank_in_group=0))
+
+    p = object.__new__(RuntimeGuardProcessor)
+    p.runner = SimpleNamespace()
+    p.runtime_config = MagicMock()
+    p._get_detector_tokenizer = MagicMock(side_effect=AssertionError("must not decode"))
+    io_mgr = MagicMock()
+    RuntimeGuardReportMixin._maybe_print_output_on_finish(p, ["r1"], io_mgr)
+    p._get_detector_tokenizer.assert_not_called()
+    io_mgr.snapshot.assert_not_called()

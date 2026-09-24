@@ -33,7 +33,6 @@ from vllm_ascend.observability.runtime_guard.manual_trigger import (
 )
 from vllm_ascend.observability.runtime_guard.rank_gate import (
     is_action_leader_rank,
-    runner_tp_rank,
     should_dump_kv_on_rank,
 )
 from vllm_ascend.observability.runtime_guard.token_utils import decode_token_ids, load_model_tokenizer
@@ -135,7 +134,7 @@ class RuntimeGuardReportMixin:
             )
 
     def _maybe_print_output_on_finish(self, finished_req_ids: Any, io_mgr: RequestIoSnapshotManager) -> None:
-        """Log output_token_ids + text for finished reqs (TP0 only).
+        """Log output_token_ids + text for finished reqs (last-PP TP0 only).
 
         Content comes from runtime_guard cumulative IO accumulated while
         ``log.print_output_on_finish`` was true on sample steps (no historical
@@ -143,15 +142,19 @@ class RuntimeGuardReportMixin:
         ``output_token_count=0`` / empty text if nothing was appended after
         enable. See ``RuntimeConfig.log_print_output_on_finish``.
         """
-        # v1 runners often lack ``tp_rank``; getattr→0 would print on every TP.
-        if runner_tp_rank(self.runner) != 0:
+        # Print on the report-leader rank (last-PP TP0): non-last PP ranks
+        # never sample and hold no cumulative IO, and other TP ranks would
+        # duplicate the print. The gate must read the process groups — v1
+        # runners often lack ``tp_rank`` and an attribute fallback would
+        # resolve 0 on every TP rank.
+        if not is_action_leader_rank(self.runner):
             return
         tokenizer = self._get_detector_tokenizer()
         max_ids = self.runtime_config.report_max_output_token_ids()
         for req_id in finished_req_ids:
             if not req_id:
                 continue
-            snap = io_mgr.snapshot(runner, req_id, None, include_token_ids=True, use_cache=False)
+            snap = io_mgr.snapshot(self.runner, req_id, None, include_token_ids=True, use_cache=False)
             ids = list(snap.output_token_ids or [])
             truncated = False
             if max_ids > 0 and len(ids) > max_ids:
