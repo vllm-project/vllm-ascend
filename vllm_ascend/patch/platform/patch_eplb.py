@@ -18,6 +18,7 @@ from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import routed_experts as _routed_experts
 
+from vllm_ascend.distributed.eplb._compat import device_stream
 from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
 from vllm_ascend.distributed.eplb.state import (
@@ -218,8 +219,9 @@ def _wrap_async_rebalance(original_rebalance):
 
 def _wrap_async_transfer(original_transfer):
     transfer_signature = signature(original_transfer)
+    stream_parameter = "stream" if "stream" in transfer_signature.parameters else "cuda_stream"
     required = {"old_layer_indices", "new_layer_indices", "expert_weights", "expert_weights_buffer"}
-    required.update({"ep_group", "communicator", "is_profile", "stream", "rank_mapping", "layer_idx"})
+    required.update({"ep_group", "communicator", "is_profile", stream_parameter, "rank_mapping", "layer_idx"})
     if not required.issubset(transfer_signature.parameters):
         raise RuntimeError("Unsupported vLLM EPLB contract: asynchronous transfer signature changed.")
 
@@ -248,7 +250,7 @@ def _wrap_async_transfer(original_transfer):
                 expert_weight_buffers=values["expert_weights_buffer"],
                 ep_group=values["ep_group"],
                 communicator=communicator,
-                stream=values["stream"],
+                stream=values[stream_parameter],
                 layer_idx=layer_idx,
             )
         except Exception:
@@ -269,6 +271,9 @@ def _patch_explicit_transfer_execution() -> None:
 
 
 def _wrap_async_worker(original_worker):
+    transfer_signature = signature(_async_worker.transfer_layer)
+    stream_parameter = "stream" if "stream" in transfer_signature.parameters else "cuda_stream"
+
     @wraps(original_worker)
     def _transfer_run_periodically(state, stream, is_profile=False):
         if not isinstance(state, AscendEplbState) or is_profile:
@@ -279,7 +284,7 @@ def _wrap_async_worker(original_worker):
             eplb_cpu_group = _async_worker.get_eplb_group().cpu_group
             for model_state in state.model_states.values():
                 model_state.communicator.set_stream(stream)
-                with _async_worker.device_stream(stream):
+                with device_stream(stream):
                     old_mapping = model_state.physical_to_logical_map.cpu()
                 new_mapping = _async_worker.run_rebalance_experts(model_state, state, old_mapping, stream)
                 if old_mapping.shape != new_mapping.shape:
@@ -303,17 +308,18 @@ def _wrap_async_worker(original_worker):
                     if int(flag.item()) != eplb_cpu_group.size():
                         model_state.rebalanced = False
                         break
-                    metadata = _async_worker.transfer_layer(
-                        old_layer_indices=old_mapping[layer_idx],
-                        new_layer_indices=new_mapping[layer_idx],
-                        expert_weights=model_state.model.expert_weights[layer_idx],
-                        expert_weights_buffer=model_state.expert_buffer,
-                        communicator=model_state.communicator,
-                        ep_group=eplb_group,
-                        is_profile=is_profile,
-                        stream=stream,
-                        layer_idx=layer_idx,
-                    )
+                    transfer_kwargs = {
+                        "old_layer_indices": old_mapping[layer_idx],
+                        "new_layer_indices": new_mapping[layer_idx],
+                        "expert_weights": model_state.model.expert_weights[layer_idx],
+                        "expert_weights_buffer": model_state.expert_buffer,
+                        "communicator": model_state.communicator,
+                        "ep_group": eplb_group,
+                        "is_profile": is_profile,
+                        "layer_idx": layer_idx,
+                        stream_parameter: stream,
+                    }
+                    metadata = _async_worker.transfer_layer(**transfer_kwargs)
                     stream.synchronize()
                     consumed_event = _async_worker.CpuGpuEvent()
                     model_state.pending_result = _AscendAsyncLayerResult(
