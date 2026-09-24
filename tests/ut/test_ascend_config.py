@@ -212,7 +212,9 @@ class TestAscendConfig(TestBase):
 
     def test_stair_config_defaults_and_overrides(self):
         defaults = EplbConfig().stair_config
-        config = EplbConfig(stair_config={"rank_pair_migration_limit": 2, "load_risk_quantile": 0.9})
+        config = EplbConfig(
+            stair_config={"rank_transfer_limit": 2, "load_risk_quantile": 0.9}
+        )
 
         self.assertEqual(
             dataclasses.asdict(defaults),
@@ -221,14 +223,15 @@ class TestAscendConfig(TestBase):
                 "load_risk_quantile": 0.75,
                 "relative_balance_threshold": 0.95,
                 "absolute_balance_threshold": 0.90,
-                "rank_pair_migration_limit": 1,
+                "rank_transfer_limit": 1,
+                "cross_node_transfer_limit": 1,
                 "replica_search_num_stages": 4,
                 "replica_search_radius": 8,
                 "replica_search_beam_size": 64,
                 "placement_search_backtrack_limit": 32,
             },
         )
-        self.assertEqual(config.stair_config.rank_pair_migration_limit, 2)
+        self.assertEqual(config.stair_config.rank_transfer_limit, 2)
         self.assertEqual(config.stair_config.z_score, NormalDist().inv_cdf(0.9))
 
     def test_stair_config_default_factory_and_frozen_contract(self):
@@ -249,7 +252,10 @@ class TestAscendConfig(TestBase):
             {"relative_balance_threshold": 1},
             {"absolute_balance_threshold": 0.000001},
             {"absolute_balance_threshold": 1},
-            {"rank_pair_migration_limit": 1},
+            {"rank_transfer_limit": 1},
+            {"rank_transfer_limit": -1},
+            {"cross_node_transfer_limit": 0},
+            {"cross_node_transfer_limit": -1},
             {"replica_search_num_stages": 1},
             {"replica_search_num_stages": 8},
             {"replica_search_radius": 0},
@@ -272,7 +278,8 @@ class TestAscendConfig(TestBase):
             {"relative_balance_threshold": 1.001},
             {"absolute_balance_threshold": 0},
             {"absolute_balance_threshold": 1.001},
-            {"rank_pair_migration_limit": 0},
+            {"rank_transfer_limit": 0},
+            {"cross_node_transfer_limit": -2},
             {"replica_search_num_stages": 0},
             {"replica_search_num_stages": 9},
             {"replica_search_radius": -1},
