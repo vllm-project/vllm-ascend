@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from heapq import heapify, heappop, heappush
 
 import numpy as np
+import torch
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb.layer_sharding import all_gather_layer_shards, assigned_layer_ids
+from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 
 _MEAN_RATIO_TIE_TOLERANCE = 1e-9
 
@@ -83,17 +85,32 @@ _VARIANCE_ROUNDOFF_SAFETY_FACTOR = 8
 class StairEplbPolicy(AbstractEplbPolicy):
     """STAIR load statistics and placement planning."""
 
+    def __init__(self, config: StairConfig) -> None:
+        self.config = config
+
+    @staticmethod
+    def _load_bin_boundaries(num_samples: int, max_bins: int) -> tuple[np.ndarray, np.ndarray]:
+        if num_samples < 1 or max_bins < 1:
+            raise ValueError("load binning requires samples and a positive bin limit")
+        num_bins = min(num_samples, max_bins)
+        boundaries = np.arange(num_bins + 1) * num_samples // num_bins
+        return boundaries, np.diff(boundaries).astype(np.int64)
+
+    def prepare_local_load_stats(self, load_samples: torch.Tensor) -> PreparedLoadStats:
+        """Compress local temporal samples into weighted STAIR bins."""
+        boundaries, samples_per_bin = self._load_bin_boundaries(load_samples.shape[0], self.config.load_window_bins)
+        load_sums_per_bin = torch.stack(
+            [load_samples[start:end].sum(dim=0) for start, end in zip(boundaries[:-1], boundaries[1:])]
+        )
+        return PreparedLoadStats(load_sums_per_bin, samples_per_bin)
+
     @staticmethod
     def compress_load_window(load_samples: np.ndarray, max_bins: int) -> tuple[np.ndarray, np.ndarray]:
         """Compress [steps, layers, experts] into bin means and sample counts."""
-        if max_bins < 1:
-            raise ValueError("max_bins must be positive")
         values = np.asarray(load_samples, dtype=np.float64)
         if values.ndim != 3 or values.shape[0] == 0 or not np.all(np.isfinite(values)) or np.any(values < 0):
             raise ValueError("load_samples must be finite non-negative [steps, layers, experts]")
-        num_bins = min(values.shape[0], max_bins)
-        boundaries = np.arange(num_bins + 1) * values.shape[0] // num_bins
-        sample_counts = np.diff(boundaries).astype(np.int64)
+        boundaries, sample_counts = StairEplbPolicy._load_bin_boundaries(values.shape[0], max_bins)
         compressed = np.stack(
             [values[start:end].mean(axis=0, dtype=np.float64) for start, end in zip(boundaries[:-1], boundaries[1:])]
         )
