@@ -45,7 +45,8 @@ The Ascend W8A8 checkpoint used by this guide will be published as
 [Eco-Tech/DeepSeek-V4.1-Flash-w8a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-w8a8)
 on ModelScope. It includes the DSpark draft parameters and INT8 Engram tables.
 After the checkpoint is available, download it to the same absolute path on
-every server; the examples use `<YOUR_MODEL_PATH>`.
+every server and replace the checkpoint-path placeholder in each serving
+command.
 
 Alternatively, use [ModelSlim](https://github.com/Ascend/msmodelslim) to
 prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
@@ -173,27 +174,24 @@ This configuration runs Prefill and Decode on one Atlas 800 A3 server. It
 uses DP4/TP4 across all 16 logical devices, expert parallelism, Engram host
 offload, asynchronous scheduling, and `FULL_DECODE_ONLY` ACL Graph.
 
-Set `MODEL_PATH` to the local checkpoint path.
+Replace `/your/path/DeepSeek-V4.1-Flash-W8A8` in the command below with the
+local checkpoint path.
 
 ```shell
 #!/usr/bin/env bash
 
-export VLLM_RPC_TIMEOUT=3600000
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
-export HCCL_CONNECT_TIMEOUT=120
+export VLLM_ENGINE_READY_TIMEOUT_S=36000
 
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
-MODEL_PATH="/mnt/share/DeepSeek-V4.1-Flash-W8A8-no-wq-wkv"
+# Optional: use jemalloc when it is installed in the container
+if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
+    export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
 
-vllm serve "$MODEL_PATH" \
+# Ensure the model path matches the directory recorded during download
+vllm serve /your/path/DeepSeek-V4.1-Flash-W8A8 \
     --host 0.0.0.0 \
     --port 8900 \
     --max-model-len 150000 \
@@ -230,15 +228,27 @@ vllm serve "$MODEL_PATH" \
 
 Key parameters:
 
+- `--max-model-len 150000` limits the total input and output length of one
+  request. `--max-num-batched-tokens 8192` limits the tokens scheduled in one
+  iteration, while `--max-num-seqs 32` limits the sequences scheduled by each
+  DP engine. Increasing either scheduler limit can improve throughput but also
+  increases memory usage.
+- `VLLM_ENGINE_READY_TIMEOUT_S=36000` allows up to 36,000 seconds for engine
+  processes to finish initialization, including weight loading and graph
+  preparation.
 - `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
   Engram table in host memory and lets local DP ranks share the host-memory
-  allocation. Ensure that the server has enough host memory for the compressed
-  Engram shards and runtime allocations.
+  allocation. This reduces duplicate host-memory copies, but requires enough
+  `/dev/shm` capacity and a shared IPC namespace. The A3 container example uses
+  `--shm-size=512g` and starts all four DP ranks in the same container.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` captures the
   Decode path while Prefill remains outside the captured graph.
+- `--safetensors-load-strategy lazy` avoids eagerly materializing the whole
+  checkpoint during loading.
 - `enable_fused_mc2`, `enable_dsa_cp`, `enable_flashcomm1`, and
   `enable_shared_expert_dp` enable the A3 MoE and communication optimizations
-  used by this configuration.
+  used by this configuration. `enable_cpu_binding` pins worker processes to
+  CPUs, while `enable_npugraph_ex` enables the enhanced ACL Graph path.
 
 ### 5.2 A3 1P1D PD Separation Deployment
 
@@ -334,36 +344,30 @@ The launcher arguments are:
 
 On the Prefill node, save the following script as `run_dp_template.sh`. Replace
 `xx.xx.xx.1` and `xxxx` with the Prefill node's service IP and network
-interface. Change `MODEL_PATH` if the checkpoint is stored elsewhere.
+interface. Replace `/your/path/DeepSeek-V4.1-Flash-W8A8` with the local
+checkpoint path.
 
 ```shell
 #!/usr/bin/env bash
 
 unset https_proxy
 unset http_proxy
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
 
-nic_name="xxxx"       # for example, enp67s0f0np0
+nic_name="xxxx"       # Prefill node service network interface
 local_ip=xx.xx.xx.1    # Prefill node service IP
-MODEL_PATH="/mnt/share/DeepSeek-V4.1-Flash-W8A8-no-wq-wkv"
 
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_RPC_TIMEOUT=3600000
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
-export HCCL_CONNECT_TIMEOUT=120
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ENGINE_READY_TIMEOUT_S=36000
 export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
-vllm serve "$MODEL_PATH" \
+# Ensure the model path matches the directory recorded during download
+vllm serve /your/path/DeepSeek-V4.1-Flash-W8A8 \
     --host 0.0.0.0 \
     --port $2 \
     --data-parallel-size $3 \
@@ -374,7 +378,7 @@ vllm serve "$MODEL_PATH" \
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name dsv41 \
-    --max-model-len 150000 \
+    --max-model-len 1048576 \
     --max-num-batched-tokens 8192 \
     --max-num-seqs 16 \
     --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
@@ -427,34 +431,29 @@ python launch_online_dp.py \
 
 On the Decode node, save the following script as `run_dp_template.sh`. Replace
 `xx.xx.xx.2` and `xxxx` with the Decode node's service IP and network
-interface. Use the same `MODEL_PATH` as the Prefill node.
+interface. Replace `/your/path/DeepSeek-V4.1-Flash-W8A8` with the same local
+checkpoint path used on the Prefill node.
 
 ```shell
 #!/usr/bin/env bash
 
 unset https_proxy
 unset http_proxy
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
 
-nic_name="xxxx"       # for example, enp67s0f0np0
+nic_name="xxxx"       # Decode node service network interface
 local_ip=xx.xx.xx.2    # Decode node service IP
-MODEL_PATH="/mnt/share/DeepSeek-V4.1-Flash-W8A8-no-wq-wkv"
 
-export VLLM_RPC_TIMEOUT=3600000
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
-export HCCL_CONNECT_TIMEOUT=120
+export VLLM_ENGINE_READY_TIMEOUT_S=36000
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=1800
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
-vllm serve "$MODEL_PATH" \
+# Ensure the model path matches the directory recorded during download
+vllm serve /your/path/DeepSeek-V4.1-Flash-W8A8 \
     --host 0.0.0.0 \
     --port $2 \
     --data-parallel-size $3 \
@@ -465,7 +464,7 @@ vllm serve "$MODEL_PATH" \
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name dsv41 \
-    --max-model-len 150000 \
+    --max-model-len 1048576 \
     --max-num-batched-tokens 400 \
     --max-num-seqs 32 \
     --async-scheduling \
@@ -527,31 +526,78 @@ Configure the proxy with Prefill endpoints `xx.xx.xx.1:7100` through
 
 #### 5.2.5 Key Parameter Descriptions
 
+- `VLLM_ENGINE_READY_TIMEOUT_S=36000` gives every Prefill and Decode engine up
+  to 36,000 seconds to finish startup. This includes weight loading and Decode
+  graph preparation.
 - `--data-parallel-size` and `--tensor-parallel-size` define DP4/TP4 on
   Prefill and DP8/TP2 on Decode. Their product must be 16 on each A3 node.
 - `--data-parallel-address` and `--data-parallel-rpc-port` coordinate DP ranks
-  within one node group. The Prefill and Decode groups use their own node IPs;
-  port `12321` can be reused because the groups run on different hosts.
+  within one role. Prefill and Decode use their respective node IPs; port
+  `12321` can be reused because the roles run on different hosts.
 - `--vllm-start-port 7100` assigns API ports `7100-7103` on Prefill and
   `7100-7107` on Decode. These endpoints must be reachable by the PD proxy.
-- `MooncakeHybridConnector` transfers KV cache between the two node groups.
+- Both roles use `--max-model-len 1048576`. Prefill uses
+  `--max-num-batched-tokens 8192` and `--max-num-seqs 16` to favor prompt
+  throughput, while Decode uses `400` and `32` respectively to favor decode
+  concurrency. Tune these role-specific scheduler limits independently.
+- `MooncakeHybridConnector` transfers KV cache between the two roles.
   `kv_role` must be `kv_producer` on Prefill and `kv_consumer` on Decode;
   `kv_port` must be reachable and must not conflict with another service.
 - `kv_connector_extra_config` must match the actual global layouts on both
   sides: Prefill DP4/TP4 and Decode DP8/TP2. Keep the values identical in the
   Prefill and Decode commands.
-- `--enforce-eager` keeps Prefill in eager mode. Decode uses
-  `FULL_DECODE_ONLY` graph mode, while `enforce_eager` inside the DSpark config
-  applies only to speculative draft execution.
-- `--engram-config '{"cpu_offload":true}'` stores Engram tables in host memory.
-  Ensure that both nodes have enough host memory and use lazy safetensors
-  loading to avoid materializing the complete table on every rank.
-- `--enable-prefix-caching` is enabled only on Prefill. Decode disables prefix
-  caching and enables `recompute_scheduler_enable` so missing KV cache can be
-  recomputed by Prefill.
-- `HCCL_IF_IP` and the socket interface variables must select the same
-  high-speed service network used by the configured IP addresses. The HCCL,
-  RPC, engine, Mooncake, and proxy ports must be allowed by the host firewall.
+- Both roles use DSpark with five speculative tokens. Prefill runs the target
+  model in eager mode. Decode uses `FULL_DECODE_ONLY` for the target model,
+  while `enforce_eager` inside `--speculative-config` applies to the Decode
+  draft model.
+- `--engram-config '{"cpu_offload":true}'` keeps the Engram table in host
+  memory. Because `dp_shared_memory` is not enabled in the P/D commands, each
+  local DP rank has its own host-memory allocation; reserve enough host memory
+  on both nodes.
+- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` captures the
+  Decode path while Prefill remains outside the captured graph.
+- Prefix caching is enabled only on Prefill. Decode disables it and enables
+  `recompute_scheduler_enable` so Prefill can recompute unavailable KV cache.
+- Prefill uses the following `--additional-config` options:
+
+    - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
+    processes and runtime threads.
+    - `enable_fused_mc2: 1` enables the fused MoE communication and computation
+    path to reduce expert dispatch, FFN, and combine overhead.
+    - `enable_dsa_cp: true` enables context parallelism for DeepSeek Sparse
+    Attention. This option applies to models with an indexer and requires the
+    sequence-parallel MoE path used by this topology.
+    - `enable_flashcomm1: true` enables the FlashComm communication backend used
+    by the sequence-parallel MoE and DSA context-parallel paths.
+    - `enable_shared_expert_dp: true` uses data parallelism for shared experts.
+    It takes effect only when expert parallelism is enabled and TP is greater
+    than one; both conditions are met by Prefill DP4/TP4.
+
+- Decode uses the following `--additional-config` options:
+
+    - `ascend_compilation_config.enable_npugraph_ex: true` enables the enhanced
+    ACL Graph compilation and execution path used by `FULL_DECODE_ONLY`.
+    - `ascend_compilation_config.enable_static_kernel: false` disables static
+    kernel generation while retaining the enhanced ACL Graph path.
+    - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
+    processes and runtime threads.
+    - `multistream_overlap_shared_expert: true` overlaps shared-expert execution
+    with routed-expert computation on separate streams to improve Decode MoE
+    throughput.
+    - `recompute_scheduler_enable: true` enables the PD Decode recomputation
+    scheduler. When the Decode-side KV cache is unavailable, the request can be
+    sent back to Prefill to recompute it. Enable this option only on Decode.
+
+The Prefill and Decode configurations are role-specific. Do not copy the
+Prefill fused-MC2 and DSA options to Decode, or the Decode graph, multistream,
+and recomputation options to Prefill, without validating the resulting
+topology and performance.
+
+`HCCL_IF_IP` and the socket interface variables must select the same high-speed
+service network used by the configured node IPs. `HCCL_BUFFSIZE` is `1024` on
+Prefill and `1800` on Decode; retain these role-specific values unless another
+setting has been validated. The DP RPC, engine, Mooncake, and proxy ports must
+be allowed by the host firewall.
 
 Wait until every engine finishes loading weights and Decode finishes graph
 capture. A successful startup includes output similar to:
@@ -764,7 +810,8 @@ For common environment, installation, and parameter issues, refer to the
 - The A2 configuration is retained unchanged and is not revalidated by this
   update. Its revised configuration will be documented separately.
 - Pipeline parallelism and model runner V2 are not covered by this guide.
-- DSpark draft execution runs in eager mode while the target model uses
-  `FULL_DECODE_ONLY` ACL Graph.
+- In the A3 PD example, Prefill runs in eager mode. Decode uses
+  `FULL_DECODE_ONLY` ACL Graph for the target model and eager execution for the
+  DSpark draft model.
 - Production performance qualification and task-level accuracy evaluation are
   not complete.
