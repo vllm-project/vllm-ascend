@@ -106,8 +106,31 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A5"
 
-    Follow the [950DT Products container instructions](../../getting_started/quick_start.md#quick-start-atlas-950dt-container)
-    to select the Ubuntu or openEuler A5 image and start the container.
+    The following command uses the Ubuntu A5 image to start the container.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    docker pull "$IMAGE"
+    export MODEL_CACHE="${HOME}/.cache"
+    mkdir -p "$MODEL_CACHE"
+
+    docker run --rm \
+        --name vllm-ascend \
+        --net=host \
+        --shm-size=1g \
+        --device /dev/davinci0 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v "$MODEL_CACHE:/root/.cache" \
+        -it "$IMAGE" bash
+    ```
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
@@ -154,21 +177,7 @@ Judge whether the Document meets the requirements based on the Query and the Ins
 
 Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
 
-=== "A3/A2 series"
-
-    ```shell
-    #!/bin/sh
-    # Ensure the model path matches the directory recorded during download
-    vllm serve Qwen/Qwen3-VL-Reranker-2B \
-        --served-model-name Qwen/Qwen3-VL-Reranker-2B \
-        --runner pooling \
-        --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
-        --chat-template ./qwen3_vl_reranker.jinja \
-        --port 8000 \
-        --max-model-len 1024
-    ```
-
-=== "A5"
+=== "A5/A3/A2"
 
     ```shell
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
