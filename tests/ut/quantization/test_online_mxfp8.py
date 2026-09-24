@@ -57,11 +57,11 @@ class TestOnlineMXFP8(unittest.TestCase):
         mock = patch.object(methods.torch_npu, "npu_dynamic_mx_quant", side_effect=fake_quantize, create=True)
         self.quantize = mock.start()
         self.addCleanup(mock.stop)
-        for target, value in (
+        for target, return_value in (
             ("vllm_ascend.quantization.method_adapters.enable_dsa_cp_with_layer_shard", False),
             ("vllm_ascend.quantization.method_adapters.FusedMoEMethodBase.__init__", None),
         ):
-            mock = patch(target, return_value=value)
+            mock = patch(target, return_value=return_value)
             mock.start()
             self.addCleanup(mock.stop)
 
