@@ -240,6 +240,33 @@ class TestAscendModelSlimConfig(TestBase):
             return_success=True,
         )
 
+    def test_get_quant_method_for_float_moe_keeps_tid2eid(self):
+        layer = RoutedExperts.__new__(RoutedExperts)
+        torch.nn.Module.__init__(layer)
+        layer.moe_config = MagicMock()
+        tid2eid = MagicMock(name="tid2eid")
+        mock_config = MagicMock()
+        mock_config.model_config.hf_config.model_type = "deepseek_v4"
+        unquantized_method = MagicMock()
+
+        with (
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
+            ),
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_quant_type_for_layer",
+                return_value=None,
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.routed_experts.AscendUnquantizedFusedMoEMethod",
+                return_value=unquantized_method,
+            ) as mock_unquantized_moe,
+        ):
+            method = self.ascend_config.get_quant_method(layer, "model.layers.0.mlp.experts", tid2eid=tid2eid)
+
+        self.assertIs(method, unquantized_method)
+        mock_unquantized_moe.assert_called_once_with(layer.moe_config, tid2eid=tid2eid)
+
     def test_get_quant_method_for_moe_installs_modelslim_weight_loader(self):
         layer = RoutedExperts.__new__(RoutedExperts)
         torch.nn.Module.__init__(layer)

@@ -679,7 +679,10 @@ class AscendModelSlimConfig(QuantizationConfig):
                 from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
 
                 logger.debug("Select AscendUnquantizedFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
-                return AscendUnquantizedFusedMoEMethod(layer.moe_config)
+                # FLOAT skip must keep the hash-routing table. quant_config is
+                # None passes tid2eid here; dropping it makes sqrtsoftplus hash
+                # layers select experts from logits only.
+                return AscendUnquantizedFusedMoEMethod(layer.moe_config, tid2eid=tid2eid)
             # RoutedExperts resolves its quant method before creating weights.
             # Install the ModelSlim-specific loader now so every subsequently
             # registered MoE parameter receives the mapped loader.
