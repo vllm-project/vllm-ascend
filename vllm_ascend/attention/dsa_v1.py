@@ -848,10 +848,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             assert self.num_decode_tokens + self.num_prefill_tokens == common_attn_metadata.num_actual_tokens
             self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
             self.common_ratio_to_sas_metadata["seq_lens"] = self.seq_lens
-            # Prefer _seq_lens_cpu (always available, updated during draft
-            # iterations) over seq_lens_cpu (None in async spec decode mode).
-            if common_attn_metadata._seq_lens_cpu is not None:
-                seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+            # Older upstreams update the private CPU view during drafting;
+            # the paired MRv2 exposes only the public seq_lens_cpu field.
+            cached_seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
+            if cached_seq_lens_cpu is not None:
+                seq_lens_cpu = cached_seq_lens_cpu
             elif common_attn_metadata.seq_lens_cpu is not None:
                 seq_lens_cpu = common_attn_metadata.seq_lens_cpu
             else:
@@ -1334,8 +1335,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         seq_lens = self.seq_lens[:num_reqs]
         seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
         max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
-        if common_attn_metadata._seq_lens_cpu is not None:
-            seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+        cached_seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
+        if cached_seq_lens_cpu is not None:
+            seq_lens_cpu = cached_seq_lens_cpu
         elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         else:

@@ -572,7 +572,12 @@ class AscendConfig:
         if vllm_config.speculative_config is not None:
             raise ValueError("Ascend PCP decode sharding does not support speculative decoding yet.")
         model_config = vllm_config.model_config
-        supported_architectures = {"DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM", "DeepseekV32ForCausalLM"}
+        supported_architectures = {
+            "DeepseekV2ForCausalLM",
+            "DeepseekV3ForCausalLM",
+            "DeepseekV32ForCausalLM",
+            "DeepseekV4ForCausalLM",
+        }
         if (
             model_config is None
             or not model_config.use_mla
@@ -580,7 +585,7 @@ class AscendConfig:
             or not supported_architectures.intersection(model_config.architectures)
             or getattr(model_config.hf_text_config, "qk_rope_head_dim", 0) <= 0
         ):
-            raise ValueError("Ascend PCP decode sharding supports non-hybrid DeepSeek V2/V3/V3.2 MLA models only.")
+            raise ValueError("Ascend PCP decode sharding supports non-hybrid DeepSeek V2/V3/V3.2/V4 MLA models only.")
         if self.kvpp_config.size > 1:
             raise ValueError("Ascend PCP decode sharding does not support KVPP yet.")
         if self.enable_pcp_o_proj_weight_sharding:

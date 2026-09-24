@@ -2241,6 +2241,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         )
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         self._pcp_rank = get_pcp_group().rank_in_group
+        self._shard_decode_requests = vllm_config.parallel_config.pcp_shard_decode_requests
         self._hidden_restore_idx_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.int64,
@@ -2428,7 +2429,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             num_prefills=0,
             attn_state=local_common_attn_metadata.attn_state,
             req_metadata=None,
-            hadamard=dsa_v1.AscendDSAMetadataBuilder.hadamard,
+            hadamard=self.hadamard,
         )
 
     def build(
@@ -2455,9 +2456,13 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             global_common_attn_metadata,
             pcp_context.global_batch.num_reqs,
         )
-        # num_prefills can miss short prefills; prevent local PCP RoPE from
-        # overwriting the global RoPE buffer whenever a request is prefilling.
-        can_use_rope_cache = not bool(pcp_context.global_batch.is_prefilling_np.any())
+        # Owner-local decode positions differ from the global cache-update
+        # positions. The local builder must not overwrite the global RoPE
+        # tensors through the shared runtime buffer. Short prefills also
+        # require separate storage, even when num_prefills reports zero.
+        can_use_rope_cache = not getattr(self, "_shard_decode_requests", False) and not bool(
+            pcp_context.global_batch.is_prefilling_np.any()
+        )
         global_dsa_metadata = self._global_metadata_builder.build(
             common_prefix_len,
             global_common_attn_metadata,

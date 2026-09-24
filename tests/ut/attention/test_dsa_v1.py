@@ -902,9 +902,11 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int, monkeyp
     [(False, None), (False, False), (True, None)],
     ids=["default-cache", "isolated-rope", "draft"],
 )
+@pytest.mark.parametrize("legacy_cpu_view", [True, False])
 def test_build_classifies_short_speculative_extends_as_decodes(
     for_drafting: bool,
     can_use_rope_cache: bool | None,
+    legacy_cpu_view: bool,
 ):
     builder = _make_builder(compressor_ratio=1)
     builder.decode_threshold = 8
@@ -928,6 +930,9 @@ def test_build_classifies_short_speculative_extends_as_decodes(
         attn_state=MagicMock(),
     )
     req_metadata = MagicMock()
+    if not legacy_cpu_view:
+        del common_attn_metadata._seq_lens_cpu
+        common_attn_metadata.seq_lens_cpu = seq_lens
     builder.build_req_metadata = MagicMock(return_value=req_metadata)
     builder.build_req_metadata_for_drafting = MagicMock(return_value=req_metadata)
     builder.spec_slot_mapping = [torch.zeros((16, 2), dtype=torch.int32)]
@@ -1849,11 +1854,13 @@ def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
                 get_backend_cls()
 
 
-def test_pcp_metadata_builds_from_manager_global_view():
+@pytest.mark.parametrize("shard_decode,is_prefilling", [(False, True), (False, False), (True, False), (True, True)])
+def test_pcp_metadata_builds_from_manager_global_view(shard_decode, is_prefilling):
     """Build rank-local metadata from the manager's scheduler-global view."""
     builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
     builder._pcp_world_size = 2
     builder._pcp_rank = 1
+    builder._shard_decode_requests = shard_decode
     builder._hidden_restore_idx_buffer = torch.empty(8, dtype=torch.int64)
     builder.model_config = SimpleNamespace(get_head_size=lambda: 512)
 
@@ -1874,7 +1881,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
         positions=torch.arange(5, dtype=torch.int64),
         attn_state=object(),
         is_dummy=False,
-        is_prefilling_np=np.array([False, True]),
+        is_prefilling_np=np.array([False, is_prefilling]),
         idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
         num_reqs_after_padding=2,
     )
@@ -1960,7 +1967,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
     assert torch.equal(global_common.slot_mapping, global_slot_mapping)
     assert global_common.attn_state is global_batch.attn_state
     assert global_call.kwargs["num_actual_reqs"] == global_batch.num_reqs
-    assert global_call.kwargs["can_use_rope_cache"] is False
+    assert global_call.kwargs["can_use_rope_cache"] is (not shard_decode and not is_prefilling)
     assert global_call.kwargs["common_ratio_to_sas_metadata"] == {}
     assert build_local.call_args.args[2] is local_common
     assert build_local.call_args.kwargs["num_actual_reqs"] == 2
@@ -2116,6 +2123,21 @@ def test_pcp_graph_metadata_builds_fixed_decode_shape(is_dummy: bool):
     assert local_call.kwargs["common_ratio_to_sas_metadata"] is shared_local_metadata
 
 
+@pytest.mark.parametrize("hadamard", [None, torch.eye(2)])
+def test_pcp_empty_owner_metadata_uses_instance_hadamard(hadamard):
+    builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
+    builder.model_config = SimpleNamespace(get_head_size=lambda: 512)
+    builder.metadata_cls = AscendDSAMetadata
+    builder.hadamard = hadamard
+    builder._device_metadata_tasks = (object(),)
+    local_common = SimpleNamespace(num_actual_tokens=0, attn_state=object())
+    metadata = builder._build_local_dsa_metadata(0, local_common, False, 0, {})
+    assert metadata.num_actual_tokens == 0
+    assert metadata.req_metadata is None
+    assert metadata.hadamard is hadamard
+    assert builder._device_metadata_tasks == ()
+
+
 def test_pcp_metadata_provider_discards_unused_global_tasks():
     builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
     local_task = DeviceMetadataTask(DeviceMetadataStage.INDEXER, MagicMock(), 1)
@@ -2156,12 +2178,14 @@ def test_pcp_graph_metadata_restores_mtp_query_offsets():
 
 
 @pytest.mark.parametrize("local_num_actual_tokens", [2, 0], ids=["local_tokens", "empty_rank"])
+@pytest.mark.parametrize("compress_ratio", [0, 4, 128], ids=["swa", "c4-indexer", "c128"])
 def test_pcp_forward_updates_global_caches_before_local_attention(
     local_num_actual_tokens: int,
+    compress_ratio: int,
 ):
     """Exercise batched cache preparation, local attention, and empty ranks."""
     impl = _make_impl(AscendDSAPCPImpl)
-    impl.compress_ratio = 4
+    impl.compress_ratio = compress_ratio
     impl.compressor = SimpleNamespace(
         state_cache=SimpleNamespace(prefix="compressor.state_cache"),
     )
@@ -2276,17 +2300,20 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
     assert torch.equal(pcp_group.all_gather.call_args.args[0], hidden_states)
     assert pcp_group.all_gather.call_args.kwargs == {"dim": 0}
     update_swa.assert_called_once()
-    update_compressor.assert_called_once()
-    impl.indexer.update_cache.assert_called_once()
     expected_global_hidden = gathered_hidden_states.index_select(0, restore_idx)
     assert torch.equal(update_swa.call_args.args[1], expected_global_hidden)
-    assert torch.equal(update_compressor.call_args.args[0], expected_global_hidden)
-    update_indexer_call = impl.indexer.update_cache.call_args
-    assert torch.equal(
-        update_indexer_call.kwargs["hidden_states"],
-        expected_global_hidden,
-    )
-    assert update_indexer_call.kwargs["kv_cache"] is caches
+    if compress_ratio > 1:
+        update_compressor.assert_called_once()
+        assert torch.equal(update_compressor.call_args.args[0], expected_global_hidden)
+    else:
+        update_compressor.assert_not_called()
+    if compress_ratio == 4:
+        impl.indexer.update_cache.assert_called_once()
+        update_indexer_call = impl.indexer.update_cache.call_args
+        assert torch.equal(update_indexer_call.kwargs["hidden_states"], expected_global_hidden)
+        assert update_indexer_call.kwargs["kv_cache"] is caches
+    else:
+        impl.indexer.update_cache.assert_not_called()
     if local_num_actual_tokens == 0:
         forward_attention.assert_not_called()
         assert not captured_o_proj_inputs

@@ -1210,7 +1210,10 @@ def _make_decode_sharding_config():
     return config, vc
 
 
-@pytest.mark.parametrize("architecture", ["DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM", "DeepseekV32ForCausalLM"])
+@pytest.mark.parametrize(
+    "architecture",
+    ["DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM", "DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM"],
+)
 def test_decode_sharding_config_accepts_supported_models(architecture):
     config, vc = _make_decode_sharding_config()
     vc.model_config.architectures = [architecture]
@@ -1224,7 +1227,7 @@ def test_decode_sharding_config_accepts_supported_models(architecture):
         ("vc", "speculative_config", object(), "speculative decoding"),
         ("model_config", "use_mla", False, "DeepSeek V2/V3/V3.2"),
         ("model_config", "is_hybrid", True, "DeepSeek V2/V3/V3.2"),
-        ("model_config", "architectures", ["DeepseekV4ForCausalLM"], "DeepSeek V2/V3/V3.2"),
+        ("model_config", "architectures", ["DeepseekV41ForCausalLM"], "DeepSeek V2/V3/V3.2"),
         ("model_config", "architectures", ["KimiK25ForConditionalGeneration"], "DeepSeek V2/V3/V3.2"),
         ("ascend", "kvpp_config", KVPPConfig(size=2), "KVPP"),
         ("ascend", "enable_pcp_o_proj_weight_sharding", True, "o_proj"),

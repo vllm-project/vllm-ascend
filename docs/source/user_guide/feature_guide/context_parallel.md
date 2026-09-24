@@ -83,7 +83,11 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <deepseek-model-path> \
 # --no-enable-pcp-decode-sharding
 ```
 
-The initial Ascend sharded-decode scope is eager, non-hybrid DeepSeek V2/V3/V3.2 MLA/SFA with RoPE; dense MLA requires unquantized KV. Graph execution, speculative decoding, KVPP and PCP O-proj weight sharding are rejected while decode sharding is enabled. Disable decode sharding to use the existing replicated-decode feature combinations documented in this guide.
+The Ascend sharded-decode scope is eager, non-hybrid DeepSeek V2/V3/V3.2 MLA/SFA and DeepSeek V4 DSA with RoPE; dense MLA requires unquantized KV. Graph execution, speculative decoding, KVPP and PCP O-proj weight sharding are rejected while decode sharding is enabled. V4.1 and multimodal V4 are outside this scope. Disable decode sharding to use the existing replicated-decode feature combinations documented in this guide.
+
+V4 reuses the DSA PCP cache-update path: all ranks gather hidden states into scheduler order and update their SWA, compressed KV, compressor-state and indexer caches before owner-local attention. Ranks with no owned requests still participate in cache updates. Global cache-update RoPE tensors are isolated from the owner-local decode RoPE buffer. Cache projections and compression remain replicated, so sharding does not eliminate all duplicate computation.
+
+Keep the model-specific options from the [V4 deployment guide](../../tutorials/models/DeepSeek-V4-Flash.md); for example, the A3 indexer path requires `--attention-config '{"indexer_kv_dtype":"int8"}'`.
 
 For performance comparisons, keep request lengths, output lengths, concurrency and warmup identical, with EP and asynchronous scheduling enabled in both runs. Sharded decode disables fused MLA preprocessing. To isolate the cost of request sharding from that preprocessing change, also use `--additional-config '{"enable_mlapo":false}'` in both runs.
 
