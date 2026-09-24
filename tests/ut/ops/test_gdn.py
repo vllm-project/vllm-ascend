@@ -27,16 +27,25 @@ from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
 )
 
+import vllm_ascend.ops.gdn as gdn_module
 from vllm_ascend.ops.gdn import (
     _PACKED_CONV_WEIGHT_NAME,
     _chunk_gated_delta_rule_fla_npu,
+    _chunk_gated_delta_rule_fla_npu_a2a3,
     _get_base_conv1d,
     _get_packed_conv_weights,
     initialize_packed_conv_weight,
 )
+from vllm_ascend.utils import AscendDeviceType
 
 
-def test_fla_npu_gdn_prefill_accepts_extended_operator_results():
+def _pin_device_type(monkeypatch, device_type):
+    monkeypatch.setattr(gdn_module, "get_ascend_device_type", lambda: device_type)
+
+
+def test_fla_npu_gdn_prefill_accepts_extended_operator_results(monkeypatch):
+    _pin_device_type(monkeypatch, AscendDeviceType.A5)
+
     q = torch.randn(1, 3, 2, 4)
     k = torch.randn_like(q)
     v = torch.randn_like(q)
@@ -89,7 +98,9 @@ def test_fla_npu_gdn_prefill_accepts_extended_operator_results():
     }
 
 
-def test_fla_npu_gdn_prefill_scatter_states_for_kept_sequences():
+def test_fla_npu_gdn_prefill_scatter_states_for_kept_sequences(monkeypatch):
+    _pin_device_type(monkeypatch, AscendDeviceType.A5)
+
     initial_state = torch.zeros(3, 1, 2, 2)
     keep_meta = torch.tensor([0, 2])
     kept_final_state = torch.stack([torch.full((1, 2, 2), 1.0), torch.full((1, 2, 2), 2.0)])
@@ -125,6 +136,124 @@ def test_fla_npu_gdn_prefill_scatter_states_for_kept_sequences():
     torch.testing.assert_close(final_state[0], kept_final_state[0])
     torch.testing.assert_close(final_state[1], initial_state[1])
     torch.testing.assert_close(final_state[2], kept_final_state[1])
+
+
+def test_fla_npu_gdn_prefill_a2a3_uses_phase6_layout(monkeypatch):
+    _pin_device_type(monkeypatch, AscendDeviceType.A3)
+    # Phase6 has no in-kernel L2 norm: the host normalizes q/k with a triton
+    # kernel that needs NPU tensors, so stub it out to keep the test
+    # device-agnostic while still checking the call contract.
+    monkeypatch.setattr(gdn_module, "l2norm_fwd", lambda x: x)
+
+    q = torch.randn(1, 3, 2, 4)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    g = torch.randn(1, 3, 2)
+    beta = torch.randn(1, 3, 2)
+    initial_state = torch.randn(1, 2, 4, 4)
+    expected_output = torch.randn_like(v)
+    expected_final_state = torch.randn_like(initial_state)
+    captured: dict[str, Any] = {}
+
+    def fake_fused_fwd(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return expected_output, expected_final_state, *(None for _ in range(8))
+
+    prebuilt_meta = SimpleNamespace(
+        cu_seqlens_host=(0, 3),
+        cu_seqlens_kern=None,
+        chunk_indices_chunk64_host=(0,),
+        keep_meta=None,
+    )
+
+    output, final_state = _chunk_gated_delta_rule_fla_npu_a2a3(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=initial_state,
+        scale=0.5,
+        prebuilt_meta=prebuilt_meta,
+        fused_fwd=fake_fused_fwd,
+    )
+
+    assert output is expected_output
+    # stateVFirst=false: the kernel works in [N, Hv, K, V], so the returned
+    # state is flipped back into the caller's layout.
+    torch.testing.assert_close(final_state, expected_final_state.transpose(-1, -2).contiguous())
+
+    # BNSD takes [B, H, T, D]; q/k/v arrive sequence-major.
+    assert [a.shape for a in captured["args"][:3]] == [(1, 2, 3, 4)] * 3
+    torch.testing.assert_close(captured["args"][0], q.transpose(1, 2).contiguous())
+    torch.testing.assert_close(captured["args"][2], v.transpose(1, 2).contiguous())
+    torch.testing.assert_close(captured["args"][3], g)
+    torch.testing.assert_close(captured["args"][4], beta)
+    torch.testing.assert_close(
+        captured["kwargs"].pop("initial_state"),
+        initial_state.transpose(-1, -2).contiguous(),
+    )
+    assert captured["kwargs"] == {
+        "output_final_state": True,
+        "chunk_size": 64,
+        "cu_seqlens": (0, 3),
+        "chunk_indices": (0,),
+        "scale": 0.5,
+        "layout": "BNSD",
+        "use_exp2": False,
+        "use_qk_l2norm_in_kernel": False,
+        "allow_neg_eigval": False,
+        "disable_recompute": True,
+        "state_v_first": False,
+    }
+
+
+def test_fla_npu_gdn_prefill_a2a3_scatter_states_for_kept_sequences(monkeypatch):
+    _pin_device_type(monkeypatch, AscendDeviceType.A3)
+    monkeypatch.setattr(gdn_module, "l2norm_fwd", lambda x: x)
+
+    # Random asymmetric values: constant tensors are insensitive to the
+    # transpose and would not catch a layout mix-up.
+    torch.manual_seed(0)
+    initial_state = torch.randn(3, 1, 2, 2)
+    keep_meta = torch.tensor([0, 2])
+    kept_final_state = torch.randn(2, 1, 2, 2)
+    captured = {}
+
+    def fake_fused_fwd(*args, **kwargs):
+        captured["initial_state"] = kwargs["initial_state"]
+        captured["cu_seqlens"] = kwargs["cu_seqlens"]
+        return args[2], kept_final_state, *(None for _ in range(8))
+
+    prebuilt_meta = SimpleNamespace(
+        cu_seqlens_host=(0, 2, 2, 4),
+        cu_seqlens_kern=(0, 2, 4),
+        chunk_indices_chunk64_host=(0, 1),
+        keep_meta=keep_meta,
+    )
+    q = torch.randn(1, 4, 1, 2)
+
+    _, final_state = _chunk_gated_delta_rule_fla_npu_a2a3(
+        q=q,
+        k=q,
+        v=q,
+        g=torch.randn(1, 4, 1),
+        beta=torch.randn(1, 4, 1),
+        initial_state=initial_state,
+        scale=1.0,
+        prebuilt_meta=prebuilt_meta,
+        fused_fwd=fake_fused_fwd,
+    )
+
+    torch.testing.assert_close(
+        captured["initial_state"],
+        initial_state[keep_meta].transpose(-1, -2).contiguous(),
+    )
+    assert captured["cu_seqlens"] == (0, 2, 4)
+    torch.testing.assert_close(final_state[0], kept_final_state[0].transpose(-1, -2))
+    torch.testing.assert_close(final_state[1], initial_state[1])
+    torch.testing.assert_close(final_state[2], kept_final_state[1].transpose(-1, -2))
 
 
 class _RecordingQuantMethod(QuantizeMethodBase):

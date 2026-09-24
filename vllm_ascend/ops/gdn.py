@@ -44,6 +44,7 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
@@ -170,6 +171,78 @@ def _chunk_gated_delta_rule_fla_npu(
         full_final_state[keep_meta] = final_state
         final_state = full_final_state
     return output, final_state
+
+
+def _chunk_gated_delta_rule_fla_npu_a2a3(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    scale: float,
+    prebuilt_meta,
+    fused_fwd,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """A2/A3 (arch22) variant of the fused FLA NPU GDN prefill.
+
+    A2/A3 only ship the Phase6 kernel, which requires ``layout`` to be
+    ``BNSD``/``NTD``; ``BSND`` falls through to the A5-only
+    Prepare/ChunkFwdH/ChunkFwdO path and is rejected with an aclnn parameter
+    error. The Phase6 path also runs with ``useExp2=false``,
+    ``useQkL2norm=false`` and ``stateVFirst=false``, so q/k are normalized here
+    instead of in the kernel and the recurrent state stays in ``[N, Hv, K, V]``
+    order.
+    """
+    # Phase6 has no in-kernel L2 norm, so normalize q/k on the host.
+    q = l2norm_fwd(q).contiguous()
+    k = l2norm_fwd(k).contiguous()
+    v = v.contiguous()
+    g = g.to(torch.float32).contiguous()
+    beta = beta.to(v.dtype).contiguous()
+    initial_state = initial_state.contiguous()
+
+    # BNSD/NTD take [B, H, T, D]; q/k/v arrive sequence-major. The output is
+    # still returned sequence-major, so only the inputs are permuted.
+    q = q.transpose(1, 2).contiguous()
+    k = k.transpose(1, 2).contiguous()
+    v = v.transpose(1, 2).contiguous()
+
+    cu_seqlens = prebuilt_meta.cu_seqlens_host
+    chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
+    keep_meta = prebuilt_meta.keep_meta
+    # stateVFirst=false takes [N, Hv, K, V], i.e. the transpose of ssm_state.
+    initial_state_kern = initial_state.transpose(-1, -2).contiguous()
+    if keep_meta is not None:
+        cu_seqlens = prebuilt_meta.cu_seqlens_kern
+        initial_state_kern = initial_state[keep_meta].transpose(-1, -2).contiguous()
+
+    output, final_state, *_ = fused_fwd(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state=initial_state_kern,
+        output_final_state=True,
+        chunk_size=64,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        scale=scale,
+        layout="BNSD",
+        use_exp2=False,
+        use_qk_l2norm_in_kernel=False,
+        allow_neg_eigval=False,
+        disable_recompute=True,
+        state_v_first=False,
+    )
+    if keep_meta is not None:
+        # Scatter in the kernel layout so empty segments keep their initial state,
+        # then flip back to the caller's [.., Dv, Dk].
+        full_final_state = initial_state.transpose(-1, -2).contiguous()
+        full_final_state[keep_meta] = final_state
+        final_state = full_final_state
+    return output, final_state.transpose(-1, -2).contiguous()
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -660,7 +733,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     raise RuntimeError("FLA fused GDN prefill currently requires PCP world size 1.")
                 initial_state = ssm_state[prefill_state_indices]
                 clear_ssm_states(initial_state, prefill_has_initial_state)
-                (core_attn_out_non_spec, last_recurrent_state) = _chunk_gated_delta_rule_fla_npu(
+                # A5 has the arch35 kernel chain (BSND, in-kernel L2 norm);
+                # A2/A3 only expose the Phase6 kernel and need the BNSD layout
+                # with the norm moved to the host.
+                if get_ascend_device_type() != AscendDeviceType.A5:
+                    fla_npu_prefill = _chunk_gated_delta_rule_fla_npu_a2a3
+                else:
+                    fla_npu_prefill = _chunk_gated_delta_rule_fla_npu
+                (core_attn_out_non_spec, last_recurrent_state) = fla_npu_prefill(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
