@@ -69,7 +69,9 @@ def test_shared_memory_needs_a_local_dp_peer():
     assert resolve_dp_shared_memory(False, edp_size=4) is False
 
 
-def test_dp_shared_memory_survives_cli_parsing():
+@pytest.mark.parametrize("draft", [False, True])
+def test_dp_shared_memory_survives_cli_parsing(draft):
+    from vllm.config import EngramConfig, VllmConfig
     from vllm.engine.arg_utils import EngineArgs
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -77,8 +79,42 @@ def test_dp_shared_memory_survives_cli_parsing():
     direct = EngineArgs(engram_config=value).engram_config
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     parsed = parser.parse_args(["--engram-config", json.dumps(value)]).engram_config
-    assert isinstance(direct, AscendEngramConfig) and direct.dp_shared_memory
-    assert isinstance(parsed, AscendEngramConfig) and parsed.dp_shared_memory
+    target = SimpleNamespace(
+        architecture="DeepseekV41ForCausalLM", hf_text_config=SimpleNamespace(engram_layer_ids=[1, 14])
+    )
+    draft_model = SimpleNamespace(architecture="DeepseekV41DSparkModel")
+    for config in (direct, parsed, None):
+        if config is not None:
+            assert type(config) is EngramConfig and config.dp_shared_memory
+        resolved = SimpleNamespace(
+            model_config=draft_model if draft else target,
+            speculative_config=SimpleNamespace(target_model_config=target, draft_model_config=draft_model)
+            if draft
+            else None,
+            engram_config=config,
+            parallel_config=_topology(use_ubatching=False),
+            load_config=SimpleNamespace(load_format="safetensors"),
+        )
+        VllmConfig._resolve_and_verify_engram_config(resolved)
+        assert isinstance(resolved.engram_config, AscendEngramConfig)
+        assert resolved.engram_config.dp_shared_memory is (config is not None)
+
+
+@pytest.mark.parametrize("ubatching,load_format,error", [(True, "auto", "DBO"), (False, "pt", "load_format")])
+def test_resolver_keeps_engram_validation(ubatching, load_format, error):
+    from vllm.config import EngramConfig, VllmConfig
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            architecture="DeepseekV41ForCausalLM", hf_text_config=SimpleNamespace(engram_layer_ids=[1])
+        ),
+        speculative_config=None,
+        engram_config=EngramConfig(cpu_offload=True, dp_shared_memory=True),
+        parallel_config=_topology(use_ubatching=ubatching),
+        load_config=SimpleNamespace(load_format=load_format),
+    )
+    with pytest.raises(ValueError, match=error):
+        VllmConfig._resolve_and_verify_engram_config(config)
 
 
 def test_loader_prefers_quantized_checkpoint(tmp_path):
