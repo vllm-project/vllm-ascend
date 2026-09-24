@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.outputs import KVConnectorOutput
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
@@ -934,6 +935,56 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         output = MagicMock()
         output.kv_connector_worker_meta = MagicMock()  # Not AscendStoreKVConnectorWorkerMetadata
         scheduler.update_connector_output(output)
+        scheduler._block_pool.free_blocks.assert_not_called()
+
+    def test_finished_request_keeps_receive_registration_until_completion(self):
+        scheduler = self._make_scheduler()
+        scheduler._block_pool = None
+        scheduler._loading_req_ids = {"r1", "other"}
+        request = SimpleNamespace(request_id="r1")
+        self.assertEqual(scheduler.request_finished(request, [1]), (False, None))
+        output = SimpleNamespace(
+            finished_req_ids={"r1"},
+            preempted_req_ids=set(),
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        )
+
+        metadata = scheduler.build_connector_meta(output)
+        self.assertEqual(metadata.loading_req_ids, {"r1", "other"})
+        scheduler.update_connector_output(KVConnectorOutput(finished_recving={"r1"}))
+        output.finished_req_ids.clear()
+        self.assertEqual(scheduler.build_connector_meta(output).loading_req_ids, {"other"})
+
+    def test_receive_completion_cleans_only_reported_registrations(self):
+        for completed in (None, set(), {"r1"}, {"r1", "r2"}):
+            with self.subTest(completed=completed):
+                scheduler = self._make_scheduler()
+                scheduler._block_pool = None
+                scheduler._loading_req_ids = {"r1", "r2"}
+                scheduler.update_connector_output(KVConnectorOutput(finished_recving=completed))
+                self.assertEqual(scheduler._loading_req_ids, {"r1", "r2"} - (completed or set()))
+
+    def test_preempted_request_still_clears_receive_registration(self):
+        scheduler = self._make_scheduler()
+        scheduler._loading_req_ids = {"r1", "other"}
+        output = SimpleNamespace(
+            finished_req_ids=set(),
+            preempted_req_ids={"r1"},
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        )
+        self.assertEqual(scheduler.build_connector_meta(output).loading_req_ids, {"other"})
+
+    def test_receive_completion_preserves_pending_send_events(self):
+        scheduler = self._make_scheduler()
+        scheduler._loading_req_ids = {"r1"}
+        scheduler.sending_events = {7: 1}
+        scheduler.sending_blocks = {7: [1, 2, 3]}
+        scheduler.update_connector_output(KVConnectorOutput(finished_recving={"r1"}))
+        self.assertFalse(scheduler._loading_req_ids)
+        self.assertEqual(scheduler.sending_events, {7: 1})
+        self.assertEqual(scheduler.sending_blocks, {7: [1, 2, 3]})
         scheduler._block_pool.free_blocks.assert_not_called()
 
 
