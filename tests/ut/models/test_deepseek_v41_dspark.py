@@ -198,6 +198,32 @@ def test_v41_draft_context_store_uses_physical_pairs_and_preserves_padding():
     torch.testing.assert_close(updates, values.squeeze(1))
 
 
+def test_draft_declares_upstream_weight_sharing_and_vocab_contract():
+    """Class defaults mirror upstream nvidia/amd DSparkDeepseekV4ForCausalLM.
+
+    The DSpark speculator reads draft_id_to_target_id at load time to pick
+    the d2t scatter path; an undeclared attribute raises AttributeError
+    there (the SupportsEagleBase protocol only carries the has_own_* flags).
+    process_eagle_weight still lets a checkpoint that ships its own
+    embed_tokens / lm_head flip those flags on the instance.
+    """
+    from vllm.model_executor.models.utils import process_eagle_weight
+
+    draft_cls = deepseek_v41_dspark_module.DSparkDeepseekV41ForCausalLM
+    assert draft_cls.has_own_embed_tokens is False
+    assert draft_cls.has_own_lm_head is False
+    assert draft_cls.draft_id_to_target_id is None
+
+    draft = draft_cls.__new__(draft_cls)
+    torch.nn.Module.__init__(draft)
+    assert draft.draft_id_to_target_id is None
+
+    process_eagle_weight(draft, "model.embed_tokens.weight")
+    process_eagle_weight(draft, "lm_head.weight")
+    assert draft.has_own_embed_tokens is True
+    assert draft.has_own_lm_head is True
+
+
 @pytest.mark.parametrize("draft_vocab_size", [None, 16])
 def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab_size):
     config = SimpleNamespace(
