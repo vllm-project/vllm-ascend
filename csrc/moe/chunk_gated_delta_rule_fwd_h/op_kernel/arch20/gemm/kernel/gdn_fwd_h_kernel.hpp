@@ -284,8 +284,9 @@ public:
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
         DeformatNzToNd<float>(HM_ND_OFFSET, HM_STAGE_OFFSET, mActual, nActual);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+        // No V_MTE3 tail: no MTE3 reader of the ND window remains, and
+        // reduce_flags (fwd_h_v3.yaml) proves the epilogue's kept fences
+        // order everything that follows.
     }
 
     __aicore__ inline void ProcessUnifiedCore() {
@@ -318,7 +319,8 @@ public:
                                       kHeadDim * vHeadDim);
                 }
                 M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/false,
-                                   /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/true>(
+                                   /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/true, /*B_NZ_GM=*/false,
+                                   /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true, /*NO_M_MTE1=*/true>(
                     resource,
                     gmW[stage1Offsets.wOffset], kHeadDim,
                     gmH[stage1Offsets.hSrcOffset], vHeadDim,
@@ -351,9 +353,10 @@ public:
                     // above: drain MTE3 into MTE2 (loads) and V (our writes).
                     AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
                     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
-                    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
-                    // exp(g_last) once per chunk (scalar dance).
+                    // (MTE3_V drain dropped: reduce_flags proves the V stream is
+                    // already ordered behind the epilogue's kept store fences.)
+                    // exp(g_last) once per chunk (scalar dance; the GM read is
+                    // L2-warm here -- an MTE2 hoist measured neutral-to-worse).
                     float hDecayScale;
                     {
                         AscendC::LocalTensor<float> gl =
@@ -384,7 +387,8 @@ public:
                     }
                     M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false,
                                        /*A_FROM_L1=*/false, /*A_COL_MAJOR=*/true,
-                                       /*B_FROM_L1=*/true>(
+                                       /*B_FROM_L1=*/true, /*B_NZ_GM=*/false,
+                                       /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true, /*NO_M_MTE1=*/true>(
                         resource,
                         gmK[stage2Offsets.wkOffset], kHeadDim,
                         gmVUpdateWorkspace[stage2Offsets.vWorkOffset], vHeadDim,
@@ -394,10 +398,9 @@ public:
                     uint32_t nFr = vHeadDim / 16;
                     uint32_t elems = kHeadDim * vHeadDim;
                     uint32_t slot2 = stage2Offsets.slot;
-                    AscendC::SetFlag<AscendC::HardEvent::V_MTE1>(EVENT_ID5);
-                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE1>(EVENT_ID5);
-                    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID5);
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID5);
+                    // (V_MTE1 + MTE3_MTE1 pairs dropped: reduce_flags proves the
+                    // extract is ordered through the mmad's kept M/V chain and
+                    // the stage-top MTE3_MTE2 drain.)
                     ExtractResidentH(slot2, kR, 0, kHeadDim, nFr);
                     AscendC::SetFlag<AscendC::HardEvent::MTE1_V>(EVENT_ID5);
                     AscendC::WaitFlag<AscendC::HardEvent::MTE1_V>(EVENT_ID5);
