@@ -218,6 +218,21 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # be float32 (the recurrent path keeps fp32 state). Cast to bf16 here.
         initial_state = initial_state.to(torch.bfloat16).contiguous()
 
+        # The fused CANN op only supports bfloat16 for q/k/v/beta, but the model
+        # may run in float16 (e.g. ColQwen3.5). The availability probe above runs
+        # its smoke call in bfloat16, so a probe-pass does not imply the op
+        # accepts the runtime dtype. Cast to bf16 for the call, then cast the
+        # outputs back to the original dtype — the same "cast to bf16 for the
+        # fused op" pattern already used for initial_state above. Without this,
+        # a float16 model hits "Tensor params.query not implemented for
+        # DT_FLOAT16, should be in dtype support list [DT_BFLOAT16]" (issue
+        # #16359 / the closed #14456).
+        orig_dtype = v.dtype
+        q = q.to(torch.bfloat16)
+        k = k.to(torch.bfloat16)
+        v = v.to(torch.bfloat16)
+        beta = beta.to(torch.bfloat16)
+
         # actual_seq_lengths is per-batch sequence length [N] (per the interface
         # doc), derived from the cumulative query_start_loc.
         actual_seq_lengths = torch.diff(cu_seqlens).to(torch.int32)
@@ -232,7 +247,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             scale=scale,
             g=g,
         )
-        return o.unsqueeze(0), final_state
+        return o.to(orig_dtype).unsqueeze(0), final_state
 
     def _split_ba_for_tp(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if hasattr(self, "split_ba"):
