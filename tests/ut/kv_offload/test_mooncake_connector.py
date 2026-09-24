@@ -2942,6 +2942,10 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         symmetric = make_worker_with_fake_ranks(2, "kv_producer", [[0], [1], [2], [3]])
         self.assertEqual(symmetric._get_remote_rank("req-symmetric"), [2])
 
+        # Multi-group OOR still uses decode-group 0 (not modulo / other groups).
+        multi = make_worker_with_fake_ranks(5, "kv_producer", [[10], [11]])
+        self.assertEqual(multi._get_remote_rank("req-multi-oor"), [10])
+
         # Real P-TP8 / D-TP1 grouping: producer tp_rank=5 matches decode-group 0.
         with (
             patch(
