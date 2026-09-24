@@ -160,6 +160,9 @@ env -u ASCEND_RT_VISIBLE_DEVICES msprof op --warm-up=10 --launch-count=1 \
 
 - 提交：Conventional Commits（perf/fix/feat/...）+ `git commit -s` 签名；
   性能数据写进 commit body。
+- **署名规则（硬性）**：提交信息只能带作者本人的 `Signed-off-by`，**禁止添加
+  `Co-Authored-By` 或任何 AI 工具署名行**（本仓所有者明确要求）；PR 描述同理，
+  不带 "Generated with" 类标记。
 - PR：从 fork 分支发到上游 main；标题 `[Type][Module] Description`
   （如 `[Ops][Misc] ...`）；描述按模板三段式（What/why、user-facing、How tested，
   附性能数据表）。范围单一（纯 perf PR 只带算子代码）。
