@@ -1036,6 +1036,13 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             swa_cache_layer = self.layers[config.engram_layer_ids[0]].self_attn.dsa_attn.swa_cache_layer
             self.engram_hash = create_engram_hash_state(vllm_config, config, swa_cache_layer)
 
+        self.decoder_replay_start = self.end_layer
+        self.decoder_replay_layers = None
+        if getattr(vllm_config.cache_config, "swa_bounded_replay", False):
+            from .decoder_replay_layers import make_decoder_replay
+
+            self.decoder_replay_layers = make_decoder_replay(self, vllm_config)
+
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         return IntermediateTensors(
             {
@@ -1223,13 +1230,40 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)
         pre_mix = hidden_states.new_zeros(hidden_states.shape[0], self.hc_mult, dtype=torch.float32)
         pre_mix[:, 0] = 1.0
-        last_layer = None
-        aux_hidden_states = []
         moe_input_ids = input_ids
         if self.needs_moe_input_ids:
             moe_input_ids = torch.where(input_ids == -1, 0, input_ids)
-        for layer in self.layers:
-            last_layer = layer
+        hidden_states, pre_mix, aux_hidden_states = self._run_layers(
+            range(self.start_layer, self.decoder_replay_start),
+            positions,
+            hidden_states,
+            pre_mix,
+            moe_input_ids,
+            lookups,
+            token_mask,
+        )
+        if self.decoder_replay_layers is not None:
+            hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
+                hidden_states,
+                pre_mix,
+                positions,
+                moe_input_ids,
+            )
+            aux_hidden_states.extend(late_aux)
+        hidden_states = self.layers[self.end_layer - 1].hc_collapse(hidden_states, pre_mix)
+        if use_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+        hidden_states = self.norm(hidden_states)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
+        return hidden_states
+
+    def _run_layers(self, layer_indices, positions, hidden_states, pre_mix, moe_input_ids, lookups, token_mask):
+        use_sequence_parallel = self.use_sequence_parallel
+        full_num_tokens = positions.shape[0]
+        aux_hidden_states = []
+        for layer_idx in layer_indices:
+            layer = self.layers[layer_idx]
             # DSpark consumes the residual stream entering its configured
             # target layers. The runner expresses checkpoint IDs as one-based.
             if layer.layer_idx + 1 in self.aux_hidden_state_layers:
@@ -1250,14 +1284,27 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     self.engram_rotation,
                 )
             hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=moe_input_ids)
-        assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
-        hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
-        if use_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
-        hidden_states = self.norm(hidden_states)
-        if aux_hidden_states:
-            return hidden_states, aux_hidden_states
-        return hidden_states
+        return hidden_states, pre_mix, aux_hidden_states
+
+    def _run_replay_layers(self, hidden_states, pre_mix, positions, input_ids):
+        hidden_states, pre_mix, aux = self._run_layers(
+            range(self.decoder_replay_start, self.end_layer),
+            positions,
+            hidden_states,
+            pre_mix,
+            input_ids,
+            {},
+            None,
+        )
+        return hidden_states, pre_mix, *aux
+
+    def _new_replay_outputs(self, hidden_states, pre_mix, positions, input_ids):
+        late_aux = (
+            hidden_states.new_zeros((positions.shape[0], self.config.hidden_size))
+            for layer_id in self.aux_hidden_state_layers
+            if layer_id > self.decoder_replay_start
+        )
+        return torch.zeros_like(hidden_states), torch.zeros_like(pre_mix), *late_aux
 
 
 class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, SupportsPP, SupportsLoRA, SupportsEagle3):
@@ -1337,6 +1384,10 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             engram_mask=engram_mask,
             lookback_token_ids=lookback_token_ids,
         )
+
+    @property
+    def decoder_replay_layers(self):
+        return self.model.decoder_replay_layers
 
     @property
     def token_lookback_depth(self) -> int:
