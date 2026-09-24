@@ -23,7 +23,7 @@ This is the first release candidate of v0.27.1 for vLLM Ascend, aligned with ups
 | Model | Supported hardware in v0.27.1rc1 | Release scope |
 | --- | --- | --- |
 | MiniMax-M3 | Atlas 800 A3 and 950DT Products | W8A8 on Atlas 800 A3 and W8A8C8 on 950DT Products; two-node large-EP 1P1D serving and KV Cache Pool deployment |
-| DeepSeek-V4-Flash | 950DT Products | W4A8C8; two-node large-EP 1P1D DSpark serving and KV Cache Pool deployment |
+| DeepSeek-V4-Flash | 950DT Products | W4A8C8; two-node 1P1D DSpark serving and KV Cache Pool deployment |
 
 - Integrated the AscendC MSA index-score operator into MiniMax-M3 prefill, decode, and speculative-decode paths. [#14539](https://github.com/vllm-project/vllm-ascend/pull/14539)
 - Added the MiniMax-M3 950DT Products FP8 MSA and index top-k path, including the release-branch AscendC FP8 MSA index-score backport. [#15897](https://github.com/vllm-project/vllm-ascend/pull/15897) [#15926](https://github.com/vllm-project/vllm-ascend/pull/15926)
@@ -95,7 +95,6 @@ Use the official v0.27.1rc1 release images to ensure that the required operator 
 - This is a model-focused release candidate. Only the model and hardware combinations in the table above are included in the v0.27.1rc1 release scope.
 - MiniMax-M3 EAGLE3 uses eager execution for the draft model in the validated P/D configurations; follow the updated deployment guide. [#17242](https://github.com/vllm-project/vllm-ascend/pull/17242)
 - The v0.27.1rc1 test report is maintained in [`tests/0.27.1rc_vllm-ascend_overall_conclusion_release_notes_EN.md`](https://github.com/vllm-project/vllm-ascend/blob/releases/v0.27.1rc/tests/0.27.1rc_vllm-ascend_overall_conclusion_release_notes_EN.md); see [#17517](https://github.com/vllm-project/vllm-ascend/pull/17517) for the report update.
-- The release and artifact status is maintained in the [release checklist](https://github.com/vllm-project/vllm-ascend/issues/16288).
 
 ## v0.23.0 - 2026.08.16
 
