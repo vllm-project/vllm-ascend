@@ -212,9 +212,7 @@ class TestAscendConfig(TestBase):
 
     def test_stair_config_defaults_and_overrides(self):
         defaults = EplbConfig().stair_config
-        config = EplbConfig(
-            stair_config={"rank_transfer_limit": 2, "load_risk_quantile": 0.9}
-        )
+        config = EplbConfig(stair_config={"rank_transfer_limit": 2, "load_risk_quantile": 0.9})
 
         self.assertEqual(
             dataclasses.asdict(defaults),

@@ -448,9 +448,7 @@ class TestStairLoadStatistics(unittest.TestCase):
         target[1, 0] = 1
         expert_sources = [np.where(current == expert)[0].tolist() for expert in range(8)]
 
-        sources = StairEplbPolicy._migration_sources(
-            current, target, 1, 1, expert_sources, np.array([0, 0, 0, 0, 1])
-        )
+        sources = StairEplbPolicy._migration_sources(current, target, 1, 1, expert_sources, np.array([0, 0, 0, 0, 1]))
 
         # Taking rank 2 for expert 0 would force expert 1 to cross nodes.
         np.testing.assert_array_equal(sources[:2, 0], [3, 2])

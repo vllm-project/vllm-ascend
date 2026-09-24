@@ -13,6 +13,7 @@ from vllm_ascend.ascend_config import StairConfig
 
 _MEAN_RATIO_TIE_TOLERANCE = 1e-9
 
+
 @dataclass(frozen=True)
 class PlacementImbalance:
     """Max-to-average rank-load ratios; 1.0 means perfectly balanced."""
