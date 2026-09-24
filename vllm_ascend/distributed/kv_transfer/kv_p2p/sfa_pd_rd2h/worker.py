@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 import os
 import threading
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -38,10 +39,14 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import (
     ConsumerReadState,
     MembPullReadThread,
+    ReqKey,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread import (
     MembPullSendingThread,
     ProducerSendState,
+)
+from vllm_ascend.distributed.kv_transfer.load_failure_registry import (
+    get_load_generation,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_sparse_kv_offload_manager,
@@ -134,16 +139,22 @@ class SFAPDRD2HConsumerWorker:
         # external_req_id -> internal_req_id, so get_finished can map the recv
         # thread's done_recving (keyed by external id from P's DONE signal) back
         # to the vLLM-internal id that the scheduler expects.
-        self.request_map: dict[str, str] = {}
+        self.request_map: dict[ReqKey, str] = {}
+        self._req_key_by_internal: dict[str, ReqKey] = {}
+        self._active_generation_by_ext: dict[str, str] = {}
         # external_req_id -> (main CPU block ids, indexer HBM block ids).
-        self._dest_blocks_by_req: dict[str, tuple[list[int], list[int]]] = {}
+        self._dest_blocks_by_req: dict[ReqKey, tuple[list[int], list[int]]] = {}
         # External req ids whose DONE signal arrived before request_map
         # was seeded (see get_finished). Retried every step until mapped.
-        self._pending_done: set[str] = set()
+        self._pending_done: set[ReqKey] = set()
         # Keep rank-local terminal state (success or failure) until every TP
         # rank has finished the same request. This is scheduler readiness state,
         # not a per-layer barrier.
-        self._terminal_ext_ids: set[str] = set()
+        self._terminal_req_keys: set[ReqKey] = set()
+        self._rendezvous_failed_req_keys: set[ReqKey] = set()
+        self._reported_terminal_req_keys: set[ReqKey] = set()
+        self._retired_req_keys: dict[ReqKey, float] = {}
+        self._deferred_cleanup_ids: set[str] = set()
 
     # ------------------------------------------------------------------
     # Common
@@ -180,15 +191,70 @@ class SFAPDRD2HConsumerWorker:
 
     # -- D-side forwards to the composed SFA worker (LRU load path) --
     def start_load_kv(self, metadata: KVConnectorMetadata):
+        now = time.monotonic()
+        self._retired_req_keys = {
+            req_key: retired_at for req_key, retired_at in self._retired_req_keys.items() if now - retired_at <= 900.0
+        }
         for req in getattr(metadata, "requests", []):
             req_id = getattr(req, "req_id", None)
             if req_id is not None:
                 ext_id = get_external_request_id(req_id)
-                self.request_map[ext_id] = req_id
+                transfer_generation = str(getattr(req, "transfer_generation", "") or "")
+                req_key = (ext_id, transfer_generation)
+                previous_generation = self._active_generation_by_ext.get(ext_id)
+                if previous_generation is not None and previous_generation != transfer_generation:
+                    previous_key = (ext_id, previous_generation)
+                    previous_internal = self.request_map.pop(previous_key, None)
+                    if previous_internal is not None:
+                        if self._req_key_by_internal.get(previous_internal) == previous_key:
+                            self._req_key_by_internal.pop(previous_internal, None)
+                        self._cpu_blocks_by_req.pop(previous_internal, None)
+                        self._deferred_cleanup_ids.discard(previous_internal)
+                    self._dest_blocks_by_req.pop(previous_key, None)
+                    self._pending_done.discard(previous_key)
+                    self._terminal_req_keys.discard(previous_key)
+                    self._rendezvous_failed_req_keys.discard(previous_key)
+                    self._reported_terminal_req_keys.discard(previous_key)
+                    self._retired_req_keys[previous_key] = now
+                    if self._mf_read_thread is not None:
+                        self._mf_read_thread.discard_requests({previous_key})
+                self.request_map[req_key] = req_id
+                self._req_key_by_internal[req_id] = req_key
+                self._active_generation_by_ext[ext_id] = transfer_generation
                 main_ids = list(getattr(req, "main_block_ids", []) or [])
                 indexer_ids = list(getattr(req, "indexer_block_ids", []) or [])
-                self._dest_blocks_by_req[ext_id] = (main_ids, indexer_ids)
+                self._dest_blocks_by_req[req_key] = (main_ids, indexer_ids)
                 self._cpu_blocks_by_req[req_id] = len(main_ids)
+                if self._mf_read_thread is not None:
+                    self._mf_read_thread.rearm_requests({req_key})
+
+        for failed_req_id, transfer_generation, main_ids, indexer_ids in getattr(metadata, "failed_requests", []) or []:
+            ext_id = get_external_request_id(failed_req_id)
+            req_key = (ext_id, str(transfer_generation or ""))
+            if req_key in self._reported_terminal_req_keys or req_key in self._retired_req_keys:
+                continue
+            active_generation = self._active_generation_by_ext.get(ext_id)
+            if active_generation is not None and active_generation != req_key[1]:
+                continue
+            self.request_map[req_key] = failed_req_id
+            self._req_key_by_internal[failed_req_id] = req_key
+            self._active_generation_by_ext[ext_id] = req_key[1]
+            self._dest_blocks_by_req[req_key] = (list(main_ids), list(indexer_ids))
+            self._cpu_blocks_by_req[failed_req_id] = len(main_ids)
+            self._invalid_block_ids.update(main_ids)
+            self._invalid_block_ids.update(indexer_ids)
+            if self._mf_read_thread is not None:
+                self._mf_read_thread.mark_failed_requests({req_key})
+            else:
+                self._rendezvous_failed_req_keys.add(req_key)
+            logger.warning(
+                "SFAPD D rendezvous failed: tp=%s req=%s ext=%s main=%d indexer=%d",
+                self.tp_rank,
+                failed_req_id,
+                ext_id,
+                len(main_ids),
+                len(indexer_ids),
+            )
 
     def save_kv_layer(
         self,
@@ -203,29 +269,48 @@ class SFAPDRD2HConsumerWorker:
         return
 
     def _cleanup_request_state(self, req_ids: set[str]) -> None:
-        ext_ids = set()
+        req_keys: set[ReqKey] = set()
         for req_id in req_ids:
-            ext_id = get_external_request_id(req_id)
-            ext_ids.add(ext_id)
             self._cpu_blocks_by_req.pop(req_id, None)
-            self.request_map.pop(ext_id, None)
-            self._dest_blocks_by_req.pop(ext_id, None)
-            self._pending_done.discard(ext_id)
-            self._terminal_ext_ids.discard(ext_id)
+            req_key = self._req_key_by_internal.get(req_id)
+            if req_key is None or self.request_map.get(req_key) != req_id:
+                continue
+            ext_id, generation = req_key
+            if req_key not in self._reported_terminal_req_keys:
+                self._deferred_cleanup_ids.add(req_id)
+                if self._mf_read_thread is not None:
+                    self._mf_read_thread.discard_requests({req_key})
+                    self._mf_read_thread.mark_failed_requests({req_key})
+                else:
+                    self._rendezvous_failed_req_keys.add(req_key)
+                continue
+            req_keys.add(req_key)
+            self.request_map.pop(req_key, None)
+            self._req_key_by_internal.pop(req_id, None)
+            self._dest_blocks_by_req.pop(req_key, None)
+            if self._active_generation_by_ext.get(ext_id) == generation:
+                self._active_generation_by_ext.pop(ext_id, None)
+            self._pending_done.discard(req_key)
+            self._terminal_req_keys.discard(req_key)
+            if req_key in self._reported_terminal_req_keys:
+                self._retired_req_keys[req_key] = time.monotonic()
+                self._reported_terminal_req_keys.discard(req_key)
+            self._deferred_cleanup_ids.discard(req_id)
+            self._rendezvous_failed_req_keys.discard(req_key)
         # Drop any partial contributor-completion state so a dead contributor or a
         # retried external id cannot complete a later request on stale arrivals.
-        if self._mf_read_thread is not None:
-            self._mf_read_thread.discard_requests(ext_ids)
+        if req_keys and self._mf_read_thread is not None:
+            self._mf_read_thread.discard_requests(req_keys)
 
     def _gather_tp_read_status(
         self,
-        local_terminal: set[str],
-        local_failed: set[str],
-    ) -> list[tuple[set[str], set[str]]]:
+        local_terminal: set[ReqKey],
+        local_failed: set[ReqKey],
+    ) -> list[tuple[set[ReqKey], set[ReqKey]]]:
         if self.tp_size == 1:
             return [(local_terminal, local_failed)]
         tp_group = get_tp_group()
-        gathered: list[tuple[set[str], set[str]] | None] = [None] * tp_group.world_size
+        gathered: list[tuple[set[ReqKey], set[ReqKey]] | None] = [None] * tp_group.world_size
         torch.distributed.all_gather_object(
             gathered,
             (local_terminal, local_failed),
@@ -235,24 +320,45 @@ class SFAPDRD2HConsumerWorker:
 
     def get_finished(self, finished_req_ids: set[str] | None = None) -> tuple[set[str], set[str]]:
         done_recving: set[str] = set()
-        local_failed: set[str] = set()
+        local_failed: set[ReqKey] = set()
 
         # memfabric pull mode: done comes from MembPullReadThread
         if hasattr(self, "_mf_read_thread") and self._mf_read_thread is not None:
-            local_done = self._mf_read_thread.get_and_clear_done()
-            local_failed = self._mf_read_thread.get_and_clear_failed()
-            self._terminal_ext_ids.update(local_done | local_failed)
+            local_done = {
+                req_key
+                for req_key in self._mf_read_thread.get_and_clear_done()
+                if self._active_generation_by_ext.get(req_key[0]) == req_key[1]
+            }
+            local_failed = {
+                req_key
+                for req_key in self._mf_read_thread.get_and_clear_failed()
+                if self._active_generation_by_ext.get(req_key[0]) == req_key[1]
+            }
+            self._terminal_req_keys.update(local_done | local_failed)
+        if self._rendezvous_failed_req_keys:
+            active_rendezvous_failures = {
+                req_key
+                for req_key in self._rendezvous_failed_req_keys
+                if self._active_generation_by_ext.get(req_key[0]) == req_key[1]
+            }
+            local_failed.update(active_rendezvous_failures)
+            self._terminal_req_keys.update(active_rendezvous_failures)
+            self._rendezvous_failed_req_keys.clear()
 
         tp_status = self._gather_tp_read_status(
-            set(self._terminal_ext_ids),
+            set(self._terminal_req_keys),
             local_failed,
         )
         finished_on_all = set.intersection(*(terminal for terminal, _ in tp_status)) if tp_status else set()
         failed_on_any = set().union(*(failed for _, failed in tp_status))
-        self._terminal_ext_ids.difference_update(finished_on_all)
+        self._terminal_req_keys.difference_update(finished_on_all)
 
-        for ext_id in failed_on_any:
-            dest = self._dest_blocks_by_req.get(ext_id)
+        for req_key in failed_on_any:
+            if req_key in self._reported_terminal_req_keys:
+                continue
+            if self._active_generation_by_ext.get(req_key[0]) != req_key[1]:
+                continue
+            dest = self._dest_blocks_by_req.get(req_key)
             if dest is None:
                 continue
             main_block_ids, indexer_block_ids = dest
@@ -260,13 +366,16 @@ class SFAPDRD2HConsumerWorker:
             self._invalid_block_ids.update(indexer_block_ids)
 
         if finished_on_all or self._pending_done:
-            still_pending: set[str] = set()
-            for ext_id in finished_on_all | self._pending_done:
-                internal = self.request_map.get(ext_id)
+            still_pending: set[ReqKey] = set()
+            for req_key in finished_on_all | self._pending_done:
+                if req_key in self._reported_terminal_req_keys:
+                    continue
+                internal = self.request_map.get(req_key)
                 if internal is not None:
                     done_recving.add(internal)
+                    self._reported_terminal_req_keys.add(req_key)
                 else:
-                    still_pending.add(ext_id)
+                    still_pending.add(req_key)
             self._pending_done = still_pending
             if done_recving or self._pending_done:
                 logger.debug(
@@ -282,8 +391,11 @@ class SFAPDRD2HConsumerWorker:
         # request_map[ext_id] and discard _pending_done[ext_id] before the
         # resolution loop above, leaking any finished req whose DONE arrives in
         # the same step (unmappable -> stuck in _pending_done forever).
+        preexisting_deferred = set(self._deferred_cleanup_ids)
         if finished_req_ids:
             self._cleanup_request_state(finished_req_ids)
+        if preexisting_deferred:
+            self._cleanup_request_state(preexisting_deferred)
 
         return set(), done_recving
 
@@ -312,6 +424,7 @@ class SFAPDRD2HConsumerWorker:
             indexer_tensors=self._indexer_tensors,
             indexer_scale_tensors=self._indexer_scale_tensors,
             dest_blocks_by_req=self._dest_blocks_by_req,
+            active_generation_by_ext=self._active_generation_by_ext,
             get_offload_layer_id=self.offload_manager._get_offload_layer_id,
         )
 
@@ -787,11 +900,13 @@ class SFAPDRD2HProducerWorker:
         assert self.kv_send_layer_thread is not None
         layer_send_task = SendTask(
             send_request={},
+            load_generations={},
             wait_event=wait_event,
             layer_idx=layer_idx,
             layer_name=layer_name,
         )
         for req_id, req_meta in connector_metadata.requests.items():
+            load_generation = get_load_generation(req_id)
             local_block_ids = req_meta.local_block_ids
             has_main = len(local_block_ids) > self.main_group_idx and bool(local_block_ids[self.main_group_idx])
             layer_has_indexer = self.layer_metadata[layer_name].has_indexer
@@ -801,6 +916,7 @@ class SFAPDRD2HProducerWorker:
             if not has_main or not has_indexer:
                 continue
             layer_send_task.send_request[req_id] = self.update_decoder_info(req_id, req_meta)
+            layer_send_task.load_generations[req_id] = load_generation
         if layer_send_task.send_request:
             self.kv_send_layer_thread.send_queue.put(layer_send_task)
         else:

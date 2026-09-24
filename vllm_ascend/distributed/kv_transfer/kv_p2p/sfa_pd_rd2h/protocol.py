@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -75,6 +75,7 @@ class SfaPDProducerReqMeta:
     remote_tp_size: int | None
     remote_pcp_size: int | None
     remote_dcp_size: int | None
+    transfer_generation: str = ""
     chunk_finish: bool = False
     prompt_len: int = 0
     trans_count: list[int] | None = None
@@ -119,6 +120,7 @@ class SfaPDProducerMetadata(KVConnectorMetadata):
             remote_tp_size=kv_transfer_params.get("remote_tp_size"),
             remote_pcp_size=kv_transfer_params.get("remote_pcp_size"),
             remote_dcp_size=kv_transfer_params.get("remote_dcp_size"),
+            transfer_generation=str(kv_transfer_params.get("transfer_generation") or ""),
             do_virtual=kv_transfer_params.get("do_virtual", False),
             chunk_finish=chunk_finish,
             remote_cache_tokens=remote_cache_tokens,
@@ -142,23 +144,43 @@ class SfaPDConsumerReqMeta:
     req_id: str
     main_block_ids: list[int]
     indexer_block_ids: list[int]
+    transfer_generation: str = ""
 
 
 class SfaPDConsumerMetadata(KVConnectorMetadata):
     def __init__(self) -> None:
         self.requests: list[SfaPDConsumerReqMeta] = []
+        self.failed_requests: list[tuple[str, str, list[int], list[int]]] = []
 
     def add_request(
         self,
         request_id: str,
         main_block_ids: list[int],
         indexer_block_ids: list[int],
+        transfer_generation: str = "",
     ) -> None:
         self.requests.append(
             SfaPDConsumerReqMeta(
                 req_id=request_id,
                 main_block_ids=list(main_block_ids),
                 indexer_block_ids=list(indexer_block_ids),
+                transfer_generation=transfer_generation,
+            )
+        )
+
+    def add_failed_request(
+        self,
+        request_id: str,
+        main_block_ids: list[int],
+        indexer_block_ids: list[int],
+        transfer_generation: str = "",
+    ) -> None:
+        self.failed_requests.append(
+            (
+                request_id,
+                transfer_generation,
+                list(main_block_ids),
+                list(indexer_block_ids),
             )
         )
 
@@ -166,6 +188,7 @@ class SfaPDConsumerMetadata(KVConnectorMetadata):
 @dataclass
 class SendTask:
     send_request: dict[str, SfaPDProducerReqMeta]
+    load_generations: dict[str, int] = field(default_factory=dict)
     wait_event: Any | None = None
     layer_idx: int = 0
     layer_name: str = ""
