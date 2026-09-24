@@ -384,11 +384,14 @@ def build_attn_state(
     num_reqs,
     num_scheduled_tokens,
     num_valid_tokens,
+    kv_cache_config: KVCacheConfig | None = None,
 ):
     """Build attention state for npu's attention backend."""
     if vllm_config.model_config.runner_type == "pooling":
+        if kv_cache_config is None:
+            raise RuntimeError("Pooling attention state requires KVCacheConfig.")
         if isinstance(
-            vllm_config.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+            kv_cache_config.kv_cache_groups[0].kv_cache_spec,
             EncoderOnlyAttentionSpec,
         ):
             attn_state = AscendAttentionState.PrefillNoCache

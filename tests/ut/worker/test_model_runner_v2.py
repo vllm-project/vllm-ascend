@@ -24,6 +24,7 @@ def _make_runner(need_timing: bool = True):
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
     runner.vllm_config = SimpleNamespace()
+    runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
