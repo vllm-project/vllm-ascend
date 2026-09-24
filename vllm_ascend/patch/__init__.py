@@ -366,6 +366,20 @@
 #    Future Plan:
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
+#   2. `vllm.v1.core.kv_cache_utils._annotate_eagle_groups`
+#    Why:
+#       vLLM PR #55390 identifies MTP groups by the last registered KV layer,
+#       but the NPU runners move Mamba specs to the end of the spec mapping.
+#       The release lane also still calls the helper with its old keyword.
+#    How:
+#       Preserve spec-driven annotations and require an exact layer partition.
+#       For supported Qwen hybrid MTP layouts, select the last full-attention
+#       layer without changing runner ordering or cache allocation. Accept both
+#       annotation keywords while the supported upstream versions differ.
+#    Related PR: vLLM PR #55390 (Hybrid MTP draft-group annotation).
+#    Future Plan:
+#       Remove the keyword bridge when the release lane includes #55390; remove
+#       positional inference when upstream transports explicit draft identity.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
