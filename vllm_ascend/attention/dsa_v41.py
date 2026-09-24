@@ -453,8 +453,8 @@ class AscendDSAV41Impl:
         compressor_metadata = metadata.compressor
         indexer_metadata = metadata.indexer
         ratio = self.role.compress_ratio
-        self._quantize_indexer_query(attn, prepared_indexer, metadata)
         if ratio == 1:
+            self._quantize_indexer_query(attn, prepared_indexer, metadata)
             latent = compressor.norm(compressor.wkv(hidden_states))
             # C1 source positions are the current token positions. Reuse the
             # query RoPE selected by the SWA metadata builder instead of
@@ -467,6 +467,9 @@ class AscendDSAV41Impl:
             state_metadata = compressor_metadata.state
             wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, state_metadata.c2_metadata_group_id)
             hidden_states_fp32 = hidden_states.float()
+            # Finish the Vector cast before overlapping query quantization
+            # with the Cube projection on the current stream.
+            self._quantize_indexer_query(attn, prepared_indexer, metadata)
             kv = compressor.wkv(hidden_states_fp32)
             score = compressor.wgate(hidden_states_fp32)
             latent = compressor.pool_projected(kv, score, state_metadata)
