@@ -1,4 +1,4 @@
-"""Classic synchronous Worker Load execution."""
+"""Classic Worker Load execution."""
 
 from .service import LoadService
 

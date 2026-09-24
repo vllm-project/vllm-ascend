@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 import torch
 from vllm.logger import logger
 
@@ -30,7 +28,6 @@ class StoreService:
         put_step: int,
         kv_role: str,
     ) -> None:
-        self._backend = backend
         self._task_builder = StoreTaskBuilder(
             token_database,
             block_size,
@@ -41,14 +38,14 @@ class StoreService:
             put_step,
             kv_role,
         )
-        self._executor: StoreExecutor | None = None
+        self._executor = StoreExecutor(backend)
 
     def start(self) -> None:
         """Start Store execution after the Worker has registered its KV buffers."""
-        if self._executor is not None:
-            return
-        self._executor = StoreExecutor(self._backend)
         self._executor.start_and_wait_ready()
+
+    def close(self) -> None:
+        self._executor.close()
 
     def submit(self, requests: list[StoreRequest]) -> None:
         if not requests:
@@ -62,15 +59,10 @@ class StoreService:
             except Exception:
                 logger.exception("Failed to prepare Store task for request %s", request.request_id)
                 tasks.append(StoreTask(request.request_id, source_ready_event, ()))
-        executor = cast(StoreExecutor, self._executor)
-        executor.submit_batch(tasks)
+        self._executor.submit_batch(tasks)
 
     def wait_for_previous_store(self) -> None:
-        executor = self._executor
-        if executor is not None:
-            executor.wait_for_previous_store()
+        self._executor.wait_for_previous_store()
 
     def discard_preempted_and_finished_requests(self, preempted_request_ids: set[str]) -> None:
-        executor = self._executor
-        if executor is not None:
-            executor.discard_preempted_and_finished_requests(preempted_request_ids)
+        self._executor.discard_preempted_and_finished_requests(preempted_request_ids)

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
 
 
@@ -36,8 +37,8 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         if len(kv_cache_config.kv_cache_groups) != 1:
             raise ValueError("AscendStore v1 classic path requires one KV cache group")
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        if extra_config.get("use_layerwise", False) or extra_config.get("load_async", False):
-            raise ValueError("AscendStore v1 classic path requires non-Layerwise synchronous Load")
+        if extra_config.get("use_layerwise", False):
+            raise ValueError("AscendStore v1 classic path requires non-Layerwise Load")
         if extra_config.get("backend", "mooncake").lower() != "mooncake":
             raise ValueError("AscendStore v1 classic path requires Mooncake")
 
@@ -76,11 +77,15 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
             block_hashes=request.block_hashes,
             num_computed_tokens=num_computed_tokens,
         )
-        return self.scheduler.lookup(lookup_request), False
+        return self.scheduler.lookup(lookup_request)
 
     def update_state_after_alloc(self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int) -> None:
         assert self.scheduler is not None
-        self.scheduler.update_state_after_alloc(request, num_external_tokens)
+        self.scheduler.update_state_after_alloc(request, blocks.get_block_ids(), num_external_tokens)
+
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        if self.scheduler is not None:
+            self.scheduler.finish_loading(connector_output.finished_recving)
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> AscendStoreV1Metadata:
         assert self.scheduler is not None
@@ -132,7 +137,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, AscendStoreV1Metadata)
         self.worker.clear_store_completion_bookkeeping(metadata.preempted_req_ids)
-        return set(), set()
+        return set(), self.worker.take_finished_load_request_ids(metadata.loading_request_ids, finished_req_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.worker is not None
@@ -143,3 +148,5 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
             self.scheduler.close()
         if self.lookup_server is not None:
             self.lookup_server.close()
+        if self.worker is not None:
+            self.worker.close()
