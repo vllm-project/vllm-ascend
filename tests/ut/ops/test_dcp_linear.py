@@ -97,7 +97,6 @@ def test_group_projection_loads_actual_shards_and_uses_ascend_gemm(rank, dcp):
         output = layer(x)[0].view(3, 2 * dcp, 3)
         expected = torch.nn.functional.linear(x, full_weight).view(3, 8, 3)
         torch.testing.assert_close(output, expected[:, (rank // dcp) * (2 * dcp) : (rank // dcp + 1) * (2 * dcp)])
-        torch.testing.assert_close(layer._local_view(output), expected[:, rank * 2 : (rank + 1) * 2])
         gemm.assert_called_once()
 
 
@@ -119,3 +118,39 @@ def test_sparse_q_replication_scope(case):
         else:
             with pytest.raises(ValueError, match="Ascend dcp_q_replicate"):
                 use_dcp_q_replicate(cfg, model, None)
+
+
+@pytest.mark.parametrize("dcp", [2, 4])
+@pytest.mark.parametrize("rank", range(4))
+@pytest.mark.parametrize("bias", [False, True])
+def test_prefill_projection_uses_local_weight_width_and_refreshes(rank, dcp, bias):
+    cfg = make_config(dcp=dcp)
+    group = SimpleNamespace(world_size=4, rank_in_group=rank)
+    full_weight = torch.arange(24 * 5, dtype=torch.float32).view(24, 5) / 100
+    x = torch.arange(15, dtype=torch.float32).view(3, 5)
+    with (
+        patch.object(dcp_linear, "get_current_vllm_config", return_value=cfg),
+        patch.object(dcp_linear, "get_tensor_model_parallel_rank", return_value=rank),
+        patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=group),
+        patch("vllm.distributed.parallel_state.get_tp_group", return_value=group),
+        patch("vllm_ascend.ops.linear._should_reshape_wo_a_to_3d", return_value=False),
+        patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight),
+        patch("vllm_ascend.utils.maybe_trans_nz", side_effect=lambda weight: weight),
+        patch("torch.ops.vllm.unquantized_gemm", side_effect=torch.nn.functional.linear, create=True) as gemm,
+    ):
+        layer = AscendDCPGroupColumnParallelLinear(5, 24, bias=bias, prefix="model.layers.0.self_attn.q_proj")
+        for offset in (0, 100):
+            layer.weight.weight_loader(layer.weight, full_weight + offset)
+            if bias:
+                layer.bias.weight_loader(layer.bias, torch.arange(24, dtype=torch.float32) + offset)
+            layer.prepare_local_weight()
+            gemm.reset_mock()
+            actual, output_bias = layer.forward_local(x)
+            local_weight = (full_weight + offset)[rank * 6 : (rank + 1) * 6]
+            local_bias = (torch.arange(24, dtype=torch.float32) + offset)[rank * 6 : (rank + 1) * 6] if bias else None
+            torch.testing.assert_close(actual, torch.nn.functional.linear(x, local_weight, local_bias))
+            assert output_bias is None
+            # GEMM itself must be narrow, not a wide GEMM followed by slicing.
+            assert gemm.call_count == 1
+            assert gemm.call_args.args[1].shape == (6, 5)
+            torch.testing.assert_close(gemm.call_args.args[1], local_weight)

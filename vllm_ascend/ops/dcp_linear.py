@@ -1,9 +1,12 @@
 """Ascend query projection replicated within each decode context group."""
 
+import torch
+import torch_npu
 from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank
 
+from vllm_ascend import utils
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 
 
@@ -45,9 +48,17 @@ class AscendDCPGroupColumnParallelLinear(AscendColumnParallelLinear):
         self.rank_in_group = get_tensor_model_parallel_rank() % self.group_size
         super().__init__(input_size, output_size, bias=bias, quant_config=quant_config, prefix=prefix)
 
-    def _local_view(self, out):
-        if self.group_size == 1:
-            return out
-        heads = out.shape[-2] // self.group_size
-        start = self.rank_in_group * heads
-        return out[..., start : start + heads, :].contiguous()
+    def prepare_local_weight(self):
+        """Prepare the original TP shard after the group weight has been loaded."""
+        weight = torch_npu.npu_format_cast(self.weight.detach(), utils.ACL_FORMAT_FRACTAL_ND)
+        local_weight = weight.chunk(self.group_size, dim=0)[self.rank_in_group].contiguous()
+        self.register_buffer("local_weight", utils.maybe_trans_nz(local_weight), persistent=False)
+
+    def forward_local(self, x):
+        """Project only this TP rank's heads for MLA prefill."""
+        local_bias = None if self.bias is None else self.bias.chunk(self.group_size, dim=0)[self.rank_in_group]
+        bias = None if self.skip_bias_add else local_bias
+        output = torch.ops.vllm.unquantized_gemm(x, self.local_weight, bias)
+        if not self.return_bias:
+            return output
+        return output, local_bias if self.skip_bias_add else None

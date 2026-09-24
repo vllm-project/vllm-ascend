@@ -8,7 +8,6 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
-from vllm_ascend.ops.dcp_linear import AscendDCPGroupColumnParallelLinear
 
 
 def make_impl(active=True, dcp=2, rank=0):
@@ -67,6 +66,7 @@ def test_group_k_weights_refresh_from_local_weights(active):
     impl = make_impl(active)
     weights = torch.arange(2 * 2 * 6, dtype=torch.float32).view(12, 2)
     impl.kv_b_proj = SimpleNamespace(weight=weights.clone(), quant_method=UnquantizedLinearMethod())
+    impl.q_proj = Mock()
     remote = torch.arange(12, dtype=torch.float32).view(2, 3, 2) + 100
     gather = Mock(side_effect=lambda local, dim: torch.cat((local, remote), dim=dim))
     with (
@@ -83,6 +83,7 @@ def test_group_k_weights_refresh_from_local_weights(active):
             if active:
                 torch.testing.assert_close(impl.W_UK_T_dcp_qrep, torch.cat((local[:, :3, :], remote)))
     assert gather.call_count == (3 if active else 0)
+    assert impl.q_proj.prepare_local_weight.call_count == (3 if active else 0)
 
 
 @pytest.mark.parametrize("rank", [0, 1])
@@ -93,10 +94,12 @@ def test_prefill_keeps_tokens_and_local_heads_in_mixed_batch(rank, decode_tokens
     class Projection:
         group_size = 2
         rank_in_group = rank
-        _local_view = AscendDCPGroupColumnParallelLinear._local_view
 
         def __call__(self, x):
-            return (x,)
+            raise AssertionError("Prefill must not run the group-width projection")
+
+        def forward_local(self, x):
+            return (x[:, rank * 10 : (rank + 1) * 10],)
 
     impl.q_proj = Projection()
     impl._get_num_prefill_kv_tokens = lambda _: 3
@@ -389,10 +392,14 @@ def test_direct_and_low_rank_preprocess_preserve_multi_token_mixed_batch(q_rank)
     class Projection:
         group_size = 2
         rank_in_group = 1
-        _local_view = AscendDCPGroupColumnParallelLinear._local_view
 
         def __call__(self, x):
+            assert x.shape[0] == 4  # Only the decode rows use group heads.
             return (torch.nn.functional.linear(x, weight),)
+
+        def forward_local(self, x):
+            assert x.shape[0] == 3
+            return (torch.nn.functional.linear(x, weight[10:]),)
 
     impl.q_proj = Projection()
     impl.W_UK_T_dcp_qrep = torch.randn(4, 3, 2)

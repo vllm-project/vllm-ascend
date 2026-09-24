@@ -1188,7 +1188,7 @@ class TestAscendSFAImpl(TestBase):
                 )
                 self.impl.exec_kv = lambda *_args: record_event("cache", (hidden, hidden))
                 self.impl._prepare_kv_for_parallel = lambda *_args: (hidden, [])
-                self.impl._q_proj_and_k_up_proj = lambda _: (hidden, hidden)
+                self.impl._q_proj_and_k_up_proj = lambda _, **kwargs: (hidden, hidden)
                 self.impl.rope_single = lambda x, *_args: x
                 self.impl._record_query_gather_context = lambda *_args: None
                 self.impl._store_parallel_kv = lambda *_args: (hidden, hidden)

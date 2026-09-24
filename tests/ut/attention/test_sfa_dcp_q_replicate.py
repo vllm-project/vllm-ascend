@@ -9,7 +9,6 @@ from vllm_ascend.attention import sfa_v1
 from vllm_ascend.attention.context_parallel import sfa_cp
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl, AscendSFADCPMetadata, DCPGatherContext
 from vllm_ascend.attention.utils import PreprocessType
-from vllm_ascend.ops.dcp_linear import AscendDCPGroupColumnParallelLinear
 
 
 def make_sparse_impl(active=True, dcp=2, rank=0):
@@ -20,6 +19,7 @@ def make_sparse_impl(active=True, dcp=2, rank=0):
     impl.qk_nope_head_dim, impl.qk_rope_head_dim = 3, 2
     impl.qk_head_dim, impl.kv_lora_rank, impl.v_head_dim = 5, 2, 3
     impl.q_lora_rank = 4
+    impl.q_proj = Mock()
     impl.scale = 5**-0.5
     impl.rl_weight_update_enabled = False
     impl.has_indexer = True
@@ -54,6 +54,7 @@ def test_sparse_weights_reload_from_local_source(active):
         assert dispose.call_count == (0 if active else 3)
     assert gather.call_count == (3 if active else 0)
     assert impl.indexer.process_weights_after_loading.call_count == 3
+    assert impl.q_proj.prepare_local_weight.call_count == (3 if active else 0)
 
 
 @pytest.mark.parametrize("dtype", [torch.float64, torch.bfloat16])
@@ -87,16 +88,8 @@ def test_sparse_projection_preserves_tokens_and_uses_group_uk(dtype, tokens):
 
 @pytest.mark.parametrize("prefills", [1, 2])
 @pytest.mark.parametrize("rank", [0, 1])
-def test_sparse_prefill_and_mixed_batch_slice_heads_but_keep_kv_gather(prefills, rank):
+def test_sparse_prefill_and_mixed_batch_keep_local_heads_and_kv_gather(prefills, rank):
     impl = make_sparse_impl(rank=rank)
-    impl.q_proj = SimpleNamespace()
-
-    class Projection:
-        group_size = 2
-        rank_in_group = rank
-        _local_view = AscendDCPGroupColumnParallelLinear._local_view
-
-    impl.q_proj = Projection()
     metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
     metadata.num_prefills = prefills
     metadata.num_decode_tokens = 1 if prefills == 1 else 0
@@ -104,7 +97,7 @@ def test_sparse_prefill_and_mixed_batch_slice_heads_but_keep_kv_gather(prefills,
     packed = torch.randn(7, 1, 4)
     context = DCPGatherContext(packed, handle, None, (2, 2))
     metadata.dcp_context = SimpleNamespace(gather_context=context, kv_gather_block_table=object())
-    q, pe, topk = torch.randn(3, 4, 2), torch.randn(3, 4, 2), torch.tensor([[0], [1], [2]])
+    q, pe, topk = torch.randn(3, 2, 2), torch.randn(3, 2, 2), torch.tensor([[0], [1], [2]])
     impl._start_dcp_query_gather = Mock(side_effect=AssertionError("Unexpected Q gather"))
     with patch.object(
         sfa_cp.DeviceOperator, "execute_sparse_flash_attention_process", return_value=object()
@@ -112,8 +105,8 @@ def test_sparse_prefill_and_mixed_batch_slice_heads_but_keep_kv_gather(prefills,
         impl._record_query_gather_context(q, pe, metadata)
         result = impl._execute_sparse_flash_attention_process(q, pe, (), topk, metadata, [1, 3], [4, 7])
     assert result is execute.return_value
-    torch.testing.assert_close(execute.call_args.args[1], q[:, rank * 2 : rank * 2 + 2])
-    torch.testing.assert_close(execute.call_args.args[2], pe[:, rank * 2 : rank * 2 + 2])
+    assert execute.call_args.args[1] is q
+    assert execute.call_args.args[2] is pe
     assert execute.call_args.args[4] is topk
     assert execute.call_args.kwargs["return_lse"] is False
     assert execute.call_args.kwargs["sparse_mode"] == 3
@@ -250,3 +243,36 @@ def test_sparse_qrep_rejects_inconsistent_decode_state(case):
     error = ValueError if case == "heads" else RuntimeError
     with pytest.raises(error, match="group head|pending Q gather"):
         impl._execute_sparse_flash_attention_process(q, q, (), None, metadata, None, None)
+
+
+@pytest.mark.parametrize("dcp,rank", [(2, 0), (2, 1), (4, 0), (4, 1), (4, 2), (4, 3)])
+@pytest.mark.parametrize("tokens", [1, 4])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.bfloat16])
+def test_sparse_prefill_projects_local_weights_before_bmm(dcp, rank, tokens, dtype):
+    impl = make_sparse_impl(dcp=dcp, rank=rank)
+    x = torch.randn(tokens, 4, dtype=dtype)
+    weight = torch.randn(2 * dcp * 5, 4, dtype=dtype)
+    local_weight = weight.chunk(dcp)[rank].contiguous()
+    impl.W_UK_T = torch.randn(2, 3, 2, dtype=dtype)
+
+    # No group UK buffer is available: prefill must not use it even transiently.
+    class Projection:
+        group_size = dcp
+
+        def __call__(self, x):
+            raise AssertionError("Prefill must not compute group-wide Q before slicing")
+
+        def forward_local(self, x):
+            return (torch.nn.functional.linear(x, local_weight),)
+
+    impl.q_proj = Projection()
+    with patch.object(
+        sfa_v1.torch_npu,
+        "npu_transpose_batchmatmul",
+        create=True,
+        side_effect=lambda a, b, **kw: torch.bmm(a.transpose(0, 1), b).transpose(0, 1),
+    ):
+        q, pe = impl._q_proj_and_k_up_proj(x, local_q=True)
+    expected = torch.nn.functional.linear(x, local_weight).view(tokens, 2, 5)
+    torch.testing.assert_close(q, torch.einsum("thp,hpl->thl", expected[..., :3], impl.W_UK_T))
+    torch.testing.assert_close(pe, expected[..., 3:])
