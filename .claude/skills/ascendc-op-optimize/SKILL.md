@@ -80,6 +80,34 @@ msprof op --kernel-name=<KernelName> --output=./profiling --aic-metrics=PipeUtil
 | msprof op | `msprof op --aic-metrics=PipeUtilization ...` | 孤立峰值，自带 ~3-4µs 固定开销；用于 pipe 归因而非记分板 |
 | msprof 判读 | vec ratio 高 → compute-bound；scalar ratio 高（如 1-token 场景 44% vs 26%）→ issue-bound | 两者的优化手段完全不同：前者减 pass 数/流水，后者减指令数 |
 
+## 流水图 trace.json 采集（涉及流水/pipe 重叠优化的轮次必做）
+
+指标 CSV 不足以证明流水生效。凡做行间流水、pipe 重叠类优化，优化前后各采一份
+指令级流水图 trace.json，存入 traces/ 目录（描述性文件名 + README 写明采集
+条件）并在优化记录文档中引用对比。
+
+```bash
+# ① 指标 CSV 快采（8 张 CSV + msprof 自带结论，日常归因用）
+env -u ASCEND_RT_VISIBLE_DEVICES msprof op --warm-up=10 --launch-count=1 \
+    --output=<dir> --kernel-name=<KernelName> \
+    python benchmarks/<op>_msprof.py 2048
+
+# ② 指令级流水图采集（产出 trace.json；关键差异 = --aic-metrics=InstrTimeline）
+env -u ASCEND_RT_VISIBLE_DEVICES msprof op --warm-up=10 --launch-count=1 \
+    --output=<dir> --kernel-name=<KernelName> --aic-metrics=InstrTimeline \
+    python benchmarks/<op>_msprof.py 2048
+```
+
+- 不加 `--aic-metrics=InstrTimeline` **只会产出 8 张指标 CSV，没有 trace.json**
+- 产出目录结构：`OPPROF_*/trace.json`（每核上万条指令级事件）+ `OpBasicInfo.csv`
+  （Task Duration / Block Dim / 频率）+ `dump/`
+- trace.json 结构：pid=coreN.veccoreN，tid 分三条流水 VECTOR / MTE3 / MTE2，
+  每条事件带 pc_addr / ts / dur
+- 查看：直接拖进 `chrome://tracing` 或 `ui.perfetto.dev`，按 tid 分三条流水看
+  重叠情况（并行度 = 三线忙碌时间之和 ÷ 墙钟，串行 ≈1.0，重叠 >1.0）
+
+
+
 ## 910B (c220) kernel 开发要点
 
 **事件编排（手工流水的基础，错一个就死锁或 NaN）**：
@@ -150,6 +178,8 @@ msprof op --kernel-name=<KernelName> --output=./profiling --aic-metrics=PipeUtil
 - 工具调用安全分类器偶发超时会挡住 Bash/Write：可在
   `.claude/settings.local.json` 配 permissions.allow 白名单（git/pytest/python/
   pip/build/msprof 前缀）使命令确定性放行。
-- msprof op 注意：只保留 `--kernel-name` / `--output`（不加 --launch-count/
-  --warm-up）；被测命令作为位置参数直接跟在选项后（不要用 `--application=`）；
-  shape 用位置参数传给 runner（环境变量穿不透 msprof 启动层）。
+- msprof op 注意：采集配方以"流水图 trace.json 采集"一节为准（`env -u
+  ASCEND_RT_VISIBLE_DEVICES` + `--warm-up=10 --launch-count=1`，流水图另加
+  `--aic-metrics=InstrTimeline`）；被测命令作为位置参数直接跟在选项后
+  （不要用 `--application=`）；shape 用位置参数传给 runner（环境变量穿不透
+  msprof 启动层）。
