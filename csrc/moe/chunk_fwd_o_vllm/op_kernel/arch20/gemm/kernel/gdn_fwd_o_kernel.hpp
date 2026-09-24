@@ -288,45 +288,17 @@ public:
                   "chunk_fwd_o: UB map moved -- these are the offsets the 24/24 "
                   "correctness sweep was measured at, re-verify before changing");
 
-    // Vec2 scratch, aliasing Vec1's region; its Broadcast temp goes in the staging
-    // window instead (live seq 16-22 vs 24, so lifetime-disjoint, and a full 32 KB).
+    // Vec2 scratch, aliasing Vec1's region. NZ-native Vec2: h_work stages at
+    // UB_HW, v_work at UB_STAGE (both straight from HandMmad, no deformat), so
+    // UB_VW is dead -- the Broadcast temp lives there now.
     static constexpr uint32_t UB_G_OFFSET      = 0;
     static constexpr uint32_t UB_GBRC_OFFSET   = 512;
     static constexpr uint32_t UB_OUT_OFFSET    = UB_GBRC_OFFSET + UB_TILE_BYTES;
-    static constexpr uint32_t UB_BRCTMP_OFFSET = UB_STAGE_OFFSET;
+    static constexpr uint32_t UB_BRCTMP_OFFSET = UB_VW_OFFSET;
     static_assert(UB_OUT_OFFSET + 64 * 128 * sizeof(half) <= UB_VEC1_TOP,
                   "chunk_fwd_o: Vec2 scratch does not fit in Vec1's region");
     static_assert(UB_OUT_OFFSET + 64 * 128 * sizeof(half) <= UB_MASK_OFFSET,
                   "chunk_fwd_o: Vec2 scratch collides with the persistent causal mask");
-
-    // block_mmad leaves the matmul result in UB at offset 0 in NZ fractal order
-    // ([N/16 Z-col][M/16 frac][16 rows][16 cols]) before its own fractal loop pushes
-    // it out to GM. On the unified core the very next consumer is a vector epilogue
-    // on THIS core, so the GM round-trip is pure overhead: deformat NZ->ND straight
-    // into a UB home instead. One burst per Z-column -- for a fixed nf the fractals
-    // mf = 0..mFracs-1 are contiguous in UB and their ND rows mf*16 + r increase with
-    // the UB linear index, so the whole column block is a single strided descriptor.
-    __aicore__ inline void DeformatL0CStagingToUb(AscendC::LocalTensor<float> dst,
-                                                  uint32_t mActual, uint32_t nActual,
-                                                  uint32_t stageOff = 0) {
-        AscendC::LocalTensor<float> co2Temp = resource.ubBuf.template GetBufferByByte<float>(stageOff);
-        uint32_t mAligned = (mActual + 15) / 16 * 16;
-        uint32_t nAligned = (nActual + 15) / 16 * 16;
-        uint32_t mFracs = mAligned / 16;
-        uint32_t nFracs = nAligned / 16;
-        AscendC::DataCopyParams p;
-        p.blockCount = static_cast<uint16_t>(mAligned);
-        p.blockLen = static_cast<uint16_t>(16 * sizeof(float) / 32);
-        p.srcStride = 0;
-        p.dstStride = static_cast<uint16_t>((nAligned - 16) * sizeof(float) / 32);
-        for (uint32_t nf = 0; nf < nFracs; ++nf) {
-            AscendC::DataCopy(dst[nf * 16], co2Temp[nf * mFracs * 256], p);
-        }
-        // UB->UB move feeding a V-pipe consumer. Nothing here touches GM, so the
-        // full PIPE_ALL that the old GM path needed is not required.
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
-    }
 
     // ---- NZ-native Vec1 -------------------------------------------------------
     // Causal mask in NZ fractal order, built once:
@@ -436,7 +408,8 @@ public:
         bool needRun = false;
         uint32_t maskedParity = 0;
         AscendC::LocalTensor<float> ubHwTensor = resource.ubBuf.template GetBufferByByte<float>(UB_HW_OFFSET);
-        AscendC::LocalTensor<float> ubVwTensor = resource.ubBuf.template GetBufferByByte<float>(UB_VW_OFFSET);
+        // v_work is HandMmad's C3 staging tile, consumed in place.
+        AscendC::LocalTensor<float> ubVwTensor = resource.ubBuf.template GetBufferByByte<float>(UB_STAGE_OFFSET);
 
         // Persistent causal mask — built once, reused by every Vec1 invocation.
         InitCausalMaskNZ();
@@ -489,9 +462,7 @@ public:
                     gmH[prevOffsets.hOffset], vHeadDim,
                     prevOffsets.blockTokens, vHeadDim, kHeadDim,
                     Q_L1_OFFSET + (maskedParity ^ 1u) * Q_L1_SLOT,
-                    HAND_L1B_OFFSET, UB_STAGE_OFFSET, L0C_C2_OFFSET);
-                // h_work out of the staging buffer before Cube3 overwrites it.
-                DeformatL0CStagingToUb(ubHwTensor, prevOffsets.blockTokens, vHeadDim, UB_STAGE_OFFSET);
+                    HAND_L1B_OFFSET, UB_HW_OFFSET, L0C_C2_OFFSET);
 
                 // Deferred consume of Vec1's UB->L1 store (set above, before Cube2).
                 if (vec1Ran) { AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID3); }
@@ -505,19 +476,20 @@ public:
                     prevOffsets.blockTokens, vHeadDim, prevOffsets.blockTokens,
                     MASKED_L1_OFFSET + (maskedParity ^ 1u) * MASKED_L1_SLOT,
                     HAND_L1B_OFFSET, UB_STAGE_OFFSET, L0C_C3_OFFSET);
-                DeformatL0CStagingToUb(ubVwTensor, prevOffsets.blockTokens, vHeadDim, UB_STAGE_OFFSET);
 
-                // VEC2 for 310P: o = scale * (v_work + exp(g) * h_work).
-                // h_work and v_work are already in UB (ND) from DeformatL0CStagingToUb,
-                // so this reads nothing from GM and runs the whole 64-row tile in one
-                // pass instead of two 32-row stages -- half the vector-op count, and
-                // 64 KB/chunk-head of MTE2 reads removed outright.
+                // VEC2 for 310P, NZ-native: o = scale * (v_work + exp(g) * h_work).
+                // h_work sits in UB_HW and v_work in UB_STAGE exactly as HandMmad
+                // staged them (NZ fractal order) -- both deformats are gone. exp(g)
+                // depends only on the token row, so its NZ broadcast is one
+                // [mAligned][16] row-broadcast block replicated per Z-column (the
+                // Vec1NZ brcA pattern). o leaves UB as one strided zN->ND
+                // descriptor per Z-column.
                 {
                     uint32_t bt = prevOffsets.blockTokens;
-                    uint32_t elems = bt * vHeadDim;
-                    // Scratch lives low in UB: Vec1's buffers down there
-                    // are dead until the next iteration rewrites them, and the cube's
-                    // UB[0] staging is finished for this iteration.
+                    uint32_t mAl = (bt + 15) / 16 * 16;
+                    uint32_t nFr = (vHeadDim + 15) / 16;
+                    uint32_t FRUN = mAl * 16;
+                    uint32_t N = nFr * FRUN;
                     AscendC::LocalTensor<float> gUb =
                         resource.ubBuf.template GetBufferByByte<float>(UB_G_OFFSET);
                     AscendC::LocalTensor<float> gBrc =
@@ -542,35 +514,43 @@ public:
                     AscendC::Exp(gUb, gUb, bt);
                     AscendC::PipeBarrier<PIPE_V>();
                     {
-                        uint32_t dstShape[2] = {bt, vHeadDim};
+                        uint32_t dstShape[2] = {bt, 16};
                         uint32_t srcShape[2] = {bt, 1};
                         AscendC::Broadcast<float, 2, 1>(gBrc, gUb, dstShape, srcShape, brcTmp);
                     }
                     AscendC::PipeBarrier<PIPE_V>();
-                    AscendC::Mul(ubHwTensor, ubHwTensor, gBrc, elems);
+                    for (uint32_t nf = 1; nf < nFr; ++nf) {
+                        AscendC::DataCopy(gBrc[nf * FRUN], gBrc, FRUN);
+                    }
                     AscendC::PipeBarrier<PIPE_V>();
-                    AscendC::Add(ubVwTensor, ubVwTensor, ubHwTensor, elems);
+                    AscendC::Mul(ubHwTensor, ubHwTensor, gBrc, N);
                     AscendC::PipeBarrier<PIPE_V>();
-                    AscendC::Muls(ubVwTensor, ubVwTensor, (float)scale, elems);
+                    AscendC::Add(ubVwTensor, ubVwTensor, ubHwTensor, N);
                     AscendC::PipeBarrier<PIPE_V>();
-                    AscendC::Cast(outUb, ubVwTensor, AscendC::RoundMode::CAST_NONE, elems);
+                    AscendC::Muls(ubVwTensor, ubVwTensor, (float)scale, N);
+                    AscendC::PipeBarrier<PIPE_V>();
+                    AscendC::Cast(outUb, ubVwTensor, AscendC::RoundMode::CAST_NONE, N);
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
                     AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                    AscendC::DataCopyParams cp{1, static_cast<uint16_t>(elems * sizeof(ElementVNEW) / 32), 0, 0};
-                    AscendC::DataCopy(gmO[prevOffsets.ovOffset], outUb, cp);
-                    // Next iteration's Cube1 reuses UB[0] via MTE2/MTE1 and its Vec1
-                    // rewrites this scratch; only the outstanding MTE3 read of outUb
-                    // has to complete first.
+                    // zN -> ND: per Z-column, rows are contiguous 16-element blocks;
+                    // ND rows stride vHeadDim.
+                    AscendC::DataCopyParams op;
+                    op.blockCount = static_cast<uint16_t>(bt);
+                    op.blockLen = static_cast<uint16_t>(16 * sizeof(ElementVNEW) / 32);
+                    op.srcStride = 0;
+                    op.dstStride = static_cast<uint16_t>((vHeadDim - 16) * sizeof(ElementVNEW) / 32);
+                    for (uint32_t nf = 0; nf < nFr; ++nf) {
+                        AscendC::DataCopy(gmO[prevOffsets.ovOffset + nf * 16], outUb[nf * FRUN], op);
+                    }
+                    // Next iteration's Vec1 rewrites this low-UB scratch (V) while
+                    // the o store's MTE3 read of outUb may still be in flight.
                     AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
                     AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
-                    // End-of-body cross-iteration fence. Vec2's V writes (v_work,
-                    // vec2_gbrc, vec2_out) land in UB windows that the NEXT body's
-                    // MTE3 deformats and UB->UB moves overwrite (Mode B dep_graph:
-                    // v2_fma@i0 -> v1_attn_in@i1, v2_brc@i0 -> c1_deformat@i1).
-                    // The block_mmad PipeBarrier<PIPE_ALL> used to cover this by
-                    // accident; now that it is a V_M edge, say it explicitly.
-                    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID4);
-                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID4);
+                    // The old end-of-body V_MTE3 fence is gone with the deformats:
+                    // the next body's only MTE3 readers (MaskedNZToL1, HandMmad
+                    // internals) touch windows Vec2 never writes, and every V-write
+                    // window Vec2 leaves behind is next written by the V pipe, which
+                    // runs in order.
                 }
             }
 
