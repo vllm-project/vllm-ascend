@@ -50,7 +50,7 @@ on:
         type: string
         default: 'digests'
       vllm_commit:
-        description: 'vLLM commit hash to checkout (used when set; mutually exclusive with tag/branch).'
+        description: 'vLLM commit hash or release tag to checkout (mutually exclusive with tag/branch).'
         required: false
         type: string
         default: ''
@@ -206,12 +206,14 @@ jobs:
             echo "Error: 'vllm_commit' and 'vllm_ascend_commit' must be specified together."
             exit 1
           fi
-          for c in "$vllm_commit" "$vllm_ascend_commit"; do
-            if ! echo "$c" | grep -Eq '^[0-9a-f]{7,40}$'; then
-              echo "Error: invalid commit format: $c (expected 7-40 hex chars)."
-              exit 1
-            fi
-          done
+          if ! echo "$vllm_commit" | grep -Eq '^[0-9a-f]{7,40}$|^v[0-9]+(\.[0-9]+){2}((a|b|rc)[0-9]+|(\.post|\.dev)[0-9]+)?$'; then
+            echo "Error: invalid vLLM commit or release tag: $vllm_commit."
+            exit 1
+          fi
+          if ! echo "$vllm_ascend_commit" | grep -Eq '^[0-9a-f]{7,40}$'; then
+            echo "Error: invalid vllm-ascend commit format: $vllm_ascend_commit (expected 7-40 hex chars)."
+            exit 1
+          fi
           commit_mode="true"
         fi
 
@@ -371,7 +373,8 @@ jobs:
           ASCEND_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
           GIT_PROXY=https://gh-proxy.test.osinfra.cn/
           COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
-          VLLM_COMMIT=${{ inputs.vllm_commit }}
+          ${{ inputs.vllm_commit != '' && !startsWith(inputs.vllm_commit, 'v') && format('VLLM_COMMIT={0}', inputs.vllm_commit) || '' }}
+          ${{ startsWith(inputs.vllm_commit, 'v') && format('VLLM_TAG={0}', inputs.vllm_commit) || '' }}
           BUILD_TYPE=${{ inputs.build_type || 'release' }}
           MEMCACHE_VERSION=${{ inputs.memcache_version || '1.3.0' }}
           MEMCACHE_DATE=${{ inputs.memcache_date || '20260921.3' }}
@@ -399,7 +402,10 @@ jobs:
           SUFFIX="-${{ inputs.suffix }}"
         fi
         if [ "${{ inputs.temp_only }}" = "true" ]; then
-          VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
+          case "${{ inputs.vllm_commit }}" in
+            v*) VLLM_SHORT="${{ inputs.vllm_commit }}" ;;
+            *) VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7) ;;
+          esac
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
           TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
         else
@@ -690,7 +696,10 @@ jobs:
           if [ -n "${{ inputs.suffix }}" ]; then
             SUFFIX="-${{ inputs.suffix }}"
           fi
-          VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
+          case "${{ inputs.vllm_commit }}" in
+            v*) VLLM_SHORT="${{ inputs.vllm_commit }}" ;;
+            *) VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7) ;;
+          esac
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
           TAG="${IMAGE}:vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}"
 
@@ -739,7 +748,10 @@ jobs:
           if [ -n "${{ inputs.suffix }}" ]; then
             SUFFIX="-${{ inputs.suffix }}"
           fi
-          VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
+          case "${{ inputs.vllm_commit }}" in
+            v*) VLLM_SHORT="${{ inputs.vllm_commit }}" ;;
+            *) VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7) ;;
+          esac
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
           # Temp tags were created in SWR by build-push-digest, so clean them up there.
           # Skip cleanup if skopeo is not available (no sudo/root on this runner).

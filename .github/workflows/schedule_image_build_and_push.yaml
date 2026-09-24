@@ -57,7 +57,7 @@ on:
           - releases/v0.18.0
           - none
       vllm_commit:
-        description: 'vLLM commit hash (must be paired with vllm_ascend_commit; mutually exclusive with tag/branch). Image will be pushed only to SWR temp repo.'
+        description: 'vLLM commit hash or release tag, e.g. v0.29.0 (must be paired with vllm_ascend_commit; mutually exclusive with tag/branch). Image will be pushed only to SWR temp repo.'
         required: false
         default: ''
         type: string
