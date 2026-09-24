@@ -37,15 +37,6 @@ def bind_kv_cache(
     # Bind kv_caches to ModelRunner
     assert len(runner_kv_caches) == 0
 
-    # V4.1 cache resources are nn.Modules that index their storage as
-    # ``kv_cache[0]``, so the value must be wrapped in a list. Sorted names
-    # give a deterministic binding order across the shared slots.
-    if any(isinstance(forward_context.get(name), DeepseekV41CacheLayer) for name in kv_caches):
-        for layer_name in sorted(kv_caches):
-            forward_context[layer_name].kv_cache = [kv_caches[layer_name]]
-            runner_kv_caches.append(kv_caches[layer_name])
-        return
-
     # Convert kv_caches dict to a list of tensors in the order of layer_index.
     index2name = defaultdict(list)
     for layer_name in kv_caches:
@@ -79,11 +70,9 @@ def bind_kv_cache_to_layers(
 
     Upstream init_kv_cache switched from bind_kv_cache to
     bind_kv_cache_to_layers on main, which calls each layer's bind_kv_cache
-    with the standardized single-tensor layout (vLLM #51718). Ascend still
-    allocates per-layer (k, v) tuples, so other layers keep the raw
-    allocation assigned directly; V4.1 slots dispatch to their own
-    bind_kv_cache, which list-wraps the allocation for the kv_cache[0]
-    contract (mirroring the Ascend bind_kv_cache patch above).
+    with the standardized single-tensor layout (vLLM #51718). Ascend
+    allocates per-layer (k, v) tuples, so assign the raw allocation directly,
+    matching the Ascend bind_kv_cache patch above.
     """
     for layer_name, kv_cache in kv_caches.items():
         layer = forward_context[layer_name]
