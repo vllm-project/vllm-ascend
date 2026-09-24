@@ -320,6 +320,14 @@ class NPUPlatform(Platform):
             if quant_action and hasattr(quant_action, "choices") and quant_action.choices:
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
+            # Same pattern for --kv-cache-dtype: the argparse choices were
+            # built from the upstream CacheDType Literal before this patch
+            # widened it, so append the Ascend-only dtypes here.
+            dtype_action = parser._option_string_actions.get("--kv-cache-dtype")
+            if dtype_action and hasattr(dtype_action, "choices") and dtype_action.choices:
+                for dtype in ("int8", "mxfp8"):
+                    if dtype not in dtype_action.choices:
+                        dtype_action.choices.append(dtype)
 
         if get_current_hardware_profile().quantization_backend_family is QuantizationBackendFamily.STANDARD:
             from vllm_ascend.quantization import (  # noqa: F401

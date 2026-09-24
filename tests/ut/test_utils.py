@@ -849,6 +849,7 @@ class TestRefreshBlockSizeC8MXFP(TestBase):
         )
         cache_config = SimpleNamespace(
             block_size=block_size,
+            cache_dtype="mxfp8",
             # What the hybrid config hook leaves behind: it runs before the
             # quant config exists, so it sizes everything for BF16 K/V.
             mamba_page_size_padded=2048 * 2 * self.HEAD_SIZE * 2 + self.CONV_BYTES,
@@ -871,7 +872,6 @@ class TestRefreshBlockSizeC8MXFP(TestBase):
             model_config=model_config,
             parallel_config=SimpleNamespace(),
             speculative_config=None,
-            quant_config=SimpleNamespace(enable_mxfp_c8_quant=True),
         )
         return vllm_config, model_cls
 

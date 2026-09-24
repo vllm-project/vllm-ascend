@@ -3,9 +3,9 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-import vllm_ascend.attention.c8_mxfp_v1 as c8_module
+import vllm_ascend.attention.attention_c8_mxfp as c8_module
 from tests.ut.base import TestBase
-from vllm_ascend.attention.c8_mxfp_v1 import AscendC8MXFPAttentionBackendImpl
+from vllm_ascend.attention.attention_c8_mxfp import AscendC8MXFPAttentionBackendImpl
 
 
 class TestC8MXFPQfaQueryPlan(TestBase):

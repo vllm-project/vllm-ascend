@@ -120,22 +120,22 @@ from vllm.v1.worker.utils import AttentionGroup, raise_if_nan_logits, select_com
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import (
-    AscendAttentionBackend,
-    AscendAttentionState,
-)
-from vllm_ascend.attention.c8_mxfp_v1 import AscendC8MXFPAttentionBackendImpl
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
-from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.attention.mxfp_kv_cache import (
+from vllm_ascend.attention.attention_c8_mxfp import (
     MXFP8_GROUP_SIZE,
+    AscendC8MXFPAttentionBackendImpl,
     fill_mxfp_v_scale_cache,
     mxfp_k_scale_cache_shape,
     mxfp_v_scale_cache_shape,
     split_hybrid_c8_mxfp_cache_buffer,
 )
+from vllm_ascend.attention.attention_v1 import (
+    AscendAttentionBackend,
+    AscendAttentionState,
+)
+from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
+from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
@@ -926,21 +926,16 @@ class NPUModelRunner(GPUModelRunner):
     def _copy_kv_cache_blocks_by_layer_views(self, block_copies: list) -> None:
         """Apply prefix-cache CoW block copies through the per-layer views.
 
-        The generic runner views each cache tensor's whole untyped_storage()
-        as (num_blocks, page_bytes) and copies whole pages. That breaks on
-        Ascend twice: PD deployments over-allocate 2 MiB-aligned buffers
-        (storage = num_blocks * page + alignment, so the divisibility assert
-        fires), and hybrid buffers are sectioned ([pad|conv|..|k|ssm|..|v|pad])
-        rather than block-major, so a whole-storage block view would copy
-        across section boundaries even when the assert passes. Every per-layer
-        cache view is block-indexed on dim 0, so copying through the views is
-        correct for every layout -- mirroring KVBlockZeroer's approach.
+        The generic runner views each cache tensor's whole storage as
+        (num_blocks, page_bytes), which breaks on Ascend: PD deployments
+        over-allocate 2 MiB-aligned buffers (the divisibility assert fires),
+        and hybrid buffers are sectioned rather than block-major. Every
+        per-layer cache view is block-indexed on dim 0, so copying through
+        the views is correct for every layout.
 
-        Dim 0 counts scheduler blocks only for recurrent-state views. Hybrid
-        attention views are split into kernel blocks, so scheduler block ``b``
-        owns rows ``[b * scale, (b + 1) * scale)``; indexing those by the
-        scheduler id would copy the wrong rows into a block another request
-        may own.
+        Dim 0 counts scheduler blocks only for recurrent-state views; hybrid
+        attention views are split into kernel blocks, so scheduler block
+        ``b`` owns rows ``[b * scale, (b + 1) * scale)``.
         """
         ids = torch.tensor(block_copies, dtype=torch.long, device=self.device)
         num_blocks = self.kv_cache_config.num_blocks
@@ -956,9 +951,7 @@ class NPUModelRunner(GPUModelRunner):
                     src_rows, dst_rows = rows.unbind(dim=1)
                     row_ids_by_scale[scale] = (src_rows.reshape(-1), dst_rows.reshape(-1))
                 src_rows, dst_rows = row_ids_by_scale[scale]
-                # aclnnIndex rejects FP8 dtypes (EZ1001); copy through a uint8
-                # byte view instead -- same storage, same rows, same bytes
-                # (same workaround as scatter_mxfp_k_scale_cache).
+                # aclnnIndex rejects FP8 dtypes; copy through a uint8 view.
                 if cache_tensor.dtype == torch.float8_e4m3fn:
                     cache_tensor = cache_tensor.view(torch.uint8)
                 cache_tensor[dst_rows] = cache_tensor[src_rows]
@@ -979,8 +972,18 @@ class NPUModelRunner(GPUModelRunner):
                     req_state.prev_num_draft_len = 0
 
         block_copies = scheduler_output.kv_cache_block_copies
-        if block_copies:
-            scheduler_output.kv_cache_block_copies = None
+        if block_copies and is_c8_mxfp_kv_quant(self.vllm_config):
+            # C8 scale caches live in the NZ 6-D layout where a scheduler
+            # block spans non-contiguous kernel rows; the generic segmented
+            # copy below would slice them. C8 takes the per-layer kernel-row
+            # views, every other layout keeps the generic path.
+            if scheduler_output.new_block_ids_to_zero:
+                self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
+            scheduler_output = replace(
+                scheduler_output,
+                new_block_ids_to_zero=[],
+                kv_cache_block_copies=[],
+            )
             self._copy_kv_cache_blocks_by_layer_views(block_copies)
 
         self._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
@@ -4700,37 +4703,16 @@ class NPUModelRunner(GPUModelRunner):
     def _fill_c8_mxfp_v_scale_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """Broadcast every C8 MXFP layer's static V scale into its scale cache.
 
-        V is quantized with the checkpoint's per-channel E8M0 scale, so its
-        scale cache holds one value per (kv head, channel) repeated over every
-        block and token slot, and it never changes at inference. Filling it
-        here, once the caches exist, is what keeps it off the attention path.
-
-        Doing it lazily in forward could not be made both correct and free.
-        ACL-graph capture records a write without executing it while the
-        Python bookkeeping beside it runs for real, so a cache first reached
-        during capture either stayed zero forever -- V dequantizing to zero,
-        attention returning exactly zero, MTP acceptance collapsing the moment
-        the draft graph was enabled -- or, once that was guarded, re-broadcast
-        the entire cache on every replay for the rest of the run. Neither
-        applies to a fill that happens before any request, capture or replay.
-
-        The impl class is installed during create_weights and the scale itself
-        is finalized in process_weights_after_loading, both at model load, so
-        every layer here is ready -- draft models included.
+        Filled once the caches exist, before any request, capture or replay --
+        a fill inside forward could not be made both correct and free under
+        graph capture (a write during capture either freezes unexecuted or
+        replays the whole broadcast every step).
         """
         static_forward_context = self.compilation_config.static_forward_context
         for layer_name, kv_cache in kv_caches.items():
             layer = static_forward_context.get(layer_name)
             if not isinstance(getattr(layer, "impl", None), AscendC8MXFPAttentionBackendImpl):
                 continue
-            # Fail loudly here rather than serve zeros: a C8 MXFP layer whose
-            # V scale never lands looks like a model quality problem, not a
-            # setup one, and that misdiagnosis has cost a debugging round once.
-            if not isinstance(kv_cache, tuple) or len(kv_cache) != 4:
-                raise RuntimeError(
-                    f"C8_MXFP layer {layer_name} needs a (k, v, k_scale, v_scale) KV cache tuple, "
-                    f"got {type(kv_cache).__name__}."
-                )
             fill_mxfp_v_scale_cache(layer.v_cache_scale, kv_cache[3])
 
     def initialize_kv_cache_tensors(
@@ -5223,9 +5205,7 @@ class NPUModelRunner(GPUModelRunner):
                             )
                         elif self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
                             # The packed spec head_size carries the E8M0 scale
-                            # bytes (head_size + head_size // MXFP8_GROUP_SIZE,
-                            # see get_kv_cache_spec); recover the real K/V head
-                            # dims and split the page budget into four raw
+                            # bytes; split the page budget into four raw
                             # payloads: K, V, K-scale, V-scale.
                             ori_k_dim = k_dim // (1 + MXFP8_GROUP_SIZE) * MXFP8_GROUP_SIZE
                             ori_v_dim = v_dim // (1 + MXFP8_GROUP_SIZE) * MXFP8_GROUP_SIZE
@@ -5281,11 +5261,8 @@ class NPUModelRunner(GPUModelRunner):
                             if current_sparse_sfa_c8:
                                 kv_cache_raw_tensors[layer_name_inner] = (k_tensor,)
                             elif self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
-                                # Same per-layer region contract as the generic
-                                # (k, v) pair, with the two E8M0 scale payloads
-                                # allocated alongside: every shared layer owns
-                                # its private 4-tuple, so block indices cannot
-                                # collide across layers here either.
+                                # Per-layer private 4-tuple, same region
+                                # contract as the generic (k, v) pair.
                                 assert v_tensor is not None
                                 k_scale_tensor = self._allocate_int8_cache_tensor(
                                     k_scale_tensor_size, alignment
@@ -5549,7 +5526,6 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         kv_caches[layer_name] = (indexer_k_cache, indexer_scale_cache)
                 elif isinstance(current_kv_cache_spec, AttentionSpec):
-                    hybrid_c8_raw_tensor = None
                     # cache_only_layers (extract_hidden_states) are allocated
                     # as a single tensor by the branch at the top of
                     # _allocate_kv_cache_tensors; route them to the dedicated
@@ -5593,8 +5569,6 @@ class NPUModelRunner(GPUModelRunner):
                         # Currently, we ensure that the same kvcache format is used even if there
                         # is no shared layer, such as the full attention mtp layer of qwen3.5, etc.
                         raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name], kv_cache_raw_tensors[layer_name]
-                        if self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
-                            hybrid_c8_raw_tensor = raw_k_tensor
                         sum_page_size_bytes = raw_k_tensor.numel()
                         raw_kv_is_combined = True
                     elif (
@@ -5655,7 +5629,7 @@ class NPUModelRunner(GPUModelRunner):
                         ]
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     assert raw_k_tensor is not None
-                    if hybrid_c8_raw_tensor is not None:
+                    if raw_kv_is_combined and self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
                         # The shared raw buffer uses Mamba's padded page size,
                         # which is intentionally larger than the C8 payload.
                         # KVCacheManager only addresses the common num_blocks.
@@ -5697,9 +5671,9 @@ class NPUModelRunner(GPUModelRunner):
                             or getattr(current_kv_cache_spec, "page_size_padded", None) is not None
                         )
                     if self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
-                        # C8-MXFP payloads are either an exact-size 4-tuple or
-                        # carved from the tail of the shared hybrid buffer; the
-                        # generic page-padding trim would slice them incorrectly.
+                        # C8 payloads are exact-size 4-tuples or carved from
+                        # the tail of the shared hybrid buffer; the generic
+                        # page-padding trim would slice them incorrectly.
                         should_trim_page_padding = False
                     if should_trim_page_padding:
                         # vLLM #51718 groups KVCacheTensor.layers by spec, so an
@@ -5740,7 +5714,7 @@ class NPUModelRunner(GPUModelRunner):
                                 padding_size = raw_k_tensor.numel() - nope_size - rope_size
                                 assert padding_size >= 0
                                 raw_kv_tensor = raw_k_tensor[padding_size:]
-                                raw_k_tensor = raw_k_tensor[:nope_size]
+                                raw_k_tensor = raw_kv_tensor[:nope_size]
                                 raw_v_tensor = raw_kv_tensor[nope_size:]
                             else:
                                 assert raw_v_tensor is not None
@@ -5753,14 +5727,14 @@ class NPUModelRunner(GPUModelRunner):
                         # carries the packed scale bytes.
                         k_shape = (*kv_cache_shape[1:-1], self.model_config.hf_text_config.head_dim)
                         v_shape = k_shape
-                        if hybrid_c8_raw_tensor is not None:
+                        if raw_kv_is_combined:
                             (
                                 raw_k_tensor,
                                 raw_v_tensor,
                                 raw_k_scale_tensor,
                                 raw_v_scale_tensor,
                             ) = split_hybrid_c8_mxfp_cache_buffer(
-                                hybrid_c8_raw_tensor,
+                                raw_k_tensor,
                                 k_shape,
                                 v_shape,
                             )

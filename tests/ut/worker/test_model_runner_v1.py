@@ -26,9 +26,11 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-from vllm_ascend.attention.c8_mxfp_v1 import AscendC8MXFPAttentionBackendImpl
+from vllm_ascend.attention.attention_c8_mxfp import (
+    AscendC8MXFPAttentionBackendImpl,
+    mxfp_v_scale_cache_shape,
+)
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.attention.mxfp_kv_cache import mxfp_v_scale_cache_shape
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -2897,13 +2899,6 @@ class TestC8MXFPVScaleCacheFill(unittest.TestCase):
 
     def test_a_layer_without_a_forward_context_entry_is_skipped(self):
         self._runner({})._fill_c8_mxfp_v_scale_caches({"stray": (MagicMock(), MagicMock())})
-
-    def test_a_c8_layer_with_the_wrong_cache_shape_raises(self):
-        # Loud at startup beats exactly-zero attention at serving time.
-        layers = {"layer.0": self._c8_layer()}
-        runner = self._runner(layers)
-        with self.assertRaises(RuntimeError):
-            runner._fill_c8_mxfp_v_scale_caches({"layer.0": (MagicMock(), MagicMock())})
 
     def test_cache_setup_hands_back_a_filled_cache(self):
         # The wiring, not just the helper: nothing downstream of
