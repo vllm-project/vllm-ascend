@@ -205,6 +205,11 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
         if not layer_names:
             raise ValueError("DSA-CP metadata builder requires at least one layer name")
+        self.layer_names = tuple(layer_names)
+        self.rope_layer_names = tuple(
+            f"{layer_name.removesuffix('.swa_cache')}.attn" if layer_name.endswith(".swa_cache") else layer_name
+            for layer_name in layer_names
+        )
         # vLLM assigns one builder result to every layer in an attention group.
         self.cache_group_key = layer_names[0]
         hf_config = self.model_config.hf_config
@@ -421,7 +426,11 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         # Draft steps update positions independently. Reusing the global RoPE
         # cache can let later draft steps overwrite step-0 metadata.
-        cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
+        cos, sin = get_cos_and_sin_dsa(
+            input_positions,
+            use_cache=False,
+            layer_names=self.rope_layer_names,
+        )
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
 
