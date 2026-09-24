@@ -92,7 +92,8 @@ CATLASS_DEVICE void HmLoadGmToL1(
 /// MTE1_MTE2 late in the body orders every earlier LoadData before the next
 /// prefetch, and the per-cube L0C regions are disjoint.
 template <class ArchTag, bool B_COL_MAJOR = false, bool A_FROM_L1 = false, bool A_COL_MAJOR = false,
-          bool B_FROM_L1 = false, bool B_NZ_GM = false, bool LEAN_TAIL = false, bool NO_MTE1_MTE2 = false>
+          bool B_FROM_L1 = false, bool B_NZ_GM = false, bool LEAN_TAIL = false, bool NO_MTE1_MTE2 = false,
+          bool NO_M_MTE1 = false>
 CATLASS_DEVICE void HandMmad(
     Catlass::Arch::Resource<ArchTag> &res,
     AscendC::GlobalTensor<half> const &gmA, uint32_t lda,
@@ -156,8 +157,16 @@ CATLASS_DEVICE void HandMmad(
         p.sid = 0;  p.dstGap = 0;  p.ifTranspose = A_COL_MAJOR;  p.addrMode = 0;
         const uint32_t dstRowStride = kR * HM_C0;
         const uint32_t srcRowStride = A_COL_MAJOR ? dstRowStride : HM_FRAC;
-        for (uint32_t i = 0; i < mR / HM_C0; ++i) {
-            AscendC::LoadData(l0a[i * dstRowStride], l1A[i * srcRowStride], p);
+        if constexpr (A_COL_MAJOR) {
+            // src and dst are BOTH fully contiguous fractal streams here
+            // (srcStride 1, row strides equal), so the whole tile is one
+            // LoadData issue instead of mR/16 -- pure scalar-issue savings.
+            p.repeatTimes = static_cast<uint16_t>((mR / HM_C0) * (kR / HM_C0));
+            AscendC::LoadData(l0a, l1A, p);
+        } else {
+            for (uint32_t i = 0; i < mR / HM_C0; ++i) {
+                AscendC::LoadData(l0a[i * dstRowStride], l1A[i * srcRowStride], p);
+            }
         }
     }
     {   // -> nZ.  From nZ (B_COL_MAJOR) it is a straight copy; from zN it transposes.
@@ -168,8 +177,14 @@ CATLASS_DEVICE void HandMmad(
         p.sid = 0;  p.dstGap = 0;  p.ifTranspose = !B_COL_MAJOR;  p.addrMode = 0;
         const uint32_t dstRowStride = nR * HM_C0;
         const uint32_t srcRowStride = B_COL_MAJOR ? dstRowStride : HM_FRAC;
-        for (uint32_t i = 0; i < kR / HM_C0; ++i) {
-            AscendC::LoadData(l0b[i * dstRowStride], l1B[i * srcRowStride], p);
+        if constexpr (B_COL_MAJOR) {
+            // Same contiguity argument as the A_COL_MAJOR path.
+            p.repeatTimes = static_cast<uint16_t>((kR / HM_C0) * (nR / HM_C0));
+            AscendC::LoadData(l0b, l1B, p);
+        } else {
+            for (uint32_t i = 0; i < kR / HM_C0; ++i) {
+                AscendC::LoadData(l0b[i * dstRowStride], l1B[i * srcRowStride], p);
+            }
         }
     }
 
@@ -187,8 +202,10 @@ CATLASS_DEVICE void HandMmad(
     AscendC::Mmad(l0c, l0a, l0b, mp);
 
     // L0A/L0B are free once the mmad retires.
-    AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID7);
-    AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID7);
+    if constexpr (!NO_M_MTE1) {
+        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID7);
+        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID7);
+    }
 
     // ---- L0C -> UB (NZ), the same copy the Catlass block-out used ----
     // copy_matrix_cc_to_ubuf issues on the V pipe (kernel_event.h GetQueEvt, L0C->UB
