@@ -158,32 +158,20 @@ class TestShouldReshapeWoATo3d(unittest.TestCase):
         """Regression: ModelSlim keeps unquantized bf16 wo_a while the model
         carries a global quant config; it still needs the 3D reshape in
         weight_loader (previously gated on quant_config is None)."""
-        self.assertTrue(
-            self._reshape_decision(
-                "model.layers.0.self_attn.wo_a", torch.bfloat16, mx_quant_fusion=True
-            )
-        )
+        self.assertTrue(self._reshape_decision("model.layers.0.self_attn.wo_a", torch.bfloat16, mx_quant_fusion=True))
 
     def test_bf16_wo_a_reshapes_without_mx_quant_fusion(self):
-        self.assertTrue(
-            self._reshape_decision(
-                "model.layers.0.self_attn.wo_a", torch.bfloat16, mx_quant_fusion=False
-            )
-        )
+        self.assertTrue(self._reshape_decision("model.layers.0.self_attn.wo_a", torch.bfloat16, mx_quant_fusion=False))
 
     def test_quantized_wo_a_not_reshaped_by_weight_loader(self):
         """fp8 wo_a is left to the quantization path (process_weights_after_loading)."""
         self.assertFalse(
-            self._reshape_decision(
-                "model.layers.0.self_attn.wo_a", torch.float8_e4m3fn, mx_quant_fusion=True
-            )
+            self._reshape_decision("model.layers.0.self_attn.wo_a", torch.float8_e4m3fn, mx_quant_fusion=True)
         )
 
     def test_non_wo_a_layer_not_reshaped(self):
         self.assertFalse(
-            self._reshape_decision(
-                "model.layers.0.self_attn.o_proj", torch.bfloat16, mx_quant_fusion=True
-            )
+            self._reshape_decision("model.layers.0.self_attn.o_proj", torch.bfloat16, mx_quant_fusion=True)
         )
 
 
