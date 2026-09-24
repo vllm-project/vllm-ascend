@@ -127,16 +127,25 @@ class AscendDSAV41CPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
 class AscendDSAV41CPImpl(AscendDSAV41Impl):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._kv_gather_buffers: dict[tuple[torch.Size, torch.dtype, torch.device], torch.Tensor] = {}
+        self._kv_gather_buffer: torch.Tensor | None = None
 
     def _all_gather_kv_hidden_states(self, hidden_states):
         """Start the SP activation gather while local Q preprocessing runs."""
         group = get_tp_group()
-        key = (hidden_states.shape, hidden_states.dtype, hidden_states.device)
-        output = self._kv_gather_buffers.get(key)
-        if output is None:
-            output = hidden_states.new_empty((hidden_states.shape[0] * group.world_size, *hidden_states.shape[1:]))
-            self._kv_gather_buffers[key] = output
+        output_shape = (hidden_states.shape[0] * group.world_size, *hidden_states.shape[1:])
+        # Long prefills have many chunk sizes; retain only one buffer per layer.
+        output = self._kv_gather_buffer
+        if (
+            output is None
+            or output.shape[0] < output_shape[0]
+            or output.shape[1:] != output_shape[1:]
+            or output.dtype != hidden_states.dtype
+            or output.device != hidden_states.device
+        ):
+            output = hidden_states.new_empty(output_shape)
+            self._kv_gather_buffer = output
+        else:
+            output = output[: output_shape[0]]
         return all_gather_async(hidden_states, group, output=output, async_op=True)
 
     @staticmethod
