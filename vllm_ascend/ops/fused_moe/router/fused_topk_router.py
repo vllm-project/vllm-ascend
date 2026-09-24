@@ -108,7 +108,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 tid2eid_ones = self.tid2eid.to(torch.int32)
                 if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
                     prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
-                    input_ids = prepare_finalize.all_gather_input_id_with_dp_group(input_ids)
+                    input_ids = prepare_finalize.all_gather_input_ids(input_ids)
                 else:
                     input_ids = _EXTRA_CTX.moe_comm_method.pad_and_split_input_ids(input_ids)
                 if _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER and input_ids.numel() != router_logits.shape[0]:

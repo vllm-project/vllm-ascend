@@ -9,7 +9,7 @@ Context Parallel (CP) serves long-context requests by splitting work or KV-cache
 
 For a general introduction to these two strategies, see the upstream [vLLM Context Parallel Deployment](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/) guide.
 
-DSA-CP is a separate sparse-attention optimization controlled by `additional_config.enable_dsa_cp`. It will be removed once PCP support is stable. See [Additional Configuration](../configuration/additional_config.md) for its configuration and model requirements.
+DSA-CP is a separate sparse-attention optimization controlled by `additional_config.enable_dsa_cp`. Enabling it automatically enables FlashComm as the all2all backend; there is no need to set `enable_flashcomm1` separately. It will be removed once PCP support is stable. See [Additional Configuration](../configuration/additional_config.md) for its configuration and model requirements.
 
 ## Supported Scenarios
 
@@ -101,6 +101,14 @@ DCP reuses the TP devices and does not increase the world size.
     ```
 
 ### DSA-CP
+
+DSA-CP will be fully deprecated once PCP is ready. PCP is currently experimental,
+with support for some feature combinations still in progress.
+
+To try PCP with the same world size, replace TP size `N > 1` with
+`--tensor-parallel-size 1 --prefill-context-parallel-size N` and remove
+`enable_dsa_cp` from `additional_config`. With TP size 1, PCP requires additional
+ranks. Check the compatibility and limitations above before migrating.
 
 ```bash
 vllm serve <glm-5.2-model> \

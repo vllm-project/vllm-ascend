@@ -191,7 +191,11 @@ from vllm_ascend.utils import (
     weak_ref_tensor,
     weak_ref_tensors,
 )
-from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
+from vllm_ascend.worker.dcp_utils import (
+    DCPAsyncSpecDecodeRebuildResult,
+    DCPDummyRunMetadata,
+    DCPManager,
+)
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataExecutor,
     DeviceMetadataTask,
@@ -236,6 +240,7 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+
 
 
 @dataclass
@@ -1545,6 +1550,21 @@ class NPUModelRunner(GPUModelRunner):
             total_num_scheduled_tokens,
         )
 
+    def set_active_loras(
+        self,
+        input_batch,
+        num_scheduled_tokens: np.ndarray,
+        num_sampled_tokens: np.ndarray | None = None,
+        mapping_type=None,
+    ) -> None:
+        # Do not forward mapping_type=None: the parent default is
+        # LoRAMappingType.LANGUAGE, and older vLLM has no 4th argument.
+        # Only pass it when the caller set TOWER/CONNECTOR/etc.
+        if mapping_type is None:
+            super().set_active_loras(input_batch, num_scheduled_tokens, num_sampled_tokens)
+        else:
+            super().set_active_loras(input_batch, num_scheduled_tokens, num_sampled_tokens, mapping_type)
+
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
             attn_state = AscendAttentionState.PrefillNoCache
@@ -1980,8 +2000,8 @@ class NPUModelRunner(GPUModelRunner):
         # this width can change step to step (mirrors vLLM's GPUModelRunner
         # ``prev_num_spec_tokens`` bookkeeping). Kept before the early returns so
         # it is updated even when the CPU copy itself is skipped.
-        if torch.is_tensor(self._draft_token_ids):  # type: ignore[has-type]
-            self.prev_num_spec_tokens = self._draft_token_ids.shape[1]  # type: ignore[has-type]
+        if isinstance(self._draft_token_ids, torch.Tensor):
+            self.prev_num_spec_tokens = self._draft_token_ids.shape[1]
         if not self.num_spec_tokens:
             return
         if self.use_async_scheduling and not (
@@ -1992,8 +2012,8 @@ class NPUModelRunner(GPUModelRunner):
             return
         self._draft_token_req_ids = self.input_batch.req_ids.copy()
 
-        draft_token_ids: torch.Tensor = self._draft_token_ids  # type: ignore[has-type]
-        if not torch.is_tensor(draft_token_ids):
+        draft_token_ids = self._draft_token_ids
+        if not isinstance(draft_token_ids, torch.Tensor):
             return
         assert self.draft_token_ids_event is not None
         assert self.draft_token_ids_copy_stream is not None
@@ -2483,6 +2503,89 @@ class NPUModelRunner(GPUModelRunner):
             deferred_state_corrections_fn()
         return None
 
+    def _num_drafter_query_tokens(self) -> int:
+        """Return the maximum query width consumed by one drafter request."""
+        assert self.speculative_config is not None
+        if isinstance(self.drafter, AscendDSparkProposer):
+            # DSpark variants use either K or K + 1 queries per request.
+            return self.drafter.num_query_per_req
+        return self.num_spec_tokens + int(self.speculative_config.use_dflash())
+
+    def _input_fits_in_drafter(
+        self, common_attn_metadata: CommonAttentionMetadata | None
+    ) -> bool:
+        """Return whether the complete drafter query fits its model limit."""
+        if common_attn_metadata is None:
+            return False
+        if self.drafter is None:
+            # Only the last PP rank owns and runs the drafter. Other PP ranks
+            # must not apply a local drafter limit or join drafter DP work.
+            return True
+        return (
+            common_attn_metadata.max_seq_len + self._num_drafter_query_tokens()
+            <= self.effective_drafter_max_model_len
+        )
+
+    def _drafter_runs_model_forward(self) -> bool:
+        """Return whether the proposer participates in model collectives."""
+        spec_config = self.speculative_config
+        return spec_config is not None and (
+            spec_config.use_eagle()
+            or spec_config.uses_draft_model()
+            or spec_config.uses_extract_hidden_states()
+        )
+
+    def _skip_drafting(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampled_token_ids: torch.Tensor | None = None,
+    ) -> None:
+        """Preserve sampled state and DP alignment; publish zero draft placeholders."""
+        if (
+            sampled_token_ids is not None
+            and self.valid_sampled_token_count_event is not None
+            and self.drafter is not None
+            and self._drafter_runs_model_forward()
+        ):
+            next_token_ids, valid_sampled_tokens_count = (
+                self.drafter.prepare_next_token_ids_padded(
+                    sampled_token_ids,
+                    self.requests,
+                    self.input_batch,
+                    self.discard_request_indices.gpu,
+                    self.num_discarded_requests,
+                )
+            )
+            self._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
+
+        if (
+            self.drafter is not None
+            and self.parallel_config.data_parallel_size > 1
+            and self._drafter_runs_model_forward()
+        ):
+            if isinstance(self.drafter, AscendDSparkProposer):
+                # DSpark requires a complete synthetic query group.
+                self.drafter.dummy_run(
+                    num_tokens=self.drafter.num_query_per_req,
+                    num_reqs=1,
+                )
+            else:
+                # Match upstream: one token is sufficient for the dummy rank;
+                # drafter DP synchronization pads it to the busiest rank.
+                self.drafter.dummy_run(num_tokens=1)
+
+        # Async scheduling may already have reserved speculative input slots.
+        # Keep a full-width tensor, including when this step produces no drafts,
+        # so the next step can scatter zeros instead of stale draft token IDs.
+        self._draft_token_ids: list[list[int]] | torch.Tensor | None = torch.zeros(
+            1, device=self.device, dtype=torch.int32
+        ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
+        self._draft_probs = None
+        self._draft_prob_req_ids = None
+        self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
+
     @torch.inference_mode()
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
@@ -2545,7 +2648,17 @@ class NPUModelRunner(GPUModelRunner):
 
         self.valid_sampled_token_count_gpu = None
 
+        input_fits_in_drafter = self.speculative_config is None or self._input_fits_in_drafter(
+            spec_decode_common_attn_metadata
+        )
+
         def propose_draft_token_ids(sampled_token_ids):
+            if not input_fits_in_drafter:
+                self._skip_drafting(
+                    scheduler_output,
+                    sampled_token_ids if use_padded_batch else None,
+                )
+                return
             assert spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
                 sampled_token_ids,
@@ -3023,9 +3136,12 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        # A stateful P/D handoff can use a uniform decode graph even at
-        # prompt_len - 1 computed tokens. Keep first-token prefills out.
         has_initial_state = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        if self.use_dcp:
+            # DCP decode graphs require the full prompt to be computed.
+            has_initial_state = has_initial_state and np.all(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs] >= self.input_batch.num_prompt_tokens[:num_reqs]
+            )
         uniform_decode = (
             (
                 has_initial_state
@@ -3120,6 +3236,7 @@ class NPUModelRunner(GPUModelRunner):
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
         num_scheduled_tokens_np: np.ndarray | None = None,
+        dcp_dummy_metadata: DCPDummyRunMetadata | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         skip_gdn_state_update: bool = False,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
@@ -3167,7 +3284,9 @@ class NPUModelRunner(GPUModelRunner):
                 return None, block_table_tensor
 
             fixed_decode_seq_lens_cpu = None
-            if self.use_async_spec_decode:
+            if dcp_dummy_metadata is not None:
+                fixed_decode_seq_lens_cpu = dcp_dummy_metadata.seq_lens_cpu
+            elif self.use_async_spec_decode:
                 fixed_decode_seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs].numpy()
 
             assert num_reqs_padded is not None
@@ -3219,14 +3338,27 @@ class NPUModelRunner(GPUModelRunner):
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
         self.long_seq_metadata, block_table_gid_0 = _get_dcp_metadata(block_table_gid_0)
-        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
-            :num_reqs_padded
-        ]
-        num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
-            :num_reqs_padded
-        ]
-        is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
-        is_prefilling[num_reqs:] = False
+        if dcp_dummy_metadata is not None:
+            # A DCP dummy decode must not inherit request state from the
+            # previous real batch. Keep this local to metadata construction so
+            # the persistent input batch is not modified.
+            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+                :num_reqs_padded
+            ].clone()
+            num_computed_tokens_cpu.zero_()
+            num_computed_tokens_cpu[:num_reqs].copy_(
+                torch.from_numpy(dcp_dummy_metadata.num_computed_tokens_cpu)
+            )
+            is_prefilling = torch.zeros_like(num_computed_tokens_cpu, dtype=torch.bool)
+        else:
+            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+                :num_reqs_padded
+            ]
+            num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
+                :num_reqs_padded
+            ]
+            is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
+            is_prefilling[num_reqs:] = False
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
         if self.use_async_spec_decode:
             # GPU tensors are authoritative in async mode.
@@ -3570,16 +3702,7 @@ class NPUModelRunner(GPUModelRunner):
             force_has_lora=num_active_loras > 0,
             force_num_active_loras=num_active_loras,
         )
-        if self.use_dcp:
-            self.dcp_manager.init_batch_info(
-                num_scheduled_tokens,
-                num_reqs,
-                self.input_batch.num_computed_tokens_cpu,
-                self.input_batch.num_prompt_tokens,
-            )
-            if self.speculative_config:
-                self.dcp_manager.query_lens_full.cpu[:num_reqs] = torch.from_numpy(num_scheduled_tokens)
-                self.dcp_manager.query_lens_full.copy_to_gpu()
+        dcp_dummy_metadata = None
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = _cudagraph_mode
         else:
@@ -3632,6 +3755,22 @@ class NPUModelRunner(GPUModelRunner):
                         if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config)
                         else max_query_len
                     )  # type: ignore[assignment]
+
+                if self.use_dcp:
+                    dcp_dummy_metadata = (
+                        self.dcp_manager.prepare_dummy_run_metadata(
+                            num_scheduled_tokens=num_scheduled_tokens,
+                            num_reqs=num_reqs,
+                            seq_len=int(seq_lens),
+                            num_computed_tokens=(
+                                self.input_batch.num_computed_tokens_cpu
+                            ),
+                            num_prompt_tokens=self.input_batch.num_prompt_tokens,
+                            uniform_decode=uniform_decode,
+                        )
+                    )
+                    if dcp_dummy_metadata is not None:
+                        seq_lens = dcp_dummy_metadata.seq_len
 
                 self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
                 self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
@@ -3686,6 +3825,7 @@ class NPUModelRunner(GPUModelRunner):
                     ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                     for_cudagraph_capture=is_graph_capturing,
                     num_scheduled_tokens_np=num_scheduled_tokens,
+                    dcp_dummy_metadata=dcp_dummy_metadata,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
                     skip_gdn_state_update=skip_gdn_state_update,

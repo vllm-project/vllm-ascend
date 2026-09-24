@@ -5,11 +5,17 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
+import vllm.envs as envs
 from transformers import PretrainedConfig
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -23,9 +29,10 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.models.common.ops.sequence_parallel import sp_padding_mask, sp_shard
 from vllm_ascend.models.deepseek_v4.model import (
-    DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
+    DeepseekV4DecoderLayer,
     DeepseekV4MoE,
     get_spec_layer_idx_from_weight_name,
 )
@@ -86,7 +93,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             topk_indices_buffer = None
 
         self.shared_head = SharedHead(config=config, prefix=prefix, quant_config=quant_config)
-        self.mtp_block = DeepseekV2DecoderLayer(
+        self.mtp_block = DeepseekV4DecoderLayer(
             vllm_config,
             prefix,
             config=self.config,
@@ -118,6 +125,24 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         previous_hidden_states = previous_hidden_states.view(-1, self.hc_mult, self.config.hidden_size)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
+        full_num_tokens = positions.shape[0]
+        use_sp = self.mtp_block.use_sequence_parallel_moe
+        # Shard the mask only for the duration of this forward: the same
+        # forward_context is reused across draft steps with full-length
+        # inputs, so a sharded mask must not leak to the next step.
+        orig_is_padding = None
+        forward_context = None
+        if use_sp:
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+                forward_context = get_forward_context()
+                orig_is_padding = forward_context.is_padding
+                forward_context.is_padding = sp_padding_mask(orig_is_padding, inputs_embeds)
+            # sp_shard supports arbitrary leading dims; upstream
+            # sequence_parallel_chunk only pads 2D correctly and would pad
+            # the hc_mult dim of [N, hc_mult, H] instead of the token dim.
+            inputs_embeds = sp_shard(inputs_embeds)
+            previous_hidden_states = sp_shard(previous_hidden_states)
+
         hidden_states = self.e_proj(inputs_embeds).unsqueeze(-2) + self.h_proj(previous_hidden_states)
 
         hidden_states, residual = self.mtp_block(
@@ -126,6 +151,13 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             residual=None,
             input_ids=None,
         )
+
+        if use_sp:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[:full_num_tokens]
+
+        if forward_context is not None:
+            forward_context.is_padding = orig_is_padding
 
         # hidden_states = self.hc_head(hidden_states, self.hc_head_fn,
         #                              self.hc_head_scale, self.hc_head_base)
@@ -226,7 +258,7 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 continue
             assert isinstance(layer, DeepSeekMultiTokenPredictorLayer)
             layer = layer.mtp_block
-            assert isinstance(layer, DeepseekV2DecoderLayer)
+            assert isinstance(layer, DeepseekV4DecoderLayer)
             if isinstance(layer.mlp, DeepseekV4MoE):
                 # Pick last one layer since the first ones may be dense layers.
                 example_moe = layer.mlp

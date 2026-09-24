@@ -86,6 +86,30 @@ class TestAscendStoreConnector(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(metadata, original_metadata)
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_memcache_barrier_config_reaches_backend(self, mock_worker_cls, mock_lookup_cls):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        for extra, expected in (({}, True), ({"memcache_dp_init_barrier": False}, False)):
+            with self.subTest(extra=extra):
+                config = self._make_vllm_config(extra_config={"backend": "memcache", **extra})
+                AscendStoreConnector(config, KVConnectorRole.WORKER)
+                kwargs = mock_worker_cls.call_args.kwargs
+                self.assertIs(kwargs["memcache_dp_init_barrier"], expected)
+                worker = KVPoolWorker.__new__(KVPoolWorker)
+                worker.backend = worker.backend_name = "memcache"
+                worker.use_compress = False
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib.import_module"
+                ) as importer:
+                    worker._init_backend(
+                        config.parallel_config, config.kv_transfer_config.kv_connector_extra_config, **kwargs
+                    )
+                    self.assertIs(importer.return_value.MemcacheBackend.call_args.kwargs["dp_init_barrier"], expected)
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
     def test_init_scheduler_role(self, mock_scheduler_cls):
         config = self._make_vllm_config()
