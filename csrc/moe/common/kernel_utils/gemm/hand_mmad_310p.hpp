@@ -36,6 +36,30 @@ static constexpr uint32_t HM_FRAC = 256;   // elements per 16x16 fractal (fp16)
 
 CATLASS_DEVICE constexpr uint32_t HmRoundUp16(uint32_t v) { return (v + 15) / 16 * 16; }
 
+/// Issue-only GM->L1 Nd2Nz load (MTE2), the same descriptor HandMmad's own
+/// GM->L1 stage would build. No fences: the caller owns the MTE2 handoff, so a
+/// batch of these can be issued early and the whole stream hidden under the
+/// previous body's compute.  nValue/dValue follow Nd2NzParams: nValue rows of
+/// dValue elements, GM row stride ld, landing as zN of the stored matrix.
+template <class ArchTag>
+CATLASS_DEVICE void HmLoadGmToL1(
+    Catlass::Arch::Resource<ArchTag> &res,
+    AscendC::GlobalTensor<half> const &gm, uint32_t ld,
+    uint32_t nValue, uint32_t dValue, uint32_t l1Off)
+{
+    auto l1 = res.l1Buf.template GetBufferByByte<half>(l1Off);
+    AscendC::Nd2NzParams p;
+    p.ndNum = 1;
+    p.nValue = nValue;
+    p.dValue = dValue;
+    p.srcNdMatrixStride = 0;
+    p.srcDValue = ld;
+    p.dstNzC0Stride = HmRoundUp16(nValue);
+    p.dstNzNStride = 1;
+    p.dstNzMatrixStride = 0;
+    AscendC::DataCopy(l1, gm, p);
+}
+
 /// One tile of C = A @ B, landing in L0C[l0cOff] and then staged to UB[ubStageOff]
 /// in NZ order. All offsets are bytes.
 ///
@@ -61,8 +85,14 @@ CATLASS_DEVICE constexpr uint32_t HmRoundUp16(uint32_t v) { return (v + 15) / 16
 ///   body's GM->L1 load, a UB->L1 hand-off, or an L1-resident state).
 ///   With B_NZ_GM, gmB already holds the tile as a zN image (the cross-op h
 ///   format): the GM->L1 move is one flat burst, no Nd2Nz row walk.
+/// LEAN_TAIL skips the V_MTE3 + V_M pairs after the L0C->UB staging copy and
+/// NO_MTE1_MTE2 the MTE1->MTE2 pair after the LoadDatas. Only for call sites
+/// where npu-pipe-optimizer's reduce_flags pass PROVED the orderings are
+/// implied transitively by the surrounding sync (fwd_o_v3.yaml): one kept
+/// MTE1_MTE2 late in the body orders every earlier LoadData before the next
+/// prefetch, and the per-cube L0C regions are disjoint.
 template <class ArchTag, bool B_COL_MAJOR = false, bool A_FROM_L1 = false, bool A_COL_MAJOR = false,
-          bool B_FROM_L1 = false, bool B_NZ_GM = false>
+          bool B_FROM_L1 = false, bool B_NZ_GM = false, bool LEAN_TAIL = false, bool NO_MTE1_MTE2 = false>
 CATLASS_DEVICE void HandMmad(
     Catlass::Arch::Resource<ArchTag> &res,
     AscendC::GlobalTensor<half> const &gmA, uint32_t lda,
@@ -108,8 +138,12 @@ CATLASS_DEVICE void HandMmad(
         AscendC::DataCopy(l1B, gmB, pb);
     }
 
-    AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID7);
-    AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID7);
+    // With both operands already in L1 there is no MTE2 of ours to wait for;
+    // the caller fenced its own prefetch stream.
+    if constexpr (!(A_FROM_L1 && B_FROM_L1)) {
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID7);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID7);
+    }
 
     // ---- L1 -> L0 ----
     {   // -> zZ.  From zN of A it strides fractal columns; from zN of the stored
@@ -139,8 +173,10 @@ CATLASS_DEVICE void HandMmad(
         }
     }
 
-    AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID7);
-    AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID7);
+    if constexpr (!NO_MTE1_MTE2) {
+        AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID7);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID7);
+    }
     AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID7);
     AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID7);
 
@@ -169,10 +205,12 @@ CATLASS_DEVICE void HandMmad(
     eh.blockMode = AscendC::BlockMode::BLOCK_MODE_MATRIX;
     AscendC::DataCopy(co2, l0c, cp, eh);
 
-    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID7);
-    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID7);
-    AscendC::SetFlag<AscendC::HardEvent::V_M>(EVENT_ID7);
-    AscendC::WaitFlag<AscendC::HardEvent::V_M>(EVENT_ID7);
+    if constexpr (!LEAN_TAIL) {
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID7);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID7);
+        AscendC::SetFlag<AscendC::HardEvent::V_M>(EVENT_ID7);
+        AscendC::WaitFlag<AscendC::HardEvent::V_M>(EVENT_ID7);
+    }
 }
 
 }  // namespace M200Gemm
