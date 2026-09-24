@@ -88,9 +88,6 @@ msgid ""
 "    to select the Ubuntu or openEuler A5 image and start the container."
 msgstr "请按照 [950DT 产品容器说明](../../getting_started/quick_start.md#quick-start-atlas-950dt-container) 选择 Ubuntu 或 openEuler A5 镜像并启动容器。"
 
-msgid "> **Validation status:** This example has not yet been validated on A5, including multimodal requests. Validate the target workload before using it in production."
-msgstr "> **验证状态：** 此示例（包括多模态请求）尚未在 A5 上验证。生产使用前，请先验证目标工作负载。"
-
 msgid "=== \"Atlas 300I DUO\""
 msgstr "=== \"Atlas 300I DUO\""
 

@@ -135,8 +135,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "950DT Products (A5)"
 
-    > **Validation status:** This example has not yet been validated on A5, including multimodal requests. Validate the target workload before using it in production.
-
     ```shell
     vllm serve Qwen/Qwen3-VL-Embedding-2B \
       --served-model-name Qwen/Qwen3-VL-Embedding-2B \

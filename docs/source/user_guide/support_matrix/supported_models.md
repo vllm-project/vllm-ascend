@@ -104,10 +104,10 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     | Model                | Support | Note                                  | Supported Hardware | W8A8 | Doc |
     |----------------------|---------|---------------------------------------|--------------------|------|-----|
-    | Qwen3-Embedding       | 🟡      | A5 validation is pending              | 950DT Products     | 🟡   | [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md) |
-    | Qwen3-VL-Embedding    | 🟡      | A5 validation is pending              | 950DT Products     | 🟡   | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |
-    | Qwen3-Reranker        | 🟡      | A5 validation is pending              | 950DT Products     | 🟡   | [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md) |
-    | Qwen3-VL-Reranker     | 🟡      | A5 validation is pending              | 950DT Products     | 🟡   | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |
+    | Qwen3-Embedding       | 🔵      |                                       | 950DT Products     | 🟡   | [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md) |
+    | Qwen3-VL-Embedding    | 🔵      |                                       | 950DT Products     | 🟡   | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |
+    | Qwen3-Reranker        | 🔵      |                                       | 950DT Products     | 🟡   | [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md) |
+    | Qwen3-VL-Reranker     | 🔵      |                                       | 950DT Products     | 🟡   | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |
 
 === "Atlas 300I DUO"
 
