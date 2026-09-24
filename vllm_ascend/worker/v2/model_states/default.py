@@ -26,53 +26,67 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.kvpp import KVPPRuntime
-    from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
 
 
 class AscendModelState(DefaultModelState):
     """Model state for Ascend NPUs."""
 
     pcp_manager: "AscendPCPManager | None" = None
+    pcp_context: "AscendPCPAttentionContext | None" = None
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
 
-    def _get_engram_history_inputs(
-        self, input_batch: AscendInputBatch
-    ) -> tuple[torch.Tensor, torch.Tensor, int] | None:
-        """MRV2 counterpart of model_runner_v1._get_engram_history_inputs.
+    def _get_engram_device_inputs(self, input_batch: AscendInputBatch) -> dict[str, torch.Tensor]:
+        """Device request coordinates for upstream NgramHashState.
 
-        The engram hook runs before set_forward_context(), so the runner-side
+        MRV2 counterpart of model_runner_v1._get_engram_device_inputs. The
+        engram hook runs before set_forward_context(), so the runner-side
         helper is unavailable; mirror it from the per-step views cached by
-        prepare_attn. Returns None for dummy/profile scopes: those batches
-        must still join the engram routing collective, but with empty hashes
-        so the request-indexed n-gram store is never polluted (the
-        ring-state ContextVar covers execute_dummy_batch on top of
-        kvpp_is_dummy_run).
+        prepare_attn. Coordinates are full-request (pre-PCP-partition): the
+        hash searches each request's chunk-start history, which a rank-local
+        boundary view cannot express. Returns an empty dict for dummy/profile
+        scopes: those batches must still join the engram routing collective,
+        but with empty hashes so the request-indexed n-gram store is never
+        polluted (the ring-state ContextVar covers execute_dummy_batch on top
+        of kvpp_is_dummy_run).
         """
         layer_name = getattr(self.model, "engram_cache_layer_name", None)
         kv_cache_config = getattr(self, "kv_cache_config", None)
         if layer_name is None or kv_cache_config is None:
-            return None
+            return {}
         if self.kvpp_is_dummy_run or ring_state_update_skipped():
-            return None
-        group = next(
-            (group for group in kv_cache_config.kv_cache_groups if layer_name in group.layer_names),
+            return {}
+        group_id = next(
+            (
+                group_id
+                for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+                if layer_name in group.layer_names
+            ),
             None,
         )
-        block_tables = getattr(self, "block_tables", None)
-        if group is None or block_tables is None:
-            return None
-        num_reqs = input_batch.num_reqs
-        group_id = kv_cache_config.kv_cache_groups.index(group)
-        boundaries = torch.from_numpy(input_batch.query_start_loc_np)[: num_reqs + 1]
-        block_table = block_tables[group_id][:num_reqs].cpu()
-        return boundaries, block_table, get_storage_block_size(group.kv_cache_spec)
+        if group_id is None:
+            return {}
+        if self.pcp_context is not None:
+            batch = self.pcp_context.global_batch
+            block_tables = self.pcp_context.global_block_tables
+            slot_mappings = self.pcp_context.global_slot_mappings
+        else:
+            batch = input_batch
+            block_tables = getattr(self, "block_tables", None)
+            slot_mappings = getattr(self, "slot_mappings", None)
+        if block_tables is None or slot_mappings is None or group_id >= len(block_tables):
+            return {}
+        return {
+            "query_start_loc": batch.query_start_loc,
+            "slot_mapping": slot_mappings[group_id],
+            "block_table": block_tables[group_id][: batch.num_reqs],
+        }
 
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
@@ -81,19 +95,19 @@ class AscendModelState(DefaultModelState):
             return model_inputs
         num_tokens = input_batch.num_tokens_after_padding
         # This hook runs before set_forward_context(), so hand the current
-        # step's history inputs to the eager engram routing explicitly.
-        # Dummy batches (DP-peer, profile) route too: engram routing joins a
-        # node-local collective spanning every DP group, so skipping it on
-        # idle ranks leaves the busy ranks spinning inside route_many's
-        # all_gather. History pollution is already guarded: their history
-        # inputs resolve to None (kvpp dummy scope / ring-state ContextVar),
-        # which prepare_engram honors before touching the n-gram store.
+        # step's device request coordinates to the eager engram routing
+        # explicitly. Dummy batches (DP-peer, profile) route too: engram
+        # routing joins a node-local collective spanning every DP group, so
+        # skipping it on idle ranks leaves the busy ranks spinning inside
+        # route_many's all_gather. Their coordinates resolve to an empty dict
+        # (kvpp dummy scope / ring-state ContextVar), which prepare_engram
+        # honors before touching the n-gram store.
         model_inputs.update(
             prepare_engram_inputs(
                 input_batch.input_ids[:num_tokens],
                 input_batch.positions[:num_tokens],
                 num_tokens,
-                history_inputs=self._get_engram_history_inputs(input_batch),
+                **self._get_engram_device_inputs(input_batch),
             )
         )
         return model_inputs
@@ -164,7 +178,9 @@ class AscendModelState(DefaultModelState):
         # The per-step views also feed the engram history hook (it runs before
         # the forward context exists, so it cannot query the runner).
         self.block_tables = block_tables
+        self.slot_mappings = slot_mappings
         self.kv_cache_config = kv_cache_config
+        self.pcp_context = pcp_context
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
