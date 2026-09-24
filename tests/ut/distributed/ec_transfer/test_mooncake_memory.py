@@ -223,7 +223,84 @@ def test_producer_allocator_prepare_is_idempotent():
     transfer.register_memory.assert_called_once()
 
 
-def test_producer_allocator_registration_failure_is_fatal():
+def test_producer_allocator_retries_with_bounce_only_slab():
+    allocator = AscendProducerAllocator(
+        staging_capacity=3 * _MIB,
+        bounce_capacity=2 * _MIB,
+    )
+    transfer = MagicMock()
+    transfer.register_memory.side_effect = [7, 0]
+
+    allocator.prepare(torch.device("cpu"), transfer)
+
+    tensor = allocator.tensor
+    bounce = allocator.bounce_tensor
+    assert tensor is not None
+    assert bounce is not None
+    assert allocator.configured_staging_capacity == 3 * _MIB
+    assert allocator.staging_capacity == 0
+    assert allocator.fallback_only
+    assert allocator.bounce_offset == 0
+    assert allocator.padding == 0
+    assert allocator.registered_capacity == 2 * _MIB
+    assert allocator.raw_allocation_size == 4 * _MIB - 1
+    assert allocator._free == []
+    assert allocator.allocate(1) is None
+    assert tensor.nbytes == 2 * _MIB
+    assert bounce.data_ptr() == tensor.data_ptr()
+    assert bounce.nbytes == 2 * _MIB
+    assert [call.args[0].nbytes for call in transfer.register_memory.call_args_list] == [
+        6 * _MIB,
+        2 * _MIB,
+    ]
+
+
+def test_producer_allocator_retries_bounce_only_after_allocation_failure():
+    allocator = AscendProducerAllocator(
+        staging_capacity=3 * _MIB,
+        bounce_capacity=2 * _MIB,
+    )
+    transfer = MagicMock()
+    transfer.register_memory.return_value = 0
+    real_empty = torch.empty
+    attempts = 0
+
+    def allocate(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise torch.OutOfMemoryError("full producer slab")
+        return real_empty(*args, **kwargs)
+
+    with patch.object(memory_module.torch, "empty", side_effect=allocate):
+        allocator.prepare(torch.device("cpu"), transfer)
+
+    assert attempts == 2
+    assert allocator.fallback_only
+    assert allocator.staging_capacity == 0
+    assert allocator.tensor is not None
+    assert allocator.tensor.nbytes == 2 * _MIB
+    assert allocator.bounce_tensor is not None
+    transfer.register_memory.assert_called_once_with(allocator.tensor)
+
+
+def test_producer_pool_returns_none_after_bounce_only_degradation():
+    allocator = AscendProducerAllocator(
+        staging_capacity=3 * _MIB,
+        bounce_capacity=2 * _MIB,
+    )
+    transfer = MagicMock()
+    transfer.register_memory.side_effect = [7, 0]
+    pool = AscendProducerMemoryPool(3 * _MIB, transfer, allocator)
+    source = torch.empty(1, dtype=torch.uint8)
+
+    assert pool.stage([source]) is None
+    assert allocator.fallback_only
+    assert allocator.bounce_tensor is not None
+    assert allocator._free == []
+
+
+def test_producer_allocator_bounce_only_failure_is_fatal():
     allocator = AscendProducerAllocator(
         staging_capacity=3 * _MIB,
         bounce_capacity=2 * _MIB,
@@ -233,11 +310,55 @@ def test_producer_allocator_registration_failure_is_fatal():
 
     with pytest.raises(
         RuntimeError,
-        match=r"staging=.*padding=.*bounce=.*registered=.*allocation=",
+        match=(
+            r"configured_staging=.*effective_staging=0.*padding=0.*"
+            r"bounce=.*registered=.*allocation="
+        ),
     ):
         allocator.prepare(torch.device("cpu"), transfer)
 
     assert allocator.tensor is None
+    assert allocator.fallback_only
+    assert allocator.staging_capacity == 0
+    assert transfer.register_memory.call_count == 2
+
+
+def test_producer_allocator_zero_bounce_does_not_retry_failure():
+    allocator = AscendProducerAllocator(
+        staging_capacity=3 * _MIB,
+        bounce_capacity=0,
+    )
+    transfer = MagicMock()
+    transfer.register_memory.return_value = 7
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"configured_staging=.*effective_staging=.*bounce=0",
+    ):
+        allocator.prepare(torch.device("cpu"), transfer)
+
+    assert allocator.tensor is None
+    assert not allocator.fallback_only
+    assert allocator.staging_capacity == 3 * _MIB
+    transfer.register_memory.assert_called_once()
+
+
+def test_producer_allocator_closes_bounce_only_slab():
+    allocator = AscendProducerAllocator(
+        staging_capacity=3 * _MIB,
+        bounce_capacity=2 * _MIB,
+    )
+    transfer = MagicMock()
+    transfer.register_memory.side_effect = [7, 0]
+    transfer.unregister_memory.return_value = True
+    allocator.prepare(torch.device("cpu"), transfer)
+    tensor = allocator.tensor
+    assert tensor is not None
+
+    assert allocator.close(transfer)
+    transfer.unregister_memory.assert_called_once_with(tensor)
+    assert allocator.tensor is None
+    assert allocator._free == []
 
 
 def test_bounce_lease_manager_zero_size_bypasses_queue():
