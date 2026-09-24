@@ -213,9 +213,12 @@ public:
     static constexpr uint32_t HRES_L1_SLOT   = 48 * 1024;   // zN(192,128) f16 max
     static constexpr uint32_t HRES_L1_OFFSET = 128 * 1024;
     // Update-phase UB map (all below vnew's pong region lifetimes):
-    static constexpr uint32_t UB_UPD_CALC  = 64 * 1024;   // f32, <=64 KB
-    static constexpr uint32_t UB_UPD_H16   = 128 * 1024;  // f16 tile, <=32 KB
-    static constexpr uint32_t UB_UPD_NDOUT = 160 * 1024;  // f16 ND out, <=32 KB
+    // Single-tile update (m = kHeadDim <= 192): the h_work stage grows to
+    // 96 KB at [0,96K); the resident h tile sits above it. No f32 calc buffer:
+    // Axpy fuses h*scale straight into the stage. [144K,192K) is scratch for
+    // the (rare) final_state deformats.
+    static constexpr uint32_t UB_UPD_H16   = 96 * 1024;   // f16 tile, <=48 KB
+    static constexpr uint32_t UB_UPD_NDOUT = 144 * 1024;  // final-state scratch
     // Scalar exp scratch: must NOT sit in vnew's pong region (a scalar write
     // there raced the outstanding v_update store -- fin came back undecayed).
     // The ND-out window is dead at hoist time: the previous body's h store was
@@ -339,20 +342,22 @@ public:
             if (cubeBlockScheduler.iterId > 1) {
                 GDNFwdHOffsets& stage2Offsets = cubeBlockScheduler.GetStage2Offsets();
 
-                // CUBE2 + VEC2, fused per m-tile (m <= 128). h_work never
-                // touches GM: mmad -> NZ stage -> deformat ND @HM_ND_OFFSET ->
-                // update epilogue reads it in place, casts the h output over it
-                // and stores straight to gmH/final_state. v_update was
-                // MTE3-written by Vec1 just above: drain MTE3 before the loads.
+                // CUBE2 + VEC2, single fused m=192 tile. h_work never touches
+                // GM: mmad -> NZ stage (96 KB) -> Axpy(stage += scale*h16) ->
+                // cast -> bank writeback + strided zN h store. One tile means
+                // half the fences and descriptors the m-loop paid.
                 if (cubeBlockScheduler.NeedProcessStage2()) {
+                    // v_update and the epilogue outputs are MTE3-written just
+                    // above: drain MTE3 into MTE2 (loads) and V (our writes).
                     AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
                     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
-                    // exp(g_last) once per chunk: one GM scalar read + one
-                    // 1-element vector Exp + S<->V handshake, shared by the tiles.
+                    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+                    // exp(g_last) once per chunk (scalar dance).
                     float hDecayScale;
                     {
                         AscendC::LocalTensor<float> gl =
-                            resource.ubBuf.template GetBufferByByte<float>(UB_GHOIST);
+                            resource.ubBuf.template GetBufferByByte<float>(UB_UPD_NDOUT);
                         gl.SetValue(0, gmG[stage2Offsets.gOffset].GetValue(stage2Offsets.blockTokens - 1));
                         AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
                         AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
@@ -363,7 +368,7 @@ public:
                         AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
                         AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
                     }
-                    // v_update (B) is identical for every m tile: load it once.
+                    // v_update (B) loaded once.
                     {
                         AscendC::Nd2NzParams pb;
                         pb.ndNum = 1;
@@ -377,87 +382,70 @@ public:
                         auto l1B = resource.l1Buf.template GetBufferByByte<half>(HM_L1B_OFFSET);
                         AscendC::DataCopy(l1B, gmVUpdateWorkspace[stage2Offsets.vWorkOffset], pb);
                     }
-                    uint32_t mLoopC2 = (kHeadDim + 127) / 128;
-                    for (uint32_t mIdx = 0; mIdx < mLoopC2; ++mIdx) {
-                        uint32_t mOff = mIdx * 128;
-                        uint32_t mTail = kHeadDim - mOff;
-                        uint32_t mActual = (mTail < 128) ? mTail : 128;
-                        M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false,
-                                           /*A_FROM_L1=*/false, /*A_COL_MAJOR=*/true,
-                                           /*B_FROM_L1=*/true>(
-                            resource,
-                            gmK[stage2Offsets.wkOffset + mOff], kHeadDim,
-                            gmVUpdateWorkspace[stage2Offsets.vWorkOffset], vHeadDim,
-                            mActual, vHeadDim, stage2Offsets.blockTokens,
-                            HM_L1A_OFFSET, HM_L1B_OFFSET, HM_STAGE_OFFSET, 0);
-                        // ---- NZ-native update on the resident bank ----
-                        uint32_t kR = (kHeadDim + 15) / 16 * 16;
-                        uint32_t nFr = vHeadDim / 16;
-                        uint32_t elems = mActual * vHeadDim;
-                        uint32_t slot2 = stage2Offsets.slot;
-                        // Prior V readers (previous tile's casts/deformat) and MTE3
-                        // readers (writeback, h store) of the H16 window must drain
-                        // before MTE1 rewrites it.
-                        AscendC::SetFlag<AscendC::HardEvent::V_MTE1>(EVENT_ID5);
-                        AscendC::WaitFlag<AscendC::HardEvent::V_MTE1>(EVENT_ID5);
-                        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID5);
-                        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID5);
-                        ExtractResidentH(slot2, kR, mOff, mActual, nFr);
-                        AscendC::SetFlag<AscendC::HardEvent::MTE1_V>(EVENT_ID5);
-                        AscendC::WaitFlag<AscendC::HardEvent::MTE1_V>(EVENT_ID5);
-                        AscendC::LocalTensor<float> calc =
-                            resource.ubBuf.template GetBufferByByte<float>(UB_UPD_CALC);
-                        AscendC::LocalTensor<half> h16 =
-                            resource.ubBuf.template GetBufferByByte<half>(UB_UPD_H16);
-                        AscendC::LocalTensor<float> stageT =
-                            resource.ubBuf.template GetBufferByByte<float>(HM_STAGE_OFFSET);
-                        AscendC::Cast(calc, h16, AscendC::RoundMode::CAST_NONE, elems);
-                        AscendC::PipeBarrier<PIPE_V>();
-                        AscendC::Muls(calc, calc, hDecayScale, elems);
-                        AscendC::PipeBarrier<PIPE_V>();
-                        AscendC::Add<float>(calc, calc, stageT, elems);
-                        AscendC::PipeBarrier<PIPE_V>();
-                        AscendC::Cast(h16, calc, AscendC::RoundMode::CAST_NONE, elems);
-                        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
-                        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
-                        WritebackResidentH(slot2, kR, mOff, mActual, nFr);
-                        if (stage2Offsets.isFinalState && storeFinalState) {
-                            // final_state replaces the h store on the last chunk.
-                            if constexpr (std::is_same<ElementFinalState, float>::value) {
-                                // f32 ND from calc, staged over the (dead) cube
-                                // staging window; MTE3_V after keeps the next
-                                // tile's L0C->UB copy off the outstanding read.
-                                DeformatNzToNd<float>(HM_STAGE_OFFSET, UB_UPD_CALC, mActual, vHeadDim);
-                                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
-                                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
-                                AscendC::DataCopy(gmFinalState[stage2Offsets.finalStateOffset + mOff * vHeadDim],
-                                                  stageT, elems);
-                                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
-                                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
-                            } else {
-                                DeformatNzToNd<half>(UB_UPD_NDOUT, UB_UPD_H16, mActual, vHeadDim);
-                                AscendC::LocalTensor<ElementFinalState> ndOut =
-                                    resource.ubBuf.template GetBufferByByte<ElementFinalState>(UB_UPD_NDOUT);
-                                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
-                                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
-                                AscendC::DataCopy(gmFinalState[stage2Offsets.finalStateOffset + mOff * vHeadDim],
-                                                  ndOut, elems);
-                                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
-                                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
-                            }
+                    M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false,
+                                       /*A_FROM_L1=*/false, /*A_COL_MAJOR=*/true,
+                                       /*B_FROM_L1=*/true>(
+                        resource,
+                        gmK[stage2Offsets.wkOffset], kHeadDim,
+                        gmVUpdateWorkspace[stage2Offsets.vWorkOffset], vHeadDim,
+                        kHeadDim, vHeadDim, stage2Offsets.blockTokens,
+                        HM_L1A_OFFSET, HM_L1B_OFFSET, HM_STAGE_OFFSET, 0);
+                    uint32_t kR = (kHeadDim + 15) / 16 * 16;
+                    uint32_t nFr = vHeadDim / 16;
+                    uint32_t elems = kHeadDim * vHeadDim;
+                    uint32_t slot2 = stage2Offsets.slot;
+                    AscendC::SetFlag<AscendC::HardEvent::V_MTE1>(EVENT_ID5);
+                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE1>(EVENT_ID5);
+                    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID5);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID5);
+                    ExtractResidentH(slot2, kR, 0, kHeadDim, nFr);
+                    AscendC::SetFlag<AscendC::HardEvent::MTE1_V>(EVENT_ID5);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE1_V>(EVENT_ID5);
+                    AscendC::LocalTensor<float> stageT =
+                        resource.ubBuf.template GetBufferByByte<float>(HM_STAGE_OFFSET);
+                    AscendC::LocalTensor<half> h16 =
+                        resource.ubBuf.template GetBufferByByte<half>(UB_UPD_H16);
+                    // h_new = h_work + scale * h  (f32 dst, f16 src, fused)
+                    AscendC::Axpy(stageT, h16, (half)hDecayScale, elems);
+                    AscendC::PipeBarrier<PIPE_V>();
+                    AscendC::Cast(h16, stageT, AscendC::RoundMode::CAST_NONE, elems);
+                    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+                    WritebackResidentH(slot2, kR, 0, kHeadDim, nFr);
+                    if (stage2Offsets.isFinalState && storeFinalState) {
+                        if constexpr (std::is_same<ElementFinalState, float>::value) {
+                            // ND f32 from the (still-live) f32 stage, staged over
+                            // the h16 scratch after the writeback consumed it.
+                            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                            DeformatNzToNd<float>(UB_UPD_H16, HM_STAGE_OFFSET, kHeadDim, vHeadDim);
+                            AscendC::LocalTensor<float> ndF =
+                                resource.ubBuf.template GetBufferByByte<float>(UB_UPD_H16);
+                            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+                            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+                            AscendC::DataCopy(gmFinalState[stage2Offsets.finalStateOffset], ndF, elems);
+                            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
                         } else {
-                            // gmH carries zN f16: store the resident tile's rows
-                            // straight into the zN image, one strided descriptor,
-                            // no deformat. (V already drained by the ev2 pair
-                            // before the writeback; MTE3 in-order after it.)
-                            AscendC::DataCopyParams hp;
-                            hp.blockCount = static_cast<uint16_t>(nFr);
-                            hp.blockLen = static_cast<uint16_t>(mActual);
-                            hp.srcStride = 0;
-                            hp.dstStride = static_cast<uint16_t>(kR - mActual);
-                            AscendC::DataCopy(gmH[stage2Offsets.hDstOffset + mOff * 16],
-                                              h16, hp);
+                            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                            DeformatNzToNd<half>(UB_UPD_NDOUT, UB_UPD_H16, kHeadDim, vHeadDim);
+                            AscendC::LocalTensor<ElementFinalState> ndH =
+                                resource.ubBuf.template GetBufferByByte<ElementFinalState>(UB_UPD_NDOUT);
+                            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+                            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+                            AscendC::DataCopy(gmFinalState[stage2Offsets.finalStateOffset], ndH, elems);
+                            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
                         }
+                    } else {
+                        // gmH zN image: strided store straight from the tile.
+                        AscendC::DataCopyParams hp;
+                        hp.blockCount = static_cast<uint16_t>(nFr);
+                        hp.blockLen = static_cast<uint16_t>(kHeadDim);
+                        hp.srcStride = 0;
+                        hp.dstStride = static_cast<uint16_t>(kR - kHeadDim);
+                        AscendC::DataCopy(gmH[stage2Offsets.hDstOffset], h16, hp);
                     }
                 }
             }
