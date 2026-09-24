@@ -105,7 +105,7 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
-=== "950DT Products (A5)"
+=== "A5"
 
     Follow the [950DT Products container instructions](../../getting_started/quick_start.md#quick-start-atlas-950dt-container)
     to select the Ubuntu or openEuler A5 image and start the container.
@@ -134,7 +134,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
       --max-model-len 1024
     ```
 
-=== "950DT Products (A5)"
+=== "A5"
 
     ```shell
     vllm serve Qwen/Qwen3-Embedding-0.6B \

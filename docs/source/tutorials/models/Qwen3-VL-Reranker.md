@@ -104,7 +104,7 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
-=== "950DT Products (A5)"
+=== "A5"
 
     Follow the [950DT Products container instructions](../../getting_started/quick_start.md#quick-start-atlas-950dt-container)
     to select the Ubuntu or openEuler A5 image and start the container.
@@ -168,7 +168,7 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
         --max-model-len 1024
     ```
 
-=== "950DT Products (A5)"
+=== "A5"
 
     ```shell
     vllm serve Qwen/Qwen3-VL-Reranker-2B \

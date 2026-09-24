@@ -80,8 +80,8 @@ msgstr "在每个节点上启动docker镜像。"
 msgid "=== \"A2 series\""
 msgstr "=== \"A2系列\""
 
-msgid "=== \"950DT Products (A5)\""
-msgstr "=== \"950DT 产品（A5）\""
+msgid "=== \"A5\""
+msgstr "=== \"A5\""
 
 msgid ""
 "Follow the [950DT Products container instructions](../../getting_started/quick_start.md#quick-start-atlas-950dt-container)\n"
