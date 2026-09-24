@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    runs-on: linux-aarch64-a2b4-1-hk-001
+    runs-on: linux-aarch64-a2-8-hk-001
     strategy:
       matrix:
         run_index: [1, 2, 3, 4, 5, 6]   
