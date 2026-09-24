@@ -5,6 +5,7 @@ import ast
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -101,6 +102,7 @@ def test_exchange_gate(tokens, expected):
 @pytest.mark.parametrize("token_dim", [1, 2])
 def test_merge_masks_invalid_rank_outputs_before_weighting(token_dim):
     spec = importlib.util.spec_from_file_location("merge_under_test", ROOT / "vllm_ascend/ops/triton/sfa_dcp_merge.py")
+    assert spec is not None and spec.loader is not None
     merge = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(merge)
     parts = torch.full((8, 2, 3, 4), float("nan"))
@@ -213,7 +215,9 @@ def test_attention_passes_current_scheduler_budget_without_global_config():
         budgets.append(kwargs["decode_token_budget"])
         return args[0]
 
-    namespace = {"torch": SimpleNamespace(ops=SimpleNamespace(vllm=SimpleNamespace(sfa_dcp_a2a_fused=invoke)))}
+    namespace: dict[str, Any] = {
+        "torch": SimpleNamespace(ops=SimpleNamespace(vllm=SimpleNamespace(sfa_dcp_a2a_fused=invoke)))
+    }
     future = ast.parse("from __future__ import annotations").body
     exec(compile(ast.Module(body=future + [method], type_ignores=[]), str(source), "exec"), namespace)
     scheduler = SimpleNamespace(max_num_batched_tokens=48)

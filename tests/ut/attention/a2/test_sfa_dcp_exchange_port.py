@@ -91,7 +91,7 @@ def test_large_batch_registered_graph_matches_exact_uniform_merge(monkeypatch):
     from vllm_ascend.ops.triton import sfa_cp as dispatch
     from vllm_ascend.ops.triton.sfa_dcp_exchange import can_exchange
 
-    calls = {}
+    calls: dict[int, int] = {}
     original_exchange = dispatch.exchange
 
     def observed_exchange(output, lse, group):
