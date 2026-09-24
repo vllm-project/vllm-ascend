@@ -952,6 +952,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
 
         if getattr(self, "dcp_q_replicate", False):
+            self.q_proj.prepare_local_weight()
             group_weight = get_dcp_group().all_gather(W_UK.permute(1, 2, 0).contiguous(), dim=0)
             group_weight = maybe_trans_nz(group_weight)
             self.W_UK_T_dcp_qrep = group_weight
@@ -1272,12 +1273,17 @@ class AscendSFAImpl(MLAAttentionImpl):
         return None, None
 
     # Return `ql_nope`, `q_pe`
-    def _q_proj_and_k_up_proj(self, x):
+    def _q_proj_and_k_up_proj(self, x, *, local_q=False):
         qrep = getattr(self, "dcp_q_replicate", False)
-        projection_heads = self.local_num_heads * (self.q_proj.group_size if qrep else 1)
-        weight = self.W_UK_T_dcp_qrep if qrep else self.W_UK_T
+        group_q = qrep and not local_q
+        projection_heads = self.local_num_heads * (self.q_proj.group_size if group_q else 1)
+        weight = self.W_UK_T_dcp_qrep if group_q else self.W_UK_T
+        # Prefill/mixed DCP batches attend to gathered KV with local heads.
+        # Keep both GEMMs at the original TP width, rather than computing
+        # group heads and slicing after shape-dependent rounding has occurred.
+        project = self.q_proj.forward_local if qrep and local_q else self.q_proj
         q_nope, q_pe = (
-            self.q_proj(x)[0]
+            project(x)[0]
             .view(x.shape[0], projection_heads, self.qk_head_dim)
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
@@ -1886,7 +1892,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 parallel_context.gather_full_o_proj,
             )
 
-            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
+            ql_nope, q_pe = self._q_proj_and_k_up_proj(
+                q_c,
+                local_q=getattr(self, "dcp_q_replicate", False) and attn_metadata.num_prefills > 0,
+            )
             if self.qk_rope_head_dim:
                 q_pe = self.rope_single(q_pe, cos, sin)
             self._record_query_gather_context(

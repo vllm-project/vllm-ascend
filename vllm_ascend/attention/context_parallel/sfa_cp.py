@@ -1379,13 +1379,12 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         dcp_context = attn_metadata.dcp_context
         qrep = getattr(self, "dcp_q_replicate", False)
         if qrep:
-            expected_heads = self.local_num_heads * self.dcp_size
+            expected_heads = self.local_num_heads * (1 if self._has_prefill(attn_metadata) else self.dcp_size)
             if ql_nope.shape[1] != expected_heads or q_pe.shape[1] != expected_heads:
-                raise ValueError("SFA replicated Q must contain the complete DCP group head set")
+                raise ValueError(
+                    "SFA Q must contain local heads for prefill or the complete DCP group head set for decode"
+                )
         if self._has_prefill(attn_metadata):
-            if qrep:
-                ql_nope = self.q_proj._local_view(ql_nope)
-                q_pe = self.q_proj._local_view(q_pe)
             gather_context = dcp_context.gather_context
             dcp_context.gather_context = None
             if gather_context is None:

@@ -1075,6 +1075,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
             self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
         if getattr(self, "dcp_q_replicate", False):
+            self.q_proj.prepare_local_weight()
             group_weight = get_dcp_group().all_gather(W_UK.permute(1, 2, 0).contiguous(), dim=0)
             group_weight = maybe_trans_nz(group_weight)
             self.W_UK_T_dcp_qrep = group_weight
@@ -1967,9 +1968,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_prefill_kv_tokens = self._get_num_prefill_kv_tokens(attn_metadata)
         prefill_kv_no_split = kv_no_split[num_decode_tokens : num_decode_tokens + num_prefill_kv_tokens]
         prefill_q_c = q_c[num_decode_tokens:num_actual_tokens]
-        prefill_q = self.q_proj(prefill_q_c)[0].view(prefill_q_c.shape[0], self.q_projection_heads, self.qk_head_dim)
         if self.dcp_q_replicate:
-            prefill_q = self.q_proj._local_view(prefill_q)
+            # Prefill uses local heads. Keep the original TP GEMM width:
+            # a wider BF16 projection can change rounding before slicing.
+            prefill_q = self.q_proj.forward_local(prefill_q_c)[0]
+        else:
+            prefill_q = self.q_proj(prefill_q_c)[0]
+        prefill_q = prefill_q.view(prefill_q_c.shape[0], self.num_heads, self.qk_head_dim)
         prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
         prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
         cos = attn_metadata.prefill.cos

@@ -2735,7 +2735,9 @@ class TestAscendMLAImpl(TestBase):
     @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
     def test_mla_preprocess_prefill_without_rope(self, mock_rope_cache, mock_rope, mock_cache):
         self.impl.use_mla_rope = False
-        self.impl.num_heads = self.impl.num_kv_heads = 1
+        # This fixture shrinks the layer after initialization; keep Q's cached
+        # projection head count consistent with the replacement projection.
+        self.impl.num_heads = self.impl.num_kv_heads = self.impl.q_projection_heads = 1
         self.impl.qk_nope_head_dim = self.impl.qk_rope_head_dim = 2
         self.impl.qk_head_dim = 4
         self.impl.kv_lora_rank = self.impl.v_head_dim = 2

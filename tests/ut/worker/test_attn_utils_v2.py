@@ -272,10 +272,12 @@ def test_build_draft_attn_metadata_applies_factory_state(monkeypatch, state_kwar
     ("replicated_indexer", "expected_size"),
     [(False, 1), (True, 4)],
 )
-@pytest.mark.parametrize("li_c8", [False, True])
+@pytest.mark.parametrize(
+    "indexer_dtype, li_c8", [("bf16", False), ("auto", False), ("int8", False), ("int8", True), ("fp8", True)]
+)
 @pytest.mark.parametrize("owner", ["unpaired", "static_shared", "mtp", "regular"])
 def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
-    monkeypatch, replicated_indexer, expected_size, li_c8, owner
+    monkeypatch, replicated_indexer, expected_size, indexer_dtype, li_c8, owner
 ):
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
     indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
@@ -299,7 +301,7 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
         additional_config={},
         parallel_config=SimpleNamespace(decode_context_parallel_size=4),
         cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        attention_config=SimpleNamespace(indexer_kv_dtype=indexer_dtype),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
             hf_text_config=SimpleNamespace(index_head_dim=128),
@@ -334,7 +336,10 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
 
     assert isinstance(spec, AscendSFAIndexerCacheSpec)
     assert spec.sfa_dcp_replicated_indexer_size == expected_size
-    assert spec.dtype == (torch.int8 if li_c8 else torch.bfloat16)
+    expected_dtype = {"int8": torch.int8, "fp8": torch.float8_e4m3fn}.get(indexer_dtype, torch.bfloat16)
+    assert spec.dtype == (expected_dtype if li_c8 else torch.bfloat16)
+    if li_c8:
+        assert spec.scale_dtype == (torch.float16 if indexer_dtype == "int8" else torch.float32)
     assert spec.scale_dim == (1 if li_c8 else 0)
 
 
