@@ -1589,13 +1589,15 @@ vllm serve /root/.cache/DeepSeek-V4-Flash-0731 \
 
 Start in this order:
 
+```text
 Memcache MetaService
 ↓
 Decode
 ↓
 Prefill
 ↓
-Proxy (:8009)
+Proxy
+```
 
 Start the Memcache MetaService on one node and confirm the ports are reachable:
 
