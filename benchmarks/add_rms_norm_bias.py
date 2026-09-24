@@ -84,9 +84,10 @@ def main():
                     x1, x2, gamma, beta, 1e-6)
 
             def reference(x1, x2, gamma, beta):
-                # Unfused composition producing the same three outputs via
-                # the CANN built-in add+rmsnorm plus a separate bias add.
-                y, residual = torch_npu.npu_add_rms_norm(x1, x2, gamma, 1e-6)
+                # Unfused composition producing the same outputs via the CANN
+                # built-in add+rmsnorm (returns y, rstd, residual) plus a
+                # separate bias add on y.
+                y, _, residual = torch_npu.npu_add_rms_norm(x1, x2, gamma, 1e-6)
                 y = y + beta
                 return y, residual
 
