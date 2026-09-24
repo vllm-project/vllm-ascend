@@ -1004,26 +1004,44 @@ class StairEplbPolicy(AbstractEplbPolicy):
     @classmethod
     def plan_rebalance(
         cls,
-        logical_load_samples: np.ndarray,
+        logical_load_values: np.ndarray,
         current_rank_expert_ids: np.ndarray,
         last_committed_mean_ratios: np.ndarray,
         rank_node_ids: np.ndarray,
         config: StairConfig,
         layer_ids: Sequence[int] | None = None,
+        sample_counts: np.ndarray | None = None,
     ) -> StairPlan:
-        """Plan every eligible layer from a ``[steps, layers, experts]`` window.
+        """Plan every eligible layer from raw samples or pre-binned sums.
 
-        Current placement is ``[layers, ranks, slots]``, committed ratios are
-        ``[layers]``, and node IDs are ``[ranks]``. A NaN committed ratio means
-        that the layer has no commit anchor; its relative deterioration is 0
-        for sorting. Eligible layers are planned by descending current mean
-        ratio, relative deterioration, then layer ID. ``layer_ids`` contains
+        ``logical_load_values`` contains raw ``[steps, layers, experts]``
+        samples when ``sample_counts`` is absent, otherwise ``[bins, layers,
+        experts]`` pre-binned sums. Current placement is ``[layers, ranks,
+        slots]``. ``layer_ids`` contains
         stage-local indices on the input layer axis. The returned plan keeps its
         full shape, but only those indices are authoritative; omitted layers are
         identity/NaN placeholders that must not be committed before the shards
         are gathered.
         """
-        load_bins, sample_counts = cls.compress_load_window(logical_load_samples, config.load_window_bins)
+        if sample_counts is None:
+            load_bins, bin_sample_counts = cls.compress_load_window(logical_load_values, config.load_window_bins)
+        else:
+            load_sums = np.asarray(logical_load_values, dtype=np.float64)
+            bin_sample_counts = np.asarray(sample_counts)
+            if (
+                load_sums.ndim != 3
+                or load_sums.shape[0] == 0
+                or not np.all(np.isfinite(load_sums))
+                or np.any(load_sums < 0)
+            ):
+                raise ValueError("prepared loads must be finite non-negative [bins, layers, experts]")
+            if (
+                bin_sample_counts.shape != (load_sums.shape[0],)
+                or not np.issubdtype(bin_sample_counts.dtype, np.integer)
+                or np.any(bin_sample_counts <= 0)
+            ):
+                raise ValueError("sample_counts must contain one positive integer per bin")
+            load_bins = load_sums / bin_sample_counts[:, None, None]
         current = np.asarray(current_rank_expert_ids)
         if current.ndim != 3 or 0 in current.shape or not np.issubdtype(current.dtype, np.integer):
             raise ValueError("current_rank_expert_ids must be a non-empty integer [layers, ranks, slots] array")
@@ -1058,7 +1076,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         layer_priority_keys = []
         for layer_id in selected_layers:
             current_imbalance = cls.gated_layer_imbalance(
-                load_bins[:, layer_id], sample_counts, current[layer_id], anchors[layer_id], config
+                load_bins[:, layer_id], bin_sample_counts, current[layer_id], anchors[layer_id], config
             )
             if current_imbalance is None:
                 continue
@@ -1068,7 +1086,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
             layer_priority_keys.append((-current_imbalance.mean_ratio, -relative_deterioration, layer_id))
 
         for _, _, layer_id in sorted(layer_priority_keys):
-            layer_plan = cls.plan_layer(load_bins[:, layer_id], sample_counts, current[layer_id], node_ids, config)
+            layer_plan = cls.plan_layer(load_bins[:, layer_id], bin_sample_counts, current[layer_id], node_ids, config)
             if layer_plan is None:
                 continue
             rank_expert_ids[layer_id] = layer_plan.placement.rank_expert_ids
@@ -1086,12 +1104,14 @@ class StairEplbPolicy(AbstractEplbPolicy):
     @classmethod
     def plan_sharded_rebalance(
         cls,
-        logical_load_samples: np.ndarray,
+        logical_load_values: np.ndarray,
         current_rank_expert_ids: np.ndarray,
         last_committed_mean_ratios: np.ndarray,
         rank_node_ids: np.ndarray,
         config: StairConfig,
         cpu_group: torch.distributed.ProcessGroup,
+        sample_counts: np.ndarray | None = None,
+        planner: Callable[..., StairPlan] | None = None,
     ) -> StairPlan:
         """Plan round-robin layer shards and gather one stage-local plan.
 
@@ -1111,13 +1131,15 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 raise ValueError("current_rank_expert_ids must be a [layers, ranks, slots] array")
             num_layers = current.shape[0]
             owned_layer_ids = assigned_layer_ids(num_layers, cpu_group.rank(), group_size)
-            local_plan = cls.plan_rebalance(
-                logical_load_samples,
+            plan_local_layers = cls.plan_rebalance if planner is None else planner
+            local_plan = plan_local_layers(
+                logical_load_values,
                 current,
                 last_committed_mean_ratios,
                 rank_node_ids,
                 config,
                 layer_ids=owned_layer_ids,
+                sample_counts=sample_counts,
             )
             owned_indices = np.fromiter(owned_layer_ids, dtype=np.int64, count=len(owned_layer_ids))
             local_plan_fields = tuple(
@@ -1129,7 +1151,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                     local_plan.predicted_mean_ratios,
                 )
             )
-            num_experts = np.asarray(logical_load_samples).shape[2]
+            num_experts = np.asarray(logical_load_values).shape[2]
         except Exception as error:
             local_error = error
 
@@ -1156,7 +1178,14 @@ class StairEplbPolicy(AbstractEplbPolicy):
             source_slot_ids=gather_owned_field(local_plan_fields[2]),
             predicted_mean_ratios=gather_owned_field(local_plan_fields[3]),
         )
-        cls.validate_plan(current, plan, num_experts, config.rank_pair_migration_limit)
+        cls.validate_plan(
+            current,
+            plan,
+            num_experts,
+            rank_node_ids,
+            config.rank_transfer_limit,
+            config.cross_node_transfer_limit,
+        )
         return plan
 
     @classmethod
