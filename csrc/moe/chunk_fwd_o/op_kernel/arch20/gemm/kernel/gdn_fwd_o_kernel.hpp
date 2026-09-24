@@ -15,41 +15,12 @@
 #include "catlass/arch/resource.hpp"
 #include "catlass/catlass.hpp"
 #include "kernel_utils/gemm/hand_mmad_310p.hpp"
-#include "catlass/gemm/block/block_mmad.hpp"
-#include "kernel_utils/block/block_mmad_pingpong_tla_multi.hpp"
-#include "catlass/gemm/block/block_swizzle.hpp"
-#include "../block/block_scheduler_gdn_fwd_o.hpp"
-#include "catlass/gemm/dispatch_policy.hpp"
-#include "catlass/gemm/gemm_type.hpp"
 #include "catlass/layout/layout.hpp"
 #include "catlass/gemm_coord.hpp"
-#include "tla/tensor.hpp"
-#include "tla/layout.hpp"
-#include "tla/tensor.hpp"
-
-using _0 = tla::Int<0>;
-using _1 = tla::Int<1>;
-using _2 = tla::Int<2>;
-using _4 = tla::Int<4>;
-using _8 = tla::Int<8>;
-using _16 = tla::Int<16>;
-using _32 = tla::Int<32>;
-using _64 = tla::Int<64>;
-using _128 = tla::Int<128>;
-using _256 = tla::Int<256>;
-using _512 = tla::Int<512>;
-using _1024 = tla::Int<1024>;
-using _2048 = tla::Int<2048>;
-using _4096 = tla::Int<4096>;
-using _8192 = tla::Int<8192>;
-using _16384 = tla::Int<16384>;
-using _32768 = tla::Int<32768>;
-using _65536 = tla::Int<65536>;
-
+#include "../block/block_scheduler_gdn_fwd_o.hpp"
 
 #include "kernel_operator.h"
 using namespace Catlass;
-using namespace tla;
 
 namespace Catlass::Gemm::Kernel {
 
@@ -65,66 +36,14 @@ public:
     using GDNFwdOOffsets = Catlass::Gemm::Block::GDNFwdOOffsets;
 
     using CubeScheduler = typename Catlass::Gemm::Block::BlockSchedulerGdnFwdOCube;
-    using VecScheduler = typename Catlass::Gemm::Block::BlockSchedulerGdnFwdOVec;
 
-    using DispatchPolicyTla = Gemm::MmadPingpongTlaMulti<ArchTag, true, false>;
-    using L1TileShapeTla = Shape<_128, _128, _128>;
-    using L0TileShapeTla = L1TileShapeTla;
-    using QType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
-    using KType = Gemm::GemmType<INPUT_TYPE, layout::ColumnMajor>;
-    using AttenType = Gemm::GemmType<WORKSPACE_TYPE, layout::RowMajor>;
-    using AttenMaskedType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
-    using HType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
-    using OinterType = Gemm::GemmType<WORKSPACE_TYPE, layout::RowMajor>;
-    using VNEWType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
-
-    using GType = Gemm::GemmType<G_TYPE, layout::RowMajor>;
-    using OType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
-    using MaskType = Gemm::GemmType<bool, layout::RowMajor>;
-
-    // cube 1
-    using TileCopyQK = Catlass::Gemm::Tile::PackedTileCopyTla<ArchTag, INPUT_TYPE, layout::RowMajor, INPUT_TYPE, layout::ColumnMajor, WORKSPACE_TYPE, layout::RowMajor>;
-    using BlockMmadQK = Gemm::Block::BlockMmadTla<DispatchPolicyTla, L1TileShapeTla, L0TileShapeTla, INPUT_TYPE, INPUT_TYPE, WORKSPACE_TYPE, void, TileCopyQK>;
-
-    // cube 2
-    using TileCopyQH = Catlass::Gemm::Tile::PackedTileCopyTla<ArchTag, INPUT_TYPE, layout::RowMajor, INPUT_TYPE, layout::RowMajor, WORKSPACE_TYPE, layout::RowMajor>;
-    using BlockMmadQH = Gemm::Block::BlockMmadTla<DispatchPolicyTla, L1TileShapeTla, L0TileShapeTla, INPUT_TYPE, INPUT_TYPE, WORKSPACE_TYPE, void, TileCopyQH>;
-
-    // cube 3
-    using TileCopyAttenVNEW = Catlass::Gemm::Tile::PackedTileCopyTla<ArchTag, INPUT_TYPE, layout::RowMajor, INPUT_TYPE, layout::RowMajor, WORKSPACE_TYPE, layout::RowMajor>;
-    using BlockMmadAttenVNEW = Gemm::Block::BlockMmadTla<DispatchPolicyTla, L1TileShapeTla, L0TileShapeTla, INPUT_TYPE, INPUT_TYPE, WORKSPACE_TYPE, void, TileCopyAttenVNEW>;
-
-    // vec 1
-
-    // vec 2
-
-    using ElementQ = typename BlockMmadQK::ElementA;
-    using LayoutQ = Catlass::layout::RowMajor;
-
-    using ElementK =  typename BlockMmadQK::ElementB;
-    using LayoutK = Catlass::layout::ColumnMajor;
-
-    using ElementAtten = typename BlockMmadQK::ElementC;
-    using LayoutAtten = Catlass::layout::RowMajor;
-    
-    using ElementAttenMasked = typename BlockMmadQH::ElementA;
-    using LayoutAttenMasked = Catlass::layout::RowMajor;
-
-    using ElementH = typename BlockMmadQH::ElementB;
-    using LayoutH = Catlass::layout::RowMajor;
-
-    using ElementOinter = typename BlockMmadQH::ElementC;
-    using LayoutOinter = Catlass::layout::RowMajor;
-
-
-    using ElementVNEW = typename BlockMmadAttenVNEW::ElementB; 
-    using LayoutVNEW = Catlass::layout::RowMajor;
-
-
+    // The Catlass BlockMmadTla / TileCopy stack is gone (hand mmads only);
+    // the element types are the template inputs directly.
+    using ElementQ = INPUT_TYPE;
+    using ElementK = INPUT_TYPE;
+    using ElementH = INPUT_TYPE;
+    using ElementVNEW = INPUT_TYPE;
     using ElementG = G_TYPE;
-    using ElementMask = bool;
-
-    using L1TileShape = typename BlockMmadQK::L1TileShape;
 
     uint32_t shapeBatch;
     uint32_t seqlen;
@@ -146,7 +65,6 @@ public:
     AscendC::GlobalTensor<ElementVNEW> gmO;
 
     CubeScheduler cubeBlockScheduler;
-    VecScheduler vecBlockScheduler;
 
     Arch::Resource<ArchTag> resource;
 
@@ -180,32 +98,6 @@ public:
 
     __aicore__ inline void Process() {
         ProcessUnifiedCore();
-    }
-
-    // Build the 64x64 lower-triangular causal mask ONCE per kernel launch.
-    // It lives at UB_MASK_OFFSET, above every
-    // ping-pong buffer, so the cube's L0C->UB staging at UB[0] cannot clobber it
-    // and this does NOT have to be redone after each matmul.
-    __aicore__ inline void InitCausalMask() {
-        AscendC::LocalTensor<float> maskUbTensor =
-            resource.ubBuf.template GetBufferByByte<float>(UB_MASK_OFFSET);
-        // 310P: Duplicate count must be >= 8 (vector width = 8 floats).
-        // Build lower-triangular mask: row i has 1.0 in cols [0..i], 0.0 elsewhere.
-        // Fill all 1.0 first, then zero the upper triangle with count >= 8.
-        AscendC::Duplicate<float>(maskUbTensor, (float)1.0, 64 * 64);
-        AscendC::PipeBarrier<PIPE_V>();
-        for (uint32_t i = 0; i < 64; ++i) {
-            uint32_t zeroStart = i + 1;
-            uint32_t zeroLen = 64 - zeroStart;
-            if (zeroLen >= 8) {
-                AscendC::Duplicate<float>(maskUbTensor[i * 64 + zeroStart], (float)0.0, zeroLen);
-            } else {
-                for (uint32_t j = 0; j < zeroLen; ++j) {
-                    maskUbTensor.SetValue(i * 64 + zeroStart + j, (float)0.0);
-                }
-            }
-        }
-        AscendC::PipeBarrier<PIPE_V>();
     }
 
     // ---- L1 ------------------------------------------------------------------
@@ -475,7 +367,7 @@ public:
                 // of the previous body: Q in its slot, h's zN image in its bank.
                 M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true,
                                    /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/true,
-                                   /*B_NZ_GM=*/false, /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true>(
+                                   /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true>(
                     resource,
                     gmQ[prevOffsets.qkOffset], kHeadDim,
                     gmH[prevOffsets.hOffset], vHeadDim,
@@ -492,7 +384,7 @@ public:
                 // tile, B was prefetched into its bank alongside it.
                 M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true,
                                    /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/true,
-                                   /*B_NZ_GM=*/false, /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true>(
+                                   /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true>(
                     resource,
                     gmV[prevOffsets.ovOffset], 0,
                     gmV[prevOffsets.ovOffset], vHeadDim,
@@ -596,7 +488,7 @@ public:
                 // path expects.
                 M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/true, /*A_FROM_L1=*/true,
                                    /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/true,
-                                   /*B_NZ_GM=*/false, /*LEAN_TAIL=*/true>(
+                                   /*LEAN_TAIL=*/true>(
                     resource,
                     gmQ[cube1Offsets.qkOffset], kHeadDim,
                     gmK[cube1Offsets.qkOffset], kHeadDim,
