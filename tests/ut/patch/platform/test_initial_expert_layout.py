@@ -29,9 +29,7 @@ def test_initial_layout_preserves_v1_and_zero_redundancy():
         1,
         2,
     ]
-    assert _build_distributed_initial_expert_map(5, 0, ep_size=5) == list(
-        range(5)
-    )
+    assert _build_distributed_initial_expert_map(5, 0, ep_size=5) == list(range(5))
     with pytest.raises(ValueError, match="divisible"):
         _build_distributed_initial_expert_map(5, 2, ep_size=2)
 
@@ -39,16 +37,10 @@ def test_initial_layout_preserves_v1_and_zero_redundancy():
 def test_weight_mapping_ep_size_is_scoped_to_the_call():
     wrapped = _with_expert_mapping_ep_size(
         lambda _model: EXPERT_MAPPING_EP_SIZE.get(),
-        lambda model: model.moe_config.ep_size
-        if model._use_v2_model_runner
-        else 1,
+        lambda model: model.moe_config.ep_size if model._use_v2_model_runner else 1,
     )
-    v2 = SimpleNamespace(
-        moe_config=SimpleNamespace(ep_size=4), _use_v2_model_runner=True
-    )
-    v1 = SimpleNamespace(
-        moe_config=SimpleNamespace(ep_size=4), _use_v2_model_runner=False
-    )
+    v2 = SimpleNamespace(moe_config=SimpleNamespace(ep_size=4), _use_v2_model_runner=True)
+    v1 = SimpleNamespace(moe_config=SimpleNamespace(ep_size=4), _use_v2_model_runner=False)
     assert wrapped(v2) == 4
     assert wrapped(v1) == 1
     assert EXPERT_MAPPING_EP_SIZE.get() == 1

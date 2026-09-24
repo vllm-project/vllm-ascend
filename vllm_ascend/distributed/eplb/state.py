@@ -16,9 +16,7 @@ from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
-EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar(
-    "vllm_ascend_expert_mapping_ep_size", default=1
-)
+EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
 
 
 def _upstream_from_mapping_accepts_valid_expert_count() -> bool:
@@ -51,13 +49,9 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         ep_group = get_ep_group()
         num_physical_experts = expert_load_view.shape[-1]
         if num_physical_experts % ep_group.world_size:
-            raise ValueError(
-                "The number of physical experts must be divisible by EP size"
-            )
+            raise ValueError("The number of physical experts must be divisible by EP size")
         self.local_expert_count = num_physical_experts // ep_group.world_size
-        self.local_expert_start = (
-            ep_group.rank_in_group * self.local_expert_count
-        )
+        self.local_expert_start = ep_group.rank_in_group * self.local_expert_count
 
     def set_layer_state(
         self,
