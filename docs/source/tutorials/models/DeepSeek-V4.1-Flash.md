@@ -279,7 +279,7 @@ def parse_args():
     parser.add_argument("--dp-size-local", type=int, default=-1)
     parser.add_argument("--dp-rank-start", type=int, default=0)
     parser.add_argument("--dp-address", type=str, required=True)
-    parser.add_argument("--dp-rpc-port", type=str, default=12345)
+    parser.add_argument("--dp-rpc-port", type=str, default="12345")
     parser.add_argument("--vllm-start-port", type=int, default=9000)
     return parser.parse_args()
 
