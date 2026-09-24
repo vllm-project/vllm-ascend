@@ -37,21 +37,63 @@ def _simulate_receive(
     return torch.stack([send_buffers[source_rank][destination_rank] for source_rank in range(dcp_size)])
 
 
-@pytest.mark.parametrize("num_tokens", [7, 8, 31, 32, 256, 257])
+@pytest.mark.parametrize(
+    ("num_tokens", "num_heads", "head_dim", "dcp_size", "output_stride", "local_stride", "pack_batch", "combine_batch"),
+    [
+        pytest.param(64, 96, 512, 8, 1, 1, True, True, id="original-shape"),
+        pytest.param(4, 96, 512, 8, 1, 1, False, False, id="too-few-pack-rows"),
+        pytest.param(7, 96, 512, 8, 1, 1, True, False, id="small-token-count"),
+        pytest.param(64, 8, 512, 8, 1, 1, True, False, id="few-local-heads"),
+        pytest.param(64, 32, 128, 4, 1, 1, True, True, id="dcp4-narrow-head"),
+        pytest.param(64, 12, 512, 3, 1, 1, True, True, id="dcp3-combine-boundary"),
+        pytest.param(64, 4, 512, 1, 1, 1, False, False, id="dcp1-wide-small-rows"),
+        pytest.param(128, 4, 512, 1, 1, 1, True, True, id="dcp1-wide-enough-rows"),
+        pytest.param(64, 4, 128, 1, 1, 1, False, True, id="dcp1-narrow-combine"),
+        pytest.param(128, 8, 257, 2, 1, 1, True, True, id="dcp2-contiguous-wide-local"),
+        pytest.param(128, 8, 257, 2, 1, 2, True, False, id="dcp2-strided-wide-local"),
+        pytest.param(64, 96, 1024, 8, 1, 1, True, False, id="wide-pack-combine-fallback"),
+        pytest.param(64, 96, 2048, 8, 1, 1, True, False, id="pack-dim-limit"),
+        pytest.param(64, 96, 512, 8, 2, 1, False, True, id="strided-pack-fallback"),
+        pytest.param(257, 32, 128, 4, 1, 1, True, True, id="beyond-old-token-limit"),
+        pytest.param(64, 36, 128, 9, 1, 1, True, False, id="dcp9-pack-only"),
+        pytest.param(64, 64, 128, 16, 1, 1, True, None, id="dcp16-pack-only"),
+    ],
+)
 @torch.inference_mode()
-def test_a5_dcp8_batched_matches_scalar_path(monkeypatch: pytest.MonkeyPatch, num_tokens: int) -> None:
-    """Check the optimized A5 boundaries against the original Triton kernels."""
+def test_a5_generalized_batching_matches_scalar_path(
+    monkeypatch: pytest.MonkeyPatch,
+    num_tokens: int,
+    num_heads: int,
+    head_dim: int,
+    dcp_size: int,
+    output_stride: int,
+    local_stride: int,
+    pack_batch: bool,
+    combine_batch: bool | None,
+) -> None:
+    """Check measured A5 dispatch boundaries against the scalar kernels."""
     if not sfa_cp.is_950():
-        pytest.skip("The batched DCP8 SFA kernels are enabled only on A5")
-    torch.manual_seed(2026 + num_tokens)
-    output = torch.randn(num_tokens, 96, 512, device="npu", dtype=torch.bfloat16)
-    lse = torch.randn(num_tokens, 96, 1, device="npu", dtype=torch.float32)
-    local_output = torch.randn(num_tokens, 12, 512, device="npu", dtype=torch.bfloat16)
-    local_lse = torch.randn(num_tokens, 12, 1, device="npu", dtype=torch.float32)
+        pytest.skip("The batched SFA kernels are enabled only on A5")
+    sfa_cp.init_device_properties_triton()
+    if sfa_cp.get_vectorcore_num() != 64:
+        pytest.skip("Dispatch boundary cases target the measured 64-vector-core A5")
+    torch.manual_seed(2026 + num_tokens + dcp_size)
+    output = torch.randn(num_tokens, num_heads, head_dim * output_stride, device="npu", dtype=torch.bfloat16)[
+        ..., ::output_stride
+    ]
+    lse = torch.randn(num_tokens, num_heads, 1, device="npu", dtype=torch.float32)
+    local_heads = num_heads // dcp_size
+    local_output = torch.randn(num_tokens, local_heads, head_dim * local_stride, device="npu", dtype=torch.bfloat16)[
+        ..., ::local_stride
+    ]
+    local_lse = torch.randn(num_tokens, local_heads, 1, device="npu", dtype=torch.float32)
 
     monkeypatch.setattr(sfa_cp, "is_950", lambda: False)
-    scalar_send = pack_sfa_dcp_output_lse(output, lse, 8, 1)
-    scalar_combined = fused_sfa_dcp_lse_combine(scalar_send, 512, 1, local_output=local_output, local_lse=local_lse)
+    scalar_send = pack_sfa_dcp_output_lse(output, lse, dcp_size, 1)
+    if combine_batch is not None:
+        scalar_combined = fused_sfa_dcp_lse_combine(
+            scalar_send, head_dim, 1, local_output=local_output, local_lse=local_lse
+        )
 
     class LaunchSpy:
         def __init__(self, kernel):
@@ -72,13 +114,32 @@ def test_a5_dcp8_batched_matches_scalar_path(monkeypatch: pytest.MonkeyPatch, nu
     monkeypatch.setattr(sfa_cp, "_pack_sfa_dcp_output_lse_batched_kernel", pack_spy)
     monkeypatch.setattr(sfa_cp, "_fused_sfa_dcp_lse_combine_batched_kernel", combine_spy)
     monkeypatch.setattr(sfa_cp, "is_950", lambda: True)
-    batched_send = pack_sfa_dcp_output_lse(output, lse, 8, 1)
-    batched_combined = fused_sfa_dcp_lse_combine(batched_send, 512, 1, local_output=local_output, local_lse=local_lse)
+    batched_send = pack_sfa_dcp_output_lse(output, lse, dcp_size, 1)
+    if combine_batch is not None:
+        batched_combined = fused_sfa_dcp_lse_combine(
+            batched_send, head_dim, 1, local_output=local_output, local_lse=local_lse
+        )
 
-    torch.testing.assert_close(batched_send, scalar_send, atol=0, rtol=0)
-    torch.testing.assert_close(batched_combined, scalar_combined, atol=2e-2, rtol=2e-2)
-    assert pack_spy.calls == int(8 <= num_tokens <= 256)
-    assert combine_spy.calls == int(32 <= num_tokens <= 256)
+    expected_output = output.reshape(num_tokens, dcp_size, local_heads, head_dim).permute(1, 2, 0, 3)
+    torch.testing.assert_close(batched_send[..., :head_dim], expected_output, atol=0, rtol=0)
+    torch.testing.assert_close(batched_send[..., :head_dim], scalar_send[..., :head_dim], atol=0, rtol=0)
+    encoded_lse = batched_send[..., head_dim:].float()
+    exponent_code = encoded_lse[..., :1]
+    significand = encoded_lse[..., 1:2] * 65536 + encoded_lse[..., 2:3] * 256 + encoded_lse[..., 3:4]
+    decoded_lse = torch.where(exponent_code < 0, -1.0, 1.0) * significand * torch.exp2(exponent_code.abs() - 151)
+    expected_lse = lse.reshape(num_tokens, dcp_size, local_heads, 1).permute(1, 2, 0, 3)
+    torch.testing.assert_close(decoded_lse, expected_lse, atol=1e-2, rtol=1e-2)
+    assert pack_spy.calls == int(pack_batch)
+    if combine_batch is not None:
+        torch.testing.assert_close(batched_combined, scalar_combined, atol=2e-2, rtol=2e-2)
+        rank_values = batched_send[..., :head_dim].permute(0, 2, 1, 3)
+        rank_lse = decoded_lse.squeeze(-1).permute(0, 2, 1)
+        expected_combined = _reference_merge(
+            torch.cat((rank_values, local_output.unsqueeze(0))),
+            torch.cat((rank_lse, local_lse[..., 0].unsqueeze(0))),
+        )
+        torch.testing.assert_close(batched_combined, expected_combined, atol=2e-2, rtol=2e-2)
+        assert combine_spy.calls == int(combine_batch)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
