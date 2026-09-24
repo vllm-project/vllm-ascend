@@ -1,3 +1,4 @@
+import math
 from contextlib import contextmanager
 from copy import copy
 from dataclasses import replace
@@ -5,6 +6,7 @@ from typing import Literal, get_args
 
 import vllm.config.speculative as speculative_config
 from transformers import DeepseekV2Config, PretrainedConfig
+from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 
 from vllm_ascend.utils import is_deepseek_v41
@@ -29,8 +31,60 @@ if hasattr(DeepseekV2Config, "__class_validators__"):
     ]
 
 
+# Identify the deployed z-lab/Kimi-K2.5-DFlash checkpoint independently of its
+# local directory name. Other DFlash checkpoints may require the new YaRN math.
+_KIMI_DFLASH_CONFIG = (
+    ("model_type", "qwen3"),
+    ("hidden_size", 7168),
+    ("vocab_size", 163840),
+    ("num_target_layers", 61),
+)
+_KIMI_DFLASH_TARGET_LAYER_IDS = (1, 12, 24, 35, 47, 58)
+_KIMI_DFLASH_YARN_PARAMS = (
+    ("rope_type", "yarn"),
+    ("factor", 64.0),
+    ("mscale", 1.0),
+    ("mscale_all_dim", 1.0),
+    ("original_max_position_embeddings", 4096),
+)
+
+
+def _normalize_kimi_dflash_rope(hf_config: PretrainedConfig) -> None:
+    """Preserve this legacy Kimi draft's vLLM 0.29 YaRN amplitude.
+
+    vLLM #56446 starts honoring mscale/mscale_all_dim for plain YaRN. For
+    this checkpoint their ratio is 1, instead of the old 1 + 0.1 * log(64),
+    which reduces draft acceptance. Make the old amplitude explicit only for
+    the known config; an explicit attention_factor always takes precedence.
+    This compatibility shim can go away once the checkpoint specifies it.
+    """
+    if "DFlashDraftModel" not in (getattr(hf_config, "architectures", None) or ()):
+        return
+    if any(getattr(hf_config, key, None) != value for key, value in _KIMI_DFLASH_CONFIG):
+        return
+    dflash_config = getattr(hf_config, "dflash_config", None) or {}
+    if tuple(dflash_config.get("target_layer_ids") or ()) != _KIMI_DFLASH_TARGET_LAYER_IDS:
+        return
+
+    # Transformers 5 stores the old rope_scaling field in rope_parameters.
+    # Copy before updating so a shared source dict is not modified in place.
+    rope_field = "rope_parameters"
+    rope_params = getattr(hf_config, rope_field, None)
+    if rope_params is None:
+        rope_field = "rope_scaling"
+        rope_params = getattr(hf_config, rope_field, None)
+    if not isinstance(rope_params, dict) or rope_params.get("attention_factor") is not None:
+        return
+    if any(rope_params.get(key) != value for key, value in _KIMI_DFLASH_YARN_PARAMS):
+        return
+
+    legacy_attention_factor = 1.0 + 0.1 * math.log(rope_params["factor"])
+    setattr(hf_config, rope_field, {**rope_params, "attention_factor": legacy_attention_factor})
+
+
 def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> PretrainedConfig:
     hf_config = _orig_hf_config_override(hf_config)
+    _normalize_kimi_dflash_rope(hf_config)
     architectures = hf_config.architectures or ()
     if hf_config.model_type == "qwen3" and "DSparkDraftModel" in architectures:
         dflash_config = hf_config.dflash_config
@@ -155,6 +209,26 @@ def _dspark_post_init(self):
 
 SpeculativeConfig.hf_config_override = staticmethod(_normalize_legacy_qwen3_dspark_config)
 SpeculativeConfig.__post_init__ = _dspark_post_init
+
+# The pinned vLLM revision propagates enable_expert_parallel to the draft
+# parallel config (upstream #55914) but no longer disables it for dense
+# drafts (upstream #56930 is not on this revision). Non-MoE draft models
+# (e.g. Kimi K3 DSpark, VWN eagle3) then fail the
+# _verify_with_expert_parallelism check in
+# ModelConfig.verify_with_parallel_config. Skip the EP check for non-MoE
+# draft model configs; the target EP check and MoE draft models are
+# unaffected.
+
+_orig_verify_with_parallel_config = ModelConfig.verify_with_parallel_config
+
+
+def _ascend_verify_with_parallel_config(self, parallel_config):
+    if parallel_config.enable_expert_parallel and not self.is_moe and getattr(self, "runner_type", None) == "draft":
+        return
+    return _orig_verify_with_parallel_config(self, parallel_config)
+
+
+ModelConfig.verify_with_parallel_config = _ascend_verify_with_parallel_config
 
 if "glm5_next_mtp" not in get_args(speculative_config.MTPModelTypes):
     speculative_config.MTPModelTypes = Literal[(*get_args(speculative_config.MTPModelTypes), "glm5_next_mtp")]

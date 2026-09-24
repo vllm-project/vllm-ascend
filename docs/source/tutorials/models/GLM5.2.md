@@ -22,9 +22,11 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 |  `GLM-5.2-w8a8`          | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8) |
 |  `GLM-5.2-w8a8c8`(Quantized version)        | 2 Atlas 800 A3 (64GB × 16) node or 4 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8) |
 |  `GLM-5.2-w4a8c8`        | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8) |
+|  `GLM-5.2-w4a4c8`        | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/glm_5_2/glm_5_2_w4a4c8_mxfp4.yaml) |
 
 - `GLM-5.2-w8a8c8`(Quantized version): The weights have been verified and are recommended for use.
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
+- `GLM-5.2-w4a4c8`(W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -1623,6 +1625,10 @@ The service returns HTTP 200 OK. The JSON response contains the `choices` field 
 | AIME2026 | - | accuracy | gen | 93.33 | 4 Atlas 800 A3 (64GB × 16) |
 | GPQA | - | accuracy | gen | 90.4 | 8 Atlas 800 A3 (64GB × 16) |
 | GPQA | - | accuracy | gen | 91.92 | 8 Atlas 800 A2 (64GB × 8) |
+| AIME2026 | - | accuracy | gen | 95.00 | 950PR&950DT Products, w4a4c8 |
+| GPQA Diamond | - | accuracy | gen | 89.90 | 950PR&950DT Products, w4a4c8 |
+
+> **Note**: Dataset evaluation results fluctuate between runs due to sampling and runtime non-determinism. When a dataset is evaluated multiple times, the average score is reported.
 
 ## 8 Performance Evaluation
 
@@ -1672,12 +1678,31 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ## 10 FAQ
 
-- **Q: How to enable function calling for GLM-5.2?**
+### Q: How to enable function calling for GLM-5.2?
 
-  A: Please add following configurations in vLLM startup command
+A: Please add following configurations in vLLM startup command
 
-  ```shell
-  --tool-call-parser glm47 \
-  --reasoning-parser glm45 \
-  --enable-auto-tool-choice \
-  ```
+```shell
+--tool-call-parser glm47 \
+--reasoning-parser glm45 \
+--enable-auto-tool-choice \
+```
+
+### Q: How do the W4A4C8 ultra-low-bit quantized weights preserve accuracy?
+
+A: For 950PR&950DT Products, the W4A4C8 weights of GLM-5.2 are quantized with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/glm_5_2/glm_5_2_w4a4c8_mxfp4.yaml). The quantization pipeline first applies QuaRot rotation and FlexSmoothQuant smoothing to suppress activation outliers, and then quantizes the model with a mixed-precision strategy: only the modules that dominate the parameter count are quantized to 4 bit, while precision-sensitive modules fall back to higher precision or are not quantized at all.
+
+| Module | Quantization configuration |
+| ------ | -------------------------- |
+| MoE FFN routed experts (`mlp.experts`) | W4A4 MXFP4 |
+| Attention linear layers (except `kv_b_proj`, `wk`, `weights_proj`) | W8A8 MXFP8 |
+| Dense FFN linear layers (except router gates) | W8A8 MXFP8 |
+| Router gates, `kv_b_proj`, `wk`, `weights_proj` | Not quantized (kept in high precision) |
+
+- **Quantization algorithm**: The weights and activations use the MXFP4/MXFP8 microscaling formats. Each tensor is divided into blocks of 32 elements, and each block shares a single scaling factor obtained with symmetric min-max calibration on a chain-of-thought calibration dataset. Combined with the QuaRot/FlexSmoothQuant outlier suppression, block-wise scaling adapts to the local dynamic range of each tensor, so the quantization error is far lower than that of uniform INT4 quantization.
+- **C8 (FP8 KV cache)**: C8 is a dynamic quantization applied to the KV cache during inference. On 950PR&950DT Products, the KV cache is quantized to FP8 (not INT8). It is unrelated to the parameters stored in the weight checkpoint and is controlled only by the serving configuration:
+    - **Attention KV cache** (SFA C8, enabled with `--kv-cache-dtype fp8`): the compressed KV latent, which serves as both K and V, is dynamically quantized per 128-element tile to FP8 (E4M3) with a per-tile scale; the RoPE part of the KV cache stays in BF16, and Q is not quantized.
+    - **Indexer cache** (LI C8, enabled with `--attention_config.indexer_kv_dtype fp8`): both indexer Q and K are first rotated by a 128-dimensional Hadamard matrix to spread outliers, and then dynamically quantized per token to FP8 (E4M3) with per-token FP32 scales.
+    - Precision-sensitive modules (the indexer and some attention layers) are configured as C8 fallback layers in the quantization configuration: they are excluded from C8 quantization during inference and run in high precision.
+
+For W4A4C8 accuracy scores, see [Accuracy Evaluation](#7-accuracy-evaluation).

@@ -20,7 +20,11 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm_ascend.model_loader.netloader.utils import find_free_port, is_valid_path_prefix
+from vllm_ascend.model_loader.netloader.utils import (
+    disk_fallback_loader_extra_config,
+    find_free_port,
+    is_valid_path_prefix,
+)
 
 
 def test_find_free_port():
@@ -54,6 +58,42 @@ def test_is_valid_path_prefix_no_directory(mock_exists):
 @patch("os.path.exists", return_value=True)
 def test_is_valid_path_prefix_directory_exists(mock_exists):
     assert is_valid_path_prefix("/existing_dir/test")
+
+
+def test_disk_fallback_keeps_default_loader_keys():
+    """Netloader-only keys are dropped; DefaultModelLoader keys survive."""
+    extra = {
+        "enable_multithread_load": True,
+        "num_threads": 8,
+        "enable_weights_track": False,
+        "SOURCE": "127.0.0.1:8000",
+        "LISTEN_PORT": 8000,
+    }
+
+    kept = disk_fallback_loader_extra_config(extra)
+
+    assert kept == {
+        "enable_multithread_load": True,
+        "num_threads": 8,
+        "enable_weights_track": False,
+    }
+
+
+def test_disk_fallback_adds_no_defaults():
+    """The fallback must not change loader behaviour the user did not ask for."""
+    assert disk_fallback_loader_extra_config({}) == {}
+    assert disk_fallback_loader_extra_config({"SOURCE": "127.0.0.1:8000"}) == {}
+
+
+def test_disk_fallback_tolerates_non_dict():
+    assert disk_fallback_loader_extra_config(None) == {}
+    assert disk_fallback_loader_extra_config("not-a-dict") == {}
+
+
+def test_disk_fallback_preserves_disabled_multithread():
+    kept = disk_fallback_loader_extra_config({"enable_multithread_load": False, "SOURCE": "x"})
+
+    assert kept == {"enable_multithread_load": False}
 
 
 if __name__ == "__main__":

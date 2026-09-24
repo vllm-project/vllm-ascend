@@ -586,7 +586,7 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     impl.q_lora_rank = 2
     impl.qk_rope_head_dim = 2
     impl.kv_lora_rank = 4
-    hidden_states = torch.zeros(2, 4)
+    hidden_states = torch.arange(8, dtype=torch.float32).reshape(2, 4)
     shared_topk = torch.ones(2, 1, dtype=torch.int32)
     computed_topk = torch.zeros_like(shared_topk)
     main_cache = tuple(torch.empty(1) for _ in range(1 if sfa_c8 else 2))
@@ -648,7 +648,10 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     if expect_indexer:
         indexer.assert_called_once()
         assert indexer.call_args.kwargs["compute_topk"] is (not skip_topk)
-        assert indexer.call_args.args[2] is hidden_states
+        # Trimming attention inputs may create a view of the original tensor.
+        k_hidden_states = indexer.call_args.args[2]
+        torch.testing.assert_close(k_hidden_states, hidden_states)
+        assert k_hidden_states.data_ptr() == hidden_states.data_ptr()
         assert indexer.call_args.args[3] is own_metadata
         assert own_metadata.actual_seq_lengths_query is own_query_lengths
         assert own_metadata.actual_seq_lengths_key is own_key_lengths

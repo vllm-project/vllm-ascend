@@ -349,15 +349,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
         if dcp_size > 1:
-            if cad.is_prefilling is not None:
-                cad.is_prefilling.fill_(False)
             assert self.runner is not None
             dcp_manager = getattr(self.runner, "dcp_manager", None)
             assert dcp_manager is not None
-            long_seq_args = dcp_manager.prepare_dspark_first_pass_cp_metadata(
-                common_attn_metadata=cad,
-                num_query_per_req=self.num_query_per_req,
-            )
+            dcp_manager.prepare_parallel_draft_metadata(cad, self.draft_attn_groups)
 
         return num_query_total, token_indices_to_sample, cad, long_seq_args
 

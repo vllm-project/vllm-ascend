@@ -13,7 +13,6 @@ from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -21,7 +20,6 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 def _make_runner(need_timing: bool = True):
     runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.pcp_manager = None
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
@@ -34,7 +32,7 @@ def _make_runner(need_timing: bool = True):
     runner.adaptive_verification = None
     runner.use_fia = False
     # Set by NPUModelRunner.__init__ on real instances.
-    runner._oproj_tp_requires_graph = False
+    runner._finegrained_tp_requires_graph = False
     return runner
 
 
@@ -141,9 +139,8 @@ def test_execute_model_records_profiling_time():
         "skip_attn_for_dummy_run": False,
         "is_profile": False,
         "context_len": 0,
+        "valid_dummy_state_slots": False,
     }
-    if not vllm_version_is("0.29.0"):
-        expected_kwargs["valid_dummy_state_slots"] = False
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 
@@ -258,21 +255,21 @@ def test_sample_tokens_restores_replicated_draft_hidden_states():
     runner.speculator = SimpleNamespace(replicated_pcp=True)
     runner.use_spec_pp = False
 
-    aux_hidden_states = [
-        torch.arange(6, dtype=torch.float32).reshape(2, 3),
-        torch.arange(4, dtype=torch.float32).reshape(2, 2),
-    ]
-    state = Mock(aux_hidden_states=aux_hidden_states)
+    hidden_states = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    # aux_hidden_states are restored by upstream sample_tokens (#56107);
+    # the Ascend pre-restore only covers the target hidden states.
+    state = Mock(aux_hidden_states=[torch.ones(2, 3)])
+    state.hidden_states = hidden_states
     restored_state = object()
     state._replace.return_value = restored_state
     runner.execute_model_state = state
 
     target_hidden_states = object()
-    restored_aux_hidden_states = torch.ones(4, 5)
+    restored_hidden_states = torch.ones(4, 3)
     runner.pcp_manager = SimpleNamespace(
         restore_hidden_state_buffer=Mock(),
         restore_hidden_states=Mock(
-            return_value=restored_aux_hidden_states,
+            return_value=restored_hidden_states,
         ),
     )
     runner.model = SimpleNamespace(
@@ -291,12 +288,8 @@ def test_sample_tokens_restores_replicated_draft_hidden_states():
     assert actual is expected_output
     parent_sample_tokens.assert_called_once_with(grammar_output)
     runner.pcp_manager.restore_hidden_state_buffer.assert_called_once_with(target_hidden_states)
-    restored_input = runner.pcp_manager.restore_hidden_states.call_args.args[0]
-    torch.testing.assert_close(
-        restored_input,
-        torch.cat(aux_hidden_states, dim=-1),
-    )
-    state._replace.assert_called_once_with(aux_hidden_states=[restored_aux_hidden_states])
+    runner.pcp_manager.restore_hidden_states.assert_called_once_with(hidden_states)
+    state._replace.assert_called_once_with(hidden_states=restored_hidden_states)
     assert runner.execute_model_state is restored_state
 
 
@@ -318,20 +311,17 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     ]
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
-    # graph descriptor, and forwards the descriptor as an explicit rank-local
-    # padded extent on both supported versions (upstream vLLM #53515).
+    # graph descriptor, and forwards the whole descriptor (upstream vLLM #53867
+    # changed maybe_partition_pcp_batch from padded_num_tokens to a
+    # BatchExecutionDescriptor).
     assert len(padding_assignments) == 1
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
 
     assert len(partition_calls) == 1
-    padded_call = next(
-        call for call in partition_calls if any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
-    )
-    padded_num_tokens = next(keyword.value for keyword in padded_call.keywords if keyword.arg == "padded_num_tokens")
-    assert isinstance(padded_num_tokens, ast.Attribute)
-    assert padded_num_tokens.attr == "num_tokens"
-    assert isinstance(padded_num_tokens.value, ast.Name)
-    assert padded_num_tokens.value.id == "batch_desc"
+    partition_call = partition_calls[0]
+    batch_desc_kw = next(keyword.value for keyword in partition_call.keywords if keyword.arg == "batch_desc")
+    assert isinstance(batch_desc_kw, ast.Name)
+    assert batch_desc_kw.id == "batch_desc"
 
 
 @pytest.mark.parametrize("num_reqs,num_tokens", [(4, 4), (2, 6)])
@@ -373,10 +363,7 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
     dummy = object()
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
         assert runner.prepare_dummy_attn(dummy) == ((), None)
-    if vllm_version_is("0.29.0"):
-        parent.assert_called_once_with(dummy)
-    else:
-        parent.assert_called_once_with(dummy, valid_state_slots=False)
+    parent.assert_called_once_with(dummy, valid_state_slots=False)
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -559,12 +546,8 @@ def test_init_spec_pp_full_graph_and_speculator():
     assert runner.use_aux_hidden_state_outputs is True
     assert runner.speculator is speculator
     assert speculator.update_stream is runner.update_stream
-    if vllm_version_is("0.29.0"):
-        assert runner.use_spec_pp is True
-        install_pp.assert_called_once()
-    else:
-        assert runner.use_spec_pp is False
-        install_pp.assert_not_called()
+    assert runner.use_spec_pp is False
+    install_pp.assert_not_called()
     assert runner.update_stream is not None
     assert runner.decode_query_len == 2
 
@@ -597,10 +580,7 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler = MagicMock()
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
-    if vllm_version_is("0.29.0"):
-        runner.pp_handler.broadcast_draft_tokens.assert_called_once_with()
-    else:
-        runner.pp_handler.broadcast_draft_tokens.assert_not_called()
+    runner.pp_handler.broadcast_draft_tokens.assert_not_called()
 
 
 def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
@@ -787,7 +767,7 @@ def _fake_async_copy(src, device=None, out=None):
     return tensor
 
 
-def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *, version_029=False):
+def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc):
     batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
 
     def _partition(_pcp_manager, input_batch, **_kwargs):
@@ -814,7 +794,6 @@ def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *
             SimpleNamespace(maybe_partition_pcp_batch=_partition),
         ),
         patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
-        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=version_029),
     ):
         return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc), batch
 
@@ -831,7 +810,7 @@ def test_prepare_inputs_covers_draft_full_dcp_pp_and_rswa():
     runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner(
         draft=True, full_cg=True, use_dcp=True, use_pp=True, rswa=True, speculator=True
     )
-    out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, version_029=True)
+    out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc)
     assert out is partitioned
     runner.num_computed_tokens_event.synchronize.assert_called_once_with()
     assert runner.req_states.num_computed_tokens_cpu[0] == 3

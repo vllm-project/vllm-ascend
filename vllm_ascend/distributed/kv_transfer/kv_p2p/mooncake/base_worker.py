@@ -98,7 +98,6 @@ class MooncakeBaseConnectorWorker:
         pcp_group = get_pcp_group()
         self.pcp_rank = pcp_group.rank_in_group
         self.pcp_size = pcp_group.world_size
-        assert self.pcp_size == 1, f"Mooncake temporarily requires prefill context parallel size 1, got {self.pcp_size}"
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
 
@@ -217,6 +216,7 @@ class MooncakeBaseConnectorWorker:
             if self.ascend_config.kvpp_config.size > 1
             else {}
         )
+        kvpp_rank = self.pcp_rank * self.tp_size + self.tp_rank
         layer_names: list[str] = []
         layer_block_sizes: list[int] = []
         group_indices: list[int] = []
@@ -242,7 +242,7 @@ class MooncakeBaseConnectorWorker:
                 # Foreign target layers alias scratch. Publish persistent owners
                 # only; MTP caches are absent from owners and remain replicated.
                 owner = owners.get(layer_name)
-                if owner is not None and owner != self.tp_rank:
+                if owner is not None and owner != kvpp_rank:
                     continue
 
                 base_addrs: list[int] = []
@@ -280,11 +280,10 @@ class MooncakeBaseConnectorWorker:
                 layer_names.append(layer_name)
                 layer_block_size = spec.block_size
                 if isinstance(spec, AscendSFAIndexerCacheSpec):
-                    # The cache manager treats one SFA indexer block as a DCP
-                    # virtual block, while every worker physically stores all
-                    # replicated indexer blocks. Publish the virtual token span
-                    # so dividing it by the tensor block scale recovers the
-                    # physical kernel block size.
+                    # A replicated SFA indexer stores one physical kernel block
+                    # per DCP rank behind each scheduler block. Publish their
+                    # aggregate token span; replication size 1 deliberately
+                    # remains an ordinary DCP-sharded FA block.
                     layer_block_size *= spec.sfa_dcp_replicated_indexer_size
                 layer_block_sizes.append(layer_block_size)
                 group_indices.append(self.layer_name_to_group_index[layer_name])
