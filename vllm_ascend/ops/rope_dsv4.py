@@ -1,4 +1,5 @@
 import math
+from collections.abc import Iterable
 from typing import Any
 
 import torch
@@ -84,15 +85,30 @@ def get_cos_and_sin_dsa(
     positions: torch.Tensor | dict[str, torch.Tensor],
     use_cache: bool = False,
     draft_index: int | None = None,
+    layer_names: str | Iterable[str] | None = None,
 ):
     if isinstance(positions, torch.Tensor):
         pos_map = {"default": positions}
     else:
         pos_map = positions
 
+    requested_configs: set[str] | None = None
+    if layer_names is not None:
+        names = [layer_names] if isinstance(layer_names, str) else list(layer_names)
+        requested_configs = set()
+        for layer_name in names:
+            info = _ROPE_STATE.layer_info.get(layer_name)
+            if info is None and layer_name.endswith(".swa_cache"):
+                info = _ROPE_STATE.layer_info.get(f"{layer_name.removesuffix('.swa_cache')}.attn")
+            if info is None:
+                raise KeyError(f"Layer {layer_name} not registered.")
+            requested_configs.add(info[0])
+
     batch_result: dict[Any, Any] = {}
 
     for config_key, registered_groups in _ROPE_STATE.registry_summary.items():
+        if requested_configs is not None and config_key not in requested_configs:
+            continue
         if config_key not in _ROPE_STATE.full_rope_cache:
             continue
         full_rope_cos, full_rope_sin = _ROPE_STATE.full_rope_cache[config_key]
