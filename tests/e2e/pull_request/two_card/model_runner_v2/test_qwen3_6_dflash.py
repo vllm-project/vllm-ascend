@@ -43,7 +43,7 @@ GPU_MEMORY_UTILIZATION = 0.95
     ("expected_acceptance_length", "num_speculative_tokens", "additional_config"),
     [
         pytest.param(
-            4.0,
+            3.4,
             7,
             {"ascend_compilation_config": {"enable_npugraph_ex": False}},
             id="dflash-qwen36-35b",
