@@ -8,7 +8,25 @@ description: vllm-ascend 仓 csrc 自研 AscendC 算子的优化开发与测试�
 本仓库的算子开发环境：Ascend 910B3（dav_c220 向量核，40 AIV，UB 192KB/核），
 CANN 9.1.0。每次修改 kernel 后必须走完整闭环：**精度是硬门槛，任何 shape 不允许回退**。
 
-## 每轮工作流（按顺序执行，缺一步都可能是空跑）
+## 第 0 步：基线采集（任何优化开始前必做，先于改一行代码）
+
+基线是一切后续判断的参照物——没有它就无法证明"无精度回退"、无法定位瓶颈、
+无法量化每轮收益。四件事全部落档（建议建 `RMS_NORM_CAST_OPT_NOTES.md` 式的
+优化记录文档）：
+
+1. **精度基线**：在未改动的代码上跑一遍精度测试确认全绿。若基线本身就红，
+   先修问题再谈优化。
+2. **性能基线（fused vs unfused 参照）**：NPUGraph 记分板跑全 shape 档位
+   （如 tokens 1/4/16/64/128/512/1024/2048/4096 × bf16/fp16），**同时测参照
+   组合**（如 `npu_rms_norm` + `Tensor.float()` 两个算子串联得到同样输出）。
+   fused 搬运量更少却比 ref 慢的 shape 档，就是优化空间所在。
+3. **pipe 基线**：对目标 shape 采 msprof op PipeUtilization，记录各 pipe
+   （vec/mte2/mte3/scalar）busy 与占比 → 确定瓶颈方向（如 vec 65.6% =
+   compute-bound），这决定第几轮先做什么。
+4. **代码走读**：基于基线 profile 列出 pass 清单/数据流，标出冗余 pass、
+   串行点、标量往返——把"为什么慢"从猜测变成清单。
+
+## 每轮工作流（基线在手后，按顺序执行，缺一步都可能是空跑）
 
 ```bash
 # 0. 修改 csrc/<category>/<op>/op_kernel/*.h|*.cpp 或 op_host/*
@@ -34,12 +52,14 @@ md5sum csrc/<category>/<op>/op_kernel/<op>.h csrc/build/binary/ascend910b/src/<o
 # 5. 精度回归（硬门槛）
 pytest tests/e2e/nightly/single_node/ops/singlecard_ops/test_<op>.py -q
 
-# 6. 性能记分板（NPUGraph replay）
+# 6. 性能记分板（NPUGraph replay，与基线/上一轮同口径对比）
 python benchmarks/<op>.py
 
 # 7. pipe 归因（msprof op；shape 用位置参数传给 runner）
 msprof op --kernel-name=<KernelName> --output=./profiling --aic-metrics=PipeUtilization \
   python benchmarks/<op>_msprof.py 2048
+
+# 8. 结果与基线/上一轮对比后记录归档，再提交（含性能数据）
 ```
 
 ## 构建陷阱（最容易空跑一轮的地方）
