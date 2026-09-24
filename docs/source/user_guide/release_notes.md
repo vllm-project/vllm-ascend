@@ -22,7 +22,7 @@ This is the first release candidate of v0.27.1 for vLLM Ascend, aligned with ups
 
 | Model | Supported hardware in v0.27.1rc1 | Release scope |
 | --- | --- | --- |
-| MiniMax-M3 | Atlas 800 A3 and 950DT Products | W8A8 on Atlas 800 A3 and W8A8C8 on 950DT Products; two-node large-EP 1P1D serving and KV Cache Pool deployment |
+| MiniMax-M3 | Atlas 800 A3 and 950DT Products | W8A8 on Atlas 800 A3 and W8A8C8 on 950DT Products; two-node 1P1D serving and KV Cache Pool deployment |
 | DeepSeek-V4-Flash | 950DT Products | W4A8C8; two-node 1P1D DSpark serving and KV Cache Pool deployment |
 
 - Integrated the AscendC MSA index-score operator into MiniMax-M3 prefill, decode, and speculative-decode paths. [#14539](https://github.com/vllm-project/vllm-ascend/pull/14539)
