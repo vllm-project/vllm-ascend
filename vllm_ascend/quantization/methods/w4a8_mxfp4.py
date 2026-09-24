@@ -30,6 +30,7 @@ from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
     ensure_mxfp4_linear_available,
 )
+from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
@@ -175,7 +176,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         log2phy: torch.Tensor = None,
         global_redundant_expert_num: int = 0,
         pertoken_scale: Any | None = None,
-        activation: str = "silu",
+        activation: str | SituActivationConfig = "silu",
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
         tid2eid: torch.Tensor | None = None,
@@ -213,21 +214,35 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
-        moe_comm_method = get_forward_context().moe_comm_method
+        forward_context = get_forward_context()
+        moe_comm_method = forward_context.moe_comm_method
+        w13_weight = getattr(
+            layer,
+            "w13_weight_packed" if self.use_weight_packed else "w13_weight",
+        )
+        w2_weight = getattr(
+            layer,
+            "w2_weight_packed" if self.use_weight_packed else "w2_weight",
+        )
+        if getattr(moe_comm_method, "uses_a5_mega_moe", False):
+            # process_weights_after_loading stores the GMM (E, K, N) view.
+            # Reversing that view restores MegaMoE's checkpoint (E, N, K)
+            # layout without keeping a second resident copy of expert weights.
+            w1 = w13_weight.transpose(1, 2)
+            w2 = w2_weight.transpose(1, 2)
+            w1_scale = layer.w13_weight_scale.transpose(1, 2)
+            w2_scale = layer.w2_weight_scale.transpose(1, 2)
+        else:
+            w1, w2 = w13_weight, w2_weight
+            w1_scale, w2_scale = layer.w13_weight_scale, layer.w2_weight_scale
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
                 combine_topk_weights_dtype=None if x.dtype == torch.float8_e4m3fn else x.dtype,
                 topk_ids=topk_ids,
-                w1=getattr(
-                    layer,
-                    "w13_weight_packed" if self.use_weight_packed else "w13_weight",
-                ),
-                w2=getattr(
-                    layer,
-                    "w2_weight_packed" if self.use_weight_packed else "w2_weight",
-                ),
+                w1=w1,
+                w2=w2,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=expert_map,
@@ -242,8 +257,9 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
                 mxfp_per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.float8_e4m3fn]),
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
+                mxfp_group_size=self.group_size,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
                 swiglu_limit=layer.swiglu_limit,
             )
         )
