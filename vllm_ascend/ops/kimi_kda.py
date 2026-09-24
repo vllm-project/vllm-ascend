@@ -26,7 +26,6 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend import envs
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -387,28 +386,12 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         max_query_len: int = 1,
     ) -> torch.Tensor:
         output = torch.empty_like(mixed_qkv)
-        # CausalConv1dV2 fast path (aclnnCausalConv1dV2, ported from PR #16468):
-        # dim-last layout, host-metadata friendly, spec-decode aware.
-        if envs.VLLM_ASCEND_ENABLE_CAUSAL_CONV1D_V2:
-            initial = None
-            if initial_state_mode is not None:
-                initial = (
-                    initial_state_mode if initial_state_mode.dtype == torch.bool else initial_state_mode.to(torch.int32)
-                )
-            return torch.ops._C_ascend.npu_causal_conv1d_custom(
-                output,
-                mixed_qkv,
-                conv_weights_t,
-                conv_state,
-                None,
-                query_start_loc.to(torch.int32).contiguous(),
-                cache_indices.to(torch.int32),
-                initial,
-                None if num_accepted_tokens is None else num_accepted_tokens.to(torch.int32).contiguous(),
-                1,
-                PAD_SLOT_ID,
-                run_mode,
-                mixed_qkv.shape[0] if run_mode == 0 else max_query_len,
+        # CausalConv1dV2 (aclnnCausalConv1dV2): dim-last layout, host-side
+        # metadata (ACLGraph friendly) and spec-decode aware (maxQueryLen).
+        initial = None
+        if initial_state_mode is not None:
+            initial = (
+                initial_state_mode if initial_state_mode.dtype == torch.bool else initial_state_mode.to(torch.int32)
             )
         # Consume the operator's declared output alias. Returning ``output``
         # independently would let graph functionalization treat the custom-op
@@ -417,15 +400,16 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             output,
             mixed_qkv,
             conv_weights_t,
-            conv_state=conv_state,
-            bias_opt=None,
-            query_start_loc_opt=query_start_loc,
-            cache_indices_opt=cache_indices,
-            initial_state_mode_opt=initial_state_mode,
-            num_accepted_tokens_opt=num_accepted_tokens,
-            activation_mode=1,
-            pad_slot_id=PAD_SLOT_ID,
-            run_mode=run_mode,
+            conv_state,
+            None,
+            query_start_loc.to(torch.int32).contiguous(),
+            cache_indices.to(torch.int32),
+            initial,
+            None if num_accepted_tokens is None else num_accepted_tokens.to(torch.int32).contiguous(),
+            1,
+            PAD_SLOT_ID,
+            run_mode,
+            mixed_qkv.shape[0] if run_mode == 0 else max_query_len,
         )
 
     @torch.no_grad()

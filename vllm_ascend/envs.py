@@ -87,11 +87,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
-    # Whether to route CausalConv1d through the aclnnCausalConv1dV2 custom
-    # operator (dim-last layout, host-metadata friendly, spec-decode aware).
-    # "0" (default): legacy aclnnCausalConv1d (v1); "1": aclnnCausalConv1dV2.
-    # This configuration is not sensitive.
-    "VLLM_ASCEND_ENABLE_CAUSAL_CONV1D_V2": lambda: _strict_binary_env("VLLM_ASCEND_ENABLE_CAUSAL_CONV1D_V2"),
 }
 
 # end-env-vars-definition
