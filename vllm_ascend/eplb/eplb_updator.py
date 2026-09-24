@@ -29,11 +29,23 @@ from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
+from vllm_ascend.eplb.timing import EplbCpuTimingWindow
 
 
 class EplbUpdator:
-    def __init__(self, eplb_config, loader: D2DExpertWeightLoader, eplb_process: EplbProcess, process):
+    def __init__(
+        self,
+        eplb_config,
+        loader: D2DExpertWeightLoader,
+        eplb_process: EplbProcess,
+        process,
+        log_balancedness: bool = False,
+        timing_window: int = 1,
+    ):
         self.eplb_config = eplb_config
+        self.log_balancedness = log_balancedness
+        self._before_timing = EplbCpuTimingWindow("v1_before", timing_window) if log_balancedness else None
+        self._end_timing = EplbCpuTimingWindow("v1_end", timing_window) if log_balancedness else None
         self.multi_stage = eplb_config.eplb_policy_type == 3
         self.init_eplb(self.eplb_config.expert_map_path, process)
         self.eplb_loader = loader
@@ -76,9 +88,11 @@ class EplbUpdator:
 
         self.process = process
         self._stats_ms = 0.0
+        self._stats_device_ms = 0.0
         self._plan_wait_ms = 0.0
         self._transfer_launch_ms = 0.0
         self._transfer_commit_ms = 0.0
+        self._transfer_commit_device_events: list[tuple[torch.Event, torch.Event]] = []
         self._transfer_layers = 0
 
         logger.info("[eplb/updator] Launched EPLB subprocess, pid=%s", self.process.pid)
@@ -88,18 +102,28 @@ class EplbUpdator:
         if self.cur_iterations == (
             self.expert_heat_collection_interval + self.algorithm_execution_interval + self.num_moe_layers
         ):
+            if self._transfer_commit_device_events:
+                self._transfer_commit_device_events[-1][1].synchronize()
+            transfer_commit_device_ms = sum(
+                start.elapsed_time(end) for start, end in self._transfer_commit_device_events
+            )
             logger.info(
-                "EPLB v1 phase timing: rank=%d stats_ms=%.3f plan_wait_ms=%.3f "
-                "transfer_launch_ms=%.3f transfer_commit_ms=%.3f transfer_layers=%d",
+                "EPLB v1 phase timing: rank=%d stats_ms=%.3f stats_device_ms=%.3f plan_wait_ms=%.3f "
+                "transfer_launch_ms=%.3f transfer_commit_ms=%.3f transfer_commit_device_ms=%.3f "
+                "transfer_layers=%d",
                 self.rank_id,
                 self._stats_ms,
+                self._stats_device_ms,
                 self._plan_wait_ms,
                 self._transfer_launch_ms,
                 self._transfer_commit_ms,
+                transfer_commit_device_ms,
                 self._transfer_layers,
             )
             self._stats_ms = self._plan_wait_ms = 0.0
+            self._stats_device_ms = 0.0
             self._transfer_launch_ms = self._transfer_commit_ms = 0.0
+            self._transfer_commit_device_events.clear()
             self._transfer_layers = 0
             logger.debug("[eplb/updator] Full EPLB cycle completed, clearing moe loads and resetting iteration counter")
             if self.expert_map_record_path is not None:
@@ -124,6 +148,12 @@ class EplbUpdator:
         self.eplb_process.planner_q.put(1)
 
     def forward_before(self):
+        if self._before_timing is not None:
+            with self._before_timing.measure():
+                return self._forward_before()
+        return self._forward_before()
+
+    def _forward_before(self):
         # Batch after eplb process being triggered, get update info provided by eplb process
         if self.get_update_info_flag():
             started_at = perf_counter()
@@ -152,6 +182,12 @@ class EplbUpdator:
             self._transfer_layers += 1
 
     def forward_end(self, eplb_heat_collection_status: bool = True):
+        if self._end_timing is not None:
+            with self._end_timing.measure():
+                return self._forward_end(eplb_heat_collection_status)
+        return self._forward_end(eplb_heat_collection_status)
+
+    def _forward_end(self, eplb_heat_collection_status: bool = True):
         if self.wakeup_eplb_worker_flag():
             with record_function_or_nullcontext("EPLB gather moe load"):
                 self.compute_and_set_moe_load()
@@ -159,7 +195,14 @@ class EplbUpdator:
 
         if self.update_expert_weight_flag() and self.expert_map_record_path is None:
             started_at = perf_counter()
+            start_event = torch.Event(enable_timing=True) if self.log_balancedness else None
+            end_event = torch.Event(enable_timing=True) if self.log_balancedness else None
+            if start_event is not None:
+                start_event.record()
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
+            if end_event is not None:
+                end_event.record()
+                self._transfer_commit_device_events.append((start_event, end_event))
             self._transfer_commit_ms += (perf_counter() - started_at) * 1000
 
         # One circle of eplb update includes expert_heat_collection_interval + algorithm_execution_interval
@@ -171,8 +214,16 @@ class EplbUpdator:
 
     def compute_and_set_moe_load(self):
         started_at = perf_counter()
+        start_event = torch.Event(enable_timing=True) if self.log_balancedness else None
+        end_event = torch.Event(enable_timing=True) if self.log_balancedness else None
+        if start_event is not None:
+            start_event.record()
         local_load = self.adaptor.get_rank_expert_workload().unsqueeze(1)
         moe_load = self.comm_group.all_gather(local_load, dim=1).cpu()
+        if end_event is not None:
+            end_event.record()
+            end_event.synchronize()
+            self._stats_device_ms = start_event.elapsed_time(end_event)
         self._stats_ms = (perf_counter() - started_at) * 1000
 
         if self.multi_stage:

@@ -568,7 +568,14 @@ class NPUModelRunner(GPUModelRunner):
                 tp_size=self.parallel_config.tensor_parallel_size,
             )
             self.process = self.eplb_process._launch_process()
-            self.eplb_updator = EplbUpdator(eplb_config, self.eplb_loader, self.eplb_process, self.process)
+            self.eplb_updator = EplbUpdator(
+                eplb_config,
+                self.eplb_loader,
+                self.eplb_process,
+                self.process,
+                log_balancedness=bool(timing_config and timing_config.log_balancedness),
+                timing_window=(timing_config.log_balancedness_interval if timing_config is not None else 1),
+            )
             # In pd colocation scenarios, we find that prefill/decode requests result in different
             # expert workloads. To reduce expert imbalance more effectively, we can coolect eplb
             # heat exclusively on a single stage rather than both prefill/decode.
