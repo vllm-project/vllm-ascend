@@ -64,8 +64,8 @@ class DCPMetadataBuilderMixin:
         self.dcp_size = dcp_group.world_size
         self.dcp_rank = dcp_group.rank_in_group
 
+    @staticmethod
     def _require_dcp_metadata(
-        self,
         common_attn_metadata: Any,
     ) -> Any:
         dcp_metadata = common_attn_metadata.context_parallel_metadata

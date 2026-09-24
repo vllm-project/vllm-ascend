@@ -678,7 +678,7 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        # Strip any PEP 440 local version segment (e.g. "0.29.0+empty" built
+        # Strip any PEP 440 local version segment (e.g. "0.30.0+empty" built
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
         parsed = Version(vllm_version)
@@ -843,10 +843,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RoutedExperts": AscendRoutedExperts,
         "GateLinear": AscendGateLinear,
     }
-    if not vllm_version_is("0.29.0"):
-        from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
+    from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
 
-        REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
+    REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
 
     if vllm_config is None:
         try:
