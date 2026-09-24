@@ -15,6 +15,7 @@ from typing import BinaryIO
 
 import numpy as np
 import torch
+from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
@@ -118,7 +119,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
             process = subprocess.Popen(
                 [
                     sys.executable,
-                    str(Path(__file__).with_name("_stair_process.py")),
+                    "-m",
+                    "vllm_ascend.distributed.eplb.policy._stair_process",
                     str(child_socket.fileno()),
                 ],
                 pass_fds=(child_socket.fileno(),),
@@ -211,6 +213,110 @@ class StairEplbPolicy(AbstractEplbPolicy):
         if plan_fields is None:
             raise RuntimeError("STAIR planner subprocess returned no plan")
         return StairPlan(*plan_fields)
+
+    def rebalance_experts(
+        self,
+        weight: torch.Tensor | PreparedLoadStats,
+        num_replicas: int,
+        num_groups: int,
+        num_nodes: int,
+        num_ranks: int,
+        old_global_expert_indices: torch.Tensor | None = None,
+        *,
+        last_committed_mean_ratios: np.ndarray | None = None,
+        rank_node_ids: np.ndarray | None = None,
+    ) -> torch.Tensor:
+        """Plan a placement through the upstream policy entry point."""
+        controls = num_replicas, num_groups, num_nodes, num_ranks
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in controls) or min(controls) < 1:
+            raise ValueError("STAIR topology values must be positive integers")
+        if num_replicas % num_ranks:
+            raise ValueError("STAIR requires equal rank capacity")
+        if old_global_expert_indices is None:
+            raise ValueError("STAIR requires the current expert placement")
+
+        current_map = old_global_expert_indices.cpu()
+        if current_map.ndim != 2 or current_map.shape[1] != num_replicas:
+            raise ValueError("current expert placement must be [layers, num_replicas]")
+        if isinstance(weight, PreparedLoadStats):
+            if weight.values.device.type != "cpu" or weight.sample_counts is None:
+                raise ValueError("prepared STAIR statistics require CPU values and sample counts")
+            logical_load_values = weight.values.to(dtype=torch.float64).numpy()
+            sample_counts = weight.sample_counts
+        else:
+            logical_load_values = weight.to(device="cpu", dtype=torch.float64).numpy()
+            if logical_load_values.ndim == 2:
+                logical_load_values = logical_load_values[None, ...]
+            sample_counts = None
+        if logical_load_values.ndim != 3 or logical_load_values.shape[1] != current_map.shape[0]:
+            raise ValueError("weight must be [samples, layers, logical_experts] and match the placement")
+
+        current_placement = current_map.numpy().reshape(current_map.shape[0], num_ranks, num_replicas // num_ranks)
+        if last_committed_mean_ratios is None:
+            last_committed_mean_ratios = np.full(current_placement.shape[0], np.nan)
+        if rank_node_ids is None:
+            if num_ranks % num_nodes:
+                raise ValueError("STAIR cannot infer topology with unequal ranks per node")
+            node_ids = np.arange(num_ranks, dtype=np.int64) // (num_ranks // num_nodes)
+        else:
+            node_ids = np.asarray(rank_node_ids)
+            if node_ids.shape != (num_ranks,) or not np.issubdtype(node_ids.dtype, np.integer) or np.any(node_ids < 0):
+                raise ValueError("rank_node_ids must contain one non-negative integer per rank")
+            if len(np.unique(node_ids)) != num_nodes:
+                raise ValueError("num_nodes must match the distinct rank_node_ids")
+        cpu_group = get_eplb_group().cpu_group
+        if cpu_group.size() != num_ranks:
+            raise RuntimeError("STAIR topology does not match the stage-local EPLB group")
+
+        planning_args = dict(
+            logical_load_values=logical_load_values,
+            current_rank_expert_ids=current_placement,
+            last_committed_mean_ratios=last_committed_mean_ratios,
+            rank_node_ids=node_ids,
+            config=self.config,
+            sample_counts=sample_counts,
+        )
+        if num_ranks == 1:
+            plan = self._plan_in_subprocess(**planning_args)
+        else:
+            plan = self.plan_sharded_rebalance(
+                **planning_args,
+                cpu_group=cpu_group,
+                planner=self._plan_in_subprocess,
+            )
+        self.validate_plan(
+            current_placement,
+            plan,
+            logical_load_values.shape[2],
+            node_ids,
+            self.config.rank_transfer_limit,
+            self.config.cross_node_transfer_limit,
+        )
+        target = torch.from_numpy(plan.rank_expert_ids.reshape(current_map.shape)).to(dtype=current_map.dtype)
+        target.source_rank_ids = plan.source_rank_ids
+        target.source_slot_ids = plan.source_slot_ids
+        target.predicted_mean_ratios = plan.predicted_mean_ratios
+
+        if sample_counts is None:
+            load_bins, bin_counts = self.compress_load_window(logical_load_values, self.config.load_window_bins)
+        else:
+            bin_counts = np.asarray(sample_counts)
+            load_bins = logical_load_values / bin_counts[:, None, None]
+        before = [
+            self.placement_imbalance(load_bins[:, layer], bin_counts, current_placement[layer])
+            for layer in range(current_placement.shape[0])
+        ]
+        after = [
+            self.placement_imbalance(load_bins[:, layer], bin_counts, plan.rank_expert_ids[layer])
+            for layer in range(current_placement.shape[0])
+        ]
+        target.predicted_imbalance_summary = (
+            float(np.mean([score.mean_ratio for score in before])),
+            float(np.mean([score.p95_ratio for score in before])),
+            float(np.mean([score.mean_ratio for score in after])),
+            float(np.mean([score.p95_ratio for score in after])),
+        )
+        return target
 
     @staticmethod
     def _load_bin_boundaries(num_samples: int, max_bins: int) -> tuple[np.ndarray, np.ndarray]:
