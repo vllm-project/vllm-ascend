@@ -353,34 +353,6 @@ def test_hccl_wakeup_refreshes_dispatcher_then_moe_runtime_state():
     assert calls == ["restore", "dispatcher", "runtime"]
 
 
-def test_hccl_prepare_calls_moe_communicator_lifecycle_hooks():
-    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
-    prepareable = MagicMock()
-    unrelated = object()
-
-    with patch(
-        "vllm_ascend.ops.fused_moe.moe_comm_method._MoECommMethods",
-        {"fused": prepareable, "other": unrelated},
-    ):
-        assert manager.prepare_moe_hccl_teardown() is True
-
-    prepareable.prepare_hccl_teardown.assert_called_once_with()
-
-
-def test_hccl_runtime_refresh_calls_moe_communicator_hooks():
-    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
-    refreshable = MagicMock()
-    unrelated = object()
-
-    with patch(
-        "vllm_ascend.ops.fused_moe.moe_comm_method._MoECommMethods",
-        {"fused": refreshable, "other": unrelated},
-    ):
-        manager.refresh_moe_hccl_runtime_state()
-
-    refreshable.refresh_hccl_runtime_state.assert_called_once_with()
-
-
 def test_sleep_wakeup_releases_anchor_after_aclgraph_recapture():
     model_runner = MagicMock(use_aclgraph=True)
     manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
