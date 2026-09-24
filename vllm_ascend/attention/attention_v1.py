@@ -220,8 +220,6 @@ class AscendMetadata:
     # for. Only used on the eager path -- graph capture bypasses the cache so
     # the metadata op executes inside the captured region.
     qfa_metadata_cache: dict = field(default_factory=dict)
-    # Rank-local padded token count when PCP expands the batch across the
-    # prefill context parallel group; None when PCP is disabled.
     pcp_local_num_input_tokens: int | None = None
 
 

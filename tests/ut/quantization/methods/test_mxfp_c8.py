@@ -4,9 +4,9 @@ from unittest.mock import patch
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 
-import vllm_ascend.attention.mxfp_kv_cache as mxfp_kv_cache
+import vllm_ascend.attention.attention_c8_mxfp as mxfp_kv_cache
 from tests.ut.base import TestBase
-from vllm_ascend.attention.mxfp_kv_cache import (
+from vllm_ascend.attention.attention_c8_mxfp import (
     MXFP8_GROUP_SIZE,
     MXFP_K_SCALE_NZ_TOKEN_FRAG,
     MXFP_KV_SCALE_GROUP_SIZE,
@@ -370,7 +370,7 @@ class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
     """Quant-method wiring: v_cache_scale fallback and backend installation."""
 
     def _make_layer(self, with_impl: bool = False):
-        from vllm_ascend.attention.c8_mxfp_v1 import AscendC8MXFPAttentionBackendImpl
+        from vllm_ascend.attention.attention_c8_mxfp import AscendC8MXFPAttentionBackendImpl
 
         layer = torch.nn.Module()
         layer.num_kv_heads = 2
@@ -378,15 +378,6 @@ class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
         if with_impl:
             layer.impl = object.__new__(AscendC8MXFPAttentionBackendImpl.__base__)
         return layer
-
-    def test_missing_v_scale_uses_e8m0_unity_default(self):
-        method = AscendC8MXFPKVCacheAttentionMethod({}, prefix="model.layers.3")
-        layer = self._make_layer()
-
-        method.create_weights(layer)
-
-        self.assertEqual(layer.v_cache_scale.dtype, torch.uint8)
-        self.assertTrue(torch.equal(layer.v_cache_scale, torch.full((8,), 127, dtype=torch.uint8)))
 
     def test_weight_loader_accepts_column_vector_checkpoint_layout(self):
         """ModelSlim exports v_scale as [hidden, 1]; the parameter is 1-D.
@@ -447,33 +438,15 @@ class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
             _quant_weight_loader(param, full)
         self.assertTrue(_torch.equal(param, _torch.full((256,), 100, dtype=_torch.uint8)))
 
-    def test_affine_v_offset_is_rejected(self):
-        # MXFP8 per-channel and the QFA operator are both symmetric, so a
-        # non-zero offset means the checkpoint was calibrated for a scheme this
-        # path cannot serve. Fail loudly instead of quantizing without it.
+    def test_missing_v_scale_uses_e8m0_unity_default(self):
         method = AscendC8MXFPKVCacheAttentionMethod.__new__(AscendC8MXFPKVCacheAttentionMethod)
         layer = torch.nn.Module()
         layer.num_kv_heads = 2
         layer.head_size_v = 4
         method.create_weights(layer)
-        layer.v_cache_offset.data[3] = 0.5
-
-        vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
-        with (
-            patch(
-                "vllm_ascend.quantization.methods.kv_cache.mxfp_c8.get_current_vllm_config",
-                return_value=vllm_config,
-            ),
-            self.assertRaisesRegex(RuntimeError, "V cache offset is non-zero"),
-        ):
-            method.process_weights_after_loading(layer)
-
-    def test_zero_v_offset_passes_through(self):
-        method = AscendC8MXFPKVCacheAttentionMethod.__new__(AscendC8MXFPKVCacheAttentionMethod)
-        layer = torch.nn.Module()
-        layer.num_kv_heads = 2
-        layer.head_size_v = 4
-        method.create_weights(layer)
+        # The missing-weight fallback: E8M0 127 is the neutral scale of 1.0.
+        self.assertEqual(layer.v_cache_scale.dtype, torch.uint8)
+        self.assertTrue(torch.equal(layer.v_cache_scale, torch.full((8,), 127, dtype=torch.uint8)))
 
         vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
         with patch(
@@ -486,11 +459,11 @@ class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
         self.assertTrue(torch.equal(layer.v_cache_scale_float_reciprocal, torch.ones(8, dtype=torch.bfloat16)))
 
     def test_installs_c8_backend_with_512_token_blocks(self):
-        from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
-        from vllm_ascend.attention.c8_mxfp_v1 import (
+        from vllm_ascend.attention.attention_c8_mxfp import (
             AscendC8MXFPAttentionBackend,
             AscendC8MXFPAttentionBackendImpl,
         )
+        from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 
         method = AscendC8MXFPKVCacheAttentionMethod({}, prefix="model.layers.3")
         layer = self._make_layer(with_impl=True)

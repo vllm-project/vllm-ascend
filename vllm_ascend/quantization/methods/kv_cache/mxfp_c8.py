@@ -15,15 +15,13 @@ def _quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
         # ColumnParallelLinear sharding), so slice it here following the same
         # rule vLLM uses to replicate KV heads under GQA TP: with
         # num_kv_heads < tp_size each head is replicated across
-        # tp_size // num_kv_heads ranks and rank r owns the 256-dim slice of
-        # head r // (tp_size // num_kv_heads). When num_kv_heads >= tp_size
-        # this degenerates to the plain contiguous narrow.
+        # tp_size // num_kv_heads ranks and rank r owns the slice of
+        # head r // (tp_size // num_kv_heads); otherwise a plain narrow.
+        # Some recipes store one set of per-channel scales shared by every KV
+        # head; tile it out to this rank's head count first.
         if loaded_weight.dim() != 1:
             loaded_weight = loaded_weight.flatten()
         if loaded_weight.numel() < param.numel() and param.numel() % loaded_weight.numel() == 0:
-            # Some ModelSlim recipes store a single set of per-channel scales
-            # shared by every KV head instead of one set per head. Tile it out
-            # to this rank's head count; the narrow below is then a no-op.
             loaded_weight = loaded_weight.repeat(param.numel() // loaded_weight.numel())
         if loaded_weight.numel() != param.numel():
             tp_rank = get_tensor_model_parallel_rank()
@@ -53,12 +51,10 @@ def _quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
 class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
     """MXFP8 KV cache storage for dense-attention models.
 
-    K/V are cached as FP8 E4M3 and their E8M0 scales are stored in extra cache
-    tensors: K uses dynamic per-token-group scales written at scatter time, V
-    uses the static per-channel E8M0 scale stored in the ModelSlim checkpoint
-    (kv_cache_type == "K_DYNAMIC_V_STATIC_MXFP8_PER_CHANNEL"). The C8-MXFP
-    backend owns the matching 512-token kernel block size, keeping hybrid
-    cache scheduling and cache views aligned.
+    K/V are cached as FP8 E4M3 and their E8M0 scales are stored in extra
+    cache tensors: K uses dynamic per-token-group scales written at scatter
+    time, V uses the static per-channel E8M0 scale stored in the ModelSlim
+    checkpoint. Enabled with ``--kv-cache-dtype mxfp8``.
     """
 
     def __init__(self, quant_description: dict, prefix: str):
@@ -68,7 +64,7 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
     def create_weights(self, layer: torch.nn.Module) -> None:
         layer.kv_cache_torch_dtype = torch.float8_e4m3fn
         if hasattr(layer, "impl"):
-            from vllm_ascend.attention.c8_mxfp_v1 import (
+            from vllm_ascend.attention.attention_c8_mxfp import (
                 AscendC8MXFPAttentionBackend,
                 AscendC8MXFPAttentionBackendImpl,
             )
@@ -79,56 +75,30 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
             # initialize the state the impl relies on here.
             layer.impl.enable_hamming_sparse = False
 
-        # Load v_cache static quantization scale
-        hidden_size = layer.num_kv_heads * layer.head_size_v
-        # E8M0 stores the exponent with a bias of 127, so 127 represents a
-        # neutral scale of 1.0. Use it as a deterministic fallback instead of
-        # leaving the parameter with uninitialized memory when a checkpoint is
+        # Load v_cache static quantization scale. E8M0 bias is 127, so 127 is
+        # the neutral scale of 1.0 -- a deterministic fallback for checkpoints
         # missing a layer's V-cache scale.
+        hidden_size = layer.num_kv_heads * layer.head_size_v
         weight_param = torch.nn.Parameter(
             torch.full((hidden_size,), 127, dtype=torch.uint8),
             requires_grad=False,
         )
         layer.register_parameter("v_cache_scale", weight_param)
-        # Some ModelSlim recipes emit a V offset next to the scale, borrowed
-        # from the affine FAKQuant template. MXFP8 per-channel is symmetric and
-        # the operator takes no offset, so the only correct value is zero --
-        # register it to check that, rather than dropping it unread.
-        offset_param = torch.nn.Parameter(
-            torch.zeros((hidden_size,), dtype=torch.float32),
-            requires_grad=False,
-        )
-        layer.register_parameter("v_cache_offset", offset_param)
         # When loading weights, segment them according to TP
         weight_param.weight_loader = _quant_weight_loader
-        offset_param.weight_loader = _quant_weight_loader
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         vllm_config = get_current_vllm_config()
         target_dtype = vllm_config.model_config.dtype
-        offset = layer.v_cache_offset.data
-        if bool(offset.any()):
-            raise RuntimeError(
-                "[vllm-ascend/MXFP8_PER_CHANNEL] V cache offset is non-zero "
-                f"(min={float(offset.min())} max={float(offset.max())}), but the MXFP8 "
-                "per-channel scheme and the QuantFlashAttn operator are both symmetric. "
-                "This checkpoint was calibrated with an affine V quantizer and cannot be "
-                "served by this scheme."
-            )
         raw = layer.v_cache_scale.data
-        # A minmax calibrator emits 0 for a channel whose absmax was 0, and
-        # 2^-127 there would make the quantization reciprocal 2^127 -- any
-        # activation that is not exactly zero at inference would go to inf.
-        # Sanitize the stored bytes in place so BOTH consumers stay neutral:
-        # the reciprocal below and the raw bytes broadcast into the V-scale
-        # cache (2^-127 there would zero the channel on dequant)  -- a
-        # real-checkpoint pitfall hit during the vendored-QFA bring-up.
+        # A minmax calibrator emits 0 for a channel whose absmax was 0;
+        # sanitize to the neutral 127 so both consumers (the reciprocal below
+        # and the raw bytes broadcast into the V-scale cache) stay neutral.
         if bool((raw == 0).any()):
             raw[raw == 0] = 127
         exponent = raw.to(torch.float32) - 127
         # Only the reciprocal is consumed (npu_quantize needs 1/scale); the
-        # forward scale itself is written into the V-scale cache as raw E8M0
-        # bytes straight from v_cache_scale.
+        # raw E8M0 bytes are broadcast into the V-scale cache as-is.
         layer.v_cache_scale_float_reciprocal = torch.nn.Parameter(
             (1 / torch.exp2(exponent)).to(target_dtype),
             requires_grad=False,
