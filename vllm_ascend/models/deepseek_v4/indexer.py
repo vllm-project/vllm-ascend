@@ -212,20 +212,15 @@ class AscendIndexerOps:
         prepared_weights = self.device_operator.prepare_dsa_indexer_weights(weights)
         prepared_query_scale = self.device_operator.prepare_dsa_indexer_query_scale(query_scale)
         prepared_key_scale = self.device_operator.prepare_dsa_indexer_key_scale(scale_cache)
-        if get_ascend_device_type() in (AscendDeviceType.A3, AscendDeviceType.A5):
-            qli_op = (
-                torch.ops._C_ascend.npu_quant_lightning_indexer_v2_cann
-                if get_ascend_device_type() == AscendDeviceType.A5
-                else import_module("cann_ops_transformer.ops").quant_lightning_indexer
-            )
-            topk_idxs, _ = qli_op(
+        if get_ascend_device_type() == AscendDeviceType.A3:
+            topk_idxs, _ = import_module("cann_ops_transformer.ops").quant_lightning_indexer(
                 query,
                 key_cache,
                 prepared_weights,
                 prepared_query_scale,
                 prepared_key_scale,
                 self.index_topk,
-                self.device_operator.get_dsa_indexer_quant_mode(),
+                2,
                 cu_seqlens_q=metadata.qli_cu_seqlens_q,
                 seqused_k=metadata.qli_seqused_k,
                 cmp_residual_k=metadata.qli_cmp_residual_k,

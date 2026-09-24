@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm_ascend.device.device_op import A5DeviceAdaptor, DeviceOperator
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import (
@@ -370,25 +370,13 @@ class TestIndexerForward:
 
 
 class TestIndexerOps:
-    @pytest.mark.parametrize(
-        ("device_type", "quant_mode", "key_dtype", "adaptor"),
-        [
-            (AscendDeviceType.A3, 2, torch.int8, DeviceOperator),
-            (AscendDeviceType.A5, 1, torch.float8_e4m3fn, A5DeviceAdaptor),
-        ],
-    )
-    def test_a3_a5_select_topk_uses_official_qli(self, device_type, quant_mode, key_dtype, adaptor):
+    def test_a3_select_topk_uses_official_qli(self):
         ops = AscendIndexerOps(index_topk=3)
-        ops.device_operator = adaptor
-        query = torch.ones((2, 2, 4), dtype=key_dtype)
-        weights = torch.ones((2, 2), dtype=torch.float16)
+        query = torch.ones((2, 2, 4), dtype=torch.int8)
+        weights = torch.ones((2, 2))
         query_scale = torch.ones((2, 2), dtype=torch.float16)
-        key = torch.empty_strided((2, 1, 1, 4), (8, 4, 4, 1), dtype=key_dtype)
-        key_scale = torch.empty_strided(
-            (2, 1, 1, 1),
-            (2, 1, 1, 1),
-            dtype=torch.float32 if device_type == AscendDeviceType.A5 else torch.float16,
-        )
+        key = torch.empty((1, 1, 1, 4), dtype=torch.int8)
+        key_scale = torch.empty((1, 1, 1), dtype=torch.float16)
         indices = torch.tensor([[[1, 2, 3]]], dtype=torch.int32)
         metadata = SimpleNamespace(
             qli_cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
@@ -398,31 +386,23 @@ class TestIndexerOps:
             qli_metadata=torch.zeros(1024, dtype=torch.int32),
         )
         official = MagicMock(return_value=(indices, None))
-        cann = MagicMock(return_value=(indices, None))
         with (
-            patch("vllm_ascend.models.deepseek_v4.indexer.get_ascend_device_type", return_value=device_type),
-            patch.object(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_cann", cann, create=True),
+            patch("vllm_ascend.models.deepseek_v4.indexer.get_ascend_device_type", return_value=AscendDeviceType.A3),
             patch(
                 "vllm_ascend.models.deepseek_v4.indexer.import_module",
                 return_value=SimpleNamespace(quant_lightning_indexer=official),
             ),
+            patch.object(DeviceOperator, "prepare_dsa_indexer_weights", side_effect=lambda value: value),
+            patch.object(DeviceOperator, "prepare_dsa_indexer_query_scale", side_effect=lambda value: value),
+            patch.object(DeviceOperator, "prepare_dsa_indexer_key_scale", side_effect=lambda value: value),
         ):
             actual = ops.select_topk(query, weights, query_scale, key, key_scale, metadata)
 
         assert actual is indices
-        selected, unused = (cann, official) if device_type == AscendDeviceType.A5 else (official, cann)
-        unused.assert_not_called()
-        args = selected.call_args.args
-        assert args[0] is query and args[1] is key
-        assert args[5:] == (3, quant_mode)
-        assert args[2].dtype == (torch.float32 if device_type == AscendDeviceType.A5 else torch.float16)
-        assert args[3].dtype == (torch.float32 if device_type == AscendDeviceType.A5 else torch.float16)
-        assert args[4].dtype == (torch.float32 if device_type == AscendDeviceType.A5 else torch.float16)
-        assert args[1].stride(0) == 8
-        assert args[4].stride(0) == 2
-        assert selected.call_args.kwargs["metadata"] is metadata.qli_metadata
-        assert selected.call_args.kwargs["block_table"] is metadata.block_table
-        assert selected.call_args.kwargs["layout_k"] == "PA_BBND"
+        assert official.call_args.args == (query, key, weights, query_scale, key_scale, 3, 2)
+        assert official.call_args.kwargs["metadata"] is metadata.qli_metadata
+        assert official.call_args.kwargs["block_table"] is metadata.block_table
+        assert official.call_args.kwargs["layout_k"] == "PA_BBND"
 
     def test_quantize_scatter_then_select_topk(self):
         indexer_ops = AscendIndexerOps(index_topk=3)

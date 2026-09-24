@@ -1345,18 +1345,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata = self.common_ratio_to_sas_metadata.get(cache_key)
 
         if metadata is None:
-            if get_ascend_device_type() in (AscendDeviceType.A3, AscendDeviceType.A5):
-                metadata_op = (
-                    torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata_cann
-                    if get_ascend_device_type() == AscendDeviceType.A5
-                    else import_module("cann_ops_transformer.ops").quant_lightning_indexer_metadata
-                )
-                metadata = metadata_op(
+            if get_ascend_device_type() == AscendDeviceType.A3:
+                metadata = import_module("cann_ops_transformer.ops").quant_lightning_indexer_metadata(
                     self.model_config.hf_config.index_n_heads,
                     1,
                     self.model_config.hf_config.index_head_dim,
                     self.model_config.hf_config.index_topk,
-                    DeviceOperator.get_dsa_indexer_quant_mode(),
+                    2,
                     cu_seqlens_q=qli_cu_seqlens_q,
                     seqused_k=qli_seqused_k,
                     cmp_residual_k=qli_cmp_residual_k,
@@ -2183,20 +2178,15 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         prepared_weights = DeviceOperator.prepare_dsa_indexer_weights(weights)
         prepared_query_scale = DeviceOperator.prepare_dsa_indexer_query_scale(q_scale)
         prepared_key_scale = DeviceOperator.prepare_dsa_indexer_key_scale(indexer_scale_cache)
-        if get_ascend_device_type() in (AscendDeviceType.A3, AscendDeviceType.A5):
-            qli_op = (
-                torch.ops._C_ascend.npu_quant_lightning_indexer_v2_cann
-                if get_ascend_device_type() == AscendDeviceType.A5
-                else import_module("cann_ops_transformer.ops").quant_lightning_indexer
-            )
-            topk_idxs, _ = qli_op(
+        if get_ascend_device_type() == AscendDeviceType.A3:
+            topk_idxs, _ = import_module("cann_ops_transformer.ops").quant_lightning_indexer(
                 q,
                 indexer_k_cache,
                 prepared_weights,
                 prepared_query_scale,
                 prepared_key_scale,
                 self.index_topk,
-                DeviceOperator.get_dsa_indexer_quant_mode(),
+                2,
                 cu_seqlens_q=dsa_meta.qli_cu_seqlens_q,
                 seqused_k=dsa_meta.qli_seqused_k,
                 cmp_residual_k=dsa_meta.qli_cmp_residual_k,

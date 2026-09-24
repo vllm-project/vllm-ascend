@@ -635,21 +635,16 @@ def test_dsa_cp_device_local_metadata_is_deferred_and_reused():
     assert first_builder.local_query_start_loc.data_ptr() == first_qsl_address
 
 
-@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
 def test_dsa_cp_qli_metadata_uses_host_maxima(device_type):
     builder = _make_cp_builder()
     seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     generated_metadata = torch.arange(1024, dtype=torch.int32)
 
     metadata_op = MagicMock(return_value=generated_metadata)
-    cann_op = MagicMock(return_value=generated_metadata)
     with (
         patch("vllm_ascend.attention.context_parallel.dsa_cp.get_ascend_device_type", return_value=device_type),
-        patch.object(
-            DeviceOperator, "get_dsa_indexer_quant_mode", return_value=1 if device_type == AscendDeviceType.A5 else 2
-        ),
         patch.object(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata", metadata_op, create=True),
-        patch.object(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata_cann", cann_op, create=True),
         patch(
             "vllm_ascend.attention.context_parallel.dsa_cp.import_module",
             return_value=SimpleNamespace(quant_lightning_indexer_metadata=metadata_op),
@@ -663,38 +658,26 @@ def test_dsa_cp_qli_metadata_uses_host_maxima(device_type):
             max_seqlen_k=8,
         )
 
-    selected = cann_op if device_type == AscendDeviceType.A5 else metadata_op
-    assert selected.call_args.kwargs["max_seqlen_q"] == 2
-    assert selected.call_args.kwargs["max_seqlen_k"] == 8 // 4
-    if device_type in (AscendDeviceType.A3, AscendDeviceType.A5):
-        assert selected.call_args.args[:5] == (
-            64,
-            1,
-            128,
-            builder.model_config.hf_config.index_topk,
-            1 if device_type == AscendDeviceType.A5 else 2,
-        )
-        assert "device" not in selected.call_args.kwargs
+    assert metadata_op.call_args.kwargs["max_seqlen_q"] == 2
+    assert metadata_op.call_args.kwargs["max_seqlen_k"] == 8 // 4
+    if device_type == AscendDeviceType.A3:
+        assert metadata_op.call_args.args[:5] == (64, 1, 128, builder.model_config.hf_config.index_topk, 2)
+        assert "device" not in metadata_op.call_args.kwargs
     else:
-        assert selected.call_args.kwargs["device"] == "cpu"
+        assert metadata_op.call_args.kwargs["device"] == "cpu"
     # QLI v2 derives seqused_k / cmp_residual_k on the host from seq_lens.
     assert torch.equal(builder.qli_seqused_k[:2], torch.tensor([2, 1], dtype=torch.int32))
     assert torch.equal(builder.qli_cmp_residual_k[:2], torch.tensor([0, 2], dtype=torch.int32))
 
 
-@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
 def test_dsa_qli_metadata_selects_expected_provider(device_type):
     builder = _make_builder()
     metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
     operator = MagicMock(return_value=metadata)
-    cann_op = MagicMock(return_value=metadata)
     with (
         patch("vllm_ascend.attention.dsa_v1.get_ascend_device_type", return_value=device_type),
-        patch.object(
-            DeviceOperator, "get_dsa_indexer_quant_mode", return_value=1 if device_type == AscendDeviceType.A5 else 2
-        ),
         patch.object(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata", operator, create=True),
-        patch.object(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata_cann", cann_op, create=True),
         patch(
             "vllm_ascend.attention.dsa_v1.import_module",
             return_value=SimpleNamespace(quant_lightning_indexer_metadata=operator),
@@ -709,20 +692,13 @@ def test_dsa_qli_metadata_selects_expected_provider(device_type):
         )
 
     assert torch.equal(actual, metadata)
-    selected = cann_op if device_type == AscendDeviceType.A5 else operator
-    assert selected.call_args.kwargs["layout_k"] == "PA_BBND"
-    assert selected.call_args.kwargs["max_seqlen_k"] == 2
-    if device_type in (AscendDeviceType.A3, AscendDeviceType.A5):
-        assert selected.call_args.args[:5] == (
-            64,
-            1,
-            128,
-            builder.model_config.hf_config.index_topk,
-            1 if device_type == AscendDeviceType.A5 else 2,
-        )
-        assert "device" not in selected.call_args.kwargs
+    assert operator.call_args.kwargs["layout_k"] == "PA_BBND"
+    assert operator.call_args.kwargs["max_seqlen_k"] == 2
+    if device_type == AscendDeviceType.A3:
+        assert operator.call_args.args[:5] == (64, 1, 128, builder.model_config.hf_config.index_topk, 2)
+        assert "device" not in operator.call_args.kwargs
     else:
-        assert selected.call_args.kwargs["device"] == "cpu"
+        assert operator.call_args.kwargs["device"] == "cpu"
 
 
 def test_build_compressor_metadata_out_uses_fixed_outputs():
@@ -832,7 +808,7 @@ def _make_dsa_cp_metadata(sas_metadata: torch.Tensor) -> AscendDSACPMetadata:
     )
 
 
-@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
 def test_dsa_cp_indexer_waits_before_qli_consumer(monkeypatch, device_type):
     impl = AscendDSACPImpl.__new__(AscendDSACPImpl)
     impl.inderxer_wq_b = MagicMock(return_value=torch.ones((1, 2)))
@@ -879,7 +855,6 @@ def test_dsa_cp_indexer_waits_before_qli_consumer(monkeypatch, device_type):
         monkeypatch.setattr(DeviceOperator, name, lambda value: value)
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *_, **__: None, raising=False)
     monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2", run_indexer, raising=False)
-    monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_cann", run_indexer, raising=False)
     monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.get_ascend_device_type", lambda: device_type)
     monkeypatch.setattr(
         "vllm_ascend.attention.context_parallel.dsa_cp.import_module",

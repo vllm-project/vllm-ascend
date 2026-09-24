@@ -991,18 +991,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 4,
                 out=qli_cmp_residual_k,
             )
-            if get_ascend_device_type() in (AscendDeviceType.A3, AscendDeviceType.A5):
-                metadata_op = (
-                    torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata_cann
-                    if get_ascend_device_type() == AscendDeviceType.A5
-                    else import_module("cann_ops_transformer.ops").quant_lightning_indexer_metadata
-                )
-                qli_metadata = metadata_op(
+            if get_ascend_device_type() == AscendDeviceType.A3:
+                qli_metadata = import_module("cann_ops_transformer.ops").quant_lightning_indexer_metadata(
                     self.model_config.hf_config.index_n_heads,
                     1,
                     self.model_config.hf_config.index_head_dim,
                     self.model_config.hf_config.index_topk,
-                    DeviceOperator.get_dsa_indexer_quant_mode(),
+                    2,
                     cu_seqlens_q=query_start_loc,
                     seqused_k=qli_seqused_k,
                     cmp_residual_k=qli_cmp_residual_k,
