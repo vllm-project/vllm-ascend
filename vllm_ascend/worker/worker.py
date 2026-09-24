@@ -214,6 +214,16 @@ class NPUWorker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
+        # Mount the elastic EP scaling executor (mirrors
+        # vllm/v1/worker/gpu_worker.py Worker.__init__). Standby-group
+        # creation is NPU-specific via
+        # NPUPlatform.stateless_init_device_torch_dist_pg.
+        from vllm.distributed.elastic_ep.elastic_execute import (
+            ElasticEPScalingExecutor,
+        )
+
+        self.elastic_ep_executor = ElasticEPScalingExecutor(self)
+
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
