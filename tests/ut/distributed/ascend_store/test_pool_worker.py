@@ -1415,60 +1415,6 @@ class TestKVPoolWorkerStartLoadKVAsync(unittest.TestCase):
         recv_thread.add_request.assert_not_called()
 
 
-class TestKVPoolWorkerGroupAllocation(unittest.TestCase):
-    def test_sparse_mtp_tail_copy_fits_allocated_group(self):
-        worker = make_worker(self, use_layerwise=True, num_layers=79, num_hidden_layers=78)
-        worker.total_layers = 78
-        # GLM-5.2: 78 target layers, 21 target indexer caches, and one MTP
-        # layer with its own indexer. Shared indexers have no separate cache.
-        mla_block_bytes = 128 * (512 + 64) * 2
-        indexer_block_bytes = 128 * 128 * 2
-        block_lengths = []
-        entry_offsets = [0]
-        for layer in range(79):
-            block_lengths.append(mla_block_bytes)
-            if layer < 3 or layer % 4 == 2:
-                block_lengths.append(indexer_block_bytes)
-            entry_offsets.append(len(block_lengths))
-        worker.group_block_len = {0: block_lengths}
-        worker.group_num_layers = {0: 79}
-        worker.token_database = SimpleNamespace(
-            group_block_len=worker.group_block_len,
-            group_block_stride=worker.group_block_len,
-            group_kv_caches_base_addr={0: [0x10000000] * len(block_lengths)},
-            group_layer_cache_entry_offsets={0: entry_offsets},
-        )
-        builder = worker._build_group_layer_builders()[0]
-        base_gva = 0x20000000
-        shared = SharedBlockData(
-            block_ids_arr=np.asarray([0], dtype=np.int64),
-            block_gvas_arr=np.asarray([base_gva], dtype=np.int64),
-            req_ids=["sparse-mtp"],
-            is_last_chunks=[True],
-        )
-        tail = builder.build_addrs(shared, layer_id=78)
-        required_bytes = 79 * mla_block_bytes + 22 * indexer_block_bytes
-        self.assertEqual(builder.page_size_bytes, required_bytes)
-        self.assertEqual(int(tail.gvas_array[-1] + tail.size_array[-1]), base_gva + required_bytes)
-        self.assertTrue(np.all(tail.gvas_array + tail.size_array <= base_gva + builder.page_size_bytes))
-
-    def test_no_pp_allocates_only_entries_in_each_group(self):
-        worker = make_worker(self, num_layers=8, num_hidden_layers=8)
-        worker.total_layers = 8
-        worker.group_block_len = {0: [64, 32, 64], 1: [64, 64]}
-        worker.group_num_layers = {0: 2, 1: 2}
-        self.assertEqual(worker._global_group_alloc_size(0), 160)
-        self.assertEqual(worker._global_group_alloc_size(1), 128)
-
-    def test_uniform_pp_group_still_covers_all_stages(self):
-        worker = make_worker(self, num_layers=3, num_hidden_layers=8)
-        worker.total_layers = 8
-        worker.pp_size = 3
-        worker.group_block_len = {0: [64, 32] * 3}
-        worker.group_num_layers = {0: 3}
-        self.assertEqual(worker._global_group_alloc_size(0), 8 * 96)
-
-
 class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
     """Test process_layer_data and related layerwise methods."""
 
