@@ -96,15 +96,6 @@ def runner_dp_rank(runner: Any) -> int:
     except (TypeError, ValueError, AttributeError):
         pass
     try:
-        import os
-
-        for key in ("VLLM_DP_RANK", "DP_RANK"):
-            raw = os.environ.get(key)
-            if raw is not None and str(raw).strip() != "":
-                return int(raw)
-    except (TypeError, ValueError):
-        pass
-    try:
         from vllm.distributed.parallel_state import get_dp_group
 
         return int(get_dp_group().rank_in_group)
