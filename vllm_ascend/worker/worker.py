@@ -1233,7 +1233,7 @@ class NPUWorker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
-    # Lockstep wave sync for idle DP ranks (never burns manual_dump, soft-fail);
+    # Lockstep wave sync for idle DP ranks (never burns manual_dump);
     # lives in the runtime_guard hook, see runtime_guard_idle_step.
     @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:

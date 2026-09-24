@@ -163,13 +163,15 @@ def test_idle_step_syncs_without_arming():
     guard.sync_for_step.assert_called_once_with(allow_arm=False)
 
 
-def test_idle_step_soft_fails_and_still_runs_body():
+def test_idle_step_propagates_sync_failure():
+    """Idle sync is a lockstep gate — do not soft-fail (matches busy path)."""
     guard = MagicMock()
     guard.sync_for_step.side_effect = RuntimeError("boom")
     worker = _IdleWorker(SimpleNamespace(runtime_guard=guard))
 
-    assert worker.execute_dummy_batch() == "done"
-    assert worker.body_ran
+    with pytest.raises(RuntimeError, match="boom"):
+        worker.execute_dummy_batch()
+    assert not worker.body_ran
 
 
 def test_idle_step_guardless_keeps_bare_path():

@@ -39,7 +39,6 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 
-from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.observability.runtime_guard.processor import SamplePhaseResult
 from vllm_ascend.observability.runtime_guard.runner_bridge import (
     get_postprocess_sampled,
@@ -49,8 +48,6 @@ from vllm_ascend.observability.runtime_guard.runner_bridge import (
     wrap_compute_logits_for_pre_sample,
     wrap_postprocess_sampled,
 )
-
-logger = init_logger_ascend(__name__)
 
 # Stashed by ``runtime_guard_step`` for the same-wave sample phase.
 _SCHEDULER_OUTPUT_ATTR = "_pending_scheduler_output"
@@ -89,8 +86,9 @@ def runtime_guard_step(execute_model_fn):
 def runtime_guard_idle_step(dummy_batch_fn):
     """Worker-level wave sync for idle DP ranks (``execute_dummy_batch``).
 
-    Soft-fails (unlike ``runtime_guard_step``): this path must not stall the
-    dummy loop. Guard lives on ``self.model_runner``.
+    Same lockstep gate as ``runtime_guard_step`` — do not soft-fail
+    ``sync_for_step`` (busy ranks take the same collectives). Guard lives on
+    ``self.model_runner``.
     """
 
     @functools.wraps(dummy_batch_fn)
@@ -98,13 +96,7 @@ def runtime_guard_idle_step(dummy_batch_fn):
         runner = getattr(self, "model_runner", None)
         guard = getattr(runner, "runtime_guard", None)
         if guard is not None:
-            try:
-                guard.sync_for_step(allow_arm=False)
-            except Exception:
-                logger.warning(
-                    "[runtime_guard soft-fail] execute_dummy_batch sync_for_step failed",
-                    exc_info=True,
-                )
+            guard.sync_for_step(allow_arm=False)
         return dummy_batch_fn(self, *args, **kwargs)
 
     return wrapper
@@ -165,13 +157,11 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
         input_batch, finished_req_ids = _peek_sample_pre_state(self)
 
         def sample_fn() -> SamplePhaseResult:
-            with (
-                wrap_compute_logits_for_pre_sample(self, input_batch)
-                if need_pre_sample_hook(guard)
-                else nullcontext()
-            ):
-                with wrap_postprocess_sampled(self):
-                    output = sample_tokens_fn(self, grammar_output)
+            logits_ctx = (
+                wrap_compute_logits_for_pre_sample(self, input_batch) if need_pre_sample_hook(guard) else nullcontext()
+            )
+            with logits_ctx, wrap_postprocess_sampled(self):
+                output = sample_tokens_fn(self, grammar_output)
             return _build_sample_phase_result(self, output, input_batch, finished_req_ids)
 
         speculative_config = getattr(self, "speculative_config", None)
