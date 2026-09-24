@@ -367,9 +367,8 @@ class AscendEplbState(_eplb_state.EplbState):
             return
         for model_state in self.model_states.values():
             while model_state.rebalanced:
-                if self._all_ranks_result_ready(model_state):
-                    result = model_state.pending_result
-                    assert result is not None
+                result = model_state.pending_result
+                if result is not None:
                     if getattr(
                         result,
                         "is_last_result",
@@ -381,6 +380,19 @@ class AscendEplbState(_eplb_state.EplbState):
                     result.consumed_event.record()
                 else:
                     time.sleep(0.001)
+
+    def _all_ranks_result_ready(self, model_state: Any) -> bool:
+        """Consume results at the next shared rearrangement boundary."""
+        if (
+            self.expert_rearrangement_step
+            < self.expert_rearrangement_step_interval
+        ):
+            return False
+        while model_state.pending_result is None:
+            if not model_state.rebalanced:
+                return False
+            time.sleep(0.001)
+        return True
 
     @classmethod
     def from_mapping(
