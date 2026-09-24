@@ -219,6 +219,7 @@ def test_async_rebalance_passes_current_prepared_stats_to_policy(monkeypatch):
     )
 
     assert result is target
+    np.testing.assert_array_equal(result.rank_node_ids, rank_node_ids)
     planned_stats = policy.rebalance_experts.call_args.args[0]
     assert isinstance(planned_stats, patch_eplb.PreparedLoadStats)
     assert planned_stats.values is cpu_values
@@ -389,6 +390,7 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     target.predicted_mean_ratios[layer_idx] = 1.2
     target.predicted_imbalance_summary = (1.4, 1.6, 1.1, 1.2)
     target.changed_layer_count = 1
+    target.rank_node_ids = np.array([0, 1])
     consumed_event = MagicMock()
     consumed_event.record.side_effect = lambda _stream=None: call_order.append("ack")
     pending_result = SimpleNamespace(
@@ -425,7 +427,7 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     assert model_state._last_committed_mean_ratios[layer_idx] == 1.2
     if is_last_layer:
         log_info.assert_called_once_with(
-            "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d",
+            "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d cross_node_transfers=%d",
             patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
             "model",
             1.4,
@@ -433,6 +435,7 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
             1.6,
             1.2,
             1,
+            2,
             2,
         )
     else:

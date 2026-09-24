@@ -274,6 +274,7 @@ def _wrap_async_rebalance(original_rebalance):
                     prepared_stats.sample_counts,
                 )
             current_mapping = bound.arguments["physical_to_logical_map_cpu"]
+            rank_node_ids = eplb_state.get_rank_node_ids()
             target = eplb_state.policy.rebalance_experts(
                 cpu_stats,
                 eplb_stats.num_replicas,
@@ -282,11 +283,12 @@ def _wrap_async_rebalance(original_rebalance):
                 eplb_stats.num_gpus,
                 current_mapping,
                 last_committed_mean_ratios=model_state._last_committed_mean_ratios,
-                rank_node_ids=eplb_state.get_rank_node_ids(),
+                rank_node_ids=rank_node_ids,
             )
             if target.device.type != "cpu":
                 raise RuntimeError("EPLB policy returned a non-CPU expert mapping")
             target.changed_layer_count = int((target != current_mapping).any(dim=1).sum().item())
+            target.rank_node_ids = rank_node_ids
         if _has_explicit_sources(target):
             setattr(communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, target)
         return target
@@ -507,7 +509,8 @@ def _wrap_move_to_workspace(original_move):
                         destination_ranks = np.arange(source_ranks.shape[-2])[None, :, None]
                         rank_transfers = np.count_nonzero(source_ranks != destination_ranks)
                         imbalance = getattr(full_target, "predicted_imbalance_summary", None)
-                        if imbalance is None:
+                        rank_node_ids = getattr(full_target, "rank_node_ids", None)
+                        if imbalance is None or rank_node_ids is None:
                             logger.info(
                                 "%s: model=%s rank_transfers=%d",
                                 ASYNC_EPLB_CYCLE_COMMITTED_LOG,
@@ -515,9 +518,14 @@ def _wrap_move_to_workspace(original_move):
                                 rank_transfers,
                             )
                         else:
+                            rank_node_ids = np.asarray(rank_node_ids)
+                            cross_node_transfers = np.count_nonzero(
+                                rank_node_ids[source_ranks] != rank_node_ids[destination_ranks]
+                            )
                             mean_before, p95_before, mean_after, p95_after = imbalance
                             logger.info(
-                                "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d",
+                                "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d "
+                                "rank_transfers=%d cross_node_transfers=%d",
                                 ASYNC_EPLB_CYCLE_COMMITTED_LOG,
                                 model_state.model_name,
                                 mean_before,
@@ -526,6 +534,7 @@ def _wrap_move_to_workspace(original_move):
                                 p95_after,
                                 full_target.changed_layer_count,
                                 rank_transfers,
+                                cross_node_transfers,
                             )
         finally:
             if pending_result is not None and consumed_event is not None:
