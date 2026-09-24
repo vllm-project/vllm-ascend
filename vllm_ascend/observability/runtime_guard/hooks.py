@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-"""Model-runner decorators wiring the runtime_guard into v1/v2 runners.
+"""Runner/worker decorators wiring the runtime_guard into the engine loop.
 
 Moving the wave sync / sample-phase orchestration out of the worker files
 dedups the v1/v2 step-sync logic and shrinks the model-runner diff surface on
@@ -24,7 +24,9 @@ as ``_rg_*`` hook methods; only the guard orchestration lives here.
 
 Decorator placement rule: guard decorators must sit INSIDE
 ``@torch.inference_mode()`` (i.e. listed below it) so the wave sync keeps
-running inside the inference-mode context exactly as before.
+running inside the inference-mode context exactly as before. The worker-level
+idle decorator has no inference-mode wrapper to order against —
+``_dummy_run`` owns its execution context.
 """
 
 from __future__ import annotations
@@ -34,11 +36,14 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
+from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.observability.runtime_guard.processor import SamplePhaseResult
 from vllm_ascend.observability.runtime_guard.runner_bridge import (
     need_pre_sample_hook,
     wrap_compute_logits_for_pre_sample,
 )
+
+logger = init_logger_ascend(__name__)
 
 
 @dataclass(frozen=True)
@@ -88,6 +93,36 @@ def runtime_guard_step(execute_model_fn):
             # No-sample / early return: do not burn manual_dump.
             if dummy_run or self.execute_model_state is None:
                 guard.end_of_wave_sync(allow_arm=False)
+
+    return wrapper
+
+
+def runtime_guard_idle_step(dummy_batch_fn):
+    """Worker-level wave sync for idle DP ranks (``execute_dummy_batch``).
+
+    Idle DP ranks skip ``execute_model`` entirely, so ``@runtime_guard_step``
+    never fires there — the worker must issue the same lockstep
+    ``sync_for_step`` (``allow_arm=False``: dummy waves never consume
+    ``manual_dump``; no ``scheduler_output`` — nothing was scheduled).
+
+    Soft-fails, unlike ``runtime_guard_step``: this path carries no
+    end-of-wave collectives, so a guard hiccup on an idle rank must not
+    stall the dummy loop. The guard lives on ``self.model_runner``.
+    """
+
+    @functools.wraps(dummy_batch_fn)
+    def wrapper(self, *args, **kwargs):
+        runner = getattr(self, "model_runner", None)
+        guard = getattr(runner, "runtime_guard", None)
+        if guard is not None:
+            try:
+                guard.sync_for_step(allow_arm=False)
+            except Exception:
+                logger.warning(
+                    "[runtime_guard soft-fail] execute_dummy_batch sync_for_step failed",
+                    exc_info=True,
+                )
+        return dummy_batch_fn(self, *args, **kwargs)
 
     return wrapper
 

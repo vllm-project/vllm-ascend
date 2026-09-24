@@ -1,5 +1,5 @@
 # mypy: ignore-errors
-"""Decorator-level tests for runtime_guard step / sample-phase hooks."""
+"""Decorator-level tests for runtime_guard step / sample-phase / idle hooks."""
 
 import ast
 from pathlib import Path
@@ -11,6 +11,7 @@ import torch
 
 from vllm_ascend.observability.runtime_guard.hooks import (
     SamplePhasePreState,
+    runtime_guard_idle_step,
     runtime_guard_sample_tokens,
     runtime_guard_step,
 )
@@ -140,6 +141,58 @@ def test_step_guardless_keeps_bare_path():
     assert runner.execute_model(so) == "output"
     assert runner.body_ran
     assert runner._rg_scheduler_output is so
+
+
+class _IdleWorker:
+    """Minimal stand-in exercising runtime_guard_idle_step on the worker."""
+
+    def __init__(self, model_runner):
+        self.model_runner = model_runner
+        self.body_ran = False
+
+    @runtime_guard_idle_step
+    def execute_dummy_batch(self):
+        self.body_ran = True
+        return "done"
+
+
+def test_idle_step_syncs_without_arming():
+    guard = MagicMock()
+    worker = _IdleWorker(SimpleNamespace(runtime_guard=guard))
+
+    assert worker.execute_dummy_batch() == "done"
+    assert worker.body_ran
+    # Dummy waves never burn manual_dump and carry no scheduler_output.
+    guard.sync_for_step.assert_called_once_with(allow_arm=False)
+
+
+def test_idle_step_soft_fails_and_still_runs_body():
+    guard = MagicMock()
+    guard.sync_for_step.side_effect = RuntimeError("boom")
+    worker = _IdleWorker(SimpleNamespace(runtime_guard=guard))
+
+    assert worker.execute_dummy_batch() == "done"
+    assert worker.body_ran
+
+
+def test_idle_step_guardless_keeps_bare_path():
+    worker = _IdleWorker(SimpleNamespace())  # no runtime_guard attr
+
+    assert worker.execute_dummy_batch() == "done"
+    assert worker.body_ran
+
+
+def test_worker_dummy_batch_uses_idle_decorator():
+    """NPUWorker must route the idle wave sync through the decorator."""
+    src = (_WORKER_ROOT / "worker.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fns = [
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "execute_dummy_batch"
+    ]
+    assert len(fns) == 1
+    assert _decorator_names(fns[0]) == ["runtime_guard_idle_step"]
+    # The lockstep sync itself lives in the hook, not in the worker body.
+    assert "rg.sync_for_step" not in src
 
 
 class _SampleRunner:

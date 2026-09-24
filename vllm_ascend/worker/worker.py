@@ -94,6 +94,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -1232,20 +1233,10 @@ class NPUWorker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
+    # Lockstep wave sync for idle DP ranks (never burns manual_dump, soft-fail);
+    # lives in the runtime_guard hook, see runtime_guard_idle_step.
+    @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
-        # Idle DP ranks skip execute_model; still run lockstep runtime_config sync
-        # (allow_arm=False so manual_trigger is not consumed on a dummy wave).
-        rg = getattr(self.model_runner, "runtime_guard", None)
-        if rg is not None:
-            try:
-                rg.sync_for_step(allow_arm=False)
-            except Exception:
-                from vllm_ascend.logger import init_logger_ascend
-
-                init_logger_ascend(__name__).warning(
-                    "[runtime_guard soft-fail] execute_dummy_batch sync_for_step failed",
-                    exc_info=True,
-                )
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)
