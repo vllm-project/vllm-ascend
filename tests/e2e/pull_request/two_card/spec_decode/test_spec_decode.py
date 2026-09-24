@@ -15,21 +15,23 @@
 # This file is a part of the vllm-ascend project.
 #
 # Run `pytest tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py`.
+#
+# NOTE: the heavyweight spec-decode cases (dspark / MoE-MTP hang / VWN /
+# sliding-window) live in test_spec_decode_heavy.py so the two file-level
+# targets can run in parallel on separate 2-card jobs.
 
 from __future__ import annotations
 
 import os
 
 import pytest
-import torch_npu
 from transformers import AutoTokenizer
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
 from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
-from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
-from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
+from tests.e2e.conftest import VllmRunner
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -47,13 +49,6 @@ P_EAGLE_MODELS = {
     },
 }
 
-VWN_EAGLE3_MODELS = {
-    "vwn_eagle3": {
-        "main": "Qwen/Qwen3-30B-A3B",
-        "spec": "vllm-ascend/Qwen3-30B-A3B-vwn-eagle-model",
-    },
-}
-
 DFLASH2_MODELS = {
     "dflash2": {
         "main": "Qwen/Qwen3.8-27B",
@@ -61,28 +56,12 @@ DFLASH2_MODELS = {
     },
 }
 
-REDUCED_VOCAB_DSPARK_MODELS = {
-    "qwen36_35b_dspark": {
-        "main": "Qwen/Qwen3.6-35B-A3B",
-        "spec": "RedHatAI/Qwen3.6-35B-A3B-speculator.dspark",
-    },
-}
-
-# MoE main models with a built-in MTP draft (the draft itself is MoE), used to
-# reproduce the spec-decode hang fixed by vllm-ascend#10117. No separate spec
-# checkpoint — qwen3_5_mtp reuses the main model's MTP layer.
-MOE_HANG_MODELS = {
-    "qwen3_5_mtp": {
-        "main": "Qwen/Qwen3.5-35B-A3B",
-    },
-}
-
 # NOTE: golden may change (eagle_proposer only runs in eager mode currently),
 # thus please update it if ci fails but you have better acceptance
+
 BASELINES_SP = {
     "eagle3": [0.68, 0.40, 0.18],
     "p-eagle": [0.5625, 0.25, 0.0625, 0.0, 0.0, 0.0, 0.0, 0.0],
-    "vwn_eagle3": [0.75, 0.5, 0.3],
     "dflash2": [0.855, 0.593, 0.359, 0.290, 0.193, 0.152, 0.076, 0.007],
 }
 
@@ -280,285 +259,6 @@ def test_p_eagle_acceptance(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-def test_qwen3_vwn_eagle3_tp2():
-    """
-    Test Qwen3-30B-A3B with VWN-Eagle3 speculative decoding acceptance rate.
-    This test verifies that VWN-Eagle3 spec decode works correctly with:
-    - Tensor Parallel size = 4
-    - Expert Parallel enabled (for MoE)
-    - num_speculative_tokens = 3
-    - enforce_eager = True
-    - Acceptance rate matches baseline (tolerance 0.06)
-    """
-    num_speculative_tokens = 3
-    main_model_name = VWN_EAGLE3_MODELS["vwn_eagle3"]["main"]
-    spec_model_name = VWN_EAGLE3_MODELS["vwn_eagle3"]["spec"]
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        main_model_name,
-        trust_remote_code=True,
-    )
-    sampling_params = SamplingParams(
-        temperature=0,
-        ignore_eos=False,
-        max_tokens=256,
-    )
-
-    prompts = [
-        {
-            "role": "user",
-            "content": "Hello, my name is",
-        },
-        {
-            "role": "user",
-            "content": "The capital of France is",
-        },
-        {
-            "role": "user",
-            "content": "The future of AI is",
-        },
-    ]
-    prompts = [
-        tokenizer.apply_chat_template(
-            [prompt],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        for prompt in prompts
-    ]
-
-    speculative_config = {
-        "method": "eagle3",
-        "num_speculative_tokens": num_speculative_tokens,
-        "model": spec_model_name,
-    }
-
-    with VllmRunner(
-        main_model_name,
-        enforce_eager=True,
-        max_model_len=2048,
-        disable_log_stats=False,
-        tensor_parallel_size=2,
-        max_num_seqs=16,
-        distributed_executor_backend="mp",
-        gpu_memory_utilization=0.92,
-        speculative_config=speculative_config,
-        enable_expert_parallel=True,
-    ) as llm:
-        _ = llm.generate(prompts, sampling_params)
-        metrics = llm.model.get_metrics()
-
-    # Check acceptance rate
-    num_drafts = 0
-    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
-    for metric in metrics:
-        if metric.name == "vllm:spec_decode_num_drafts":
-            assert isinstance(metric, Counter)
-            num_drafts += metric.value
-        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
-            assert isinstance(metric, Vector)
-            for pos in range(len(metric.values)):
-                num_accepted_tokens_per_pos[pos] += metric.values[pos]
-
-    acceptance_per_pos = [n / num_drafts for n in num_accepted_tokens_per_pos]
-    golden = BASELINES_SP["vwn_eagle3"]
-
-    match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
-    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
-
-
-def test_eagle3_sliding_window():
-    method = "eagle3"
-    num_speculative_tokens = 3
-    draft_window_size = 512
-
-    main_model_name = MODELS[method]["main"]
-    spec_model_name = MODELS[method]["spec"]
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        main_model_name,
-        trust_remote_code=True,
-    )
-    sampling_params = SamplingParams(
-        temperature=0,
-        ignore_eos=False,
-        max_tokens=32,
-    )
-
-    # Build a prompt that exceeds draft_window_size (512) tokens so the
-    # sliding window actually crops the draft's attention.
-    filler = "This is a padding sentence for testing sliding window draft attention. " * 80
-    long_prompt = {
-        "role": "user",
-        "content": filler + " What is 2+2?",
-    }
-    prompt_text = tokenizer.apply_chat_template(
-        [long_prompt],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    prompt_tokens = tokenizer(prompt_text, return_tensors="pt")["input_ids"].shape[1]
-    assert prompt_tokens > draft_window_size, (
-        f"Prompt ({prompt_tokens} tokens) must exceed draft_window_size ({draft_window_size})"
-    )
-
-    speculative_config = {
-        "method": method,
-        "num_speculative_tokens": num_speculative_tokens,
-        "model": spec_model_name,
-    }
-    additional_config = {"draft_window_size": draft_window_size}
-
-    with VllmRunner(
-        main_model_name,
-        enforce_eager=True,
-        max_model_len=4096,
-        disable_log_stats=False,
-        tensor_parallel_size=2,
-        max_num_seqs=16,
-        distributed_executor_backend="mp",
-        gpu_memory_utilization=0.7,
-        speculative_config=speculative_config,
-        additional_config=additional_config,
-    ) as llm:
-        outputs = llm.model.generate([prompt_text], sampling_params)
-        metrics = llm.model.get_metrics()
-
-    # The model must not crash and must produce output.
-    assert len(outputs) == 1
-    assert len(outputs[0].outputs[0].token_ids) > 0
-    print(f"Generated: {outputs[0].outputs[0].text!r}")
-
-    # Sliding window should still give non-zero acceptance.
-    num_drafts = 0
-    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
-    for metric in metrics:
-        if metric.name == "vllm:spec_decode_num_drafts":
-            assert isinstance(metric, Counter)
-            num_drafts += metric.value
-        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
-            assert isinstance(metric, Vector)
-            for pos in range(len(metric.values)):
-                num_accepted_tokens_per_pos[pos] += metric.values[pos]
-
-    acceptance_per_pos = [n / num_drafts for n in num_accepted_tokens_per_pos]
-    golden = [0.7, 0.4, 0.3]
-    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
-    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
-
-
-def test_hang():
-    """Reproduce the spec-decode hang fixed by vllm-ascend#10117.
-
-    The server deadlocks when all of the following hold:
-      1. Data Parallelism is enabled (data_parallel_size >= 2);
-      2. The draft model is MoE (here: 72 routed experts);
-      3. prompt_len + generated_len approaches max_model_len (boundary case).
-
-    ``ignore_eos=True`` drives generation to max_model_len so the request
-    length saturates the boundary in (3). The model is a small random-weight
-    DeepseekV3 MoE+MTP so the case runs on two cards with EP on.
-    """
-    # Fail-fast: cap NPU operator execution timeout at 5 min. Without this the
-    # hang deadlocks for ~9 min until CANN's default vector-core timeout
-    # (~556s) fires — too long for CI.
-    torch_npu.npu.set_op_timeout_ms(300_000)
-
-    method = "qwen3_5_mtp"
-    main_model_name = MOE_HANG_MODELS[method]["main"]
-    max_model_len = 1024
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        main_model_name,
-        trust_remote_code=True,
-    )
-
-    # Prompts padded to exactly max_model_len - 1 tokens so that
-    # prompt_len + num_speculative_tokens > max_model_len at the FIRST draft
-    # proposal — this deterministically triggers input_fits_in_drafter=False
-    # (the path PR #10117 removed) instead of relying on generation to wander
-    # into the boundary. The filler counts below tokenize to exactly 1023 for
-    # this tokenizer; the assert guards against tokenizer drift.
-    #
-    # Three requests are needed:
-    #   - With 1 request, once the hang triggers the single vllm worker dies,
-    #     which tears the server down before the deadlock is observable.
-    #   - With 2 requests, the scheduler may route both to the SAME DP rank
-    #     (the other rank idle), so the cross-DP synchronization that the bug
-    #     needs never happens — the hang only reproduces probabilistically.
-    #   - With 3 requests across data_parallel_size=2, at least one request
-    #     lands on each DP rank, so both ranks hit input_fits_in_drafter=False
-    #     and deadlock on the cross-DP sync. Verified to reproduce 5/5 runs.
-    #
-    # All three prompts below tokenize to exactly 1023 tokens (max_model_len - 1)
-    # for this tokenizer; the assert after apply_chat_template enforces it.
-    prompts = [
-        {
-            "role": "user",
-            "content": "2. Hello, your name is:" * 126 + "x" * 29,
-        },
-        {
-            "role": "user",
-            "content": "!. Hello, your name is:" * 144 + "x" * 29,
-        },
-        {
-            "role": "user",
-            "content": "2. Hello, your name is:" * 126 + "x" * 29,
-        },
-    ]
-    prompts = [
-        tokenizer.apply_chat_template(
-            [prompt],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        for prompt in prompts
-    ]
-
-    prompt_lens = [len(tokenizer.encode(prompt, add_special_tokens=False)) for prompt in prompts]
-    assert all(plen == max_model_len - 1 for plen in prompt_lens), (
-        f"prompt_lens {prompt_lens} != max_model_len - 1 ({max_model_len - 1}); "
-        "update the filler if the tokenizer changed"
-    )
-
-    sampling_params = SamplingParams(
-        temperature=0,
-        ignore_eos=True,
-        max_tokens=max_model_len,
-    )
-
-    speculative_config = {
-        "method": method,
-        "num_speculative_tokens": 3,
-    }
-
-    compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
-
-    with DPVllmRunner(
-        main_model_name,
-        max_model_len=max_model_len,
-        disable_log_stats=False,
-        tensor_parallel_size=1,
-        data_parallel_size=2,
-        max_num_seqs=2,
-        distributed_executor_backend="mp",
-        gpu_memory_utilization=0.8,
-        enable_expert_parallel=True,
-        speculative_config=speculative_config,
-        compilation_config=compilation_config,
-        enable_prefix_caching=False,
-    ) as llm:
-        outputs = llm.generate(prompts, sampling_params=sampling_params)
-
-    for output in outputs:
-        # DPVllmRunner.generate returns list[tuple[list[list[int]], list[str]]]:
-        # (token_ids per seq, generated text per seq).
-        output_tokens = output[0][0]
-        generated_text = output[1][0]
-        print(f"Generated text: {generated_text!r}")
-        print(f"Output tokens: {output_tokens}")
-
-
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
 def test_dflash2_acceptance(
@@ -723,62 +423,3 @@ def test_dflash2_v2_acceptance(
 
     match = all(abs(a - b) < 0.2 for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
-
-
-@pytest.mark.parametrize("model", [REDUCED_VOCAB_DSPARK_MODELS["qwen36_35b_dspark"]["main"]])
-@pytest.mark.parametrize("draft_model", [REDUCED_VOCAB_DSPARK_MODELS["qwen36_35b_dspark"]["spec"]])
-@pytest.mark.parametrize("max_tokens", [1024])
-@pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize(
-    "compilation_config",
-    [
-        pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
-            id="full_decode_only",
-        )
-    ],
-)
-@wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_qwen36_35b_dspark_spec_decoding(
-    model: str,
-    draft_model: str,
-    max_tokens: int,
-    enforce_eager: bool,
-    compilation_config: dict,
-) -> None:
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-
-    num_speculative_tokens = 7
-    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
-    with VllmRunner(
-        model,
-        max_model_len=4096,
-        tensor_parallel_size=2,
-        enable_expert_parallel=True,
-        enforce_eager=enforce_eager,
-        disable_log_stats=False,
-        async_scheduling=True,
-        speculative_config={
-            "method": "dspark",
-            "model": draft_model,
-            "num_speculative_tokens": num_speculative_tokens,
-        },
-        compilation_config=compilation_config,
-    ) as runner:
-        runner.model.generate(prompts, sampling_params)
-        metrics = runner.model.get_metrics()
-
-    acceptance_per_pos = calculate_acceptance_per_pos(
-        metrics,
-        num_speculative_tokens,
-        Counter,
-        Vector,
-    )
-    golden = [0.78, 0.61, 0.49, 0.39, 0.33, 0.29, 0.25]
-    match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
-    assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"

@@ -28,6 +28,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self._lora_triton_workspaces: dict[int, torch.Tensor] = {}
         self.lora_config = kwargs.get("lora_config")
         ascend_device_type = get_ascend_device_type()
+        self.ascend_device_type = ascend_device_type
         if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
         ):
@@ -206,6 +207,17 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.Tensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 
+    def _in_graph_mode(self) -> bool:
+        try:
+            return torch.npu.is_current_stream_capturing()
+        except Exception:
+            return False
+
+    def _use_sgmv(self) -> bool:
+        if not self.is_prefill:
+            return False
+        return not (self.ascend_device_type == AscendDeviceType._310P and self._in_graph_mode())
+
     def _apply_expand(
         self,
         y: torch.Tensor,
@@ -221,7 +233,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         GEMM of lora'b.
         """
 
-        expand_slice_fun: Callable = self._expand_slice_prefill if self.is_prefill else self._expand_slice_decode
+        expand_slice_fun: Callable = self._expand_slice_prefill if self._use_sgmv() else self._expand_slice_decode
         expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
 
     def _apply_shrink(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, scale: float):
@@ -235,7 +247,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        shrink_fun: Callable = self._shrink_prefill if self.is_prefill else self._shrink_decode
+        shrink_fun: Callable = self._shrink_prefill if self._use_sgmv() else self._shrink_decode
         shrink_fun(y, x, w_t_all, scale)
         y = y.view_as(y_org)
 
@@ -329,7 +341,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
 
         # Embedding layer only need expand op
-        expand_fun: Callable = self._expand_prefill if self.is_prefill else self._expand_decode
+        expand_fun: Callable = self._expand_prefill if self._use_sgmv() else self._expand_decode
         x = x.to(torch.float32)
         expand_fun(y, x, lora_b_stacked, add_inputs)
 
@@ -581,12 +593,56 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         x = x.view(-1, x.shape[-1])
         r = lora_b_stacked.size(-1)
 
+        indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
+
+        if y.size(1) < r:
+            # Ascend bgmv_expand requires hidden_out >= hidden_in (LoRA rank).
+            # The sequence-classification LoRA head (#53555) can have
+            # num_labels < rank, so use the matmul fallback.
+            self._add_lora_logits_matmul(y, x, lora_a_stacked, lora_b_stacked, scale, indices)
+            y = y.view_as(y_org)
+            return
+
         if buffer is None:
             buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
 
-        indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
-
         self.bgmv_shrink(x, lora_a_stacked, buffer, indices, scale)
-        self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
+        if y.dtype in (torch.half, torch.bfloat16):
+            self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
+        else:
+            # Ascend bgmv_expand only writes half/bf16 outputs. Compute
+            # the LoRA delta into a workspace of the weight dtype (matching
+            # the kernel's output dtype) and merge it back, so fp32
+            # classification outputs (classifier LoRA, #53555) work on
+            # vLLM main without quantizing the base logits.
+            op_dtype = lora_b_stacked.dtype
+            delta = torch.zeros(y.shape, dtype=op_dtype, device=y.device)
+            self.bgmv_expand(buffer, lora_b_stacked, delta, indices, add_inputs=True)
+            y.add_(delta.to(y.dtype))
 
         y = y.view_as(y_org)
+
+    def _add_lora_logits_matmul(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+        scale: float,
+        indices: torch.Tensor,
+    ) -> None:
+        """Per-adapter matmul fallback for add_lora_logits (see call site)."""
+        active = indices >= 0
+        idx = indices.clamp(min=0)
+        lora_a = lora_a_stacked[idx]
+        lora_b = lora_b_stacked[idx]
+        if lora_a.ndim == 4:
+            lora_a = lora_a[:, 0]
+        if lora_b.ndim == 4:
+            lora_b = lora_b[:, 0]
+
+        delta = torch.bmm(x.to(torch.float32).unsqueeze(1), lora_a.to(torch.float32).transpose(1, 2)).squeeze(1)
+        delta = torch.bmm(delta.unsqueeze(1), lora_b.to(torch.float32).transpose(1, 2)).squeeze(1)
+        delta.mul_(scale)
+        delta.masked_fill_(~active.unsqueeze(1), 0)
+        y.add_(delta.to(y.dtype))

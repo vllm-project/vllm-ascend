@@ -17,6 +17,7 @@ from vllm.utils.network_utils import get_ip
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -25,6 +26,7 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -64,7 +66,6 @@ class MooncakeBaseConnectorScheduler:
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        assert self.pcp_size == 1, f"Mooncake temporarily requires prefill context parallel size 1, got {self.pcp_size}"
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.max_device_id = (
             self.tp_size
@@ -113,8 +114,9 @@ class MooncakeBaseConnectorScheduler:
     def _get_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         """Return prompt blocks while retaining evicted-block padding.
 
-        Attention groups are clipped by their block size. Mamba groups are not
-        prompt-block aligned, so only their speculative tail blocks are removed.
+        Attention groups are clipped by their block size. Circular groups keep
+        their single state page. Mamba groups are not prompt-block aligned, so
+        only their speculative tail blocks are removed.
         """
         if not block_ids:
             return block_ids
@@ -122,18 +124,26 @@ class MooncakeBaseConnectorScheduler:
         assert len(block_ids) == len(self.group_unique_specs), "Number of KV cache groups must match"
 
         transfer_block_ids: list[list[int]] = []
-        cp_size = max(1, self.pcp_size * self.dcp_size)
         for blocks, block_size, group_specs in zip(
             block_ids,
             self.group_block_size,
             self.group_unique_specs,
         ):
-            if any(isinstance(spec, MambaSpec) for spec in group_specs):
+            if all(is_circular_kv_cache_spec(spec) for spec in group_specs):
+                # Circular caches own one request-lifetime ring block. It is
+                # state, not a prompt-aligned attention-block sequence.
+                transfer_block_ids.append(blocks)
+            elif any(isinstance(spec, MambaSpec) for spec in group_specs):
                 if self.num_speculative_tokens > 0:
                     transfer_block_ids.append(blocks[: -self.num_speculative_tokens])
                 else:
                     transfer_block_ids.append(blocks)
             else:
+                # SWA remains TP-sharded/replicated and keeps its original
+                # logical block size even when FullAttention uses DCP.
+                cp_size = (
+                    1 if all(isinstance(spec, SlidingWindowSpec) for spec in group_specs) else max(1, self.dcp_size)
+                )
                 num_prompt_blocks = cdiv(prompt_len, block_size * cp_size)
                 transfer_block_ids.append(blocks[:num_prompt_blocks])
         return tuple(transfer_block_ids)
@@ -168,7 +178,11 @@ class MooncakeBaseConnectorScheduler:
         params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:
-        raise NotImplementedError
+        # Truncate before local prefix-cache lookup so its hit count stays
+        # consistent with the prompt length used by the scheduler.
+        params = request.kv_transfer_params
+        if params is not None and params.get("do_remote_decode") and self.need_truncate:
+            self._truncate_request_for_prefill(request)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         raise NotImplementedError

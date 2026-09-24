@@ -28,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
+    MooncakePCPTransferMetadata,
     MooncakePPTransferMetadata,
     MooncakeTPTransferMetadata,
     MooncakeTransferMetadata,
@@ -64,6 +65,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         pp_size: int,
         pcp_size: int,
         dcp_size: int,
+        use_kv_pp: bool,
         ready_event: threading.Event,
     ) -> None:
         super().__init__(daemon=True, name="MooncakeSchedulerSendingThread")
@@ -75,7 +77,9 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         self.pcp_size = pcp_size
         self.dcp_size = dcp_size
         self.engine_id = engine_id
-        self.use_kv_pp = False
+        self.use_kv_pp = use_kv_pp
+        if self.use_kv_pp and self.dcp_size != 1:
+            raise ValueError(f"Mooncake KVPP cannot be combined with DCP, got dcp_size={self.dcp_size}")
         metadata_by_pp_rank = self._merge_metadata_by_pp_rank(metadata)
         self.encoded_metadata = encoder.encode(
             MooncakeTransferMetadataGroups(
@@ -116,22 +120,26 @@ class MooncakeSchedulerSendingThread(threading.Thread):
     ) -> dict[int, MooncakePPTransferMetadata]:
         """Merge worker metadata into one PP-wide layer table.
 
-        LayerSplit may assign different layers to redundant TP ranks. Per-layer
+        LayerSplit may assign different layers to any PCP/TP worker. Per-layer
         fields are therefore aligned by layer name instead of requiring every
-        TP worker to expose the same layer list. TP-private address tables are
+        worker to expose the same layer list. Worker-private address tables are
         padded to the PP-union layer order, while ``layer_indices`` records the
-        entries physically owned by each TP rank.
+        entries physically owned by each PCP/TP worker.
         """
-        # pp_rank -> tp_rank -> worker handshake metadata.
-        workers_by_pp_rank: dict[int, dict[int, MooncakeTransferMetadata]] = {}
+        # pp_rank -> pcp_rank -> tp_rank -> worker handshake metadata.
+        workers_by_pp_rank: dict[int, dict[int, dict[int, MooncakeTransferMetadata]]] = {}
         for metadata_key, rank_metadata in metadata.items():
             if isinstance(metadata_key, int):
-                pp_rank, tp_rank = 0, metadata_key
+                pp_rank, pcp_rank, tp_rank = 0, 0, metadata_key
             elif len(metadata_key) == 2:
                 pp_rank, tp_rank = metadata_key
+                pcp_rank = 0
+            elif len(metadata_key) == 3:
+                pp_rank, pcp_rank, tp_rank = metadata_key
             else:
                 raise ValueError(
-                    f"Mooncake handshake metadata key must be tp_rank or (pp_rank, tp_rank), got {metadata_key!r}"
+                    "Mooncake handshake metadata key must be tp_rank, "
+                    f"(pp_rank, tp_rank), or (pp_rank, pcp_rank, tp_rank), got {metadata_key!r}"
                 )
 
             if not isinstance(rank_metadata, MooncakeTransferMetadata):
@@ -145,9 +153,11 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                     f"{self.engine_id!r}, got {rank_metadata.engine_id!r}"
                 )
 
-            workers_by_tp_rank = workers_by_pp_rank.setdefault(pp_rank, {})
+            workers_by_tp_rank = workers_by_pp_rank.setdefault(pp_rank, {}).setdefault(pcp_rank, {})
             if tp_rank in workers_by_tp_rank:
-                raise ValueError(f"Duplicate Mooncake metadata for PP rank {pp_rank}, TP rank {tp_rank}")
+                raise ValueError(
+                    f"Duplicate Mooncake metadata for PP rank {pp_rank}, PCP rank {pcp_rank}, TP rank {tp_rank}"
+                )
             workers_by_tp_rank[tp_rank] = rank_metadata
 
         expected_pp_ranks = set(range(self.pp_size))
@@ -157,30 +167,40 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 f"{sorted(expected_pp_ranks)}, got {sorted(workers_by_pp_rank)}"
             )
 
+        expected_pcp_ranks = set(range(self.pcp_size))
         expected_tp_ranks = set(range(self.tp_size))
         merged: dict[int, MooncakePPTransferMetadata] = {}
-        for pp_rank, workers_by_tp_rank in sorted(workers_by_pp_rank.items()):
-            if set(workers_by_tp_rank) != expected_tp_ranks:
+        for pp_rank, workers_by_pcp_rank in sorted(workers_by_pp_rank.items()):
+            if set(workers_by_pcp_rank) != expected_pcp_ranks:
                 raise ValueError(
-                    "Mooncake worker metadata has incomplete TP ranks for "
-                    f"PP rank {pp_rank}: expected {sorted(expected_tp_ranks)}, "
-                    f"got {sorted(workers_by_tp_rank)}"
+                    "Mooncake worker metadata has incomplete PCP ranks for "
+                    f"PP rank {pp_rank}: expected {sorted(expected_pcp_ranks)}, "
+                    f"got {sorted(workers_by_pcp_rank)}"
                 )
-
-            reference_tp_rank = min(workers_by_tp_rank)
-            reference = workers_by_tp_rank[reference_tp_rank]
-            for tp_rank, worker_metadata in workers_by_tp_rank.items():
-                mismatched_fields = [
-                    field_name
-                    for field_name in ("block_size", "num_blocks")
-                    if getattr(worker_metadata, field_name) != getattr(reference, field_name)
-                ]
-                if mismatched_fields:
+            for pcp_rank, workers_by_tp_rank in workers_by_pcp_rank.items():
+                if set(workers_by_tp_rank) != expected_tp_ranks:
                     raise ValueError(
-                        "Mooncake worker metadata differs across TP ranks for "
-                        f"PP rank {pp_rank}: TP {reference_tp_rank} and "
-                        f"TP {tp_rank} mismatch in {mismatched_fields}"
+                        "Mooncake worker metadata has incomplete TP ranks for "
+                        f"PP rank {pp_rank}, PCP rank {pcp_rank}: "
+                        f"expected {sorted(expected_tp_ranks)}, got {sorted(workers_by_tp_rank)}"
                     )
+
+            reference_pcp_rank = min(workers_by_pcp_rank)
+            reference_tp_rank = min(workers_by_pcp_rank[reference_pcp_rank])
+            reference = workers_by_pcp_rank[reference_pcp_rank][reference_tp_rank]
+            for pcp_rank, workers_by_tp_rank in workers_by_pcp_rank.items():
+                for tp_rank, worker_metadata in workers_by_tp_rank.items():
+                    mismatched_fields = [
+                        field_name
+                        for field_name in ("block_size", "num_blocks")
+                        if getattr(worker_metadata, field_name) != getattr(reference, field_name)
+                    ]
+                    if mismatched_fields:
+                        raise ValueError(
+                            "Mooncake worker metadata differs across PCP/TP ranks for "
+                            f"PP rank {pp_rank}: PCP/TP {reference_pcp_rank}/{reference_tp_rank} and "
+                            f"{pcp_rank}/{tp_rank} mismatch in {mismatched_fields}"
+                        )
 
             # layer_name -> (first owning worker metadata, its local layer index).
             # The source supplies PP-shared fields after all duplicate owners
@@ -189,53 +209,56 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             # layer_name -> (group index, block size, strides, lengths, shapes,
             #                block-size scales).
             layer_signature_by_name: dict[str, tuple[object, ...]] = {}
-            tp_layer_names: list[set[str]] = []
-            for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
-                if len(set(worker_metadata.layer_names)) != len(worker_metadata.layer_names):
-                    raise ValueError(
-                        f"Mooncake worker metadata for PP rank {pp_rank}, TP rank {tp_rank} contains duplicate layers"
-                    )
-                tp_layer_names.append(set(worker_metadata.layer_names))
-                for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
-                    layer_signature = (
-                        worker_metadata.group_indices[local_layer_index],
-                        worker_metadata.layer_block_sizes[local_layer_index],
-                        worker_metadata.block_strides[local_layer_index],
-                        worker_metadata.block_lens[local_layer_index],
-                        worker_metadata.block_shapes[local_layer_index],
-                        worker_metadata.block_size_scales[local_layer_index],
-                    )
-                    previous_signature = layer_signature_by_name.get(layer_name)
-                    if previous_signature is not None and previous_signature != layer_signature:
-                        layer_field_names = (
-                            "group_indices",
-                            "layer_block_sizes",
-                            "block_strides",
-                            "block_lens",
-                            "block_shapes",
-                            "block_size_scales",
-                        )
-                        mismatched_layer_fields = [
-                            field_name
-                            for field_name, previous_value, value in zip(
-                                layer_field_names, previous_signature, layer_signature
-                            )
-                            if previous_value != value
-                        ]
+            reference_layer_names: set[str] | None = None
+            for pcp_rank, workers_by_tp_rank in sorted(workers_by_pcp_rank.items()):
+                for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
+                    worker_layer_names = set(worker_metadata.layer_names)
+                    if len(worker_layer_names) != len(worker_metadata.layer_names):
                         raise ValueError(
-                            "Mooncake worker metadata differs across TP ranks for "
-                            f"PP rank {pp_rank}, layer {layer_name!r}: mismatch in {mismatched_layer_fields}"
+                            f"Mooncake worker metadata for PP rank {pp_rank}, PCP rank {pcp_rank}, "
+                            f"TP rank {tp_rank} contains duplicate layers"
                         )
-                    if previous_signature is None:
-                        layer_source_by_name[layer_name] = (worker_metadata, local_layer_index)
-                        layer_signature_by_name[layer_name] = layer_signature
-
+                    if reference_layer_names is None:
+                        reference_layer_names = worker_layer_names
+                    elif not self.use_kv_pp and worker_layer_names != reference_layer_names:
+                        raise ValueError(
+                            "Mooncake workers expose different KV-cache layers while KVPP is disabled: "
+                            f"PP rank {pp_rank}, PCP/TP rank {pcp_rank}/{tp_rank}"
+                        )
+                    for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
+                        layer_signature = (
+                            worker_metadata.group_indices[local_layer_index],
+                            worker_metadata.layer_block_sizes[local_layer_index],
+                            worker_metadata.block_strides[local_layer_index],
+                            worker_metadata.block_lens[local_layer_index],
+                            worker_metadata.block_shapes[local_layer_index],
+                            worker_metadata.block_size_scales[local_layer_index],
+                        )
+                        previous_signature = layer_signature_by_name.get(layer_name)
+                        if previous_signature is not None and previous_signature != layer_signature:
+                            layer_field_names = (
+                                "group_indices",
+                                "layer_block_sizes",
+                                "block_strides",
+                                "block_lens",
+                                "block_shapes",
+                                "block_size_scales",
+                            )
+                            mismatched_layer_fields = [
+                                field_name
+                                for field_name, previous_value, value in zip(
+                                    layer_field_names, previous_signature, layer_signature
+                                )
+                                if previous_value != value
+                            ]
+                            raise ValueError(
+                                "Mooncake worker metadata differs across PCP/TP ranks for "
+                                f"PP rank {pp_rank}, layer {layer_name!r}: mismatch in {mismatched_layer_fields}"
+                            )
+                        if previous_signature is None:
+                            layer_source_by_name[layer_name] = (worker_metadata, local_layer_index)
+                            layer_signature_by_name[layer_name] = layer_signature
             layer_names = sorted(layer_source_by_name)
-            has_layer_split = any(layer_set != tp_layer_names[0] for layer_set in tp_layer_names[1:])
-            self.use_kv_pp |= has_layer_split
-            if has_layer_split and self.dcp_size != 1:
-                raise ValueError(f"Mooncake LayerSplit cannot be combined with DCP, got dcp_size={self.dcp_size}")
-
             layer_block_sizes: list[int] = []
             group_indices: list[int] = []
             block_strides: list[list[int]] = []
@@ -252,22 +275,27 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 block_size_scales.append(worker_metadata.block_size_scales[local_layer_index])
 
             layer_index_by_name = {layer_name: layer_index for layer_index, layer_name in enumerate(layer_names)}
-            metadata_by_tp_rank: dict[int, MooncakeTPTransferMetadata] = {}
-            for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
-                layer_indices = sorted(layer_index_by_name[layer_name] for layer_name in worker_metadata.layer_names)
-                # PP-union layer index -> this TP's per-cache-tensor addresses;
-                # layers not owned by this TP retain an empty address list.
-                aligned_base_addrs: list[list[int]] = [[] for _ in layer_names]
-                for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
-                    layer_index = layer_index_by_name[layer_name]
-                    aligned_base_addrs[layer_index] = worker_metadata.kv_caches_base_addr[local_layer_index]
-                metadata_by_tp_rank[tp_rank] = MooncakeTPTransferMetadata(
-                    te_rpc_port=worker_metadata.te_rpc_port,
-                    layer_indices=layer_indices,
-                    kv_caches_base_addr=aligned_base_addrs,
-                    local_ip=worker_metadata.local_ip,
-                    handshake_port=worker_metadata.handshake_port,
-                )
+            metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata] = {}
+            for pcp_rank, workers_by_tp_rank in sorted(workers_by_pcp_rank.items()):
+                metadata_by_tp_rank: dict[int, MooncakeTPTransferMetadata] = {}
+                for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
+                    layer_indices = sorted(
+                        layer_index_by_name[layer_name] for layer_name in worker_metadata.layer_names
+                    )
+                    # PP-union layer index -> this worker's per-cache-tensor
+                    # addresses; unowned entries remain empty.
+                    aligned_base_addrs: list[list[int]] = [[] for _ in layer_names]
+                    for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
+                        layer_index = layer_index_by_name[layer_name]
+                        aligned_base_addrs[layer_index] = worker_metadata.kv_caches_base_addr[local_layer_index]
+                    metadata_by_tp_rank[tp_rank] = MooncakeTPTransferMetadata(
+                        te_rpc_port=worker_metadata.te_rpc_port,
+                        layer_indices=layer_indices,
+                        kv_caches_base_addr=aligned_base_addrs,
+                        local_ip=worker_metadata.local_ip,
+                        handshake_port=worker_metadata.handshake_port,
+                    )
+                metadata_by_pcp_rank[pcp_rank] = MooncakePCPTransferMetadata(metadata_by_tp_rank=metadata_by_tp_rank)
 
             merged[pp_rank] = MooncakePPTransferMetadata(
                 block_size=reference.block_size,
@@ -279,7 +307,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 block_lens=block_lens,
                 block_shapes=block_shapes,
                 block_size_scales=block_size_scales,
-                metadata_by_tp_rank=metadata_by_tp_rank,
+                metadata_by_pcp_rank=metadata_by_pcp_rank,
             )
         return merged
 
@@ -487,6 +515,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             self.pp_size,
             self.pcp_size,
             self.dcp_size,
+            self.ascend_config.kvpp_config.size > 1,
             ready_event,
         )
         self._sending_thread.start()
@@ -511,9 +540,6 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             count = max(actual - num_computed_tokens, 0)
             if count > 0:
                 return count, True
-
-        if params is not None and params.get("do_remote_decode") and self.need_truncate:
-            self._truncate_request_for_prefill(request)
 
         return 0, False
 
@@ -642,9 +668,6 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             "remote_port": self.side_channel_port,
             "last_token_id": request.output_token_ids[-1],
         }
-
-    def on_new_request(self, request: "Request") -> None:
-        pass
 
     def update_connector_output(
         self,

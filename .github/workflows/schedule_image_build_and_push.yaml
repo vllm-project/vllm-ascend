@@ -110,6 +110,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'image-build' || true }}
     outputs:
       build_meta: ${{ steps.filter.outputs.build_meta }}
+      build_type: ${{ (github.event_name == 'pull_request' && github.event.label.name == 'image-build-daily') && 'daily' || inputs.build_type || 'release' }}
     steps:
       - name: Resolve effective build_type
         id: resolve_bt

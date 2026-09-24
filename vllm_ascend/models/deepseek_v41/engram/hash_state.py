@@ -17,7 +17,9 @@ launch is split into request search and hashing for the Ascend compiler.
 """
 
 import torch
-from vllm.models.deepseek_v4_1.common.engram import (
+
+# Upstream #56741 normalized the V4.1 model package name.
+from vllm.models.deepseek_v41.common.engram import (
     DEAD_ID,
     EngramLayout,
     NgramHashState,

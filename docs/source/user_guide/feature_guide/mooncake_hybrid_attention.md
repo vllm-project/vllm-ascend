@@ -22,11 +22,11 @@ It does not translate Mooncake operations into Memcache GVA operations.
 - This patch wires compute windows into the Ascend DSA, FA, and SFA attention
   paths. Start validation in eager mode. Graph-mode execution and additional
   attention backends require separate integration validation.
-- PP, DCP, PCP, and prefill/decode TP mismatch retain the restrictions of the
-  upstream-main Mooncake layerwise implementation. This branch does not include
-  the independent PP/DCP adaptation.
-- Recurrent Mamba state is explicitly rejected. Hybrid attention and hybrid
-  recurrent/linear-attention state are not interchangeable.
+- Topology-matched PP supports uneven partitions and stage-local hybrid groups.
+  DCP, PCP and prefill/decode TP mismatch remain unsupported.
+- Recurrent/linear-attention groups using `MambaSpec` require
+  `mamba_cache_mode="align"`. Their state is saved after the attention kernels
+  update it; they do not submit PUTs at attention entry.
 - Only complete, coordinator-aligned block snapshots are published. Partial
   block offloading and cross-layer cache-buffer reuse are not part of this
   hybrid implementation.
@@ -67,9 +67,9 @@ entries at the same physical layer remain separate byte ranges.
 
 ## Reachability and session lifetime
 
-The scheduler queries `batch_is_exist` for the keys selected by the coordinator's
-per-group lookup masks. A block is usable only if all required storing-head keys
-exist. The coordinator then determines a common reachable token boundary across
+The scheduler queries `batch_is_readable` for the keys selected by the coordinator's
+per-group lookup masks. A block is usable only if all required stage and storing-head keys
+are committed and readable. The coordinator then determines a common reachable token boundary across
 groups. A full-attention hit alone is insufficient when the corresponding
 window or compressor state is missing.
 
@@ -110,10 +110,17 @@ previous collectives / cache updates
 ```
 
 At attention entry, an NPU event protects cache writes and preceding work on the
-compute stream. Prefetched gets wait for that event. The worker records the save
-event and submits current-layer puts at the same boundary. The host then launches
+compute stream. Prefetched gets wait for that event. For full/SWA attention, the
+worker records the save event and submits current-layer puts at the same boundary. The host then launches
 the attention kernel and applies the configured queue policy before returning
 to the following output projection or MoE communication.
+
+Physical layers containing `MambaSpec` (including GDN and Kimi KDA) update
+conv/recurrent state inside attention. They record the save event and submit PUTs
+from the existing post-compute save hook instead. That hook also applies send
+backpressure to attention paths without a compute-window context manager.
+Step completion waits for all queued PUTs, including when the final layer has
+no ranges to save.
 
 By default, future-layer gets remain queued and up to eight send tasks may stay
 unfinished. This removes whole-queue drains from each layer's critical path,
