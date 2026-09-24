@@ -184,3 +184,65 @@ msprof 归因 → 记录 → 提交。
 ## 轮次结果记录
 
 （每轮：精度 / NPUGraph / msprof / 与上轮对比 / 教训）
+
+### Round 1（2026-09-24）：NORMAL 消标量往返 + 冗余 pass —— 详设
+
+对象：key 30（bf16 NORMAL，DeepSeek 生产热路径）；tiling 前置 + kernel 4 项。
+
+1. **tiling（op_host/add_rms_norm_bias_tiling.cpp）**：NORMAL 落选其余分支后
+   `ubFactor = numColAlign`。原来 hidden=7168+beta 按 11264 列分配缓冲（~180.5KB，
+   接近 191KB 上限），收紧后 ~115KB，腾出 ~76KB。不变量校验：kernel 全部行内
+   逻辑以 numCol 为界、x2 的 bf16 stash 位于 sqxBuf 上半部（依赖 numCol ≤
+   ubFactor，收紧后仍成立；写读重叠逐元素分析 j=(i+ubFactor/2)/2 < i 仅当
+   i > ubFactor，安全）。MULTI_N 的 rowFactor==0 回退 NORMAL 情形同表达式覆盖。
+2. **gamma/beta cast 上提（bf16 独有）**：新增常驻 gammaFp32Buf/betaFp32Buf
+   （ubFactor×4B ×2 = 57.4KB @7168），Process() 序言每核 Cast 一次；
+   行循环内直接 Mul/Add fp32 缓冲。省 2 遍全宽 pass/行。
+3. **avgFactor 折叠**：删除 reduce 前全宽 `Muls(sqx, ×avgFactor)`，改为 reduce 后
+   1 元素 `Muls(sqx, sqx, avgFactor, 1)`。省 1 遍全宽 pass/行。舍入路径：
+   mean = rawsum×(1/N) 与 golden 的逐元素 pre-mul 相比有 ~1ulp fp32 差异
+   （rms_norm_cast R1 同款，容差内）。
+4. **rstd 广播（全 dtype）**：`MulByRstd(dst, src, sqx, numCol)` helper：
+   `Gather(rstd8, sqx, zeroOff×8, 0, 8)` 复制成 8 lane 块 →
+   `Mul(dst, src, rstd8, 64, reps, {1,1,0, 8,8,0})` stride-0 块广播（MULTI_N
+   同款、c220 官方先例同款）。**位级一致**：同一个 fp32 rstd 参与同样的 fp32
+   乘法，只是操作数不再走 S pipe。每行消掉 S_V 同步 + 标量操作数编码；
+   V_S/GetValue/SetValue 仅为 rstd 的 GM 输出累积保留（outQueueRstd 契约路径
+   不动，零风险）。
+
+预期：bf16 每行 15 遍全宽 pass → 12 遍（-20% vec 工作）；小 shape 增加一次
+序言开销（每核固定）。UB 预算 bf16 @7168：115 + 57.4 ≈ 172.4KB < 191KB ✓；
+fp32 @7168：~144KB ✓；fp16 NORMAL 中宽 col 更小 ✓。
+
+风险点：
+- Gather/Mul 广播是 MULTI_N 验证过的范式（fp16 生产路径在用），rstd8/zeroOff
+  均 32B 对齐（独立 TBuf）。
+- tiling ubFactor 收紧影响所有 NORMAL 实例（3 dtype × 各 shape），126 用例
+  中 NORMAL 覆盖 = col 3000(fp16/fp32 rows≥41)、7168(bf16/fp32 rows≥41)。
+- SINGLE_N/MERGE_N/SPLIT_D 本轮不动（SPLIT_D ubFactor 自算，不受影响）。
+
+#### Round 1 结果 — ✅ 完成（2026-09-24）
+
+- **精度**：`test_add_rms_norm_bias.py` **126/126 通过**（107s），device 日志无
+  [ERROR] 行，零回退。
+- **NPUGraph（µs，vs 基线）**：
+
+| tokens | bf16 base→R1 | Δ | fp16 base→R1（未动参照） |
+|---|---|---|---|
+| 64 | 10.10→9.73 | -3.7% | 8.65→8.74（+1%，噪声） |
+| 128 | 13.98→13.43 | -3.9% | 11.42→12.62（噪声带 ±1.2µs） |
+| 512 | 33.16→30.84 | **-7.0%** | 21.50→21.53（0%） |
+| 1024 | 59.04→54.20 | **-8.2%** | 35.36→35.28（0%） |
+| 2048 | 119.41→109.34 | **-8.4%** | 62.95→62.80（0%） |
+| 4096 | 250.89→231.14 | **-7.9%** | 171.68→166.63（-3%，噪声带） |
+
+- **msprof@2048（40 核均值）**：wall 124.4→**114.7µs**（-7.8%，与 NPUGraph 一致）；
+  vec busy 87.9→**77.8µs**（-10.1µs = 3 遍 pass 实际 ~0.19µs/行，低于 0.34 估算，
+  因被删 pass 里 gamma/beta cast 部分与 MTE3 x 落盘重叠）；mte2 27.0→27.8、
+  mte3 18.7→18.7、scalar_wait 106→96.4µs（结构未动，符合"纯减 vec 工作"定位）。
+- **tiling 验证**：probe 实测 key 30 ub_factor 11264→**7168**；key 13/33（SINGLE_N）
+  11264 不变、key 14（MULTI_N）7168 不变 ✓。
+- **噪声口径发现**：未动代码的 fp16 路径在 128 档出现 +1.2µs（+10%）波动 →
+  中小档噪声带 ~±1µs；判断收益以 ≥512 档为准（该段波动 <1%）。
+- 结论：3 遍 pass 消除兑现 ~8%；剩余大头是行间串行（vec 空转 30%、
+  scalar_wait 84%）→ Round 2 行间流水。

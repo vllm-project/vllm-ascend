@@ -70,6 +70,20 @@ public:
         }
         Ppipe->InitBuffer(sqxBuf, ubFactor * sizeof(float));
         Ppipe->InitBuffer(reduceFp32Buf, NUM_PER_REP_FP32 * sizeof(float));
+        // 8 zero byte-offsets for the rstd Gather plus the 8-lane broadcast
+        // block the Gather produces (rstd stays in the vector domain, the
+        // per-row Muls with a scalar operand becomes a stride-0 block Mul).
+        Ppipe->InitBuffer(zeroOffBuf, NUM_PER_BLK_FP32 * sizeof(uint32_t));
+        Ppipe->InitBuffer(rstdBcastBuf, NUM_PER_BLK_FP32 * sizeof(float));
+        if constexpr (is_same<T, bfloat16_t>::value) {
+            // bf16 math must stay in the fp32 domain (c220 has no element-wise
+            // bf16 ops), so gamma/beta are widened once per core instead of
+            // once per row.
+            Ppipe->InitBuffer(gammaFp32Buf, ubFactor * sizeof(float));
+            if (!this->nullptrBeta) {
+                Ppipe->InitBuffer(betaFp32Buf, ubFactor * sizeof(float));
+            }
+        }
     }
 
     __aicore__ inline void Process()
@@ -79,6 +93,20 @@ public:
         LocalTensor<T> betaLocal;
         if (!this->nullptrBeta) {
             betaLocal = inQueueBeta.DeQue<T>();
+        }
+        // Per-core preamble: zero Gather offsets, and for bf16 widen
+        // gamma/beta once (the row loop would otherwise repeat the casts).
+        LocalTensor<uint32_t> zeroOffsets = zeroOffBuf.Get<uint32_t>();
+        Duplicate(zeroOffsets, ZERO_UINT, NUM_PER_BLK_FP32);
+        if constexpr (is_same<T, bfloat16_t>::value) {
+            LocalTensor<float> gammaFp32 = gammaFp32Buf.Get<float>();
+            Cast(gammaFp32, gammaLocal, RoundMode::CAST_NONE, numCol);
+            PipeBarrier<PIPE_V>();
+            if (!this->nullptrBeta) {
+                LocalTensor<float> betaFp32 = betaFp32Buf.Get<float>();
+                Cast(betaFp32, betaLocal, RoundMode::CAST_NONE, numCol);
+                PipeBarrier<PIPE_V>();
+            }
         }
         uint32_t i_o_max = RmsNorm::CeilDiv(rowWork, rowFactor);
         uint32_t row_tail = rowWork - (i_o_max - 1) * rowFactor;
@@ -107,6 +135,33 @@ public:
     }
 
 private:
+    // Broadcasts sqx[0] (the freshly computed rstd, whose block start is
+    // 32B-aligned) into an 8-lane block via Gather, then multiplies it into
+    // dst over count floats with a stride-0 src1 (antiquant/batchnorm-style
+    // block broadcast). Numerically identical to
+    // Muls(dst, src, rstdScalar, count): the same fp32 rstd takes part in the
+    // same fp32 multiplies, but rstd never leaves the vector pipe, so the
+    // per-row V_S/S_V scalar sync for the Muls operand disappears.
+    __aicore__ inline void MulByRstd(const LocalTensor<float>& dst, const LocalTensor<float>& src,
+        const LocalTensor<float>& sqx, uint32_t count)
+    {
+        LocalTensor<float> rstd8 = rstdBcastBuf.Get<float>();
+        LocalTensor<uint32_t> zeroOffsets = zeroOffBuf.Get<uint32_t>();
+        Gather(rstd8, sqx, zeroOffsets, ZERO_UINT, NUM_PER_BLK_FP32);
+        PipeBarrier<PIPE_V>();
+        int32_t repeatTimes = count / NUM_PER_REP_FP32;
+        int32_t tailCount = count % NUM_PER_REP_FP32;
+        if (likely(repeatTimes > 0)) {
+            Mul(dst, src, rstd8, NUM_PER_REP_FP32, repeatTimes,
+                {1, 1, 0, DEFAULT_REPEAT_STRIDE, DEFAULT_REPEAT_STRIDE, 0});
+        }
+        if (unlikely(tailCount != 0)) {
+            Mul(dst[repeatTimes * NUM_PER_REP_FP32], src[repeatTimes * NUM_PER_REP_FP32], rstd8, tailCount, 1,
+                {1, 1, 0, DEFAULT_REPEAT_STRIDE, DEFAULT_REPEAT_STRIDE, 0});
+        }
+        PipeBarrier<PIPE_V>();
+    }
+
     __aicore__ inline void CopyIn(uint32_t gm_bias)
     {
         LocalTensor<T> x1Local_in = inQueueX.AllocTensor<T>();
@@ -172,10 +227,9 @@ private:
         Mul(sqx, xLocal, xLocal, numCol);
         PipeBarrier<PIPE_V>();
 
-        Muls(sqx, sqx, avgFactor, numCol);
-        PipeBarrier<PIPE_V>();
-
         ReduceSumCustom(sqx, sqx, reduce_buf_local, numCol);
+        PipeBarrier<PIPE_V>();
+        Muls(sqx, sqx, avgFactor, 1);
         PipeBarrier<PIPE_V>();
         Adds(sqx, sqx, epsilon, 1);
         PipeBarrier<PIPE_V>();
@@ -195,9 +249,8 @@ private:
         rstdLocal.SetValue(inner_progress, rstdValue);
         PipeBarrier<PIPE_V>();
         LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
-        Muls(yLocal, xLocal, rstdValue, numCol);
+        MulByRstd(yLocal, xLocal, sqx, numCol);
         inQueueX.FreeTensor(xLocal);
-        PipeBarrier<PIPE_V>();
         Mul(yLocal, gammaLocal, yLocal, numCol);
         if (!this->nullptrBeta) {
             PipeBarrier<PIPE_V>();
@@ -217,11 +270,10 @@ private:
         Mul(sqx, x_fp32, x_fp32, numCol);
         PipeBarrier<PIPE_V>();
 
-        Muls(sqx, sqx, avgFactor, numCol);
-        PipeBarrier<PIPE_V>();
         ReduceSumCustom(sqx, sqx, reduce_buf_local, numCol);
         PipeBarrier<PIPE_V>();
-
+        Muls(sqx, sqx, avgFactor, 1);
+        PipeBarrier<PIPE_V>();
         Adds(sqx, sqx, epsilon, 1);
         PipeBarrier<PIPE_V>();
 
@@ -239,21 +291,18 @@ private:
         WaitFlag<HardEvent::S_V>(event_s_v);
         rstdLocal.SetValue(inner_progress, rstdValue);
         PipeBarrier<PIPE_V>();
-        Muls(x_fp32, x_fp32, rstdValue, numCol);
-        PipeBarrier<PIPE_V>();
+        MulByRstd(x_fp32, x_fp32, sqx, numCol);
         LocalTensor<bfloat16_t> yLocal = outQueueY.AllocTensor<bfloat16_t>();
         Cast(yLocal, x_fp32, RoundMode::CAST_RINT, numCol);
         PipeBarrier<PIPE_V>();
         Cast(x_fp32, yLocal, RoundMode::CAST_NONE, numCol);
         PipeBarrier<PIPE_V>();
-        Cast(sqx, gammaLocal, RoundMode::CAST_NONE, numCol); // gamma_fp32 reuse sqx
-        PipeBarrier<PIPE_V>();
-        Mul(x_fp32, x_fp32, sqx, numCol);
+        LocalTensor<float> gammaFp32 = gammaFp32Buf.Get<float>();
+        Mul(x_fp32, x_fp32, gammaFp32, numCol);
         if (!this->nullptrBeta) {
             PipeBarrier<PIPE_V>();
-            Cast(sqx, betaLocal, RoundMode::CAST_NONE, numCol);
-            PipeBarrier<PIPE_V>();
-            Add(x_fp32, x_fp32, sqx, numCol);
+            LocalTensor<float> betaFp32 = betaFp32Buf.Get<float>();
+            Add(x_fp32, x_fp32, betaFp32, numCol);
         }
         PipeBarrier<PIPE_V>();
         Cast(yLocal, x_fp32, RoundMode::CAST_RINT, numCol);
@@ -275,12 +324,10 @@ private:
         Mul(sqx, x_fp32, x_fp32, numCol);
         PipeBarrier<PIPE_V>();
 
-        Muls(sqx, sqx, avgFactor, numCol);
-        PipeBarrier<PIPE_V>();
-
         ReduceSumCustom(sqx, sqx, reduce_buf_local, numCol);
         PipeBarrier<PIPE_V>();
-
+        Muls(sqx, sqx, avgFactor, 1);
+        PipeBarrier<PIPE_V>();
         Adds(sqx, sqx, epsilon, 1);
         PipeBarrier<PIPE_V>();
 
@@ -298,8 +345,7 @@ private:
         WaitFlag<HardEvent::S_V>(event_s_v);
         rstdLocal.SetValue(inner_progress, rstdValue);
         PipeBarrier<PIPE_V>();
-        Muls(x_fp32, x_fp32, rstdValue, numCol);
-        PipeBarrier<PIPE_V>();
+        MulByRstd(x_fp32, x_fp32, sqx, numCol);
         LocalTensor<half> yLocal = outQueueY.AllocTensor<half>();
         Cast(yLocal, x_fp32, RoundMode::CAST_NONE, numCol);
 
@@ -346,6 +392,10 @@ private:
     TBuf<TPosition::VECCALC> xFp32Buf;
     TBuf<TPosition::VECCALC> sqxBuf;
     TBuf<TPosition::VECCALC> reduceFp32Buf;
+    TBuf<TPosition::VECCALC> zeroOffBuf;
+    TBuf<TPosition::VECCALC> rstdBcastBuf;
+    TBuf<TPosition::VECCALC> gammaFp32Buf;
+    TBuf<TPosition::VECCALC> betaFp32Buf;
     GlobalTensor<T> x1Gm;
     GlobalTensor<T> x2Gm;
     GlobalTensor<T> gammaGm;
