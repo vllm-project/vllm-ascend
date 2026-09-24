@@ -1196,17 +1196,20 @@ def test_mrv2_binding_wraps_only_v41_slots():
 
     vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
     v41_layer = DeepseekV41CacheLayer(vllm_config, "model.layers.0.self_attn.attn", object())
+    v41_indexer = DeepseekV41CacheLayer(vllm_config, "model.layers.2.self_attn.indexer.k_cache", object())
     other_layer = SimpleNamespace(kv_cache=None)
     kv_caches = {
-        # V4.1 reshape output: one slot tensor per layer; the indexer variant
-        # carries a (kv, scale) tuple.
+        # V4.1 reshape output: one slot tensor per layer.
         "model.layers.0.self_attn.attn": torch.zeros(4, 2),
         # Non-V4.1 Ascend allocation: a (k, v) tuple.
         "model.layers.1.self_attn.attn": (torch.zeros(2, 2), torch.zeros(2, 2)),
+        # V4.1 indexer reshape output: a (kv, scale) tuple slot view.
+        "model.layers.2.self_attn.indexer.k_cache": (torch.zeros(2, 2), torch.zeros(2, 1)),
     }
     forward_context = {
         "model.layers.0.self_attn.attn": v41_layer,
         "model.layers.1.self_attn.attn": other_layer,
+        "model.layers.2.self_attn.indexer.k_cache": v41_indexer,
     }
 
     bind_kv_cache_to_layers(kv_caches, forward_context)
@@ -1217,6 +1220,10 @@ def test_mrv2_binding_wraps_only_v41_slots():
     assert isinstance(v41_layer.kv_cache, list)
     assert v41_layer.kv_cache[0] is kv_caches["model.layers.0.self_attn.attn"]
     assert other_layer.kv_cache is kv_caches["model.layers.1.self_attn.attn"]
+    # The indexer consumer unpacks kv_cache[0] into (kv, scale).
+    kv_view, scale_view = v41_indexer.kv_cache[0]
+    assert kv_view is kv_caches["model.layers.2.self_attn.indexer.k_cache"][0]
+    assert scale_view is kv_caches["model.layers.2.self_attn.indexer.k_cache"][1]
 
 
 def test_ascend_init_kv_cache_reduces_slot_views_to_tensors(monkeypatch):

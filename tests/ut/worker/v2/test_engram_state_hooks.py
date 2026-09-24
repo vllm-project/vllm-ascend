@@ -92,6 +92,21 @@ def test_prepare_inputs_routes_real_steps_with_device_inputs(monkeypatch):
     assert result["engram_mask"].shape == (0,)
 
 
+def test_prepare_inputs_skips_unknown_engram_group(monkeypatch):
+    """A stale engram_cache_layer_name outside every group degrades to no metadata."""
+    monkeypatch.setattr(DefaultModelState, "prepare_inputs", lambda self, batch, reqs: {})
+    model = _v41_model()
+    state = _state(model, kvpp_is_dummy_run=False)
+    state.kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["other.layer"])])
+    state.block_tables = (torch.zeros(1, 1),)
+    state.slot_mappings = torch.zeros(1, 4)
+
+    state.prepare_inputs(_batch(), req_states=None)
+
+    _, kwargs = model.prepare_engram_inputs.call_args
+    assert kwargs == {}
+
+
 def test_prepare_inputs_passes_device_coordinates_from_cached_views(monkeypatch):
     monkeypatch.setattr(DefaultModelState, "prepare_inputs", lambda self, batch, reqs: {})
     model = _v41_model()
