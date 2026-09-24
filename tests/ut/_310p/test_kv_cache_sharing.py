@@ -80,6 +80,9 @@ def test_uses_per_layer_specs_from_uniform_type_group() -> None:
     mamba = groups[1].kv_cache_spec
     groups[1] = KVCacheGroupSpec(
         ["L0", "L4"],
-        UniformTypeKVCacheSpecs({"L0": mamba, "L4": mamba}),
+        UniformTypeKVCacheSpecs(
+            block_size=mamba.block_size,
+            kv_cache_specs={"L0": mamba, "L4": mamba},
+        ),
     )
     assert get_310p_shared_cache_slots(groups, KVCacheLayout.LBNHC)["L4"] == 1
