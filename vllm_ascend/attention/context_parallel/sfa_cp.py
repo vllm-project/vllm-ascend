@@ -1481,6 +1481,9 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 gather_context,
                 keep_view=not enable_sfa_dcp_force_tmajor_restore(),
             )
+        else:
+            ql_nope = ql_nope.contiguous()
+            q_pe = q_pe.contiguous()
         sfa_output, softmax_max, softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,
