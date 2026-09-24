@@ -1595,9 +1595,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert prefill_preprocess_res.latent is not None
         assert prefill_preprocess_res.current_k_pe is not None
         num_prefills = len(plan_meta.plan.query_lengths)
-        # `bf16_prepare` matches the feat branch: pack K192/V128 with the fused
-        # AscendC operator when it is available and fall back to cat/contiguous
-        # (bitwise identical) otherwise.
+        # `bf16_prepare` packs the expanded K192/V128 views with cat/contiguous
+        # before the prefill kernel, preserving every input BF16 bit.
         _, attention = native_flash_adapters(
             self.num_heads,
             self.scale,

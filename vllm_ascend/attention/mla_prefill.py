@@ -18,19 +18,10 @@ from vllm.logger import logger
 
 
 def _flash_binding_source() -> str:
-    """Name the package that will serve ``cann_ops_transformer.ops.flash_attn``.
-
-    The operator is served by the CANN-bundled ``cann_ops_transformer``; the
-    ``flash_attn_manifest.json`` check is a leftover of the former csrc overlay
-    build and reports the resolved package directory only.
-    """
+    """Report the package directory serving ``cann_ops_transformer.ops.flash_attn``."""
     import cann_ops_transformer
 
-    package_dir = os.path.dirname(os.path.abspath(cann_ops_transformer.__file__))
-    manifest = os.path.join(os.path.dirname(package_dir), "flash_attn_manifest.json")
-    if os.path.isfile(manifest):
-        return f"the self-compiled csrc overlay at {package_dir} (manifest: {manifest})"
-    return f"the CANN-bundled package at {package_dir} (no csrc manifest)"
+    return os.path.dirname(os.path.abspath(cann_ops_transformer.__file__))
 
 
 @dataclass(frozen=True)
@@ -311,13 +302,13 @@ def native_flash_adapters(
 
     The binding must expose ``head_dim_v`` so that QK192 can attend V128; the
     CANN-bundled ``cann_ops_transformer`` provides it, and
-    :func:`_flash_binding_source` reports which package serves the call.
+    :func:`_flash_binding_source` reports the serving package directory.
     """
     from cann_ops_transformer.ops import flash_attn, flash_attn_metadata
 
     logger.info_once(
-        "A5 Flash MLA prefill FlashAttn is served by %s, which carries the head_dim_v "
-        "ABI needed for QK192/V128; the CANN-bundled operator keeps head_dim_v == head_dim.",
+        "A5 Flash MLA prefill FlashAttn is served by the CANN-bundled cann_ops_transformer at %s, "
+        "which exposes head_dim_v so that QK192 can attend V128.",
         _flash_binding_source(),
     )
 
