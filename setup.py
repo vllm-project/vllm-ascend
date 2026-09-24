@@ -535,6 +535,7 @@ setup(
         "Topic :: Scientific/Engineering :: Information Analysis",
     ],
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
+    package_data={"ops.cannbot_dsl": ["LICENSE"]},
     python_requires=">=3.10",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
