@@ -2602,6 +2602,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def(
         "situ_mx_quant(Tensor x, "
+        "              *, Tensor? group_list=None, "
         "              float beta=1.0, "
         "              float linear_beta=0.0, "
         "              bool activate_left=False, "

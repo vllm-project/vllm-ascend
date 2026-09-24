@@ -35,6 +35,7 @@ constexpr int64_t INDEX_ATTR_LINEAR_BETA = 1;
 constexpr int64_t INDEX_ATTR_ACTIVATE_LEFT = 2;
 constexpr int64_t INDEX_ATTR_AXIS = 3;
 constexpr int64_t INDEX_ATTR_DST_TYPE = 4;
+constexpr int64_t INDEX_INPUT_GROUP_LIST = 1;
 
 constexpr int64_t BYTES_OF_BF16 = 2;
 constexpr int64_t BYTES_OF_FP8 = 1;
@@ -146,6 +147,21 @@ ge::graphStatus SituMxQuantRegbaseTiling::ValidateInput()
                 OP_LOGE(context_->GetNodeName(), "Last dimension must be divisible by 2, but got %ld.",
                         inputInfo_.inputDim2),
                 return ge::GRAPH_FAILED);
+
+    auto groupListDesc = context_->GetOptionalInputDesc(INDEX_INPUT_GROUP_LIST);
+    inputInfo_.hasGroupList = groupListDesc != nullptr;
+    if (inputInfo_.hasGroupList) {
+        OP_CHECK_IF(groupListDesc->GetDataType() != ge::DT_INT64,
+                    OP_LOGE(context_->GetNodeName(), "group_list must have int64 dtype"),
+                    return ge::GRAPH_FAILED);
+        auto groupListShape = context_->GetOptionalInputShape(INDEX_INPUT_GROUP_LIST);
+        OP_CHECK_NULL_WITH_CONTEXT(context_, groupListShape);
+        const auto storageShape = groupListShape->GetStorageShape();
+        OP_CHECK_IF(storageShape.GetDimNum() != 1 || storageShape.GetDim(0) <= 0,
+                    OP_LOGE(context_->GetNodeName(), "group_list must be a non-empty 1-D tensor"),
+                    return ge::GRAPH_FAILED);
+        inputInfo_.groupListSize = storageShape.GetDim(0);
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -267,6 +283,8 @@ ge::graphStatus SituMxQuantRegbaseTiling::FillTilingData()
     tilingData_->beta = attrParam_.beta;
     tilingData_->linearBeta = attrParam_.linearBeta;
     tilingData_->hasLinearBeta = attrParam_.hasLinearBeta ? 1 : 0;
+    tilingData_->hasGroupList = inputInfo_.hasGroupList ? 1 : 0;
+    tilingData_->groupListSize = inputInfo_.groupListSize;
     return ge::GRAPH_SUCCESS;
 }
 
@@ -287,11 +305,11 @@ void SituMxQuantRegbaseTiling::PrintTilingData() const
     OP_LOGI(context_->GetNodeName(),
             "TilingData: usedCoreNum=%ld, inputDim1=%ld, inputDim2=%ld, dimNBlockNum=%ld, "
             "maxBasicNumUbDim2=%ld, maxBasicNumUbDim1=%ld, nCoreNum=%ld, mCorePerB=%ld, "
-            "beta=%f, linearBeta=%f, hasLinearBeta=%ld",
+            "beta=%f, linearBeta=%f, hasLinearBeta=%ld, hasGroupList=%ld, groupListSize=%ld",
             tilingData_->usedCoreNum, tilingData_->inputDim1, tilingData_->inputDim2,
             tilingData_->dimNBlockNum, tilingData_->maxBasicNumUbDim2, tilingData_->maxBasicNumUbDim1,
             tilingData_->nCoreNum, tilingData_->mCorePerB, tilingData_->beta, tilingData_->linearBeta,
-            tilingData_->hasLinearBeta);
+            tilingData_->hasLinearBeta, tilingData_->hasGroupList, tilingData_->groupListSize);
 }
 
 // ==================== Entry Functions ====================
