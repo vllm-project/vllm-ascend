@@ -60,7 +60,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 6
         request_rate: 0
-        baseline: 113.1299
+        baseline: 95.42
         threshold: 0.97
       acc_GPQA:
         case_type: accuracy
