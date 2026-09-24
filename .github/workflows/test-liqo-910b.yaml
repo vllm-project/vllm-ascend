@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    runs-on: linux-aarch64-910b-1                    
+    runs-on: linux-aarch64-910b-2                    
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
     steps:
