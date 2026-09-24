@@ -63,12 +63,25 @@ def test_recommendations_are_batch_bucket_specific():
     assert controller.cap(5, 32) == 5
 
 
-def test_small_batch_keeps_full_k():
+def test_small_batch_uses_its_own_profile_recommendation():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
     controller.recommend(8, 3)
     assert controller.cap(5, 8) == 5
-    controller.observe([5] * 8, [[0]] * 8)
-    assert controller._state(8).observations == 0
+    for _ in range(3):
+        controller.observe([5] * 8, [[0]] * 8)
+    assert controller._state(8).observations == 3
+    assert controller.cap(5, 8) == 3
+
+
+def test_profiled_auto_tune_observation_skips_sampled_token_iteration():
+    class NoIterationSequence(list):
+        def __iter__(self):
+            raise AssertionError("profiled auto-tune must not reprocess accepted tokens")
+
+    controller = AdaptiveDraftKController(max_k=5, min_k=3)
+    controller.recommend(8, 4)
+    controller.observe([5] * 8, NoIterationSequence([[1, 2]] * 8))
+    assert controller._state(8).observations == 1
 
 
 def test_periodic_probe_forces_full_k():
@@ -101,6 +114,54 @@ def test_output_recommendation_drives_controller():
     for _ in range(3):
         _update_controller(controller, scheduler_output, model_output)
     assert controller.cap(5, 16) == 3
+
+
+def test_full_k_profile_is_a_runtime_noop():
+    controller = AdaptiveDraftKController(max_k=5, min_k=3)
+    controller.recommend(8, 5)
+
+    def unexpected_bucket_settle(batch_size):
+        raise AssertionError("a full-K profile must not enter dynamic bucket logic")
+
+    controller._settled_bucket = unexpected_bucket_settle
+    assert controller.cap(5, 8) == 5
+
+
+def test_worker_recommendation_is_not_applied_to_a_different_batch_bucket():
+    controller = AdaptiveDraftKController(max_k=5, min_k=3)
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={str(i): [1] * 5 for i in range(8)}
+    )
+    model_output = SimpleNamespace(
+        physical_k_recommendation=(1, 3),
+        req_ids=[str(i) for i in range(8)],
+        sampled_token_ids=[[1, 2] for _ in range(8)],
+    )
+    _update_controller(controller, scheduler_output, model_output)
+    assert controller._state(8).profile_k == 5
+    assert controller._state(1).profile_k is None
+
+
+def test_small_batch_updates_controller_observation():
+    class CountingController(AdaptiveDraftKController):
+        observed = False
+
+        def observe(self, scheduled_widths, sampled_token_ids):
+            self.observed = True
+            super().observe(scheduled_widths, sampled_token_ids)
+
+    controller = CountingController(max_k=5, min_k=3)
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={str(i): [1] * 5 for i in range(8)}
+    )
+    model_output = SimpleNamespace(
+        physical_k_recommendation=None,
+        req_ids=[str(i) for i in range(8)],
+        sampled_token_ids=[[1, 2] for _ in range(8)],
+    )
+    _update_controller(controller, scheduler_output, model_output)
+    assert controller.observed
+    assert controller._state(8).observations == 1
 
 
 def test_profile_recommendation_is_authoritative_over_acceptance():
