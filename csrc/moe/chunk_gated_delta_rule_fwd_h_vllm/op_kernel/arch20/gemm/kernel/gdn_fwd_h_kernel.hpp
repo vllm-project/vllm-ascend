@@ -16,44 +16,14 @@
 #include "catlass/catlass.hpp"
 #include "catlass/epilogue/block/block_epilogue.hpp"
 #include "../../epilogue/block/block_epilogue_gdn_fwdh_vnew.hpp"
-#include "catlass/gemm/block/block_mmad.hpp"
-#include "kernel_utils/block/block_mmad_pingpong_tla_multi.hpp"
 #include "kernel_utils/gemm/hand_mmad_310p.hpp"
-#include "catlass/gemm/block/block_swizzle.hpp"
-#include "../block/block_scheduler_gdn_fwd_h.hpp"
-#include "catlass/gemm/dispatch_policy.hpp"
 #include "catlass/gemm/gemm_type.hpp"
 #include "catlass/layout/layout.hpp"
 #include "catlass/gemm_coord.hpp"
-#include "tla/tensor.hpp"
-#include "tla/layout.hpp"
-#include "tla/tensor.hpp"
-
-using _0 = tla::Int<0>;
-using _1 = tla::Int<1>;
-using _2 = tla::Int<2>;
-using _4 = tla::Int<4>;
-using _8 = tla::Int<8>;
-using _16 = tla::Int<16>;
-using _32 = tla::Int<32>;
-using _64 = tla::Int<64>;
-using _128 = tla::Int<128>;
-using _256 = tla::Int<256>;
-using _512 = tla::Int<512>;
-using _1024 = tla::Int<1024>;
-using _2048 = tla::Int<2048>;
-using _4096 = tla::Int<4096>;
-using _8192 = tla::Int<8192>;
-using _16384 = tla::Int<16384>;
-using _32768 = tla::Int<32768>;
-using _65536 = tla::Int<65536>;
-
-
-
+#include "../block/block_scheduler_gdn_fwd_h.hpp"
 
 #include "kernel_operator.h"
 using namespace Catlass;
-using namespace tla;
 
 namespace Catlass::Gemm::Kernel {
 
@@ -69,28 +39,15 @@ public:
     using ArchTag = Arch::AtlasA2;
     using CubeScheduler = typename Catlass::Gemm::Block::BlockSchedulerGdnFwdHCube;
 
-    using DispatchPolicyTla = Gemm::MmadPingpongTlaMulti<ArchTag, true, false>;
-    using L1TileShapeTla = Shape<_128, _128, _128>;
-    using L0TileShapeTla = L1TileShapeTla;
-
-    using WType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
-    using HType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
+    // Only the vnew epilogue still takes GemmType wrappers; the hand mmads use
+    // the element types directly.
     using VworkType = Gemm::GemmType<WORKSPACE_TYPE, layout::RowMajor>;
-    using KType = Gemm::GemmType<INPUT_TYPE, layout::ColumnMajor>;
     using VType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
     using GType = Gemm::GemmType<G_TYPE, layout::RowMajor>;
     using UType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
-    using FinalStateType = Gemm::GemmType<STATE_TYPE, layout::RowMajor>;
 
-    // cube 1
-
-    // cube 2
-
-    // vec 1
     using DispatchPolicyGDNFwdHVnew = Epilogue::EpilogueAtlasGDNFwdHVnew;
     using EpilogueGDNFwdHVnew = Epilogue::Block::BlockEpilogue<DispatchPolicyGDNFwdHVnew, VType, GType, UType, VworkType>;
-
-    // vec 2
 
     using GDNFwdHOffsets = Catlass::Gemm::Block::GDNFwdHOffsets;
 
@@ -102,11 +59,6 @@ public:
     using ElementV = INPUT_TYPE;
     using ElementInitialState = STATE_TYPE;
     using ElementFinalState = STATE_TYPE;
-    
-    using LayoutW = Catlass::layout::RowMajor;
-    using LayoutH = Catlass::layout::RowMajor;
-    using LayoutV = Catlass::layout::RowMajor;
-    using LayoutK = Catlass::layout::ColumnMajor;
 
     
     uint32_t batch;
@@ -218,12 +170,7 @@ public:
     // Axpy fuses h*scale straight into the stage. [144K,192K) is scratch for
     // the (rare) final_state deformats.
     static constexpr uint32_t UB_UPD_H16   = 96 * 1024;   // f16 tile, <=48 KB
-    static constexpr uint32_t UB_UPD_NDOUT = 144 * 1024;  // final-state scratch
-    // Scalar exp scratch: must NOT sit in vnew's pong region (a scalar write
-    // there raced the outstanding v_update store -- fin came back undecayed).
-    // The ND-out window is dead at hoist time: the previous body's h store was
-    // drained by the MTE3_MTE2 guard just above.
-    static constexpr uint32_t UB_GHOIST    = UB_UPD_NDOUT;
+    static constexpr uint32_t UB_UPD_NDOUT = 144 * 1024;  // final-state + exp(g_last) scratch
 
     // m-tile of the resident bank <-> UB, one strided descriptor each way.
     // zN(kR, v): fractal column nf stride kR*16 elems; a tile is nFracs runs of
@@ -319,7 +266,7 @@ public:
                                       kHeadDim * vHeadDim);
                 }
                 M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/false,
-                                   /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/true, /*B_NZ_GM=*/false,
+                                   /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/true,
                                    /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true, /*NO_M_MTE1=*/true>(
                     resource,
                     gmW[stage1Offsets.wOffset], kHeadDim,
@@ -387,7 +334,7 @@ public:
                     }
                     M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false,
                                        /*A_FROM_L1=*/false, /*A_COL_MAJOR=*/true,
-                                       /*B_FROM_L1=*/true, /*B_NZ_GM=*/false,
+                                       /*B_FROM_L1=*/true,
                                        /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true, /*NO_M_MTE1=*/true>(
                         resource,
                         gmK[stage2Offsets.wkOffset], kHeadDim,
