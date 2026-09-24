@@ -198,8 +198,8 @@ class TestMRv2Mtp310(TestBase):
         self.assertEqual(flag_states, [True])
         self.assertFalse(AscendRotaryEmbedding310._is_drafting_update_enabled)
 
-    def test_draft_config_disables_profiling_chunk(self):
-        """The 310P override must build on the shared CPP-disabled draft config."""
+    def test_draft_config_preserves_profiling_chunk(self):
+        """The 310P draft keeps the target CPP setting while using PP=1."""
 
         def fake_replace(config, **changes):
             values = vars(config).copy()
@@ -230,7 +230,7 @@ class TestMRv2Mtp310(TestBase):
         ):
             draft_config = speculator._create_draft_vllm_config()
 
-        self.assertFalse(draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"])
+        self.assertTrue(draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"])
         self.assertTrue(target_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"])
         self.assertEqual(draft_config.parallel_config.pipeline_parallel_size, 1)
 

@@ -15,16 +15,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from copy import deepcopy
 from typing import Any, cast
 
 import torch
-from vllm.config import (
-    VllmConfig,
-    get_layers_from_vllm_config,
-    replace,
-    set_current_vllm_config,
-)
+from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
@@ -52,52 +46,12 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
 
-    def _replace_draft_profiling_chunk_config(
-        self,
-        vllm_config: VllmConfig,
-    ) -> VllmConfig:
-        if vllm_config.parallel_config.pipeline_parallel_size <= 1:
-            return vllm_config
-
-        additional_config = vllm_config.additional_config
-        if not isinstance(additional_config, dict):
-            return vllm_config
-
-        scheduler_config = additional_config.get("scheduler_config")
-        if not isinstance(scheduler_config, dict):
-            return vllm_config
-
-        profiling_chunk_config = scheduler_config.get("profiling_chunk_config")
-        if not isinstance(profiling_chunk_config, dict):
-            return vllm_config
-
-        if profiling_chunk_config.get("enabled") is not True:
-            return vllm_config
-
-        draft_additional_config = deepcopy(additional_config)
-        draft_additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] = False
-
-        vllm_config = replace(
-            vllm_config,
-            additional_config=draft_additional_config,
-        )
-        return vllm_config
-
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        target_vllm_config = self.vllm_config
-        draft_loader_vllm_config = self._replace_draft_profiling_chunk_config(
-            target_vllm_config
-        )
-        self.vllm_config = draft_loader_vllm_config
-        try:
-            model = super().load_draft_model(target_model, target_attn_layer_names)
-        finally:
-            self.vllm_config = target_vllm_config
-
+        model = super().load_draft_model(target_model, target_attn_layer_names)
         if hasattr(model, "post_process"):
             with set_current_vllm_config(self.vllm_config):
                 model.post_process(self.vllm_config)

@@ -32,11 +32,8 @@ class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
         # EAGLE draft models are dense even when the target is an MoE model.
         # Reusing the target's EP/EPLB flags makes VllmConfig validate the
         # draft as an expert model and fail because the draft has no experts.
-        draft_vllm_config = self._replace_draft_profiling_chunk_config(
-            self.vllm_config
-        )
-        draft_vllm_config = replace(
-            draft_vllm_config,
+        return replace(
+            self.vllm_config,
             model_config=self.draft_model_config,
             parallel_config=replace(
                 self.vllm_config.parallel_config,
@@ -46,4 +43,3 @@ class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
                 enable_eplb=False,
             ),
         )
-        return draft_vllm_config

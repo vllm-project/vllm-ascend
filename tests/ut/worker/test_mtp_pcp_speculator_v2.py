@@ -169,9 +169,9 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     assert draft_config.parallel_config.cp_kv_cache_interleave_size == 128
     assert draft_config.parallel_config.pipeline_parallel_size == 1
     assert draft_config.parallel_config.decode_context_parallel_size == dcp_size
-    # PP>1 with CPP enabled: the draft config disables profiling chunk while
-    # the target config keeps it on.
-    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False
+    # The draft inherits CPP from the target. Its PP=1 topology is accepted by
+    # AscendConfig because it is identified as a separate draft model.
+    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
     assert target_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
 
 
@@ -181,57 +181,7 @@ def _fake_config_replace(config, **changes):
     return SimpleNamespace(**values)
 
 
-@pytest.mark.parametrize(
-    ("pipeline_parallel_size", "additional_config", "expect_rewrite"),
-    [
-        (
-            2,
-            {
-                "scheduler_config": {"profiling_chunk_config": {"enabled": True}, "max_num_batched_tokens": 8192},
-                "enable_cpu_binding": True,
-            },
-            True,
-        ),
-        (1, {"scheduler_config": {"profiling_chunk_config": {"enabled": True}}}, False),
-        (2, {"scheduler_config": {"profiling_chunk_config": {"enabled": False}}}, False),
-        (2, {"enable_cpu_binding": True}, False),
-    ],
-)
-def test_replace_draft_profiling_chunk_config(pipeline_parallel_size, additional_config, expect_rewrite) -> None:
-    speculator = object.__new__(speculator_module.AscendAutoRegressiveSpeculator)
-    target_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(pipeline_parallel_size=pipeline_parallel_size),
-        additional_config=additional_config,
-    )
-
-    with patch.object(
-        speculator_module,
-        "replace",
-        side_effect=_fake_config_replace,
-    ) as replace_mock:
-        draft_config = speculator._replace_draft_profiling_chunk_config(target_config)
-
-    if not expect_rewrite:
-        assert draft_config is target_config
-        replace_mock.assert_not_called()
-        return
-
-    assert draft_config is not target_config
-    draft_additional_config = draft_config.additional_config
-    draft_profiling_chunk = draft_additional_config["scheduler_config"]["profiling_chunk_config"]
-    target_profiling_chunk = additional_config["scheduler_config"]["profiling_chunk_config"]
-    assert draft_profiling_chunk["enabled"] is False
-    # The target config is left untouched and keeps CPP enabled.
-    assert target_profiling_chunk["enabled"] is True
-    # Unrelated fields survive the deepcopy, and the nested dicts are not shared.
-    assert draft_additional_config["scheduler_config"]["max_num_batched_tokens"] == 8192
-    assert draft_additional_config["enable_cpu_binding"] is True
-    assert draft_additional_config is not additional_config
-    assert draft_additional_config["scheduler_config"] is not additional_config["scheduler_config"]
-    assert draft_profiling_chunk is not target_profiling_chunk
-
-
-def test_eagle_draft_config_disables_profiling_chunk() -> None:
+def test_eagle_draft_config_preserves_profiling_chunk() -> None:
     target_config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=2,
@@ -251,8 +201,7 @@ def test_eagle_draft_config_disables_profiling_chunk() -> None:
     ):
         draft_config = speculator._create_draft_vllm_config()
 
-    # The override must build on the shared helper result.
-    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False
+    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
     assert target_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
     assert draft_config.model_config is speculator.draft_model_config
     assert draft_config.parallel_config.pipeline_parallel_size == 1

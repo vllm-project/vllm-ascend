@@ -57,6 +57,15 @@ def validate_additional_config_bool(value: Any, path: str) -> bool:
         raise ValueError(f"{path} must be a boolean, got {value!r}.") from exc
 
 
+def _is_separate_draft_model_config(vllm_config: VllmConfig) -> bool:
+    speculative_config = vllm_config.speculative_config
+    return (
+        speculative_config is not None
+        and vllm_config.model_config is speculative_config.draft_model_config
+        and vllm_config.model_config is not speculative_config.target_model_config
+    )
+
+
 @config(config=ConfigDict(frozen=True))
 class KVPPConfig:
     """Configuration for KV layer parallelism on Ascend."""
@@ -583,7 +592,11 @@ class AscendConfig:
                     max_batched,
                 )
                 self.scheduler_config.profiling_chunk_config.min_chunk = max_batched
-        if self.scheduler_config.profiling_chunk_config.enabled and vc.parallel_config.pipeline_parallel_size <= 1:
+        if (
+            not _is_separate_draft_model_config(vc)
+            and self.scheduler_config.profiling_chunk_config.enabled
+            and vc.parallel_config.pipeline_parallel_size <= 1
+        ):
             raise ValueError(
                 "profiling_chunk_config requires pipeline parallelism (pp > 1). "
                 "Please set --pipeline-parallel-size to a value greater than 1, "

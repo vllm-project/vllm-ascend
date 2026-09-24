@@ -42,15 +42,12 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         if draft_model_config.hf_overrides is None:
             draft_model_config.hf_overrides = {}
 
-        draft_vllm_config = self._replace_draft_profiling_chunk_config(
-            self.vllm_config
-        )
         parallel_config = replace(
             self.vllm_config.parallel_config,
             pipeline_parallel_size=1,
         )
         draft_vllm_config = replace(
-            draft_vllm_config,
+            self.vllm_config,
             model_config=draft_model_config,
             parallel_config=parallel_config,
         )

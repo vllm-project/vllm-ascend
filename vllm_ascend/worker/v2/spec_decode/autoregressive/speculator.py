@@ -18,7 +18,7 @@
 #
 import logging
 from contextlib import contextmanager
-from copy import copy, deepcopy
+from copy import copy
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -109,42 +109,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         self.input_batch: InputBatch | None = None
         self.pcp_manager: AscendPCPManager | None = None
 
-    def _replace_draft_profiling_chunk_config(
-        self,
-        vllm_config: VllmConfig,
-    ) -> VllmConfig:
-        if vllm_config.parallel_config.pipeline_parallel_size <= 1:
-            return vllm_config
-
-        additional_config = vllm_config.additional_config
-        if not isinstance(additional_config, dict):
-            return vllm_config
-
-        scheduler_config = additional_config.get("scheduler_config")
-        if not isinstance(scheduler_config, dict):
-            return vllm_config
-
-        profiling_chunk_config = scheduler_config.get("profiling_chunk_config")
-        if not isinstance(profiling_chunk_config, dict):
-            return vllm_config
-
-        if profiling_chunk_config.get("enabled") is not True:
-            return vllm_config
-
-        draft_additional_config = deepcopy(additional_config)
-        draft_additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] = False
-
-        vllm_config = replace(
-            vllm_config,
-            additional_config=draft_additional_config,
-        )
-        return vllm_config
-
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Build the runtime config used while executing the draft model."""
-        draft_config = self._replace_draft_profiling_chunk_config(
-            self.vllm_config
-        )
         source_parallel_config = self.vllm_config.parallel_config
         dcp_size = source_parallel_config.decode_context_parallel_size
         parallel_config = replace(
@@ -153,7 +119,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             decode_context_parallel_size=1 if self.replicated_pcp else dcp_size,
         )
         draft_config = replace(
-            draft_config,
+            self.vllm_config,
             model_config=self.draft_model_config,
             parallel_config=parallel_config,
             cache_config=replace(self.vllm_config.cache_config),
