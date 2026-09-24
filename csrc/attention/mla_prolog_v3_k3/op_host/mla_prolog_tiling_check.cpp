@@ -131,6 +131,18 @@ bool MlaPrologTilingCheck::CheckAttrsRange() const
                         OP_LOGE_FOR_INVALID_VALUE(context_.opName, "WeightQuantMode",
                                                   std::to_string(*context_.weightQuantMode), "{0, 1, 2}"),
                         return false);
+
+            std::unordered_set<uint32_t> supportedKvQuantMode{0U};
+            if (*context_.weightQuantMode == static_cast<int64_t>(WEIGHT_QUANT_MODE::PARTIAL_QUANT)) {
+                supportedKvQuantMode = {0U, 2U};
+            } else if (*context_.weightQuantMode == static_cast<int64_t>(WEIGHT_QUANT_MODE::FULL_QUANT)) {
+                supportedKvQuantMode = {0U, 1U};
+            }
+            OP_CHECK_IF(supportedKvQuantMode.find(*context_.kvQuantMode) == supportedKvQuantMode.end(),
+                        OP_LOGE_FOR_INVALID_VALUE(context_.opName, "KvQuantMode",
+                                                  std::to_string(*context_.kvQuantMode),
+                                                  ConvertContainerToStringV3(supportedKvQuantMode)),
+                        return false);
         }
 
         const std::unordered_set<uint32_t> supportedKvQuantMode{0U, 1U, 2U, 3U};
@@ -310,6 +322,19 @@ ge::graphStatus MlaPrologTilingCheck::CheckQuantMode() const
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                         context_.opName, "quantMode", std::to_string(static_cast<uint32_t>(scenarioInfo_.quantMode_)),
                         "On DAV3510, quantMode allows only " + ConvertContainerToStringV3(supportedQuantModes)),
+                    return ge::GRAPH_FAILED);
+    } else {
+        const std::set<uint32_t> supportedQuantModes{
+            static_cast<uint32_t>(QUANT_MODE::NO_QUANT),
+            static_cast<uint32_t>(QUANT_MODE::PARTIAL_QUANT_KV_NO_QUANT),
+            static_cast<uint32_t>(QUANT_MODE::PARTIAL_QUANT_KV_QUANT_PER_CHANNEL),
+            static_cast<uint32_t>(QUANT_MODE::FULL_QUANT_KV_NO_QUANT),
+            static_cast<uint32_t>(QUANT_MODE::FULL_QUANT_KV_QUANT_PER_TENSOR)};
+        OP_CHECK_IF(supportedQuantModes.find(static_cast<uint32_t>(scenarioInfo_.quantMode_)) ==
+                        supportedQuantModes.end(),
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                        context_.opName, "quantMode", std::to_string(static_cast<uint32_t>(scenarioInfo_.quantMode_)),
+                        "On arch22, quantMode allows only " + ConvertContainerToStringV3(supportedQuantModes)),
                     return ge::GRAPH_FAILED);
     }
     return ge::GRAPH_SUCCESS;

@@ -99,6 +99,8 @@ class HardwareCapability(Enum):
     INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN = auto()
     # Reserve host CPUs for interrupt handling when constructing worker CPU pools.
     IRQ_CPU_RESERVATION = auto()
+    # Run the isolated Kimi K3 MLA Prolog V3 implementation.
+    KIMI_K3_MLA_PROLOG_V3 = auto()
     # Create the local communication resource used by supported KV-transfer deployments.
     LOCAL_KV_COMM_RESOURCE = auto()
     # Use vLLM-Ascend's custom BGMV/SGMV LoRA kernels when rank constraints also pass.
@@ -249,6 +251,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.KIMI_K3_MLA_PROLOG_V3,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"

@@ -2903,7 +2903,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 #endif
 
-    // K3 MLA prolog uses a distinct ACLNN/operator name to keep CANN's MlaPrologV3 available.
+    // K3 MLA prolog uses a distinct A2/A3/A5 ACLNN/operator name to keep CANN's MlaPrologV3 available.
     ops.def(
         "npu_mla_prolog_v3_k3(Tensor token_x, Tensor weight_dq, Tensor weight_uq_qr, Tensor weight_uk,"
         "           Tensor weight_dkv_kr, Tensor rmsnorm_gamma_cq, Tensor rmsnorm_gamma_ckv,"
