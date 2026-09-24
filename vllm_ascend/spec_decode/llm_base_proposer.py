@@ -757,6 +757,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             return self.model.unwrap()
         return self.model
 
+    def _is_prefill_only_mtp(self) -> bool:
+        return self.method == "mtp" and self.num_speculative_tokens == 1 and self.runner._is_pd_prefill_worker() is True
+
     def shallow_copy_metadata(self, attn_metadata):
         # Currently, new objects will be assigned to the lists in attn_metadata
         # when update. So we can use the shallow copy.
@@ -1376,6 +1379,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         draft_model = getattr(self.model, "model", None)
         if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
             draft_model.set_skip_topk(True)
+
+        # A pure prefill worker needs the MTP forward to populate the draft
+        # layer KV cache, but it does not consume or transfer draft tokens.
+        # Avoid restoring the sequence-parallel hidden states solely for
+        # sampling an unused draft token.
+        if self._is_prefill_only_mtp():
+            return torch.empty((batch_size, 0), dtype=torch.int64, device=last_hidden_states.device)
 
         if self.method != "dflash":
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
