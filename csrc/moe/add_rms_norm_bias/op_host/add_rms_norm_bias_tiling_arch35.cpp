@@ -161,10 +161,10 @@ ge::graphStatus ValidateInputs(gert::TilingContext* context, uint64_t& numRow, u
 
 uint64_t ComputeSplitBufferBytes(ge::DataType dtype, uint64_t dtypeBytes, uint64_t length, bool hasBeta)
 {
-    // Keep the existing queues double buffered and account for a separate single beta tile.
+    // Keep the existing queues double buffered and account for two separate beta tiles.
     const uint64_t queueBytes = DOUBLE_BUFFER_NUM * length * dtypeBytes * SPLIT_QUEUE_NUM +
                                 FP32_VECTOR_ELEMENTS * DOUBLE_BUFFER_NUM * sizeof(float);
-    const uint64_t betaBytes = hasBeta ? length * dtypeBytes : 0;
+    const uint64_t betaBytes = hasBeta ? DOUBLE_BUFFER_NUM * length * dtypeBytes : 0;
     const uint64_t temporaryBytes = dtype == ge::DT_FLOAT ? 0 : length * sizeof(float) * 2;
     return queueBytes + betaBytes + temporaryBytes + RETAINED_SIZE;
 }

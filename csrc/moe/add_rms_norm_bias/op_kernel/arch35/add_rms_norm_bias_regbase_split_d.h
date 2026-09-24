@@ -59,7 +59,7 @@ public:
         gammaGm.SetGlobalBuffer((__gm__ T*)gamma, numCol);
         if (!nullptrBeta) {
             betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
-            pPipe->InitBuffer(inQueueBeta, BUFFER_NUM, colBufferLength * sizeof(T));
+            pPipe->InitBuffer(inQueueBeta, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         }
         yGm.SetGlobalBuffer((__gm__ T*)y + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
         rstdGm.SetGlobalBuffer((__gm__ float*)rstd + GetBlockIdx() * blockFactor, blockFactor);
