@@ -69,7 +69,7 @@ public:
         xOutGm.SetGlobalBuffer((__gm__ T*)x + blockOffset, blockLength);
         pPipe->InitBuffer(inQueueX1, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(inQueueX2, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
-        pPipe->InitBuffer(inQueueGamma, nullptrBeta ? DOUBLE_BUFFER_NUM : BUFFER_NUM, colBufferLength * sizeof(T));
+        pPipe->InitBuffer(inQueueGamma, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(outQueueY, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(outQueueX, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(outQueueRstd, DOUBLE_BUFFER_NUM, rowFactor * sizeof(float));

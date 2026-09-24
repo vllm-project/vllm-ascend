@@ -88,7 +88,7 @@ public:
         pPipe->InitBuffer(inQueueX2, DOUBLE_BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
         pPipe->InitBuffer(inQueueGamma, BUFFER_NUM, numColAlign * sizeof(T));
         pPipe->InitBuffer(outQueueY, DOUBLE_BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
-        pPipe->InitBuffer(outQueueX, nullptrBeta ? DOUBLE_BUFFER_NUM : BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
+        pPipe->InitBuffer(outQueueX, DOUBLE_BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
         pPipe->InitBuffer(outQueueRstd, DOUBLE_BUFFER_NUM, rstdUbSizeAlignSize);
         pPipe->InitBuffer(xReduceBuff, rstdUbSizeAlignSize);
         pPipe->InitBuffer(xFp32Buff, numColAlign * sizeof(float) * rowFactor);
