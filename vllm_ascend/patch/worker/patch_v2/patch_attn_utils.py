@@ -28,17 +28,4 @@ vllm.v1.worker.gpu.attn_utils.bind_kv_cache = bind_kv_cache
 # which Ascend overrides with direct raw-allocation binding.
 vllm.v1.worker.gpu.attn_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
 
-# vLLM main (#53781) also builds self.kv_caches by filtering
-# cache.device, assuming single-tensor allocations; Ascend allocates
-# per-layer (k, v) tuples. Expose the first tensor for that filter.
-# The binding inside init_kv_cache still uses the raw allocations.
-_orig_init_kv_cache = vllm.v1.worker.gpu.model_runner.init_kv_cache
-
-
-def _ascend_init_kv_cache(*args, **kwargs):
-    d = _orig_init_kv_cache(*args, **kwargs)
-    return {name: (v[0] if isinstance(v, (tuple, list)) and v else v) for name, v in d.items()}
-
-
-vllm.v1.worker.gpu.model_runner.init_kv_cache = _ascend_init_kv_cache
 vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec
