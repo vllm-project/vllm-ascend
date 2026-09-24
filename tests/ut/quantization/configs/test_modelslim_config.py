@@ -20,6 +20,8 @@ from vllm_ascend.quantization.configs.modelslim_config import (
     _make_modelslim_moe_weight_loader,
     get_quant_type_for_layer,
 )
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicLinearMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, get_rotation_path
 
 
@@ -192,6 +194,41 @@ class TestAscendModelSlimConfig(TestBase):
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
             self.assertIs(method, mock_ascend_linear.return_value)
             mock_ascend_linear.assert_called_once_with(mock_scheme)
+
+    def test_get_quant_method_for_w4a8_dynamic_linear(self):
+        prefix = "model.layers.0.mlp.shared_experts.gate_up_proj"
+        config = AscendModelSlimConfig(
+            {
+                "group_size": 0,
+                "version": "1.0.0",
+                "model.layers.0.mlp.shared_experts.gate_proj.weight": "W4A8_DYNAMIC",
+                "model.layers.0.mlp.shared_experts.up_proj.weight": "W4A8_DYNAMIC",
+            }
+        )
+        config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+        linear_layer = MagicMock(spec=LinearBase)
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.hf_config.model_type = None
+        mock_vllm_config.quant_config = config
+
+        with (
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+                return_value=mock_vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config",
+                return_value=mock_vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8.get_tensor_model_parallel_world_size",
+                return_value=1,
+            ),
+        ):
+            method = config.get_quant_method(linear_layer, prefix)
+
+        self.assertIsInstance(method, AscendLinearMethod)
+        self.assertIsInstance(method.quant_method, AscendW4A8DynamicLinearMethod)
 
     def test_get_quant_method_for_attention(self):
         attention_layer = MagicMock(spec=Attention)
