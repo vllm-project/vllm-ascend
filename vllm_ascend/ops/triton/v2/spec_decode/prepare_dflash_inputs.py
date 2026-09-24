@@ -19,6 +19,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
@@ -81,8 +82,11 @@ def _prepare_dflash_inputs_kernel(
     max_num_reqs,
     max_num_tokens,
     max_model_len,
+    cp_rank,
     SAMPLE_FROM_ANCHOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
+    CP_SIZE: tl.constexpr,
+    CP_INTERLEAVE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     QUERY_BLOCK_SIZE: tl.constexpr,
     SAMPLE_BLOCK_SIZE: tl.constexpr,
@@ -116,17 +120,14 @@ def _prepare_dflash_inputs_kernel(
 
     ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=ctx_valid_mask, other=0)
     # Text-only: scalar positions are linear KV indices; multimodal/M-RoPE is unsupported.
-    ctx_block_num = tl.minimum(ctx_pos // block_size, block_table_stride - 1)
+    ctx_block_num = tl.minimum(ctx_pos // (block_size * CP_SIZE), block_table_stride - 1)
     ctx_block_id = tl.load(
         block_table_ptr + req_idx * block_table_stride + ctx_block_num,
         mask=ctx_valid_mask,
         other=0,
     ).to(tl.int64)
-    ctx_slot = tl.where(
-        ctx_valid_mask & (ctx_block_id != 0),
-        ctx_block_id * block_size + ctx_pos % block_size,
-        PAD_SLOT_ID,
-    )
+    local_ctx_slot = cp_local_slot(ctx_pos, ctx_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID)
+    ctx_slot = tl.where(ctx_valid_mask & (ctx_block_id != 0), local_ctx_slot, PAD_SLOT_ID)
 
     tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos, mask=ctx_mask)
     tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot, mask=ctx_mask)
@@ -160,13 +161,14 @@ def _prepare_dflash_inputs_kernel(
 
     input_id = tl.where(query_off == 0, bonus_token, parallel_drafting_token_id)
 
-    q_block_num = tl.minimum(query_pos // block_size, block_table_stride - 1)
+    q_block_num = tl.minimum(query_pos // (block_size * CP_SIZE), block_table_stride - 1)
     q_block_id = tl.load(
         block_table_ptr + req_idx * block_table_stride + q_block_num,
         mask=query_mask,
         other=0,
     ).to(tl.int64)
-    q_slot = tl.where(q_block_id != 0, q_block_id * block_size + query_pos % block_size, PAD_SLOT_ID)
+    local_q_slot = cp_local_slot(query_pos, q_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID)
+    q_slot = tl.where(q_block_id != 0, local_q_slot, PAD_SLOT_ID)
 
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=query_mask)
     tl.store(out_query_positions_ptr + query_idx, tl.minimum(query_pos, max_model_len - 1), mask=query_mask)
@@ -266,6 +268,9 @@ def prepare_dflash_inputs_triton(
     input_seeds: torch.Tensor,
     block_table: torch.Tensor,
     block_size: int,
+    cp_rank: int,
+    cp_size: int,
+    cp_interleave: int,
     parallel_drafting_token_id: int,
     num_query_per_req: int,
     num_speculative_steps: int,
@@ -330,8 +335,11 @@ def prepare_dflash_inputs_triton(
         max_num_reqs,
         max_num_tokens,
         max_model_len,
+        cp_rank,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
         PAD_SLOT_ID=PAD_SLOT_ID,
+        CP_SIZE=cp_size,
+        CP_INTERLEAVE=cp_interleave,
         BLOCK_SIZE=block_size_kernel,
         QUERY_BLOCK_SIZE=_QUERY_BLOCK_SIZE,
         SAMPLE_BLOCK_SIZE=_SAMPLE_BLOCK_SIZE,

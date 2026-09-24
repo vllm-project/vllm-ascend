@@ -10,6 +10,7 @@ import torch
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs
 
 ACCURACY_CASES = [
     {
@@ -127,6 +128,71 @@ ACCURACY_CASES = [
         "parallel_drafting_token_id": 777,
     },
     {
+        "name": "dcp_rank0_interleave1_null_block",
+        "req_lens": [17, 9],
+        "position_starts": [6, 30],
+        "idx_mapping": [2, 0],
+        "null_blocks": [(0, 1)],
+        "max_num_reqs": 4,
+        "max_num_tokens": 48,
+        "max_model_len": 128,
+        "block_size": 8,
+        "cp_rank": 0,
+        "cp_size": 2,
+        "cp_interleave": 1,
+        "num_query_per_req": 5,
+        "num_speculative_steps": 4,
+        "parallel_drafting_token_id": 778,
+    },
+    {
+        "name": "dcp_rank1_interleave1",
+        "req_lens": [17, 9],
+        "position_starts": [6, 30],
+        "idx_mapping": [2, 0],
+        "max_num_reqs": 4,
+        "max_num_tokens": 48,
+        "max_model_len": 128,
+        "block_size": 8,
+        "cp_rank": 1,
+        "cp_size": 2,
+        "cp_interleave": 1,
+        "num_query_per_req": 5,
+        "num_speculative_steps": 4,
+        "parallel_drafting_token_id": 779,
+    },
+    {
+        "name": "dcp_rank1_interleave4",
+        "req_lens": [18],
+        "position_starts": [10],
+        "idx_mapping": [1],
+        "max_num_reqs": 4,
+        "max_num_tokens": 32,
+        "max_model_len": 128,
+        "block_size": 8,
+        "cp_rank": 1,
+        "cp_size": 2,
+        "cp_interleave": 4,
+        "num_query_per_req": 5,
+        "num_speculative_steps": 4,
+        "parallel_drafting_token_id": 780,
+    },
+    {
+        "name": "dcp_rank2_interleave2_cross_block",
+        "req_lens": [33],
+        "position_starts": [14],
+        "idx_mapping": [1],
+        "max_num_reqs": 4,
+        "max_num_tokens": 64,
+        "max_model_len": 128,
+        "block_size": 8,
+        "cp_rank": 2,
+        "cp_size": 4,
+        "cp_interleave": 2,
+        "num_query_per_req": 5,
+        "num_speculative_steps": 4,
+        "parallel_drafting_token_id": 781,
+    },
+    {
         # Crosses both QUERY_BLOCK_SIZE=16 and SAMPLE_BLOCK_SIZE=16.
         "name": "query_sample_tile_boundary",
         "req_lens": [2] * 32,
@@ -182,6 +248,18 @@ def _build_positions(req_lens, position_starts):
     for length, start in zip(req_lens, position_starts):
         values.extend(range(start, start + length))
     return values
+
+
+def _local_slot(position, physical_block, block_size, cp_rank, cp_size, cp_interleave):
+    if physical_block == 0:
+        return PAD_SLOT_ID
+    block_offset = position % (block_size * cp_size)
+    if cp_size == 1:
+        return physical_block * block_size + block_offset
+    if (block_offset // cp_interleave) % cp_size != cp_rank:
+        return PAD_SLOT_ID
+    local_offset = (block_offset // (cp_interleave * cp_size)) * cp_interleave + block_offset % cp_interleave
+    return physical_block * block_size + local_offset
 
 
 def _allocate_outputs(max_num_reqs, max_num_tokens, num_speculative_steps, device):
@@ -284,6 +362,9 @@ def _build_reference(data, case):
     num_query_per_req = case["num_query_per_req"]
     num_speculative_steps = case["num_speculative_steps"]
     block_size = case["block_size"]
+    cp_rank = case.get("cp_rank", 0)
+    cp_size = case.get("cp_size", 1)
+    cp_interleave = case.get("cp_interleave", 1)
     max_model_len = case["max_model_len"]
 
     positions = data.input_batch.positions.cpu().tolist()
@@ -329,11 +410,11 @@ def _build_reference(data, case):
                 ref.context_slot_mapping[ctx_idx] = PAD_SLOT_ID
                 continue
             ctx_pos = positions[ctx_idx]
-            logical_block = min(ctx_pos // block_size, len(block_table[req_idx]) - 1)
+            logical_block = min(ctx_pos // (block_size * cp_size), len(block_table[req_idx]) - 1)
             physical_block = block_table[req_idx][logical_block]
             ref.context_positions[ctx_idx] = ctx_pos
-            ref.context_slot_mapping[ctx_idx] = (
-                physical_block * block_size + ctx_pos % block_size if physical_block != 0 else PAD_SLOT_ID
+            ref.context_slot_mapping[ctx_idx] = _local_slot(
+                ctx_pos, physical_block, block_size, cp_rank, cp_size, cp_interleave
             )
 
         query_base = req_idx * num_query_per_req
@@ -347,10 +428,10 @@ def _build_reference(data, case):
             query_pos = last_valid_pos + 1 + query_off
             ref.input_ids[query_idx] = bonus_token if query_off == 0 else case["parallel_drafting_token_id"]
             ref.query_positions[query_idx] = min(query_pos, max_model_len - 1)
-            logical_block = min(query_pos // block_size, len(block_table[req_idx]) - 1)
+            logical_block = min(query_pos // (block_size * cp_size), len(block_table[req_idx]) - 1)
             physical_block = block_table[req_idx][logical_block]
-            ref.query_slot_mapping[query_idx] = (
-                physical_block * block_size + query_pos % block_size if physical_block != 0 else PAD_SLOT_ID
+            ref.query_slot_mapping[query_idx] = _local_slot(
+                query_pos, physical_block, block_size, cp_rank, cp_size, cp_interleave
             )
 
         for sample_local in range(num_speculative_steps):
@@ -432,6 +513,9 @@ def _impl_args(data, case):
         data.input_seeds,
         data.block_table,
         case["block_size"],
+        case.get("cp_rank", 0),
+        case.get("cp_size", 1),
+        case.get("cp_interleave", 1),
         case["parallel_drafting_token_id"],
         case["num_query_per_req"],
         case["num_speculative_steps"],
@@ -474,3 +558,11 @@ def test_prepare_dflash_inputs_partition_boundaries(num_reqs, context_len):
         "parallel_drafting_token_id": 151669,
     }
     _run_case(case)
+
+
+def test_prepare_dflash_inputs_wrapper_forwards_dcp():
+    case = next(case for case in ACCURACY_CASES if case["name"] == "dcp_rank1_interleave4")
+    data = _build_inputs(case, "npu")
+    prepare_dflash_inputs(*_impl_args(data, case))
+    _validate_outputs(data, case, _build_reference(data, case))
+    _cleanup()

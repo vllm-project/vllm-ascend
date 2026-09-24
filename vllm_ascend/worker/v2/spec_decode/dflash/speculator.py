@@ -186,8 +186,6 @@ def prepare_dflash_inputs(
     max_model_len: int,
     sample_from_anchor: bool = False,
 ) -> None:
-    # DFlash+DCP is not supported on Ascend yet. Accept the v0.29 ABI
-    # parameters while preserving the existing non-DCP slot mapping.
     prepare_dflash_inputs_triton(
         input_buffers,
         query_slot_mapping,
@@ -207,6 +205,9 @@ def prepare_dflash_inputs(
         input_seeds,
         block_table,
         block_size,
+        cp_rank,
+        cp_size,
+        cp_interleave,
         parallel_drafting_token_id,
         num_query_per_req,
         num_speculative_steps,

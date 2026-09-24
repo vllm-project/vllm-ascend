@@ -3,14 +3,13 @@
 ## Description
 
 - **Function**: Prepares the metadata and fixed-capacity buffers required by DFlash speculative decoding on Ascend NPU. For each request, the operator converts the current target-model token span into draft-model context KV positions/slots, constructs the next DFlash query tokens and query slots, builds sampling mappings, copies per-request sampling state, and pads graph-visible buffers.
-- **Supported vLLM ABI**: vLLM 0.29.0 `prepare_dflash_inputs`, including
-  `cp_rank`, `cp_size`, and `cp_interleave`. The current Ascend DFlash path
-  supports non-DCP slot mapping only; these DCP arguments are accepted but ignored.
+- **Supported vLLM ABI**: vLLM 0.30.0 `prepare_dflash_inputs`, including
+  `cp_rank`, `cp_size`, and `cp_interleave` for rank-local DCP KV slots.
 - **Implementation**:
     - `vllm_ascend/ops/triton/v2/spec_decode/prepare_dflash_inputs.py` contains
       the 2-D Triton kernel and launcher `prepare_dflash_inputs_triton`.
     - `vllm_ascend/worker/v2/spec_decode/dflash/speculator.py` provides the
-      vLLM 0.29.0 `prepare_dflash_inputs` wrapper.
+      vLLM 0.30.0 `prepare_dflash_inputs` wrapper.
 - **Formula**:
     - Request context range:
       `ctx_start = query_start_loc[req]`,
@@ -20,9 +19,11 @@
       after full rejection, `last_valid_pos = positions[ctx_start] - 1`
       so the next query starts at this request's first position.
     - Context/query KV slot:
-      `logical_block = min(position // block_size, block_table_stride - 1)`,
+      `logical_block = min(position // (block_size * cp_size), block_table_stride - 1)`,
       `physical_block = block_table[req, logical_block]`,
-      `slot = PAD_SLOT_ID` when `physical_block == 0`; otherwise `physical_block * block_size + position % block_size`.
+      `slot = PAD_SLOT_ID` when `physical_block == 0` or the DCP rank does not
+      own the position; otherwise the rank-local slot follows vLLM's
+      `cp_local_slot` interleave and local-offset rules.
     - Query construction:
       `query_pos = last_valid_pos + 1 + query_offset`;
       query offset `0` uses the request bonus token, and subsequent offsets use
@@ -53,9 +54,8 @@
 
 > [!NOTE]
 >
-> The worker wrapper follows the vLLM 0.29.0 ABI. `cp_rank`, `cp_size`, and
-> `cp_interleave` are accepted for ABI compatibility; DFlash+DCP slot remapping
-> is not supported by the optimized Ascend kernel.
+> The wrapper forwards `cp_rank`, `cp_size`, and `cp_interleave` to the optimized
+> kernel. The kernel uses the same `cp_local_slot` rule as main's scalar kernel.
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
@@ -77,9 +77,9 @@
 | `input_seeds` | Input | Source sampling seed per request-state slot | int64 | dense tensor |
 | `block_table` | Input | Request-to-physical-KV-block table, shape `[max_num_reqs, max_num_blocks]` | int32 | dense tensor |
 | `block_size` | Input/Attribute | Number of tokens in one KV block | int | scalar |
-| `cp_rank` | Input/Attribute | vLLM 0.29.0 wrapper compatibility parameter for DCP rank; ignored by the non-DCP Ascend implementation | int | scalar |
-| `cp_size` | Input/Attribute | vLLM 0.29.0 wrapper compatibility parameter for DCP size; ignored by the non-DCP Ascend implementation | int | scalar |
-| `cp_interleave` | Input/Attribute | vLLM 0.29.0 wrapper compatibility parameter for DCP interleave; ignored by the non-DCP Ascend implementation | int | scalar |
+| `cp_rank` | Input/Attribute | DCP rank that owns local KV slots | int | scalar |
+| `cp_size` | Input/Attribute | Number of DCP ranks used in block indexing and slot ownership | int | scalar |
+| `cp_interleave` | Input/Attribute | Number of adjacent positions assigned to one DCP rank per round | int | scalar |
 | `parallel_drafting_token_id` | Input/Attribute | Token ID written to non-anchor DFlash query positions | int | scalar |
 | `num_query_per_req` | Input/Attribute | Number of DFlash query rows produced per request | int | scalar |
 | `num_speculative_steps` | Input/Attribute | Number of speculative sample rows produced per request | int | scalar |
@@ -91,9 +91,8 @@
 ## Constraints
 
 - The operator is inference-only and requires Ascend NPU Triton execution.
-- The optimized kernel implements the vLLM 0.29.0 DFlash ABI with non-DCP
-  slot mapping. DFlash+DCP is not supported; the wrapper accepts the DCP
-  parameters but does not apply rank-local slot remapping.
+- The optimized kernel implements the vLLM 0.30.0 DFlash ABI and the same
+  rank-local DCP slot mapping as main's scalar implementation.
 - Multimodal inputs (including M-RoPE positions) are not supported by this optimized path. It derives KV slots from scalar token positions; multimodal inputs require the target slot mapping and linear token indices (see [#9340](https://github.com/vllm-project/vllm-ascend/pull/9340)).
 - `input_batch.num_reqs > 0` and `input_batch.num_reqs <= max_num_reqs`.
 - `input_batch.query_start_loc` contains at least `num_reqs + 1` int32 entries, is non-decreasing, and delimits the flattened `input_batch.positions` tensor.
@@ -113,9 +112,8 @@
 
 ## Upstream Compatibility
 
-The worker wrapper has one vLLM 0.29.0 signature and forwards non-DCP DFlash
-inputs to the optimized 2-D launcher. The DCP parameters are accepted for ABI
-compatibility but do not change slot mapping. Multimodal input positions are
+The worker wrapper has one vLLM 0.30.0 signature and forwards DFlash and DCP
+inputs to the optimized 2-D launcher. Multimodal input positions are
 unsupported because KV slots currently derive from scalar position IDs.
 
 ## Origin and Differences
@@ -126,8 +124,8 @@ unsupported because KV slots currently derive from scalar position IDs.
     - Context, Query, and Sample domains are independently partitioned with quotient/remainder balancing.
     - Graph-padding work is distributed across the complete launch grid instead of being serialized by a single request/program.
     - `workers_per_req` is derived from the detected VectorCore count and the Context/Query/Sample vector-width requirements rather than a hard-coded device core count.
-    - The worker wrapper supports both the vLLM 0.28.0 legacy signature and the current-main extended signature.
-    - The current-main DCP parameters are accepted only for ABI compatibility; DCP-specific slot mapping is not implemented by this optimized legacy kernel.
+    - The worker wrapper follows the current-main signature and forwards DCP parameters.
+    - CP-aware block indexing and `cp_local_slot` preserve main's rank ownership and local-offset semantics.
 
 ## Test Cases
 
@@ -144,6 +142,8 @@ The cases cover the captured DFlash inference shapes plus branch-specific cases:
 - Query/Sample sizes crossing the 16-element vector boundary;
 - query-position clamping at `max_model_len`;
 - full-capacity execution with minimal graph padding.
+- DCP ranks 0, 1, and 2; interleave sizes 1, 2, and 4; cross-block positions,
+  non-owned positions, and null physical blocks.
 
 The test compares Context mapping, Query construction, Sample mapping, per-request sampling state, and all graph-padding regions against an independent Python reference. Since this operator performs integer indexing and direct state copies, the unified precision requirement is bit-exact (`rtol=0, atol=0`).
 
@@ -153,7 +153,7 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_prepare_
 
 ## Example
 
-The optimized launcher is called by the version-adaptive worker wrapper:
+The optimized launcher is called by the DFlash worker wrapper:
 
 ```python
 prepare_dflash_inputs_triton(
@@ -175,6 +175,9 @@ prepare_dflash_inputs_triton(
     input_seeds,
     block_table,
     block_size=128,
+    cp_rank=0,
+    cp_size=1,
+    cp_interleave=1,
     parallel_drafting_token_id=151669,
     num_query_per_req=9,
     num_speculative_steps=8,
