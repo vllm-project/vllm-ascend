@@ -11,7 +11,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from heapq import heapify, heappop, heappush
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, cast
 
 import numpy as np
 import torch
@@ -137,7 +137,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         child_socket.close()
         self._planner_process = process
         self._planner_socket = parent_socket
-        self._planner_stream = parent_socket.makefile("rwb")
+        self._planner_stream = cast(BinaryIO, parent_socket.makefile("rwb"))
 
     def _stop_planner_process(self) -> None:
         stream = getattr(self, "_planner_stream", None)
@@ -1352,19 +1352,20 @@ class StairEplbPolicy(AbstractEplbPolicy):
         follow :meth:`plan_rebalance` and :class:`StairPlan`.
         """
         group_size = cpu_group.size()
-        local_error = None
-        local_plan_fields = None
-        current = None
+        local_error: Exception | None = None
+        local_plan_fields: tuple[torch.Tensor, ...] | None = None
+        current: np.ndarray | None = None
         try:
-            current = np.asarray(current_rank_expert_ids)
-            if current.ndim != 3:
+            current_array = np.asarray(current_rank_expert_ids)
+            if current_array.ndim != 3:
                 raise ValueError("current_rank_expert_ids must be a [layers, ranks, slots] array")
-            num_layers = current.shape[0]
+            current = current_array
+            num_layers = current_array.shape[0]
             owned_layer_ids = assigned_layer_ids(num_layers, cpu_group.rank(), group_size)
-            plan_local_layers = cls.plan_rebalance if planner is None else planner
+            plan_local_layers = cast(Callable[..., StairPlan], cls.plan_rebalance) if planner is None else planner
             local_plan = plan_local_layers(
                 logical_load_values,
-                current,
+                current_array,
                 last_committed_mean_ratios,
                 rank_node_ids,
                 config,

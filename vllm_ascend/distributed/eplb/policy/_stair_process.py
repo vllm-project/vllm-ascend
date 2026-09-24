@@ -9,7 +9,7 @@ import struct
 import sys
 import traceback
 from io import BytesIO
-from typing import BinaryIO
+from typing import BinaryIO, cast
 
 import numpy as np
 
@@ -127,7 +127,8 @@ def _send_planner_response(
 def _serve(socket_fd: int) -> None:
     from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 
-    with socket.socket(fileno=socket_fd) as planner_socket, planner_socket.makefile("rwb") as stream:
+    with socket.socket(fileno=socket_fd) as planner_socket, planner_socket.makefile("rwb") as raw_stream:
+        stream = cast(BinaryIO, raw_stream)
         while True:
             try:
                 request = _receive_planner_request(stream)
@@ -152,7 +153,7 @@ def _serve(socket_fd: int) -> None:
                     layer_ids=layer_ids,
                     sample_counts=sample_counts,
                 )
-                response = (
+                response: tuple[str | None, str | None, tuple | None] = (
                     None,
                     None,
                     (
