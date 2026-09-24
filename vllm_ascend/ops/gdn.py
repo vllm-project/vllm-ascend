@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+import functools
+
 import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
@@ -33,11 +35,25 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
-from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
+from vllm_ascend.ops.triton.fla.utils import clear_ssm_states, prepare_chunk_indices
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
+_FLA_CHUNK_SIZE = 128
 
-_FLA_CHUNK_SIZE = 64
+
+@functools.lru_cache(maxsize=32)
+def _fla_chunk_indices_host(cu_seqlens: tuple[int, ...]) -> tuple[int, ...]:
+    """Host (seq_idx, chunk_idx) pairs for the FLA fused op at ``_FLA_CHUNK_SIZE``.
+
+    The metadata builder precomputes chunk indices for its own 64-sized Triton
+    pipeline (``chunk_indices_chunk64_host``); the fused AscendC op must instead
+    receive indices consistent with ``chunk_size=_FLA_CHUNK_SIZE`` or its
+    workspace validation fails (aclnn error 161002) once a sequence spans more
+    than one chunk. Zero-length segments yield no chunks, matching the
+    compact-ranked semantics the kernels expect.
+    """
+    cu = torch.tensor(cu_seqlens, dtype=torch.int64)
+    return tuple(prepare_chunk_indices(cu, _FLA_CHUNK_SIZE).reshape(-1).tolist())
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -103,14 +119,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         beta: torch.Tensor,
         initial_state: torch.Tensor,
         cu_seqlens: tuple[int, ...],
-        chunk_indices: tuple[int, ...],
         scale: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Adapt packed vLLM inputs to FLA NPU, returning cache-layout states.
 
         q/k/v retain the leading batch dimension [1, T, H, D]. FLA uses
         [N, Hv, Dk, Dv] states instead of the cache's [N, Hv, Dv, Dk].
-        Host sequence/chunk metadata is reused from the existing builder.
+        Chunk indices are derived from the host sequence layout at
+        ``_FLA_CHUNK_SIZE`` (the builder's precomputed indices use the
+        Triton pipeline's 64-sized chunks and would mismatch).
         """
         from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd
 
@@ -122,7 +139,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             beta.to(v.dtype).contiguous(),
             initial_state=initial_state.transpose(-1, -2).to(torch.bfloat16).contiguous(),
             cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
+            chunk_indices=_fla_chunk_indices_host(cu_seqlens),
             scale=scale,
             chunk_size=_FLA_CHUNK_SIZE,
             output_final_state=True,
@@ -606,15 +623,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            use_fla = envs.VLLM_ASCEND_ENABLE_FLA_GDN
-            probe = (
-                AscendGatedDeltaNetAttention._probe_fused_chunk
-                if use_fla
-                else AscendGatedDeltaNetAttention._probe_torch_chunk
+            # Single-node prefill runs the fused FLA op, falling back to the
+            # torch_npu fused op; the legacy Triton pipeline is retired for
+            # this case. PCP keeps the Triton path because its cross-rank
+            # state exchange is not implemented in the fused wrappers.
+            pcp_size = get_pcp_group().world_size
+            use_fla = (
+                pcp_size == 1 and envs.VLLM_ASCEND_ENABLE_FLA_GDN and AscendGatedDeltaNetAttention._probe_fused_chunk()
             )
-            # Probe each backend separately; PCP keeps using the Triton path.
-            use_fused_chunk = get_pcp_group().world_size == 1 and probe()
-            if use_fused_chunk:
+            use_torch = pcp_size == 1 and not use_fla and AscendGatedDeltaNetAttention._probe_torch_chunk()
+            if use_fla or use_torch:
                 # The wrapper converts cache states to/from the FLA layout.
                 # Advanced indexing returns a copy, safe to clear in place.
                 initial_state = ssm_state[prefill_state_indices]
@@ -629,7 +647,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                             beta=beta_non_spec,
                             initial_state=initial_state,
                             cu_seqlens=attn_metadata.non_spec_prefill_metadata.chunk.cu_seqlens_host,
-                            chunk_indices=attn_metadata.non_spec_prefill_metadata.chunk.chunk_indices_chunk64_host,
                             scale=key_non_spec.shape[-1] ** -0.5,
                         )
                     )
@@ -647,6 +664,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         )
                     )
                 ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            elif pcp_size == 1:
+                raise RuntimeError(
+                    "No fused GDN prefill backend available: the FLA NPU op "
+                    "(fla_npu) and the torch_npu op npu_chunk_gated_delta_rule "
+                    "both failed their availability probes."
+                )
             else:
                 initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
                 clear_ssm_states(initial_state, prefill_has_initial_state)

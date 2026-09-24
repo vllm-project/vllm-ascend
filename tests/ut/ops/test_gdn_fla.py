@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.ops.gdn import _FLA_CHUNK_SIZE, AscendGatedDeltaNetAttention
 
 
 class TestFLAPrefill(unittest.TestCase):
@@ -29,7 +29,7 @@ class TestFLAPrefill(unittest.TestCase):
             patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: torch.nn.functional.normalize(x, dim=-1)),
         ):
             result, result_state = AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
-                q, q, v, g, beta, state, (0, 3, 7), (0, 0, 1, 0), 128**-0.5
+                q, q, v, g, beta, state, (0, 3, 7), 128**-0.5
             )
         args, kwargs = op.call_args
         torch.testing.assert_close(args[0], torch.nn.functional.normalize(q, dim=-1))
@@ -38,15 +38,41 @@ class TestFLAPrefill(unittest.TestCase):
         torch.testing.assert_close(kwargs["initial_state"], state.transpose(-1, -2).to(torch.bfloat16))
         self.assertTrue(kwargs["initial_state"].is_contiguous())
         self.assertEqual(kwargs["cu_seqlens"], (0, 3, 7))
+        # Sequences shorter than the chunk size yield one chunk each.
         self.assertEqual(kwargs["chunk_indices"], (0, 0, 1, 0))
         self.assertEqual(kwargs["layout"], "TND")
-        self.assertEqual(kwargs["chunk_size"], 64)
+        self.assertEqual(kwargs["chunk_size"], _FLA_CHUNK_SIZE)
         self.assertTrue(kwargs["output_final_state"])
         self.assertTrue(kwargs["disable_recompute"])
         self.assertFalse(kwargs["return_intermediate_states"])
         self.assertIs(result, output)
         torch.testing.assert_close(result_state, final.transpose(-1, -2))
         self.assertTrue(result_state.is_contiguous())
+
+    def test_chunk_indices_match_fla_chunk_size(self):
+        # The builder precomputes indices for its 64-sized Triton pipeline; the
+        # fused op must instead receive indices derived at _FLA_CHUNK_SIZE or
+        # its workspace validation rejects multi-chunk sequences (161002).
+        q = torch.randn(1, 300, 2, 128, dtype=torch.bfloat16)
+        v = torch.randn(1, 300, 4, 256, dtype=torch.bfloat16)
+        state = torch.randn(2, 4, 256, 128)
+        g = -torch.rand(1, 300, 4)
+        beta = torch.rand(1, 300, 4)
+        output = torch.randn_like(v)
+        final = torch.randn(2, 4, 128, 256, dtype=torch.bfloat16)
+        op = Mock(return_value=(output, final, None, None, None, None, None, None, None, None))
+        module = ModuleType("fla_npu.ops.ascendc")
+        module.chunk_gated_delta_rule_fwd = op
+        with (
+            patch.dict(sys.modules, {"fla_npu.ops.ascendc": module}),
+            patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: torch.nn.functional.normalize(x, dim=-1)),
+        ):
+            AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
+                q, q, v, g, beta, state, (0, 200, 300), 128**-0.5
+            )
+        _, kwargs = op.call_args
+        # 200 -> two chunks, 100 -> one chunk; zero-length segments yield none.
+        self.assertEqual(kwargs["chunk_indices"], (0, 0, 0, 1, 1, 0))
 
     def test_missing_fla_is_cached_as_unavailable(self):
         with (
