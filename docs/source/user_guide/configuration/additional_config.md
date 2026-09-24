@@ -24,6 +24,7 @@ Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064),
 | `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` | `enable_context_parallel` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_FUSED_MC2` | `enable_fused_mc2` | Integer (unchanged) |
 | `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` | `enable_transpose_kv_cache_by_block` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_BLOCK_TABLE_NO_COMMIT_OPTIMIZE` | `block_table_no_commit_optimize` | Environment variable not supported; use integer `0` or `1` in `--additional-config` |
 
 ### Example Migration
 
@@ -76,6 +77,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
 | `enable_sleep_mode_extra_cleanup`   | bool | `False` | Enables extra sleep-mode cleanup for RL workloads, including HCCL process-group release and ACL graph workspace cleanup. Disabled by default because wakeup may need to restore HCCL and recapture ACL graphs. |
+| `block_table_no_commit_optimize`    | int  | `0`     | MRv1 only. `0` commits only changed block-table ranges; `1` restores the full-copy path for rollback or comparison. The legacy `VLLM_ASCEND_BLOCK_TABLE_NO_COMMIT_OPTIMIZE` environment variable is not supported. MRv2 already provides staged incremental block-table updates and ignores this option. This temporary MRv1 compatibility option will be removed when MRv1 is retired. |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek).                                      |
 | `enable_sparse_sfa_c8`              | bool | `False` | Whether to enable the packed C8 KV cache for Sparse Flash Attention in DSA models (e.g., DeepSeek V3.2 and GLM5). This option is independent of `enable_sparse_li_c8`. SFA prefill context parallelism and Ascend 950 DCP are not supported. |

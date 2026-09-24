@@ -14,6 +14,7 @@
 #
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -75,6 +76,62 @@ class TestBlockTableComputeSlotMapping(TestBase):
             )
 
             return block_table
+
+    def create_optimized_block_table(self):
+        with patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_group:
+            mock_group.return_value = SimpleNamespace(world_size=1, rank_in_group=0)
+            from vllm_ascend.worker.block_table import OptimizedBlockTable
+
+            return OptimizedBlockTable(
+                block_size=4,
+                max_num_reqs=4,
+                max_num_blocks_per_req=8,
+                max_num_batched_tokens=16,
+                pin_memory=False,
+                device=torch.device("cpu"),
+                kernel_sizes=[4],
+            )
+
+    def test_optimized_block_table_tracks_appended_ranges(self):
+        table = self.create_optimized_block_table()
+        table.add_row([1, 2], 0)
+        table.commit_block_table(1)
+        table.append_row([3], 0)
+
+        self.assertEqual(table._dirty_begin[0], 2)
+        self.assertEqual(table._dirty_end[0], 3)
+        table.commit_block_table(1)
+        np.testing.assert_array_equal(table.block_table.gpu[0, :3], [1, 2, 3])
+        self.assertEqual(table._dirty_begin[0], np.iinfo(np.int32).max)
+
+    def test_optimized_block_table_move_and_swap_mark_new_prefixes(self):
+        table = self.create_optimized_block_table()
+        table.add_row([1, 2], 0)
+        table.add_row([3, 4, 5], 1)
+        table.commit_block_table(2)
+
+        table.move_row(0, 2)
+        table.swap_row(0, 1)
+
+        self.assertEqual((table._dirty_begin[2], table._dirty_end[2]), (0, 2))
+        self.assertEqual((table._dirty_begin[0], table._dirty_end[0]), (0, 3))
+        self.assertEqual((table._dirty_begin[1], table._dirty_end[1]), (0, 2))
+        np.testing.assert_array_equal(table.block_table.np[0, :3], [3, 4, 5])
+        np.testing.assert_array_equal(table.block_table.np[1, :2], [1, 2])
+
+    def test_additional_config_selects_mrv1_commit_path(self):
+        from vllm_ascend.worker.block_table import BlockTable, OptimizedBlockTable, _get_block_table_cls
+
+        with patch(
+            "vllm_ascend.worker.block_table.get_ascend_config",
+            return_value=SimpleNamespace(block_table_no_commit_optimize=0),
+        ):
+            self.assertIs(_get_block_table_cls(), OptimizedBlockTable)
+        with patch(
+            "vllm_ascend.worker.block_table.get_ascend_config",
+            return_value=SimpleNamespace(block_table_no_commit_optimize=1),
+        ):
+            self.assertIs(_get_block_table_cls(), BlockTable)
 
     def test_compute_slot_mapping_draft_reserves_mtp_slots(self):
         """MTP5 draft slots can exceed the scheduler token capacity."""
