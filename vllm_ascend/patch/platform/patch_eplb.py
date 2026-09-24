@@ -517,8 +517,7 @@ def _wrap_move_to_workspace(original_move):
                         else:
                             mean_before, p95_before, mean_after, p95_after = imbalance
                             logger.info(
-                                "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f "
-                                "changed_layers=%d rank_transfers=%d",
+                                "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d",
                                 ASYNC_EPLB_CYCLE_COMMITTED_LOG,
                                 model_state.model_name,
                                 mean_before,

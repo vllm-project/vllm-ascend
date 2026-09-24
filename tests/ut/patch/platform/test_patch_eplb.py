@@ -425,8 +425,7 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     assert model_state._last_committed_mean_ratios[layer_idx] == 1.2
     if is_last_layer:
         log_info.assert_called_once_with(
-            "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f "
-            "changed_layers=%d rank_transfers=%d",
+            "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d",
             patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
             "model",
             1.4,
