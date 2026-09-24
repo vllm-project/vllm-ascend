@@ -17,8 +17,8 @@ def stage_explicit_layer_transfer(
     new_layer_indices: torch.Tensor,
     source_rank_ids: np.ndarray,
     source_slot_ids: np.ndarray,
-    expert_weights: Sequence[torch.Tensor],
-    expert_weight_buffers: Sequence[torch.Tensor],
+    expert_weights: Sequence[torch.Tensor | Sequence[torch.Tensor]],
+    expert_weight_buffers: Sequence[torch.Tensor | Sequence[torch.Tensor]],
     ep_group: Any,
     communicator: Any,
     stream: torch.Stream | None = None,
@@ -29,12 +29,12 @@ def stage_explicit_layer_transfer(
     Old and new indices are flattened ``[ranks * slots]`` CPU tensors for a
     dense, equal-capacity placement with no rank-local duplicate experts. The
     source arrays index the old placement. Weight and buffer sequences are
-    non-empty and aligned; each pair has identical shape, dtype, and device,
-    with ``slots`` rows. Mappings, source coordinates, and buffer schemas are
-    validated before any copy or transfer is registered. Callers must validate
-    the policy's complete plan separately before this function stages data into
-    buffers and returns metadata for the current rank; live weights are not
-    committed here.
+    non-empty and aligned; each pair has ``slots`` expert tensors with matching
+    shape, dtype, and device at each slot. Mappings, source coordinates, and
+    buffer schemas are validated before any copy or transfer is registered.
+    Callers must validate the policy's complete plan separately. This function
+    stages data into buffers and returns metadata for the current rank; live
+    weights are not committed here.
     """
     if old_layer_indices.device.type != "cpu" or new_layer_indices.device.type != "cpu":
         raise ValueError("explicit EPLB layer mappings must be CPU tensors")
@@ -78,15 +78,23 @@ def stage_explicit_layer_transfer(
         raise ValueError("explicit EPLB source plan contains an out-of-range coordinate")
     if len(expert_weights) != len(expert_weight_buffers) or not expert_weights:
         raise ValueError("EPLB expert weights and buffers must be non-empty and aligned")
-    if any(
-        weight.ndim == 0
-        or weight.shape != buffer.shape
-        or weight.shape[0] != slots_per_rank
-        or weight.dtype != buffer.dtype
-        or weight.device != buffer.device
-        for weight, buffer in zip(expert_weights, expert_weight_buffers)
-    ):
-        raise ValueError("each EPLB expert weight and buffer pair must have the same slot-aligned schema")
+    for weight, buffer in zip(expert_weights, expert_weight_buffers):
+        if (
+            (isinstance(weight, torch.Tensor) and weight.ndim == 0)
+            or (isinstance(buffer, torch.Tensor) and buffer.ndim == 0)
+            or len(weight) != slots_per_rank
+            or len(buffer) != slots_per_rank
+        ):
+            raise ValueError("each EPLB expert weight and buffer pair must have the same slot-aligned schema")
+        for source_row, buffer_row in zip(weight, buffer):
+            if (
+                not isinstance(source_row, torch.Tensor)
+                or not isinstance(buffer_row, torch.Tensor)
+                or source_row.shape != buffer_row.shape
+                or source_row.dtype != buffer_row.dtype
+                or source_row.device != buffer_row.device
+            ):
+                raise ValueError("each EPLB expert weight and buffer pair must have the same slot-aligned schema")
 
     old_placement = old.reshape(expected_shape)
     new_placement = new.reshape(expected_shape)

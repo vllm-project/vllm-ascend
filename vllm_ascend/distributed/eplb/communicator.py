@@ -5,6 +5,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import P2POp, batch_isend_irecv
 from vllm.distributed.eplb.eplb_communicator import TorchDistGlooStagedEplbCommunicator
+from vllm.distributed.eplb.eplb_utils import device_stream
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 
@@ -78,7 +79,7 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
         recv_staging: list[tuple[torch.Tensor, torch.Tensor]] = []
         buffer_indices: dict[tuple[torch.dtype, tuple[int, ...]], int] = {}
         try:
-            with torch.cuda.stream(self._cuda_stream):
+            with device_stream(self._stream):
                 for operation, tensor, peer_rank in self._ops:
                     cpu_tensor = self._acquire_staging_buffer(tensor, buffer_indices)
                     if operation == "send":
@@ -91,13 +92,15 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
             self._ops.clear()
 
         with gpu_sync_allowed():
-            stream = self._cuda_stream or torch.cuda.current_stream()
-            stream.synchronize()
+            if self._stream is not None:
+                self._stream.synchronize()
+            else:
+                torch.accelerator.current_stream().synchronize()
 
         for request in batch_isend_irecv(p2p_ops):
             request.wait()
 
-        with torch.cuda.stream(self._cuda_stream):
+        with device_stream(self._stream):
             for dst_tensor, cpu_tensor in recv_staging:
                 dst_tensor.copy_(cpu_tensor, non_blocking=True)
 

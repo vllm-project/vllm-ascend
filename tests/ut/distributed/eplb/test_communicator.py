@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+from contextlib import nullcontext
 from unittest.mock import MagicMock, call
 
 import pytest
@@ -68,3 +69,27 @@ def test_pinned_staging_buffers_are_reused_between_transfers(communicator, monke
     assert communicator._acquire_staging_buffer(tensor, second_transfer) is allocated[0]
     assert empty_like.call_count == 2
     empty_like.assert_called_with(tensor, device="cpu", pin_memory=True)
+
+
+def test_execute_uses_current_device_stream_when_stream_is_unset(communicator, monkeypatch):
+    tensor = torch.zeros(1)
+    communicator._ops.append(("send", tensor, 0))
+    monkeypatch.setattr(communicator, "_acquire_staging_buffer", lambda *_args: tensor)
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.eplb.communicator.device_stream",
+        lambda _stream: nullcontext(),
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.eplb.communicator.P2POp",
+        lambda *_args: object(),
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.eplb.communicator.batch_isend_irecv",
+        lambda _ops: [],
+    )
+    current_stream = MagicMock()
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: current_stream)
+
+    communicator.execute()
+
+    current_stream.synchronize.assert_called_once_with()

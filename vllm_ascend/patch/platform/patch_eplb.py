@@ -270,18 +270,18 @@ def _patch_explicit_transfer_execution() -> None:
 
 def _wrap_async_worker(original_worker):
     @wraps(original_worker)
-    def _transfer_run_periodically(state, cuda_stream, is_profile=False):
+    def _transfer_run_periodically(state, stream, is_profile=False):
         if not isinstance(state, AscendEplbState) or is_profile:
-            return original_worker(state, cuda_stream, is_profile)
+            return original_worker(state, stream, is_profile)
         while True:
-            state.rearrange_event.wait(stream=cuda_stream)
+            state.rearrange_event.wait(stream=stream)
             eplb_group = _async_worker.get_eplb_group().device_group
             eplb_cpu_group = _async_worker.get_eplb_group().cpu_group
             for model_state in state.model_states.values():
-                model_state.communicator.set_stream(cuda_stream)
-                with torch.cuda.stream(cuda_stream):
+                model_state.communicator.set_stream(stream)
+                with _async_worker.device_stream(stream):
                     old_mapping = model_state.physical_to_logical_map.cpu()
-                new_mapping = _async_worker.run_rebalance_experts(model_state, state, old_mapping, cuda_stream)
+                new_mapping = _async_worker.run_rebalance_experts(model_state, state, old_mapping, stream)
                 if old_mapping.shape != new_mapping.shape:
                     raise ValueError("EPLB planner changed the mapping shape")
                 changed_layers = torch.nonzero((old_mapping != new_mapping).any(dim=1)).flatten().tolist()
@@ -293,7 +293,7 @@ def _wrap_async_worker(original_worker):
                         continue
                     consumed_event = _async_worker.CpuGpuEvent()
                     model_state.pending_result = _AscendAsyncLayerResult(None, None, None, consumed_event, True)
-                    consumed_event.wait(stream=cuda_stream)
+                    consumed_event.wait(stream=stream)
                     assert model_state.pending_result is None
                     continue
 
@@ -311,10 +311,10 @@ def _wrap_async_worker(original_worker):
                         communicator=model_state.communicator,
                         ep_group=eplb_group,
                         is_profile=is_profile,
-                        cuda_stream=cuda_stream,
+                        stream=stream,
                         layer_idx=layer_idx,
                     )
-                    cuda_stream.synchronize()
+                    stream.synchronize()
                     consumed_event = _async_worker.CpuGpuEvent()
                     model_state.pending_result = _AscendAsyncLayerResult(
                         layer_idx,
@@ -323,7 +323,7 @@ def _wrap_async_worker(original_worker):
                         consumed_event,
                         index == len(changed_layers) - 1,
                     )
-                    consumed_event.wait(stream=cuda_stream)
+                    consumed_event.wait(stream=stream)
                     assert model_state.pending_result is None
 
     setattr(_transfer_run_periodically, _PATCH_MARKER, True)
