@@ -55,6 +55,7 @@ class TestAscendEPLBController(unittest.TestCase):
         ascend_state.assert_called_once_with(
             controller.parallel_config,
             controller.device,
+            controller.eplb_policy,
         )
 
     def test_set_batch_phase_updates_match(self):
@@ -200,6 +201,7 @@ class TestAscendEPLBController(unittest.TestCase):
             parallel_config=controller.parallel_config,
             expanded_physical_to_logical=mapping,
             num_valid_physical_experts=2,
+            policy=controller.eplb_policy,
         )
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
