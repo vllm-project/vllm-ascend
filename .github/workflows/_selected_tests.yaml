@@ -95,6 +95,9 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
+        # Provisioned read-only in the A3 runner's existing model-cache mount.
+        # Set the repository variable to its in-container checkpoint path.
+        GLM53_FLASH_SOURCE_DIR: ${{ vars.GLM53_FLASH_SOURCE_DIR }}
         MAX_JOBS: 4
         UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
         UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
@@ -341,7 +344,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: selected-test-logs-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ matrix.group.partition }}
-          path: ${{ runner.temp }}/selected-tests-*
+          path: |
+            ${{ runner.temp }}/selected-tests-*
+            tests/outputs/glm53_flash/**
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0

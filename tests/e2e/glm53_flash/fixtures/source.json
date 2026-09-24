@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "model": "GLM-5.3-Flash-W8A8-0916",
+  "recipe_version": 1,
+  "retained_layers": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "files": {
+    "chat_template.jinja": {
+      "size": 10644,
+      "sha256": "34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891"
+    },
+    "config.json": {
+      "size": 5938,
+      "sha256": "1131b99ef7cd672666b56992b9921d709d4f3f6f9b777cefb7444499f17db37a"
+    },
+    "generation_config.json": {
+      "size": 194,
+      "sha256": "230c30609ecbbb9e6583bedde8e7bdda0c6eb8fe5fad0eaeb3d1b293d751cb4f"
+    },
+    "image_processing_glm5_next.py": {
+      "size": 13385,
+      "sha256": "e01be8ed9bdf67f213bd57e0fef99c82a9100a3223b42c5ba8f49bd21a33e98b"
+    },
+    "processor_config.json": {
+      "size": 1013,
+      "sha256": "dcc3bc26de6196182bd69a7ee6eaf5f466ad13dd4d394534e905fb6914dba799"
+    },
+    "quant_model_description.json": {
+      "size": 9956179,
+      "sha256": "9aae1f3c7657115b7e24294bf6d668f6ea062e2c8fe9eccad4a3862284fe665f"
+    },
+    "quant_model_weights-00001-of-00082.safetensors": {
+      "size": 4288320126,
+      "sha256": "f0daf35c99651168b32f61364eb7b3f9b5b83a8fba7bfe1dfadb7e2896f95f02"
+    },
+    "quant_model_weights-00009-of-00082.safetensors": {
+      "size": 3892804196,
+      "sha256": "282d5439d485aa0a36aadbbef648625e8f40ae8c298c7845f0d531b1c8fbc950"
+    },
+    "quant_model_weights-00010-of-00082.safetensors": {
+      "size": 4294127582,
+      "sha256": "dd7cbb6f043acbc26fb88777996946fb40da3aadac7e69a270604811b3c55f20"
+    },
+    "quant_model_weights-00019-of-00082.safetensors": {
+      "size": 1392608888,
+      "sha256": "ee39271cb18b60f2b49e548056bb613edcbcb3b018a8f8164ed5e34a16938eaf"
+    },
+    "quant_model_weights-00020-of-00082.safetensors": {
+      "size": 4292349748,
+      "sha256": "27b2e3f1387bdb1581fa18c9e603f68b74f2dc4d8ea3e467079916e4bfc47b93"
+    },
+    "quant_model_weights-00029-of-00082.safetensors": {
+      "size": 3648157128,
+      "sha256": "bb888d0c0c1ff8a23fc7cd5b0bc18dd63c04c04446e31e8895424d3c47102531"
+    },
+    "quant_model_weights-00030-of-00082.safetensors": {
+      "size": 4288100732,
+      "sha256": "65483ddfa1903f1c372a5754795154da09618dd052c71655eb0633a5b7907b6a"
+    },
+    "quant_model_weights-00041-of-00082.safetensors": {
+      "size": 1268777088,
+      "sha256": "5ce6ce355c1a255e893ac237a0a3beb43d0d8c3c26fa8ed959cd2c5324d7cb77"
+    },
+    "quant_model_weights-00042-of-00082.safetensors": {
+      "size": 4291139860,
+      "sha256": "893a99db088990ebc3fb5cc15d9e31c128fad4a5266e13e319b060af206e2260"
+    },
+    "quant_model_weights-00050-of-00082.safetensors": {
+      "size": 3626380576,
+      "sha256": "cfef7fa5f9b17bc57bda1cc08d970da5b21184df31a7f348baf9c05c69c1c45b"
+    },
+    "quant_model_weights-00051-of-00082.safetensors": {
+      "size": 4293898378,
+      "sha256": "4624f32f172890a9074d1c05bfb53ba6299215fee6494fb000e8dde2aed8d21e"
+    },
+    "quant_model_weights-00059-of-00082.safetensors": {
+      "size": 4226691780,
+      "sha256": "a9f0ec98f7723b9d533965cfdb4baaa62f89c9edadca00cb38abb8100c21c426"
+    },
+    "quant_model_weights-00060-of-00082.safetensors": {
+      "size": 1268777056,
+      "sha256": "85bb417d2c72f9208c22cf9f2c50ae35f0ea3b8a6d4139d9a9bc9e83bd180d2b"
+    },
+    "quant_model_weights-00061-of-00082.safetensors": {
+      "size": 4289372666,
+      "sha256": "dd23ef64b44efcbfe2d182af80baf8bd24541211ed5b223c0e74d27a920092f8"
+    },
+    "quant_model_weights-00070-of-00082.safetensors": {
+      "size": 1377958000,
+      "sha256": "7ca8b99074197b38229246fc90f1f11b5c86de5a662d1010beb5db2a280cea37"
+    },
+    "quant_model_weights-00071-of-00082.safetensors": {
+      "size": 4292686992,
+      "sha256": "4f1726d77f2be9d57a07f2135df525a4044ce9d1399ecd36333a903d525fd394"
+    },
+    "quant_model_weights-00082-of-00082.safetensors": {
+      "size": 188850632,
+      "sha256": "2bf88d4878557612f8fc982c2aafccb8d5288d937fb68d4345ee4a2f06d714d6"
+    },
+    "quant_model_weights.safetensors.index.json": {
+      "size": 14047084,
+      "sha256": "4f0c027c326ce3f1c72673007869f297a569854b020386edb91134ea3d31ccb2"
+    },
+    "rot.safetensors": {
+      "size": 33554520,
+      "sha256": "d49a897c8c9a899b57890e3943f520dcb58f71490386c2895980634d31afc053"
+    },
+    "tokenizer.json": {
+      "size": 20217442,
+      "sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d"
+    },
+    "tokenizer_config.json": {
+      "size": 761,
+      "sha256": "98b1271574f41abf89427ae2dda030d94dc9478f0edc5a8bd240db213c6fd5fc"
+    }
+  },
+  "source_id": "affc28717a0601665403c40e625940c258ccce4be578b7dfa743beb9d0e19957"
+}
