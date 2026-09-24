@@ -967,10 +967,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
 
         self.hc_mult = config.hc_mult
-        # Pre-hc_collapse residual stream buffer for the speculative draft
-        # (MTP / DSpark / DFlash). Only needed when the decoder consumes
-        # target-model hidden states; allocating it unconditionally would
-        # permanently cost max_num_batched_tokens * hc_dim per rank.
         spec_config = vllm_config.speculative_config
         needs_mtp_hidden_states = spec_config is not None and (
             spec_config.use_eagle() or spec_config.uses_draft_model()
@@ -1268,8 +1264,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 )
             hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=moe_input_ids)
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
-        # MTP needs full HC states; otherwise collapse and normalize locally
-        # before gathering to reduce communication.
+        # MTP needs full HC states
         if self._mtp_hidden_buffer is not None:
             if use_sequence_parallel:
                 hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
@@ -1277,8 +1272,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
-        # hc_collapse is per-token, so collapsing gathered states is
-        # equivalent to gathering collapsed states.
         hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
         if use_sequence_parallel and self._mtp_hidden_buffer is None:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]

@@ -43,19 +43,7 @@ class AscendModelState(DefaultModelState):
     kvpp_is_dummy_run: bool = False
 
     def _get_engram_device_inputs(self, input_batch: AscendInputBatch) -> dict[str, torch.Tensor]:
-        """Device request coordinates for upstream NgramHashState.
-
-        MRV2 counterpart of model_runner_v1._get_engram_device_inputs. The
-        engram hook runs before set_forward_context(), so the runner-side
-        helper is unavailable; mirror it from the per-step views cached by
-        prepare_attn. Coordinates are full-request (pre-PCP-partition): the
-        hash searches each request's chunk-start history, which a rank-local
-        boundary view cannot express. Returns an empty dict for dummy/profile
-        scopes: those batches must still join the engram routing collective,
-        but with empty hashes so the request-indexed n-gram store is never
-        polluted (the ring-state ContextVar covers execute_dummy_batch on top
-        of kvpp_is_dummy_run).
-        """
+        """Device request coordinates for upstream NgramHashState."""
         layer_name = getattr(self.model, "engram_cache_layer_name", None)
         kv_cache_config = getattr(self, "kv_cache_config", None)
         if layer_name is None or kv_cache_config is None:
@@ -94,14 +82,6 @@ class AscendModelState(DefaultModelState):
         if prepare_engram_inputs is None:
             return model_inputs
         num_tokens = input_batch.num_tokens_after_padding
-        # This hook runs before set_forward_context(), so hand the current
-        # step's device request coordinates to the eager engram routing
-        # explicitly. Dummy batches (DP-peer, profile) route too: engram
-        # routing joins a node-local collective spanning every DP group, so
-        # skipping it on idle ranks leaves the busy ranks spinning inside
-        # route_many's all_gather. Their coordinates resolve to an empty dict
-        # (kvpp dummy scope / ring-state ContextVar), which prepare_engram
-        # honors before touching the n-gram store.
         model_inputs.update(
             prepare_engram_inputs(
                 input_batch.input_ids[:num_tokens],
@@ -116,9 +96,6 @@ class AscendModelState(DefaultModelState):
         model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
         prepare_engram_graph_inputs = getattr(self.model, "prepare_engram_graph_inputs", None)
         if prepare_engram_graph_inputs is not None:
-            # Capture binds the fixed-address engram buffers so replay never
-            # traces the eager prepare_engram path (ContextVar.get() inside
-            # is not dynamo-safe).
             model_inputs.update(prepare_engram_graph_inputs(num_tokens))
         return model_inputs
 
@@ -175,8 +152,6 @@ class AscendModelState(DefaultModelState):
         )
         # attn_metadata is needed when update_full_graph_params, but no way can get it now.
         # Temporarily store it in model_state.
-        # The per-step views also feed the engram history hook (it runs before
-        # the forward context exists, so it cannot query the runner).
         self.block_tables = block_tables
         self.slot_mappings = slot_mappings
         self.kv_cache_config = kv_cache_config
@@ -205,9 +180,7 @@ class AscendModelState(DefaultModelState):
             attn_state=input_batch.attn_state,
             pcp_context=pcp_context,
             for_cudagraph_capture=for_capture,
-            # Same wiring as model_runner_v1: V4.1 builders branch on this
-            # (RoPE table caching). FULL runtime only ever sees decode-only
-            # batches on MRV2, so this is behaviorally a no-op today.
+            # Same wiring as model_runner_v1
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
         )
         return self.attn_metadata

@@ -79,9 +79,7 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
-# MRV2's upstream _dummy_run drops runner-specific kwargs such as
-# ``skip_gdn_state_update``, so the flag travels through this ContextVar
-# (mirroring ``override_mrv2_in_profile_run``) instead of the call chain.
+# MRV2's upstream _dummy_run drops runner-specific kwargs such as``skip_gdn_state_update``
 _SKIP_RING_STATE_UPDATE: ContextVar[bool] = ContextVar("_SKIP_RING_STATE_UPDATE", default=False)
 
 
@@ -270,10 +268,6 @@ def build_attn_metadata(
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
-    # V4.1 builders need the runtime graph mode to decide between
-    # graph-friendly and eager metadata paths, and a flag to skip ring-state
-    # writes during dummy runs that must not touch the compressor state.
-    # ``None`` resolves from the dummy-run scope ContextVar.
     full_graph_mode: bool = False,
     skip_ring_state_update: bool | None = None,
 ) -> dict[str, Any]:
@@ -321,8 +315,6 @@ def build_attn_metadata(
     attn_metadata: dict[str, Any] = {}
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
-    # Share request-count-independent V4.1 batch metadata across cache groups
-    # in one execution (query_start_loc/seq_lens/positions-derived entries).
     common_v41_batch_metadata: dict[str, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
     for i, kv_cache_spec in enumerate(kv_cache_groups):
@@ -330,9 +322,6 @@ def build_attn_metadata(
         slot_mapping = slot_mappings[i]
         # Hybrid drafters can configure causality per KV cache group.
         group_causal = causal if isinstance(causal, bool) else causal.get(i, True)
-        # V4.1 slot coordinates stay group-local: each KV cache group owns a
-        # fresh sharing dict so LongKV/Indexer mappings never alias another
-        # SWA group's mapping (aligned with model_runner_v1 semantics).
         common_v41_metadata: dict[str, Any] = {}
 
         common_attn_metadata_extra_kwargs = (
@@ -388,12 +377,6 @@ def build_attn_metadata(
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                 )
             elif is_v41_builder:
-                # V4.1 cache coordinates are shared only inside one framework
-                # KV cache group: a source's LongKV and Indexer builders reuse
-                # the same [T, 2] mapping without aliasing any SWA group's
-                # mapping. Batch-level values are shared across all groups.
-                # The kwargs also flow into build_for_cudagraph_capture (it
-                # forwards them to build), so FULL-graph capture sees them.
                 attn_metadata_extra_kwargs.update(
                     num_actual_reqs=num_actual_reqs,
                     skip_ring_state_update=skip_ring_state_update,
@@ -716,10 +699,6 @@ def _allocate_kv_cache(
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     if is_deepseek_v41_cache(layer_kv_cache_spec):
-        # V4.1 uses layer-outermost hybrid allocation: one int8 backing tensor
-        # per KVCacheTensor (layer slot), shared by every layer mapped onto
-        # that slot at distinct live block IDs (sources, SWA aliases, state,
-        # draft). Mirrors model_runner_v1's allocation contract.
         for allocation in kv_cache_config.kv_cache_tensors:
             backing = _allocate_int8_cache_tensor(allocation.size, alignment, device)
             for name in get_kv_cache_tensor_layers(allocation):
@@ -1068,8 +1047,6 @@ def _reshape_kv_cache_v2(
     is_dsv4_model = _is_dsv4_model(vllm_config)
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
-    # V4.1 slots are reshaped with their own page-strided as_strided views,
-    # keyed by the shared slot's block_stride (one KVCacheTensor per slot).
     layer_tuple_strides: dict[str, int] = {}
     if is_deepseek_v41_cache(layer_kv_cache_spec):
         layer_tuple_strides = {
@@ -1102,9 +1079,7 @@ def _reshape_kv_cache_v2(
             kv_cache_spec = layer_kv_cache_spec[layer_name]
 
             if layer_name in layer_tuple_strides:
-                # Same view construction as model_runner_v1: every slot layer
-                # is addressed with the slot's block_stride; an indexer adds
-                # its scale plane after the KV plane of the same page.
+                # Same view construction as model_runner_v1
                 block_stride = layer_tuple_strides[layer_name]
                 initial_offset = 0
                 kv_cache_shape = group.backend.get_kv_cache_shape(

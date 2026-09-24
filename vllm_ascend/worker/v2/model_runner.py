@@ -298,9 +298,6 @@ class NPUModelRunner(GPUModelRunner):
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
         if any(is_circular_kv_cache_spec(group.kv_cache_spec) for group in self.kv_cache_config.kv_cache_groups):
-            # V4.1 ratio-2 ring compressors must be prepared (persistent
-            # buffer validation + Triton core resolution) before any graph
-            # capture. Lazy import avoids the model/cache registration cycle.
             from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 
             for module in self.model.modules():
