@@ -54,19 +54,16 @@ public:
         avgFactor = tiling->avgFactor;
         nullptrBeta = tiling->nullptr_beta;
         rowWork = (GetBlockIdx() < GetBlockNum() - 1) ? blockFactor : numRow - (GetBlockNum() - 1) * blockFactor;
-        const uint64_t blockRowOffset = static_cast<uint64_t>(GetBlockIdx()) * blockFactor;
-        const uint64_t blockOffset = blockRowOffset * numCol;
-        const uint64_t blockLength = static_cast<uint64_t>(rowWork) * numCol;
-        xGm1.SetGlobalBuffer((__gm__ T*)x1 + blockOffset, blockLength);
-        xGm2.SetGlobalBuffer((__gm__ T*)x2 + blockOffset, blockLength);
+        xGm1.SetGlobalBuffer((__gm__ T*)x1 + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
+        xGm2.SetGlobalBuffer((__gm__ T*)x2 + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
         gammaGm.SetGlobalBuffer((__gm__ T*)gamma, numCol);
         if (!nullptrBeta) {
             betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
             pPipe->InitBuffer(inQueueBeta, BUFFER_NUM, colBufferLength * sizeof(T));
         }
-        yGm.SetGlobalBuffer((__gm__ T*)y + blockOffset, blockLength);
-        rstdGm.SetGlobalBuffer((__gm__ float*)rstd + blockRowOffset, rowWork);
-        xOutGm.SetGlobalBuffer((__gm__ T*)x + blockOffset, blockLength);
+        yGm.SetGlobalBuffer((__gm__ T*)y + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
+        rstdGm.SetGlobalBuffer((__gm__ float*)rstd + GetBlockIdx() * blockFactor, blockFactor);
+        xOutGm.SetGlobalBuffer((__gm__ T*)x + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
         pPipe->InitBuffer(inQueueX1, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(inQueueX2, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(inQueueGamma, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
@@ -103,7 +100,7 @@ public:
         for (uint32_t row = 0; row < calRowNum; row++) {
             uint32_t split = ubLoop * ubFactor;
             uint32_t colTail = numCol - split;
-            uint64_t offsets = (static_cast<uint64_t>(rowRepeat) * rowFactor + row) * numCol;
+            uint64_t offsets = (rowRepeat * rowFactor + row) * numCol;
             uint32_t tail = colTail % ubFactor;
             uint32_t tailLoop = colTail / ubFactor;
             uint32_t masterLoop = tail != 0 ? 1 : 0;
@@ -144,7 +141,7 @@ private:
     __aicore__ inline void CopyInGamma(uint32_t colRepeat, uint32_t calColNum)
     {
         LocalTensor<T> gammaLocal = inQueueGamma.AllocTensor<T>();
-        DataCopyImpl<T>(gammaLocal, gammaGm[static_cast<uint64_t>(colRepeat) * ubFactor], 1, calColNum, 0, 0);
+        DataCopyImpl<T>(gammaLocal, gammaGm[colRepeat * ubFactor], 1, calColNum, 0, 0);
         inQueueGamma.EnQue(gammaLocal);
     }
 
@@ -169,11 +166,11 @@ private:
     __aicore__ inline void CopyInBeta(uint32_t colRepeat, uint32_t calColNum)
     {
         LocalTensor<T> betaLocal = inQueueBeta.AllocTensor<T>();
-        DataCopyImpl<T>(betaLocal, betaGm[static_cast<uint64_t>(colRepeat) * ubFactor], 1, calColNum, 0, 0);
+        DataCopyImpl<T>(betaLocal, betaGm[colRepeat * ubFactor], 1, calColNum, 0, 0);
         inQueueBeta.EnQue(betaLocal);
     }
 
-    __aicore__ inline void ComputeFormer(uint64_t curRow, LocalTensor<float> dstLocal, uint32_t position,
+    __aicore__ inline void ComputeFormer(uint32_t curRow, LocalTensor<float> dstLocal, uint32_t position,
                                          uint32_t masterLoop, uint32_t tailLoop, uint32_t tail)
     {
         uint64_t offset{curRow};
@@ -242,8 +239,7 @@ private:
             betaLocal = inQueueBeta.DeQue<T>();
         }
         for (uint32_t row = 0; row < calRowNum; row++) {
-            uint64_t curRow = static_cast<uint64_t>(rowRepeat) * rowFactor + row;
-            uint64_t offset = curRow * numCol + static_cast<uint64_t>(colRepeat) * ubFactor;
+            uint64_t offset = (rowRepeat * rowFactor + row) * numCol + colRepeat * ubFactor;
             CopyInX(offset, calColNum);
             LocalTensor<T> xLocal1 = inQueueX1.DeQue<T>();
             LocalTensor<T> xLocal2 = inQueueX2.DeQue<T>();
@@ -281,8 +277,8 @@ private:
             inQueueX2.FreeTensor(xLocal2);
             outQueueY.EnQue<T>(yLocal);
             outQueueX.EnQue<T>(xOutLocal);
-            CopyOutY(curRow, colRepeat, calColNum);
-            CopyOutX(curRow, colRepeat, calColNum);
+            CopyOutY(rowRepeat * rowFactor + row, colRepeat, calColNum);
+            CopyOutX(rowRepeat * rowFactor + row, colRepeat, calColNum);
         }
         inQueueGamma.FreeTensor(gammaLocal);
         if (!nullptrBeta) {
@@ -290,24 +286,24 @@ private:
         }
     }
 
-    __aicore__ inline void CopyOutY(uint64_t curRow, uint32_t curCol, uint32_t calColNum)
+    __aicore__ inline void CopyOutY(uint32_t curRow, uint32_t curCol, uint32_t calColNum)
     {
         LocalTensor<T> yLocal = outQueueY.DeQue<T>();
-        DataCopyImpl<T>(yGm[curRow * numCol + static_cast<uint64_t>(curCol) * ubFactor], yLocal, 1, calColNum, 0, 0);
+        DataCopyImpl<T>(yGm[curRow * numCol + curCol * ubFactor], yLocal, 1, calColNum, 0, 0);
         outQueueY.FreeTensor(yLocal);
     }
 
     __aicore__ inline void CopyOutRstd(uint32_t rowRepeat, uint32_t calRowNum)
     {
         LocalTensor<float> rstdLocal = outQueueRstd.DeQue<float>();
-        DataCopyImpl<float>(rstdGm[static_cast<uint64_t>(rowRepeat) * rowFactor], rstdLocal, 1, calRowNum, 0, 0);
+        DataCopyImpl<float>(rstdGm[rowRepeat * rowFactor], rstdLocal, 1, calRowNum, 0, 0);
         outQueueRstd.FreeTensor(rstdLocal);
     }
 
-    __aicore__ inline void CopyOutX(uint64_t curRow, uint32_t curCol, uint32_t calColNum)
+    __aicore__ inline void CopyOutX(uint32_t curRow, uint32_t curCol, uint32_t calColNum)
     {
         LocalTensor<T> xOutLocal = outQueueX.DeQue<T>();
-        DataCopyImpl<T>(xOutGm[curRow * numCol + static_cast<uint64_t>(curCol) * ubFactor], xOutLocal, 1, calColNum, 0, 0);
+        DataCopyImpl<T>(xOutGm[curRow * numCol + curCol * ubFactor], xOutLocal, 1, calColNum, 0, 0);
         outQueueX.FreeTensor(xOutLocal);
     }
 
