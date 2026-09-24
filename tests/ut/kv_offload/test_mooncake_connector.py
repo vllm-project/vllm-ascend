@@ -4390,6 +4390,27 @@ class TestMooncakeConnectorSchedulerTransferBlockSize(unittest.TestCase):
         self.assertEqual(params["remote_block_sizes"], (1024, 128))
         self.assertEqual(params["remote_block_size"], 1024)
 
+    def test_compressed_group_reports_tokens_per_block(self):
+        # Compressed MLA-like groups count block ids in tokens after
+        # compression, so the per-group entry is tokens per block id
+        # (block_size * compress_ratio) while the scalar stays the physical
+        # spec block size.
+        class _CompressedSpec:
+            block_size = 128
+            compress_ratio = 4
+
+        scheduler = self._make_scheduler(128, [MockKVCacheGroup(kv_cache_spec=_CompressedSpec())])
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=list(range(16)),
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+        _, params = scheduler.request_finished(request, ([1],))
+        self.assertIsNotNone(params)
+        self.assertEqual(params["remote_block_sizes"], (512,))
+        self.assertEqual(params["remote_block_size"], 128)
+
 
 class TestMooncakeConnectorWorkerKernelBlockIds(unittest.TestCase):
     """Receiver-side kernel block expansion must respect per-group sizes.
@@ -4518,6 +4539,75 @@ class TestMooncakeConnectorWorkerKernelBlockIds(unittest.TestCase):
         local, remote = worker._get_kernel_block_ids([1], meta, 1, spec)
         self.assertEqual(local, [0, 1, 2, 3])
         self.assertEqual(remote, [80, 81, 82, 83])
+
+    def test_group_fallback_keeps_scalar_assert(self):
+        # When the per-group size does not tile the kernel and the scalar
+        # also cannot tile it (e.g. a producer whose max physical size is
+        # 128 against a 1024-token consumer kernel), the fallback must keep
+        # the historical loud assertion rather than misplace blocks.
+        worker = self._make_worker(1024, [[1]])
+        spec = self._group_spec("SlidingWindowSpec", 0, 0)
+        meta = self._make_meta(
+            local_block_ids=([0, 1],),
+            remote_block_ids=([1, 2],),
+            remote_block_size=128,
+            remote_block_sizes=(128,),
+        )
+        with self.assertRaises(AssertionError, msg="not divisible by kernel_size"):
+            worker._get_kernel_block_ids([0], meta, 0, spec)
+
+    def test_two_group_mixed_layout_expands_per_group(self):
+        # The realistic dspark consumer: a 1024-token full-attention kernel
+        # next to a 128-token sliding-window kernel. Each group must expand
+        # with its own size — the scalar (1024) would 8x-expand the window
+        # group's ids.
+        worker = self._make_worker(1024, [[1], [8]])
+        fa_spec = self._group_spec("FullAttentionSpec", 0, 0)
+        swa_spec = self._group_spec("SlidingWindowSpec", 1, 1)
+        meta = self._make_meta(
+            local_block_ids=([0, 1], [0, 1, 2, 3, 4, 5, 6, 7]),
+            remote_block_ids=([10], [20, 21, 22, 23, 24, 25, 26, 27]),
+            remote_block_size=1024,
+            remote_block_sizes=(1024, 128),
+        )
+        local0, remote0 = worker._get_kernel_block_ids([0], meta, 0, fa_spec)
+        # Local kernels are trimmed to the number of fetched remote kernels.
+        self.assertEqual(local0, [0])
+        self.assertEqual(remote0, [10])
+        local1, remote1 = worker._get_kernel_block_ids([1], meta, 1, swa_spec)
+        self.assertEqual(local1, [0, 1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(remote1, [20, 21, 22, 23, 24, 25, 26, 27])
+
+    def test_cp_path_rejects_mixed_per_group_sizes(self):
+        # The CP path expands every group with the scalar; a mixed layout
+        # must fail loudly instead of misplacing the mismatched group.
+        worker = self._make_worker(1024, [[1], [8]])
+        worker.dcp_rank = 0
+        worker.dcp_size = 2
+        meta = self._make_meta(
+            local_block_ids=([0], [0]),
+            remote_block_ids=([10], [20]),
+            remote_block_size=1024,
+            remote_block_sizes=(1024, 128),
+        )
+        with self.assertRaises(AssertionError, msg="mixed per-group remote block sizes"):
+            worker._get_local_remote_cp_params(meta)
+
+    def test_cp_path_allows_uniform_per_group_sizes(self):
+        worker = self._make_worker(1024, [[1], [8]])
+        worker.dcp_rank = 0
+        worker.dcp_size = 1
+        meta = self._make_meta(
+            local_block_ids=([0], [0]),
+            remote_block_ids=([10], [20]),
+            remote_block_size=1024,
+            remote_block_sizes=(1024, 1024),
+        )
+        remote_block_size, _, local_cp_size, remote_cp_size, r_blk = worker._get_local_remote_cp_params(meta)
+        self.assertEqual(remote_block_size, 1024)
+        self.assertEqual(local_cp_size, 1)
+        self.assertEqual(remote_cp_size, 1)
+        self.assertEqual(r_blk, 1)
 
 
 if __name__ == "__main__":
