@@ -83,7 +83,7 @@ public:
 
     __aicore__ inline void Process()
     {
-        uint32_t repeatTimes = rowWork / rowFactor + (rowWork % rowFactor != 0);
+        uint32_t repeatTimes = CeilDiv(rowWork, rowFactor);
         for (uint32_t repeat = 0; repeat < repeatTimes; repeat++) {
             uint32_t remain = rowWork - repeat * rowFactor;
             uint32_t calRowNum = Min(remain, rowFactor);
@@ -95,7 +95,7 @@ public:
     {
         LocalTensor<float> rstdLocal = outQueueRstd.AllocTensor<float>();
         Duplicate(rstdLocal, (float)0.0, rowFactor);
-        uint32_t colRepeats = numCol / ubFactor + (numCol % ubFactor != 0);
+        uint32_t colRepeats = CeilDiv(numCol, ubFactor);
 
         for (uint32_t row = 0; row < calRowNum; row++) {
             uint32_t split = ubLoop * ubFactor;
