@@ -360,62 +360,95 @@ class TestStairLoadStatistics(unittest.TestCase):
                 backtrack_limit=0,
             )
 
-    def test_migration_sources_enforce_directed_rank_pair_limit(self):
+    def test_migration_sources_enforce_rank_transfer_limit(self):
         current = np.array([[0, 1], [2, 3], [4, 5]])
         target = np.array([[2, 3], [0, 4], [1, 5]])
         expert_sources = [np.flatnonzero(np.any(current == expert, axis=1)).tolist() for expert in range(6)]
+        node_ids = np.zeros(3, dtype=np.int64)
 
-        self.assertIsNone(StairEplbPolicy._migration_sources(current, target, 1, expert_sources))
-        sources = StairEplbPolicy._migration_sources(current, target, 2, expert_sources)
+        self.assertIsNone(StairEplbPolicy._migration_sources(current, target, 1, 1, expert_sources, node_ids))
+        sources = StairEplbPolicy._migration_sources(current, target, 2, 1, expert_sources, node_ids)
 
         np.testing.assert_array_equal(sources, [[1, 1], [0, 2], [0, 2]])
+        np.testing.assert_array_equal(
+            StairEplbPolicy._migration_sources(current, target, -1, 1, expert_sources, node_ids),
+            sources,
+        )
 
     def test_migration_sources_reassign_earlier_demand(self):
-        current = np.array([[2, 3], [0, 1], [0, 4]])
-        partial_target = np.array([[0, 1], [-1, -1], [-1, -1]])
-        expert_sources = [np.flatnonzero(np.any(current == expert, axis=1)).tolist() for expert in range(5)]
+        current = np.array([[2, 4], [3, 5], [0, 1], [0, 6]])
+        partial_target = np.full_like(current, -1)
+        partial_target[0, 0] = 0
+        partial_target[1, 0] = 1
+        expert_sources = [np.flatnonzero(np.any(current == expert, axis=1)).tolist() for expert in range(7)]
 
-        sources = StairEplbPolicy._migration_sources(current, partial_target, 1, expert_sources)
+        sources = StairEplbPolicy._migration_sources(
+            current, partial_target, 1, 1, expert_sources, np.zeros(4, dtype=np.int64)
+        )
 
-        np.testing.assert_array_equal(sources[0], [2, 1])
+        self.assertEqual(sources[0, 0], 3)
+        self.assertEqual(sources[1, 0], 2)
+
+    def test_migration_sources_enforce_cross_node_limit(self):
+        current = np.array([[0], [1], [2], [3]])
+        target = np.array([[2], [3], [0], [1]])
+        expert_sources = [[expert] for expert in range(4)]
+        node_ids = np.array([0, 0, 1, 1])
+
+        self.assertIsNone(StairEplbPolicy._migration_sources(current, target, 1, 1, expert_sources, node_ids))
+        sources = StairEplbPolicy._migration_sources(current, target, 1, 2, expert_sources, node_ids)
+
+        np.testing.assert_array_equal(sources, [[2], [3], [0], [1]])
+        np.testing.assert_array_equal(
+            StairEplbPolicy._migration_sources(current, target, 1, -1, expert_sources, node_ids),
+            sources,
+        )
+
+    def test_migration_sources_allow_disabling_cross_node_transfers(self):
+        current = np.array([[0], [1]])
+        target = np.array([[1], [0]])
+        expert_sources = [[0], [1]]
+
+        self.assertIsNone(StairEplbPolicy._migration_sources(current, target, 1, 0, expert_sources, np.array([0, 1])))
 
     def test_migration_sources_follow_multi_hop_augmenting_path(self):
         current = np.array([[3, 4, 5], [0, 2, 6], [0, 1, 7], [1, 8, 9]])
         partial_target = np.full_like(current, -1)
-        partial_target[0] = [0, 1, 2]
+        partial_target[0, 0] = 0
+        partial_target[1, 0] = 1
+        partial_target[2, 0] = 2
         expert_sources = [np.where(current == expert)[0].tolist() for expert in range(10)]
 
-        sources = StairEplbPolicy._migration_sources(current, partial_target, 1, expert_sources)
+        sources = StairEplbPolicy._migration_sources(
+            current, partial_target, 1, 1, expert_sources, np.zeros(4, dtype=np.int64)
+        )
 
-        np.testing.assert_array_equal(sources[0], [2, 3, 1])
+        np.testing.assert_array_equal(sources[:3, 0], [2, 3, 1])
 
     def test_minimum_cost_sources_prefer_same_node_then_lowest_rank(self):
         current = np.array([[1], [0], [0]])
         target = np.array([[0], [-1], [-1]])
         expert_sources = [[1, 2], [0]]
 
-        same_node = StairEplbPolicy._minimum_cost_migration_sources(
-            current, target, 1, expert_sources, np.array([0, 1, 0])
-        )
-        tied = StairEplbPolicy._minimum_cost_migration_sources(
-            current, target, 1, expert_sources, np.zeros(3, dtype=np.int64)
-        )
+        same_node = StairEplbPolicy._migration_sources(current, target, 1, 1, expert_sources, np.array([0, 1, 0]))
+        tied = StairEplbPolicy._migration_sources(current, target, 1, 1, expert_sources, np.zeros(3, dtype=np.int64))
 
         self.assertEqual(same_node[0, 0], 2)
         self.assertEqual(tied[0, 0], 1)
 
     def test_minimum_cost_sources_preserve_global_topology_optimum(self):
-        current = np.array([[2, 3], [0, 1], [0, 4], [1, 5]])
+        current = np.array([[2, 6], [3, 7], [0, 1], [0, 4], [1, 5]])
         target = np.full_like(current, -1)
-        target[0] = [0, 1]
-        expert_sources = [np.where(current == expert)[0].tolist() for expert in range(6)]
+        target[0, 0] = 0
+        target[1, 0] = 1
+        expert_sources = [np.where(current == expert)[0].tolist() for expert in range(8)]
 
-        sources = StairEplbPolicy._minimum_cost_migration_sources(
-            current, target, 1, expert_sources, np.array([0, 0, 0, 1])
+        sources = StairEplbPolicy._migration_sources(
+            current, target, 1, 1, expert_sources, np.array([0, 0, 0, 0, 1])
         )
 
-        # Taking rank 1 for expert 0 would force expert 1 to cross nodes.
-        np.testing.assert_array_equal(sources[0], [2, 1])
+        # Taking rank 2 for expert 0 would force expert 1 to cross nodes.
+        np.testing.assert_array_equal(sources[:2, 0], [3, 2])
 
     def test_lpt_placement_aligns_slots_with_topology_aware_sources(self):
         current = np.array([[2, 0], [1, 0], [3, 1]])

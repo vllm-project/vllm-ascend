@@ -7,7 +7,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment  # type: ignore
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
@@ -459,141 +458,148 @@ class StairEplbPolicy(AbstractEplbPolicy):
         return max(float(updated_variance), 0.0), updated_scale
 
     @staticmethod
+    def _has_feasible_migration_sources(
+        demands: list[tuple[int, int]],
+        rank_transfer_limit: int,
+        cross_node_transfer_limit: int,
+        source_candidates: list[list[tuple[int, ...]]],
+        compact_node_ids: np.ndarray,
+        num_nodes: int,
+    ) -> bool:
+        """Check source feasibility for ``(destination rank, expert)`` demands."""
+        if rank_transfer_limit == -1:
+            rank_transfer_limit = len(demands)
+        if cross_node_transfer_limit == -1:
+            cross_node_transfer_limit = len(demands)
+        candidates = [source_candidates[dst_rank][expert] for dst_rank, expert in demands]
+        source_usage = [0] * len(compact_node_ids)
+        cross_out = [0] * num_nodes
+        cross_in = [0] * num_nodes
+        max_cross_transfers = min(len(demands), num_nodes * cross_node_transfer_limit)
+        failed_states: set[tuple[int, int, tuple[int, ...], tuple[int, ...], tuple[int, ...]]] = set()
+
+        def assign(demand_index: int, remaining_cross_transfers: int) -> bool:
+            if demand_index == len(demands):
+                return True
+            state = (
+                demand_index,
+                remaining_cross_transfers,
+                tuple(source_usage),
+                tuple(cross_out),
+                tuple(cross_in),
+            )
+            if state in failed_states:
+                return False
+            dst_rank, _ = demands[demand_index]
+            dst_node = compact_node_ids[dst_rank]
+            for src_rank in candidates[demand_index]:
+                src_node = compact_node_ids[src_rank]
+                crosses_node = src_node != dst_node
+                if source_usage[src_rank] >= rank_transfer_limit or crosses_node > remaining_cross_transfers:
+                    continue
+                if crosses_node and (
+                    cross_out[src_node] >= cross_node_transfer_limit or cross_in[dst_node] >= cross_node_transfer_limit
+                ):
+                    continue
+                source_usage[src_rank] += 1
+                cross_out[src_node] += crosses_node
+                cross_in[dst_node] += crosses_node
+                if assign(demand_index + 1, remaining_cross_transfers - crosses_node):
+                    return True
+                cross_in[dst_node] -= crosses_node
+                cross_out[src_node] -= crosses_node
+                source_usage[src_rank] -= 1
+            failed_states.add(state)
+            return False
+
+        return assign(0, max_cross_transfers)
+
+    @staticmethod
     def _migration_sources(
         current_placement: np.ndarray,
         target_placement: np.ndarray,
-        rank_pair_limit: int,
-        expert_sources: list[list[int]],
-    ) -> np.ndarray | None:
-        """Return source ranks aligned with target slots, or ``None``.
-
-        Per destination, ``(source rank, capacity index)`` owns at most one
-        ``(target slot, expert)`` demand. Occupied capacity recursively rematches
-        its owner; retained experts stay local, and unplaced slots remain ``-1``.
-        """
-        source_rank_ids = np.full_like(target_placement, -1)
-
-        def try_assign_source(
-            slot: int,
-            expert: int,
-            dst_rank: int,
-            capacity_slot_owners: dict[tuple[int, int], tuple[int, int]],
-            visited_capacity_slots: set[tuple[int, int]],
-        ) -> bool:
-            for src_rank in expert_sources[expert]:
-                if src_rank == dst_rank:
-                    continue
-                for capacity_index in range(rank_pair_limit):
-                    capacity_slot = (src_rank, capacity_index)
-                    if capacity_slot in visited_capacity_slots:
-                        continue
-                    visited_capacity_slots.add(capacity_slot)
-                    displaced_demand = capacity_slot_owners.get(capacity_slot)
-                    if displaced_demand is not None:
-                        displaced_slot, displaced_expert = displaced_demand
-                        if not try_assign_source(
-                            displaced_slot, displaced_expert, dst_rank, capacity_slot_owners, visited_capacity_slots
-                        ):
-                            continue
-                    capacity_slot_owners[capacity_slot] = (slot, expert)
-                    source_rank_ids[dst_rank, slot] = src_rank
-                    return True
-            return False
-
-        for dst_rank, target_experts in enumerate(target_placement):
-            capacity_slot_owners: dict[tuple[int, int], tuple[int, int]] = {}
-            for slot, expert in enumerate(target_experts):
-                if expert >= 0:
-                    if expert in current_placement[dst_rank]:
-                        source_rank_ids[dst_rank, slot] = dst_rank
-                    elif not try_assign_source(slot, int(expert), dst_rank, capacity_slot_owners, set()):
-                        return None
-        return source_rank_ids
-
-    @staticmethod
-    def _minimum_cost_migration_sources(
-        current_placement: np.ndarray,
-        target_placement: np.ndarray,
-        rank_pair_limit: int,
+        rank_transfer_limit: int,
+        cross_node_transfer_limit: int,
         expert_sources: list[list[int]],
         rank_node_ids: np.ndarray,
     ) -> np.ndarray | None:
-        """Choose a source rank for each target slot.
-
-        The returned array is aligned with ``target_placement``; unplaced slots
-        remain ``-1`` and retained local experts use the destination rank. Local
-        experts do not consume directed rank-pair migration capacity. Among
-        valid assignments, minimize transfers between unequal node IDs, then
-        choose the lexicographically smallest source-rank vector in target-slot
-        order. Return ``None`` when no valid assignment exists.
-
-        The matching helper computes the globally minimal cost of the remaining
-        demands. The outer loop uses it as a tail oracle while fixing the
-        smallest source rank that can still achieve the global minimum.
-        """
+        """Globally assign sources within per-rank and cross-node budgets."""
         source_rank_ids = np.full_like(target_placement, -1)
+        node_ids = np.asarray(rank_node_ids)
+        unique_nodes, compact_node_ids = np.unique(node_ids, return_inverse=True)
+        assigned = target_placement >= 0
+        retained = assigned & np.any(target_placement[:, :, None] == current_placement[:, None, :], axis=2)
+        destination_ranks = np.broadcast_to(np.arange(current_placement.shape[0])[:, None], target_placement.shape)
+        source_rank_ids[retained] = destination_ranks[retained]
+        incoming_mask = assigned & ~retained
+        incoming = incoming_mask.sum(axis=1)
+        demands = [
+            (int(dst_rank), int(slot), int(target_placement[dst_rank, slot]))
+            for dst_rank, slot in np.argwhere(incoming_mask)
+        ]
+        if rank_transfer_limit == -1:
+            rank_transfer_limit = len(demands)
+        if cross_node_transfer_limit == -1:
+            cross_node_transfer_limit = len(demands)
+        if np.any(incoming > rank_transfer_limit):
+            return None
 
-        def minimum_cross_node_transfers(
-            remaining_demands: list[tuple[int, int]],
-            available_capacity_slots: list[tuple[int, int]],
-            dst_rank: int,
-        ) -> int | None:
-            if not remaining_demands:
-                return 0
-            if len(remaining_demands) > len(available_capacity_slots):
-                return None
-            infeasible_cost = len(remaining_demands) + 1
-            costs = np.full((len(remaining_demands), len(available_capacity_slots)), infeasible_cost, dtype=np.int64)
-            for demand_index, (_, expert) in enumerate(remaining_demands):
-                for capacity_index, (src_rank, _) in enumerate(available_capacity_slots):
-                    if src_rank in expert_sources[expert]:
-                        costs[demand_index, capacity_index] = int(rank_node_ids[src_rank] != rank_node_ids[dst_rank])
-            demand_indices, capacity_indices = linear_sum_assignment(costs)
-            selected_costs = costs[demand_indices, capacity_indices]
-            if len(demand_indices) != len(remaining_demands) or np.any(selected_costs == infeasible_cost):
-                return None
-            return int(selected_costs.sum())
-
-        for dst_rank, target_experts in enumerate(target_placement):
-            demands = [
-                (slot, int(expert))
-                for slot, expert in enumerate(target_experts)
-                if expert >= 0 and expert not in current_placement[dst_rank]
-            ]
-            for slot, expert in enumerate(target_experts):
-                if expert >= 0 and expert in current_placement[dst_rank]:
-                    source_rank_ids[dst_rank, slot] = dst_rank
-            candidate_sources = sorted(
-                {src_rank for _, expert in demands for src_rank in expert_sources[expert] if src_rank != dst_rank}
+        source_usage = np.zeros(current_placement.shape[0], dtype=np.int64)
+        cross_out = np.zeros(len(unique_nodes), dtype=np.int64)
+        cross_in = np.zeros(len(unique_nodes), dtype=np.int64)
+        max_cross_transfers = min(len(demands), len(unique_nodes) * cross_node_transfer_limit)
+        candidates_by_demand = [
+            sorted(
+                expert_sources[expert],
+                key=lambda src_rank, dst_node=compact_node_ids[dst_rank]: (
+                    compact_node_ids[src_rank] != dst_node,
+                    src_rank,
+                ),
             )
-            capacity_slots = [
-                (src_rank, capacity_index)
-                for src_rank in candidate_sources
-                for capacity_index in range(rank_pair_limit)
-            ]
+            for dst_rank, _, expert in demands
+        ]
+        failed_states: set[tuple[int, int, bytes, bytes, bytes]] = set()
 
-            remaining_cost = minimum_cross_node_transfers(demands, capacity_slots, dst_rank)
-            if remaining_cost is None:
-                return None
-            # Fix the smallest source that preserves the global minimum tail cost.
-            while demands:
-                slot, expert = demands[0]
-                for capacity_slot in capacity_slots:
-                    src_rank, _ = capacity_slot
-                    if src_rank not in expert_sources[expert]:
-                        continue
-                    edge_cost = int(rank_node_ids[src_rank] != rank_node_ids[dst_rank])
-                    remaining_capacity = [item for item in capacity_slots if item != capacity_slot]
-                    tail_cost = minimum_cross_node_transfers(demands[1:], remaining_capacity, dst_rank)
-                    if tail_cost is not None and edge_cost + tail_cost == remaining_cost:
-                        source_rank_ids[dst_rank, slot] = src_rank
-                        demands = demands[1:]
-                        capacity_slots = remaining_capacity
-                        remaining_cost = tail_cost
-                        break
-                else:
-                    return None
-        return source_rank_ids
+        def assign(demand_index: int, remaining_cross_transfers: int) -> bool:
+            if demand_index == len(demands):
+                return True
+            state = (
+                demand_index,
+                remaining_cross_transfers,
+                source_usage.tobytes(),
+                cross_out.tobytes(),
+                cross_in.tobytes(),
+            )
+            if state in failed_states:
+                return False
+            dst_rank, slot, _ = demands[demand_index]
+            dst_node = compact_node_ids[dst_rank]
+            for src_rank in candidates_by_demand[demand_index]:
+                src_node = compact_node_ids[src_rank]
+                crosses_node = src_node != dst_node
+                if source_usage[src_rank] >= rank_transfer_limit or crosses_node > remaining_cross_transfers:
+                    continue
+                if crosses_node and (
+                    cross_out[src_node] >= cross_node_transfer_limit or cross_in[dst_node] >= cross_node_transfer_limit
+                ):
+                    continue
+                source_usage[src_rank] += 1
+                cross_out[src_node] += crosses_node
+                cross_in[dst_node] += crosses_node
+                source_rank_ids[dst_rank, slot] = src_rank
+                if assign(demand_index + 1, remaining_cross_transfers - crosses_node):
+                    return True
+                source_rank_ids[dst_rank, slot] = -1
+                cross_in[dst_node] -= crosses_node
+                cross_out[src_node] -= crosses_node
+                source_usage[src_rank] -= 1
+            failed_states.add(state)
+            return False
+
+        for cross_budget in range(max_cross_transfers + 1):
+            if assign(0, cross_budget):
+                return source_rank_ids
+        return None
 
     @staticmethod
     def _align_target_slots(current_placement: np.ndarray, target_placement: np.ndarray) -> np.ndarray:
