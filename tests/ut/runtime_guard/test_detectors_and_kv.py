@@ -552,3 +552,115 @@ def test_bug4_block_ids_v2_gpu_row_when_no_host_np():
         req_states=SimpleNamespace(req_id_to_index={"r0": 0}),
     )
     assert block_ids_for_request(runner, "r0") == [7, 8]
+
+
+# ---- output_substring hit / miss (T1) --------------------------------------
+
+
+class _FakeTokenizer:
+    """Minimal encode/decode for substring UT (ord/chr round-trip)."""
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return [ord(c) for c in text]
+
+    def decode(self, token_ids: list[int], skip_special_tokens: bool = False) -> str:
+        return "".join(chr(int(t)) for t in token_ids)
+
+
+def test_output_substring_helpers_subsequence_and_prefix():
+    from vllm_ascend.observability.runtime_guard.detector.output_substring import (
+        contains_prefix,
+        contains_token_subsequence,
+    )
+
+    hay = [1, 2, 3, 4, 5]
+    assert contains_token_subsequence(hay, [2, 3]) is True
+    assert contains_token_subsequence(hay, [2, 4]) is False
+    assert contains_token_subsequence(hay, []) is False
+    assert contains_prefix(hay, [1, 2]) is True
+    assert contains_prefix(hay, [2, 3]) is False
+
+
+def test_output_substring_token_ids_hit_and_miss(tmp_path: Path):
+    from vllm_ascend.observability.runtime_config.config import RuntimeConfig
+    from vllm_ascend.observability.runtime_guard.detector.output_substring import OutputSubstringDetector
+    from vllm_ascend.observability.runtime_guard.io_snapshot import RequestIoSnapshotManager
+    from vllm_ascend.observability.runtime_guard.request_state import RequestGuardStore
+
+    RequestGuardStore.reset_for_tests()
+    RequestIoSnapshotManager.reset_for_tests()
+    try:
+        cfg = RuntimeConfig(
+            config_path=tmp_path / "c.json",
+            report_dir=tmp_path / "r",
+            ensure_file=True,
+            reload_interval_seconds=0,
+        )
+        sec = cfg._data["detector"]["output_substring"]
+        sec["enabled"] = True
+        sec["patterns"] = [[10, 11, 12]]
+        sec["match_prefix"] = False
+
+        det = OutputSubstringDetector(
+            runtime_config=cfg,
+            runner=SimpleNamespace(tp_rank=0, input_batch=SimpleNamespace(req_ids=["r1"])),
+            tokenizer_provider=lambda: _FakeTokenizer(),
+        )
+        det.refresh_from_config()
+        assert det._compiled  # noqa: SLF001
+
+        miss = det.check_all([[1, 2, 3, 4]], req_ids=["r1"])
+        assert miss == []
+
+        # Production clears the same-wave IO cache between steps.
+        RequestIoSnapshotManager.get().clear_wave_cache()
+        hit = det.check_all([[9, 10, 11, 12, 13]], req_ids=["r1"])
+        assert len(hit) == 1
+        assert hit[0].incident_type == "output_substring"
+        assert hit[0].req_id == "r1"
+
+        # Once per req.
+        RequestIoSnapshotManager.get().clear_wave_cache()
+        again = det.check_all([[10, 11, 12]], req_ids=["r1"])
+        assert again == []
+    finally:
+        RequestGuardStore.reset_for_tests()
+        RequestIoSnapshotManager.reset_for_tests()
+
+
+def test_output_substring_text_pattern_hit(tmp_path: Path):
+    from vllm_ascend.observability.runtime_config.config import RuntimeConfig
+    from vllm_ascend.observability.runtime_guard.detector.output_substring import OutputSubstringDetector
+    from vllm_ascend.observability.runtime_guard.io_snapshot import RequestIoSnapshotManager
+    from vllm_ascend.observability.runtime_guard.request_state import RequestGuardStore
+
+    RequestGuardStore.reset_for_tests()
+    RequestIoSnapshotManager.reset_for_tests()
+    try:
+        cfg = RuntimeConfig(
+            config_path=tmp_path / "c.json",
+            report_dir=tmp_path / "r",
+            ensure_file=True,
+            reload_interval_seconds=0,
+        )
+        sec = cfg._data["detector"]["output_substring"]
+        sec["enabled"] = True
+        sec["patterns"] = ["bad"]
+        sec["match_prefix"] = False
+
+        det = OutputSubstringDetector(
+            runtime_config=cfg,
+            runner=SimpleNamespace(tp_rank=0, input_batch=SimpleNamespace(req_ids=["r1"])),
+            tokenizer_provider=lambda: _FakeTokenizer(),
+        )
+        det.refresh_from_config()
+
+        # "xxbadxx" as ord codes
+        ids = [ord(c) for c in "xxbadxx"]
+        alerts = det.check_all([ids], req_ids=["r1"])
+        assert len(alerts) == 1
+        assert alerts[0].detail["matched_text"] == "bad"
+        assert alerts[0].detail["matched_source"] == "text"
+    finally:
+        RequestGuardStore.reset_for_tests()
+        RequestIoSnapshotManager.reset_for_tests()

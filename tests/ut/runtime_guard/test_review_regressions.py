@@ -794,6 +794,47 @@ def test_v17_spec_acceptance_short_batch_no_index_error():
     assert isinstance(alerts, list)
 
 
+def test_v17d_spec_acceptance_high_rate_below_len_high_no_alert():
+    """Normal high accept: rate can be 1.0 but accept_len below len_high → no alert."""
+    from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
+
+    section = {
+        "enabled": True,
+        "window": 2,
+        "low_threshold": 0.3,
+        "len_low_threshold": 1.4,
+        "high_threshold": 0.96,
+        "len_high_threshold": 2.8,
+    }
+    rc = SimpleNamespace(
+        detector_section=lambda name: section,
+        detector_get=lambda sec, key, default=None: section.get(key, default),
+    )
+    # draft_len=2 → full accept gives accept_len=2.0 < 2.8 even at rate=1.0
+    runner = SimpleNamespace(
+        tp_rank=0,
+        speculative_config=SimpleNamespace(),
+        input_batch=SimpleNamespace(req_ids=["r1"], num_draft_tokens_per_req=[2]),
+        requests=None,
+    )
+    det = SpecAcceptanceDetector(runtime_config=rc, runner=runner)
+    sampled = torch.tensor([[7, 8, 9]])  # draft+bonus
+    with (
+        patch(
+            "vllm_ascend.observability.runtime_guard.detector.spec_acceptance.get_pp_group",
+            return_value=SimpleNamespace(is_last_rank=True),
+        ),
+        patch(
+            "vllm_ascend.observability.runtime_guard.detector.spec_acceptance.runner_tp_rank",
+            return_value=0,
+        ),
+    ):
+        for _ in range(2):
+            alerts = det.check_all(sampled, [3], req_ids=["r1"])  # accepted_token_num=3
+        assert alerts == []
+        assert len(det._history["r1"]) == 2
+
+
 def test_v17b_spec_acceptance_v2_threads_req_ids_without_input_batch():
     """v2: runner.input_batch is None; req_ids must come from SamplePhaseResult."""
     from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector

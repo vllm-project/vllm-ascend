@@ -34,6 +34,8 @@ Priorities: **P0** every PR / smoke; **P1** full suite; **P2** env-dependent.
 | ID | What | Expect |
 |----|------|--------|
 | T1–T3 | output_substring / token_repeat / logits_finite | Hit/miss; max_per_req stop-detect |
+| T1b | output_substring helpers + text/token_ids patterns | `test_detectors_and_kv.py` |
+| T4 | spec_acceptance normal high accept (len below high) | no alert — `test_v17d_*` |
 | R1–R6 | block_ids / sensitive ids / truncate | Schema matches config flags |
 | D1–D5 | dump_kv scope=request, quota, cooldown | Files only for armed req; quota respected |
 | C1–C4 | v1 vs v2 runner hook parity | Same report fields / detector hits |

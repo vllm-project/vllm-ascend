@@ -182,6 +182,42 @@ def test_dump_manual_trigger_unknown_key_rejected():
         validate_runtime_config(data)
 
 
+def test_token_repeat_window_wrong_type_rejected():
+    from copy import deepcopy
+
+    from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
+    from vllm_ascend.observability.runtime_config._validate import validate_runtime_config
+
+    data = deepcopy(_DEFAULTS)
+    data["detector"]["token_repeat"]["window"] = "x"
+    with pytest.raises(ValueError, match="detector.token_repeat.window"):
+        validate_runtime_config(data)
+
+
+def test_token_repeat_window_non_integer_float_rejected():
+    from copy import deepcopy
+
+    from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
+    from vllm_ascend.observability.runtime_config._validate import validate_runtime_config
+
+    data = deepcopy(_DEFAULTS)
+    data["detector"]["token_repeat"]["window"] = 2.7
+    with pytest.raises(ValueError, match="must be an integer"):
+        validate_runtime_config(data)
+
+
+def test_report_save_sensitive_wrong_type_rejected():
+    from copy import deepcopy
+
+    from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
+    from vllm_ascend.observability.runtime_config._validate import validate_runtime_config
+
+    data = deepcopy(_DEFAULTS)
+    data["report"]["save_sensitive_info"] = "yes"
+    with pytest.raises(ValueError, match="save_sensitive_info"):
+        validate_runtime_config(data)
+
+
 def test_ascend_log_enabled_unknown_key_rejected():
     from copy import deepcopy
 
