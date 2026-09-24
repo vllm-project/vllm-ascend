@@ -66,7 +66,13 @@ _CONFIG_KEY_FIELDS = (
 
 
 def _moe_config_key(moe_config: FusedMoEConfig) -> tuple[int, ...]:
-    """Distinguish execution shapes sharing the same communication type."""
+    """Return the execution shape that owns mutable MoE comm state.
+
+    Everything the communication stack touches (dispatcher histograms, group
+    lists, per-rank expert placement) derives from these fields; configs that
+    agree on them can safely share one stateful implementation because layer
+    forwards are sequential.
+    """
     return tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS)
 
 
@@ -114,22 +120,24 @@ def activate_moe_comm_method(
     moe_config: FusedMoEConfig,
     current_method: MoECommMethod | None,
 ) -> MoECommMethod | None:
-    """Bind this layer's communication state, registered during runner init.
+    """Bind the comm implementation matching the active MoE layer's shape.
 
-    MRV2 initially selects the last registered instance. A target and drafter
-    can differ (e.g. 384 experts/top-6 vs 128 experts/top-3), so bind before
-    prepare and publish the same instance for dispatch, combine and finalize.
-    Keep the single-shape path untouched for compiled/310P execution.
+    The forward context publishes one ``moe_comm_method`` per step, chosen
+    before any layer runs. When a drafter and a target coexist in the process,
+    their expert shapes differ and the published instance can only match one
+    of them, so each layer rebinds its own before use (``current_method`` is
+    the value published for this step). With a single registered shape this is
+    the identity and the forward context is left untouched (mutating it inside
+    a compiled MoE forward changes 310P ModelRunner V2 graph behavior).
     """
     if len({key for _, key in _MoECommMethodsByConfig}) <= 1:
         return current_method
 
     comm_method = get_moe_comm_method(moe_comm_type, moe_config)
-    assert comm_method is not None, (
-        f"MoE communication method was not registered during runner initialization: "
-        f"comm_type={moe_comm_type}, config_key={_moe_config_key(moe_config)}"
-    )
-    if comm_method is current_method:
+    if comm_method is None:
+        setup_moe_comm_method(moe_config)
+        comm_method = get_moe_comm_method(moe_comm_type, moe_config)
+    if comm_method is None or comm_method is current_method:
         return current_method
     _EXTRA_CTX.moe_comm_method = comm_method
     return comm_method
