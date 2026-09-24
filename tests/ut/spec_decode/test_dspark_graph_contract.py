@@ -29,40 +29,22 @@ def _speculator(**attributes):
     return speculator
 
 
-def test_set_attn_preserves_cache_group_order(monkeypatch):
-    draft_config = object()
-    active_context = []
-
-    @contextmanager
-    def config_context(config):
-        assert config is draft_config
-        active_context.append(config)
-        try:
-            yield
-        finally:
-            active_context.pop()
-
+def test_set_attn_reuses_initialized_cache_group_order(monkeypatch):
     def parent_set_attn(self, *_args):
-        assert active_context == [draft_config]
         self._context_slot_mappings = torch.zeros(2, dtype=torch.int64)
-        self.attn_groups = [[SimpleNamespace(backend=_BackendA)]]
+        self.attn_groups = [
+            [SimpleNamespace(backend=_BackendA, layer_names=["draft.2", "draft.1"])],
+            [SimpleNamespace(backend=_BackendA, layer_names=["draft.0"])],
+        ]
 
-    def get_layers(config, layer_type, names):
-        assert active_context == [draft_config]
-        return {name: SimpleNamespace(get_attn_backend=lambda: _BackendA) for name in names}
-
-    monkeypatch.setattr(speculator_module, "set_current_vllm_config", config_context)
     monkeypatch.setattr(speculator_module.DSparkSpeculator, "set_attn", parent_set_attn)
-    monkeypatch.setattr(speculator_module, "get_layers_from_vllm_config", get_layers)
-    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: draft_config))
-    speculator = _speculator(vllm_config=object(), draft_attn_layer_names={"draft.2", "draft.0"})
-    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["draft.2", "target.0", "draft.0"])])
+    speculator = _speculator()
 
-    speculator.set_attn(None, cache, None, None, None)
+    speculator.set_attn(None, None, None, None, None)
 
-    assert list(speculator.attn_backends) == ["draft.2", "draft.0"]
+    assert list(speculator.attn_backends) == ["draft.2", "draft.1", "draft.0"]
+    assert all(backend is _BackendA for backend in speculator.attn_backends.values())
     assert speculator._context_slot_mappings.dtype == torch.int32
-    assert active_context == []
 
 
 @pytest.mark.parametrize("query_count", [1, 7, 8])

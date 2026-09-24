@@ -24,6 +24,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC128Backend,
     AscendDSASWABackend,
+    select_dsa_backend,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -129,6 +130,11 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             self.attn_backend = AscendDSAC128Backend
         else:
             self.attn_backend = AscendDSASWABackend
+
+        self.attn_backend = select_dsa_backend(
+            self.attn_backend,
+            use_pcp=get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1,
+        )
 
         # NOTE(zxr): vllm_is_batch_invariant is delete during updating to v0.20.1
         if (

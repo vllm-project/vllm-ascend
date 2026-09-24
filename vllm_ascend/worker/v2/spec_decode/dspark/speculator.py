@@ -16,15 +16,13 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
-from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
@@ -99,40 +97,25 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_input_buffers: Any,
         target_attn_groups: Any,
     ) -> None:
-        # Initialize the draft attention backend with its PCP=1 config.
-        with set_current_vllm_config(self.attn_vllm_config):
-            super().set_attn(
-                model_state,
-                kv_cache_config,
-                block_tables,
-                target_input_buffers,
-                target_attn_groups,
-            )
-            self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
-            # npu needs attn_backends to update full graph params in run_fullgraph.
-            attn_backends: dict[str, type[AttentionBackend]] = {}
-            active_layer_names = self.draft_attn_layer_names
-            for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-                layer_names = kv_cache_group_spec.layer_names
-                if active_layer_names is not None:
-                    # Preserve cache-group order so captured graph tasks and
-                    # runtime metadata stay aligned.
-                    layer_names = [name for name in layer_names if name in active_layer_names]
-
-                layer_type = cast(type[Any], AttentionLayerBase)
-                attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
-
-                for layer_name in layer_names:
-                    attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
-
-            self.attn_backends = attn_backends
-            backend = _get_graph_update_backend(self.attn_groups)
-            if issubclass(backend, AscendMLABackend):
-                self.attn_architecture = "MLA"
-            elif issubclass(backend, AscendAttentionBackend):
-                self.attn_architecture = "GQA"
-            else:
-                self.attn_architecture = None
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
+        self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
+        # npu needs attn_backends to update full graph params in run_fullgraph.
+        self.attn_backends = {
+            name: group.backend for groups in self.attn_groups for group in groups for name in group.layer_names
+        }
+        backend = _get_graph_update_backend(self.attn_groups)
+        if issubclass(backend, AscendMLABackend):
+            self.attn_architecture = "MLA"
+        elif issubclass(backend, AscendAttentionBackend):
+            self.attn_architecture = "GQA"
+        else:
+            self.attn_architecture = None
 
     def _prepare_draft_dcp_metadata_inputs(
         self, num_reqs: int, num_reqs_padded: int, step: int

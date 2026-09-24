@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from vllm.config import VllmConfig, replace, set_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
 from vllm.v1.attention.backend import AttentionBackend
@@ -88,7 +88,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
         self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
-        self.draft_vllm_config = self._create_draft_vllm_config()
         self._init_dcp()
 
         del self.input_buffers
@@ -114,41 +113,24 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         self.pcp_manager: AscendPCPManager | None = None
 
     def _init_dcp(self) -> None:
-        self.use_dcp = self.draft_vllm_config.parallel_config.decode_context_parallel_size > 1
+        attn_config = self.attn_vllm_config
+        self.use_dcp = attn_config.parallel_config.decode_context_parallel_size > 1
         self.dcp_manager: DCPManager | None = None
         if not self.use_dcp:
             return
+        # DCPManager checks the draft architecture to allocate its attention
+        # mask. The backend itself is already bound to the loaded draft layer.
+        draft_dcp_config = copy(attn_config)
+        draft_dcp_config.model_config = self.draft_model_config
         self.dcp_manager = DCPManager(
-            dcp_world_size=self.draft_vllm_config.parallel_config.decode_context_parallel_size,
+            dcp_world_size=attn_config.parallel_config.decode_context_parallel_size,
             dcp_rank=get_dcp_group().rank_in_group,
             max_buffer_num_tokens=self.max_num_tokens,
             max_num_reqs=self.max_num_reqs,
             device=self.device,
-            vllm_config=self.draft_vllm_config,
+            vllm_config=draft_dcp_config,
             use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
-
-    def _create_draft_vllm_config(self) -> VllmConfig:
-        """Build the runtime config used while executing the draft model."""
-        source_parallel_config = self.vllm_config.parallel_config
-        dcp_size = source_parallel_config.decode_context_parallel_size
-        parallel_config = replace(
-            source_parallel_config,
-            pipeline_parallel_size=1,
-            decode_context_parallel_size=1 if self.replicated_pcp else dcp_size,
-        )
-        draft_config = replace(
-            self.vllm_config,
-            model_config=self.draft_model_config,
-            parallel_config=parallel_config,
-            cache_config=replace(self.vllm_config.cache_config),
-        )
-        if self.replicated_pcp:
-            # TODO: Separate draft execution settings from worker topology.
-            # Restore DCP only after the complete draft config reconstruction;
-            # this does not rerun validation or recompute DCP-dependent settings.
-            draft_config.parallel_config.decode_context_parallel_size = dcp_size
-        return draft_config
 
     # TODO: Remove this method once vllm-project/vllm#53458 or an
     # equivalent upstream fix is merged.
@@ -220,7 +202,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # TODO: Remove this early return once FIA supports padded Query tensors
         # whose token count exceeds the cumulative query length. Keep the
         # mapping refresh above when unifying metadata construction.
-        if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA"):
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA") and attn_metadata:
             return attn_metadata, slot_mappings
 
         slot_mappings = build_slot_mappings_by_layer(
@@ -321,19 +303,17 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
     ) -> None:
-        # Initialize the draft attention backend with its PCP=1 config.
-        with set_current_vllm_config(self.attn_vllm_config):
-            super().set_attn(
-                model_state,
-                kv_cache_config,
-                block_tables,
-                target_input_buffers,
-                target_attn_groups,
-            )
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
 
-            # Use the first executable draft attention layer as the architecture
-            # discriminator and cache it for ACL graph parameter updates.
-            self.attn_backend = _get_graph_update_backend(self.attn_groups)
+        # Use the first executable draft attention layer as the architecture
+        # discriminator and cache it for ACL graph parameter updates.
+        self.attn_backend = _get_graph_update_backend(self.attn_groups)
         if issubclass(self.attn_backend, AscendDSABackend):
             self.attn_architecture = "DSA"
         elif issubclass(self.attn_backend, AscendMLABackend):
@@ -522,7 +502,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             num_tokens_padded,
             is_prefilling,
             seq_lens_cpu=seq_lens_cpu,
-            parallel_config=self.draft_vllm_config.parallel_config,
+            parallel_config=self.attn_vllm_config.parallel_config,
         ):
             # vLLM main restructured _build_draft_attn_metadata into
             # _build_uniform_attn_metadata / _build_attn_metadata, which
@@ -763,7 +743,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             decode_metadata.actual_seq_lengths_q = query_lens_list
             if dcp_local_seq_lens_cpu is not None:
                 assert self.dcp_manager is not None
-                parallel_config = self.draft_vllm_config.parallel_config
+                parallel_config = self.attn_vllm_config.parallel_config
                 decode_metadata.update_dcp_seq_lens_cpu(
                     next_seq_lens_cpu,
                     dcp_local_seq_lens_cpu,

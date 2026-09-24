@@ -1,5 +1,6 @@
 import importlib
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,6 +8,7 @@ import torch
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
+from vllm.v1.attention import selector as vllm_selector
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
@@ -118,6 +120,63 @@ def test_visible_device_id_to_physical_device_id():
         assert NPUPlatform.visible_device_id_to_physical_device_id(0) == 6
         ops.get_physical_device_id.assert_called_once_with(0)
         load_extension.assert_called_once_with("vllm_ascend.vllm_ascend_C")
+
+
+@pytest.mark.skipif("use_dcp" not in vllm_selector.AttentionSelectorConfig._fields, reason="requires DCP cache key")
+@pytest.mark.parametrize(
+    ("use_mla", "use_sparse", "base_backend", "dcp_backend"),
+    [
+        (False, False, "AscendAttentionBackend", "AscendAttentionDCPBackend"),
+        (True, False, "AscendMLABackend", "AscendMLADCPBackend"),
+        (True, True, "AscendSFABackend", "AscendSFADCPBackend"),
+    ],
+)
+def test_cached_selector_follows_dcp_config(use_mla, use_sparse, base_backend, dcp_backend):
+    config = SimpleNamespace(
+        model_config=None,
+        cache_config=None,
+        kv_transfer_config=None,
+        speculative_config=None,
+        attention_config=SimpleNamespace(use_non_causal=False, backend=None, backend_per_kind={}),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
+    )
+    vllm_selector._cached_get_attn_backend.cache_clear()
+    try:
+        with (
+            patch("vllm.platforms.current_platform", NPUPlatform()),
+            patch("vllm_ascend.platform._validate_fa3_backend", return_value=False),
+            set_current_vllm_config(cast(VllmConfig, config)),
+        ):
+            for dcp_size, expected in ((1, base_backend), (2, dcp_backend), (1, base_backend)):
+                config.parallel_config.decode_context_parallel_size = dcp_size
+                backend = vllm_selector.get_attn_backend(128, torch.bfloat16, "auto", use_mla, use_sparse=use_sparse)
+                assert backend.__name__ == expected
+    finally:
+        vllm_selector._cached_get_attn_backend.cache_clear()
+
+
+@pytest.mark.parametrize("use_dcp", [False, True])
+def test_explicit_dcp_flag_does_not_read_load_config(use_dcp):
+    selector = SimpleNamespace(use_mla=False, use_sparse=False, use_pcp=False, use_dcp=use_dcp)
+    expected = "AscendAttentionDCPBackend" if use_dcp else "AscendAttentionBackend"
+    with (
+        patch("vllm_ascend.platform._validate_fa3_backend", return_value=False),
+        patch("vllm.config.get_current_vllm_config", side_effect=AssertionError("unexpected config lookup")),
+    ):
+        assert NPUPlatform.get_attn_backend_cls(None, selector) == f"vllm_ascend.attention.attention_v1.{expected}"
+
+
+@pytest.mark.parametrize(
+    ("use_pcp", "expected_backend"),
+    [
+        (False, "AscendDSABackend"),
+        (True, "AscendDSAPCPBackend"),
+    ],
+)
+def test_platform_dsa_backend_modes(use_pcp, expected_backend):
+    selector = SimpleNamespace(use_mla=True, use_sparse=False, use_compress=True, use_pcp=use_pcp, use_dcp=True)
+    with patch("vllm_ascend.platform._validate_fa3_backend", return_value=False):
+        assert NPUPlatform.get_attn_backend_cls(None, selector) == f"vllm_ascend.attention.dsa_v1.{expected_backend}"
 
 
 class TestNPUPlatform(TestBase):
@@ -1936,13 +1995,13 @@ class TestNPUPlatform(TestBase):
                 True,
                 False,
                 True,
-                "vllm_ascend.attention.mla_v1.AscendMLABackend",
+                "vllm_ascend.attention.mla_v1.AscendMLADCPBackend",
             ),
             (
                 False,
                 False,
                 True,
-                "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
+                "vllm_ascend.attention.attention_v1.AscendAttentionDCPBackend",
             ),
         )
         for use_mla, use_pcp, use_dcp, expected_backend in cases:
@@ -1960,21 +2019,6 @@ class TestNPUPlatform(TestBase):
                 result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
                 self.assertEqual(result, expected_backend)
 
-    def test_get_attn_backend_cls_supports_legacy_config_without_use_dcp(self):
-        attn_selector_config = SimpleNamespace(
-            use_mla=True,
-            use_sparse=True,
-            use_pcp=True,
-        )
-
-        config = self.mock_vllm_config()
-        config.model_config.hf_text_config = SimpleNamespace(index_topk=2048)
-        config.model_config.hf_config = config.model_config.hf_text_config
-        with set_current_vllm_config(config):
-            result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
-
-        self.assertEqual(result, "vllm_ascend.attention.sfa_v1.AscendSFABackend")
-
     def test_get_attn_backend_cls_selects_sfa_pcp_backend(self):
         attn_selector_config = AttentionSelectorConfig(
             dtype=torch.float16,
@@ -1990,7 +2034,7 @@ class TestNPUPlatform(TestBase):
         config.model_config.hf_config = config.model_config.hf_text_config
         with set_current_vllm_config(config):
             result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
-        self.assertEqual(result, "vllm_ascend.attention.sfa_v1.AscendSFABackend")
+        self.assertEqual(result, "vllm_ascend.attention.sfa_v1.AscendSFAPCPBackend")
 
     def test_get_attn_backend_cls_rejects_unsupported_pcp_backend(self):
         attn_selector_config = AttentionSelectorConfig(

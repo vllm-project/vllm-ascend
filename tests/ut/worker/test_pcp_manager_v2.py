@@ -1095,3 +1095,32 @@ def test_pcp_slot_buffers_match_block_tables(slot_dtype):
     assert dummy.tolist() == [[-1, -1, -1, -1]]
     assert dummy.dtype == slot_dtype
     assert dummy.data_ptr() == buffer_ptr
+
+
+@pytest.mark.parametrize("replicated_pcp", [False, True])
+def test_target_metadata_excludes_replicated_draft_groups(replicated_pcp):
+    target_builder, draft_builder = object(), object()
+    target = SimpleNamespace(layer_names=["target.swa"], metadata_builders=[target_builder])
+    draft = SimpleNamespace(layer_names=["draft.swa"], metadata_builders=[draft_builder])
+    shared = SimpleNamespace(layer_names=["target.attn", "draft.attn"], metadata_builders=[target_builder])
+    original = [[target, draft], [shared], [draft]]
+    runner = SimpleNamespace(
+        speculator=SimpleNamespace(
+            replicated_pcp=replicated_pcp,
+            draft_attn_layer_names={"draft.swa", "draft.attn"},
+        ),
+        attn_groups=original,
+    )
+    NPUModelRunner._exclude_replicated_draft_attn_groups(runner)
+    if replicated_pcp:
+        assert [[g.layer_names for g in groups] for groups in runner.attn_groups] == [
+            [["target.swa"]],
+            [["target.attn"]],
+            [],
+        ]
+        assert runner.attn_groups[0][0].metadata_builders[0] is target_builder
+        # Speculators may retain the original list for their own capture.
+        assert original[0][1] is draft
+        assert shared.layer_names == ["target.attn", "draft.attn"]
+    else:
+        assert runner.attn_groups is original

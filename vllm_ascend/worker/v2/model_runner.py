@@ -18,6 +18,8 @@
 #
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextvars import ContextVar
+from copy import copy
 from typing import Any
 
 import numpy as np
@@ -45,6 +47,7 @@ from vllm.v1.worker.gpu.model_runner import (
     ExecuteModelState,
     GPUModelRunner,
 )
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -95,6 +98,7 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    attn_groups: list[list[AttentionGroup]]
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -289,17 +293,17 @@ class NPUModelRunner(GPUModelRunner):
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
+            self._exclude_replicated_draft_attn_groups()
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
         self.use_fia = any(
-            (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
+            issubclass(group.backend, (AscendAttentionBackend, AscendMLABackend))
             and any(layer_name not in draft_layer_names for layer_name in group.layer_names)
             for groups in self.attn_groups
             for group in groups
         )
-
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
@@ -309,6 +313,25 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
         )
         self.model_state.kvpp_runtime = self.kvpp
+
+    def _exclude_replicated_draft_attn_groups(self) -> None:
+        if self.speculator is None or not getattr(self.speculator, "replicated_pcp", False):
+            return
+        # PCP can split target requests into more rows than a PCP=1 draft
+        # builder can hold. Replicated drafts build their own global metadata;
+        # do not run their builders on the target's local segment batch.
+        draft_layers = self.speculator.draft_attn_layer_names
+        target_groups = []
+        for groups in self.attn_groups:
+            target_group = []
+            for group in groups:
+                layer_names = [name for name in group.layer_names if name not in draft_layers]
+                if layer_names:
+                    filtered = copy(group)
+                    filtered.layer_names = layer_names
+                    target_group.append(filtered)
+            target_groups.append(target_group)
+        self.attn_groups = target_groups
 
     @torch.inference_mode()
     def execute_model(
