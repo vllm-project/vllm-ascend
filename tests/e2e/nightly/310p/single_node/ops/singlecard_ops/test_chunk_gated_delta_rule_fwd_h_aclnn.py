@@ -38,6 +38,7 @@ def cpu_reference(k, w, u, g, initial_state=None, chunk_size=64):
 
     for c in range(NT):
         t0 = c * chunk_size
+        head_groups = HV // Hg
         W_chunk = w[:, :, t0 : t0 + chunk_size, :]
         ws = torch.einsum("bhik,bhkv->bhiv", W_chunk, h)
         g_chunk = g[:, :, t0 : t0 + chunk_size]
@@ -47,7 +48,9 @@ def cpu_reference(k, w, u, g, initial_state=None, chunk_size=64):
             vn = u[:, :, t0 + i, :] - ws[:, :, i, :]
             v_new[:, :, t0 + i, :] = vn
             v_update[:, :, i, :] = gi_cum.unsqueeze(-1).exp() * vn
-        K_chunk = k[:, :, t0 : t0 + chunk_size, :]
+        K_chunk = k[:, :, t0 : t0 + chunk_size, :].repeat_interleave(
+            head_groups, dim=1
+        )
         h_work = torch.einsum("bhik,bhiv->bhkv", K_chunk, v_update)
         h = h * g_chunk[:, :, -1:].unsqueeze(-1).exp() + h_work
         h_chunks.append(h.clone())
@@ -71,13 +74,14 @@ class TestChunkGatedDeltaRuleFwdH310:
         [
             (1, 1, 1, 128, 128, 128),
             (1, 2, 2, 128, 128, 128),
+            (1, 16, 32, 128, 128, 128),
         ],
     )
     def test_h_state_correctness(self, B, Hg, HV, T, K, V):
         torch.manual_seed(42)
         DTYPE = torch.float16
         k = torch.randn(B, Hg, T, K, dtype=DTYPE) * 0.1
-        w = torch.randn(B, Hg, T, K, dtype=DTYPE) * 0.1
+        w = torch.randn(B, HV, T, K, dtype=DTYPE) * 0.1
         u = torch.randn(B, HV, T, V, dtype=DTYPE) * 0.1
         g = (-torch.rand(B, HV, T) * 0.1).float()
         init = torch.randn(B, HV, K, V, dtype=DTYPE) * 0.01
@@ -98,20 +102,25 @@ class TestChunkGatedDeltaRuleFwdH310:
             ref = h_ref[c].flatten()
             npu = h_npu[0, :, c].flatten()
             cos = cosine(npu, ref)
-            assert cos >= 0.99, f"h[{c}] cos={cos:.6f} too low"
+            finite_by_head = torch.isfinite(h_npu[0, :, c]).flatten(1).all(1)
+            assert cos >= 0.99, (
+                f"h[{c}] cos={cos:.6f} too low; "
+                f"nonfinite_heads={(~finite_by_head).nonzero().flatten().tolist()}"
+            )
 
     @pytest.mark.parametrize(
         "B,Hg,HV,T,K,V",
         [
             (1, 1, 1, 128, 128, 128),
             (1, 2, 2, 128, 128, 128),
+            (1, 16, 32, 128, 128, 128),
         ],
     )
     def test_v_new_correctness(self, B, Hg, HV, T, K, V):
         torch.manual_seed(42)
         DTYPE = torch.float16
         k = torch.randn(B, Hg, T, K, dtype=DTYPE) * 0.1
-        w = torch.randn(B, Hg, T, K, dtype=DTYPE) * 0.1
+        w = torch.randn(B, HV, T, K, dtype=DTYPE) * 0.1
         u = torch.randn(B, HV, T, V, dtype=DTYPE) * 0.1
         g = (-torch.rand(B, HV, T) * 0.1).float()
         init = torch.randn(B, HV, K, V, dtype=DTYPE) * 0.01
@@ -133,7 +142,11 @@ class TestChunkGatedDeltaRuleFwdH310:
             ref = vn_ref[:, :, t0:t1].flatten()
             npu = vn_npu[:, :, t0:t1].flatten()
             cos = cosine(npu, ref)
-            assert cos >= 0.99, f"v_new chunk {c} cos={cos:.6f} too low"
+            finite_by_head = torch.isfinite(vn_npu[:, :, t0:t1]).flatten(2).all(2)
+            assert cos >= 0.99, (
+                f"v_new chunk {c} cos={cos:.6f} too low; "
+                f"nonfinite_heads={(~finite_by_head[0]).nonzero().flatten().tolist()}"
+            )
 
     def test_no_nan(self):
         torch.manual_seed(42)
