@@ -1540,8 +1540,29 @@ class KVPoolWorker:
                 # cache state across groups (see PR #9701 for rationale).
                 if invalid_block_ids:
                     if self.num_kv_cache_groups == 1:
+                        # A failed external load invalidates the whole request
+                        # load plan. Do not save recomputed KV built over a
+                        # partially loaded prefix. The scheduler still receives
+                        # invalid block IDs; the PD failure registry added by
+                        # the following transfer-lifecycle PR fences the push.
+                        leased_keys_to_release = list(
+                            dict.fromkeys([
+                                *all_group_load_keys,
+                                *leased_keys,
+                            ])
+                        )
+                        if leased_keys_to_release:
+                            self.m_store.batch_remove_lease(leased_keys_to_release)
                         with self._invalid_block_ids_lock:
                             self._invalid_block_ids.update(invalid_block_ids)
+                        request.can_save = False
+                        request.load_spec = None
+                        request.load_keys = []
+                        request.load_block_gvas_by_group_np = None
+                        request.load_block_gvas_np = None
+                        all_group_load_gvas = []
+                        all_group_load_keys = []
+                        break
                     else:
                         leased_keys_to_release = list(
                             dict.fromkeys(
