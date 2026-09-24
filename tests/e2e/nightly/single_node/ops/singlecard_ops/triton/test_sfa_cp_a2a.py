@@ -46,6 +46,7 @@ def _simulate_receive(
         pytest.param(64, 8, 512, 8, 1, 1, True, False, id="few-local-heads"),
         pytest.param(64, 32, 128, 4, 1, 1, True, True, id="dcp4-narrow-head"),
         pytest.param(64, 12, 512, 3, 1, 1, True, True, id="dcp3-combine-boundary"),
+        pytest.param(65, 12, 512, 3, 1, 1, True, True, id="partial-row-tile"),
         pytest.param(64, 4, 512, 1, 1, 1, False, False, id="dcp1-wide-small-rows"),
         pytest.param(128, 4, 512, 1, 1, 1, True, True, id="dcp1-wide-enough-rows"),
         pytest.param(64, 4, 128, 1, 1, 1, False, True, id="dcp1-narrow-combine"),
@@ -71,12 +72,21 @@ def test_a5_generalized_batching_matches_scalar_path(
     pack_batch: bool,
     combine_batch: bool | None,
 ) -> None:
-    """Check measured A5 dispatch boundaries against the scalar kernels."""
+    """Check A5 dispatch boundaries against the scalar kernels."""
     if not sfa_cp.is_950():
         pytest.skip("The batched SFA kernels are enabled only on A5")
     sfa_cp.init_device_properties_triton()
-    if sfa_cp.get_vectorcore_num() != 64:
-        pytest.skip("Dispatch boundary cases target the measured 64-vector-core A5")
+    vector_cores = sfa_cp.get_vectorcore_num()
+    # The case table describes shapes for a 64-core A5. Scale token counts so
+    # the same dispatch boundaries are exercised on other vector-core counts.
+    tail_rows = num_tokens == 65
+    num_tokens = (num_tokens * vector_cores + 63) // 64
+    if tail_rows:
+        # Keep the dedicated tail case odd after scaling: both row counts
+        # (12 * tokens for pack, 4 * tokens for combine) then have a tail.
+        num_tokens |= 1
+        assert num_tokens * num_heads % 8 != 0
+        assert num_tokens * (num_heads // dcp_size) % 8 != 0
     torch.manual_seed(2026 + num_tokens + dcp_size)
     output = torch.randn(num_tokens, num_heads, head_dim * output_stride, device="npu", dtype=torch.bfloat16)[
         ..., ::output_stride
