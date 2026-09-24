@@ -28,6 +28,7 @@ from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.draft_config_context import get_draft_config_loading_method
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -57,8 +58,13 @@ def validate_additional_config_bool(value: Any, path: str) -> bool:
         raise ValueError(f"{path} must be a boolean, got {value!r}.") from exc
 
 
-def _is_separate_draft_model_config(vllm_config: VllmConfig) -> bool:
+def _is_draft_model_config(vllm_config: VllmConfig) -> bool:
+    # DSpark and DFlash retain the target model_config while reconstructing a
+    # draft VllmConfig, so object identity alone cannot identify those paths.
     speculative_config = vllm_config.speculative_config
+    loader_method = get_draft_config_loading_method()
+    if speculative_config is not None and loader_method is not None and loader_method == speculative_config.method:
+        return True
     return (
         speculative_config is not None
         and vllm_config.model_config is speculative_config.draft_model_config
@@ -593,7 +599,7 @@ class AscendConfig:
                 )
                 self.scheduler_config.profiling_chunk_config.min_chunk = max_batched
         if (
-            not _is_separate_draft_model_config(vc)
+            not _is_draft_model_config(vc)
             and self.scheduler_config.profiling_chunk_config.enabled
             and vc.parallel_config.pipeline_parallel_size <= 1
         ):
