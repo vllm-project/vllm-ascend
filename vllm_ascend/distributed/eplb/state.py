@@ -372,8 +372,7 @@ class AscendEplbState(_eplb_state.EplbState):
                     if getattr(
                         result,
                         "is_last_result",
-                        result.layer_idx
-                        == model_state.model.num_moe_layers - 1,
+                        result.layer_idx == model_state.model.num_moe_layers - 1,
                     ):
                         model_state.rebalanced = False
                     model_state.pending_result = None
@@ -383,10 +382,7 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def _all_ranks_result_ready(self, model_state: Any) -> bool:
         """Consume results at the next shared rearrangement boundary."""
-        if (
-            self.expert_rearrangement_step
-            < self.expert_rearrangement_step_interval
-        ):
+        if self.expert_rearrangement_step < self.expert_rearrangement_step_interval:
             return False
         while model_state.pending_result is None:
             if not model_state.rebalanced:
