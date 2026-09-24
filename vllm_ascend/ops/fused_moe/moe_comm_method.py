@@ -47,100 +47,29 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 from vllm_ascend.quantization.quant_type import QuantType
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
-# Shape-qualified registry. A single process can host MoE layers with different
-# expert shapes (a target and its speculative drafter), so comm state cannot be
-# keyed by comm type alone; see _moe_config_key.
-_MoECommMethodsByConfig: dict[tuple[MoECommType | None, tuple[int, ...]], MoECommMethod] = {}
-
-_CONFIG_KEY_FIELDS = (
-    "num_experts",
-    "num_local_experts",
-    "experts_per_token",
-    "hidden_dim",
-    "intermediate_size_per_partition",
-    "ep_size",
-    "tp_size",
-    "dp_size",
-    "pcp_size",
-)
 
 
-def _moe_config_key(moe_config: FusedMoEConfig) -> tuple[int, ...]:
-    """Return the execution shape that owns mutable MoE comm state.
-
-    Everything the communication stack touches (dispatcher histograms, group
-    lists, per-rank expert placement) derives from these fields; configs that
-    agree on them can safely share one stateful implementation because layer
-    forwards are sequential.
-    """
-    return tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS)
+def _moe_config_key(moe_comm_type: MoECommType, moe_config: FusedMoEConfig) -> tuple[int, ...]:
+    """Return the execution shape that owns mutable MoE comm state."""
+    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
+    return tuple(moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
 
 
 def get_moe_comm_method(
     moe_comm_type: MoECommType | None,
     moe_config: FusedMoEConfig | None = None,
 ) -> MoECommMethod | None:
-    if moe_config is not None:
-        return _MoECommMethodsByConfig.get((moe_comm_type, _moe_config_key(moe_config)))
-    return _MoECommMethods.get(moe_comm_type)
+    return _MoECommMethods.get(_moe_config_key(moe_comm_type, moe_config))
 
 
 def setup_moe_comm_method(moe_config):
-    """Ensure the comm implementations for this config's shape exist.
-
-    Instances are deduplicated per (comm type, execution shape): all layers
-    sharing a shape share one stateful comm instance.
-    """
-    implementations: dict[MoECommType, type[MoECommMethod]]
     if moe_config.ep_size > 1:
-        implementations = {
-            MoECommType.ALLTOALL: AlltoAllCommImpl,
-            MoECommType.ALLGATHER: AllGatherCommImpl,
-            MoECommType.MC2: MC2CommImpl,
-            MoECommType.FUSED_MC2: FusedMC2CommImpl,
-        }
+        _MoECommMethods[_moe_config_key(MoECommType.ALLTOALL, moe_config)] = AlltoAllCommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.MC2, moe_config)] = MC2CommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.FUSED_MC2, moe_config)] = FusedMC2CommImpl(moe_config)
     else:
-        implementations = {MoECommType.ALLGATHER: AllGatherCommImpl}
-
-    config_key = _moe_config_key(moe_config)
-    for comm_type, implementation_cls in implementations.items():
-        cache_key = (comm_type, config_key)
-        comm_method = _MoECommMethodsByConfig.get(cache_key)
-        if comm_method is None:
-            comm_method = implementation_cls(moe_config)
-            _MoECommMethodsByConfig[cache_key] = comm_method
-        # Legacy global lookup for callers that do not own a layer config
-        # (forward-context setup, capture helpers). The last registered shape
-        # wins; layer forwards rebind explicitly via activate_moe_comm_method.
-        _MoECommMethods[comm_type] = comm_method
-
-
-def activate_moe_comm_method(
-    moe_comm_type: MoECommType | None,
-    moe_config: FusedMoEConfig,
-    current_method: MoECommMethod | None,
-) -> MoECommMethod | None:
-    """Bind the comm implementation matching the active MoE layer's shape.
-
-    The forward context publishes one ``moe_comm_method`` per step, chosen
-    before any layer runs. When a drafter and a target coexist in the process,
-    their expert shapes differ and the published instance can only match one
-    of them, so each layer rebinds its own before use (``current_method`` is
-    the value published for this step). With a single registered shape this is
-    the identity and the forward context is left untouched (mutating it inside
-    a compiled MoE forward changes 310P ModelRunner V2 graph behavior).
-    """
-    if len({key for _, key in _MoECommMethodsByConfig}) <= 1:
-        return current_method
-
-    comm_method = get_moe_comm_method(moe_comm_type, moe_config)
-    if comm_method is None:
-        setup_moe_comm_method(moe_config)
-        comm_method = get_moe_comm_method(moe_comm_type, moe_config)
-    if comm_method is None or comm_method is current_method:
-        return current_method
-    _EXTRA_CTX.moe_comm_method = comm_method
-    return comm_method
+        _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
 
 
 @dataclass

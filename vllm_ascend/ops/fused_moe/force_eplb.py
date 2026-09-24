@@ -17,10 +17,7 @@
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
-
-# Imported as a module so the attribute is resolved at call time: unit tests
-# patch ``ascend_forward_context._EXTRA_CTX`` to inject a fake context.
-from vllm_ascend import ascend_forward_context
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 
 def _build_or_get_topk(
@@ -94,22 +91,10 @@ def get_force_eplb_topk(
     topk_ids: torch.Tensor,
     num_logical_experts: int,
 ) -> torch.Tensor | None:
-    """Return deterministic round-robin ids when the policy is enabled.
-
-    Read the comm method through the extras proxy: MRV2 stores
-    ``moe_comm_method`` in the forward context's ``additional_kwargs``, so a
-    plain ``getattr`` on the context object would silently miss it and leave
-    the original (possibly degenerate) topk_ids in place.
-    """
-    try:
-        moe_comm_method = ascend_forward_context._EXTRA_CTX.moe_comm_method
-    except AssertionError:
-        # The proxy resolves through vllm's get_forward_context, which
-        # asserts when no forward context is set (e.g. unit tests outside
-        # the model runner). Degrade to a pass-through there.
-        return topk_ids
+    """Return deterministic round-robin ids when the policy is enabled."""
+    moe_comm_method = _EXTRA_CTX.moe_comm_method
     if moe_comm_method is None:
-        return topk_ids
+        return None
     top_k = int(topk_ids.shape[1])
     return _build_or_get_topk(
         moe_comm_method,

@@ -42,7 +42,7 @@ from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     FusedExpertsResult,
-    activate_moe_comm_method,
+    activate_moe_comm_method, get_moe_comm_method,
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
@@ -657,15 +657,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self.quant_method, lora_context)
 
-        # Rebind the comm method to THIS layer's expert shape before use: the
-        # context-wide instance published at forward-context setup matches only
-        # one of the shapes coexisting in the process (target vs drafter).
-        moe_comm_method = activate_moe_comm_method(
-            _EXTRA_CTX.moe_comm_type, self.moe_config, _EXTRA_CTX.moe_comm_method
-        )
-        # The forward context always publishes a comm method before any MoE
-        # layer runs; the rebind returns None only if the context had none.
-        assert moe_comm_method is not None
+        # moe_comm_method = activate_moe_comm_method(
+        #     _EXTRA_CTX.moe_comm_type, self.moe_config, _EXTRA_CTX.moe_comm_method
+        # )
+        # assert moe_comm_method is not None
+        moe_comm_method = get_moe_comm_method(_EXTRA_CTX.moe_comm_type, self.moe_config)
+        _EXTRA_CTX.moe_comm_method = moe_comm_method
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
