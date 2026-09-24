@@ -11,13 +11,17 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import (
+    is_circular_kv_cache_spec,
+    is_prefix_cacheable,
+)
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.ops.triton.block_table_scatter import scatter_block_table
 from vllm_ascend.ops.triton.compute_slot_mapping import (
     _compute_slot_mapping_kernel,
     _next_power_of_2,
     compute_slot_mapping_fused_groups,
+    pad_replayed_slot_mapping,
 )
 
 _DIRTY_SENTINEL = np.iinfo(np.int32).max
@@ -62,6 +66,11 @@ class BlockTable:
             kernel_sizes = [block_size]
             self.max_num_blocks_per_req = max_num_blocks_per_req = 1
         self.is_circular_group = kv_cache_group is not None and is_circular_kv_cache_spec(kv_cache_group.kv_cache_spec)
+        # Fixed for the group's lifetime. A bounded-replay sliding-window group
+        # opts out of prefix caching, so it is the one group that has to keep
+        # writing the replayed positions -- that write rebuilds its window.
+        # Every other group pads them.
+        self.is_prefix_cacheable = kv_cache_group is None or is_prefix_cacheable(kv_cache_group.kv_cache_spec)
 
         # If kernel_sizes is None or [0], use physical block size (no splitting)
         if kernel_sizes is None or kernel_sizes == [0]:
@@ -570,6 +579,26 @@ class MultiGroupBlockTable:
             )
             self._fused_min_block_size = min(block_table.block_size for block_table in active_block_tables)
 
+        # The replayed-slot PAD pass addresses the groups' slot mappings
+        # directly, so unlike the fused kernel above it cannot be limited to the
+        # fused configuration -- that one additionally requires DCP to be off
+        # and every group to be splittable. Built unconditionally, mamba groups
+        # aside, which are the ones the fused path skips too.
+        self._replay_slot_mapping_addrs = torch.tensor(
+            [block_table.slot_mapping.gpu.data_ptr() for block_table in active_block_tables],
+            dtype=torch.uint64,
+            device=device,
+        )
+        # Only the cacheable groups get padded. A group that opted out of prefix
+        # caching never has its KV persisted, so it has no cached copy of the
+        # replayed positions to fall back on -- and for the bounded-replay
+        # sliding-window group, writing them is what rebuilds its window.
+        self._replay_cacheable_groups = torch.tensor(
+            [group_idx for group_idx, block_table in enumerate(active_block_tables) if block_table.is_prefix_cacheable],
+            dtype=torch.int32,
+            device=device,
+        )
+
     def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
         for i, block_table in enumerate(self.block_tables):
             block_table.append_row(block_ids[i], row_idx)
@@ -624,6 +653,39 @@ class MultiGroupBlockTable:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
             else:
                 block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
+
+    def pad_replayed_slots(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        replay_start: torch.Tensor,
+        replay_window: int,
+    ) -> None:
+        """Stop the cacheable groups from rewriting replayed KV.
+
+        A request that hit a prefix cache reuses the hit's blocks, which are
+        still shared with every other request that hit the same prefix, so the
+        KV they hold must not be written again -- not because the rewritten
+        values would be wrong for this request, but because they would be
+        different from what every other sharer reads. ``replay_start`` names,
+        per request, where the replayed run begins (0 for a request that is not
+        replaying), and that run is exactly what has to be skipped: the
+        sliding-window group rebuilds it itself.
+
+        Runs after every group's slot mapping is final, so it needs to know
+        nothing about how those were computed.
+        """
+        pad_replayed_slot_mapping(
+            num_reqs,
+            query_start_loc,
+            positions,
+            replay_start,
+            self._replay_slot_mapping_addrs,
+            self._replay_cacheable_groups,
+            replay_window,
+            pad_id=PAD_SLOT_ID,
+        )
 
     def compute_slot_mapping_draft(
         self,

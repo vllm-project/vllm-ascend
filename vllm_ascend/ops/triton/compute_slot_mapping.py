@@ -392,3 +392,91 @@ def compute_slot_mapping_fused_groups(
             PARALLEL_TILES=parallel_tiles,
             BLOCK_TABLE_WINDOW_SIZE=block_table_window_size,
         )
+
+
+@triton.jit(do_not_specialize=["replay_window"])
+def _pad_replayed_slots_kernel(
+    query_start_loc_ptr,  # [num_reqs + 1], int32
+    positions_ptr,  # [num_tokens], int64
+    replay_start_ptr,  # [max_num_reqs], int32; 0 = this req does not replay
+    slot_mapping_addrs_ptr,  # [group_count], uint64: slot_mapping.gpu of each group
+    cacheable_groups_ptr,  # [NUM_GROUPS], int32: indices of the cacheable groups
+    replay_window,  # The one window every replaying group agrees on
+    PAD_ID: tl.constexpr,
+    NUM_GROUPS: tl.constexpr,
+    TILE_BLOCK_SIZE: tl.constexpr,
+):
+    """Pad the replayed positions of the cacheable groups.
+
+    A request that hits a prefix cache keeps the hit's blocks, which are still
+    shared with every other request that hit the same prefix, so their KV must
+    not be written again -- the write would not be wrong, it would be a
+    *different* value landing in a block other requests read. The replayed
+    tokens are recomputed only to rebuild the sliding-window group, whose KV
+    does not survive in the prefix cache, so that group is the one that has to
+    keep its slots.
+
+    This runs after every group's slot mapping is final, so it covers the
+    context-parallel layouts too without knowing anything about them.
+    """
+    req_idx = tl.program_id(0)
+    replay_start = tl.load(replay_start_ptr + req_idx)
+    # Guarding on the start rather than on the upper bound alone is what keeps
+    # a request that is not replaying -- whose replay_start is 0 -- from having
+    # its first window of tokens padded. A start below zero is malformed (the
+    # scheduler derives it from a hit count), and padding around it would write
+    # the window into positions that belong to this request, so it takes the
+    # same exit rather than shifting the interval left.
+    if replay_start <= 0:
+        return
+    write_end = replay_start + replay_window
+    start_idx = tl.load(query_start_loc_ptr + req_idx).to(tl.int64)
+    end_idx = tl.load(query_start_loc_ptr + req_idx + 1).to(tl.int64)
+    for i in range(start_idx, end_idx, TILE_BLOCK_SIZE):
+        offsets = i + tl.arange(0, TILE_BLOCK_SIZE)
+        mask = offsets < end_idx
+        pos = tl.load(positions_ptr + offsets, mask=mask, other=0).to(tl.int32)
+        replayed = mask & (pos >= replay_start) & (pos < write_end)
+        for group_offset in tl.static_range(NUM_GROUPS):
+            group_idx = tl.load(cacheable_groups_ptr + group_offset)
+            slot_mapping_ptr = tl.cast(
+                tl.load(slot_mapping_addrs_ptr + group_idx),
+                tl.pointer_type(tl.int32),
+            )
+            tl.store(slot_mapping_ptr + offsets, PAD_ID, mask=replayed)
+
+
+def pad_replayed_slot_mapping(
+    num_reqs,
+    query_start_loc_ptr,
+    positions_ptr,
+    replay_start_ptr,
+    slot_mapping_addrs_ptr,
+    cacheable_groups_ptr,
+    replay_window,
+    *,
+    pad_id,
+    tile_block_size: int = 1024,
+):
+    """Overwrite the replayed slots of every cacheable group with ``pad_id``.
+
+    Launched once per step that replays at all, over every request in the batch:
+    ``replay_start_ptr`` carries 0 for the requests that are not replaying, and
+    those programs return immediately. ``cacheable_groups_ptr`` empty means
+    there is nothing to pad, which is the configuration where every group opted
+    out of prefix caching.
+    """
+    num_groups = cacheable_groups_ptr.shape[0]
+    if num_reqs == 0 or num_groups == 0:
+        return
+    _pad_replayed_slots_kernel[(num_reqs,)](
+        query_start_loc_ptr,
+        positions_ptr,
+        replay_start_ptr,
+        slot_mapping_addrs_ptr,
+        cacheable_groups_ptr,
+        replay_window,
+        PAD_ID=pad_id,
+        NUM_GROUPS=num_groups,
+        TILE_BLOCK_SIZE=tile_block_size,
+    )
