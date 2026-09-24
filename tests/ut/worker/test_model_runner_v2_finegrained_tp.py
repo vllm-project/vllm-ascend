@@ -353,6 +353,10 @@ def _make_speculator(max_num_reqs=8, num_speculative_steps=1):
     spec.replicated_pcp = False
     spec.model = MagicMock()
     spec.use_local_argmax_reduction = False
+    # Set by the parent __init__; the greedy sample_draft path reads both (the
+    # estimator hook is a no-op while the estimator is None).
+    spec.enable_adaptive_verification = False
+    spec.acceptance_estimator = None
     return spec
 
 
@@ -453,26 +457,32 @@ def test_sample_draft_rejects_probabilistic_draft_sampling():
 
 
 @pytest.mark.parametrize(
-    "draft_method, bypass_sample_draft, local_argmax, match",
+    "draft_method, bypass_sample_draft, local_argmax, adaptive_verification, match",
     [
-        ("probabilistic", False, False, "probabilistic"),
+        ("probabilistic", False, False, False, "probabilistic"),
         # greedy is the default draft sampling method and stays supported
-        ("greedy", False, False, None),
+        ("greedy", False, False, False, None),
         # DSpark-style speculators (flag off) bypass sample_draft entirely
-        ("greedy", True, False, "sample_draft"),
-        ("greedy", False, True, "use_local_argmax_reduction"),
+        ("greedy", True, False, False, "sample_draft"),
+        ("greedy", False, True, False, "use_local_argmax_reduction"),
+        ("greedy", False, False, True, "enable_adaptive_verification"),
     ],
 )
-def test_speculator_init_validates_unsupported_draft_sampling(draft_method, bypass_sample_draft, local_argmax, match):
+def test_speculator_init_validates_unsupported_draft_sampling(
+    draft_method, bypass_sample_draft, local_argmax, adaptive_verification, match
+):
     """Unsupported combinations must fail at construction time, not at the
     first sampling step inside a running engine: probabilistic (gumbel writes
     fixed-size buffers), DSpark-style paths that bypass sample_draft (the row
-    alignment never runs), and local argmax (reduces over the local vocab
-    shard only, silently wrong under pure DP). Greedy stays allowed."""
+    alignment never runs), local argmax (reduces over the local vocab shard
+    only, silently wrong under pure DP), and adaptive verification (the
+    acceptance estimator sizes its kernels by the draft logit row count, which
+    the group-aligned padding inflates). Greedy stays allowed."""
     spec = _make_speculator()
     spec.speculative_config = SimpleNamespace(draft_sample_method=draft_method)
     spec._lmhead_tp_sample_draft_supported = not bypass_sample_draft
     spec.use_local_argmax_reduction = local_argmax
+    spec.enable_adaptive_verification = adaptive_verification
 
     with (
         nullcontext() if match is None else pytest.raises(NotImplementedError, match=match),
