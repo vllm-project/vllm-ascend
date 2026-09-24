@@ -22,7 +22,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 ### 3.1 Model Weight
 
 - `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp)
-- For Ascend 950DT servers, use the original [`DeepSeek-V4-Flash-0731`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) weights released by DeepSeek on Hugging Face. The Attention weights use MXFP8, while the MoE weights use MXFP4 with 4-bit weights and 8-bit activation computation (W4A8). No Ascend-specific quantization or weight conversion is required. Both the mixed-deployment example in Section 5.1 and the intra-server 1P1D example in Section 5.2.3 use two Ascend 950DT servers (96GB × 8). The mixed deployment uses four NPUs, while the 1P1D deployment assigns one server to Prefill and one server to Decode.
+- For Ascend 950DT servers, use the original [`DeepSeek-V4-Flash-0731`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) weights released by DeepSeek on Hugging Face. The Attention weights use MXFP8, while the MoE weights use MXFP4 with 4-bit weights and 8-bit activation computation (W4A8). No Ascend-specific quantization or weight conversion is required. Both the mixed-deployment example in Section 5.1 and the 1P1D example in Section 5.2.3 use two Ascend 950DT servers (96GB × 8). The mixed deployment uses four NPUs, while the 1P1D deployment assigns one server to Prefill and one server to Decode.
 
 - DeepSeek released new DeepSeek-V4-Flash-DSpark weights on July 31, 2026. Download the quantized `DeepSeek-V4-Flash-0731-w8a8` weight from [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8).
 
@@ -382,7 +382,7 @@ Key Parameter Descriptions:
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
 - `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
 - `--data-parallel-size` sets the global number of data parallel ranks, while `--tensor-parallel-size` sets the tensor parallel size within each DP rank. Configure them together according to the deployment topology and available NPUs.
-- On Ascend 950DT, DeepSeek-V4 does not currently support standalone tensor parallelism (TP-only). TP partitions only the `wq_b`, `wo_a`, and `wo_b` linear layers, so data parallelism is recommended. When TP is required, use it together with DSA-CP (`enable_dsa_cp`), as in the two-server DeepSeek-V4-Pro mixed deployment.
+- On Ascend 950DT, DeepSeek-V4 does not currently support standalone tensor parallelism (TP-only). TP partitions only the `wq_b`, `wo_a`, and `wo_b` linear layers, so data parallelism is recommended. When TP is required, use it together with DSA-CP (`enable_dsa_cp`).
 - `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--block-size` sets the KV cache block size. To enable the experimental 4k prefix cache hit support, change it from `128` to `32`.
@@ -1150,8 +1150,8 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
     export HCCL_ALGO=level0:fullmesh
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=204
-    export HCCL_CONNECT_TIMEOUT=120
+    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_CONNECT_TIMEOUT=1200
     export HCCL_BUFFSIZE=512
     export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
     export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
@@ -1162,13 +1162,13 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-    vllm serve /mnt/share/weight/DeepSeek-V4-Flash-0731  \
+    vllm serve /root/.cache/DeepSeek-V4-Flash-0731  \
         --host $local_ip \
         --port 8000 \
         --tensor-parallel-size 8 \
         --data-parallel-address $local_ip \
         --data-parallel-rpc-port 12325 \
-        --max_model_len 1048576 \
+        --max-model-len 1048576 \
         --max-num-batched-tokens 8192 \
         --served-model-name dsv \
         --gpu-memory-utilization 0.85 \
@@ -1177,7 +1177,7 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
         --max-num-seqs 8 \
         --block-size 32 \
         --enable-prefix-caching \
-        --api_server_count 1 \
+        --api-server-count 1 \
         --tokenizer-mode deepseek_v4 \
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
