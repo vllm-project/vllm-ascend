@@ -22,7 +22,7 @@ on:
     branches:
       - 'main'
       - 'releases/*'
-    types: [ labeled ]
+    types: [ synchronize ]
   workflow_dispatch:
     inputs:
       tag:
