@@ -31,7 +31,7 @@ from typing import Any, Optional
 import regex as re
 import torch
 from transformers import PretrainedConfig
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import LinearBase
@@ -43,6 +43,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
+    C8_MXFP_KV_CACHE_DTYPE,
     calc_split_factor,
 )
 
@@ -361,6 +362,16 @@ class AscendModelSlimConfig(QuantizationConfig):
     quantized using the ModelSlim tool.
     """
 
+    # Assigned in _add_kvcache_quant_metadata; declared here so the types
+    # resolve regardless of method order (get_cache_scale_mapper reads and
+    # conditionally rewrites enable_fa_quant before the assignment site).
+    enable_fa_quant: bool
+    kvcache_quant_layers: list[int]
+    enable_indexer_quant: bool
+    indexer_quant_layers: list[int]
+    enable_c8_quant: bool
+    c8_quant_layers: list[int]
+
     def __init__(self, quant_config: dict[str, Any] | None = None):
         super().__init__()
         # This will be updated by upstream vLLM with model-specific mappings.
@@ -450,6 +461,22 @@ class AscendModelSlimConfig(QuantizationConfig):
         """Upstream use staticmethod, but we need to use instance attribute"""
         suffix_map = {}
         regex_map = {}
+        if self._has_mxfp_c8_recipe and not self.enable_mxfp_c8_quant:
+            logger.warning_once(
+                "[quantization] The checkpoint carries an MXFP8 KV recipe, but "
+                "--kv-cache-dtype is not 'mxfp8'; the recipe is not enabled. "
+                "Pass --kv-cache-dtype mxfp8 to serve with C8-MXFP."
+            )
+        if self.enable_mxfp_c8_quant and self.enable_fa_quant:
+            # A checkpoint can carry fa_quant_type alongside an MXFP8 KV
+            # recipe; FAKQuant would win every shared dispatch and rename
+            # fa_v.scale into an MLA submodule this dense model does not
+            # have, silently dropping the scale. Stand FAKQuant down.
+            logger.warning_once(
+                "[quantization] fa_quant_type=%s is declared alongside an MXFP8 KV cache; ignoring FAKQuant.",
+                self.quant_description.get("fa_quant_type", ""),
+            )
+            self.enable_fa_quant = False
         if self.enable_c8_quant:
             suffix_map.update(
                 {
@@ -461,23 +488,9 @@ class AscendModelSlimConfig(QuantizationConfig):
             )
         if self.enable_mxfp_c8_quant:
             # MXFP C8 quantizes K dynamically, but V uses the static E8M0
-            # per-channel scale stored in the ModelSlim checkpoint.
-            suffix_map[".v_proj.kv_cache_scale"] = ".attn.v_cache_scale"
-            # Newer ModelSlim recipes name it v_proj.v_scale. vLLM's own
-            # cache-scale regex has already rewritten that to attn.v_scale by
-            # the time suffixes run (WeightsMapper._map_name applies regexes
-            # first), so catch it under the rewritten name or it lands on a
-            # parameter this scheme never registers and is silently dropped
-            # (the vendored-QFA bring-up served with the 127 fallback for a
-            # whole run because of this).
-            suffix_map[".attn.v_scale"] = ".attn.v_cache_scale"
-            # And the newest ones name it fa_v.scale, reusing FAKQuant's key for
-            # a different recipe. Safe to hang on the raw name: no regex in
-            # either mapper rewrites it once FAKQuant has stood down.
+            # per-channel scale stored in the ModelSlim checkpoint
+            # (fa_v.scale, reusing FAKQuant's key for a different recipe).
             suffix_map[".fa_v.scale"] = ".attn.v_cache_scale"
-            # The offset comes along with it. MXFP8 is symmetric so it has to
-            # be zero; loading it is how that gets checked rather than assumed.
-            suffix_map[".fa_v.offset"] = ".attn.v_cache_offset"
         if self.enable_fa_quant:
             # Some models (e.g., Kimi-K2.6) have a nested module and call AutoWeightsLoader twice, to avoid double
             # mapping, we use regex mapping.
@@ -706,7 +719,14 @@ class AscendModelSlimConfig(QuantizationConfig):
 
                 scheme = AscendC8KVCacheAttentionMethod(self.quant_description, prefix)
                 logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
-            elif self.enable_mxfp_c8_quant and self._is_c8_mxfp_kv_layer(layer):
+            elif self.enable_mxfp_c8_quant and self._is_full_attention_layer(layer):
+                if self._has_mxfp_c8_recipe is False:
+                    logger.warning_once(
+                        "[quantization] --kv-cache-dtype mxfp8 is set but the checkpoint "
+                        "carries no MXFP8 KV recipe; V scales fall back to the neutral default."
+                    )
+                else:
+                    logger.info_once("[quantization] C8 MXFP8 KV cache enabled (--kv-cache-dtype mxfp8).")
                 from ..methods.kv_cache.mxfp_c8 import AscendC8MXFPKVCacheAttentionMethod
 
                 scheme = AscendC8MXFPKVCacheAttentionMethod(self.quant_description, prefix)
@@ -775,7 +795,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         return False
 
     @staticmethod
-    def _is_c8_mxfp_kv_layer(layer: torch.nn.Module) -> bool:
+    def _is_full_attention_layer(layer: torch.nn.Module) -> bool:
         """C8-MXFP only applies to standard full-attention ``Attention``
         layers. Other AttentionLayerBase subclasses (GDN/Mamba, encoder
         attention, ...) must not get the MXFP KV-cache method: they have no
@@ -784,6 +804,43 @@ class AscendModelSlimConfig(QuantizationConfig):
         from vllm.model_executor.layers.attention import Attention
 
         return isinstance(layer, Attention)
+
+    @property
+    def enable_mxfp_c8_quant(self) -> bool:
+        """C8-MXFP is enabled with ``--kv-cache-dtype mxfp8``.
+
+        A Model-config-time query: returns False while the engine config is
+        still being assembled or absent (e.g. unit tests without a
+        ``set_current_vllm_config`` context), so no quant-config constructor
+        or mapper may take a C8 decision through this switch.
+        """
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            return False
+        return vllm_config.cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+
+    @property
+    def _has_mxfp_c8_recipe(self) -> bool:
+        """Whether the checkpoint carries an MXFP8 KV recipe (model-wide
+        ``kv_cache_type`` or a per-layer ``quant_type``). This is NOT the
+        switch -- ``--kv-cache-dtype mxfp8`` is; the recipe only decides
+        whether the fa_v.scale weights are expected."""
+        kv_quant_type = self.quant_description.get("kv_cache_type", "")
+        return kv_quant_type == _MXFP_C8_KV_CACHE_TYPE or any(
+            key.endswith(_MXFP_C8_LAYER_QUANT_TYPE_SUFFIX) and value in _MXFP_C8_LAYER_QUANT_TYPES
+            for key, value in self.quant_description.items()
+        )
+
+    @property
+    def _ignore_unexpected_suffixes(self) -> tuple[str, ...]:
+        base = QuantizationConfig._ignore_unexpected_suffixes
+        if self.enable_mxfp_c8_quant:
+            # FAKQuant parameters that MXFP8 has no home for: K and Q are
+            # quantized dynamically at runtime, so their checkpoint scales
+            # have no parameter to land on. Without these AutoWeightsLoader
+            # rejects the checkpoint outright.
+            return (*base, *_MXFP_C8_UNUSED_FA_SUFFIXES)
+        return base
 
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
         # Note: C8-MXFP models never reach this hook — its only caller in
@@ -991,29 +1048,6 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.enable_indexer_quant = indexer_quant_type != ""
         self.indexer_quant_layers = []
         kv_quant_type = self.quant_description.get("kv_cache_type", "")
-        self.enable_mxfp_c8_quant = kv_quant_type == _MXFP_C8_KV_CACHE_TYPE or any(
-            key.endswith(_MXFP_C8_LAYER_QUANT_TYPE_SUFFIX) and value in _MXFP_C8_LAYER_QUANT_TYPES
-            for key, value in self.quant_description.items()
-        )
-        if self.enable_mxfp_c8_quant:
-            logger.info_once("[quantization] Enable C8 MXFP8 quantization!")
-            self._ignore_unexpected_suffixes = (
-                *QuantizationConfig._ignore_unexpected_suffixes,
-                *_MXFP_C8_UNUSED_FA_SUFFIXES,
-            )
-            if self.enable_fa_quant:
-                # A checkpoint can carry the top-level fa_quant_type while the
-                # per-layer quant_type says MXFP8; the two are alternative KV
-                # cache recipes for the same layer, and FAKQuant wins every
-                # dispatch they share -- get_quant_method tests it first, and
-                # its weight mapping renames fa_v.scale into an MLA submodule
-                # this dense model does not have, so the scale would be
-                # silently dropped. Stand FAKQuant down and let MXFP8 own it.
-                logger.warning_once(
-                    "[quantization] fa_quant_type=%s is declared alongside an MXFP8 KV cache; ignoring FAKQuant.",
-                    fa_quant_type,
-                )
-                self.enable_fa_quant = False
         self.enable_c8_quant = kv_quant_type == "C8"
         self.c8_quant_layers = []
         if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant:
