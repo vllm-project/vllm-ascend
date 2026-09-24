@@ -428,6 +428,12 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
         worker.tp_rank = 2
         self.assertEqual(worker._get_remote_rank("req-symmetric"), [2])
 
+        # Multi-group OOR still uses decode-group 0 (not modulo / other groups).
+        worker._get_remote_ranks_for_req = MagicMock(return_value=[[10], [11]])
+        worker.kv_role = "kv_producer"
+        worker.tp_rank = 5
+        self.assertEqual(worker._get_remote_rank("req-multi-oor"), [10])
+
     def test_start_load_kv_replica_routing_and_completion(self):
         cases = [
             # PCP, P-TP, D-TP, P-DP rank, Mamba receive branch.
