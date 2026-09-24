@@ -139,6 +139,11 @@ class ReqMeta:
     # (e.g. 1024-token full-attention blocks next to a 128-token sliding
     # window group), so the scalar remote_block_size is not enough to expand
     # block ids on the receiver side. Empty tuple = legacy metadata.
+    # Units: entries are tokens per remote block id (block_size *
+    # compress_ratio for compressed MLA-like groups) — the same unit the
+    # per-group block ids are counted in. The scalar remote_block_size is
+    # the producer's physical max in logical block units and only serves as
+    # a fallback for legacy/mixed metadata.
     remote_block_sizes: tuple[int, ...] = ()
     local_full_block_ids: BlockIds = tuple()
     do_virtual: bool = False
@@ -1750,26 +1755,28 @@ class MooncakeConnectorScheduler:
         init_ascend_config(vllm_config)
         self.ascend_config = get_ascend_config()
         self.block_size = vllm_config.cache_config.block_size
-        # [dspark-fix] P2P meta 的 remote_block_size 必须是物理 KV 块单位。
-        # hybrid(Mamba) 布局下物理块统一为 lcm (本机 1024), 而
-        # cache_config.block_size 在 dspark 的 P 侧 EngineCore 进程会停留在
-        # CLI 值 128, 直接发射会让 D 侧 kernel 展开断言
-        # (128 not divisible by 1024)。取 kv_cache_config 各组 spec 的
-        # 物理块大小最大值, 只升不降; 布局一致时等于 self.block_size
-        # (MTP 等已验证路径不变)。
+        # The P2P meta remote_block_size must be in physical KV block units.
+        # Under a hybrid (Mamba) layout the physical block is unified to the
+        # lcm of the page sizes, while cache_config.block_size lags at the
+        # CLI value in the P-side EngineCore process; emitting it directly
+        # trips the D-side kernel-expansion assertion (128 not divisible by
+        # 1024). Take the max physical block size across the kv_cache_config
+        # group specs, only ever raising, never lowering; when the layout is
+        # consistent it equals self.block_size (verified paths such as MTP
+        # are unchanged).
         spec_block_sizes = [
-            bs
+            spec.block_size
             for group in kv_cache_config.kv_cache_groups
             for spec in self._get_group_unique_specs(group)
-            if isinstance((bs := getattr(spec, "block_size", None)), int)
+            if isinstance(getattr(spec, "block_size", None), int)
         ]
         self.transfer_block_size = max([self.block_size, *spec_block_sizes])
         if self.transfer_block_size != self.block_size:
             logger.warning(
-                "[dspark-fix] pid=%s transfer block_size aligned %d -> %d (physical kv spec)",
-                os.getpid(),
+                "Mooncake transfer block size aligned %d -> %d (physical kv spec), pid=%s",
                 self.block_size,
                 self.transfer_block_size,
+                os.getpid(),
             )
         self.engine_id = engine_id
         self.local_ip = get_ip()
@@ -2937,8 +2944,8 @@ class MooncakeConnectorWorker:
                 # different page sizes for it). Keep the historical scalar
                 # behavior instead of failing the transfer.
                 logger.warning(
-                    "[kv-layout] group %s (%s) reports physical block size %s, which does not tile the local "
-                    "kernel size %s (local_scale=%s, scalar=%s); falling back to the scalar",
+                    "Mooncake consumer group %s (%s) reports remote physical block size %s, which does not tile the "
+                    "local kernel size %s (local_scale=%s, scalar=%s); falling back to the scalar",
                     kv_cache_group_id,
                     group_spec.get("kv_cache_spec_type"),
                     group_remote_size,
