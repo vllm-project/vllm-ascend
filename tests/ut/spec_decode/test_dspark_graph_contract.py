@@ -16,11 +16,14 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpec
 
 
 class _BackendA:
-    pass
+    @staticmethod
+    def get_impl_cls():
+        return object
 
 
 def _speculator(**attributes):
     speculator = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    speculator.attn_architecture = None
     for name, value in attributes.items():
         setattr(speculator, name, value)
     return speculator
@@ -42,6 +45,7 @@ def test_set_attn_preserves_cache_group_order(monkeypatch):
     def parent_set_attn(self, *_args):
         assert active_context == [draft_config]
         self._context_slot_mappings = torch.zeros(2, dtype=torch.int64)
+        self.attn_groups = [[SimpleNamespace(backend=_BackendA)]]
 
     def get_layers(config, layer_type, names):
         assert active_context == [draft_config]
@@ -147,6 +151,8 @@ def test_dispatcher_pads_uniform_draft_descriptors(query_count):
     manager._candidates = {}
     manager._capture_descs = {}
     manager._graphs_captured = True
+    # vLLM #51700 added ubatch_runner to the cudagraph manager.
+    manager.ubatch_runner = None
     manager._init_candidates()
 
     for num_reqs in (1, 2, 3, 4, 8, 16):

@@ -16,6 +16,7 @@
 #
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -76,6 +77,34 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.model_config.get_total_num_kv_heads.return_value = 1
     config.model_config.get_num_layers.return_value = 2
     return config
+
+
+@pytest.mark.parametrize("num_speculative_blocks", [None, 0, 3])
+def test_mooncake_layerwise_accepts_aligned_recurrent_state(num_speculative_blocks):
+    config = make_config(extra_config={"backend": "mooncake"})
+    groups = [
+        KVCacheGroupSpec(
+            ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        )
+    ]
+    if num_speculative_blocks is not None:
+        groups.append(
+            KVCacheGroupSpec(
+                ["layer.1"],
+                MambaSpec(
+                    shapes=((4,),),
+                    dtypes=(torch.float32,),
+                    block_size=16,
+                    mamba_cache_mode="align",
+                    num_speculative_blocks=num_speculative_blocks,
+                ),
+            )
+        )
+    kv_cache_config = MagicMock(kv_cache_groups=groups)
+    scheduler = KVPoolScheduler(config, use_layerwise=True, kv_cache_config=kv_cache_config)
+    assert scheduler.num_speculative_blocks_by_group == (
+        {} if num_speculative_blocks is None else {1: num_speculative_blocks}
+    )
 
 
 class TestGetZmqRpcPathLookup(unittest.TestCase):
@@ -1001,9 +1030,11 @@ class TestKVPoolSchedulerGetLayerwiseHitTokens(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def _make_scheduler(self, mock_client_cls):
         # memcache backend makes the constructor resolve the real protocol
-        # module; use_layerwise stays False so the test keeps exercising
-        # the query_start_block offset math it was built around.
-        return KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=False)
+        # module and binds the key layout. Disable layerwise after binding so
+        # this focused test still exercises the query_start_block offset math.
+        scheduler = KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=True)
+        scheduler.use_layerwise = False
+        return scheduler
 
     def test_layerwise_hit_tokens(self):
         cases = [
@@ -1167,10 +1198,16 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def _make_scheduler(self, mock_client_cls):
-        scheduler = KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=True)
-        scheduler.cache_coordinator = self._make_coordinator()
-        scheduler.grouped_block_size = [16, 16]
-        scheduler.kv_cache_group_ids = [0, 1]
+        coordinator = self._make_coordinator()
+        # Layout identity is bound during construction, just as in production.
+        config = make_config(extra_config={"backend": "memcache"})
+        config.scheduler_config.disable_hybrid_kv_cache_manager = False
+        with patch.object(KVPoolScheduler, "_build_cache_coordinator", return_value=coordinator):
+            scheduler = KVPoolScheduler(
+                config,
+                use_layerwise=True,
+                kv_cache_config=SimpleNamespace(kv_cache_groups=coordinator.kv_cache_groups),
+            )
         return scheduler
 
     def _stub_pool(self, scheduler, num_blocks: int, pool_layout: dict[int, list[int]]):

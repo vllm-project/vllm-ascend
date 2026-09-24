@@ -545,10 +545,10 @@ class DeepseekV4Attention(nn.Module):
         self.compress_ratio = get_dsv4_compress_ratio(config, config_layer_idx)
 
         if self.compress_ratio > 1:
-            config.rope_parameters["rope_theta"] = config.compress_rope_theta
+            rope_theta = config.compress_rope_theta
             rope_groups = ["default", f"c{self.compress_ratio}"]
         else:
-            config.rope_parameters["rope_theta"] = config.rope_theta
+            rope_theta = config.rope_theta
             rope_groups = ["default"]
         self.rotary_emb = ComplexExpRotaryEmbedding(
             vllm_config=vllm_config,
@@ -558,7 +558,7 @@ class DeepseekV4Attention(nn.Module):
             max_position_embeddings=max_position_embeddings,
             is_neox_style=False,
             scaling_factor=config.rope_parameters["factor"],
-            base=config.rope_parameters["rope_theta"],
+            base=rope_theta,
             beta_fast=config.rope_parameters["beta_fast"],
             beta_slow=config.rope_parameters["beta_slow"],
             rope_groups=rope_groups,
@@ -880,19 +880,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # permanently cost max_num_batched_tokens * hc_dim per rank.
         # Aligned with upstream DeepSeekV4 (see vllm PR #50312).
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
+        self._needs_mtp_hidden_states = bool(
+            get_pp_group().is_last_rank
+            and spec_config is not None
+            and (spec_config.use_eagle() or spec_config.uses_draft_model())
         )
-        self._mtp_hidden_buffer = (
-            torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                hc_dim,
-                dtype=vllm_config.model_config.dtype,
-                device=self.device,
-            )
-            if get_pp_group().is_last_rank and needs_mtp_hidden_states
-            else None
+        self._mtp_buffer_shape = (
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            hc_dim,
         )
+        self._mtp_buffer_dtype = vllm_config.model_config.dtype
+        self._mtp_hidden_buffer: torch.Tensor | None = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -987,7 +985,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        if self._mtp_hidden_buffer is not None:
+        if self._needs_mtp_hidden_states:
+            if self._mtp_hidden_buffer is None:
+                self._mtp_hidden_buffer = torch.empty(
+                    self._mtp_buffer_shape,
+                    dtype=self._mtp_buffer_dtype,
+                    device=self.device,
+                )
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 

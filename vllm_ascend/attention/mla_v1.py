@@ -1,5 +1,6 @@
+from copy import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -9,6 +10,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_pcp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
     MLACommonMetadataBuilder,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -69,6 +71,9 @@ if TYPE_CHECKING:
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
+# Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
+TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
+
 
 def _npu_mla_prolog_v3_k3(**kwargs):
     """Call the isolated K3 MLA prolog with optional RoPE inputs omitted."""
@@ -115,6 +120,20 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
+
+
+class AscendMLAAttention(MLAAttention):
+    """Ascend ``MLAAttention`` layer.
+
+    Upstream gates PCP+DCP on the layer ``supports_pcp_dcp`` ClassVar (default
+    False) inside ``__init__``, so the Ascend opt-in must live on the class
+    (mirroring upstream ``DeepseekV32Attention``) rather than being assigned
+    onto the shared upstream ``MLAAttention``. PCP+DCP is implemented by the
+    Ascend attention impls (AscendMlaDCPImpl / AscendSFAPCPDCPImpl) selected
+    by the Ascend backends.
+    """
+
+    supports_pcp_dcp: ClassVar[bool] = True
 
 
 @dataclass
@@ -742,6 +761,14 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
         return decode_metadata
 
+    def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata):
+        capture_metadata = copy(common_attn_metadata)
+        if capture_metadata.attn_state is None:
+            capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        if self.dcp_enabled and capture_metadata.is_prefilling is None:
+            capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
+        return super().build_for_cudagraph_capture(capture_metadata)
+
     def build_for_graph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
@@ -986,18 +1013,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         return x
 
     def _v_up_proj_batch_major(self, x: torch.Tensor) -> torch.Tensor:
-        """Project a batch-major partial-attention result.
-
-        The normal MLA kernel returns head-major output. Distributed attention
-        merges partial outputs into batch-major layout, so it only needs this
-        small layout adapter instead of replacing the projection itself.
-        """
-        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-        x = torch.bmm(x, self.W_UV)
-        return x.transpose(0, 1).reshape(
-            -1,
-            self.num_heads * self.v_head_dim,
-        )
+        """Keep the DCP result batch-major and fuse both BMM permutations."""
+        x = x.view(-1, self.num_heads, self.kv_lora_rank)
+        # The operator's batch dimension is num_heads, not the token count.
+        if 1 <= self.num_heads * self.kv_lora_rank < TRANSPOSE_BMM_MAX_SUPPORTED_DIM:
+            x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
+        else:
+            x = torch.bmm(x.transpose(0, 1), self.W_UV).transpose(0, 1)
+        return x.reshape(-1, self.num_heads * self.v_head_dim)
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
@@ -1060,9 +1083,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
             self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
         self.mlapo_W_UK_T = self.W_UK_T
-
-        # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
-        # self.W_UV = maybe_trans_nz(self.W_UV)
 
         if self.enable_mlapo:
             layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
@@ -1649,14 +1669,23 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         attn_output_shape: tuple | None = None
         if (
-            attn_metadata.attn_state
-            in [
-                AscendAttentionState.SpecDecoding,
-                AscendAttentionState.ChunkedPrefill,
-                AscendAttentionState.DecodeOnly,
-                AscendAttentionState.PrefillNoCache,  # for extremely short prefills
-            ]
-            and self.speculative_config is not None
+            (
+                attn_metadata.attn_state
+                in [
+                    AscendAttentionState.SpecDecoding,
+                    AscendAttentionState.ChunkedPrefill,
+                    AscendAttentionState.DecodeOnly,
+                    AscendAttentionState.PrefillNoCache,  # for extremely short prefills
+                ]
+                and self.speculative_config is not None
+            )
+            # vLLM main (#56181) restructured the draft decode metadata flow;
+            # the draft decode graph capture then records a non-TND layout,
+            # while replay still passes cumulative actual_seq_lengths_q. Force
+            # TND for the draft (its metadata uses cumulative lengths). Use the
+            # forward-context flag, not self.is_draft_model: the draft MLA impl
+            # shares the target's vllm_config, so runner_type is "generate".
+            or _EXTRA_CTX.is_draft_model
         ):
             # The right part layout indicates the layout of the attention
             # output. It is set to NTD to avoid the need for a transpose

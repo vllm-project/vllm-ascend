@@ -57,6 +57,10 @@ class HardwareCapability(Enum):
     ATB_WARMUP = auto()
     # Register fake/meta implementations for the custom BGMV and SGMV LoRA ops.
     BGMV_SGMV_META_REGISTRATION = auto()
+    # Stride-aware scatter kernel for paged cache writes (A2/A3 ABI).
+    SCATTER_ND_CACHE_STORE = auto()
+    # CANN ScatterPaCache for contiguous paged caches (A5 ABI).
+    SCATTER_PA_CACHE_STORE = auto()
     # Allow the CANN MegaMoe fused-MC2 path when its model, EP, and config checks pass.
     CANN_MEGAMOE = auto()
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
@@ -103,9 +107,6 @@ class HardwareCapability(Enum):
     MLA_DECODE_PROLOG_WITHOUT_ROPE = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
-    # Allow MiniMax-M3 prefill sparse attention to use the KV-gather-Q path;
-    # A3 can fall back when its vendor Split-KV package is unavailable.
-    MINIMAX_M3_PREFILL_KV_GATHER_Q = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
     MC2_FULLMESH_V2_COMM = auto()
     # Accept hierarchical MC2 communication, subject to its expert-count constraints.
@@ -114,6 +115,9 @@ class HardwareCapability(Enum):
     MOE_DISPATCH_EXTRA_ARGS = auto()
     # Pass shared-expert, expert-scale, quant-mode, and output-dtype metadata to MoE dispatch.
     MOE_DISPATCH_SHARED_EXPERT_ARGS = auto()
+    # Route DeepSeek-V4 vision and hash rows through the fused
+    # ``moe_gating_top_k_hash`` ABI with ``bias_vl`` and image sentinels.
+    MOE_GATING_TOP_K_HASH_VISION = auto()
     # Allow the extended NPU graph backend; static-kernel mode depends on this contract.
     NPUGRAPH_EX = auto()
     # Use ``torch_npu.npu_top_k_top_p`` for sampling instead of the PyTorch fallback.
@@ -122,8 +126,6 @@ class HardwareCapability(Enum):
     PAGED_ATTENTION = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
-    # Apply the temporary reduced ACL-graph capture-size set required by affected drivers.
-    REDUCED_CUDAGRAPH_CAPTURE_SIZES = auto()
     # Import and register the compiled vLLM-Ascend custom-op library at runtime.
     # This is independent of whether custom ops are enabled by default.
     RUNTIME_CUSTOM_OPS = auto()
@@ -235,9 +237,11 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
         HardwareCapability.MC2_HIERARCHY_COMM,
+        HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
+        HardwareCapability.SCATTER_ND_CACHE_STORE,
         HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER,
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
@@ -246,7 +250,6 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.MC2_FULLMESH_V2_COMM,
-    HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
@@ -316,6 +319,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=frozenset(
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
+                    HardwareCapability.SCATTER_PA_CACHE_STORE,
                     HardwareCapability.BGMV_SGMV_META_REGISTRATION,
                     HardwareCapability.CANN_MEGAMOE,
                     HardwareCapability.CANN_MEGAMOE_MXFP,
@@ -332,11 +336,9 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.LORA_CUSTOM_OPS,
                     HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
-                    HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.NPUGRAPH_EX,
-                    HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,
                     HardwareCapability.SWIGLU_OAI_MX_QUANT,

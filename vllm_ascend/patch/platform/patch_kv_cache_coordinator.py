@@ -33,24 +33,38 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
-from vllm_ascend.utils import vllm_version_is
-
-USE_MULTI_GROUPS_KV_CACHE = True
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
 
-def _select_kv_token_budget(
-    max_model_len: int,
-    max_in_flight_tokens: int | None,
-    max_num_batched_tokens: int | None,
-) -> int:
-    token_budget = max_in_flight_tokens
-    return token_budget if token_budget is not None else max_model_len
+def _skips_eagle_block_drop(kv_transfer_config) -> bool:
+    """Whether the EAGLE last-block drop must be suppressed on this process.
+
+    Suppressed for a pure PD prefill producer (``is_kv_producer`` and not
+    ``is_kv_consumer``; ``getattr`` fallbacks keep the check working with
+    partial config doubles in unit tests and across vLLM revisions) and for
+    a standalone instance (``kv_transfer_config is None``). A standalone
+    instance has no connector: ``num_external_computed_tokens`` is always
+    zero and every content-hash match comes from verified local prompt
+    blocks, so the drop only erases hit length - on hybrid mamba-align
+    models with a fine ``prefix_match_unit`` it trims the full-attention
+    hit below the mamba partial-tail entry and collapses the reconciled
+    hybrid hit to 0 (the single-instance counterpart of the P-side kill
+    band). Consumers and ``kv_both`` instances keep upstream behavior: they
+    receive external loads whose verifier window the drop protects.
+    """
+    return kv_transfer_config is None or (
+        getattr(kv_transfer_config, "is_kv_producer", False)
+        and not getattr(kv_transfer_config, "is_kv_consumer", False)
+    )
+
+
+def _select_kv_token_budget(max_model_len: int, max_in_flight_tokens: int | None) -> int:
+    return max_in_flight_tokens if max_in_flight_tokens is not None else max_model_len
 
 
 def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
-    if getattr(kv_cache_spec, "model_version", None) == "deepseek_v4":
+    if getattr(kv_cache_spec, "model_version", None) in {"deepseek_v4", "deepseek_v41"}:
         return True
 
     nested_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
@@ -62,7 +76,7 @@ def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
     elif not isinstance(nested_specs, (list, tuple, set)):
         return False
 
-    return any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in nested_specs)
+    return any(getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41"} for spec in nested_specs)
 
 
 def _is_deepseek_v4_kv_cache_config(kv_cache_config: KVCacheConfig) -> bool:
@@ -99,9 +113,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
         max_in_flight_tokens: int | None = None,
-        max_num_batched_tokens: int | None = None,
         scheduler_block_size: int | None = None,
         num_prefill_lookahead: int = 0,
+        allow_partial_hash_hits: bool = True,
     ):
         # Keep pcp_world_size in this patched constructor for compatibility
         # with the upstream coordinator interface. PCP is rejected by the platform.
@@ -113,12 +127,14 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
+        # vLLM main (#54736) added allow_partial_hash_hits to the upstream
+        # coordinator interface (fine-grained hybrid prefix hits).
+        self.allow_partial_hash_hits = allow_partial_hash_hits
         # Fall back to `max_model_len` when unset so the recycling-aware
         # admission cap (vLLM PR #40946) collapses to the prior uncapped
         # behavior. The scheduler always supplies the real value at runtime.
-        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
         self.max_in_flight_tokens = token_budget
-        self.max_num_batched_tokens = token_budget
         self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
         validate_retention_interval = getattr(
             vllm_kv_cache_coordinator,
@@ -143,9 +159,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.eagle_group_ids: set[int] = {  # type: ignore[no-redef]
             i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
         }
-        # Conservatively fall back to flag all groups when no group is flagged.
+        # Fall back to flagging only full-attention groups when no group is
+        # flagged. Mamba/GDN state hits do not use the eagle drop (a draft
+        # model has no mamba layers), and flagging mamba groups truncates
+        # cached state writes, collapsing hybrid prefix-cache hits to 0.
         if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+            self.eagle_group_ids = {
+                i
+                for i, g in enumerate(kv_cache_config.kv_cache_groups)
+                if isinstance(g.kv_cache_spec, FullAttentionSpec)
+            }
 
         extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
         extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
@@ -164,7 +187,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
         # vLLM #53614 aligns exported Mamba checkpoints with EAGLE replay.
-        if use_eagle and not vllm_version_is("0.29.0"):
+        if use_eagle:
             for manager in self.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
@@ -202,6 +225,23 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             mgr.cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
 
         self.use_eagle = use_eagle
+        # Roles are derived here, where they are used, from the kv-transfer
+        # config attached by the ``get_kv_cache_config_from_groups`` builder
+        # in ``patch_kv_cache_utils`` (``KVCacheConfig`` has no native field;
+        # the attach survives the scheduler-side deepcopy and is dropped by
+        # worker pickle IPC, which never reads it). Configs built without it
+        # (e.g. unit tests) read as standalone (``kv_transfer_config is
+        # None``).
+        #
+        # A PD prefill producer only schedules fresh-request prefills;
+        # every content-hash block it can match is a verified prompt block
+        # (draft/lookahead tokens live in the request-private tail, whose
+        # hash can never match another request). The EAGLE last-block drop
+        # is therefore never needed on the producer, and with hybrid
+        # mamba-align pages (1536 tokens) it erases the whole shared prefix
+        # of typical ~2K prompts, pinning P-side prefix hits to 0.
+        kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
+        self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:
@@ -360,7 +400,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     curr_hit_length = min(curr_hit_length, hit_length_by_group[first_group_id])
                     continue
 
-                drop_eagle_block = use_eagle and idx not in eagle_verified
+                drop_eagle_block = use_eagle and idx not in eagle_verified and not self.skips_eagle_block_drop
 
                 _max_length = curr_hit_length
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
@@ -422,6 +462,35 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         cache_hit_blocks = tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group)
         return cache_hit_blocks, hit_length, longest_hit_length - hit_length
 
+    def find_longest_cache_hit_per_group(
+        self,
+        block_hashes: list[BlockHash],
+        max_cache_hit_length: int,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
+        # PD + hybrid connector path. Skip the EAGLE drop on the prefill
+        # producer and on standalone instances (see
+        # ``self.skips_eagle_block_drop``): matched content blocks are
+        # always verified prompt blocks there.
+        num_groups = len(self.kv_cache_config.kv_cache_groups)
+        hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
+        hit_lengths: list[int] = [0] * num_groups
+        for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
+            blocks, group_hit = manager_cls.find_longest_cache_hit(
+                block_hashes=block_hashes,
+                max_length=max_cache_hit_length,
+                kv_cache_group_ids=group_ids,
+                block_pool=self.block_pool,
+                kv_cache_spec=spec,
+                drop_eagle_block=use_eagle and not self.skips_eagle_block_drop,
+                alignment_tokens=self._cache_hit_alignment_tokens,
+                dcp_world_size=self.dcp_world_size,
+                pcp_world_size=1,
+            )
+            for gid, blks in zip(group_ids, blocks):
+                hit_blocks[gid] = blks
+                hit_lengths[gid] = group_hit
+        return tuple(hit_blocks), tuple(hit_lengths)
+
 
 def get_kv_cache_coordinator(  # type: ignore[misc]
     kv_cache_config: KVCacheConfig,
@@ -436,30 +505,32 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     scheduler_block_size: int | None = None,
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
-    max_num_batched_tokens: int | None = None,
     num_prefill_lookahead: int = 0,
+    allow_partial_hash_hits: bool = True,
 ) -> KVCacheCoordinator:
     # Keep pcp_world_size in this patched function for upstream call
     # compatibility; platform validation guarantees that it is one.
     del pcp_world_size
-    token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+    token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
+    hybrid_kwargs = dict(
+        kv_cache_config=kv_cache_config,
+        max_model_len=max_model_len,
+        use_eagle=use_eagle,
+        enable_caching=enable_caching,
+        enable_kv_cache_events=enable_kv_cache_events,
+        dcp_world_size=dcp_world_size,
+        pcp_world_size=1,
+        hash_block_size=hash_block_size,
+        eagle_attn_layer_names=eagle_attn_layer_names,
+        metrics_collector=metrics_collector,
+        max_in_flight_tokens=token_budget,
+        scheduler_block_size=scheduler_block_size,
+        num_prefill_lookahead=num_prefill_lookahead,
+    )
+    # vLLM main (#54736) added allow_partial_hash_hits.
+    hybrid_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
     if _is_deepseek_v4_kv_cache_config(kv_cache_config):
-        return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
-            kv_cache_config,
-            max_model_len,
-            use_eagle,
-            enable_caching,
-            enable_kv_cache_events,
-            dcp_world_size=dcp_world_size,
-            pcp_world_size=1,
-            hash_block_size=hash_block_size,
-            eagle_attn_layer_names=eagle_attn_layer_names,
-            metrics_collector=metrics_collector,
-            max_in_flight_tokens=token_budget,
-            max_num_batched_tokens=token_budget,
-            scheduler_block_size=scheduler_block_size,
-            num_prefill_lookahead=num_prefill_lookahead,
-        )
+        return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
     if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
         orig_kwargs = dict(
@@ -476,24 +547,10 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         orig_kwargs["max_in_flight_tokens"] = token_budget
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
         orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
+        orig_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
 
-    return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
-        kv_cache_config,
-        max_model_len,
-        use_eagle,
-        enable_caching,
-        enable_kv_cache_events,
-        dcp_world_size=dcp_world_size,
-        pcp_world_size=1,
-        hash_block_size=hash_block_size,
-        eagle_attn_layer_names=eagle_attn_layer_names,
-        metrics_collector=metrics_collector,
-        max_in_flight_tokens=token_budget,
-        max_num_batched_tokens=token_budget,
-        scheduler_block_size=scheduler_block_size,
-        num_prefill_lookahead=num_prefill_lookahead,
-    )
+    return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
 
 vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]

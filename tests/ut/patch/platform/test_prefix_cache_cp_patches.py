@@ -975,7 +975,7 @@ def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:
     coordinator = get_kv_cache_coordinator(
         single_group_config,
         max_model_len=1024,
-        max_num_batched_tokens=1024,
+        max_in_flight_tokens=1024,
         use_eagle=False,
         enable_caching=True,
         enable_kv_cache_events=False,
@@ -1002,7 +1002,7 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
     coordinator = get_kv_cache_coordinator(
         kv_cache_config,
         max_model_len=1024,
-        max_num_batched_tokens=1024,
+        max_in_flight_tokens=1024,
         use_eagle=False,
         enable_caching=False,
         enable_kv_cache_events=False,
@@ -1036,7 +1036,7 @@ def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> No
     coordinator = get_kv_cache_coordinator(
         kv_cache_config,
         max_model_len=1024,
-        max_num_batched_tokens=1024,
+        max_in_flight_tokens=1024,
         use_eagle=False,
         enable_caching=True,
         enable_kv_cache_events=False,
@@ -1051,6 +1051,26 @@ def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> No
 class _FakeEagleManager:
     def __init__(self) -> None:
         self.use_eagle = False
+
+
+def test_verify_and_split_accepts_one_unique_spec_across_groups() -> None:
+    kv_cache_config = _make_deepseek_v4_kv_cache_config()
+    repeated_group = kv_cache_config.kv_cache_groups[0]
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.kv_cache_config = replace(
+        kv_cache_config,
+        kv_cache_groups=[repeated_group, repeated_group],
+    )
+    coordinator.single_type_managers = (_FakeEagleManager(), _FakeEagleManager())
+    coordinator.eagle_group_ids = set()
+    coordinator.enable_partial_hash_hits = False
+    coordinator.dcp_world_size = 1
+    coordinator.enable_caching = False
+
+    coordinator.verify_and_split_kv_cache_groups()
+
+    assert len(coordinator.attention_groups) == 1
+    assert coordinator.attention_groups[0].group_ids == [0, 1]
 
 
 def test_verify_and_split_propagates_eagle_to_managers() -> None:

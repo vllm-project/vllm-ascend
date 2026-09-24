@@ -30,11 +30,20 @@ from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextTailCache,
     KpoolTailManager,
     format_indexer_kpool_slot_mapping,
+    get_kpool_tail_ring_capacity,
 )
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     return {"tokens_per_state": ratio}
+
+
+@pytest.mark.parametrize(("pool", "lookahead", "capacity"), [(4, 0, 4), (4, 3, 7), (16, 5, 21)])
+def test_tail_ring_capacity_retains_speculative_lookahead(pool, lookahead, capacity):
+    config = SimpleNamespace(
+        speculative_config=(None if lookahead == 0 else SimpleNamespace(num_speculative_tokens=lookahead))
+    )
+    assert get_kpool_tail_ring_capacity(config, pool) == capacity
 
 
 @pytest.mark.parametrize("capacity", [4, 12])
@@ -309,3 +318,124 @@ def test_indexer_metadata_preserves_raw_request_boundaries():
     assert metadata.raw_seq_lens.tolist() == [18, 35]
     assert metadata.seq_lens.tolist() == [1, 2]
     assert metadata.num_actual_tokens == 5
+
+
+def test_indexer_metadata_request_buffers_cover_graph_token_padding():
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=256),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8,
+            max_num_seqs=2,
+        ),
+        model_config=SimpleNamespace(max_model_len=512),
+    )
+    builder = AscendIndexerKPoolMetadataBuilder(
+        AscendMLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            **_ratio_kwargs(16),
+        ),
+        ["model.layers.0.indexer.k_cache"],
+        config,
+        torch.device("cpu"),
+    )
+    common = SimpleNamespace(
+        num_reqs=4,
+        num_input_tokens=4,
+        num_actual_tokens=2,
+        query_start_loc=torch.arange(5, dtype=torch.int32),
+        seq_lens=torch.tensor([17, 33, 0, 0], dtype=torch.int32),
+        _seq_lens_cpu=None,
+        seq_lens_cpu=None,
+        positions=torch.tensor([16, 32, 0, 0], dtype=torch.int32),
+        slot_mapping=torch.tensor([16, 32, -1, -1], dtype=torch.int64),
+        block_table_tensor=torch.zeros((4, 2), dtype=torch.int32),
+    )
+
+    metadata = builder.build_for_drafting(common, draft_index=1)
+
+    assert metadata.seq_lens.tolist() == [1, 2, 0, 0]
+    assert metadata.cum_query_lens.tolist() == [1, 2, 3, 4]
+    assert metadata.raw_seq_lens.tolist() == [17, 33, 0, 0]
+
+
+def test_indexer_metadata_buffers_are_stable_per_draft_step():
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=256),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8,
+            max_num_seqs=2,
+        ),
+        model_config=SimpleNamespace(max_model_len=512),
+    )
+    builder = AscendIndexerKPoolMetadataBuilder(
+        AscendMLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            **_ratio_kwargs(16),
+        ),
+        ["model.layers.0.indexer.k_cache"],
+        config,
+        torch.device("cpu"),
+    )
+    common = SimpleNamespace(
+        num_reqs=1,
+        num_input_tokens=2,
+        num_actual_tokens=2,
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([18], dtype=torch.int32),
+        _seq_lens_cpu=None,
+        seq_lens_cpu=None,
+        positions=torch.tensor([16, 17], dtype=torch.int32),
+        slot_mapping=torch.tensor([16, 17], dtype=torch.int32),
+        block_table_tensor=torch.tensor([[0, 1]], dtype=torch.int32),
+    )
+
+    first = builder.build(0, common)
+    first_ptrs = (
+        first.slot_mapping.data_ptr(),
+        first.seq_lens.data_ptr(),
+        first.cum_query_lens.data_ptr(),
+        first.raw_seq_lens.data_ptr(),
+        first.positions.data_ptr(),
+    )
+    captured = builder.build_for_graph_capture(common, attn_state=object())
+    drafted = builder.build_for_drafting(
+        common,
+        draft_index=1,
+        common_ratio_to_sas_metadata={},
+    )
+    assert captured.slot_mapping.data_ptr() == first.slot_mapping.data_ptr()
+    assert drafted.slot_mapping.data_ptr() == first.slot_mapping.data_ptr()
+    common.positions.copy_(torch.tensor([32, 33], dtype=torch.int32))
+    common.slot_mapping.copy_(torch.tensor([32, 33], dtype=torch.int32))
+    common.seq_lens.fill_(34)
+    refreshed = builder.build(0, common)
+    refreshed_ptrs = (
+        refreshed.slot_mapping.data_ptr(),
+        refreshed.seq_lens.data_ptr(),
+        refreshed.cum_query_lens.data_ptr(),
+        refreshed.raw_seq_lens.data_ptr(),
+        refreshed.positions.data_ptr(),
+    )
+    assert refreshed_ptrs == first_ptrs
+    assert refreshed.positions.tolist() == [32, 33]
+    assert refreshed.raw_seq_lens.tolist() == [34]
+
+    other_step = SimpleNamespace(**vars(common))
+    other_step.slot_mapping = common.slot_mapping.clone()
+    second = builder.build(0, other_step)
+    second_ptrs = (
+        second.slot_mapping.data_ptr(),
+        second.seq_lens.data_ptr(),
+        second.cum_query_lens.data_ptr(),
+        second.raw_seq_lens.data_ptr(),
+        second.positions.data_ptr(),
+    )
+    assert all(left != right for left, right in zip(first_ptrs, second_ptrs))
