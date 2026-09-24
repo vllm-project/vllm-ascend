@@ -251,9 +251,11 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
         kv_transfer_config=None,
         weight_transfer_config=None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
-        # Since #15514 the packed C8 dtype comes from this CLI-facing field
-        # rather than the hardware profile. "int8" is what this test packs
-        # and what _reference_quantized_sparse_attention asserts.
+        # Since #17448 the packed SFA C8 dtype comes from the cache_dtype CLI
+        # field; indexer_kv_dtype now only drives the LI C8 indexer cache.
+        # "int8" is what this test packs and what
+        # _reference_quantized_sparse_attention asserts.
+        cache_config=SimpleNamespace(cache_dtype="int8"),
         attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
     )
     ascend_config = SimpleNamespace(
