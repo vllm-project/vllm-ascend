@@ -108,9 +108,11 @@ private:
         PipeBarrier<PIPE_V>();
         Mul(sqxLocal, xFp32Local, xFp32Local, numCol);
         PipeBarrier<PIPE_V>();
-        Muls(sqxLocal, sqxLocal, avgFactor, numCol);
-        PipeBarrier<PIPE_V>();
         ReduceSumCustom(sqxLocal, sqxLocal, tmpLocal, numCol);
+        PipeBarrier<PIPE_V>();
+        // Scale the 1-element sum instead of the whole row of squares before
+        // the reduction: mean = rawsum * (1/N).
+        Muls(sqxLocal, sqxLocal, avgFactor, 1);
         PipeBarrier<PIPE_V>();
         Adds(sqxLocal, sqxLocal, epsilon, 1);
         PipeBarrier<PIPE_V>();
@@ -126,15 +128,28 @@ private:
         WaitFlag<HardEvent::V_MTE3>(eventVMTE3);
         DataCopyCustom<float>(rstdGm, sqxLocal, 1);
 #endif
-        event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(eventVS);
-        WaitFlag<HardEvent::V_S>(eventVS);
-        float rstdValue = sqxLocal.GetValue(0);
-        event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
-        SetFlag<HardEvent::S_V>(eventSV);
-        WaitFlag<HardEvent::S_V>(eventSV);
-
-        Muls(xFp32Local, xFp32Local, rstdValue, numCol);
+        // Broadcast rstd inside the vector pipe: Gather replicates sqx[0]
+        // into a 32B block and a stride-0 block Mul scales the row.
+        // Bit-identical to the scalar Muls it replaces and removes the
+        // V_S/S_V round trip that stalls the issuing thread. The reduce
+        // workspace (tmpLocal) is dead past this point and hosts the
+        // offsets and the broadcast block.
+        LocalTensor<uint32_t> zeroOff = tmpLocal.ReinterpretCast<uint32_t>()[8];
+        Duplicate(zeroOff, ZERO_UINT, NUM_PER_BLK_FP32);
+        PipeBarrier<PIPE_V>();
+        LocalTensor<float> rstd8 = tmpLocal[16];
+        Gather(rstd8, sqxLocal, zeroOff, ZERO_UINT, NUM_PER_BLK_FP32);
+        PipeBarrier<PIPE_V>();
+        int32_t repeatTimes = numCol / NUM_PER_REP_FP32;
+        int32_t tailCount = numCol % NUM_PER_REP_FP32;
+        if (likely(repeatTimes > 0)) {
+            Mul(xFp32Local, xFp32Local, rstd8, NUM_PER_REP_FP32, repeatTimes,
+                {1, 1, 0, DEFAULT_REPEAT_STRIDE, DEFAULT_REPEAT_STRIDE, 0});
+        }
+        if (unlikely(tailCount != 0)) {
+            Mul(xFp32Local[repeatTimes * NUM_PER_REP_FP32], xFp32Local[repeatTimes * NUM_PER_REP_FP32], rstd8,
+                tailCount, 1, {1, 1, 0, DEFAULT_REPEAT_STRIDE, DEFAULT_REPEAT_STRIDE, 0});
+        }
         PipeBarrier<PIPE_V>();
         WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
         Cast(x1Local, xFp32Local, RoundMode::CAST_NONE, numCol);
@@ -194,9 +209,11 @@ private:
 
         Mul(sqxLocal, x1Local, x1Local, numCol);
         PipeBarrier<PIPE_V>();
-        Muls(sqxLocal, sqxLocal, avgFactor, numCol);
-        PipeBarrier<PIPE_V>();
         ReduceSumCustom(sqxLocal, sqxLocal, tmpLocal, numCol);
+        PipeBarrier<PIPE_V>();
+        // Scale the 1-element sum instead of the whole row of squares before
+        // the reduction: mean = rawsum * (1/N).
+        Muls(sqxLocal, sqxLocal, avgFactor, 1);
         PipeBarrier<PIPE_V>();
         Adds(sqxLocal, sqxLocal, epsilon, 1);
         PipeBarrier<PIPE_V>();
@@ -212,15 +229,25 @@ private:
         WaitFlag<HardEvent::V_MTE3>(eventVMTE3);
         DataCopyCustom<float>(rstdGm, sqxLocal, 1);
 #endif
-        event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(eventVS);
-        WaitFlag<HardEvent::V_S>(eventVS);
-        float rstdValue = sqxLocal.GetValue(0);
-        event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
-        SetFlag<HardEvent::S_V>(eventSV);
-        WaitFlag<HardEvent::S_V>(eventSV);
         WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
-        Muls(x1Local, x1Local, rstdValue, numCol);
+        // Broadcast rstd inside the vector pipe (see ProcessFp16); the
+        // reduce workspace hosts the offsets and the broadcast block.
+        LocalTensor<uint32_t> zeroOff = tmpLocal.ReinterpretCast<uint32_t>()[8];
+        Duplicate(zeroOff, ZERO_UINT, NUM_PER_BLK_FP32);
+        PipeBarrier<PIPE_V>();
+        LocalTensor<float> rstd8 = tmpLocal[16];
+        Gather(rstd8, sqxLocal, zeroOff, ZERO_UINT, NUM_PER_BLK_FP32);
+        PipeBarrier<PIPE_V>();
+        int32_t repeatTimes = numCol / NUM_PER_REP_FP32;
+        int32_t tailCount = numCol % NUM_PER_REP_FP32;
+        if (likely(repeatTimes > 0)) {
+            Mul(x1Local, x1Local, rstd8, NUM_PER_REP_FP32, repeatTimes,
+                {1, 1, 0, DEFAULT_REPEAT_STRIDE, DEFAULT_REPEAT_STRIDE, 0});
+        }
+        if (unlikely(tailCount != 0)) {
+            Mul(x1Local[repeatTimes * NUM_PER_REP_FP32], x1Local[repeatTimes * NUM_PER_REP_FP32], rstd8,
+                tailCount, 1, {1, 1, 0, DEFAULT_REPEAT_STRIDE, DEFAULT_REPEAT_STRIDE, 0});
+        }
         PipeBarrier<PIPE_V>();
         WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
         Mul(x1Local, x1Local, x2Local, numCol);
@@ -287,9 +314,11 @@ private:
         PipeBarrier<PIPE_V>();
         Mul(sqxLocal, xFp32Local, xFp32Local, numCol);
         PipeBarrier<PIPE_V>();
-        Muls(sqxLocal, sqxLocal, avgFactor, numCol);
-        PipeBarrier<PIPE_V>();
         ReduceSumCustom(sqxLocal, sqxLocal, tmpLocal, numCol);
+        PipeBarrier<PIPE_V>();
+        // Scale the 1-element sum instead of the whole row of squares before
+        // the reduction: mean = rawsum * (1/N).
+        Muls(sqxLocal, sqxLocal, avgFactor, 1);
         PipeBarrier<PIPE_V>();
         Adds(sqxLocal, sqxLocal, epsilon, 1);
         PipeBarrier<PIPE_V>();
@@ -298,13 +327,6 @@ private:
         PipeBarrier<PIPE_V>();
         Div(sqxLocal, tmpLocal, sqxLocal, 1);
         PipeBarrier<PIPE_V>();
-        event_t eventVS_BF16_0 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(eventVS_BF16_0);
-        WaitFlag<HardEvent::V_S>(eventVS_BF16_0);
-        float rstdValue = sqxLocal.GetValue(0);
-        event_t eventSV_BF16_0 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
-        SetFlag<HardEvent::S_V>(eventSV_BF16_0);
-        WaitFlag<HardEvent::S_V>(eventSV_BF16_0);
         // copyout rstd
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220 || (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
         event_t eventVMTE3_BF16_1 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
@@ -315,7 +337,24 @@ private:
         SetFlag<HardEvent::MTE3_V>(eventMTE3V2_BF16_0);
 #endif
         
-        Muls(xFp32Local, xFp32Local, rstdValue, numCol);
+        // Broadcast rstd inside the vector pipe (see ProcessFp16); the
+        // reduce workspace hosts the offsets and the broadcast block.
+        LocalTensor<uint32_t> zeroOff = tmpLocal.ReinterpretCast<uint32_t>()[8];
+        Duplicate(zeroOff, ZERO_UINT, NUM_PER_BLK_FP32);
+        PipeBarrier<PIPE_V>();
+        LocalTensor<float> rstd8 = tmpLocal[16];
+        Gather(rstd8, sqxLocal, zeroOff, ZERO_UINT, NUM_PER_BLK_FP32);
+        PipeBarrier<PIPE_V>();
+        int32_t repeatTimes = numCol / NUM_PER_REP_FP32;
+        int32_t tailCount = numCol % NUM_PER_REP_FP32;
+        if (likely(repeatTimes > 0)) {
+            Mul(xFp32Local, xFp32Local, rstd8, NUM_PER_REP_FP32, repeatTimes,
+                {1, 1, 0, DEFAULT_REPEAT_STRIDE, DEFAULT_REPEAT_STRIDE, 0});
+        }
+        if (unlikely(tailCount != 0)) {
+            Mul(xFp32Local[repeatTimes * NUM_PER_REP_FP32], xFp32Local[repeatTimes * NUM_PER_REP_FP32], rstd8,
+                tailCount, 1, {1, 1, 0, DEFAULT_REPEAT_STRIDE, DEFAULT_REPEAT_STRIDE, 0});
+        }
         PipeBarrier<PIPE_V>();
         WaitFlag<HardEvent::MTE3_V>(eventMTE3V_BF16_0);
         GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_V>(eventMTE3V_BF16_0);

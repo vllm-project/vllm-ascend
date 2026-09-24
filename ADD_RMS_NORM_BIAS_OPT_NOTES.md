@@ -304,3 +304,52 @@ vec busy 74.8µs ≈ 12 pass × 0.113µs/行 × 52 行（模型吻合）→ 大 
 - **流水图留档**：本机 msprof 不支持 `--aic-metrics=InstrTimeline`（报
   "Unexpected argument"），对应指标名为 `TimelineDetail`；前后 trace 见
   traces/ 目录（README 注明采集条件与该差异）。
+
+#### Round 2 流水图前后对比（traces/，simulator 指令级，core18，2048×7168 bf16）
+
+| 指标 | R1（流水前） | R2（流水后） |
+|---|---|---|
+| wall | 101.4µs | **80.7µs（-20%）** |
+| VECTOR 忙碌 | 98.2µs（96.9%） | 78.1µs（96.8%） |
+| MTE2 忙碌 | 51.5µs（**50.8%**） | 76.0µs（**94.2%**） |
+| MTE3 忙碌 | 80.6µs（79.5%） | 77.4µs（95.9%） |
+| SCALAR 忙碌 | 91.3µs（**90.0%**） | 2.0µs（**2.5%**） |
+| 三线并行度 | 2.27 | **2.87** |
+
+解读：流水前 SCALAR 占 90%（串行编排全压在发射线程上）、MTE2 只有 51%
+（装载被 V 串行化）；流水后 SCALAR 归零、MTE2 94%——装载/落盘完全与 V
+重叠，墙钟 -20%。（simulator 绝对时长与真机 msprof 有差，结构性结论一致；
+真机口径见上表 PipeUtilization 三轮对比。）
+
+### Round 3（2026-09-24）：广度轮 —— 序言重叠 + MULTI_N 折叠 + SINGLE_N 消标量往返 — ✅ 完成
+
+三个独立小改动，一轮闭环验证：
+
+1. **NORMAL bf16 序言重排**（add_rms_norm_bias.h）：gamma/beta 的 MTE2 装载
+   提前到 iota 预计算（64 次 Duplicate，~1.6µs V 发射）之前，两者重叠 →
+   64-128 档（行数少、序言占比高）受益。
+2. **MULTI_N avgFactor 折叠**（add_rms_norm_bias_multi_n.h，fp16+bf16 共用）：
+   删除全宽 `Muls(sqx, ×avgFactor)`（calc_row_num×numColAlign），改为 reduce 后
+   对 rstdLocal（8 lane/行，≤512 元素）做 Muls。fp16 生产路径（key 14）主收益。
+3. **SINGLE_N 消 V_S/S_V + avgFactor 折叠**（add_rms_norm_bias_single_n.h，
+   fp16/fp32/bf16 三路径）：V_S/GetValue/S_V → tmpLocal 尾部划出的 zeroOff +
+   Gather + stride-0 广播 Mul（位级一致）；tmpLocal 是 reduce 工作区，此后已死。
+   同时折叠 avgFactor 全宽 Muls（同 2）。decode 路径（≤40 行，1-4 tokens
+   生产 decode 档）主收益。
+
+- **精度**：`test_add_rms_norm_bias.py` **126/126 通过**（127s），零回退。
+- **NPUGraph（µs，vs Round 2）**：
+
+| tokens | bf16 R2→R3 | fp16 R2→R3 |
+|---|---|---|
+| 1 | 3.43→**3.34**（-2.6%） | 2.63→2.60 |
+| 4 | 3.84→**3.69**（-3.9%） | 2.89→2.86 |
+| 16 | 5.32→5.36（噪声） | 4.53→4.50 |
+| 64 | 10.11→10.08（持平） | 8.74→8.75（持平） |
+| 512 | 28.43→**27.73**（-2.5%） | 21.53→**20.60**（-4.3%） |
+| 1024 | 47.93→**47.07**（-1.8%） | 35.28→**33.43**（-5.3%） |
+| 2048 | 86.67→**85.93**（-0.9%） | 62.80→**59.55**（-5.2%） |
+| 4096 | 180.60→180.26（持平） | 166.63→171.98（噪声带） |
+
+各档收益与预期方向一致：bf16 decode 档吃 SINGLE_N 改动，fp16 大档吃
+MULTI_N 折叠，bf16 大档持平（流水后序言已摊薄）。

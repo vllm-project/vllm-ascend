@@ -171,6 +171,13 @@ private:
     // ------------------------------------------------------------------
     __aicore__ inline void ProcessPipelined()
     {
+        // Stage gamma/beta through the row-0 x slots first so their MTE2
+        // transfers fly while the vector preamble below runs.
+        LocalTensor<T> stage1 = x1PipeBuf[0].Get<T>();
+        DataCopyCustom<T>(stage1, gammaGm, numCol);
+        if (!this->nullptrBeta) {
+            DataCopyCustom<T>(x2PipeBuf[0].Get<T>(), betaGm, numCol);
+        }
         LocalTensor<uint32_t> zeroOff = zeroOffBuf.Get<uint32_t>();
         LocalTensor<float> one8 = oneBuf.Get<float>();
         LocalTensor<uint32_t> iota = iotaBuf.Get<uint32_t>();
@@ -181,13 +188,8 @@ private:
         }
         PipeBarrier<PIPE_V>();
 
-        // Stage gamma/beta through the row-0 x slots, widen once per core,
-        // then free the slots for row 0's loads behind one V_MTE2 flag.
-        LocalTensor<T> stage1 = x1PipeBuf[0].Get<T>();
-        DataCopyCustom<T>(stage1, gammaGm, numCol);
-        if (!this->nullptrBeta) {
-            DataCopyCustom<T>(x2PipeBuf[0].Get<T>(), betaGm, numCol);
-        }
+        // Widen once per core, then free the slots for row 0's loads behind
+        // one V_MTE2 flag.
         TEventID evtStage = GetTPipePtr()->AllocEventID<HardEvent::MTE2_V>();
         SetFlag<HardEvent::MTE2_V>(evtStage);
         WaitFlag<HardEvent::MTE2_V>(evtStage); // runs on the V pipe
