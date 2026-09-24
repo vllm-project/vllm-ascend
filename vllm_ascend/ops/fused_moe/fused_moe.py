@@ -258,25 +258,17 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            if _EXTRA_CTX.use_megamoe:
-                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-                w1_scale = None
-                w2_scale = None
-                w1_scale_bias = None
-                w2_scale_bias = None
-            else:
-                if self.dynamic_eplb and not has_split_weight_lists:
-                    logger.warning_once(
-                        "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
-                        "tensor lists. This may cause accuracy issues or communication hangs."
-                    )
-                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-                w1_scale = [torch.tensor([], dtype=torch.int64)]
-                w2_scale = [torch.tensor([], dtype=torch.int64)]
-                w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-                w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            if self.dynamic_eplb and not has_split_weight_lists:
+                logger.warning_once(
+                    "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
+                    "tensor lists. This may cause accuracy issues or communication hangs."
+                )
+            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+            w1_scale = [torch.tensor([], dtype=torch.int64)]
+            w2_scale = [torch.tensor([], dtype=torch.int64)]
+            w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         else:
             w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
             w1_scale = None
