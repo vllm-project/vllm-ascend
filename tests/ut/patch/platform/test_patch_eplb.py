@@ -340,9 +340,10 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     refresh.assert_called_once_with(model_state, layer_idx)
     if is_last_layer:
         log_info.assert_called_once_with(
-            "%s: model=%s",
+            "%s: model=%s rank_transfers=%d",
             patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
             "model",
+            2,
         )
     else:
         log_info.assert_not_called()
