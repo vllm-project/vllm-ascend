@@ -37,7 +37,7 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-**Attention**: DSpark is supported on both A2 and A3 in vLLM Ascend `v0.25.0` and later. Use the image `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731` for A2 or the image `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731-a3` for A3.
+**Attention**: DSpark is supported on both A2 and A3 in vLLM Ascend `v0.25.0` and later. Use the image `quay.io/ascend/vllm-ascend:v0.26.0rc2` for A2 or the image `quay.io/ascend/vllm-ascend:v0.26.0rc2-a3` for A3.
 
 === "A3 series"
 
@@ -45,7 +45,7 @@ Select an image based on your machine type and start the docker image on your no
 
     ```bash
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.26.0rc2-a3
     docker run --rm \
         --name vllm-ascend \
         --shm-size=512g \
@@ -86,11 +86,8 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on each node.
 
     ```bash
-    # deepseek-v4-flash uses the following image
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-
-    # deepseek-v4-flash-dspark uses the following image
-    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
+    # DeepSeek-V4-Flash and DeepSeek-V4-Flash-DSpark use the following image
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.26.0rc2
 
     docker run --rm \
         --name vllm-ascend \
