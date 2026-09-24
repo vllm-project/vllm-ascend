@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import multiprocessing
 import unittest
 from unittest.mock import Mock, patch
 
@@ -17,6 +18,24 @@ from vllm_ascend.distributed.eplb.policy.stair import (
     StairEplbPolicy,
     StairPlan,
 )
+
+
+def _plan_from_daemon_worker(connection):
+    policy = StairEplbPolicy(StairConfig())
+    try:
+        policy._plan_in_subprocess(
+            np.ones((1, 1, 2)),
+            np.array([[[0], [1]]]),
+            np.array([np.nan]),
+            np.array([0, 0]),
+            policy.config,
+        )
+        connection.send(None)
+    except Exception as error:
+        connection.send(repr(error))
+    finally:
+        policy._stop_planner_process()
+        connection.close()
 
 
 class TestStairLoadStatistics(unittest.TestCase):
@@ -58,6 +77,9 @@ class TestStairLoadStatistics(unittest.TestCase):
         self.assertEqual(result.predicted_mean_ratios.shape, (1,))
         np.testing.assert_allclose(result.predicted_imbalance_summary, (15 / 13, 15 / 13, 1, 1))
         self.assertIs(planner.call_args.kwargs["cpu_group"], cpu_group)
+        planner_callback = planner.call_args.kwargs["planner"]
+        self.assertIs(planner_callback.__self__, policy)
+        self.assertIs(planner_callback.__func__, StairEplbPolicy._plan_in_subprocess)
 
     def test_rebalance_forwards_prepared_stats_and_placement_context(self):
         policy = StairEplbPolicy(StairConfig())
@@ -102,6 +124,80 @@ class TestStairLoadStatistics(unittest.TestCase):
         np.testing.assert_array_equal(planning_context["sample_counts"], prepared.sample_counts)
         self.assertIs(planning_context["cpu_group"], cpu_group)
         np.testing.assert_array_equal(result.source_rank_ids, plan.source_rank_ids)
+
+    def test_planner_subprocess_is_reused_and_matches_local_planning(self):
+        policy = StairEplbPolicy(StairConfig())
+        arguments = dict(
+            logical_load_values=np.array([[[2.0, 2.0]], [[3.0, 3.0]]]),
+            current_rank_expert_ids=np.array([[[0], [1]]]),
+            last_committed_mean_ratios=np.array([np.nan]),
+            rank_node_ids=np.array([0, 0]),
+            config=policy.config,
+        )
+        expected = policy.plan_rebalance(**arguments)
+        process = None
+
+        try:
+            first = policy._plan_in_subprocess(**arguments)
+            process = policy._planner_process
+            second = policy._plan_in_subprocess(**arguments)
+
+            self.assertIsNotNone(process)
+            self.assertIs(policy._planner_process, process)
+            self.assertIsNone(process.poll())
+            for actual in (first, second):
+                np.testing.assert_array_equal(actual.rank_expert_ids, expected.rank_expert_ids)
+                np.testing.assert_array_equal(actual.source_rank_ids, expected.source_rank_ids)
+                np.testing.assert_array_equal(actual.source_slot_ids, expected.source_slot_ids)
+                np.testing.assert_array_equal(actual.predicted_mean_ratios, expected.predicted_mean_ratios)
+        finally:
+            policy._stop_planner_process()
+
+        self.assertIsNotNone(process)
+        self.assertIsNotNone(process.poll())
+
+    def test_planner_subprocess_reports_request_failure_without_dying(self):
+        policy = StairEplbPolicy(StairConfig())
+        try:
+            with self.assertRaisesRegex(ValueError, "current_rank_expert_ids"):
+                policy._plan_in_subprocess(
+                    np.ones((1, 1, 2)),
+                    np.array([[0, 1]]),
+                    np.array([np.nan]),
+                    np.array([0, 0]),
+                    policy.config,
+                )
+            process = policy._planner_process
+            self.assertIsNotNone(process)
+            self.assertIsNone(process.poll())
+
+            plan = policy._plan_in_subprocess(
+                np.ones((1, 1, 2)),
+                np.array([[[0], [1]]]),
+                np.array([np.nan]),
+                np.array([0, 0]),
+                policy.config,
+            )
+            np.testing.assert_array_equal(plan.rank_expert_ids, [[[0], [1]]])
+        finally:
+            policy._stop_planner_process()
+
+    def test_planner_subprocess_can_start_from_daemon_worker(self):
+        context = multiprocessing.get_context("fork")
+        parent_connection, child_connection = context.Pipe(duplex=False)
+        process = context.Process(target=_plan_from_daemon_worker, args=(child_connection,), daemon=True)
+        process.start()
+        child_connection.close()
+        try:
+            self.assertTrue(parent_connection.poll(10), "daemon worker did not return a STAIR plan")
+            self.assertIsNone(parent_connection.recv())
+            process.join(timeout=5)
+            self.assertEqual(process.exitcode, 0)
+        finally:
+            parent_connection.close()
+            if process.is_alive():
+                process.terminate()
+                process.join()
 
     def test_rebalance_rejects_node_count_mismatch(self):
         with self.assertRaisesRegex(ValueError, "num_nodes"):
@@ -977,6 +1073,7 @@ class TestStairLoadStatistics(unittest.TestCase):
             np.array([0, 1]),
             StairConfig(),
             group,
+            planner=plan_rebalance,
         )
 
         self.assertFalse(pending_field_gathers)

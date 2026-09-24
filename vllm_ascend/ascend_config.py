@@ -216,7 +216,7 @@ class StairConfig:
     cross_node_transfer_limit: int = 1
     replica_search_num_stages: int = 4
     replica_search_radius: int = 8
-    replica_search_beam_size: int = 4
+    replica_search_beam_size: int = 64
     placement_search_backtrack_limit: int = 32
 
     @property
