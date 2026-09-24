@@ -18,8 +18,10 @@
 """Decorators that wire runtime_guard into the engine loop.
 
 Goal: keep ModelRunner/Worker free of runtime_guard types and ``_rg_*``
-protocol methods. The runner may expose **neutral** Ascend hooks that are
-useful with or without the guard:
+protocol methods, and keep every decorator pure observability — deleting
+any of them must leave the functional path byte-identical (worker
+``execute_dummy_batch`` pattern). Functional Ascend hooks are called by
+the decorated methods themselves:
 
 - ``_prepare_sample_tokens()`` — PCP / draft restore before parent pops state
 - ``_finalize_sample_tokens(output)`` — e.g. spec-PP draft broadcast
@@ -109,19 +111,6 @@ def runtime_guard_idle_step(dummy_batch_fn):
     return wrapper
 
 
-def _call_prepare_sample_tokens(runner: Any) -> None:
-    prepare = getattr(runner, "_prepare_sample_tokens", None)
-    if prepare is not None:
-        prepare()
-
-
-def _call_finalize_sample_tokens(runner: Any, output: Any) -> Any:
-    finalize = getattr(runner, "_finalize_sample_tokens", None)
-    if finalize is not None:
-        return finalize(output)
-    return output
-
-
 def _peek_sample_pre_state(runner: Any) -> tuple[Any, Any]:
     """Peek ephemeral execute_model_state before parent ``sample_tokens`` pops it."""
     state = getattr(runner, "execute_model_state", None)
@@ -149,25 +138,31 @@ def _build_sample_phase_result(runner: Any, output: Any, input_batch: Any, finis
 
 
 def runtime_guard_sample_tokens(sample_tokens_fn):
-    """Sample-phase runtime_guard orchestration for ``sample_tokens`` (MRV2).
+    """Guard orchestration for v2 ``sample_tokens`` — pure observability.
 
-    Optional runner methods (Ascend-only, no guard types):
+    Worker pattern: the decorated method owns its functional Ascend hooks
+    (``_prepare_sample_tokens()`` before / ``_finalize_sample_tokens(output)``
+    after the parent call), so deleting this decorator leaves the functional
+    path byte-identical. This wrapper only adds guard orchestration:
 
-    - ``_prepare_sample_tokens()`` — before parent pops ``execute_model_state``
-    - ``_finalize_sample_tokens(output)`` — after the sample phase returns
+    - guardless → bare method call (zero guard work);
+    - guard → ``run_sample_phase`` around the method, reading the
+      ``postprocess_sampled`` stash (``runner_bridge.note_postprocess_sampled``)
+      and the pre-pop ``execute_model_state`` peek.
     """
 
     @functools.wraps(sample_tokens_fn)
     def wrapper(self, grammar_output):
-        _call_prepare_sample_tokens(self)
-
         guard = getattr(self, "runtime_guard", None)
         if guard is None:
-            output = sample_tokens_fn(self, grammar_output)
-            return _call_finalize_sample_tokens(self, output)
+            return sample_tokens_fn(self, grammar_output)
 
         note_postprocess_sampled(self, None, None)  # clear prior-step stash
-        # Peek before parent sample_tokens pops execute_model_state.
+        # Peek before the method pops execute_model_state (inside the parent
+        # sample_tokens). The runner's PCP swap in _prepare_sample_tokens runs
+        # on non-last-PP ranks only; the detection rank (last-PP TP0) — the
+        # only consumer of these fields — is unaffected by the swap, so
+        # peeking before the method is equivalent to peeking after prepare.
         input_batch, finished_req_ids = _peek_sample_pre_state(self)
 
         def sample_fn() -> SamplePhaseResult:
@@ -192,6 +187,6 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
         output = result.model_runner_output
         if guard.needs_sample_phase_hooks():
             output = maybe_wrap_v2_async_output(output, self)
-        return _call_finalize_sample_tokens(self, output)
+        return output
 
     return wrapper

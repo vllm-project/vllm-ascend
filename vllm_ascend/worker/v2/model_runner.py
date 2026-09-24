@@ -259,7 +259,12 @@ class NPUModelRunner(GPUModelRunner):
 
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
-        return super().sample_tokens(grammar_output)
+        # Functional Ascend hooks bracket the parent call; the decorator is
+        # pure observability — deleting it leaves this path byte-identical
+        # (worker execute_dummy_batch pattern).
+        self._prepare_sample_tokens()
+        output = super().sample_tokens(grammar_output)
+        return self._finalize_sample_tokens(output)
 
     def _prepare_sample_tokens(self) -> None:
         """Ascend prep before parent ``sample_tokens`` pops ``execute_model_state``.

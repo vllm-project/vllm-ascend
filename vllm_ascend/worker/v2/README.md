@@ -12,11 +12,13 @@ to get specific plans.
     Why: The wave sync / sample-phase guard orchestration lives in
     `vllm_ascend/observability/runtime_guard/hooks.py` decorators
     (`@runtime_guard_step` shared with v1, `@runtime_guard_sample_tokens`
-    v2-only). The runner keeps only **neutral** Ascend hooks
-    (`_prepare_sample_tokens` / `_finalize_sample_tokens`) with no
-    `SamplePhaseResult` / `_rg_*` protocol — outside code should not perceive
-    runtime_guard. Track these when the upstream `GPUModelRunner.execute_model`
-    / `sample_tokens` contract changes.
+    v2-only). The runner's `sample_tokens` body brackets the parent call with
+    its functional Ascend hooks (`_prepare_sample_tokens` /
+    `_finalize_sample_tokens`) and holds no `SamplePhaseResult` / `_rg_*`
+    protocol — deleting the decorator leaves the functional path
+    byte-identical (worker `execute_dummy_batch` pattern). Track these when
+    the upstream `GPUModelRunner.execute_model` / `sample_tokens` contract
+    changes.
 
 - [ ] `set_cos_and_sin` & `update_cos_sin`
 

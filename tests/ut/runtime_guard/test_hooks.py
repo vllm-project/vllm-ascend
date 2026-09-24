@@ -209,8 +209,12 @@ class _SampleRunner:
 
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
+        # Mirrors the runner: functional hooks bracket the parent call, so
+        # deleting the decorator leaves this path intact.
+        self._prepare_sample_tokens()
         self.order.append("body")
-        return SimpleNamespace(sampled_token_ids=[[7]])
+        output = SimpleNamespace(sampled_token_ids=[[7]])
+        return self._finalize_sample_tokens(output)
 
     def _prepare_sample_tokens(self):
         self.order.append("prepare")
