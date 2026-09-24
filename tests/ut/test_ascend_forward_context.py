@@ -40,6 +40,7 @@ def _make_vllm_config(
     kv_connector: str | None = None,
     kv_role: str | None = None,
     recompute_scheduler_enable: bool = False,
+    fused_mc2_request: int = 2,
 ):
     hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
     if quant_type is not None:
@@ -68,6 +69,7 @@ def _make_vllm_config(
         else None
     )
     return SimpleNamespace(
+        additional_config={"enable_fused_mc2": fused_mc2_request},
         model_config=model_config,
         parallel_config=parallel_config,
         compilation_config=compilation_config,
@@ -92,6 +94,7 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
     monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
     monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
+    monkeypatch.setattr(afc, "importlib", SimpleNamespace(util=SimpleNamespace(find_spec=lambda _: object())))
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
@@ -318,7 +321,7 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_1(
         enable_fused_mc2=1,
     )
 
-    vllm_config = _make_vllm_config(quant_type="w4a8")
+    vllm_config = _make_vllm_config(quant_type="w4a8", fused_mc2_request=1)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
@@ -359,6 +362,21 @@ def test_a3_ep128_extension_does_not_change_a5_limit(monkeypatch):
     monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
 
     assert afc.use_cann_megamoe(_make_vllm_config(quant_type="w4a8")) is False
+
+
+def test_cann_megamoe_uses_model_request_after_draft_resets_global_flag(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A3,
+        ep_world_size=16,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: False)
+
+    assert afc.use_cann_megamoe(_make_vllm_config(fused_mc2_request=2)) is True
+    assert afc.use_cann_megamoe(_make_vllm_config(fused_mc2_request=0)) is False
+    monkeypatch.setattr(afc, "importlib", SimpleNamespace(util=SimpleNamespace(find_spec=lambda _: None)))
+    assert afc.use_cann_megamoe(_make_vllm_config(fused_mc2_request=2)) is False
 
 
 @pytest.mark.parametrize(

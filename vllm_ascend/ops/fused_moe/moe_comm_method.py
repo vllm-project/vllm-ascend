@@ -490,8 +490,14 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         expert_tokens = None
+        prepared_mega_moe = hasattr(fused_experts_input.layer, "cann_mega_moe_w13_weight_list")
         if self.enable_fused_mc2 == 1:
-            if _EXTRA_CTX.use_mega_moe:
+            if _EXTRA_CTX.use_mega_moe or prepared_mega_moe:
+                if not hasattr(self, "mega_moe"):
+                    # Load lazily if the draft reset the process-global flag
+                    # after the target prepared MegaMoE weights.
+                    self.mega_moe_symm_buffer = None
+                    self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
                 out, expert_tokens = self._apply_cann_mega_moe(
                     fused_experts_input, weights, is_decode_only_node=_EXTRA_CTX.is_decode_only_node
                 )
