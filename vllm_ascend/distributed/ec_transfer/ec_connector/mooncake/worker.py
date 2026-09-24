@@ -81,8 +81,13 @@ def _resolve_bounce_arena_size(vllm_config: VllmConfig) -> int:
     value = extra_config[_BOUNCE_ARENA_CONFIG_KEY]
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{_BOUNCE_ARENA_CONFIG_KEY} must be an integer")
+    if value == 0:
+        return 0
     if value < ASCEND_DIRECT_MEMORY_ALIGNMENT:
-        raise ValueError(f"{_BOUNCE_ARENA_CONFIG_KEY} must be at least {ASCEND_DIRECT_MEMORY_ALIGNMENT} bytes")
+        raise ValueError(
+            f"{_BOUNCE_ARENA_CONFIG_KEY} must be 0 to disable "
+            f"fallback or at least {ASCEND_DIRECT_MEMORY_ALIGNMENT} bytes"
+        )
 
     return round_up(value, ASCEND_DIRECT_MEMORY_ALIGNMENT)
 
@@ -431,6 +436,12 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                     finally:
                         self._producer_memory.release(staged)
                 else:
+                    if self._bounce_arena_size == 0:
+                        raise RuntimeError(
+                            "Ascend Mooncake producer staging pool cannot fit "
+                            "the transfer batch and direct/bounce fallback is "
+                            f"disabled because {_BOUNCE_ARENA_CONFIG_KEY}=0"
+                        )
                     waves = _plan_transfer_waves(
                         tensors,
                         self._bounce_arena_size,

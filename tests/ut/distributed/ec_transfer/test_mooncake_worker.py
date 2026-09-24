@@ -280,6 +280,33 @@ def test_push_batch_preserves_staging_first_path():
     worker._producer_pushes.complete.assert_called_once_with([push])
 
 
+def test_push_batch_rejects_staging_failure_when_fallback_is_disabled():
+    worker = object.__new__(AscendECMooncakeWorker)
+    push = _make_push("first")
+    shard = _make_writable_shard("session-a", 1000)
+    worker._producer_memory = MagicMock()
+    worker._producer_memory.stage.return_value = None
+    worker._producer_pushes = MagicMock()
+    worker._producer_pushes.resolve_reservations.return_value = [shard]
+    worker._validate_push_source = MagicMock()
+    worker._notify_completions = MagicMock()
+    worker._abandon_pushes = MagicMock()
+    worker._bounce_arena_size = 0
+
+    with patch.object(worker_module, "_plan_transfer_waves") as plan_waves:
+        worker._push_batch([push])
+
+    plan_waves.assert_not_called()
+    worker._producer_pushes.begin_notifying.assert_not_called()
+    worker._notify_completions.assert_not_called()
+    worker._producer_pushes.complete.assert_not_called()
+    worker._producer_pushes.settle_all.assert_called_once_with([push])
+    worker._abandon_pushes.assert_called_once_with([push])
+    failure = worker._producer_pushes.fail.call_args.args[1]
+    assert isinstance(failure, RuntimeError)
+    assert "direct/bounce fallback is disabled" in str(failure)
+
+
 def test_push_batch_runs_and_releases_fallback_waves_in_order():
     worker = object.__new__(AscendECMooncakeWorker)
     first = _make_push("first")
@@ -619,12 +646,21 @@ def test_resolve_explicit_bounce_arena_size_align_up():
     assert _resolve_bounce_arena_size(config) == 4 * mib
 
 
+def test_resolve_zero_bounce_arena_size_disables_fallback():
+    config = _make_bounce_config(
+        extra_config={
+            "ascend_mooncake_bounce_arena_size": 0,
+        },
+    )
+
+    assert _resolve_bounce_arena_size(config) == 0
+
+
 @pytest.mark.parametrize(
     "value",
     [
         True,
         False,
-        0,
         -1,
         2 * 1024 * 1024 - 1,
         2.0,

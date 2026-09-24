@@ -133,10 +133,12 @@ class AscendProducerAllocator(AscendContiguousAllocator):
         staging_capacity: int,
         bounce_capacity: int,
     ) -> None:
-        bounce_offset = round_up(
-            staging_capacity,
-            ASCEND_DIRECT_MEMORY_ALIGNMENT,
-        )
+        bounce_offset = staging_capacity
+        if bounce_capacity:
+            bounce_offset = round_up(
+                staging_capacity,
+                ASCEND_DIRECT_MEMORY_ALIGNMENT,
+            )
 
         self.staging_capacity = staging_capacity
         self.bounce_offset = bounce_offset
@@ -156,7 +158,7 @@ class AscendProducerAllocator(AscendContiguousAllocator):
     @property
     def bounce_tensor(self) -> torch.Tensor | None:
         tensor = self.tensor
-        if tensor is None:
+        if tensor is None or self.bounce_capacity == 0:
             return None
 
         return tensor.narrow(
