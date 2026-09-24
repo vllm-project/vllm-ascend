@@ -2986,11 +2986,30 @@ class MooncakeConnectorWorker:
             group_kernel_params[group_idx] = (local_scale, remote_scale, kernel_size)
         return group_kernel_params
 
+    def _assert_cp_layout_single_block_size(self, meta: ReqMeta) -> None:
+        """Reject mixed per-group layouts on the CP path.
+
+        The CP/DCP paths expand every group's ids with the scalar
+        ``remote_block_size``. A producer with mixed per-group physical
+        sizes (e.g. a 128-token sliding-window group next to 1024-token
+        full-attention groups) would have the mismatched groups silently
+        misplaced there, so fail loudly; the non-CP path expands per group
+        in ``_get_kernel_block_ids`` and is unaffected.
+        """
+        remote_block_sizes = getattr(meta, "remote_block_sizes", ())
+        if remote_block_sizes and len(set(remote_block_sizes)) > 1:
+            raise AssertionError(
+                f"CP/DCP transfer with mixed per-group remote block sizes {remote_block_sizes} "
+                f"is not supported; the CP path expands all groups with the scalar "
+                f"remote_block_size={meta.remote_block_size}"
+            )
+
     def _get_local_remote_cp_params(self, meta: ReqMeta):
         """Resolve CP geometry: (remote_block_size, local_cp_rank, local_cp_size,
         remote_cp_size, r_blk), where r_blk = Bd/Bp (>=1) is the D/P block-size ratio.
         Also validates that P/D block sizes are compatible under D-side CP.
         """
+        self._assert_cp_layout_single_block_size(meta)
         remote_block_size = meta.remote_block_size or self.block_size
         # MRV2's DCP group already spans PCP; PCP is not another KV shard axis.
         local_cp_rank = self.dcp_rank
@@ -3023,6 +3042,7 @@ class MooncakeConnectorWorker:
         assert (meta.remote_block_size or self.block_size) == self.block_size, (
             "Decode-only DCP requires equal P/D block sizes."
         )
+        self._assert_cp_layout_single_block_size(meta)
         if self._is_hma_required:
             chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
         else:
