@@ -45,7 +45,7 @@ The exact rescaled PR still needs clean-runtime A3 validation. Earlier A3 runs
 used additional runtime fixes and cannot establish that this standalone PR
 works on unmodified main. Failure must remain visible: do not silently skip,
 xfail, or install runtime patches from inside the test. The four-card directory
-is the existing CI entry. The 1800-second scheduling estimate is provisional,
+is the existing CI entry. The 900-second scheduling estimate is provisional,
 not a measured performance threshold; calibrate it after a clean run.
 
 ## Deferred work
