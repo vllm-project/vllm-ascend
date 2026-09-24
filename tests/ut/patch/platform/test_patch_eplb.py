@@ -275,10 +275,14 @@ def test_async_worker_only_publishes_changed_layers(monkeypatch, changed_layer):
         rearrange_event=SimpleNamespace(wait=wait_for_cycle),
         model_states={"model": model_state},
     )
-    worker = patch_eplb._wrap_async_worker(MagicMock())
+
+    def original_worker(state, cuda_stream, is_profile=False):
+        raise AssertionError("Ascend state must use the patched worker")
+
+    worker = patch_eplb._wrap_async_worker(original_worker)
 
     with pytest.raises(StopIteration):
-        worker(state, MagicMock())
+        worker(state=state, cuda_stream=MagicMock())
 
     assert len(published) == 1
     assert published[0].layer_idx == changed_layer

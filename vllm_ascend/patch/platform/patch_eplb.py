@@ -271,13 +271,20 @@ def _patch_explicit_transfer_execution() -> None:
 
 
 def _wrap_async_worker(original_worker):
+    worker_signature = signature(original_worker)
+    worker_stream_parameter = "stream" if "stream" in worker_signature.parameters else "cuda_stream"
     transfer_signature = signature(_async_worker.transfer_layer)
-    stream_parameter = "stream" if "stream" in transfer_signature.parameters else "cuda_stream"
+    transfer_stream_parameter = "stream" if "stream" in transfer_signature.parameters else "cuda_stream"
 
     @wraps(original_worker)
-    def _transfer_run_periodically(state, stream, is_profile=False):
+    def _transfer_run_periodically(*args, **kwargs):
+        bound = worker_signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        state = bound.arguments["state"]
+        stream = bound.arguments[worker_stream_parameter]
+        is_profile = bound.arguments["is_profile"]
         if not isinstance(state, AscendEplbState) or is_profile:
-            return original_worker(state, stream, is_profile)
+            return original_worker(*bound.args, **bound.kwargs)
         while True:
             state.rearrange_event.wait(stream=stream)
             eplb_group = _async_worker.get_eplb_group().device_group
@@ -317,7 +324,7 @@ def _wrap_async_worker(original_worker):
                         "ep_group": eplb_group,
                         "is_profile": is_profile,
                         "layer_idx": layer_idx,
-                        stream_parameter: stream,
+                        transfer_stream_parameter: stream,
                     }
                     metadata = _async_worker.transfer_layer(**transfer_kwargs)
                     stream.synchronize()
