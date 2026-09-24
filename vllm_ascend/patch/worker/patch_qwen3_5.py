@@ -226,3 +226,9 @@ else:
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
     _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels
+    # The fused prepare kernel is wired by method patching like above: the
+    # runtime class is QwenGatedDeltaNetAttention, which does not inherit from
+    # AscendGatedDeltaNetAttention, so the attribute and the method it calls
+    # must be patched alongside _forward_core.
+    _GDN_PATCH_TARGET._fused_prepare = AscendGatedDeltaNetAttention._fused_prepare
+    _GDN_PATCH_TARGET._use_fused_gdn_prepare = AscendGatedDeltaNetAttention._use_fused_gdn_prepare
