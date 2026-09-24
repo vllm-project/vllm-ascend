@@ -57,17 +57,14 @@ ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/*.cpp)
 set(VLLM_ASCEND_CUSTOM_OP
     ${KERNEL_FILES}
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 
 set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 
 if(SOC_VERSION MATCHES "ascend950")
     message(STATUS "A5 hardware detected: disabling MLAPO operators")
-    message(STATUS "A5 hardware detected: excluding batch_matmul_transpose operators")
     list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
 endif()
 
@@ -88,8 +85,7 @@ if(SOC_VERSION MATCHES "ascend310p.*")
 else()
     file(GLOB VLLM_ASCEND_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host/tiling/tiling_data.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
 endif()
 
 # Sparse KV cache offloading is currently supported on Atlas A3 only.
@@ -101,9 +97,10 @@ include_directories(
   ${pybind11_INCLUDE_DIRS}
   ${PYTHON_INCLUDE_PATH}
   ${TORCH_INCLUDE_DIRS}
-  ${TORCH_NPU_PATH}/include
+  # Prefer the selected CANN toolkit headers over the ACL snapshot bundled in
+  # some torch_npu wheels. Feature checks below use ASCEND_HOME_PATH as well.
   ${ASCEND_HOME_PATH}/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host
+  ${TORCH_NPU_PATH}/include
 )
 
 set(
@@ -129,6 +126,19 @@ include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_INCLUDES ${ASCEND_HOME_PATH}/include)
 set(CMAKE_REQUIRED_LIBRARIES ascendcl)
 set(CMAKE_REQUIRED_LINK_OPTIONS "-L${ASCEND_HOME_PATH}/lib64")
+
+# Keep builds on older CANN versions working; endpoint selection must fail
+# explicitly if the installed CANN lacks the user-to-physical conversion.
+check_cxx_source_compiles("
+  #include <acl/acl_rt.h>
+  int main() {
+    int32_t physical_id = 0;
+    return aclrtGetPhyDevIdByUserDevId(0, &physical_id);
+  }
+" HAVE_ACLRT_GET_PHY_DEV_ID_BY_USER_DEV_ID)
+if(HAVE_ACLRT_GET_PHY_DEV_ID_BY_USER_DEV_ID)
+  target_compile_definitions(vllm_ascend_C PRIVATE CANN_DEVICE_ID_MAPPING)
+endif()
 
 if(DEFINED VLLM_ASCEND_ENABLE_BATCH_MEMCPY)
   if("${VLLM_ASCEND_ENABLE_BATCH_MEMCPY}" STREQUAL "1")

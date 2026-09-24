@@ -4,10 +4,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
@@ -16,6 +18,7 @@ from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
     _validate_eplb_config,
+    _validate_parallel_config,
     _validate_sfa_dcp_kv_sp,
 )
 from vllm_ascend.utils import (
@@ -25,11 +28,104 @@ from vllm_ascend.utils import (
 )
 
 
+@pytest.mark.parametrize(
+    ("dp_size", "tp_size", "enable_ep", "all2all_backend", "expected"),
+    [
+        (1, 2, True, "allgather_reducescatter", True),
+        (2, 2, True, "allgather_reducescatter", True),
+        (1, 1, True, "allgather_reducescatter", False),
+        (1, 2, False, "allgather_reducescatter", False),
+        (1, 2, True, "flashinfer_all2allv", False),
+    ],
+)
+def test_ascend_sequence_parallel_moe_supports_dp1(dp_size, tp_size, enable_ep, all2all_backend, expected):
+    from vllm.config.parallel import ParallelConfig
+
+    import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
+
+    config = ParallelConfig(
+        data_parallel_size=dp_size,
+        tensor_parallel_size=tp_size,
+        enable_expert_parallel=enable_ep,
+        all2all_backend=all2all_backend,
+    )
+
+    assert config.use_sequence_parallel_moe is expected
+
+
+@pytest.mark.parametrize("model_role", ["target", "draft", "alias", "non_speculative"])
+def test_sfa_dcp_validation_only_bypasses_separate_draft(model_role):
+    target = object()
+    draft = target if model_role == "alias" else object()
+    spec = (
+        None
+        if model_role == "non_speculative"
+        else SimpleNamespace(target_model_config=target, draft_model_config=draft)
+    )
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1, tensor_parallel_size=4, decode_context_parallel_size=2
+        ),
+        model_config=draft if model_role == "draft" else target,
+        speculative_config=spec,
+    )
+    with (
+        patch("vllm_ascend.platform.KVPPConfig.from_vllm_config", return_value=SimpleNamespace(size=1)),
+        patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True) as enable_sfa,
+    ):
+        if model_role == "draft":
+            _validate_parallel_config(config)
+            enable_sfa.assert_not_called()
+        else:
+            with pytest.raises(AssertionError, match="DCP for SFA"):
+                _validate_parallel_config(config)
+            enable_sfa.assert_called_once_with(config)
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("enable_sfa_c8", [False, True])
+def test_sfa_dcp_c8_hardware_validation(device_type, enable_sfa_c8):
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1, tensor_parallel_size=4, decode_context_parallel_size=4
+        ),
+        speculative_config=None,
+        additional_config={
+            "enable_sparse_sfa_c8": enable_sfa_c8,
+        },
+    )
+    with (
+        patch("vllm_ascend.platform.KVPPConfig.from_vllm_config", return_value=SimpleNamespace(size=1)),
+        patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True),
+        patch("vllm_ascend.platform.get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
+    ):
+        if device_type == AscendDeviceType.A5 and enable_sfa_c8:
+            with pytest.raises(NotImplementedError, match="SFA C8 DCP"):
+                _validate_parallel_config(config)
+        else:
+            _validate_parallel_config(config)
+
+
+def test_visible_device_id_to_physical_device_id():
+    with (
+        patch("vllm_ascend.platform.bootstrap_custom_op_env"),
+        patch("vllm_ascend.platform.import_module") as load_extension,
+        patch.object(torch.ops, "_C_ascend") as ops,
+    ):
+        ops.get_physical_device_id.return_value = 6
+        assert NPUPlatform.visible_device_id_to_physical_device_id(0) == 6
+        ops.get_physical_device_id.assert_called_once_with(0)
+        load_extension.assert_called_once_with("vllm_ascend.vllm_ascend_C")
+
+
 class TestNPUPlatform(TestBase):
     @staticmethod
     def mock_vllm_config():
         mock_vllm_config = MagicMock()
         mock_vllm_config.compilation_config = MagicMock()
+        mock_vllm_config.compilation_config.reduced_cg_cap = None
         mock_vllm_config.model_config = MagicMock()
         mock_vllm_config.model_config.is_hybrid = False
         mock_vllm_config.model_config.is_encoder_decoder = False
@@ -71,10 +167,11 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         mock_ascend_config.ascend_fusion_config = None
         mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
+        mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 0
+        mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 0
         mock_ascend_config.scheduler_config.enable_balance_scheduling = False
         mock_ascend_config.scheduler_config.batch_job_sched_config.enabled = False
-        mock_ascend_config.get_mc2_comm_alg = MagicMock()
-        mock_ascend_config.get_mc2_comm_alg.return_value = ""
+        mock_ascend_config.mc2_comm_alg = ""
         mock_ascend_config.enable_fused_mc2 = False
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.scheduler_config.short_request_first_config.enabled = False
@@ -490,6 +587,21 @@ class TestNPUPlatform(TestBase):
 
         mock_validate_indexer.assert_called_once_with(vllm_config)
 
+    def test_check_ascend_config_oproj_tp_requires_offload_connector(self):
+        from vllm_ascend.platform import _check_ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
+
+        # The base mock carries no kv_transfer_config: a real split must fail closed.
+        with pytest.raises(AssertionError, match="PreemptOffloadConnector"):
+            _check_ascend_config(vllm_config, ascend_config)
+
+        # Size 1 exchanges nothing across ranks and stays exempt.
+        ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 1
+        _check_ascend_config(vllm_config, ascend_config)
+
     def test_apply_config_platform_defaults_skips_when_scheduler_max_num_seqs_is_missing(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.compilation_config.max_cudagraph_capture_size = None
@@ -520,11 +632,14 @@ class TestNPUPlatform(TestBase):
         # validated False value from AscendConfig to the compile backend.
         vllm_config.additional_config = {"enable_dsa_cp": "false"}
         vllm_config.scheduler_config.max_num_seqs = 77
-        vllm_config.compilation_config.max_cudagraph_capture_size = None
-        vllm_config.compilation_config.cudagraph_capture_sizes = None
-        vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
-        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-        vllm_config.compilation_config.custom_ops = []
+        vllm_config.scheduler_config.max_num_batched_tokens = 1024
+        vllm_config.compilation_config = CompilationConfig(
+            mode=CompilationMode.DYNAMO_TRACE_ONCE,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        vllm_config.uniform_decode_query_len = 1
+        vllm_config.num_speculative_tokens = 0
+        vllm_config.lora_config = None
         vllm_config.model_config.enforce_eager = False
         vllm_config.model_config.enable_sleep_mode = True
         vllm_config.model_config.is_encoder_decoder = False
@@ -536,16 +651,20 @@ class TestNPUPlatform(TestBase):
         vllm_config.cache_config.block_size = 1
 
         self.platform.apply_config_platform_defaults(vllm_config)
-
-        observed_inputs: list[int | None] = []
-        vllm_config._set_cudagraph_sizes = MagicMock(
-            side_effect=lambda: observed_inputs.append(vllm_config.compilation_config.max_cudagraph_capture_size)
-        )
+        vllm_config._set_cudagraph_sizes = lambda: VllmConfig._set_cudagraph_sizes(vllm_config)
+        vllm_config._set_cudagraph_sizes()
 
         with patch("vllm_ascend.platform._setup_compile_backend", wraps=_setup_compile_backend) as mock_setup:
             self.platform.check_and_update_config(vllm_config)
 
-        self.assertEqual(observed_inputs, [77])
+        self.assertEqual(
+            vllm_config.compilation_config.cudagraph_capture_sizes,
+            [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 77],
+        )
+        self.assertEqual(vllm_config.compilation_config.max_cudagraph_capture_size, 77)
+        dispatcher = CudagraphDispatcher(vllm_config)
+        dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL_DECODE_ONLY)
+        self.assertEqual(dispatcher.dispatch(77, uniform_decode=True)[0], CUDAGraphMode.FULL)
         self.assertIs(mock_setup.call_args.kwargs["enable_dsa_cp"], False)
 
     @patch("vllm_ascend.platform.refresh_block_size")
@@ -1209,11 +1328,6 @@ class TestNPUPlatform(TestBase):
                 "batch_job_sched_config",
             ),
             (
-                "profiling_chunk",
-                lambda config, ascend: setattr(ascend.scheduler_config.profiling_chunk_config, "enabled", True),
-                "profiling_chunk_config",
-            ),
-            (
                 "kv_consumer",
                 lambda config, ascend: setattr(
                     config, "kv_transfer_config", MagicMock(kv_role="kv_consumer", engine_id="engine0")
@@ -1236,6 +1350,79 @@ class TestNPUPlatform(TestBase):
                     patch.object(platform, "check_kv_extra_config"),
                 ):
                     self.platform.check_and_update_config(vllm_config)
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_short_request_first_accepts_profiling_chunk(
+        self,
+        mock_init_ascend,
+        mock_soc_version,
+        mock_auto_detect,
+    ):
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.scheduler_config.short_request_first_config.enabled = True
+        ascend_config.scheduler_config.profiling_chunk_config.enabled = True
+        mock_init_ascend.return_value = ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = None
+        vllm_config.scheduler_config.async_scheduling = False
+
+        with (
+            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
+
+        self.assertEqual(
+            vllm_config.scheduler_config.scheduler_cls,
+            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler",
+        )
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_short_request_first_rejects_async_profiling_chunk(
+        self,
+        mock_init_ascend,
+        mock_soc_version,
+        mock_auto_detect,
+    ):
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.scheduler_config.short_request_first_config.enabled = True
+        ascend_config.scheduler_config.profiling_chunk_config.enabled = True
+        mock_init_ascend.return_value = ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = None
+        vllm_config.scheduler_config.async_scheduling = True
+
+        with (
+            pytest.raises(
+                ValueError,
+                match="requires synchronous scheduling",
+            ),
+            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch(
@@ -1586,6 +1773,35 @@ class TestNPUPlatform(TestBase):
 
         platform._validate_parallel_config(vllm_config)
 
+        # Exercise Pydantic construction, not just the patched Python method.
+        from vllm.config.parallel import ParallelConfig
+
+        import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
+
+        parallel = ParallelConfig(
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=2,
+            data_parallel_size=2,
+            data_parallel_size_local=1,
+        )
+        assert parallel.prefill_context_parallel_size == 2
+        assert parallel.data_parallel_size == 2
+        from vllm.config import VllmConfig
+
+        # Exercise nested Pydantic validation without initializing model/runtime
+        # configuration in this CPU test.
+        with patch.object(VllmConfig, "__post_init__", return_value=None):
+            config = VllmConfig(parallel_config=parallel)
+        assert config.parallel_config is parallel
+        with pytest.raises(ValueError, match="valid DCP sizes"):
+            ParallelConfig(
+                tensor_parallel_size=1,
+                prefill_context_parallel_size=2,
+                data_parallel_size=2,
+                data_parallel_size_local=1,
+                decode_context_parallel_size=3,
+            )
+
     def test_validate_parallel_config_accepts_dp_only(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.data_parallel_size = 2
@@ -1744,18 +1960,6 @@ class TestNPUPlatform(TestBase):
                 result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
                 self.assertEqual(result, expected_backend)
 
-    def test_get_attn_backend_cls_rejects_pcp_and_dcp(self):
-        attn_selector_config = AttentionSelectorConfig(
-            dtype=torch.float16,
-            head_size=0,
-            kv_cache_dtype=None,
-            block_size=128,
-            use_pcp=True,
-            use_dcp=True,
-        )
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP simultaneously"):
-            self.platform.get_attn_backend_cls("ascend", attn_selector_config)
-
     def test_get_attn_backend_cls_supports_legacy_config_without_use_dcp(self):
         attn_selector_config = SimpleNamespace(
             use_mla=True,
@@ -1763,7 +1967,11 @@ class TestNPUPlatform(TestBase):
             use_pcp=True,
         )
 
-        result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
+        config = self.mock_vllm_config()
+        config.model_config.hf_text_config = SimpleNamespace(index_topk=2048)
+        config.model_config.hf_config = config.model_config.hf_text_config
+        with set_current_vllm_config(config):
+            result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
 
         self.assertEqual(result, "vllm_ascend.attention.sfa_v1.AscendSFABackend")
 
@@ -1777,7 +1985,11 @@ class TestNPUPlatform(TestBase):
             use_sparse=True,
             use_pcp=True,
         )
-        result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
+        config = self.mock_vllm_config()
+        config.model_config.hf_text_config = SimpleNamespace(index_topk=2048)
+        config.model_config.hf_config = config.model_config.hf_text_config
+        with set_current_vllm_config(config):
+            result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
         self.assertEqual(result, "vllm_ascend.attention.sfa_v1.AscendSFABackend")
 
     def test_get_attn_backend_cls_rejects_unsupported_pcp_backend(self):

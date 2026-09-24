@@ -63,27 +63,12 @@ msgid "### 3.1 Model Weight"
 msgstr "### 3.1 模型权重"
 
 msgid ""
-"- `DeepSeek-OCR-2`: [Download model weight](https://huggingface.co/deepseek-"
-"ai/DeepSeek-OCR-2)."
-msgstr ""
-"- `DeepSeek-OCR-2`：[下载模型权重](https://huggingface.co/deepseek-ai/DeepSeek-"
-"OCR-2)。"
-
-msgid ""
 "It is recommended to download the model weight to the shared directory of "
 "multiple nodes, such as `/root/.cache/`."
 msgstr "建议将模型权重下载到多节点的共享目录中，例如 `/root/.cache/`。"
 
 msgid "### 3.2 Verify Multi-node Communication"
 msgstr "### 3.2 验证多节点通信"
-
-msgid ""
-"If you want to deploy multi-node environment, you need to verify multi-node "
-"communication according to [verify multi-node communication "
-"environment](../../installation.md#verify-multi-node-communication)."
-msgstr ""
-"如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
-"communication)中的说明验证多节点通信。"
 
 msgid "## 4 Installation"
 msgstr "## 4 安装"
@@ -94,14 +79,6 @@ msgstr "### 4.1 Docker 镜像安装"
 msgid ""
 "You can use our official docker image to run `DeepSeek-OCR-2` directly."
 msgstr "您可以使用我们的官方 Docker 镜像直接运行 `DeepSeek-OCR-2`。"
-
-msgid ""
-"Select an image based on your machine type and start the docker image on "
-"your node, refer to [using docker](../../installation.md#set-up-using-"
-"docker)."
-msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
-"using-docker)。"
 
 msgid "=== \"A2 series\""
 msgstr "=== \"A2 系列\""
@@ -148,9 +125,6 @@ msgstr "推荐使用单节点部署。"
 msgid "### 5.3 Prefill-Decode Disaggregation"
 msgstr "### 5.3 预填充-解码分离"
 
-msgid "We don't need to Prefill-Decode disaggregation"
-msgstr "我们不需要进行预填充-解码分离"
-
 msgid "## 6 Functional Verification"
 msgstr "## 6 功能验证"
 
@@ -178,9 +152,6 @@ msgstr "2. 执行后，您可以获得结果，以下是 `DeepSeek-OCR-2` 的结
 
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
 
 msgid ""
 "Refer to [Using AISBench for performance "
@@ -231,13 +202,6 @@ msgid ""
 " for tuning methods."
 msgstr ""
 "请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)了解调优方法。"
-
-msgid ""
-"Please refer to the [Feature "
-"Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
-"feature descriptions."
-msgstr ""
-"请参考[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
 
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题"
@@ -297,3 +261,45 @@ msgid ""
 "For common environment, installation, and general parameter issues, please "
 "refer to the [Public FAQs](../../faqs.md)."
 msgstr "对于常见的环境、安装和一般参数问题，请参阅[公共FAQ](../../faqs.md)。"
+
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-node "
+"communication according to [verify multi-node communication "
+"environment](../../getting_started/installation.md#installation-multi-node-"
+"interconnect)."
+msgstr ""
+"如果您想部署多节点环境，您需要根据[验证多节点通信环境](../../getting_started/installation.md#installation-"
+"multi-node-interconnect)来验证多节点通信。"
+
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using "
+"docker](../../getting_started/installation.md#installation-prebuilt-image)."
+msgstr ""
+"根据您的机器类型选择镜像，并在您的节点上启动docker镜像，请参考[使用docker](../../getting_started/installation.md#installation-"
+"prebuilt-image)。"
+
+msgid "|  Weight Version  | Download Links |"
+msgstr "|  权重版本  | 下载链接 |"
+
+msgid ""
+"| `DeepSeek-OCR-2` | [Hugging Face](https://huggingface.co/deepseek-"
+"ai/DeepSeek-OCR-2) |"
+msgstr ""
+"| `DeepSeek-OCR-2` | [Hugging Face](https://huggingface.co/deepseek-"
+"ai/DeepSeek-OCR-2) |"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该目录。确保后续部署命令中的模型路径与该目录一致。"
+
+msgid "Prefill-Decode disaggregation is not required."
+msgstr "无需进行 Prefill-Decode 分离部署。"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用 AISBench"
+
+msgid "### 8.1 Using AISBench"
+msgstr "### 8.1 使用 AISBench"

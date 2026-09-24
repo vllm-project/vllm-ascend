@@ -21,42 +21,10 @@ msgstr ""
 msgid "# gpt-oss-120b"
 msgstr "# gpt-oss-120b"
 
-msgid "## Introduction"
-msgstr "## 简介"
-
-msgid "## Supported Features"
-msgstr "## 支持的特性"
-
-msgid "## Environment Preparation"
-msgstr "## 环境准备"
-
-msgid "### Model Weight"
-msgstr "### 模型权重"
-
-msgid "### Installation"
-msgstr "### 安装"
-
-msgid "#### Docker Pull (by tag)"
-msgstr "#### Docker 拉取（按标签）"
-
-msgid "#### Docker run"
-msgstr "#### Docker 运行"
-
 msgid ""
 "In addition, if you don't want to use the docker image as above, you can "
 "also build all from source:"
 msgstr "此外，如果您不想使用上述 Docker 镜像，也可以从源码构建所有内容："
-
-msgid ""
-"- Install `vllm-ascend` from source, refer to "
-"[installation](../../installation.md)."
-msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
-
-msgid "## Deployment"
-msgstr "## 部署"
-
-msgid "### Troubleshooting"
-msgstr "### 故障排除"
 
 msgid "Run into"
 msgstr "遇到"
@@ -67,9 +35,6 @@ msgid ""
 msgstr ""
 "\"openai_harmony.HarmonyError: error downloading or loading vocab file: "
 "failed to download or load vocab error\""
-
-msgid "### Single-node Deployment"
-msgstr "### 单节点部署"
 
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
@@ -102,15 +67,9 @@ msgstr ""
 "\"cudagraph_mode\"：表示具体的图模式。目前支持 \"PIECEWISE\" 和 \"FULL_DECODE_ONLY\"。图模式主要用于降低算子调度的开销。目前推荐使用 \"FULL_DECODE_ONLY\"。\n"
 "- \"cudagraph_capture_sizes\"：表示不同级别的图模式。默认值为 [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]。在图模式下，不同级别图的输入是固定的，级别之间的输入会自动填充到下一级别。目前推荐使用默认设置。仅在部分场景下需要单独设置以达到最佳性能。"
 
-msgid "## Functional Verification"
-msgstr "## 功能验证"
-
 msgid ""
 "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
-
-msgid "## Accuracy Evaluation"
-msgstr "## 精度评估"
 
 msgid "Here are two accuracy evaluation methods."
 msgstr "以下是两种精度评估方法。"
@@ -126,12 +85,6 @@ msgid ""
 "oss-120b-bf16`  for reference only."
 msgstr "2. 执行后可获得结果，以下为 `gpt-oss-120b-bf16` 的结果，仅供参考。"
 
-msgid "## Performance"
-msgstr "## 性能"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
-
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -140,9 +93,6 @@ msgstr ""
 "详情请参考[使用 AISBench "
 "进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
-
-msgid "### Using vLLM Benchmark"
-msgstr "### 使用 vLLM 基准测试"
 
 msgid "Run performance evaluation of `gpt-oss-120b-BF16` as an example."
 msgstr "以 `gpt-oss-120b-BF16` 为例运行性能评估。"
@@ -194,14 +144,6 @@ msgstr ""
 " Apache 2.0 许可证下发布模型权重、推理实现、工具环境和分词器，以促进广泛使用和进一步研究。"
 
 msgid ""
-"- `gpt-oss-120b`(bf16 version): require 1 Atlas 800 A3 (64GB × 16) nodes or "
-"1 Atlas 800 A2 (64GB × 8) nodes. [Download model "
-"weight](https://huggingface.co/unsloth/gpt-oss-120b-BF16)"
-msgstr ""
-"- `gpt-oss-120b`（bf16 版本）：需要 1 个 Atlas 800 A3（64GB × 16）节点或 1 个 Atlas 800 "
-"A2（64GB × 8）节点。[下载模型权重](https://huggingface.co/unsloth/gpt-oss-120b-BF16)"
-
-msgid ""
 "You can use our official docker image for supporting gpt-oss-120b-bf16 models.\n"
 "Currently, we provide the all-in-one images. [Download images](https://quay.io/repository/ascend/vllm-ascend?tab=tags)"
 msgstr ""
@@ -248,3 +190,79 @@ msgid ""
 "Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
 " feature's configuration."
 msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)以获取该特性的配置。"
+
+msgid ""
+"- Install `vllm-ascend` from source, refer to "
+"[installation](../../getting_started/installation.md)."
+msgstr ""
+"- 从源码安装 `vllm-ascend`，请参考[安装指南](../../getting_started/installation.md)。"
+
+msgid "## 1 Introduction"
+msgstr "## 1 简介"
+
+msgid "## 2 Supported Features"
+msgstr "## 2 支持的特性"
+
+msgid "## 3 Environment Preparation"
+msgstr "## 3 环境准备"
+
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
+msgid ""
+"|  Weight Version              | Hardware Requirements"
+"                                               | Download Links |"
+msgstr ""
+"|  权重版本              | 硬件要求                                               | "
+"下载链接 |"
+
+msgid ""
+"| `gpt-oss-120b`(bf16 version) | 1 Atlas 800 A3 (64GB × 16) nodes or 1 Atlas"
+" 800 A2 (64GB × 8) nodes | [Hugging "
+"Face](https://huggingface.co/unsloth/gpt-oss-120b-BF16) |"
+msgstr ""
+"| `gpt-oss-120b`（bf16 版本） | 1 个 Atlas 800 A3（64GB × 16）节点或 1 个 Atlas 800 "
+"A2（64GB × 8）节点 | [Hugging Face](https://huggingface.co/unsloth/gpt-"
+"oss-120b-BF16) |"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该目录。请确保后续部署命令中的模型路径与该目录一致。"
+
+msgid "## 4 Installation"
+msgstr "## 4 安装"
+
+msgid "### 4.1 Docker Pull (by tag)"
+msgstr "### 4.1 Docker 拉取（按标签）"
+
+msgid "### 4.2 Docker run"
+msgstr "### 4.2 Docker 运行"
+
+msgid "## 5 Deployment"
+msgstr "## 5 部署"
+
+msgid "### 5.1 Troubleshooting"
+msgstr "### 5.1 故障排查"
+
+msgid "### 5.2 Single-node Deployment"
+msgstr "### 5.2 单节点部署"
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用 AISBench"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid "### 8.1 Using AISBench"
+msgstr "### 8.1 使用 AISBench"
+
+msgid "### 8.2 Using vLLM Benchmark"
+msgstr "### 8.2 使用 vLLM Benchmark"

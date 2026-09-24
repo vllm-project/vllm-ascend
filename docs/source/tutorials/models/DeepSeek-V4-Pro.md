@@ -21,11 +21,19 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantized): download the production weight from [ModelScope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-0813-w4a8). This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
+|  Weight Version             | Hardware Requirements                                               | Download Links |
+|-----------------------------|---------------------------------------------------------------------|----------------|
+| `DeepSeek-V4-Pro-w4a8-mtp`  | 2 Atlas 800 A3 (128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp) |
+| `DeepSeek-V4-Pro-0813-w4a8` |                                                                     | [ModelScope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-0813-w4a8)    |
+| `DeepSeek-V4-Pro-0813-w4a4c8` | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_pro_w4a4c8.yaml) |
 
-- `DeepSeek-V4-Pro-w4a8-mtp` (Quantized version): requires 2 Atlas 800 A3 (128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp)
+- `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantized): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
+
+- `DeepSeek-V4-Pro-0813-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -167,9 +175,10 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export ASCEND_TRANSFER_TIMEOUT=10000
     export VLLM_RPC_TIMEOUT=1800000
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
-      --port 10010 \
+      --port 8000 \
       --data-parallel-address $node0_ip  \
       --data-parallel-size 4 \
       --data-parallel-size-local 1 \
@@ -187,6 +196,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config '{
          "enable_multithread_load": true,
          "num_threads": 128
@@ -241,10 +251,11 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export ASCEND_CONNECT_TIMEOUT=10000
     export ASCEND_TRANSFER_TIMEOUT=10000
     export VLLM_RPC_TIMEOUT=1800000
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
-      --port 10010 \
+      --port 8000 \
       --headless \
       --data-parallel-address $node0_ip  \
       --data-parallel-size 4 \
@@ -263,6 +274,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config '{
          "enable_multithread_load": true,
          "num_threads": 128
@@ -312,10 +324,11 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
-      --port 8900 \
+      --port 8000 \
       --data-parallel-address $node0_ip \
       --data-parallel-rpc-port 13399 \
       --data-parallel-size 2 \
@@ -333,6 +346,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
       --quantization ascend \
       --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
@@ -369,10 +383,11 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
-      --port 8900 \
+      --port 8000 \
       --headless \
       --data-parallel-address $node0_ip \
       --data-parallel-rpc-port 13399 \
@@ -391,6 +406,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
       --quantization ascend \
       --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
@@ -439,7 +455,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
 
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
       --host 0.0.0.0 \
-      --port 8900 \
+      --port 8000 \
       --data-parallel-address $node0_ip \
       --data-parallel-rpc-port 13399 \
       --data-parallel-size 2 \
@@ -457,6 +473,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
       --quantization ascend \
       --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
@@ -501,7 +518,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
 
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
       --host 0.0.0.0 \
-      --port 8900 \
+      --port 8000 \
       --headless \
       --data-parallel-address $node0_ip \
       --data-parallel-rpc-port 13399 \
@@ -520,6 +537,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
       --quantization ascend \
       --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
@@ -556,7 +574,7 @@ Key Parameter Descriptions:
 - `--speculative-config` configures speculative decoding. Use `mtp` for the preview MTP checkpoint and `dspark` for `DeepSeek-V4-Pro-0813-w4a8`. For DSpark, use the value declared by the checkpoint; the example uses five speculative tokens, and all ranks must use the same value.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
 - `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, `enable_shared_expert_dp` enables data parallelism for shared experts, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput.
-- `enable_flashcomm1: true` in `--additional-config` enables the FlashComm1 communication optimization. This is the recommended replacement for the deprecated `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable. Configure it explicitly whenever `enable_dsa_cp` is enabled.
+- `enable_flashcomm1: true` in `--additional-config` enables the FlashComm1 communication optimization. This is the recommended replacement for the deprecated `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable. It is auto-enabled whenever `enable_dsa_cp` is enabled.
 - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` retains prefix-cache checkpoints every 4096 tokens. It takes effect only when prefix caching is enabled and must be a non-negative multiple of `--block-size`; `4096` matches the DSpark example's block size of `32`.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
@@ -564,7 +582,7 @@ Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](..
 Service Verification:
 
 ```shell
-curl http://<node0_ip>:8900/v1/chat/completions \
+curl http://<node0_ip>:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "dsv4",
@@ -739,6 +757,7 @@ Before you start, please:
     export TASK_QUEUE_ENABLE=1
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export ASCEND_RT_VISIBLE_DEVICES=$1
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
         --host 0.0.0.0 \
         --port $2 \
@@ -760,6 +779,7 @@ Before you start, please:
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
+        --attention_config.indexer_kv_dtype int8 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --trust-remote-code \
         --quantization ascend \
@@ -808,7 +828,8 @@ Before you start, please:
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
     export ASCEND_RT_VISIBLE_DEVICES=$1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
         --host 0.0.0.0 \
         --port $2 \
@@ -831,6 +852,7 @@ Before you start, please:
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
+        --attention_config.indexer_kv_dtype int8 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --trust-remote-code \
         --quantization ascend \
@@ -907,7 +929,8 @@ Before you start, please:
     export HCCL_OP_EXPANSION_MODE="AIV"
     export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
     export ASCEND_RT_VISIBLE_DEVICES=$1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
         --host 0.0.0.0 \
         --port $2 \
@@ -929,6 +952,7 @@ Before you start, please:
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
+        --attention_config.indexer_kv_dtype int8 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --trust-remote-code \
         --quantization ascend \
@@ -970,7 +994,8 @@ Before you start, please:
     export HCCL_BUFFSIZE=1800
     export TASK_QUEUE_ENABLE=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
         --host 0.0.0.0 \
         --port $2 \
@@ -993,6 +1018,7 @@ Before you start, please:
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
+        --attention_config.indexer_kv_dtype int8 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --trust-remote-code \
         --quantization ascend \
@@ -1178,7 +1204,8 @@ Before you start, please:
         sysctl kernel.sched_migration_cost_ns=50000
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -1200,6 +1227,7 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
+            --attention_config.indexer_kv_dtype int8 \
             --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --trust-remote-code \
             --quantization ascend \
@@ -1253,7 +1281,8 @@ Before you start, please:
         sysctl kernel.sched_migration_cost_ns=50000
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -1276,6 +1305,7 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
+            --attention_config.indexer_kv_dtype int8 \
             --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --trust-remote-code \
             --quantization ascend \
@@ -1367,7 +1397,7 @@ Key Parameter Descriptions:
 - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
 - `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.
 - `--trust-remote-code` allows the model repository's custom code to be loaded. Only use trusted model repositories.
-- `enable_dsa_cp: true` enables DSA context parallelism on Prefill nodes. DSA-CP depends on FlashComm1, so the same `--additional-config` object must also set `"enable_flashcomm1": true`.
+- `enable_dsa_cp: true` enables DSA context parallelism on Prefill nodes. DSA-CP depends on FlashComm1, which is auto-enabled when DSA-CP is on, so there is no need to set `"enable_flashcomm1": true` in the same `--additional-config` object.
 - `--kv-transfer-config` configures KV cache transfer between the prefill producer and decode consumer in PD separation.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.
 - `additional_config.enable_fused_mc2=1`: enables the Fused MC2 fusion operator to accelerate communication on Prefill nodes (A3 series).
@@ -1409,7 +1439,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -1420,14 +1450,17 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 | GPQA | - | accuracy | gen | 91.41 | 0831 official W4A8 weight with DSpark enabled |
 | GPQA | - | accuracy | gen | 89.90 | 2 Atlas 800 A3 (128GB × 8) |
 | GSM8K | - | accuracy | gen | 96.21 | 2 Atlas 800 A3 (128GB × 8) |
+| GSM8K | - | accuracy | gen | 97.54 | 950PR&950DT Products, w4a4c8 |
+
+> **Note**: Dataset evaluation results fluctuate between runs due to sampling and runtime non-determinism. When a dataset is evaluated multiple times, the average score is reported.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
@@ -1474,3 +1507,21 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
+
+### Q: How do the W4A4C8 ultra-low-bit quantized weights preserve accuracy?
+
+A: For 950PR&950DT Products, the W4A4C8 weights of `DeepSeek-V4-Pro-0813` are quantized with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_pro_w4a4c8.yaml). To preserve accuracy at such a low bit-width, a mixed-precision strategy is used: only the modules that dominate the parameter count are quantized to 4 bit, while precision-sensitive modules fall back to higher precision or are not quantized at all.
+
+| Module | Quantization configuration |
+| ------ | -------------------------- |
+| MoE FFN routed experts | W4A4 MXFP4 |
+| Attention linear layers | W8A8 MXFP8 |
+| FFN shared experts | W8A8 MXFP8 |
+| Router gates, compressor projections (`wgate`/`wkv`), indexer projections, and MTP layers | Not quantized (kept in high precision) |
+
+- **Quantization algorithm**: The weights and activations use the MXFP4/MXFP8 microscaling formats. Each tensor is divided into blocks of 32 elements, and each block shares a single scaling factor obtained with symmetric min-max calibration on a mixed calibration dataset. Block-wise scaling adapts to the local dynamic range of each tensor, so the quantization error is far lower than that of uniform INT4 quantization.
+- **C8 (FP8 KV cache)**: C8 is a dynamic quantization applied to the KV cache during inference. On 950PR&950DT Products, the KV cache is quantized to FP8 (not INT8). It is unrelated to the parameters stored in the weight checkpoint and is controlled only by the serving configuration. DeepSeek-V4-Flash and DeepSeek-V4-Pro share exactly the same C8 scheme:
+    - **Attention KV cache** (FP8 by default on 950PR&950DT Products; switch back to BF16 with `--kv-cache-dtype bfloat16`): the compressed KV latent, which serves as both K and V, is dynamically quantized per 64-element tile to FP8 (E4M3) with a shared E8M0 scale per tile; the RoPE part of the KV cache stays in BF16, and Q is not quantized.
+    - **Indexer cache** (enabled with `--attention_config.indexer_kv_dtype fp8`): both indexer Q and K are first rotated by a Hadamard matrix to spread outliers, and then dynamically quantized per token to FP8 (E4M3) with per-token FP32 scales.
+
+For W4A4C8 accuracy scores, see [Accuracy Evaluation](#7-accuracy-evaluation).

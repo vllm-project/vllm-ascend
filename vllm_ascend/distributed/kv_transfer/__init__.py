@@ -47,6 +47,24 @@ def register_connector():
     )
 
     KVConnectorFactory.register_connector(
+        "MooncakeD2RHConnectorV1",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_d2rh_connector",
+        "MooncakeConnector",
+    )
+
+    KVConnectorFactory.register_connector(
+        "MooncakeConnectorV2",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector",
+        "MooncakeConnector",
+    )
+
+    KVConnectorFactory.register_connector(
+        "MooncakePullConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector",
+        "MooncakePullConnector",
+    )
+
+    KVConnectorFactory.register_connector(
         "MooncakeHybridConnector",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector",
         "MooncakeConnector",
@@ -105,9 +123,9 @@ def register_connector():
         )
 
     KVConnectorFactory.register_connector(
-        "RecomputeCPUOffloadConnector",
-        "vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.recompute_cpu_offload_connector",
-        "RecomputeCPUOffloadConnectorV1",
+        "PreemptOffloadConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.preempt_offload_connector",
+        "PreemptOffloadConnectorV1",
     )
 
     KVConnectorFactory.register_connector(

@@ -45,7 +45,14 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import FP8_METHOD, is_950, maybe_trans_nz
 
-from ..base import AscendLinearScheme, AscendMoEScheme, QuantType
+from ..base import (
+    AscendLinearScheme,
+    AscendMoEScheme,
+    QuantType,
+    WeightSwitchConfig,
+    WeightSwitchGatherSpec,
+    WeightSwitchRepeatSpec,
+)
 from ..registry import register_scheme
 from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicFusedMoEMethod, AscendW8A8MXFP8DynamicLinearMethod
 
@@ -136,6 +143,36 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
     resolves those tiles and then either re-quantizes to MXFP8 (Ascend 950) or
     keeps the model dtype (everything else).
     """
+
+    supports_weight_switch = True
+
+    # Dense post-processing keeps weight in [output, input] layout.
+    weight_switch_gather_specs = (WeightSwitchGatherSpec("weight", gather_dim=1),)
+    weight_switch_output_gather_specs = (WeightSwitchGatherSpec("weight"),)
+
+    def _get_weight_switch_specs(
+        self,
+        layer: torch.nn.Module,
+        config: WeightSwitchConfig,
+    ) -> tuple[
+        tuple[WeightSwitchGatherSpec, ...],
+        tuple[WeightSwitchRepeatSpec, ...],
+        str,
+    ]:
+        gather_specs, repeat_specs, shard_axis = super()._get_weight_switch_specs(layer, config)
+        if self.mxfp8_method is None:
+            return gather_specs, repeat_specs, shard_axis
+        if shard_axis == "input":
+            return (
+                self.mxfp8_method.weight_switch_gather_specs,
+                self.mxfp8_method.weight_switch_repeat_specs,
+                shard_axis,
+            )
+        return (
+            self.mxfp8_method.weight_switch_output_gather_specs,
+            self.mxfp8_method.weight_switch_output_repeat_specs,
+            shard_axis,
+        )
 
     def __init__(self, weight_block_size: tuple[int, int]):
         self.block_n, self.block_k = weight_block_size

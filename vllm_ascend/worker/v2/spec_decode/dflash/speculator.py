@@ -11,6 +11,8 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.worker.gpu.cp_utils import cp_local_slot
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
@@ -25,10 +27,17 @@ class AscendDFlashSpeculator(DFlashSpeculator):
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
-            attn_metadata = self._build_draft_attn_metadata(
+            # vLLM main (#56181) replaced _build_draft_attn_metadata with
+            # _build_uniform_attn_metadata (BatchExecutionDescriptor).
+            batch_desc = BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.FULL,
+                num_tokens=num_tokens_padded,
+                num_reqs=num_reqs_padded,
+            )
+            attn_metadata = self._build_uniform_attn_metadata(
                 num_reqs=self.input_batch.num_reqs,
-                num_reqs_padded=num_reqs_padded,
-                num_tokens_padded=num_tokens_padded,
+                batch_desc=batch_desc,
+                num_query_per_req=self.num_query_per_req,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=self.num_query_per_req,
                 causal=self._group_causal,
@@ -117,16 +126,21 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         next_prefill_tokens: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync: Any = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
-        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
-        dp_sync: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
         sync_state = dp_sync
+        if dummy_run and skip_attn_for_dummy_run:
+            # Profiling runs the draft with its own query token count, which
+            # can differ from the target batch. Let forward_context coordinate
+            # the actual draft counts instead of reusing the target DP state.
+            # TODO: Remove this guard once main2main includes upstream vLLM
+            # #54856 (facd9a74a1), which resets the profiling DP counts.
+            sync_state = None
         with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
@@ -148,17 +162,8 @@ class AscendDFlashSpeculator(DFlashSpeculator):
             )
 
 
-# main2main compat: upstream ``_prepare_dflash_inputs_kernel`` added four
-# ``temperature``/``seeds`` parameters and corresponding stores (see
-# vllm-project/vllm#50000). Ascend keeps its own kernel for NPU, matching
-# the upstream parameter layout.
-
-
-# main2main compat: upstream ``_prepare_dflash_inputs_kernel`` added
-# ``cp_rank``/``CP_SIZE``/``CP_INTERLEAVE`` for DCP support (see
-# vllm-project/vllm#52188). The extra parameters are unused: Ascend does not
-# run dflash with DCP (CP_SIZE is always 1, where upstream ``cp_local_slot``
-# yields the same slots as this kernel).
+# Keep the Ascend scalar-loop implementation while sharing upstream's CP
+# slot ownership and local-offset rules for both DFlash and DSpark.
 @triton.jit
 def _prepare_dflash_inputs_kernel_ascend(
     # Outputs
@@ -218,6 +223,7 @@ def _prepare_dflash_inputs_kernel_ascend(
 
     nrejected = tl.load(num_rejected_ptr + req_idx)
     valid_ctx_end = ctx_end - nrejected
+    num_valid_ctx = valid_ctx_end - ctx_start
 
     nsampled = tl.load(num_sampled_ptr + req_idx)
     if nsampled > 0:
@@ -232,11 +238,17 @@ def _prepare_dflash_inputs_kernel_ascend(
     # --- Context positions / slots ---
     for j in range(0, num_ctx):
         ctx_pos_idx = ctx_start + j
-        ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx)
-        ctx_block_num = ctx_pos // block_size
+        is_valid_ctx = j < num_valid_ctx
+        ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_valid_ctx, other=0)
+        ctx_block_num = ctx_pos // (block_size * CP_SIZE)
         ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
-        ctx_block_id = tl.load(block_table_ptr + req_idx * block_table_stride + ctx_block_num).to(tl.int64)
-        ctx_slot = ctx_block_id * block_size + (ctx_pos % block_size)
+        ctx_block_id = tl.load(
+            block_table_ptr + req_idx * block_table_stride + ctx_block_num,
+            mask=is_valid_ctx,
+            other=0,
+        ).to(tl.int64)
+        local_ctx_slot = cp_local_slot(ctx_pos, ctx_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID)
+        ctx_slot = tl.where(is_valid_ctx & (ctx_block_id != 0), local_ctx_slot, PAD_SLOT_ID)
         tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos)
         tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot)
 
@@ -249,10 +261,11 @@ def _prepare_dflash_inputs_kernel_ascend(
         else:
             input_id = parallel_drafting_token_id
 
-        q_block_num = query_pos // block_size
+        q_block_num = query_pos // (block_size * CP_SIZE)
         q_block_num = tl.minimum(q_block_num, block_table_stride - 1)
         q_block_id = tl.load(block_table_ptr + req_idx * block_table_stride + q_block_num).to(tl.int64)
-        q_slot = q_block_id * block_size + (query_pos % block_size)
+        local_q_slot = cp_local_slot(query_pos, q_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID)
+        q_slot = tl.where(q_block_id != 0, local_q_slot, PAD_SLOT_ID)
 
         tl.store(out_input_ids_ptr + query_idx, input_id)
         clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)
@@ -274,7 +287,7 @@ def _prepare_dflash_inputs_kernel_ascend(
     # seq_lens is the absolute sequence length the draft attention
     # reads up to (context + query), not just the count of accepted
     # tokens this step.
-    tl.store(out_seq_lens_ptr + req_idx, last_valid_pos + 1 + num_query_per_req)
+    tl.store(out_seq_lens_ptr + req_idx, tl.minimum(last_valid_pos + 1 + num_query_per_req, max_model_len))
     # Copy sampling state (added upstream in vllm-project/vllm#50000).
     tl.store(
         out_temperature_ptr + req_state_idx,

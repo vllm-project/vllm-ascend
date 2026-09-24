@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import math
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import partial
 from typing import Any, cast
 
@@ -160,7 +160,10 @@ class NPUModelRunner310(NPUModelRunner):
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
     ):
-        is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        is_prefilling = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] < self.input_batch.num_prompt_tokens[:num_reqs]
+        )
+        is_all_decode = not np.any(is_prefilling)
 
         if self.attn_state in (AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit):
             force_eager = True
@@ -451,13 +454,6 @@ class NPUModelRunner310(NPUModelRunner):
                 self.mrope_positions.cpu,
                 non_blocking=True,
             )
-        elif self.uses_xdrope_dim > 0:
-            self._calc_xdrope_positions(scheduler_output)
-            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
-
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
         base_num_reqs = self.input_batch.num_reqs
@@ -685,13 +681,19 @@ class NPUModelRunner310(NPUModelRunner):
             static_forward_context=(self.compilation_config.static_forward_context),
         )
 
-    def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+    def initialize_kv_cache_tensors(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+    ) -> dict[str, torch.Tensor]:
         """
         Override the base class method.
         Initialize the memory buffer for KV cache.
 
         Args:
             kv_cache_config: The KV cache config
+            kv_cache_allocation_context: Sleep-mode pool used only for discardable
+            KV backing allocations. Sharing and bind stay outside.
         Returns:
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
@@ -706,8 +708,9 @@ class NPUModelRunner310(NPUModelRunner):
         if self.model_config.use_mla:
             logger.error("MLAAttention is not supported.")
             raise ValueError("MLAAttention is not supported for 310P.")
-        # Initialize the memory buffer for KV cache
-        kv_caches = self._allocate_kv_cache_tensors(kv_cache_config)
+        allocation_context = kv_cache_allocation_context or nullcontext()
+        with allocation_context:
+            kv_caches = self._allocate_kv_cache_tensors(kv_cache_config)
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
@@ -748,7 +751,7 @@ class NPUModelRunner310(NPUModelRunner):
                     assert isinstance(cache_spec, MambaSpec)
                     # vLLM #51718 packs all group layers into one tensor on main;
                     # MambaSpec.page_size_bytes is per-layer, so num_blocks times
-                    # it is the per-layer byte count (matching v0.27.1's size).
+                    # it is the per-layer byte count (matching v0.28.0's size).
                     per_layer_size = kv_cache_config.num_blocks * cache_spec.page_size_bytes
                     assert per_layer_size % cache_spec.page_size_bytes == 0
                     num_blocks = per_layer_size // cache_spec.page_size_bytes

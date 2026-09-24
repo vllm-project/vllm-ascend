@@ -4,9 +4,9 @@
 
 |产品      | 是否支持 |
 |:----------------------------|:-----------:|
-|<term>Ascend 950PR/Ascend 950DT</term>|      √     |
-|<term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>|      √     |
-|<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>|      √     |
+|<term>Ascend 950PR&950DT 系列产品</term>|      √     |
+|<term>Atlas A3 系列产品</term>|      √     |
+|<term>Atlas A2 系列产品</term>|      √     |
 |<term>Atlas 200I/500 A2 推理产品</term>|      ×     |
 |<term>Atlas 推理系列加速卡产品</term>|      ×     |
 |<term>Atlas 训练系列产品</term>|      ×     |
@@ -212,11 +212,11 @@
 ## 约束说明
 
 - 该接口支持图模式。
-- 参数query shape中：<term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>、<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>：Q_N不支持48。
+- 参数query shape中：<term>Atlas A3 系列产品</term>、<term>Atlas A2 系列产品</term>：Q_N不支持48。
 - 参数key、value数据类型要求：
-    - <term>Ascend 950PR/Ascend 950DT</term>：仅支持float8_e4m3、int8、hifloat8数据类型。
-    - <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>、<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>：仅支持int8数据类型。
+    - <term>Ascend 950PR&950DT 系列产品</term>：仅支持float8_e4m3、int8、hifloat8数据类型。
+    - <term>Atlas A3 系列产品</term>、<term>Atlas A2 系列产品</term>：仅支持int8数据类型。
 - 参数sparse\_block\_size：
-    - <term>Ascend 950PR/Ascend 950DT</term>：只支持sparse\_block\_size为1。
-    - <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>、<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>：支持[1,16]，且要求是2的幂次方，在PageAttention场景下要求sparse\_block\_size整除block\_size
+    - <term>Ascend 950PR&950DT 系列产品</term>：只支持sparse\_block\_size为1。
+    - <term>Atlas A3 系列产品</term>、<term>Atlas A2 系列产品</term>：支持[1,16]，且要求是2的幂次方，在PageAttention场景下要求sparse\_block\_size整除block\_size
 - 非PageAttention场景layout\_query和layout\_kv取值需要保持一致。

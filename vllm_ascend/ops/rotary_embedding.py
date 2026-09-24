@@ -136,7 +136,27 @@ def _record_cos_and_sin_cache(cos_cache, sin_cache):
     _sin_cache = sin_cache
 
 
-def _record_cos_and_sin_cache_interleaved(cos_sin_cache):
+def _record_cos_and_sin_cache_interleaved(owner: "torch.nn.Module", cos_sin_cache) -> None:
+    """Publish the interleaved cos/sin pair derived from ``cos_sin_cache``.
+
+    ``cos_sin_cache`` is a non-persistent buffer of ``owner``, but the
+    de-interleaved pair every MLA/SFA rope lookup reads through the module
+    globals is a *derived* tensor pair, allocated while
+    ``NPUWorker.load_model()`` holds the sleep-mode ``weights`` mem-pool.
+    Holding them only in module globals makes them invisible to the level-2
+    wake backup, which walks ``model.named_buffers()``: a level-2 wake then
+    leaves every rope lookup reading discarded (remapped, zeroed) storage and
+    silently changes the model output, while the pointers stay valid so nothing
+    crashes. This is the ownership bug RFC #16558 describes.
+
+    Own the pair as non-persistent buffers of the module that built it, the
+    contract RFC #16558 section "Prefer model buffers or host values for static
+    state" prescribes: the globals keep the very same tensor objects, so the
+    lookup path and the addresses baked into captured ACL graphs are unchanged,
+    ``named_buffers()`` de-duplicates the shared pair, and ``persistent=False``
+    keeps them out of ``state_dict()`` and makes vLLM's layerwise reload keep
+    their bytes instead of re-materialising them from meta storage.
+    """
     global _cos_cache
     global _sin_cache
     if _cos_cache is not None or _sin_cache is not None:
@@ -145,6 +165,8 @@ def _record_cos_and_sin_cache_interleaved(cos_sin_cache):
     cos_cache, sin_cache = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2).chunk(2, dim=1)
     _cos_cache = cos_cache.squeeze(1)
     _sin_cache = sin_cache.squeeze(1)
+    owner.register_buffer("_rope_derived_cos_cache", _cos_cache, persistent=False)
+    owner.register_buffer("_rope_derived_sin_cache", _sin_cache, persistent=False)
 
 
 def update_cos_sin(positions):
@@ -245,13 +267,13 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         vllm_config = get_current_vllm_config()
         self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
         _record_cos_sin_cache(self.cos_sin_cache)
-        _record_cos_and_sin_cache_interleaved(self.cos_sin_cache)
+        _record_cos_and_sin_cache_interleaved(self, self.cos_sin_cache)
 
     def forward_oot(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
         out_dtype: torch.dtype | None = None,
@@ -264,6 +286,26 @@ class AscendRotaryEmbedding(RotaryEmbedding):
             tp_group = get_tp_group()
             positions = torch.ops.vllm.all_gather(positions.contiguous(), 0, tp_group.world_size, tp_group.unique_name)
 
+        if key is None:
+            dummy_key = (
+                torch.empty(query.shape[0], 0, self.head_size, dtype=query.dtype, device=query.device)
+                if HAS_TRITON
+                else torch.empty(
+                    (query.shape[0], 1, self.head_size) if query.ndim == 3 else (query.shape[0], self.head_size),
+                    dtype=query.dtype,
+                    device=query.device,
+                )
+            )
+            query, _ = rope_forward_oot(
+                positions,
+                query,
+                dummy_key,
+                self.cos_sin_cache,
+                self.head_size,
+                self.rotary_dim,
+                is_neox_style,
+            )
+            return query, None
         rope_args = (
             positions,
             query,
@@ -294,15 +336,19 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         beta_fast: int = 32,
         beta_slow: int = 1,
         apply_yarn_scaling: bool = True,
+        mscale: float | None = None,
+        mscale_all_dim: float | None = None,
+        attention_factor: float | None = None,
         truncate: bool = False,
     ) -> None:
+        # vLLM main (#56446) replaced the YaRN mscale parameters with
+        # mscale/mscale_all_dim/attention_factor.
         extra_kwargs = {
-            "extrapolation_factor": extrapolation_factor,
-            "attn_factor": attn_factor,
             "beta_fast": beta_fast,
             "beta_slow": beta_slow,
-            "apply_yarn_scaling": apply_yarn_scaling,
-            # TODO: current not support actual truncate，adaptation for extra parameters to be compatible with vllm
+            "mscale": mscale,
+            "mscale_all_dim": mscale_all_dim,
+            "attention_factor": attention_factor,
             "truncate": truncate,
         }
         super().__init__(

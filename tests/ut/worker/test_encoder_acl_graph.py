@@ -179,7 +179,7 @@ def test_capture_budget_graph_npu():
             side_effect=lambda tensors: tensors,
         ),
     ):
-        mgr._capture_budget_graph(2048)
+        mgr._capture_budget_graph(2048, axis_keys=())
 
     graph_meta = mgr._get_graph_set("default")[2048]
     assert graph_meta.graph is fake_graph

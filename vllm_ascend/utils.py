@@ -23,7 +23,7 @@ import functools
 import json
 import math
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -38,12 +38,11 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
     check_ascend_device_type,
     get_ascend_device_type,
-    is_310p,
     is_950,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
@@ -76,7 +75,6 @@ _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
-_HAS_LAYER_IDX = None
 _HAS_ROPE = None
 _ATNN_CALCULATION_STREAM = None
 _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
@@ -117,12 +115,54 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     return compress_ratios[layer_idx]
 
 
+def is_deepseek_v41(hf_config: Any) -> bool:
+    """Identify the released V4.1 config at the model boundary."""
+    model_types = ("deepseek_v41", "deepseek_v41_text")
+    if isinstance(hf_config, dict):
+        return hf_config.get("model_type") in model_types or is_deepseek_v41(hf_config.get("text_config"))
+    # SpeculativeConfig may overwrite the instance model_type for DSpark.
+    # The upstream flattened config class still identifies the V4.1 checkpoint.
+    return (
+        getattr(type(hf_config), "model_type", None) in model_types
+        or getattr(hf_config, "model_type", None) in model_types
+        or (getattr(hf_config, "text_config", None) is not None and is_deepseek_v41(hf_config.text_config))
+    )
+
+
+def normalize_deepseek_v41_config(hf_config: Any) -> Any:
+    """Prepare runtime defaults not supplied by upstream's released config."""
+    for name, default in (("num_hash_layers", 0), ("n_group", 1), ("topk_group", 1)):
+        if not hasattr(hf_config, name):
+            setattr(hf_config, name, default)
+    rope = dict(getattr(hf_config, "rope_parameters", None) or {})
+    for name, value in {
+        "factor": 1.0,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "original_max_position_embeddings": getattr(hf_config, "max_position_embeddings", 1048576),
+        "rope_theta": getattr(hf_config, "rope_theta", 10000.0),
+    }.items():
+        rope.setdefault(name, value)
+    hf_config.rope_parameters = rope
+    hf_config.image_sentinel_base_id = getattr(hf_config, "image_token_id", 129264)
+    hf_config.image_pad_token_id = hf_config.image_sentinel_base_id + 1
+    supported_rotation = {
+        "value_projection_rotated": True,
+        "value_basis": "quarot_global",
+        "key_and_gate_basis": "original",
+        "runtime_delta_rotation": False,
+    }
+    rotation = getattr(hf_config, "engram_rotation_config", None) or supported_rotation
+    hf_config.engram_rotation_config = dict(rotation)
+    return hf_config
+
+
 def model_uses_kpool_indexer(model_config: Any | None) -> bool:
     """Return True for GLM-5.3-Flash style kpool indexer models.
 
     Those models expose ``index_topk`` like DeepSeek SFA but use a kpool
-    indexer over a hybrid MLA + KDA cache, so they must not be routed through
-    the SFA / DSA layouts.
+    indexer over a hybrid MLA + KDA cache. Its cache geometry is
+    independent of the LightningIndexer layout used by other SFA models.
     """
     return any(hasattr(getattr(model_config, attr, None), "index_kpool") for attr in ("hf_text_config", "hf_config"))
 
@@ -155,6 +195,7 @@ def clear_enable_sp():
     enable_dsa_cp.cache_clear()
     enable_dsa_cp_full_o_proj.cache_clear()
     enable_pcp_o_proj_weight_sharding.cache_clear()
+    enable_pcp_embedding_lmhead_weight_sharding.cache_clear()
     _libc_getenv.cache_clear()
 
 
@@ -184,14 +225,7 @@ def is_rc_device() -> bool:
     return _IS_RC_DEVICE
 
 
-def _mark_op_side_effectful(op: Any) -> None:
-    torch.fx.node.has_side_effect(op)
-    default_overload = getattr(op, "default", None)
-    if default_overload is not None:
-        torch.fx.node.has_side_effect(default_overload)
-
-
-def _ensure_device_print_registered() -> None:
+def register_device_print() -> None:
     global _DEVICE_PRINT_OP_REGISTERED
 
     if _DEVICE_PRINT_OP_REGISTERED:
@@ -204,9 +238,10 @@ def _ensure_device_print_registered() -> None:
         )
 
     try:
-        # Mark device_print ops side-effectful so FX/Inductor does not DCE or reorder these debug callbacks.
-        _mark_op_side_effectful(torch.ops._C_ascend.device_print)
-        _mark_op_side_effectful(torch.ops._C_ascend.device_print_tensor)
+        from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
+
+        _register_effectful_op(torch.ops._C_ascend.device_print.default, _EffectType.ORDERED)
+        _register_effectful_op(torch.ops._C_ascend.device_print_tensor.default, _EffectType.ORDERED)
         _DEVICE_PRINT_OP_REGISTERED = True
     except AttributeError as exc:
         raise RuntimeError(
@@ -228,7 +263,8 @@ def device_print(
 
     Supported usage:
 
-        >>> from vllm_ascend.utils import device_print
+        >>> from vllm_ascend.utils import device_print, register_device_print
+        >>> register_device_print()
         >>> device_print(x)
         >>> device_print("already formatted text")
         >>> device_print(7)
@@ -250,8 +286,6 @@ def device_print(
         >>> device_print(f"x = {x}")
         >>> device_print("x = " + str(x))
     """
-    _ensure_device_print_registered()
-
     if isinstance(value, torch.Tensor):
         torch.ops._C_ascend.device_print_tensor(value)
     elif isinstance(value, (str, int, float, bool, torch.dtype, torch.device, torch.Size)):
@@ -263,6 +297,12 @@ def device_print(
         )
 
 
+# Minimum number of dimensions a matmul weight needs for both k and n dims to exist.
+MIN_MATMUL_WEIGHT_NDIMS = 2
+# Size of a singleton dimension (k=1 or n=1), unsupported by aclnnMatmulWeightNZ.
+SINGLETON_DIM_SIZE = 1
+
+
 def _should_trans_nz(weight: torch.Tensor) -> bool:
     # FP32 cannot use NZ.
     if weight.dtype == torch.float32:
@@ -270,6 +310,14 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 
     # meta tensor only keeps shape/dtype meta info without physical memory, it is not necessary to trans it to NZ
     if weight.is_meta:
+        return False
+
+    # aclnnMatmulWeightNZ does not support matrices whose reduction/output
+    # dimension is one (k=1 or n=1). Keep these weights in ND format so the
+    # subsequent linear/matmul dispatch does not select the NZ-only path.
+    if weight.ndim >= MIN_MATMUL_WEIGHT_NDIMS and (
+        weight.shape[-1] == SINGLETON_DIM_SIZE or weight.shape[-2] == SINGLETON_DIM_SIZE
+    ):
         return False
 
     # Some hardware profiles require NZ weight layout.
@@ -297,10 +345,46 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 # - non-310P: follow additional_config.weight_nz_mode
 # - FP32: never convert
 # - meta tensor: never convert
-def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
+def maybe_trans_nz(
+    weight: torch.Tensor,
+    customize_dtype: torch.dtype | None = None,
+    input_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
-    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+    kwargs = {}
+    if customize_dtype is not None:
+        kwargs["customize_dtype"] = customize_dtype
+    if input_dtype is not None:
+        kwargs["input_dtype"] = input_dtype
+    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ, **kwargs)
+
+
+def maybe_trans_nz_with_scale(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    transpose_dims: tuple[int, ...],
+    *,
+    customize_dtype: torch.dtype | None = None,
+    input_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Transpose weight/scale and convert to FRACTAL_NZ when NZ applies.
+
+    Preserves the pre-NZ non-contiguous layout when NZ is disabled.
+    """
+    weight = weight.transpose(*transpose_dims)
+    weight_scale = weight_scale.transpose(*transpose_dims)
+    if not _should_trans_nz(weight):
+        return weight, weight_scale
+    weight = weight.contiguous()
+    weight_scale = weight_scale.contiguous()
+    kwargs = {}
+    if customize_dtype is not None:
+        kwargs["customize_dtype"] = customize_dtype
+    if input_dtype is not None:
+        kwargs["input_dtype"] = input_dtype
+    weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ, **kwargs)
+    return weight, weight_scale
 
 
 def _round_up(x: int, align: int):
@@ -550,30 +634,25 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 
 
-def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
-    """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES."""
+def setup_ascend_local_comm_res(user_device_id: int, kv_transfer_config: Any | None) -> None:
+    """Load the physical NPU endpoint config after binding a runtime device.
+
+    user_device_id must be the ordinal passed to torch.npu.set_device, not
+    the vLLM local rank. Endpoint filenames use host physical device IDs.
+    """
     if kv_transfer_config is None:
         return
-
-    visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
-    if visible_devices is None:
-        from vllm_ascend.cpu_binding import DeviceInfo
-
-        devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info()])
-    else:
-        devices = [int(x) for x in visible_devices.split(",") if x.strip()]
 
     extra_config = kv_transfer_config.kv_connector_extra_config or {}
     local_comm_res_path = extra_config.get("ascend_local_comm_res_path")
     if not local_comm_res_path:
         return
 
-    if not devices:
-        raise ValueError("No NPU devices found or specified in ASCEND_RT_VISIBLE_DEVICES.")
-    if local_rank < 0 or local_rank >= len(devices):
-        raise ValueError(f"local_rank {local_rank} is out of bounds for the available NPU devices: {devices}")
+    # Import lazily: the platform module also imports utils.
+    from vllm.platforms import current_platform
 
-    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{devices[local_rank]}.json")
+    npu_id = current_platform.visible_device_id_to_physical_device_id(user_device_id)
+    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{npu_id}.json")
     try:
         with open(local_comm_res_file) as f:
             data = json.load(f)
@@ -590,6 +669,7 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
 
 
 @functools.cache
+@torch._dynamo.disable
 def vllm_version_is(target_vllm_version: str):
     if envs_ascend.VLLM_VERSION is not None:
         vllm_version = envs_ascend.VLLM_VERSION
@@ -598,11 +678,11 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        # Strip any PEP 440 local version segment (e.g. "0.27.1+empty" built
+        # Strip any PEP 440 local version segment (e.g. "0.30.0+empty" built
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
-        vllm_version = vllm_version.split("+")[0]
-        return Version(vllm_version) == Version(target_vllm_version)
+        parsed = Version(vllm_version)
+        return Version(parsed.public) == Version(target_vllm_version)
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
@@ -616,10 +696,8 @@ def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
     """Layer names covered by a KVCacheTensor.
 
     vLLM #51718 renamed the `shared_by` field to `layers` and introduced a
-    required `layer_stride` on vLLM main. This helper keeps both lanes readable.
+    required `layer_stride` on vLLM main. Gate by release vs main lane.
     """
-    if vllm_version_is("0.27.1"):
-        return kv_cache_tensor.shared_by
     return kv_cache_tensor.layers
 
 
@@ -704,6 +782,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+    from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
     from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
@@ -762,7 +841,12 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
         "MoERunner": AscendMoERunner,
         "RoutedExperts": AscendRoutedExperts,
+        "GateLinear": AscendGateLinear,
     }
+    from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
+
+    REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
+
     if vllm_config is None:
         try:
             from vllm.config import get_current_vllm_config
@@ -770,10 +854,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             vllm_config = get_current_vllm_config()
         except AssertionError:
             vllm_config = None
-    if vllm_config is not None and vllm_config.model_config.is_deepseek_mla:
-        from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
-
-        REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
 
     # Override selected ops when the compatibility implementations are required.
     if get_current_hardware_profile().supports(HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS):
@@ -827,10 +907,6 @@ def embedding_tp_enable() -> bool:
 
 def oproj_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 0
-
-
-def olora_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.olora_tensor_parallel_size > 1
 
 
 def mlp_tp_enable() -> bool:
@@ -946,24 +1022,35 @@ def has_rope(vllm_config: VllmConfig):
     return _HAS_ROPE
 
 
+@contextmanager
+def super_kernel_scope(scope: str, enabled: bool):
+    if not enabled:
+        yield
+        return
+
+    torch.npu.super_kernel_scope_begin(scope)
+    try:
+        yield
+    finally:
+        torch.npu.super_kernel_scope_end(scope)
+
+
 def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    if isinstance(tensor, torch.Tensor):
+    if isinstance(tensor, torch.Tensor) and tensor.device.type == "npu":
         return torch_npu._C._weak_ref_tensor(tensor)
     else:
         return tensor
 
 
-def weak_ref_tensors(
-    tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor],
-) -> torch.Tensor | list[Any] | tuple[Any] | Any:
+def weak_ref_tensors(tensors: Any) -> Any:
     """
-    Convenience function to create weak references to tensors,
-    for single tensor, list of tensors or tuple of tensors.
+    Recursively replace tensors with weak references while preserving containers
+    and non-tensor values.
 
     This function should be used in the following scenario:
     When a tensor is created during graph capture, and it's held by a method
@@ -975,14 +1062,14 @@ def weak_ref_tensors(
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):
-        return [weak_ref_tensor(t) for t in tensors]
+        return [weak_ref_tensors(tensor) for tensor in tensors]
     if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensor(t) for t in tensors)
-    # For IntermediateTensors used in pipeline parallelism
+        return tuple(weak_ref_tensors(tensor) for tensor in tensors)
+    if isinstance(tensors, dict):
+        return {key: weak_ref_tensors(tensor) for key, tensor in tensors.items()}
     if isinstance(tensors, IntermediateTensors):
-        ret = IntermediateTensors({key: weak_ref_tensor(val) for key, val in tensors.tensors.items()})
-        return ret
-    raise ValueError("Invalid type for tensors")
+        return IntermediateTensors(weak_ref_tensors(tensors.tensors))
+    return tensors
 
 
 def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
@@ -1099,8 +1186,8 @@ def _compute_potential_max_tokens(vllm_config) -> int:
         if potential_max_tokens != compilation_config.max_cudagraph_capture_size:
             logger.warning_once(
                 "The max_cudagraph_capture_size (%d) is smaller than the potential max tokens required for "
-                "decode (%d). This may lead to suboptimal performance. Consider adjusting"
-                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs)"
+                "decode (%d). This may lead to suboptimal performance. Consider adjusting "
+                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs) "
                 "to ensure max_cudagraph_capture_size can accommodate the decode workload. For more details, "
                 "see the issue #8240(https://github.com/vllm-project/vllm-ascend/issues/8240).",
                 compilation_config.max_cudagraph_capture_size,
@@ -1151,9 +1238,11 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
     ascend_config = get_ascend_config()
-    # When mc2_comm_alg == "hierarchy", dispatch/combine op don't support dynamic global_bs,
+    # 1. When mc2_comm_alg == "hierarchy", dispatch/combine op don't support dynamic bs;
+    # 2. When use mega_moe, op don't support dynamic global_bs;
     # we need to do allreduce and pad token across dp every step.
-    if ascend_config.get_mc2_comm_alg() == "hierarchy":
+    # TODO(zzzzwwjj): remove it when op can support dynamic bs.
+    if ascend_config.get_mc2_comm_alg() == "hierarchy" or is_mega_moe_supported():
         return False
 
     # For dense models, since we don't actually need dp communication, we simply skip it.
@@ -1192,11 +1281,7 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if model_instance is None:
         return False
-
-    global _HAS_LAYER_IDX
-    if _HAS_LAYER_IDX is None:
-        _HAS_LAYER_IDX = hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
-    return _HAS_LAYER_IDX
+    return hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
 
 
 def refresh_block_size(vllm_config):
@@ -1206,6 +1291,17 @@ def refresh_block_size(vllm_config):
     cache_config = vllm_config.cache_config
     scheduler_config = vllm_config.scheduler_config
     model_config = vllm_config.model_config
+
+    # A separate draft model shares the target model's CacheConfig and must use
+    # its resolved cache layout. Model-free proposers may alias the target as
+    # draft_model_config, so exclude that case.
+    spec_cfg = vllm_config.speculative_config
+    if (
+        spec_cfg is not None
+        and model_config is spec_cfg.draft_model_config
+        and model_config is not spec_cfg.target_model_config
+    ):
+        return
 
     if not cache_config:
         return
@@ -1259,6 +1355,23 @@ def dispose_layer(layer: Any):
             dispose_tensor(attr_value)
 
 
+def is_rl_weight_update_enabled(vllm_config: VllmConfig) -> bool:
+    """Whether this deployment takes part in an RL weight update loop.
+
+    RL rollout workers receive weights through vLLM's layerwise reload, which
+    writes every checkpoint parameter back into the storage that exists when
+    the transaction starts. A parameter whose storage was released therefore
+    has no valid reload destination, so whoever would release it must keep it
+    while this returns ``True``.
+
+    Two switches mark such a deployment: the Ascend RL defaults
+    (``additional_config.rl_config.enabled``) and the upstream weight transfer
+    service (``--weight-transfer-config``), which is how a rollout worker
+    declares that a trainer may update its weights in place.
+    """
+    return get_ascend_config().rl_config.enabled or vllm_config.weight_transfer_config is not None
+
+
 def check_kv_extra_config(vllm_config):
     def _check(name: str, config: dict):
         tp_key = "tp_size"
@@ -1308,7 +1421,7 @@ def is_gqa_backend(vllm_config: VllmConfig) -> bool:
 
 
 def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
-    mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1"}
+    mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1", "MooncakeConnectorV2"}
     return bool(_collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names)
 
 
@@ -1355,6 +1468,15 @@ def enable_dsa_cp() -> bool:
     return get_ascend_config().enable_dsa_cp
 
 
+def enable_sfa_dcp_force_tmajor_restore() -> bool:
+    # Read from the validated AscendConfig singleton (additional-config key
+    # sfa_dcp_force_tmajor_restore), like enable_dsa_cp, so the value
+    # benefits from @config type validation (bool lax coercion).
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().sfa_dcp_force_tmajor_restore
+
+
 @lru_cache(maxsize=1)
 def enable_pcp_o_proj_weight_sharding() -> bool:
     """Whether SFA-PCP stores O-proj weights as PCP-local resident shards.
@@ -1366,6 +1488,14 @@ def enable_pcp_o_proj_weight_sharding() -> bool:
     from vllm_ascend.ascend_config import get_ascend_config
 
     return get_ascend_config().enable_pcp_o_proj_weight_sharding
+
+
+@lru_cache(maxsize=1)
+def enable_pcp_embedding_lmhead_weight_sharding() -> bool:
+    """Whether PCP shards embedding and LM Head weights."""
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().enable_pcp_embedding_lmhead_weight_sharding
 
 
 @lru_cache(maxsize=1)
@@ -1460,6 +1590,27 @@ def parse_layer_idx(prefix: str) -> int | None:
     """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
     match = re.search(r"layers\.(\d+)", prefix)
     return int(match.group(1)) if match else None
+
+
+def is_mtp_layer(hf_config: Any, layer_name: str | None) -> bool:
+    """Whether ``layer_name`` belongs to an MTP/nextn layer rather than the backbone.
+
+    MTP layers live past the backbone in two naming styles: an explicit
+    ``mtp`` segment, or a layer index at or beyond ``num_hidden_layers``.
+    Callers that need a bounded range can also consult
+    ``num_nextn_predict_layers``; this helper answers the coarser
+    "is this layer part of the model's speculative head" question.
+    """
+    layer_name = layer_name or ""
+    num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int):
+        return False
+    if ".mtp." in f".{layer_name}.":
+        return True
+    layer_id = parse_layer_idx(layer_name)
+    if layer_id is None:
+        return False
+    return layer_id >= num_hidden_layers
 
 
 def get_compressed_pos_and_indices(
@@ -1593,10 +1744,10 @@ def get_rotation_path(vllm_config: VllmConfig) -> Path | None:
     if quant_config is None:
         return None
     target_model_path = vllm_config.model_config.model
+    quant_description = getattr(quant_config, "quant_description", None) or {}
     try:
-        quant_description = quant_config.quant_description
         rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
-    except KeyError:
+    except (KeyError, TypeError):
         return None
     return Path(target_model_path) / rotation_relative_path
 
@@ -1613,3 +1764,11 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
             rotation_path,
         )
         raise e
+
+
+def use_updatable_graph(
+    attn_backend,
+) -> bool:
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+
+    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)

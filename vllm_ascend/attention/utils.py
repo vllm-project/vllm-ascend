@@ -1,3 +1,4 @@
+import enum
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -5,11 +6,11 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -22,17 +23,22 @@ from vllm_ascend.utils import (
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
-_GLM5_NEXT_KPOOL_CACHE_TYPES = frozenset({"Glm5NextIndexerCache", "Glm5NextTailCache"})
+
+class PreprocessType(enum.Enum):
+    NATIVE = "native"
+    PROLOG_V3 = "prolog_v3"
+    MLAPO = "mlapo"
 
 
-def is_glm5_next_kpool_cache(attn_module: Any) -> bool:
-    """Return True for GLM-5.3-Flash kpool indexer / tail cache layers.
-
-    Those classes subclass DeepseekV32IndexerCache but keep their own
-    ``compress_ratio`` / ``KpoolTailSpec`` layouts. The DeepSeek V3.2 SFA
-    rewrite must not replace them with ``AscendSFAIndexerCacheSpec``.
-    """
-    return type(attn_module).__name__ in _GLM5_NEXT_KPOOL_CACHE_TYPES
+def mark_fused_preprocess_weights(impl: MLAAttentionImpl) -> None:
+    """Refresh NZ management after changing preprocessing policy, before loading weights."""
+    resolve_type = getattr(impl, "_fused_preprocess_type", None)
+    if resolve_type is None:
+        return
+    managed = resolve_type() is not None
+    for layer in (impl.fused_qkv_a_proj, impl.q_proj):
+        if layer is not None:
+            layer._fused_preprocess_managed = managed
 
 
 def get_or_register_attention_buffer(
@@ -101,53 +107,6 @@ class PagedAttentionGraphParam:
 
     def __iter__(self):
         return iter(self.params)
-
-
-def update_paged_attention_graph_param(
-    update_stream,
-    handle,
-    event,
-    param: PagedAttentionGraphParam,
-    block_table: torch.Tensor,
-    seq_lens: torch.Tensor,
-) -> None:
-    (
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        num_heads,
-        scale,
-        _captured_block_table,
-        _captured_seq_lens,
-        output,
-    ) = param.params
-    workspace = torch_npu._npu_paged_attention_get_workspace(
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        num_kv_heads=num_kv_heads,
-        num_heads=num_heads,
-        scale_value=scale,
-        block_table=block_table,
-        context_lens=seq_lens,
-        out=output,
-    )
-    torch.npu.graph_task_update_begin(update_stream, handle)
-    torch_npu._npu_paged_attention(
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        num_kv_heads=num_kv_heads,
-        num_heads=num_heads,
-        scale_value=scale,
-        block_table=block_table,
-        context_lens=seq_lens,
-        out=output,
-        workspace=workspace,
-    )
-    torch.npu.graph_task_update_end(update_stream)
-    event.record(update_stream)
 
 
 def cache_graph_workspace(
@@ -270,6 +229,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
 
+    # Host mirror of this cache group's block table, including padded rows.
+
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
@@ -305,6 +266,15 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # resident LRU (adler32-hashed request ids and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
+
+    # vLLM main (#55353) removed the deprecated
+    # CommonAttentionMetadata._seq_lens_cpu / _num_computed_tokens_cpu
+    # fields and (#56157) renamed dcp_local_seq_lens_cpu to
+    # dcp_local_seq_lens_cpu_upper_bound. Ascend keeps its own copies so
+    # NPU attention backends get CPU seq_lens without a GPU->CPU sync.
+    _seq_lens_cpu: torch.Tensor | None = None
+    _num_computed_tokens_cpu: torch.Tensor | None = None
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
