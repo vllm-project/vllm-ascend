@@ -10,7 +10,7 @@
 // __clang_cce_types.h already typedefs bfloat16_t from __bf16.
 // CANN9.2: ascend310p also get native bfloat16_t, skip dummy definition
 #if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200) && !defined(__bfloat16_t_defined) && !defined(__clang_cce_types_h)
-#define __bfloat16_t_defined
+#defined(__clang_cce_types_h)
 #define __COMPAT_310P_ACTIVE__
 struct bfloat16_t {
     uint16_t val;
