@@ -1202,7 +1202,7 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
             }
           }
         }' \
-        --additional-config '{"enable_cpu_binding": true, multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true, "enable_dsa_cp": true}'
+        --additional-config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true, "enable_dsa_cp": true}'
     ```
 
 2. Prepare `run_decode.sh`.
@@ -1273,7 +1273,7 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
             }
           }
         }' \
-        --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, , "enable_shared_expert_dp":true, "multistream_overlap_shared_expert": true}'
+        --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_shared_expert_dp":true, "multistream_overlap_shared_expert": true}'
     ```
 
 3. Start the Prefill and Decode services in separate terminals.
@@ -1356,6 +1356,7 @@ Here is the accuracy evaluation method using AISBench.
 | GSM8K | - | accuracy | gen | 96.30 | 1 Atlas 800 A3 (128GB × 8) |
 | GPQA | v0.25.1rc | accuracy | gen | 90.40 | A3 1P1D DSpark w8a8 |
 | SWE Multilingual | v0.25.1rc | accuracy | gen | 68.33 | A3 1P1D DSpark w8a8 |
+| GPQA | v0.27.1rc | accuracy | gen | 90.57 | Ascend 950DT server 1P1D DSpark |
 
 ## 8 Performance Evaluation
 
