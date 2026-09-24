@@ -144,6 +144,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
+    get_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
     prepare_copy_sfa_request_slots,
@@ -5092,8 +5093,13 @@ class NPUModelRunner(GPUModelRunner):
                     for layer_name, start, layer_size in regions:
                         kv_cache_raw_tensors[layer_name] = backing[start : start + layer_size]
 
+        layerwise_reuse = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config) is not None
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             shared_layers = get_kv_cache_tensor_layers(kv_cache_tensor)
+            # Only the layerwise planner emits zero-stride alias descriptors
+            # here. Ordinary vLLM group descriptors retain private layer buffers.
+            reuse_slot = layerwise_reuse and kv_cache_tensor.layer_stride == 0
+            allocation_layers = shared_layers[:1] if reuse_slot else shared_layers
             use_mamba = False
             use_compressed_cache = False
             for layer_name in shared_layers:
@@ -5103,6 +5109,9 @@ class NPUModelRunner(GPUModelRunner):
                     use_compressed_cache = True
             for idx in range(len(shared_layers)):
                 layer_name = shared_layers[idx]
+                if reuse_slot and idx > 0:
+                    kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[shared_layers[0]]
+                    continue
                 # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
                 if (
                     "linear_attn" in layer_name
@@ -5168,8 +5177,8 @@ class NPUModelRunner(GPUModelRunner):
                         )
                     else:
                         scale_tensor_size = None
-                    # main: every layer owns its own region.
-                    for layer_name_inner in shared_layers:
+                    # Layerwise reuse allocates the representative once.
+                    for layer_name_inner in allocation_layers:
                         if scale_tensor_size is not None:
                             kv_cache_raw_tensors[layer_name_inner] = self._allocate_sparse_c8_indexer_tensors(
                                 dsa_k_tensor_size=k_tensor_size,
@@ -5223,7 +5232,7 @@ class NPUModelRunner(GPUModelRunner):
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
                         assert v_tensor_size is not None
-                        for layer_name_inner in shared_layers:
+                        for layer_name_inner in allocation_layers:
                             if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
                                 kv_cache_raw_tensors[layer_name_inner] = (
                                     allocate_kv_cache_tensors_for_sparse_kv_offload(
@@ -5238,7 +5247,7 @@ class NPUModelRunner(GPUModelRunner):
                         continue
                     # main: every layer owns its own region; give each layer a
                     # private (k, v) so block indices don't collide across layers.
-                    for layer_name_inner in shared_layers:
+                    for layer_name_inner in allocation_layers:
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
                             k_tensor = self._allocate_int8_cache_tensor(
                                 k_tensor_size,
