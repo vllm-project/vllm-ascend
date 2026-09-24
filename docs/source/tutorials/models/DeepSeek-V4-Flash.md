@@ -1212,7 +1212,7 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
     source /root/.bashrc
 
     nic_name="xxx"
-    local_ip="xx.xx.xx.1"
+    local_ip="xx.xx.xx.2"
 
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
@@ -1390,14 +1390,10 @@ unset https_proxy
 unset http_proxy
 unset HCCL_INTRA_ROCE_ENABLE
 source /root/.bashrc
-export VLLM_SERVER_DEV_MODE=1
-export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
-# 自动获取配置
-nic_name=自动获取
-local_ip=自动获取
+nic_name="xxx"
+local_ip="xx.xx.xx.1"
 
-# 以下环境变量无需修改
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
@@ -1416,22 +1412,23 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+export VLLM_SERVER_DEV_MODE=1
+export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
+
 export TASK_QUEUE_ENABLE=1
-export ASCEND_RT_VISIBLE_DEVICES=$1
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
 export MMC_LOCAL_CONFIG_PATH=/usr/local/python3.12.13/lib/python3.12/site-packages/memcache_hybrid/config/mmc-local.conf
 export LD_LIBRARY_PATH=/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH}
 
-vllm serve /mnt/share/weight/DeepSeek-V4-Flash-0731  \
+vllm serve /root/.cache/DeepSeek-V4-Flash-0731  \
   --host $local_ip \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --max_model_len 1048576 \
+  --port 8000 \
+  --tensor-parallel-size 8 \
+  --data-parallel-address $local_ip \
+  --data-parallel-rpc-port 12325 \
+  --max-model-len 1048576 \
   --max-num-batched-tokens 8192 \
   --served-model-name dsv \
   --gpu-memory-utilization 0.85 \
@@ -1440,7 +1437,7 @@ vllm serve /mnt/share/weight/DeepSeek-V4-Flash-0731  \
   --max-num-seqs 8 \
   --block-size 32 \
   --enable-prefix-caching \
-  --api_server_count 1 \
+  --api-server-count 1 \
   --tokenizer-mode deepseek_v4 \
   --tool-call-parser deepseek_v4 \
   --enable-auto-tool-choice \
@@ -1449,7 +1446,6 @@ vllm serve /mnt/share/weight/DeepSeek-V4-Flash-0731  \
   --enforce-eager \
   --no-disable-hybrid-kv-cache-manager \
   --speculative-config '{"num_speculative_tokens": 5,"method": "dspark"}' \
-  --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/home/c30047037/vllm_profile", "torch_profiler_with_stack": false}' \
   --kv-transfer-config \
  '{
      "kv_connector": "MultiConnector",
@@ -1463,7 +1459,7 @@ vllm serve /mnt/share/weight/DeepSeek-V4-Flash-0731  \
              "kv_connector_extra_config": {
                     "prefill": {
                         "dp_size": 1,
-                     "tp_size": 8
+                        "tp_size": 8
                      },
                      "decode": {
                         "dp_size": 8,
@@ -1483,7 +1479,7 @@ vllm serve /mnt/share/weight/DeepSeek-V4-Flash-0731  \
          ]
      }
  }' \
-  --additional_config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true, "enable_dsa_cp": true}'
+  --additional-config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true, "enable_dsa_cp": true}'
 ```
 
 **Decode node:**
@@ -1495,17 +1491,10 @@ unset ftp_proxy
 unset https_proxy
 unset http_proxy
 unset HCCL_INTRA_ROCE_ENABLE
-export VLLM_SERVER_DEV_MODE=1
-export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
-# 自动获取配置
-nic_name=自动获取
-local_ip=自动获取
+nic_name="xxx"
+local_ip="xx.xx.xx.2"
 
-# 临时规避
-export MEMCACHE_DP_INIT_BARRIER=1
-
-# 以下环境变量无需修改
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
@@ -1524,22 +1513,25 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-export TASK_QUEUE_ENABLE=1
-export ASCEND_RT_VISIBLE_DEVICES=$1
-export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+export VLLM_SERVER_DEV_MODE=1
+export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
+export TASK_QUEUE_ENABLE=1
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+export MEMCACHE_DP_INIT_BARRIER=1
 export MMC_LOCAL_CONFIG_PATH=/usr/local/python3.12.13/lib/python3.12/site-packages/memcache_hybrid/config/mmc-local.conf
 export LD_LIBRARY_PATH=/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH}
 
-vllm serve /mnt/share/weight/DeepSeek-V4-Flash-0731 \
+vllm serve /root/.cache/DeepSeek-V4-Flash-0731 \
   --host $local_ip \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --max_model_len 1048576 \
+  --port 8001 \
+  --data-parallel-size 8 \
+  --data-parallel-address $local_ip \
+  --data-parallel-rpc-port 12325 \
+  --tensor-parallel-size 1 \
+  --max-model-len 1048576 \
   --max-num-batched-tokens 1024 \
   --served-model-name dsv \
   --gpu-memory-utilization 0.92 \
@@ -1554,10 +1546,9 @@ vllm serve /mnt/share/weight/DeepSeek-V4-Flash-0731 \
   --enable-auto-tool-choice \
   --reasoning-parser deepseek_v4 \
   --trust-remote-code \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --no-disable-hybrid-kv-cache-manager \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --speculative-config '{"num_speculative_tokens": 5,"method": "dspark"}' \
-  --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/home/c30047037/vllm_profile", "torch_profiler_with_stack": false}' \
   --kv-transfer-config \
    '{
        "kv_connector": "MultiConnector",
@@ -1591,7 +1582,7 @@ vllm serve /mnt/share/weight/DeepSeek-V4-Flash-0731 \
            ]
        }
    }' \
-  --additional_config '{"enable_cpu_binding": "True", "recompute_scheduler_enable":true, "enable_shared_expert_dp":true, "multistream_overlap_shared_expert": true}'
+  --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable":true, "enable_shared_expert_dp":true, "multistream_overlap_shared_expert": true}'
 ```
 
 #### 5.3.3 Start the Services
