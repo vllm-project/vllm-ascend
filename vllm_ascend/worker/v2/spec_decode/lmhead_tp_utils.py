@@ -29,6 +29,7 @@ class LmheadTPDraftSamplingMixin:
     num_speculative_steps: int
     speculative_config: Any
     use_local_argmax_reduction: bool
+    enable_adaptive_verification: bool
 
     # Speculators whose draft sampling does not funnel through sample_draft
     # cannot be row-aligned by this mixin; they opt out and are rejected at
@@ -61,6 +62,14 @@ class LmheadTPDraftSamplingMixin:
                 "lmhead TP does not support use_local_argmax_reduction: "
                 "get_top_tokens reduces over the local vocab shard only, which "
                 "silently produces wrong tokens under pure-DP lmhead TP."
+            )
+        if self.enable_adaptive_verification:
+            raise NotImplementedError(
+                "lmhead TP does not support enable_adaptive_verification: the "
+                "online acceptance estimator sizes its kernels by the draft "
+                "logit row count and indexes its per-token features and "
+                "confidence buffers by it, so the group-aligned padding rows "
+                "read the request mapping and write those buffers out of bounds."
             )
 
     def sample_draft(
