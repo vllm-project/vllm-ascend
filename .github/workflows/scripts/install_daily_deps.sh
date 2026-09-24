@@ -25,7 +25,7 @@ if [ "$DAILY_DEPS_MODE" = "torch_npu_only" ]; then
         -O /tmp/torch_npu/torch_npu.tar.gz \
         "https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.10.0/${TORCH_NPU_DATE}/pytorch_v2.10.0_py312.tar.gz"
     tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu
-    python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH}".whl --force-reinstall --extra-index-url https://download.pytorch.org/whl/cpu/
+    python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH}".whl --force-reinstall --no-deps --extra-index-url https://download.pytorch.org/whl/cpu/
     echo "Clean up temporary files..."
     rm -rf /tmp/torch_npu
     echo "Daily packages installation complete (torch_npu_only)."
@@ -58,7 +58,7 @@ wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \
     -O /tmp/torch_npu/torch_npu.tar.gz \
     "https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.10.0/${TORCH_NPU_DATE}/pytorch_v2.10.0_py312.tar.gz"
 tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu
-python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH}".whl --force-reinstall --extra-index-url https://download.pytorch.org/whl/cpu/
+python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH}".whl --force-reinstall --no-deps--extra-index-url https://download.pytorch.org/whl/cpu/
 echo "Clean up temporary files..."
 rm -rf /tmp/torch_npu
 
