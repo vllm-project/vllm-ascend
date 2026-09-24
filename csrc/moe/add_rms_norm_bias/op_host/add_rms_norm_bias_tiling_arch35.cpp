@@ -260,10 +260,6 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
         return SaveTiling(context, tiling, MODE_R_FULL_LOAD, useCoreNum);
     }
 
-    // The upstream SplitD address expressions use uint32 multiplication.
-    OP_CHECK_IF(numRow > UINT32_LIMIT / numCol,
-                OP_LOGE(context, "A5 AddRmsNormBias SplitD total element count exceeds uint32 addressing."),
-                return ge::GRAPH_FAILED);
     numColAlign = CeilAlign(numCol * dtypeBytes, SPLIT_ALIGN_BYTES) / dtypeBytes;
     uint64_t ubFactor = 1;
     while (ubFactor < MAX_SPLIT_UB_FACTOR &&
