@@ -2989,6 +2989,10 @@ class MooncakeConnectorWorker:
                     f"in transfer group {group_idx} (layer indices {layer_indices})."
                 )
             local_blocks = (meta.local_full_block_ids or meta.local_block_ids)[group_id]
+            if not local_blocks:
+                # Rejected requests enqueue an empty receive to release P-side KV.
+                # Keep the selected ports and empty IDs for the completion signal.
+                continue
             remote_blocks = meta.remote_block_ids[group_id]
             first_block = meta.num_computed_tokens // self.block_size
             first_block += (self.dcp_rank - first_block) % self.dcp_size
