@@ -115,6 +115,40 @@ def wrap_compute_logits_for_pre_sample(runner: Any, input_batch: Any):
             del model.compute_logits
 
 
+@contextmanager
+def wrap_postprocess_sampled(runner: Any):
+    """Stash spec-sample stats from parent ``postprocess_sampled`` (v2).
+
+    ``sampled_tokens`` / ``num_sampled`` are local intermediates of the
+    parent ``sample_tokens`` chain, unreachable from the decorator. Wrap the
+    bound method for the duration of the sample phase so the runner body
+    keeps zero guard footprint (worker pattern). Restored in ``finally``.
+    """
+    orig = getattr(runner, "postprocess_sampled", None)
+    if orig is None:
+        yield
+        return
+    # Prefer deleting the instance override so the class method is restored.
+    had_instance_attr = "postprocess_sampled" in getattr(runner, "__dict__", {})
+
+    def wrapped(*args: Any, **kwargs: Any):
+        # Positional: (idx_mapping, sampled_tokens, num_sampled, ...)
+        sampled = args[1] if len(args) > 1 else kwargs.get("sampled_tokens")
+        num = args[2] if len(args) > 2 else kwargs.get("num_sampled")
+        note_postprocess_sampled(runner, sampled, num)
+        return orig(*args, **kwargs)
+
+    runner.postprocess_sampled = wrapped
+    try:
+        yield
+    finally:
+        # Same restore semantics as wrap_compute_logits_for_pre_sample.
+        if had_instance_attr:
+            runner.postprocess_sampled = orig
+        elif "postprocess_sampled" in getattr(runner, "__dict__", {}):
+            del runner.postprocess_sampled
+
+
 def is_async_output_rank() -> bool:
     """True on the TP rank that materializes async model-runner output (TP0)."""
     try:

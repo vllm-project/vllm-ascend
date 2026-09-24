@@ -47,6 +47,7 @@ from vllm_ascend.observability.runtime_guard.runner_bridge import (
     need_pre_sample_hook,
     note_postprocess_sampled,
     wrap_compute_logits_for_pre_sample,
+    wrap_postprocess_sampled,
 )
 
 logger = init_logger_ascend(__name__)
@@ -169,7 +170,8 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
                 if need_pre_sample_hook(guard)
                 else nullcontext()
             ):
-                output = sample_tokens_fn(self, grammar_output)
+                with wrap_postprocess_sampled(self):
+                    output = sample_tokens_fn(self, grammar_output)
             return _build_sample_phase_result(self, output, input_batch, finished_req_ids)
 
         speculative_config = getattr(self, "speculative_config", None)

@@ -66,7 +66,6 @@ from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_step,
 )
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
-from vllm_ascend.observability.runtime_guard.runner_bridge import note_postprocess_sampled
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
@@ -803,9 +802,6 @@ class NPUModelRunner(GPUModelRunner):
         """Override GPUModelRunner.postprocess_sampled for Ascend NPUs.
         npu attention backends need seq_lens_cpu to work.
         so we need to copy num_computed_tokens back to cpu here.
-
-        Also stash sampled / num_sampled for the same-wave sample-phase
-        observability path (cleared each sample by the sample-tokens decorator).
         """
         super().postprocess_sampled(
             idx_mapping,
@@ -814,7 +810,6 @@ class NPUModelRunner(GPUModelRunner):
             num_rejected,
             query_start_loc,
         )
-        note_postprocess_sampled(self, sampled_tokens, num_sampled)
 
         # Without MTP, update_requests writes the shared NumPy/torch CPU state.
         if self.speculator is not None:

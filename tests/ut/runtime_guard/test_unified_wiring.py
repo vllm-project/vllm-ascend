@@ -136,10 +136,11 @@ def test_runners_call_run_sample_phase():
     # v1 keeps the orchestration inline (different kwargs shape).
     assert "run_sample_phase(" in v1
     # v2 routes it through the shared decorator; the method body is the
-    # original functional logic (no _rg_* / guard hook split).
+    # original functional logic (no _rg_* / guard hook split / runner-side
+    # stash — the postprocess stash lives in the decorator's wrap).
     assert "run_sample_phase(" in hooks
     assert "@runtime_guard_sample_tokens" in v2
-    assert "note_postprocess_sampled" in v2
+    assert "note_postprocess_sampled" not in v2
     assert "_prepare_sample_tokens" not in v2
     assert "_finalize_sample_tokens" not in v2
     assert "_rg_sample_phase_result" not in v2

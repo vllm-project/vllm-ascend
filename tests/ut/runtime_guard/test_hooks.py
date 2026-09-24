@@ -14,10 +14,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
     runtime_guard_step,
 )
-from vllm_ascend.observability.runtime_guard.runner_bridge import (
-    get_postprocess_sampled,
-    note_postprocess_sampled,
-)
+from vllm_ascend.observability.runtime_guard.runner_bridge import get_postprocess_sampled
 
 _WORKER_ROOT = Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker"
 _PENDING_SO_ATTR = "_pending_scheduler_output"
@@ -210,9 +207,15 @@ class _SampleRunner:
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
         # Mirrors the runner: original functional body — the decorator only
-        # adds guard orchestration around it.
+        # adds guard orchestration around it. The parent chain calls
+        # postprocess_sampled (the decorator wraps it to stash spec stats).
         self.order.append("body")
+        self.postprocess_sampled("idx", [[7]], [1], 0)
         return SimpleNamespace(sampled_token_ids=[[7]])
+
+    def postprocess_sampled(self, idx_mapping, sampled_tokens, num_sampled, num_rejected, query_start_loc=None):
+        # Parent-chain method; the decorator's wrap stashes (sampled, num).
+        self.order.append("postprocess")
 
 
 def test_sample_tokens_orchestrates_guard_around_body():
@@ -229,9 +232,9 @@ def test_sample_tokens_orchestrates_guard_around_body():
 
     out = runner.sample_tokens("grammar")
     assert out.sampled_token_ids == [[7]]
-    # Body ran exactly once, inside the guard's sample_fn; result assembled
-    # in hooks, not on the runner.
-    assert runner.order == ["body"]
+    # Body ran exactly once inside the guard's sample_fn (the parent chain's
+    # postprocess included); result assembled in hooks, not on the runner.
+    assert runner.order == ["body", "postprocess"]
     assert runner.run_phase_kwargs == {
         "speculative_config": None,
         "need_accepted_tokens": False,
@@ -249,16 +252,17 @@ def test_sample_tokens_passes_accepted_token_nums_fn_for_spec():
 
     def _run(sample_fn, **kwargs):
         result = sample_fn()
-        # postprocess_sampled would have noted during the sample body.
-        note_postprocess_sampled(runner, [[1]], [3])
+        # The wrap stashed the stats from the body's postprocess_sampled call.
+        assert get_postprocess_sampled(runner) == ([[7]], [1])
         nums_fn = kwargs["accepted_token_nums_fn"]
         assert nums_fn is not None
-        assert nums_fn(result) == [3]
+        assert nums_fn(result) == [1]
         return result, None
 
     guard.run_sample_phase.side_effect = _run
     runner.sample_tokens(None)
-    assert get_postprocess_sampled(runner) == ([[1]], [3])
+    # Full data flow: body postprocess -> wrap stash -> nums_fn.
+    assert get_postprocess_sampled(runner) == ([[7]], [1])
 
 
 def test_sample_tokens_guardless_is_bare_method_call():
@@ -266,5 +270,6 @@ def test_sample_tokens_guardless_is_bare_method_call():
 
     out = runner.sample_tokens("grammar")
     assert out.sampled_token_ids == [[7]]
-    # Guardless path is a bare method call — zero guard work.
-    assert runner.order == ["body"]
+    # Guardless path is a bare method call — zero guard work, no stash.
+    assert runner.order == ["body", "postprocess"]
+    assert get_postprocess_sampled(runner) == (None, None)
