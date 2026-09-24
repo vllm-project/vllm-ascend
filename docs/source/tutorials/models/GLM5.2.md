@@ -134,7 +134,7 @@ export HCCL_BUFFSIZE=200
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # Ensure the model path matches the directory recorded during download
-vllm serve /mnt/share/weight/GLM-5.2-W8A8C8-A3-0808 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
 --host 0.0.0.0 \
 --port 8077 \
 --api-server-count 1 \
@@ -190,7 +190,7 @@ The parameters are explained as follows:
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     
     # Ensure the model path matches the directory recorded during download
-    vllm serve /mnt/share/weight/GLM-5.2-W8A8C8-A3-0808 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port 8000 \
     --api-server-count 1 \
@@ -238,7 +238,7 @@ The parameters are explained as follows:
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     
     # Ensure the model path matches the directory recorded during download
-    vllm serve /mnt/share/weight/GLM-5.2-W8A8C8-A3-0808 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port 8000 \
     --api-server-count 1 \
