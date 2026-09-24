@@ -23,6 +23,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
 )
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend._310p.attention.attention_mask import (
     AttentionMaskBuilder310,
@@ -95,7 +96,7 @@ class AscendAttentionBackend310(AscendAttentionBackend):
         return AscendAttentionMetadataBuilder310
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec: KVCacheSpec | None = None) -> list[int]:
         return [128, 64]
 
 

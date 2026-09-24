@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, Mock, patch
 import numpy as np
 import pytest
 import torch
-from vllm.config import CUDAGraphMode
+from vllm.config import AuxOutputConfig, CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
@@ -47,11 +47,14 @@ def _make_batch_state(computed: list[int], scheduled: list[int], prefill_lens: l
         req_ids=[f"req-{i}" for i in range(num_reqs)],
         num_scheduled_tokens=np.array(scheduled, dtype=np.int32),
         num_tokens=sum(scheduled),
+        num_draft_tokens_np=None,
         idx_mapping_np=np.arange(num_reqs, dtype=np.intp),
         prefill_len_np=np.array(prefill_lens, dtype=np.int32),
         num_computed_prefill_tokens_np=np.array(computed, dtype=np.int32),
         is_prefilling_np=is_prefilling,
         has_prefill=bool(is_prefilling.any()),
+        prefill_runs_as_decode_np=None,
+        decode_graph_eligible=not bool(is_prefilling.any()),
     )
 
 
@@ -71,6 +74,7 @@ def test_recompute_scheduler_reclassifies_pd_tail_in_mixed_decode_batch():
 
     np.testing.assert_array_equal(gathered.is_prefilling_np, [False, False])
     assert gathered.has_prefill is False
+    assert gathered.decode_graph_eligible is True
     assert uniform == 1
 
 
@@ -94,6 +98,7 @@ def test_recompute_scheduler_keeps_non_matching_prefill(computed, scheduled, ena
 
     np.testing.assert_array_equal(gathered.is_prefilling_np, [True, False])
     assert gathered.has_prefill is True
+    assert gathered.decode_graph_eligible is False
     assert uniform is None
 
 
@@ -113,6 +118,7 @@ def test_recompute_scheduler_supports_multi_token_decode_query():
 
     np.testing.assert_array_equal(gathered.is_prefilling_np, [False, False])
     assert gathered.has_prefill is False
+    assert gathered.decode_graph_eligible is True
     assert uniform == 2
 
 
@@ -309,23 +315,18 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     partition_calls = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "maybe_partition_pcp_batch"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "partition_batch"
     ]
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
-    # graph descriptor, and forwards the whole descriptor (upstream vLLM #53867
-    # changed maybe_partition_pcp_batch from padded_num_tokens to a
-    # BatchExecutionDescriptor).
+    # graph descriptor, and forwards the whole descriptor to the PCP manager.
     assert len(padding_assignments) == 1
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
 
     assert len(partition_calls) == 1
     partition_call = partition_calls[0]
-    batch_desc_kw = next(keyword.value for keyword in partition_call.keywords if keyword.arg == "batch_desc")
-    assert isinstance(batch_desc_kw, ast.Name)
-    assert batch_desc_kw.id == "batch_desc"
+    assert ast.unparse(partition_call.func.value) == "self.pcp_manager"
+    assert ast.unparse(partition_call.args[1]) == "batch_desc"
 
 
 @pytest.mark.parametrize("num_reqs,num_tokens", [(4, 4), (2, 6)])
@@ -393,7 +394,7 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
     )
     state = default.AscendModelState.__new__(default.AscendModelState)
     state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
-    state.max_model_len = 32
+    state.model_config = SimpleNamespace(max_model_len=32)
     state.kvpp_runtime = runner.kvpp
     runner.model_state = state
     batch = SimpleNamespace(
@@ -592,13 +593,13 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
 
 def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     runner = _make_runner()
-    runner.vllm_config = SimpleNamespace()
+    runner.vllm_config = SimpleNamespace(aux_output_config=AuxOutputConfig(enable_return_routed_experts=True))
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = SimpleNamespace()
-    runner.model_config = SimpleNamespace(enable_return_routed_experts=True)
-    runner.init_routed_experts_capturer = MagicMock()
+    runner.model_config = SimpleNamespace()
+    aux_output_connector = object()
     kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
@@ -611,6 +612,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     def _super(self, kv_cache_config, kv_cache_allocation_context=None):
         self.kv_cache_config = kv_cache_config
         self.attn_groups = []
+        self.aux_output_connector = aux_output_connector
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
         seen["cfg"] = kv_cache_config
 
@@ -634,17 +636,17 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     assert runner.pcp_manager.vllm_config is runner.vllm_config
     assert runner.model_state.pcp_manager is runner.pcp_manager
     assert runner.speculator.pcp_manager is runner.pcp_manager
-    runner.init_routed_experts_capturer.assert_called_once_with()
+    assert runner.aux_output_connector is aux_output_connector
 
 
 def test_initialize_kv_cache_forwards_allocation_context():
     runner = _make_runner()
-    runner.vllm_config = SimpleNamespace()
+    runner.vllm_config = SimpleNamespace(aux_output_config=AuxOutputConfig())
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.pcp_manager = None
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = None
-    runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+    runner.model_config = SimpleNamespace()
     called = False
     captured_kwargs: dict[str, object] = {}
     allocation_context = object()
@@ -756,6 +758,8 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
         prefill_len_np=np.array([2, 2], dtype=np.int32),
         num_computed_prefill_tokens_np=np.array([0, 0], dtype=np.int32),
         is_prefilling_np=np.array([True, True]),
+        prefill_runs_as_decode_np=None,
+        decode_graph_eligible=False,
     )
     batch_desc = SimpleNamespace(
         num_tokens=8 if full_cg else 4,
@@ -785,9 +789,6 @@ def _run_prepare_inputs(
 ):
     batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
 
-    def _partition(_pcp_manager, input_batch, **_kwargs):
-        return input_batch
-
     with (
         patch("vllm_ascend.worker.v2.model_runner.async_copy_to_gpu", side_effect=_fake_async_copy),
         patch("vllm_ascend.worker.v2.model_runner.build_attn_state", return_value="attn"),
@@ -803,12 +804,7 @@ def _run_prepare_inputs(
             "vllm_ascend.worker.v2.model_runner.expand_idx_mapping",
             return_value=(torch.tensor([0, 1], dtype=torch.int32), torch.zeros(2, dtype=torch.int32)),
         ),
-        patch("vllm_ascend.worker.v2.model_runner.AscendInputBatch", return_value=batch),
-        patch.object(
-            vllm_model_runner,
-            "pcp",
-            SimpleNamespace(maybe_partition_pcp_batch=_partition),
-        ),
+        patch("vllm_ascend.worker.v2.model_runner.AscendInputBatch", autospec=True, return_value=batch),
         patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
     ):
         return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc), batch

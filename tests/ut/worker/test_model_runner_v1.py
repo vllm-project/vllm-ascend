@@ -156,7 +156,7 @@ class TestDPPaddingPolicy(unittest.TestCase):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.dp_size = 2
         runner.dp_rank = dp_rank
-        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(enable_return_routed_experts=False))
+        runner.vllm_config = SimpleNamespace(aux_output_config=SimpleNamespace(enable_return_routed_experts=False))
         runner.ascend_config = SimpleNamespace(finegrained_tp_config=FinegrainedTPConfig())
         return runner
 
@@ -259,7 +259,7 @@ class TestDPPaddingPolicy(unittest.TestCase):
         for dp_rank in range(2):
             with self.subTest(dp_rank=dp_rank):
                 runner = self._make_runner(dp_rank)
-                runner.vllm_config.model_config.enable_return_routed_experts = True
+                runner.vllm_config.aux_output_config.enable_return_routed_experts = True
                 _, across_dp, mode = self._run_sync(runner, comm_method=MoECommType.FUSED_MC2)
                 self.assertEqual(mode, CUDAGraphMode.NONE)
                 self.assertEqual(across_dp.tolist(), [32, 32])
@@ -2839,7 +2839,7 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
         runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
         runner.vllm_config = MagicMock()
-        runner.vllm_config.model_config.enable_return_routed_experts = False
+        runner.vllm_config.aux_output_config.enable_return_routed_experts = False
         runner.ascend_config = SimpleNamespace(
             scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False))
         )
@@ -2879,7 +2879,7 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
         runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
         runner.vllm_config = MagicMock()
-        runner.vllm_config.model_config.enable_return_routed_experts = False
+        runner.vllm_config.aux_output_config.enable_return_routed_experts = False
         runner.ascend_config = SimpleNamespace(
             scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False))
         )
