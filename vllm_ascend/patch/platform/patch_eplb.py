@@ -378,9 +378,7 @@ def _wrap_move_to_workspace(original_move):
             if pending_result is not None
             else False
         )
-        full_target = getattr(
-            model_state.communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, None
-        )
+        full_target = getattr(model_state.communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, None)
 
         deferred_event = None
         consumed_event = None
@@ -408,12 +406,8 @@ def _wrap_move_to_workspace(original_move):
                         )
                     else:
                         source_ranks = np.asarray(full_target.source_rank_ids)
-                        destination_ranks = np.arange(source_ranks.shape[-2])[
-                            None, :, None
-                        ]
-                        rank_transfers = np.count_nonzero(
-                            source_ranks != destination_ranks
-                        )
+                        destination_ranks = np.arange(source_ranks.shape[-2])[None, :, None]
+                        rank_transfers = np.count_nonzero(source_ranks != destination_ranks)
                         logger.info(
                             "%s: model=%s rank_transfers=%d",
                             ASYNC_EPLB_CYCLE_COMMITTED_LOG,
