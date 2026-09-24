@@ -27,8 +27,9 @@ class LoadChunk:
 
 @dataclass(frozen=True, slots=True)
 class LoadTask:
-    """A fully resolved Load operation ready for synchronous execution."""
+    """A fully resolved Load operation ready for execution."""
 
+    request_id: str
     chunks: tuple[LoadChunk, ...]
 
 
@@ -73,4 +74,4 @@ class LoadTaskBuilder:
             )
             chunks.append(LoadChunk(key, tuple(address), tuple(size), block_id))
         chunks = _circular_shift(chunks, self.tp_rank % len(chunks)) if chunks else []
-        return LoadTask(tuple(chunks))
+        return LoadTask(request.request_id, tuple(chunks))

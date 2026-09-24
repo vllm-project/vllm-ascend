@@ -2,7 +2,7 @@
 
 import sys
 import tempfile
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -41,10 +41,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.servi
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.store import (
     StoreService as SchedulerStoreService,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import resources as worker_resources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import service as worker_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.load import (
     LoadService as WorkerLoadService,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.load.async_executor import AsyncLoadExecutor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.lookup import LookupService
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.store import StoreService
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.store.executor import StoreExecutor
@@ -83,7 +85,7 @@ def test_connector_adapts_scheduler_lookup_request() -> None:
 
     def lookup(lookup_request):
         received.append(lookup_request)
-        return 4
+        return 4, False
 
     instance = connector.AscendStoreV1Connector.__new__(connector.AscendStoreV1Connector)
     instance.scheduler = SimpleNamespace(lookup=lookup)
@@ -116,12 +118,44 @@ def test_scheduler_lookup_preserves_full_hit_allocation() -> None:
     block_hashes = [b"a", b"b", b"c"]
     request = scheduler_lookup.SchedulerLookupRequest("request", 12, 12, block_hashes, 0)
 
-    assert service.lookup(request) == 11
+    assert service.lookup(request) == (11, False)
     assert calls == [(12, block_hashes, 0)]
-    load_candidate = service._load_service.take_for_transfer("request")
+    load_candidate = service._load_service._pending_candidates["request"]
     assert load_candidate is not None
     assert load_candidate.kvpool_cached_tokens == 11
-    assert not load_candidate.allocation_confirmed
+
+
+def test_scheduler_publishes_async_load_after_allocation() -> None:
+    service = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
+    configure_scheduler_transfer_boundary(service)
+    service._lookup_service = SimpleNamespace(lookup=lambda request: scheduler_lookup.SchedulerLookupResult(11, 11))
+    service._load_service = SchedulerLoadService(load_async=True)
+    service._store_service = make_scheduler_store_service()
+    service.request_trackers = {}
+    service.unfinished_requests = {}
+    service.preempted_req_ids = set()
+    block_hashes = [b"a", b"b", b"c"]
+    lookup_request = scheduler_lookup.SchedulerLookupRequest("request", 12, 12, block_hashes, 0)
+    request = SimpleNamespace(request_id="request", prompt_token_ids=[0] * 12, block_hashes=block_hashes)
+
+    assert service.lookup(lookup_request) == (11, True)
+    service.update_state_after_alloc(request, ([1, 2, 3],), 11)
+    empty_cached = SimpleNamespace(req_ids=[], new_block_ids=[])
+    output = SimpleNamespace(
+        finished_req_ids=set(), preempted_req_ids=set(), scheduled_new_reqs=[], scheduled_cached_reqs=empty_cached
+    )
+
+    metadata = service.build_connector_meta(output)
+    assert metadata.loading_request_ids == {"request"}
+    assert metadata.store_requests == []
+    assert metadata.load_requests == [LoadRequest("request", 12, (1, 2, 3), tuple(block_hashes), 0, 11)]
+
+    next_metadata = service.build_connector_meta(output)
+    assert next_metadata.load_requests == []
+    assert next_metadata.loading_request_ids == {"request"}
+
+    service.finish_loading({"request"})
+    assert service.build_connector_meta(output).loading_request_ids == set()
 
 
 @pytest.mark.parametrize(
@@ -154,7 +188,7 @@ def test_classic_transfer_requests_match_legacy_operation(
     )
     tracker = RequestTracker("request", target_tokens, [1, 2, 3], 12)
     legacy_load = LegacyLoadSpec(0, load_tokens, can_load) if load_tokens is not None else None
-    load_candidate = LoadCandidate(0, load_tokens, can_load) if load_tokens is not None else None
+    load_candidate = LoadCandidate(0, load_tokens) if load_tokens is not None and can_load else None
 
     legacy = LegacyReqMeta.from_request_tracker(
         legacy_tracker,
@@ -186,7 +220,7 @@ def test_classic_transfer_requests_match_legacy_operation(
 
 def test_finished_request_keeps_unconsumed_load_candidate_like_legacy() -> None:
     service = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
-    load_candidate = LoadCandidate(0, 4, False)
+    load_candidate = LoadCandidate(0, 4)
     service._load_service = SchedulerLoadService()
     service._load_service.record_candidate("request", load_candidate)
     service._store_service = make_scheduler_store_service()
@@ -202,7 +236,7 @@ def test_finished_request_keeps_unconsumed_load_candidate_like_legacy() -> None:
 
     service.build_connector_meta(output)
 
-    assert service._load_service.take_for_transfer("request") is load_candidate
+    assert service._load_service._pending_candidates["request"] is load_candidate
     assert "request" not in service.request_trackers
     assert "request" not in service.unfinished_requests
 
@@ -226,13 +260,13 @@ def test_missing_scheduler_state_reports_legacy_error(branch: str, expected_mess
     new_requests = []
     cached_requests = SimpleNamespace(req_ids=[], new_block_ids=[])
     if branch == "new":
-        service._load_service.record_candidate("request", LoadCandidate(0, 4, False))
+        service._load_service.record_candidate("request", LoadCandidate(0, 4))
         new_requests = [SimpleNamespace(req_id="request", num_computed_tokens=0)]
     else:
         cached_requests = SimpleNamespace(req_ids=["request"], new_block_ids=[([1],)])
         if branch == "preempted":
             service.preempted_req_ids.add("request")
-            service._load_service.record_candidate("request", LoadCandidate(0, 4, False))
+            service._load_service.record_candidate("request", LoadCandidate(0, 4))
         if branch == "running_tracker":
             service.unfinished_requests["request"] = SimpleNamespace(num_computed_tokens=0, num_prompt_tokens=4)
         if branch == "running_request":
@@ -312,11 +346,11 @@ def test_preempted_cached_request_matches_legacy(resume_load: bool) -> None:
 
     if resume_load:
         legacy.load_specs["request"] = LegacyLoadSpec(4, 8, False)
-        current._load_service.record_candidate("request", LoadCandidate(4, 8, False))
+        current._load_service.record_candidate("request", LoadCandidate(4, 8))
     allocated_blocks = SimpleNamespace(get_block_ids=lambda: [[3, 4]])
     external_tokens = 4 if resume_load else 0
     legacy.update_state_after_alloc(request, allocated_blocks, external_tokens)
-    current.update_state_after_alloc(request, external_tokens)
+    current.update_state_after_alloc(request, ([3, 4],), external_tokens)
 
     resume_step = SimpleNamespace(
         finished_req_ids=set(),
@@ -367,12 +401,12 @@ def test_allocation_mismatch_raises_legacy_assertion() -> None:
     current = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
     current.unfinished_requests = {}
     current._load_service = SchedulerLoadService()
-    current._load_service.record_candidate("request", LoadCandidate(0, 8, False))
+    current._load_service.record_candidate("request", LoadCandidate(0, 8))
 
     with pytest.raises(AssertionError):
         legacy.update_state_after_alloc(request, blocks, 4)
     with pytest.raises(AssertionError):
-        current.update_state_after_alloc(request, 4)
+        current.update_state_after_alloc(request, ([1],), 4)
 
 
 @pytest.mark.parametrize(
@@ -490,6 +524,88 @@ def test_classic_load_task_reports_failed_blocks(get_result, invalid_block_ids) 
     assert load_service.take_failed_block_ids() == invalid_block_ids
 
 
+def test_async_load_reports_completion_and_failed_blocks() -> None:
+    completed = Event()
+
+    class Database:
+        def load_mask(self, block_hashes, token_len):
+            return [[True, True]]
+
+        def mask_allows_chunk(self, masks, group_id, start):
+            return True
+
+        def process_token_key_strings_with_block_ids(self, token_len, block_hashes, block_ids, mask_num, chunk_filter):
+            return [(0, 4, "first", 0, 1), (4, 8, "second", 0, 2)]
+
+        def prepare_value(self, start, end, block_ids, block_id):
+            return [block_id * 16], [16], block_id
+
+    class Backend:
+        def set_device(self):
+            return
+
+        def get(self, keys, addresses, sizes):
+            completed.set()
+            return [0, -1]
+
+    load_service = WorkerLoadService(Backend(), Database(), 4, 4, tp_rank=0, load_async=True)
+    load_service.start()
+    load_service.load([LoadRequest("request", 8, (1, 2), (b"a", b"b"), 0, 8)])
+    assert completed.wait(2)
+    load_service._executor._task_queue.join()
+
+    assert load_service.take_finished_request_ids(set(), set()) == set()
+    assert load_service.take_finished_request_ids({"request"}, set()) == {"request"}
+    assert load_service.take_failed_block_ids() == {2}
+    load_service.close()
+
+
+def test_async_load_reports_terminal_request_after_late_completion(monkeypatch) -> None:
+    load_started = Event()
+    allow_load_to_finish = Event()
+
+    class Database:
+        def load_mask(self, block_hashes, token_len):
+            return [[True]]
+
+        def mask_allows_chunk(self, masks, group_id, start):
+            return True
+
+        def process_token_key_strings_with_block_ids(self, token_len, block_hashes, block_ids, mask_num, chunk_filter):
+            return [(0, 4, "key", 0, 1)]
+
+        def prepare_value(self, start, end, block_ids, block_id):
+            return [16], [16], block_id
+
+    class Backend:
+        def set_device(self):
+            return
+
+        def get(self, keys, addresses, sizes):
+            load_started.set()
+            assert allow_load_to_finish.wait(2)
+            return [0]
+
+    load_service = WorkerLoadService(Backend(), Database(), 4, 4, tp_rank=0, load_async=True)
+    load_service.start()
+    load_service.load([LoadRequest("request", 4, (1,), (b"a",), 0, 4)])
+    assert load_started.wait(2)
+
+    worker = worker_module.WorkerService.__new__(worker_module.WorkerService)
+    worker._load_service = load_service
+    worker._store_service = None
+    instance = connector.AscendStoreV1Connector.__new__(connector.AscendStoreV1Connector)
+    instance.worker = worker
+    monkeypatch.setattr(instance, "_get_connector_metadata", lambda: AscendStoreV1Metadata(set(), set()))
+
+    assert instance.get_finished({"request"}) == (set(), set())
+    allow_load_to_finish.set()
+    load_service._executor._task_queue.join()
+    assert instance.get_finished(set()) == (set(), {"request"})
+    assert instance.get_finished(set()) == (set(), set())
+    load_service.close()
+
+
 @pytest.mark.parametrize(
     ("present", "max_model_len", "granularity", "expected_hit"),
     [
@@ -565,6 +681,8 @@ def test_classic_worker_keeps_registered_caches_and_starts_store_after_registrat
             calls.append(("database", addresses, lengths, strides))
 
     class Backend:
+        requires_exists_before_put = True
+
         def __init__(self, parallel_config=None, extra_config=None) -> None:
             return
 
@@ -621,27 +739,128 @@ def test_classic_worker_keeps_registered_caches_and_starts_store_after_registrat
     assert calls == expected_calls
 
 
-def test_store_service_starts_executor_only_once_after_cache_registration(monkeypatch) -> None:
-    executors = []
+@pytest.mark.parametrize("executor_type", [AsyncLoadExecutor, StoreExecutor])
+def test_async_executor_start_and_close_are_idempotent(executor_type) -> None:
+    device_selections = []
+    backend = SimpleNamespace(set_device=lambda: device_selections.append(True))
+    executor = executor_type(backend)
+
+    executor.start_and_wait_ready()
+    executor.start_and_wait_ready()
+    executor.close()
+    executor.close()
+
+    assert device_selections == [True]
+    assert not executor.is_alive()
+    with pytest.raises(RuntimeError, match="is closed"):
+        executor.start_and_wait_ready()
+
+
+@pytest.mark.parametrize("executor_type", [AsyncLoadExecutor, StoreExecutor])
+def test_async_executor_reports_startup_failure(executor_type) -> None:
+    def fail_to_select_device() -> None:
+        raise RuntimeError("device unavailable")
+
+    executor = executor_type(SimpleNamespace(set_device=fail_to_select_device))
+
+    with pytest.raises(RuntimeError, match="failed during") as error:
+        executor.start_and_wait_ready()
+
+    assert isinstance(error.value.__cause__, RuntimeError)
+    assert not executor.is_alive()
+
+
+def test_worker_close_stops_load_after_store_failure() -> None:
+    closed_services = []
+
+    def close_store() -> None:
+        closed_services.append("store")
+        raise RuntimeError("store failed")
+
     worker = worker_module.WorkerService.__new__(worker_module.WorkerService)
-    store_service = StoreService.__new__(StoreService)
-    store_service._backend = SimpleNamespace()
-    store_service._executor = None
-    worker._store_service = store_service
-    worker._cache_resources = SimpleNamespace(register_kv_caches=lambda caches: None)
-    monkeypatch.setattr(StoreExecutor, "start_and_wait_ready", lambda executor: executors.append(executor))
+    worker._store_service = SimpleNamespace(close=close_store)
+    worker._load_service = SimpleNamespace(close=lambda: closed_services.append("load"))
+    worker._cache_resources = SimpleNamespace(close=lambda: closed_services.append("resources"))
 
-    worker.register_kv_caches({})
-    worker.register_kv_caches({})
+    with pytest.raises(RuntimeError, match="store failed"):
+        worker.close()
 
-    assert len(executors) == 1
-    assert store_service._executor is executors[0]
+    assert closed_services == ["store", "load", "resources"]
+
+
+def test_worker_stops_store_when_load_startup_fails() -> None:
+    lifecycle = []
+    worker = worker_module.WorkerService.__new__(worker_module.WorkerService)
+    worker._cache_resources = SimpleNamespace(
+        register_kv_caches=lambda caches: lifecycle.append("register"),
+        close=lambda: lifecycle.append("close_resources"),
+    )
+    worker._store_service = SimpleNamespace(
+        start=lambda: lifecycle.append("start_store"), close=lambda: lifecycle.append("close_store")
+    )
+
+    def start_load() -> None:
+        lifecycle.append("start_load")
+        raise RuntimeError("load failed")
+
+    worker._load_service = SimpleNamespace(start=start_load, close=lambda: lifecycle.append("close_load"))
+
+    with pytest.raises(RuntimeError, match="load failed"):
+        worker.register_kv_caches({})
+
+    assert lifecycle == ["register", "start_store", "start_load", "close_store", "close_load", "close_resources"]
+
+
+def test_classic_mooncake_backend_releases_buffers_before_store(monkeypatch) -> None:
+    lifecycle = []
+    transfer_engine = SimpleNamespace(
+        batch_unregister_memory=lambda addresses: lifecycle.append(("unregister", addresses)) or 0
+    )
+    managed_transfer_engine = SimpleNamespace(
+        transfer_engine=transfer_engine,
+        is_register_buffer=True,
+        register_buffer_lock=Lock(),
+    )
+    monkeypatch.setattr(worker_resources, "global_te", managed_transfer_engine)
+
+    class Backend:
+        requires_exists_before_put = True
+
+        def __init__(self) -> None:
+            self.store = SimpleNamespace(close=lambda: lifecycle.append(("close_store",)) or 0)
+
+        def register_buffer(self, addresses, lengths) -> None:
+            lifecycle.append(("register", addresses, lengths))
+
+        def set_device(self) -> None:
+            return
+
+        def exists(self, keys):
+            return []
+
+        def put(self, keys, addresses, sizes):
+            return []
+
+        def get(self, keys, addresses, sizes):
+            return []
+
+    backend = worker_resources.ClassicMooncakeBackend(Backend())
+    backend.register_buffer([100, 200], [10, 20])
+    backend.close()
+    backend.close()
+
+    assert lifecycle == [
+        ("register", [100, 200], [10, 20]),
+        ("unregister", [100, 200]),
+        ("close_store",),
+    ]
+    assert not managed_transfer_engine.is_register_buffer
 
 
 def test_store_executor_reports_failure_while_waiting_for_previous_batch() -> None:
     executor = StoreExecutor(SimpleNamespace())
     executor.wait_for_previous_store()
-    executor.submit_batch([StoreTask("request", SimpleNamespace(), ())])
+    executor._previous_store_batch = SimpleNamespace(done=Event())
     executor._fatal_error = RuntimeError("sender stopped")
 
     with pytest.raises(RuntimeError, match="failed during asynchronous transfer") as error:
@@ -677,13 +896,25 @@ def test_classic_connector_discards_store_completion_bookkeeping(monkeypatch) ->
     store_service = StoreService.__new__(StoreService)
     store_service._executor = executor
     worker._store_service = store_service
+    worker._load_service = SimpleNamespace(take_finished_request_ids=lambda loading, finished: loading | finished)
     instance = connector.AscendStoreV1Connector.__new__(connector.AscendStoreV1Connector)
     instance.worker = worker
-    monkeypatch.setattr(instance, "_get_connector_metadata", lambda: AscendStoreV1Metadata({"preempted"}))
+    metadata = AscendStoreV1Metadata({"preempted"}, {"loaded"})
+    monkeypatch.setattr(instance, "_get_connector_metadata", lambda: metadata)
 
-    assert instance.get_finished(set()) == (set(), set())
+    assert instance.get_finished(set()) == (set(), {"loaded"})
     assert executor.stored_requests == {"active": 1}
     assert executor.finished_requests == set()
+
+
+def test_connector_returns_finished_loads_to_scheduler() -> None:
+    finished = []
+    instance = connector.AscendStoreV1Connector.__new__(connector.AscendStoreV1Connector)
+    instance.scheduler = SimpleNamespace(finish_loading=finished.append)
+
+    instance.update_connector_output(SimpleNamespace(finished_recving={"request"}))
+
+    assert finished == [{"request"}]
 
 
 def test_classic_connector_finished_hooks_do_not_delay_block_release() -> None:
@@ -805,6 +1036,7 @@ def test_classic_connector_lookup_load_and_send_thread_store(monkeypatch) -> Non
         instance = None
 
         def __init__(self, parallel_config, extra_config) -> None:
+            self.store = SimpleNamespace(close=lambda: 0)
             self.existing_keys: set[str] = set()
             self.loaded_keys: list[str] = []
             self.stored_keys: list[str] = []
@@ -849,6 +1081,15 @@ def test_classic_connector_lookup_load_and_send_thread_store(monkeypatch) -> Non
     )
     monkeypatch.setattr(worker_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=RecordedEvent), raising=False)
+    monkeypatch.setattr(
+        worker_resources,
+        "global_te",
+        SimpleNamespace(
+            transfer_engine=SimpleNamespace(batch_unregister_memory=lambda addresses: 0),
+            is_register_buffer=True,
+            register_buffer_lock=Lock(),
+        ),
+    )
 
     with tempfile.TemporaryDirectory(prefix="v1-", dir="/tmp") as lookup_directory:
         lookup_path = f"ipc://{lookup_directory}/lookup"
@@ -900,7 +1141,7 @@ def test_classic_connector_lookup_load_and_send_thread_store(monkeypatch) -> Non
             )
 
             assert scheduler_connector.get_num_new_matched_tokens(request, 0) == (8, False)
-            scheduler_connector.update_state_after_alloc(request, SimpleNamespace(), 8)
+            scheduler_connector.update_state_after_alloc(request, SimpleNamespace(get_block_ids=lambda: ([1, 2],)), 8)
             new_request = SimpleNamespace(req_id="request", block_ids=([1, 2],), num_computed_tokens=0)
             empty_cached = SimpleNamespace(req_ids=[], new_block_ids=[])
             first_step = SimpleNamespace(

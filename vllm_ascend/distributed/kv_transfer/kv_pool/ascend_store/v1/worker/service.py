@@ -1,4 +1,4 @@
-"""Worker-side classic Lookup, synchronous Load and queued Store."""
+"""Worker-side classic Lookup, Load and queued Store."""
 
 from __future__ import annotations
 
@@ -69,7 +69,9 @@ class WorkerService:
             model_config.max_model_len,
             layout.block_size,
         )
-        self._load_service = LoadService(backend, token_database, layout.block_size, layout.block_size, layout.tp_rank)
+        block_size = layout.block_size
+        load_async = extra_config.get("load_async", False)
+        self._load_service = LoadService(backend, token_database, block_size, block_size, layout.tp_rank, load_async)
         self._store_service: StoreService | None = None
         if self.can_store:
             self._store_service = StoreService(
@@ -85,9 +87,24 @@ class WorkerService:
             )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        self._cache_resources.register_kv_caches(kv_caches)
-        if self._store_service is not None:
-            self._store_service.start()
+        try:
+            self._cache_resources.register_kv_caches(kv_caches)
+            if self._store_service is not None:
+                self._store_service.start()
+            self._load_service.start()
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        try:
+            try:
+                if self._store_service is not None:
+                    self._store_service.close()
+            finally:
+                self._load_service.close()
+        finally:
+            self._cache_resources.close()
 
     def lookup(self, token_len: int, block_hashes: list[BlockHash] | list[str]) -> int:
         return self._lookup_service.lookup(token_len, block_hashes)
@@ -106,6 +123,9 @@ class WorkerService:
     def clear_store_completion_bookkeeping(self, preempted_req_ids: set[str]) -> None:
         if self._store_service is not None:
             self._store_service.discard_preempted_and_finished_requests(preempted_req_ids)
+
+    def take_finished_load_request_ids(self, loading_ids: set[str], finished_ids: set[str]) -> set[str]:
+        return self._load_service.take_finished_request_ids(loading_ids, finished_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         return self._load_service.take_failed_block_ids()

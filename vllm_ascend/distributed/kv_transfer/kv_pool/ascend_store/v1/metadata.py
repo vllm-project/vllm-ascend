@@ -10,7 +10,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 
 @dataclass(frozen=True, slots=True)
 class LoadRequest:
-    """A Scheduler-approved synchronous Load command."""
+    """A Scheduler-approved Load command."""
 
     request_id: str
     transfer_end_token: int
@@ -32,7 +32,8 @@ class StoreRequest:
 
 
 class AscendStoreV1Metadata(KVConnectorMetadata):
-    def __init__(self, preempted_req_ids: set[str]) -> None:
+    def __init__(self, preempted_req_ids: set[str], loading_request_ids: set[str] | None = None) -> None:
         self.load_requests: list[LoadRequest] = []
         self.store_requests: list[StoreRequest] = []
         self.preempted_req_ids = preempted_req_ids
+        self.loading_request_ids = loading_request_ids or set()
