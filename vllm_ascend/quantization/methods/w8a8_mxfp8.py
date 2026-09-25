@@ -447,3 +447,113 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
         # Mark as not transformed (ready for weight loading)
         layer._mxfp8_transformed = False
+
+
+# Online checkpoint weights use a separate scheme; offline schemes above retain
+# their existing loading, packing and inference behavior.
+_MXFP8_GROUP_SIZE = 32
+_ONLINE_WEIGHT_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _validate_online_weight(shape: tuple[int, ...], dtype: torch.dtype) -> None:
+    if dtype not in _ONLINE_WEIGHT_DTYPES:
+        raise ValueError("Online MXFP8 checkpoint weights must be FP16 or BF16.")
+    if shape[-1] <= 0 or shape[-1] % _MXFP8_GROUP_SIZE:
+        raise ValueError("Online MXFP8 reduction dimensions must be positive multiples of 32.")
+
+
+def _quantize_online_weight(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize checkpoint rows and pack E8M0 scales for the existing NPU kernels."""
+    _validate_online_weight(tuple(weight.shape), weight.dtype)
+    rows = weight.reshape(-1, weight.shape[-1]).contiguous()
+    quantized, scales = torch_npu.npu_dynamic_mx_quant(rows, dst_type=torch.float8_e4m3fn)
+    if quantized.shape != rows.shape or quantized.dtype != torch.float8_e4m3fn:
+        raise ValueError("npu_dynamic_mx_quant returned an unexpected weight shape or dtype.")
+    if scales.element_size() != 1:
+        raise ValueError("Online MXFP8 requires one-byte E8M0 scale storage.")
+    scales = scales.contiguous().view(torch.uint8)
+    groups = rows.shape[-1] // _MXFP8_GROUP_SIZE
+    padded_groups = cdiv(groups, 2) * 2
+    if scales.numel() not in (rows.shape[0] * groups, rows.shape[0] * padded_groups):
+        raise ValueError("npu_dynamic_mx_quant returned an unexpected scale shape.")
+    scales = scales.reshape(rows.shape[0], -1)[:, :groups].contiguous()
+    scales = scales.reshape(*weight.shape[:-1], groups)
+    if groups % 2:
+        scales = F.pad(scales, (0, 1), value=0)
+    scales = scales.reshape(*weight.shape[:-1], cdiv(groups, 2), 2)
+    return (
+        quantized.reshape(weight.shape).transpose(-2, -1).contiguous(),
+        scales.transpose(-3, -2).contiguous(),
+    )
+
+
+class AscendMXFP8OnlineLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
+    """Quantize FP16/BF16 linear weights during standard online model loading."""
+
+    online_quantization = True
+
+    def __init__(self):
+        ensure_mxfp8_linear_available("Online MXFP8 linear quantization")
+        self.group_size = _MXFP8_GROUP_SIZE
+
+    def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
+        shape = (output_size, input_size)
+        _validate_online_weight(shape, params_dtype)
+        return {"weight": torch.empty(shape, dtype=params_dtype)}
+
+    def get_computed_params(self) -> set[str]:
+        return {"weight_scale"}
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Native layerwise reload restores checkpoint dtype/shape from metadata
+        # and copies processed results into the original graph-visible tensors.
+        if layer.weight.dtype == torch.float8_e4m3fn:
+            return
+        weight, scales = _quantize_online_weight(layer.weight.data)
+        layer.weight.data = weight
+        layer.weight_scale.data = scales
+
+
+class AscendMXFP8OnlineMoEMethod(AscendW8A8MXFP8DynamicFusedMoEMethod):
+    """Quantize FP16/BF16 expert weights without a pre-quantized checkpoint."""
+
+    online_quantization = True
+    supports_eplb = True
+
+    def __init__(self):
+        ensure_mxfp8_moe_available("Online MXFP8 MoE quantization")
+        self.group_size = _MXFP8_GROUP_SIZE
+        vllm_config = get_current_vllm_config()
+        ascend_config = get_ascend_config()
+        self.use_aclgraph = (
+            vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and not vllm_config.model_config.enforce_eager
+        )
+        self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
+        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
+
+    @staticmethod
+    def get_weight(
+        num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
+    ) -> dict[str, Any]:
+        shapes = {
+            "w13_weight": (num_experts, 2 * intermediate_size_per_partition, hidden_sizes),
+            "w2_weight": (num_experts, hidden_sizes, intermediate_size_per_partition),
+        }
+        for shape in shapes.values():
+            _validate_online_weight(shape, params_dtype)
+        return {name: torch.empty(shape, dtype=params_dtype) for name, shape in shapes.items()}
+
+    def get_computed_params(self) -> set[str]:
+        return {"w13_weight_scale", "w2_weight_scale"}
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if layer.w13_weight.dtype == torch.float8_e4m3fn and layer.w2_weight.dtype == torch.float8_e4m3fn:
+            return
+        # Quantize both weights before publishing either result on the layer.
+        w13, w13_scale = _quantize_online_weight(layer.w13_weight.data)
+        w2, w2_scale = _quantize_online_weight(layer.w2_weight.data)
+        layer.w13_weight.data = w13
+        layer.w13_weight_scale.data = w13_scale
+        layer.w2_weight.data = w2
+        layer.w2_weight_scale.data = w2_scale
