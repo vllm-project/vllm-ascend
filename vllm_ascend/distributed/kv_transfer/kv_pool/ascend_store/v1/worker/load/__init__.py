@@ -1,5 +1,5 @@
 """Classic Worker Load execution."""
 
-from .service import LoadService
+from .service import LoadResult, LoadService
 
-__all__ = ["LoadService"]
+__all__ = ["LoadResult", "LoadService"]

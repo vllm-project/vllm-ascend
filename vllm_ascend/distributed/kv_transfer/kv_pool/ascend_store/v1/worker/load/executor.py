@@ -1,9 +1,10 @@
-"""Synchronous execution of fully resolved classic Load tasks."""
+"""Worker Load execution boundary and synchronous implementation."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Protocol
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
@@ -18,7 +19,19 @@ class LoadExecutionResult:
     result_codes: tuple[int, ...] | None
 
 
-LoadCompletion = tuple[LoadTask, LoadExecutionResult]
+LoadTaskResult = tuple[LoadTask, LoadExecutionResult]
+
+
+class LoadExecution(Protocol):
+    """Execution boundary consumed by the Worker Load service."""
+
+    def start_and_wait_ready(self) -> None: ...
+
+    def close(self) -> None: ...
+
+    def submit(self, tasks: list[LoadTask]) -> Iterable[LoadTaskResult]: ...
+
+    def collect(self) -> Iterable[LoadTaskResult]: ...
 
 
 class LoadExecutor:
@@ -33,11 +46,11 @@ class LoadExecutor:
     def close(self) -> None:
         return
 
-    def submit(self, tasks: list[LoadTask]) -> Iterable[LoadCompletion]:
+    def submit(self, tasks: list[LoadTask]) -> Iterable[LoadTaskResult]:
         for task in tasks:
             yield task, self.execute(task)
 
-    def take_completed(self, request_ids: set[str]) -> list[LoadCompletion]:
+    def collect(self) -> list[LoadTaskResult]:
         return []
 
     def execute(self, task: LoadTask) -> LoadExecutionResult:

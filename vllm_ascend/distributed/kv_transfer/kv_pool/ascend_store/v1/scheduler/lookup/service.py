@@ -15,18 +15,16 @@ class LookupService:
         *,
         cache_transfer_granularity: int,
         discard_partial_chunks: bool,
-        kv_role: str,
-        consumer_is_to_load: bool,
+        enabled: bool,
     ) -> None:
         self.lookup_address = lookup_address
         self.cache_transfer_granularity = cache_transfer_granularity
         self.discard_partial_chunks = discard_partial_chunks
-        self.kv_role = kv_role
-        self.consumer_is_to_load = consumer_is_to_load
+        self.enabled = enabled
         self.client: LookupKeyClient | None = None
 
     def lookup(self, request: SchedulerLookupRequest) -> SchedulerLookupResult:
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
+        if not self.enabled:
             return SchedulerLookupResult(0, None)
 
         token_len = request.prompt_token_len
