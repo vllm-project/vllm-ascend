@@ -29,6 +29,11 @@ on:
         type: string
         default: 'main'
         description: "Branch/ref to checkout"
+      base_image_branch:
+        required: false
+        type: string
+        default: ''
+        description: "Branch used to resolve the base image tag (nightly-<branch>). Defaults to vllm_ascend_branch. For PR verification builds, set to the target branch instead of the head SHA."
       build_type:
         required: false
         type: string
@@ -126,15 +131,15 @@ jobs:
 
       - name: Build nightly-${{ inputs.target }} image
         id: build
-        env:
-          GIT_PROXY: https://gh-proxy.test.osinfra.cn/
-          PIP_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          PIP_EXTRA_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
-          PIP_TRUSTED_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
         shell: bash
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
+          BASE_BRANCH_TAG="${{ inputs.base_image_branch }}"
+          if [ -z "$BASE_BRANCH_TAG" ]; then
+            BASE_BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
+          fi
+          BASE_BRANCH_TAG=$(echo "$BASE_BRANCH_TAG" | tr '/' '-')
 
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             SWR_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend"
@@ -162,7 +167,7 @@ jobs:
               DATE=""
               for i in $(seq 0 30); do
                 CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
-                CANDIDATE_TAG="nightly-${BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
+                CANDIDATE_TAG="nightly-${BASE_BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
                 if docker buildx imagetools inspect "${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
                   DATE="$CANDIDATE_DATE"
                   echo "Found base image date: $DATE (tag: $CANDIDATE_TAG)"
@@ -190,11 +195,7 @@ jobs:
           BUILD_ARGS=(
             --platform ${{ matrix.arch_platform }}
             -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }}
-            --build-arg VLLM_ASCEND_BRANCH="${BRANCH_TAG}"
-            --build-arg GIT_PROXY="${GIT_PROXY}"
-            --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}"
-            --build-arg PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}"
-            --build-arg PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}"
+            --build-arg VLLM_ASCEND_BRANCH="${BASE_BRANCH_TAG}"
           )
 
           if [ -n "$TAG_SUFFIX" ]; then
