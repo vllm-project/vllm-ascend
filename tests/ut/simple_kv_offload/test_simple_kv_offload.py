@@ -181,6 +181,49 @@ def test_register_kv_caches_keeps_separate_kv_and_initializes_backend(
     )
 
 
+def test_register_kv_caches_keeps_kv_views_of_one_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model Runner V2 slices K and V out of a single allocation.
+
+    Both views have to be registered: deduplicating by storage pointer alone
+    drops every V cache, so a reloaded prefix cache would miss half of it.
+    """
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.init_args: tuple[object, ...] | None = None
+
+        def init(self, *args) -> None:
+            self.init_args = args
+
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(Stream=lambda: object()),
+        raising=False,
+    )
+    monkeypatch.setattr(worker_module, "is_pin_memory_available", lambda: False)
+
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker.kv_cache_config = SimpleNamespace(num_blocks=4)
+    worker.cpu_capacity_bytes = 96
+    worker._backend = FakeBackend()
+
+    num_blocks, page_elems = 4, 6
+    backing = torch.empty(2 * num_blocks * page_elems, dtype=torch.uint8)
+    key_cache = backing[: num_blocks * page_elems].view(num_blocks, page_elems)
+    value_cache = backing[num_blocks * page_elems :].view(num_blocks, page_elems)
+    assert key_cache.untyped_storage().data_ptr() == value_cache.untyped_storage().data_ptr()
+
+    worker.register_kv_caches({"layer": (key_cache, value_cache)})
+
+    assert list(worker.gpu_kv_caches) == ["layer", "layer.1"]
+    assert worker.num_cpu_blocks == 8
+    assert worker.cpu_kv_caches["layer"].shape == (8, page_elems)
+    assert worker.cpu_kv_caches["layer.1"].shape == (8, page_elems)
+
+
 def test_get_finished_records_store_barrier_on_npu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
