@@ -1128,10 +1128,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         if (
             kv_transfer_config is not None
             and kv_transfer_config.is_kv_consumer
+            and not kv_transfer_config.is_kv_producer
             and self.vllm_config.weight_transfer_config is None
         ):
             dispose_layer(self.kv_b_proj)
-            torch.npu.empty_cache()
 
     def _load_fa_quant_scales(self):
         layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
