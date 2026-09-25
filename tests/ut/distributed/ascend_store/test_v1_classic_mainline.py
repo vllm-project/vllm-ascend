@@ -24,29 +24,40 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import connector
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import factory as service_factory
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.metadata import (
     AscendStoreV1Metadata,
     LoadRequest,
+    LoadRequestBatch,
     StoreRequest,
+    StoreRequestBatch,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import lookup as scheduler_lookup
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler import service as scheduler
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.layout import (
+    SchedulerTransferLayout,
+    resolve_scheduler_transfer_layout,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.load import (
+    DeferredLoadScheduling,
+    ImmediateLoadScheduling,
     LoadCandidate,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.load import (
     LoadService as SchedulerLoadService,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.service import RequestTracker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.request_tracker import RequestTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.store import (
     StoreService as SchedulerStoreService,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import layout as worker_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import resources as worker_resources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import service as worker_module
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.load import (
-    LoadService as WorkerLoadService,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layout import WorkerTransferLayout
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.load import LoadResult
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.load import LoadService as WorkerLoadService
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.load.async_executor import AsyncLoadExecutor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.load.executor import LoadExecutor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.lookup import LookupService
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.store import StoreService
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.store.executor import StoreExecutor
@@ -65,9 +76,13 @@ def make_scheduler_store_service(
         cache_transfer_granularity=4,
         discard_partial_chunks=discard_partial_chunks,
         save_decode_cache=save_decode_cache,
-        kv_role="kv_producer",
-        consumer_is_to_put=False,
+        enabled=True,
     )
+
+
+def make_scheduler_load_service(*, deferred: bool = False) -> SchedulerLoadService:
+    scheduling = DeferredLoadScheduling() if deferred else ImmediateLoadScheduling()
+    return SchedulerLoadService(scheduling)
 
 
 def configure_scheduler_transfer_boundary(
@@ -75,9 +90,129 @@ def configure_scheduler_transfer_boundary(
     *,
     discard_partial_chunks: bool = True,
 ) -> None:
-    service._cache_transfer_granularity = 4
-    service._hash_block_size = 4
-    service._discard_partial_chunks = discard_partial_chunks
+    service._layout = SchedulerTransferLayout(4, 4, discard_partial_chunks)
+
+
+def fixed_scheduler_transfer_layout(_vllm_config, _kv_cache_config) -> SchedulerTransferLayout:
+    return SchedulerTransferLayout(4, 4, True)
+
+
+def fixed_worker_transfer_layout(_vllm_config, _kv_cache_config) -> WorkerTransferLayout:
+    return WorkerTransferLayout(0, 1, 1, 0, 1, 1, 1, 1, 4, 4, KeyMetadata("model", 0, 0, 0))
+
+
+def configure_worker_factory(monkeypatch) -> None:
+    cache_resources = SimpleNamespace(backend=SimpleNamespace(), token_database=SimpleNamespace())
+    monkeypatch.setattr(service_factory, "resolve_worker_transfer_layout", fixed_worker_transfer_layout)
+    monkeypatch.setattr(service_factory.WorkerCacheResources, "create", lambda *args: cache_resources)
+
+
+def test_scheduler_transfer_layout_resolves_classic_boundaries() -> None:
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2),
+        cache_config=SimpleNamespace(block_size=4, prefix_match_unit=2),
+        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"discard_partial_chunks": False}),
+    )
+    kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=4))])
+
+    assert resolve_scheduler_transfer_layout(vllm_config, kv_cache_config) == SchedulerTransferLayout(8, 4, False)
+
+
+@pytest.mark.parametrize(
+    ("load_async", "load_is_deferred", "executor_factory"),
+    [(False, False, LoadExecutor), (True, True, AsyncLoadExecutor)],
+)
+def test_load_execution_mode_selects_scheduler_and_worker_components(
+    monkeypatch, load_async, load_is_deferred, executor_factory
+) -> None:
+    def take_scheduler_load_service(layout, lookup_service, load_service, store_service):
+        return load_service
+
+    def take_worker_load_service(cache_resources, lookup_service, load_service, store_service):
+        return load_service
+
+    monkeypatch.setattr(service_factory, "SchedulerService", take_scheduler_load_service)
+    monkeypatch.setattr(service_factory, "WorkerService", take_worker_load_service)
+    monkeypatch.setattr(service_factory, "resolve_scheduler_transfer_layout", fixed_scheduler_transfer_layout)
+    configure_worker_factory(monkeypatch)
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(),
+        model_config=SimpleNamespace(max_model_len=64),
+        kv_transfer_config=SimpleNamespace(kv_role="kv_producer", kv_connector_extra_config={"load_async": load_async}),
+    )
+
+    scheduler_load_service = service_factory.build_scheduler_service(vllm_config, object(), "ipc:///lookup")
+    worker_load_service = service_factory.build_worker_service(vllm_config, SimpleNamespace(num_blocks=4))
+
+    assert scheduler_load_service.is_deferred is load_is_deferred
+    assert type(worker_load_service._executor) is executor_factory
+
+
+@pytest.mark.parametrize(
+    ("kv_role", "consumer_is_to_put", "store_enabled"),
+    [
+        ("kv_producer", False, True),
+        ("kv_both", False, True),
+        ("kv_consumer", False, False),
+        ("kv_consumer", True, True),
+    ],
+)
+def test_store_capability_selects_scheduler_and_worker_components(
+    monkeypatch, kv_role, consumer_is_to_put, store_enabled
+) -> None:
+    def take_scheduler_store_service(layout, lookup_service, load_service, store_service):
+        return store_service
+
+    def take_worker_store_service(cache_resources, lookup_service, load_service, store_service):
+        return store_service
+
+    monkeypatch.setattr(service_factory, "SchedulerService", take_scheduler_store_service)
+    monkeypatch.setattr(service_factory, "WorkerService", take_worker_store_service)
+    monkeypatch.setattr(service_factory, "resolve_scheduler_transfer_layout", fixed_scheduler_transfer_layout)
+    configure_worker_factory(monkeypatch)
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(),
+        model_config=SimpleNamespace(max_model_len=64),
+        kv_transfer_config=SimpleNamespace(
+            kv_role=kv_role,
+            kv_connector_extra_config={"consumer_is_to_put": consumer_is_to_put},
+        ),
+    )
+
+    scheduler_store_service = service_factory.build_scheduler_service(vllm_config, object(), "ipc:///lookup")
+    worker_store_service = service_factory.build_worker_service(vllm_config, SimpleNamespace(num_blocks=4))
+
+    assert scheduler_store_service.is_enabled is store_enabled
+    assert isinstance(worker_store_service, StoreService) is store_enabled
+
+
+@pytest.mark.parametrize(
+    ("kv_role", "consumer_is_to_load", "lookup_enabled"),
+    [
+        ("kv_producer", False, True),
+        ("kv_both", False, True),
+        ("kv_consumer", False, False),
+        ("kv_consumer", True, True),
+    ],
+)
+def test_lookup_capability_selects_scheduler_component(
+    monkeypatch, kv_role, consumer_is_to_load, lookup_enabled
+) -> None:
+    def take_scheduler_lookup_service(layout, lookup_service, load_service, store_service):
+        return lookup_service
+
+    monkeypatch.setattr(service_factory, "SchedulerService", take_scheduler_lookup_service)
+    monkeypatch.setattr(service_factory, "resolve_scheduler_transfer_layout", fixed_scheduler_transfer_layout)
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_role=kv_role,
+            kv_connector_extra_config={"consumer_is_to_load": consumer_is_to_load},
+        )
+    )
+
+    lookup_service = service_factory.build_scheduler_service(vllm_config, object(), "ipc:///lookup")
+
+    assert lookup_service.enabled is lookup_enabled
 
 
 def test_connector_adapts_scheduler_lookup_request() -> None:
@@ -108,13 +243,12 @@ def test_scheduler_lookup_preserves_full_hit_allocation() -> None:
         "ipc:///unused/lookup",
         cache_transfer_granularity=4,
         discard_partial_chunks=True,
-        kv_role="kv_producer",
-        consumer_is_to_load=False,
+        enabled=True,
     )
     lookup_service.client = SimpleNamespace(lookup=lookup)
     service = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
     service._lookup_service = lookup_service
-    service._load_service = SchedulerLoadService()
+    service._load_service = make_scheduler_load_service()
     block_hashes = [b"a", b"b", b"c"]
     request = scheduler_lookup.SchedulerLookupRequest("request", 12, 12, block_hashes, 0)
 
@@ -125,11 +259,24 @@ def test_scheduler_lookup_preserves_full_hit_allocation() -> None:
     assert load_candidate.kvpool_cached_tokens == 11
 
 
+def test_disabled_scheduler_lookup_skips_rpc() -> None:
+    lookup_service = scheduler_lookup.LookupService(
+        "ipc:///unused/lookup",
+        cache_transfer_granularity=4,
+        discard_partial_chunks=True,
+        enabled=False,
+    )
+    request = scheduler_lookup.SchedulerLookupRequest("request", 12, 12, [b"a", b"b", b"c"], 0)
+
+    assert lookup_service.lookup(request) == scheduler_lookup.SchedulerLookupResult(0, None)
+    assert lookup_service.client is None
+
+
 def test_scheduler_publishes_async_load_after_allocation() -> None:
     service = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
     configure_scheduler_transfer_boundary(service)
     service._lookup_service = SimpleNamespace(lookup=lambda request: scheduler_lookup.SchedulerLookupResult(11, 11))
-    service._load_service = SchedulerLoadService(load_async=True)
+    service._load_service = make_scheduler_load_service(deferred=True)
     service._store_service = make_scheduler_store_service()
     service.request_trackers = {}
     service.unfinished_requests = {}
@@ -146,16 +293,11 @@ def test_scheduler_publishes_async_load_after_allocation() -> None:
     )
 
     metadata = service.build_connector_meta(output)
-    assert metadata.loading_request_ids == {"request"}
-    assert metadata.store_requests == []
-    assert metadata.load_requests == [LoadRequest("request", 12, (1, 2, 3), tuple(block_hashes), 0, 11)]
+    assert metadata.store.requests == ()
+    assert metadata.load.requests == (LoadRequest("request", 12, (1, 2, 3), tuple(block_hashes), 0, 11),)
 
     next_metadata = service.build_connector_meta(output)
-    assert next_metadata.load_requests == []
-    assert next_metadata.loading_request_ids == {"request"}
-
-    service.finish_loading({"request"})
-    assert service.build_connector_meta(output).loading_request_ids == set()
+    assert next_metadata.load.requests == ()
 
 
 @pytest.mark.parametrize(
@@ -186,7 +328,7 @@ def test_classic_transfer_requests_match_legacy_operation(
         num_saved_tokens=saved_tokens,
         num_prompt_tokens=12,
     )
-    tracker = RequestTracker("request", target_tokens, [1, 2, 3], 12)
+    tracker = RequestTracker("request", target_tokens, [1, 2, 3], hashes, 12)
     legacy_load = LegacyLoadSpec(0, load_tokens, can_load) if load_tokens is not None else None
     load_candidate = LoadCandidate(0, load_tokens) if load_tokens is not None and can_load else None
 
@@ -200,11 +342,11 @@ def test_classic_transfer_requests_match_legacy_operation(
     )
     service = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
     configure_scheduler_transfer_boundary(service, discard_partial_chunks=discard_partial_chunks)
+    service._load_service = make_scheduler_load_service()
     service._store_service = make_scheduler_store_service(discard_partial_chunks=discard_partial_chunks)
-    service._store_service.record_scheduled("request", saved_tokens)
-    load_request, store_request = service._schedule_request_transfer(
-        tracker, SimpleNamespace(block_hashes=hashes), load_candidate
-    )
+    if saved_tokens:
+        service._store_service._scheduled_tokens["request"] = saved_tokens
+    load_request, store_request = service._schedule_request_transfer(tracker, load_candidate)
 
     assert service._store_service._scheduled_tokens.get("request", 0) == legacy_tracker.num_saved_tokens
     if legacy is None or (not legacy.can_save and legacy.load_spec is None):
@@ -221,10 +363,10 @@ def test_classic_transfer_requests_match_legacy_operation(
 def test_finished_request_keeps_unconsumed_load_candidate_like_legacy() -> None:
     service = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
     load_candidate = LoadCandidate(0, 4)
-    service._load_service = SchedulerLoadService()
+    service._load_service = make_scheduler_load_service()
     service._load_service.record_candidate("request", load_candidate)
     service._store_service = make_scheduler_store_service()
-    service.request_trackers = {"request": RequestTracker("request", 4, [1], 4)}
+    service.request_trackers = {"request": RequestTracker("request", 4, [1], [b"a"], 4)}
     service.unfinished_requests = {"request": SimpleNamespace()}
     service.preempted_req_ids = {"request"}
     output = SimpleNamespace(
@@ -252,7 +394,7 @@ def test_finished_request_keeps_unconsumed_load_candidate_like_legacy() -> None:
 )
 def test_missing_scheduler_state_reports_legacy_error(branch: str, expected_message: str) -> None:
     service = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
-    service._load_service = SchedulerLoadService()
+    service._load_service = make_scheduler_load_service()
     service._store_service = make_scheduler_store_service()
     service.request_trackers = {}
     service.unfinished_requests = {}
@@ -270,7 +412,7 @@ def test_missing_scheduler_state_reports_legacy_error(branch: str, expected_mess
         if branch == "running_tracker":
             service.unfinished_requests["request"] = SimpleNamespace(num_computed_tokens=0, num_prompt_tokens=4)
         if branch == "running_request":
-            service.request_trackers["request"] = RequestTracker("request", 4, [1], 4)
+            service.request_trackers["request"] = RequestTracker("request", 4, [1], [b"a"], 4)
     output = SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
@@ -322,12 +464,12 @@ def test_preempted_cached_request_matches_legacy(resume_load: bool) -> None:
 
     current = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
     configure_scheduler_transfer_boundary(current)
-    current.request_trackers = {"request": RequestTracker("request", 8, [1, 2], 12)}
+    current.request_trackers = {"request": RequestTracker("request", 8, [1, 2], request.block_hashes, 12)}
     current.unfinished_requests = {"request": request}
     current.preempted_req_ids = set()
-    current._load_service = SchedulerLoadService()
+    current._load_service = make_scheduler_load_service()
     current._store_service = make_scheduler_store_service()
-    current._store_service.record_scheduled("request", 8)
+    current._store_service._scheduled_tokens["request"] = 8
 
     empty_cached = SimpleNamespace(req_ids=[], new_block_ids=[])
     preempt_step = SimpleNamespace(
@@ -339,8 +481,9 @@ def test_preempted_cached_request_matches_legacy(resume_load: bool) -> None:
     )
     legacy_preempted = legacy.build_connector_meta(preempt_step)
     current_preempted = current.build_connector_meta(preempt_step)
-    assert legacy_preempted.requests == current_preempted.load_requests == current_preempted.store_requests == []
-    assert legacy_preempted.preempted_req_ids == current_preempted.preempted_req_ids == {"request"}
+    assert legacy_preempted.requests == []
+    assert current_preempted.load.requests == current_preempted.store.requests == ()
+    assert legacy_preempted.preempted_req_ids == current_preempted.store.preempted_request_ids == {"request"}
     assert "request" not in legacy._request_trackers
     assert "request" not in current.request_trackers
 
@@ -363,18 +506,18 @@ def test_preempted_cached_request_matches_legacy(resume_load: bool) -> None:
     current_meta = current.build_connector_meta(resume_step)
     legacy_request = legacy_meta.requests[0]
     if resume_load:
-        assert len(current_meta.load_requests) == 1
-        assert current_meta.store_requests == []
-        current_request = current_meta.load_requests[0]
+        assert len(current_meta.load.requests) == 1
+        assert current_meta.store.requests == ()
+        current_request = current_meta.load.requests[0]
         assert current_request.request_id == legacy_request.req_id
         assert current_request.block_ids == tuple(legacy_request.block_ids_by_group[0])
         assert current_request.transfer_end_token == legacy_request.token_len_chunk
         assert current_request.kvpool_cached_tokens == legacy_request.load_spec.kvpool_cached_tokens == 8
         assert legacy_request.load_spec.can_load
     else:
-        assert current_meta.load_requests == []
-        assert len(current_meta.store_requests) == 1
-        current_request = current_meta.store_requests[0]
+        assert current_meta.load.requests == ()
+        assert len(current_meta.store.requests) == 1
+        current_request = current_meta.store.requests[0]
         assert current_request.request_id == legacy_request.req_id
         assert current_request.block_ids == tuple(legacy_request.block_ids_by_group[0])
         assert current_request.save_end_token == legacy_request.token_len_chunk
@@ -400,7 +543,7 @@ def test_allocation_mismatch_raises_legacy_assertion() -> None:
 
     current = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
     current.unfinished_requests = {}
-    current._load_service = SchedulerLoadService()
+    current._load_service = make_scheduler_load_service()
     current._load_service.record_candidate("request", LoadCandidate(0, 8))
 
     with pytest.raises(AssertionError):
@@ -457,12 +600,14 @@ def test_running_cached_request_matches_legacy(
 
     current = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
     configure_scheduler_transfer_boundary(current)
-    current.request_trackers = {"request": RequestTracker("request", computed_tokens, block_ids.copy(), 12)}
+    current.request_trackers = {
+        "request": RequestTracker("request", computed_tokens, block_ids.copy(), request.block_hashes, 12)
+    }
     current.unfinished_requests = {"request": request}
     current.preempted_req_ids = set()
-    current._load_service = SchedulerLoadService()
+    current._load_service = make_scheduler_load_service()
     current._store_service = make_scheduler_store_service(save_decode_cache=save_decode_cache)
-    current._store_service.record_scheduled("request", computed_tokens)
+    current._store_service._scheduled_tokens["request"] = computed_tokens
 
     output = SimpleNamespace(
         finished_req_ids=set(),
@@ -474,15 +619,15 @@ def test_running_cached_request_matches_legacy(
     legacy_meta = legacy.build_connector_meta(output)
     current_meta = current.build_connector_meta(output)
 
-    assert current_meta.load_requests == []
-    assert len(current_meta.store_requests) == len(legacy_meta.requests) == int(should_emit_meta)
+    assert current_meta.load.requests == ()
+    assert len(current_meta.store.requests) == len(legacy_meta.requests) == int(should_emit_meta)
     legacy_tracker = legacy._request_trackers["request"]
     current_tracker = current.request_trackers["request"]
     assert current_tracker.token_len == legacy_tracker.token_len == expected_tokens
     assert current_tracker.block_ids == legacy_tracker.allocated_block_ids
     assert current._store_service._scheduled_tokens["request"] == legacy_tracker.num_saved_tokens
     if should_emit_meta:
-        current_request = current_meta.store_requests[0]
+        current_request = current_meta.store.requests[0]
         legacy_request = legacy_meta.requests[0]
         assert current_request.request_id == legacy_request.req_id
         assert current_request.block_ids == tuple(legacy_request.block_ids)
@@ -518,10 +663,10 @@ def test_classic_load_task_reports_failed_blocks(get_result, invalid_block_ids) 
             return get_result
 
     request = LoadRequest("request", 8, (1, 2), (b"a", b"b"), 0, 8)
-    load_service = WorkerLoadService(Backend(), Database(), 4, 4, tp_rank=1)
-    load_service.load([request])
+    load_service = WorkerLoadService(Database(), 4, 4, 1, LoadExecutor(Backend()))
+    load_service.load(LoadRequestBatch((request,)))
 
-    assert load_service.take_failed_block_ids() == invalid_block_ids
+    assert load_service.collect_result() == LoadResult(frozenset(), frozenset(invalid_block_ids))
 
 
 def test_async_load_reports_completion_and_failed_blocks() -> None:
@@ -548,15 +693,14 @@ def test_async_load_reports_completion_and_failed_blocks() -> None:
             completed.set()
             return [0, -1]
 
-    load_service = WorkerLoadService(Backend(), Database(), 4, 4, tp_rank=0, load_async=True)
+    load_service = WorkerLoadService(Database(), 4, 4, 0, AsyncLoadExecutor(Backend()))
     load_service.start()
-    load_service.load([LoadRequest("request", 8, (1, 2), (b"a", b"b"), 0, 8)])
+    load_service.load(LoadRequestBatch((LoadRequest("request", 8, (1, 2), (b"a", b"b"), 0, 8),)))
     assert completed.wait(2)
     load_service._executor._task_queue.join()
 
-    assert load_service.take_finished_request_ids(set(), set()) == set()
-    assert load_service.take_finished_request_ids({"request"}, set()) == {"request"}
-    assert load_service.take_failed_block_ids() == {2}
+    assert load_service.collect_result() == LoadResult(frozenset({"request"}), frozenset({2}))
+    assert load_service.collect_result() == LoadResult(frozenset(), frozenset())
     load_service.close()
 
 
@@ -586,9 +730,9 @@ def test_async_load_reports_terminal_request_after_late_completion(monkeypatch) 
             assert allow_load_to_finish.wait(2)
             return [0]
 
-    load_service = WorkerLoadService(Backend(), Database(), 4, 4, tp_rank=0, load_async=True)
+    load_service = WorkerLoadService(Database(), 4, 4, 0, AsyncLoadExecutor(Backend()))
     load_service.start()
-    load_service.load([LoadRequest("request", 4, (1,), (b"a",), 0, 4)])
+    load_service.load(LoadRequestBatch((LoadRequest("request", 4, (1,), (b"a",), 0, 4),)))
     assert load_started.wait(2)
 
     worker = worker_module.WorkerService.__new__(worker_module.WorkerService)
@@ -596,13 +740,17 @@ def test_async_load_reports_terminal_request_after_late_completion(monkeypatch) 
     worker._store_service = None
     instance = connector.AscendStoreV1Connector.__new__(connector.AscendStoreV1Connector)
     instance.worker = worker
-    monkeypatch.setattr(instance, "_get_connector_metadata", lambda: AscendStoreV1Metadata(set(), set()))
+    instance._pending_load_result = None
+    monkeypatch.setattr(instance, "_get_connector_metadata", AscendStoreV1Metadata)
 
     assert instance.get_finished({"request"}) == (set(), set())
+    assert instance.get_block_ids_with_load_errors() == set()
     allow_load_to_finish.set()
     load_service._executor._task_queue.join()
     assert instance.get_finished(set()) == (set(), {"request"})
+    assert instance.get_block_ids_with_load_errors() == set()
     assert instance.get_finished(set()) == (set(), set())
+    assert instance.get_block_ids_with_load_errors() == set()
     load_service.close()
 
 
@@ -641,7 +789,7 @@ def test_classic_lookup_service_returns_zero_on_backend_error() -> None:
 
 
 def test_classic_worker_layout_keeps_rank_and_chunk_mapping(monkeypatch) -> None:
-    monkeypatch.setattr(worker_module, "get_tensor_model_parallel_rank", lambda: 3)
+    monkeypatch.setattr(worker_layout, "get_tensor_model_parallel_rank", lambda: 3)
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             rank=7,
@@ -655,7 +803,7 @@ def test_classic_worker_layout_keeps_rank_and_chunk_mapping(monkeypatch) -> None
     )
     kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=4))])
 
-    layout = worker_module._resolve_worker_transfer_layout(vllm_config, kv_cache_config)
+    layout = worker_layout.resolve_worker_transfer_layout(vllm_config, kv_cache_config)
 
     assert (layout.tp_rank, layout.tp_size, layout.pp_size, layout.put_step) == (3, 4, 2, 2)
     assert (layout.block_size, layout.hash_block_size) == (4, 2)
@@ -696,7 +844,7 @@ def test_classic_worker_keeps_registered_caches_and_starts_store_after_registrat
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend",
         backend_module,
     )
-    monkeypatch.setattr(worker_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(worker_layout, "get_tensor_model_parallel_rank", lambda: 0)
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             rank=0,
@@ -714,8 +862,8 @@ def test_classic_worker_keeps_registered_caches_and_starts_store_after_registrat
     kv_cache_config = SimpleNamespace(
         num_blocks=4, kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=4))]
     )
-    worker = worker_module.WorkerService(vllm_config, kv_cache_config)
-    assert worker.can_store == starts_store
+    worker = service_factory.build_worker_service(vllm_config, kv_cache_config)
+    assert (worker._store_service is not None) is starts_store
     monkeypatch.setattr(worker._cache_resources.token_database, "set_group_buffers", Database().set_group_buffers)
 
     def start_store(executor) -> None:
@@ -882,7 +1030,7 @@ def test_store_service_keeps_task_build_failures_inside_the_store_batch(monkeypa
     store_service._executor = SimpleNamespace(submit_batch=submitted_tasks.extend)
     monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=lambda: source_ready_event), raising=False)
 
-    store_service.submit([SimpleNamespace(request_id="failed"), SimpleNamespace(request_id="ready")])
+    store_service.submit(StoreRequestBatch((SimpleNamespace(request_id="failed"), SimpleNamespace(request_id="ready"))))
 
     assert [task.request_id for task in submitted_tasks] == ["failed", "ready"]
     assert all(task.source_ready_event is source_ready_event for task in submitted_tasks)
@@ -896,25 +1044,24 @@ def test_classic_connector_discards_store_completion_bookkeeping(monkeypatch) ->
     store_service = StoreService.__new__(StoreService)
     store_service._executor = executor
     worker._store_service = store_service
-    worker._load_service = SimpleNamespace(take_finished_request_ids=lambda loading, finished: loading | finished)
+    worker._load_service = SimpleNamespace(collect_result=lambda: LoadResult(frozenset({"loaded"}), frozenset({3})))
     instance = connector.AscendStoreV1Connector.__new__(connector.AscendStoreV1Connector)
     instance.worker = worker
-    metadata = AscendStoreV1Metadata({"preempted"}, {"loaded"})
+    instance._pending_load_result = None
+    metadata = AscendStoreV1Metadata(store=StoreRequestBatch(preempted_request_ids=frozenset({"preempted"})))
     monkeypatch.setattr(instance, "_get_connector_metadata", lambda: metadata)
 
     assert instance.get_finished(set()) == (set(), {"loaded"})
+    assert instance.get_block_ids_with_load_errors() == {3}
     assert executor.stored_requests == {"active": 1}
     assert executor.finished_requests == set()
 
 
-def test_connector_returns_finished_loads_to_scheduler() -> None:
-    finished = []
+def test_connector_leaves_finished_loads_to_vllm() -> None:
     instance = connector.AscendStoreV1Connector.__new__(connector.AscendStoreV1Connector)
-    instance.scheduler = SimpleNamespace(finish_loading=finished.append)
+    instance.scheduler = object()
 
-    instance.update_connector_output(SimpleNamespace(finished_recving={"request"}))
-
-    assert finished == [{"request"}]
+    assert instance.update_connector_output(SimpleNamespace(finished_recving={"request"})) is None
 
 
 def test_classic_connector_finished_hooks_do_not_delay_block_release() -> None:
@@ -926,37 +1073,30 @@ def test_classic_connector_finished_hooks_do_not_delay_block_release() -> None:
     assert instance.request_finished_all_groups(request, ([1],)) == (False, None)
 
 
-@pytest.mark.parametrize("can_store", [False, True])
-def test_connector_selects_store_hook_once(monkeypatch, can_store: bool) -> None:
+def test_connector_routes_store_batch_through_worker_service(monkeypatch) -> None:
     calls = []
 
     class Worker:
-        def __init__(self, vllm_config, kv_cache_config) -> None:
-            self.can_store = can_store
-
         def submit_store(self, metadata) -> None:
             calls.append(("store", metadata))
 
-    monkeypatch.setattr(connector, "WorkerService", Worker)
+    monkeypatch.setattr(connector, "build_worker_service", lambda vllm_config, kv_cache_config: Worker())
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(rank=1),
         kv_transfer_config=SimpleNamespace(kv_connector_extra_config={}),
     )
     kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
     instance = connector.AscendStoreV1Connector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
-    metadata = AscendStoreV1Metadata(set())
+    metadata = AscendStoreV1Metadata()
 
     def get_metadata():
         calls.append(("metadata",))
         return metadata
 
     monkeypatch.setattr(instance, "_get_connector_metadata", get_metadata)
-    assert instance.worker is not None
-    instance.worker.can_store = not can_store
     instance.wait_for_save()
 
-    expected_calls = [("metadata",), ("store", metadata)] if can_store else []
-    assert calls == expected_calls
+    assert calls == [("metadata",), ("store", metadata.store)]
 
 
 @pytest.mark.parametrize(
@@ -1079,7 +1219,7 @@ def test_classic_connector_lookup_load_and_send_thread_store(monkeypatch) -> Non
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend",
         backend_module,
     )
-    monkeypatch.setattr(worker_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(worker_layout, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=RecordedEvent), raising=False)
     monkeypatch.setattr(
         worker_resources,
@@ -1152,18 +1292,19 @@ def test_classic_connector_lookup_load_and_send_thread_store(monkeypatch) -> Non
                 preempted_req_ids=set(),
             )
             load_metadata = scheduler_connector.build_connector_meta(first_step)
-            assert len(load_metadata.load_requests) == 1
-            assert load_metadata.store_requests == []
+            assert len(load_metadata.load.requests) == 1
+            assert load_metadata.store.requests == ()
             worker.bind_connector_metadata(load_metadata)
             worker.start_load_kv(None)
             worker.wait_for_save()
-            worker.clear_connector_metadata()
             assert backend.loaded_keys == keys[:2]
             assert backend.loaded_addresses == [
                 [key_cache.data_ptr() + 16 * block_id, value_cache.data_ptr() + 16 * block_id] for block_id in (1, 2)
             ]
             assert backend.loaded_sizes == [[16, 16], [16, 16]]
+            assert worker.get_finished(set()) == (set(), set())
             assert worker.get_block_ids_with_load_errors() == set()
+            worker.clear_connector_metadata()
 
             request.num_computed_tokens = 8
             store_steps.clear()
@@ -1176,12 +1317,12 @@ def test_classic_connector_lookup_load_and_send_thread_store(monkeypatch) -> Non
                 preempted_req_ids=set(),
             )
             store_metadata = scheduler_connector.build_connector_meta(next_step)
-            assert store_metadata.load_requests == []
-            assert len(store_metadata.store_requests) == 1
+            assert store_metadata.load.requests == ()
+            assert len(store_metadata.store.requests) == 1
             worker.bind_connector_metadata(store_metadata)
             worker.start_load_kv(None)
             worker.wait_for_save()
-            assert not hasattr(store_metadata.store_requests[0], "current_event")
+            assert not hasattr(store_metadata.store.requests[0], "current_event")
             worker.clear_connector_metadata()
             assert store_entered.wait(2)
             assert backend.stored_keys == []

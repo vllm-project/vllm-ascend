@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ...metadata import LoadRequest
+from ..request_tracker import RequestTracker
+from .scheduling import LoadScheduling
+
 
 @dataclass(frozen=True, slots=True)
 class LoadCandidate:
@@ -14,17 +18,15 @@ class LoadCandidate:
 
 
 class LoadService:
-    """Own Load candidates from Lookup through asynchronous completion."""
+    """Own Load candidates from Lookup through transfer request publication."""
 
-    def __init__(self, load_async: bool = False) -> None:
-        self._load_async = load_async
+    def __init__(self, scheduling: LoadScheduling) -> None:
+        self._scheduling = scheduling
         self._pending_candidates: dict[str, LoadCandidate] = {}
-        self._confirmed_candidates: dict[str, LoadCandidate] = {}
-        self._ready_candidates: dict[str, LoadCandidate] = {}
-        self._inflight_request_ids: set[str] = set()
 
-    def executes_asynchronously(self) -> bool:
-        return self._load_async
+    @property
+    def is_deferred(self) -> bool:
+        return self._scheduling.is_deferred
 
     def record_candidate(self, request_id: str, candidate: LoadCandidate) -> None:
         self._pending_candidates[request_id] = candidate
@@ -42,35 +44,31 @@ class LoadService:
             f"{candidate.kvpool_cached_tokens} - {candidate.vllm_cached_tokens} for request {request_id}"
         )
         self._pending_candidates.pop(request_id)
-        if self._load_async:
-            self._ready_candidates[request_id] = candidate
-        else:
-            self._confirmed_candidates[request_id] = candidate
-        return candidate
+        return self._scheduling.confirm(request_id, candidate)
 
     def take_for_transfer(self, request_id: str) -> LoadCandidate | None:
         self._pending_candidates.pop(request_id, None)
-        return self._confirmed_candidates.pop(request_id, None)
+        return self._scheduling.take_for_transfer(request_id)
 
     def take_ready_for_transfer(self) -> list[tuple[str, LoadCandidate]]:
-        ready_candidates = list(self._ready_candidates.items())
-        self._ready_candidates.clear()
-        return ready_candidates
+        return self._scheduling.take_ready_for_transfer()
 
-    def record_inflight(self, request_id: str) -> None:
-        self._inflight_request_ids.add(request_id)
-
-    def finish(self, request_ids: set[str] | None) -> None:
-        if request_ids:
-            self._inflight_request_ids.difference_update(request_ids)
+    def schedule_request(
+        self,
+        tracker: RequestTracker,
+        transfer_end_token: int,
+        candidate: LoadCandidate,
+    ) -> LoadRequest:
+        return LoadRequest(
+            request_id=tracker.request_id,
+            transfer_end_token=transfer_end_token,
+            block_ids=tuple(tracker.block_ids),
+            block_hashes=tuple(tracker.block_hashes),
+            vllm_cached_tokens=candidate.vllm_cached_tokens,
+            kvpool_cached_tokens=candidate.kvpool_cached_tokens,
+        )
 
     def discard_transfer(self, request_id: str) -> None:
-        candidate = self._ready_candidates.pop(request_id, None)
-        if candidate is None:
-            candidate = self._confirmed_candidates.pop(request_id, None)
+        candidate = self._scheduling.discard(request_id)
         if candidate is not None:
             self._pending_candidates[request_id] = candidate
-        self._inflight_request_ids.discard(request_id)
-
-    def inflight_request_ids(self) -> set[str]:
-        return self._inflight_request_ids.copy()

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from vllm.utils.math_utils import cdiv
 
+from ...metadata import StoreRequest
+from ..request_tracker import RequestTracker
+
 
 class StoreService:
     """Decide Store work and own each request's scheduled Store progress."""
@@ -14,34 +17,49 @@ class StoreService:
         cache_transfer_granularity: int,
         discard_partial_chunks: bool,
         save_decode_cache: bool,
-        kv_role: str,
-        consumer_is_to_put: bool,
+        enabled: bool,
     ) -> None:
         self._cache_transfer_granularity = cache_transfer_granularity
         self._discard_partial_chunks = discard_partial_chunks
         self._save_decode_cache = save_decode_cache
-        self._can_store = kv_role != "kv_consumer" or consumer_is_to_put
+        self._enabled = enabled
         self._scheduled_tokens: dict[str, int] = {}
 
     @property
-    def can_store(self) -> bool:
-        return self._can_store
+    def is_enabled(self) -> bool:
+        return self._enabled
 
     def accepts_cached_request(self, is_decoding: bool) -> bool:
         return not is_decoding or self._save_decode_cache
 
-    def should_store(self, request_id: str, transfer_end_token: int) -> bool:
+    def schedule_request(
+        self,
+        tracker: RequestTracker,
+        transfer_end_token: int,
+    ) -> StoreRequest | None:
+        if not self._should_store(tracker.request_id, transfer_end_token):
+            return None
+
+        request = StoreRequest(
+            request_id=tracker.request_id,
+            save_end_token=transfer_end_token,
+            block_ids=tuple(tracker.block_ids),
+            block_hashes=tuple(tracker.block_hashes),
+            num_prompt_tokens=tracker.num_prompt_tokens,
+        )
+        # This progress records published Store work, not a confirmed Backend write.
+        previous_saved_tokens = self._scheduled_tokens.get(tracker.request_id, 0)
+        self._scheduled_tokens[tracker.request_id] = max(previous_saved_tokens, transfer_end_token)
+        return request
+
+    def _should_store(self, request_id: str, transfer_end_token: int) -> bool:
         previous_saved_tokens = self._scheduled_tokens.get(request_id, 0)
         chunk_boundary = (
             cdiv(previous_saved_tokens + 1, self._cache_transfer_granularity) * self._cache_transfer_granularity
             if self._discard_partial_chunks
             else 0
         )
-        return self._can_store and transfer_end_token >= chunk_boundary
-
-    def record_scheduled(self, request_id: str, save_end_token: int) -> None:
-        previous_saved_tokens = self._scheduled_tokens.get(request_id, 0)
-        self._scheduled_tokens[request_id] = max(previous_saved_tokens, save_end_token)
+        return self._enabled and transfer_end_token >= chunk_boundary
 
     def discard(self, request_id: str) -> None:
         self._scheduled_tokens.pop(request_id, None)

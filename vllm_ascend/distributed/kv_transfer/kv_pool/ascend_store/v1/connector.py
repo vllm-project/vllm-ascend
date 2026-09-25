@@ -13,11 +13,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 
+from .factory import build_scheduler_service, build_worker_service
 from .metadata import AscendStoreV1Metadata
 from .scheduler.lookup import SchedulerLookupRequest
-from .scheduler.service import SchedulerService
+from .worker.load import LoadResult
 from .worker.lookup import LookupKeyServer
-from .worker.service import WorkerService
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -27,6 +27,9 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
+
+    from .scheduler.service import SchedulerService
+    from .worker.service import WorkerService
 
 
 class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
@@ -45,14 +48,12 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         self.scheduler: SchedulerService | None = None
         self.worker: WorkerService | None = None
         self.lookup_server: LookupKeyServer | None = None
-        self._store_hook = self._submit_store
+        self._pending_load_result: LoadResult | None = None
         if role == KVConnectorRole.SCHEDULER:
             lookup_address = self._resolve_lookup_address(vllm_config)
-            self.scheduler = SchedulerService(vllm_config, kv_cache_config, lookup_address)
+            self.scheduler = build_scheduler_service(vllm_config, kv_cache_config, lookup_address)
         else:
-            self.worker = WorkerService(vllm_config, kv_cache_config)
-            if not self.worker.can_store:
-                self._store_hook = self._skip_store
+            self.worker = build_worker_service(vllm_config, kv_cache_config)
             if vllm_config.parallel_config.rank == 0:
                 lookup_address = self._resolve_lookup_address(vllm_config)
                 self.lookup_server = LookupKeyServer(self.worker.lookup, lookup_address)
@@ -84,8 +85,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         self.scheduler.update_state_after_alloc(request, blocks.get_block_ids(), num_external_tokens)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
-        if self.scheduler is not None:
-            self.scheduler.finish_loading(connector_output.finished_recving)
+        return
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> AscendStoreV1Metadata:
         assert self.scheduler is not None
@@ -111,7 +111,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         assert self.worker is not None
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, AscendStoreV1Metadata)
-        self.worker.load(metadata)
+        self.worker.load(metadata.load)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         return
@@ -120,28 +120,28 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         return
 
     def wait_for_save(self) -> None:
-        self._store_hook()
-
-    def _submit_store(self) -> None:
         assert self.worker is not None
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, AscendStoreV1Metadata)
-        self.worker.submit_store(metadata)
-
-    @staticmethod
-    def _skip_store() -> None:
-        return
+        self.worker.submit_store(metadata.store)
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.worker is not None
+        if self._pending_load_result is not None:
+            raise RuntimeError("Previous Load result has not been fully consumed")
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, AscendStoreV1Metadata)
-        self.worker.clear_store_completion_bookkeeping(metadata.preempted_req_ids)
-        return set(), self.worker.take_finished_load_request_ids(metadata.loading_request_ids, finished_req_ids)
+        self.worker.finish_store_step(metadata.store)
+        self._pending_load_result = self.worker.collect_load_result()
+        return set(), set(self._pending_load_result.completed_request_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.worker is not None
-        return self.worker.get_block_ids_with_load_errors()
+        if self._pending_load_result is None:
+            return set()
+        failed_block_ids = set(self._pending_load_result.failed_block_ids)
+        self._pending_load_result = None
+        return failed_block_ids
 
     def shutdown(self) -> None:
         if self.scheduler is not None:

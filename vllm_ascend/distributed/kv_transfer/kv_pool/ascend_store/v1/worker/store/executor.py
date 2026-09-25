@@ -96,14 +96,14 @@ class StoreExecutor(threading.Thread):
         if self._closed:
             raise RuntimeError(f"{self.name} is closed")
 
-    def discard_preempted_and_finished_requests(self, preempted_request_ids: set[str]) -> None:
+    def finish_step(self, preempted_request_ids: frozenset[str]) -> None:
         """Forget preempted Stores and consume completions not reported by the classic path."""
         for request_id in preempted_request_ids:
             self.delete_finished_stored_request(request_id)
         self.discard_finished_requests(preempted_request_ids)
         self.get_and_clear_finished_requests()
 
-    def discard_finished_requests(self, request_ids: set[str]) -> None:
+    def discard_finished_requests(self, request_ids: frozenset[str]) -> None:
         with self.done_task_lock:
             self.finished_requests -= request_ids
 

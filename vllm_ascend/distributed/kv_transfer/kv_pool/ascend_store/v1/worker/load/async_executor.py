@@ -10,7 +10,7 @@ from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
-from .executor import LoadCompletion, LoadExecutionResult, LoadExecutor
+from .executor import LoadExecutor, LoadTaskResult
 from .task import LoadTask
 
 
@@ -27,7 +27,7 @@ class AsyncLoadExecutor(threading.Thread):
         self._closed = False
         self._completed_lock = threading.Lock()
         self._task_queue: queue.Queue[LoadTask | None] = queue.Queue()
-        self._completed: dict[str, tuple[LoadTask, LoadExecutionResult]] = {}
+        self._completed: dict[str, LoadTaskResult] = {}
         self._fatal_error: BaseException | None = None
 
     def start_and_wait_ready(self) -> None:
@@ -52,17 +52,18 @@ class AsyncLoadExecutor(threading.Thread):
         self.join()
         self.raise_if_failed()
 
-    def submit(self, tasks: list[LoadTask]) -> Iterable[LoadCompletion]:
+    def submit(self, tasks: list[LoadTask]) -> Iterable[LoadTaskResult]:
         with self._lifecycle_lock:
             self._raise_if_not_running()
             for task in tasks:
                 self._task_queue.put(task)
         return ()
 
-    def take_completed(self, request_ids: set[str]) -> list[LoadCompletion]:
+    def collect(self) -> list[LoadTaskResult]:
         self.raise_if_failed()
         with self._completed_lock:
-            completed = [self._completed.pop(request_id) for request_id in request_ids if request_id in self._completed]
+            completed = list(self._completed.values())
+            self._completed.clear()
         return completed
 
     def raise_if_failed(self) -> None:

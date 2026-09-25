@@ -1,4 +1,4 @@
-"""Cross-role execution requests used by the classic path."""
+"""Operation-owned requests carried across the classic role boundary."""
 
 from __future__ import annotations
 
@@ -31,9 +31,22 @@ class StoreRequest:
     num_prompt_tokens: int
 
 
+@dataclass(frozen=True, slots=True)
+class LoadRequestBatch:
+    """Load requests approved for one Worker step."""
+
+    requests: tuple[LoadRequest, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class StoreRequestBatch:
+    """Store requests and preempted work to discard in one Worker step."""
+
+    requests: tuple[StoreRequest, ...] = ()
+    preempted_request_ids: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
 class AscendStoreV1Metadata(KVConnectorMetadata):
-    def __init__(self, preempted_req_ids: set[str], loading_request_ids: set[str] | None = None) -> None:
-        self.load_requests: list[LoadRequest] = []
-        self.store_requests: list[StoreRequest] = []
-        self.preempted_req_ids = preempted_req_ids
-        self.loading_request_ids = loading_request_ids or set()
+    load: LoadRequestBatch = LoadRequestBatch()
+    store: StoreRequestBatch = StoreRequestBatch()
