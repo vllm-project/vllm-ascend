@@ -244,3 +244,64 @@ class TestChunkFwdOVllm310:
             else:
                 assert torch.equal(actual, first), "nonzero-g output changed across repeats"
         assert torch.equal(g.cpu(), before), "FwdO modified g"
+
+    @pytest.mark.parametrize("tail", [1, 7, 8, 11, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63])
+    @pytest.mark.parametrize("g_dtype", [torch.float16, torch.float32])
+    def test_packed_partial_chunks(self, tail, g_dtype):
+        """NZ strides, exact DMA tails, nonzero states and packed boundaries."""
+        heads_qk, heads_v, dim = 16, 32, 128
+        lengths = [CHUNK_SIZE + tail, CHUNK_SIZE, tail]
+        tokens = sum(lengths)
+        chunks = 4
+        q = torch.ones(1, heads_qk, tokens, dim, dtype=torch.float16)
+        v = torch.zeros(1, heads_v, tokens, dim, dtype=torch.float16)
+        g = torch.zeros(1, heads_v, tokens, dtype=g_dtype)
+        h = torch.zeros(1, heads_v, chunks, dim, dim, dtype=torch.float16)
+        expected = torch.zeros_like(v, dtype=torch.float64)
+        cu, indices, chunk_index = [0], [], 0
+        for seq, length in enumerate(lengths):
+            start = cu[-1]
+            for local_chunk, pos in enumerate(range(0, length, CHUNK_SIZE)):
+                n = min(CHUNK_SIZE, length - pos)
+                token_slice = slice(start + pos, start + pos + n)
+                v[0, :, token_slice, :n] = torch.eye(n)
+                # Distinct heads/states also expose incorrect h-layout contracts.
+                h[0, :, chunk_index, 0, :] = (
+                    (torch.arange(heads_v)[:, None] + chunk_index + 1)
+                    * (torch.arange(dim)[None, :] + 1) / 1024
+                )
+                slopes = (torch.arange(heads_v)[:, None] + 1) / 16
+                gate_log = (-slopes * torch.arange(n)).to(g_dtype)
+                g[0, :, token_slice] = gate_log
+                gd = gate_log.double()
+                expected[0, :, token_slice, :n] = (
+                    gd.unsqueeze(-1) - gd.unsqueeze(-2)
+                ).clamp(max=0).exp().tril()
+                expected[0, :, token_slice] += (
+                    gd.exp().unsqueeze(-1) * h[0, :, chunk_index, 0].double().unsqueeze(1) / dim
+                )
+                indices.extend((seq, local_chunk))
+                chunk_index += 1
+            cu.append(start + length)
+        # FwdH -> FwdO uses packed zN state tiles on 310P.
+        h_nz = h.reshape(1, heads_v, chunks, dim // 16, 16, dim // 16, 16)
+        h_nz = h_nz.permute(0, 1, 2, 5, 3, 4, 6).contiguous().reshape_as(h)
+        qn, vn, hn, gn = (x.npu() for x in (q, v, h_nz, g))
+        enable_custom_op()
+        first = None
+        for repeat in range(3):
+            actual = torch.ops._C_ascend.chunk_fwd_o(
+                qn, qn, vn, hn, 1.0 / dim, g=gn, cu_seqlens=cu,
+                chunk_indices=indices, chunk_size=CHUNK_SIZE,
+                transpose_state_layout=False,
+            ).cpu()
+            error = (actual.double() - expected).abs()
+            bad = ~torch.isfinite(actual) | (error > .002 + .005 * expected.abs())
+            assert not bad.any(), (
+                f"tail={tail}, repeat={repeat}, wrong={bad.sum().item()}, "
+                f"first_bad={bad.nonzero()[:5].tolist()}, max_abs={error.max().item()}"
+            )
+            if first is None:
+                first = actual.clone()
+            else:
+                assert torch.equal(first, actual)
