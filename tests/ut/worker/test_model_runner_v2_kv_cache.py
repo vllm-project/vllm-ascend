@@ -2,16 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
 from contextlib import nullcontext
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.kv_cache_interface import FullAttentionSpec, HiddenStateCacheSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 
-from vllm_ascend.patch.worker.patch_v2.patch_model_runner import init_kv_zero_meta
+from vllm_ascend.patch.worker.patch_v2 import patch_model_runner  # noqa: F401
 from vllm_ascend.worker import utils as ascend_utils
 
 
@@ -71,39 +70,3 @@ def test_mrv2_block_copy_preserves_segmented_mamba_storage():
     torch.testing.assert_close(ssm[2], before_ssm[0])
     torch.testing.assert_close(conv[:2], before_conv[:2])
     torch.testing.assert_close(ssm[:2], before_ssm[:2])
-
-
-@pytest.mark.parametrize(("block_size", "num_blocks"), [(16, 2), (32, 3)])
-def test_mrv2_zeroer_metadata_and_hidden_state_exclusion(block_size, num_blocks):
-    ratio = block_size // 16
-    k, v = torch.empty(num_blocks * ratio, 4), torch.empty(num_blocks * ratio, 4)
-    hidden = torch.full((num_blocks, 1, 16, 4), 7.0)
-    attention_spec = FullAttentionSpec(block_size=block_size, num_kv_heads=1, head_size=4, dtype=torch.float32)
-    hidden_spec = HiddenStateCacheSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.float32)
-    groups = [
-        SimpleNamespace(kv_cache_spec=attention_spec, kv_cache_group_id=0, layer_names=["attention"]),
-        SimpleNamespace(kv_cache_spec=hidden_spec, kv_cache_group_id=1, layer_names=["hidden"]),
-    ]
-    context = {
-        "attention": SimpleNamespace(kv_cache=(k, v)),
-        "hidden": SimpleNamespace(kv_cache=hidden),
-    }
-    runner = SimpleNamespace(
-        device=torch.device("cpu"),
-        attn_groups=[[group] for group in groups],
-        kernel_block_sizes=[16, 16],
-        cache_config=SimpleNamespace(cache_dtype="auto"),
-        compilation_config=SimpleNamespace(static_forward_context=context),
-    )
-    with patch("vllm_ascend.patch.worker.patch_v2.patch_model_runner.is_pin_memory_available", return_value=False):
-        init_kv_zero_meta(runner)
-    assert type(runner.kv_block_zeroer) is ascend_utils.AscendKVBlockZeroer
-    addresses, page_size, _, count = runner.kv_block_zeroer._meta
-    assert page_size == 4 * ratio
-    assert addresses.tolist() == [k.data_ptr(), v.data_ptr()]
-    assert count == 2
-    assert context["attention"].kv_cache[0] is k
-    assert context["attention"].kv_cache[1] is v
-    assert context["hidden"].kv_cache is hidden
-    # Two blocks must also be excluded: len(tensor) == 2 is not a K/V tuple.
-    torch.testing.assert_close(hidden, torch.full_like(hidden, 7.0))

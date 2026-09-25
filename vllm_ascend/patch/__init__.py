@@ -1520,24 +1520,7 @@
 #       during device filtering without truncating connector cache entries.
 #       Until then, keep the copied initializer aligned with supported vLLM.
 #
-#   2. `vllm.v1.worker.gpu.model_runner.GPUModelRunner._init_kv_zero_meta`
-#    Why:
-#       The upstream zeroer expects the standardized single-tensor cache layout
-#       and a GPU implementation. Ascend already has a zeroer for separate K/V,
-#       whose metadata interface expects nested kernel block sizes.
-#    How:
-#       Reuse AscendKVBlockZeroer and convert MRv2's flat kernel block sizes to
-#       the existing nested interface. Keep the shared MRv1 implementation and
-#       its supported cache layouts unchanged. Exclude HiddenStateCacheSpec
-#       output buffers, which are single tensors written by cache-only layers,
-#       through the zeroer's runner_only_attn_layers argument.
-#    Related PR (if no, explain why):
-#       No. This is an Ascend zeroer integration for the MRv2 metadata interface.
-#    Future Plan:
-#       Remove this override when upstream provides a backend-dispatched zeroer
-#       supporting Ascend's cache layouts and block-size metadata contract.
-#
-#   3. `vllm.v1.worker.gpu.model_runner.copy_kv_cache_blocks_inplace`
+#   2. `vllm.v1.worker.gpu.model_runner.copy_kv_cache_blocks_inplace`
 #    Why:
 #       Runner cache flattening alone does not establish that upstream's
 #       storage-copy paths support every Ascend segmented cache layout.

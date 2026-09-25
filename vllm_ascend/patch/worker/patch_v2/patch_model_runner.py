@@ -3,11 +3,10 @@
 
 from contextlib import AbstractContextManager
 
-from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.kv_cache_interface import HiddenStateCacheSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 
-from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_kv_cache_blocks_inplace
+from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
 
 # Adapted from vLLM ced6857afa GPUModelRunner.initialize_kv_cache.
@@ -192,27 +191,6 @@ def initialize_kv_cache(
         self.kv_connector = upstream.get_kv_connector(self.vllm_config, kv_caches_dict)
 
 
-def init_kv_zero_meta(self) -> None:
-    """Adapt MRv2 arguments to the existing Ascend zeroer contract."""
-    self.kv_block_zeroer = AscendKVBlockZeroer(self.device, is_pin_memory_available())
-    self.kv_block_zeroer.init_meta(
-        attn_groups_iter=(group for groups in self.attn_groups for group in groups),
-        kernel_block_sizes=[[block_size] for block_size in self.kernel_block_sizes],
-        cache_dtype=self.cache_config.cache_dtype,
-        # Hidden-state extraction uses a single output tensor, not split K/V.
-        # Its valid slots are written by the cache-only layer before export.
-        runner_only_attn_layers={
-            layer_name
-            for groups in self.attn_groups
-            for group in groups
-            if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
-            for layer_name in group.layer_names
-        },
-        static_forward_context=self.compilation_config.static_forward_context,
-    )
-
-
-upstream.GPUModelRunner._init_kv_zero_meta = init_kv_zero_meta
 upstream.copy_kv_cache_blocks_inplace = copy_kv_cache_blocks_inplace
 
 upstream.GPUModelRunner.initialize_kv_cache = initialize_kv_cache
