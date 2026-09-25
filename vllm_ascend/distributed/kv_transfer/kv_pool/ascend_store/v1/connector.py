@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 
+from .backend import BACKEND_IMPORTS
 from .factory import build_scheduler_service, build_worker_service
 from .metadata import AscendStoreV1Metadata
 from .scheduler.lookup import SchedulerLookupRequest
@@ -42,8 +43,9 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         if extra_config.get("use_layerwise", False):
             raise ValueError("AscendStore v1 classic path requires non-Layerwise Load")
-        if extra_config.get("backend", "mooncake").lower() != "mooncake":
-            raise ValueError("AscendStore v1 classic path requires Mooncake")
+        backend_name = extra_config.get("backend", "mooncake").strip().lower()
+        if backend_name not in BACKEND_IMPORTS:
+            raise ValueError(f"Unsupported AscendStore v1 backend: {backend_name}")
 
         self.scheduler: SchedulerService | None = None
         self.worker: WorkerService | None = None
