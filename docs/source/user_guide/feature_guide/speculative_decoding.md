@@ -401,17 +401,19 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve zai-org/GLM-5.3-Flash \
   --tensor-parallel-size 8 \
   --max-model-len 8192 \
   --no-enable-prefix-caching \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [8, 16, 32, 64, 96, 128]}' \
   --speculative-config '{"method": "dflash", "model": "incoai/GLM-5.3-Flash-DFlash2", "num_speculative_tokens": 7, "enforce_eager": true}'
 ```
 
 Notes:
 
 - As above, `"enforce_eager": true` is required (the DFlash2 selector is
-  eager-only on model runner V2). Unlike the Qwen targets, GLM-5.3-Flash
-  does not support graph-mode speculative decoding at all (see the
-  GLM-5.3-Flash tutorial), so keep the target eager for the first runs;
-  re-enabling target graphs under spec decode is a separate follow-up
-  experiment.
+  eager-only on model runner V2). The target keeps its own ACL graph mode,
+  as in the GLM-5.3-Flash MTP recipe: the GLM-series eager restriction is
+  draft-side.
+- Each decode step verifies `1 + num_speculative_tokens = 8` tokens per
+  request, so every target ACL graph capture size must be a multiple of 8
+  (`[8, 16, 32, 64, 96, 128]` above covers 1, 2, 4, 8, 12 and 16 requests).
 - The draft's attention is GQA with a 2048 sliding window and runs
   non-causal, exactly like the Qwen3.8 DFlash2 drafter, so the same
   backend selection applies.
