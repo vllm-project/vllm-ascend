@@ -29,7 +29,12 @@ import torch.nn as nn
 import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
-from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CUDAGraphMode,
+    CompilationMode,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import (
@@ -846,6 +851,7 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+        self._inductor_track_warmup_tail()
         return CompilationTimes(
             language_model=self.vllm_config.compilation_config.compilation_time,
             # `encoder_compilation_time` was added after v0.19.1 (vLLM #39240); fall
@@ -856,6 +862,47 @@ class NPUWorker(WorkerBase):
                 0.0,
             ),
         )
+
+    def _inductor_track_warmup_tail(self) -> None:
+        """Post-warmup hooks for the inductor compile-backend track.
+
+        Stage5 F2, mirroring the upstream gpu_worker.py compile_or_warm_up_model
+        tail (vllm/v1/worker/gpu_worker.py:823-839), on the active track only:
+        1. Eagerly trigger inductor's once-per-process lazy inits during
+           warmup. When a warm start hits the on-disk compile cache, no
+           compile runs during warmup, so these one-shot inits would
+           otherwise fire on the first real-request cache miss.
+        2. Start monitoring for unexpected JIT compilations that would cause
+           latency spikes during inference. Unlike upstream (which activates
+           unconditionally), the monitor is track-gated to keep off-track
+           behavior bit-identical, and defensively wrapped: triton-ascend
+           3.2.2 cannot import triton.knobs, which makes the upstream
+           activate() raise ImportError on this stack (stage5 M0 P0-4).
+        """
+        c_config = self.vllm_config.compilation_config
+        if (
+            c_config.mode != CompilationMode.NONE
+            and c_config.backend == "inductor"
+        ):
+            from vllm.compilation.compiler_interface import (
+                trigger_inductor_lazy_init,
+            )
+
+            trigger_inductor_lazy_init(self.device)
+
+            try:
+                from vllm.utils.jit_monitor import activate as activate_jit_monitor
+
+                activate_jit_monitor(
+                    mode=self.vllm_config.observability_config.jit_monitor_mode,
+                    verbose=self.vllm_config.observability_config.jit_monitor_verbose,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "JIT monitor unavailable on this stack (%s); "
+                    "continuing without runtime JIT compilation monitoring.",
+                    e,
+                )
 
     def _warm_up_atb(self):
         x = torch.rand((2, 4), dtype=torch.float16).npu()
