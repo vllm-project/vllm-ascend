@@ -16,9 +16,7 @@
 #
 
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+from vllm.logger import logger
 
 
 def _register_with_class_name_alias(name: str, module_path: str, class_name: str) -> None:
