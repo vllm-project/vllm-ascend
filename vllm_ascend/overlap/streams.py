@@ -138,23 +138,24 @@ class StreamRegistry:
             return torch_npu.npu.Stream()
         raise KeyError(f"Unknown stream name: {name!r}")
 
+    def clear(self) -> None:
+        """Drop all cached streams while preserving the registry singleton."""
+        with self._lock:
+            self._streams.clear()
+
     def registered_names(self) -> tuple[str, ...]:
         """Return the sorted names the registry knows how to build."""
         return ("current_computation",) + tuple(sorted(_NEW_STREAM_NAMES))
 
 
-_REGISTRY: StreamRegistry | None = None
+_REGISTRY = StreamRegistry()
 
 
 def get_stream_registry() -> StreamRegistry:
     """Return the process-wide :class:`StreamRegistry`."""
-    global _REGISTRY
-    if _REGISTRY is None:
-        _REGISTRY = StreamRegistry()
     return _REGISTRY
 
 
 def reset_stream_registry() -> None:
     """Drop all cached streams. Intended for tests only."""
-    global _REGISTRY
-    _REGISTRY = None
+    _REGISTRY.clear()

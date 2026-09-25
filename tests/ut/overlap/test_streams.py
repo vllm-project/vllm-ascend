@@ -58,6 +58,13 @@ class TestStreamRegistry(PytestBase):
     def test_get_stream_registry_returns_same_instance(self):
         assert get_stream_registry() is get_stream_registry()
 
+    def test_registry_reset_preserves_singleton(self):
+        registry = get_stream_registry()
+        registry.get_stream("global_computation")
+        reset_stream_registry()
+        assert get_stream_registry() is registry
+        assert registry.peek_stream("global_computation") is None
+
     @pytest.mark.parametrize("name", sorted(_NEW_STREAM_NAMES))
     def test_same_name_returns_same_stream(self, name):
         registry = get_stream_registry()
@@ -244,13 +251,17 @@ class TestEventLedger(PytestBase):
     def test_ledger_singleton(self):
         assert get_event_ledger() is get_event_ledger()
 
-    def test_ledger_reset_drops_slots(self):
+    def test_event_creation_disables_timing(self):
+        ledger = get_event_ledger()
+        ledger.record("timing_disabled")
+        torch.npu.Event.assert_called_with(enable_timing=False)
+
+    def test_ledger_reset_preserves_singleton(self):
         ledger = get_event_ledger()
         ledger.record("slot")
         reset_event_ledger()
-        fresh = get_event_ledger()
-        assert fresh is not ledger
-        assert fresh.get_event("slot") is None
+        assert get_event_ledger() is ledger
+        assert ledger.get_event("slot") is None
 
 
 class TestRegistryConcurrency(PytestBase):
