@@ -114,7 +114,7 @@ class _FusedGroupsHarness:
 def _make_batch(device: str, seq_lens: list[int], position_offsets: list[int], negatives):
     """Request i covers [offset_i, offset_i + len_i); ``negatives`` overrides (index, value) pairs."""
     lengths = [0]
-    positions = []
+    positions: list[int] = []
     for seq_len, offset in zip(seq_lens, position_offsets):
         positions.extend(range(offset, offset + seq_len))
         lengths.append(len(positions))
