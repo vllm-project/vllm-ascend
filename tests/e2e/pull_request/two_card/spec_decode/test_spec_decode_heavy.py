@@ -375,7 +375,9 @@ def test_qwen36_35b_dspark_spec_decoding(
     max_tokens: int,
     enforce_eager: bool,
     compilation_config: dict,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
