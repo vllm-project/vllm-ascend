@@ -209,10 +209,14 @@ public:
     //   maskNZ[(nf*4+mf)*256 + r*16 + c] = 1 iff (mf*16+r) >= (nf*16+c)
     // Whole fractals are all-ones (mf>nf) or all-zeros (mf<nf); only the diagonal
     // fractals need a per-row triangle.
-    __aicore__ inline void InitCausalMaskNZ() {
+    uint32_t maskAlignedTokens = 0;
+
+    __aicore__ inline void InitCausalMaskNZ(uint32_t alignedTokens) {
         AscendC::LocalTensor<float> m =
             resource.ubBuf.template GetBufferByByte<float>(UB_MASK_OFFSET);
-        constexpr uint32_t FR = 256, NF = 4, MF = 4;
+        constexpr uint32_t FR = 256;
+        const uint32_t NF = alignedTokens / 16, MF = NF;
+        AscendC::SetMaskNorm();
         AscendC::Duplicate<float>(m, (float)0.0, NF * MF * FR);
         AscendC::PipeBarrier<PIPE_V>();
         for (uint32_t nf = 0; nf < NF; ++nf) {
@@ -223,13 +227,45 @@ public:
                 } else if (mf == nf) {
                     for (uint32_t r = 0; r < 16; ++r) {
                         uint32_t cnt = r + 1;
-                        if (cnt >= 8) AscendC::Duplicate<float>(m[base + r * 16], (float)1.0, cnt);
-                        else for (uint32_t c = 0; c < cnt; ++c) m.SetValue(base + r * 16 + c, (float)1.0);
+                        // Explicit lane mask handles short rows on m200 and keeps
+                        // initialization on V (no unordered scalar UB stores).
+                        AscendC::Duplicate<float, true>(m[base + r * 16], 1.0f,
+                            static_cast<uint64_t>(cnt), static_cast<uint8_t>(1),
+                            static_cast<uint16_t>(1), static_cast<uint8_t>(8));
                     }
                 }
             }
         }
         AscendC::PipeBarrier<PIPE_V>();
+        AscendC::ResetMask();
+        maskAlignedTokens = alignedTokens;
+    }
+
+    // m200 DataCopy truncates to whole 32-byte blocks. Copy only valid GM
+    // elements and explicitly fill the remaining NZ rows; never over-read the
+    // next sequence/head to obtain a padded DMA block.
+    __aicore__ inline void LoadGate(AscendC::LocalTensor<ElementG> dst,
+                                   uint32_t offset, uint32_t tokens) {
+        constexpr uint32_t perBlock = 32 / sizeof(ElementG);
+        const uint32_t dmaTokens = tokens / perBlock * perBlock;
+        const uint32_t alignedTokens = M200Gemm::HmRoundUp16(tokens);
+        if (dmaTokens != 0) {
+            AscendC::DataCopy(dst, gmG[offset], dmaTokens);
+        }
+        if (dmaTokens != alignedTokens) {
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID1);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID1);
+            AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID1);
+            AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID1);
+            for (uint32_t i = dmaTokens; i < tokens; ++i) {
+                dst.SetValue(i, gmG.GetValue(offset + i));
+            }
+            for (uint32_t i = tokens; i < alignedTokens; ++i) {
+                dst.SetValue(i, static_cast<ElementG>(0));
+            }
+            AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID1);
+            AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID1);
+        }
     }
 
     // Vec1, NZ-native: consumes the cube staging buffer IN PLACE -- no ND deformat.
@@ -238,6 +274,10 @@ public:
     // multiplying the resulting Inf by the causal mask produces NaN.
     // Compute exp(min(g_i - g_j, 0)) in the same NZ layout instead.
     __aicore__ inline void Vec1NZ(uint32_t gOffset, uint32_t bt) {
+        const uint32_t alignedTokens = M200Gemm::HmRoundUp16(bt);
+        if (maskAlignedTokens != alignedTokens) {
+            InitCausalMaskNZ(alignedTokens);
+        }
         auto stage = resource.ubBuf.template GetBufferByByte<float>(UB_STAGE_OFFSET);
         auto brcA  = resource.ubBuf.template GetBufferByByte<float>(UB_BRC_A_OFFSET);
         auto brcB  = resource.ubBuf.template GetBufferByByte<float>(UB_BRC_B_OFFSET);
@@ -247,26 +287,26 @@ public:
         auto outH  = resource.ubBuf.template GetBufferByByte<half>(UB_OUTH_OFFSET);
 
         if constexpr (std::is_same<ElementG, float>::value) {
-            AscendC::DataCopy(gUb, gmG[gOffset], bt);
+            LoadGate(gUb, gOffset, bt);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
         } else {
             AscendC::LocalTensor<ElementG> gTyped =
                 resource.ubBuf.template GetBufferByByte<ElementG>(
                     UB_GCOMP_OFFSET + 256);
-            AscendC::DataCopy(gTyped, gmG[gOffset], bt);
+            LoadGate(gTyped, gOffset, bt);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-            AscendC::Cast(gUb, gTyped, AscendC::RoundMode::CAST_NONE, bt);
+            AscendC::Cast(gUb, gTyped, AscendC::RoundMode::CAST_NONE, alignedTokens);
             AscendC::PipeBarrier<PIPE_V>();
         }
-        const uint32_t NF = bt / 16, FRUN = NF * 256, N = bt * bt;
-        { uint32_t d[2] = {bt, 16}, sr[2] = {bt, 1};
+        const uint32_t NF = alignedTokens / 16, FRUN = alignedTokens * 16, N = alignedTokens * alignedTokens;
+        { uint32_t d[2] = {alignedTokens, 16}, sr[2] = {alignedTokens, 1};
           AscendC::Broadcast<float, 2, 1>(brcA, gUb, d, sr, shareT); }
         AscendC::PipeBarrier<PIPE_V>();
         for (uint32_t nf = 1; nf < NF; ++nf) AscendC::DataCopy(brcA[nf * FRUN], brcA, FRUN);
         for (uint32_t nf = 0; nf < NF; ++nf) {
-            uint32_t d[2] = {bt, 16}, sr[2] = {1, 16};
+            uint32_t d[2] = {alignedTokens, 16}, sr[2] = {1, 16};
             AscendC::Broadcast<float, 2, 0>(brcB[nf * FRUN], gUb[nf * 16], d, sr, shareT);
         }
         AscendC::PipeBarrier<PIPE_V>();
@@ -296,7 +336,8 @@ public:
         auto l1M = resource.l1Buf.template GetBufferByByte<half>(l1Off);
         AscendC::DataCopyParams p;
         p.blockCount = 1;
-        p.blockLen = static_cast<uint16_t>(bt * bt * sizeof(half) / 32);
+        const uint32_t alignedTokens = M200Gemm::HmRoundUp16(bt);
+        p.blockLen = static_cast<uint16_t>(alignedTokens * alignedTokens * sizeof(half) / 32);
         p.srcStride = 0;
         p.dstStride = 0;
         AscendC::DataCopy(l1M, outH, p);
@@ -311,8 +352,7 @@ public:
         // v_work is HandMmad's C3 staging tile, consumed in place.
         AscendC::LocalTensor<float> ubVwTensor = resource.ubBuf.template GetBufferByByte<float>(UB_STAGE_OFFSET);
 
-        // Persistent causal mask — built once, reused by every Vec1 invocation.
-        InitCausalMaskNZ();
+        // The NZ mask is cached for the current aligned chunk geometry.
 
 
         while (cubeBlockScheduler.isRunning) {
@@ -417,13 +457,13 @@ public:
                     if constexpr (std::is_same<ElementG, float>::value) {
                         AscendC::LocalTensor<float> gPre =
                             resource.ubBuf.template GetBufferByByte<float>(UB_GPRE_OFFSET);
-                        AscendC::Exp(gUb, gPre, bt);
+                        AscendC::Exp(gUb, gPre, mAl);
                     } else {
                         AscendC::LocalTensor<ElementG> gPre =
                             resource.ubBuf.template GetBufferByByte<ElementG>(UB_GPRE_OFFSET);
-                        AscendC::Cast(gUb, gPre, AscendC::RoundMode::CAST_NONE, bt);
+                        AscendC::Cast(gUb, gPre, AscendC::RoundMode::CAST_NONE, mAl);
                         AscendC::PipeBarrier<PIPE_V>();
-                        AscendC::Exp(gUb, gUb, bt);
+                        AscendC::Exp(gUb, gUb, mAl);
                     }
                     // gPre is consumed; release it for this body's re-prefetch
                     // (auto_flag: WAR v2_exp -> gpre@MTE2). Narrow: only the g
@@ -432,8 +472,8 @@ public:
                     if (vec1Ran) { AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID4); }
                     AscendC::PipeBarrier<PIPE_V>();
                     {
-                        uint32_t dstShape[2] = {bt, 16};
-                        uint32_t srcShape[2] = {bt, 1};
+                        uint32_t dstShape[2] = {mAl, 16};
+                        uint32_t srcShape[2] = {mAl, 1};
                         AscendC::Broadcast<float, 2, 1>(gBrc, gUb, dstShape, srcShape, brcTmp);
                     }
                     AscendC::PipeBarrier<PIPE_V>();
@@ -504,7 +544,7 @@ public:
                 if (needRun) { AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID4); }
                 {
                     auto gPre = resource.ubBuf.template GetBufferByByte<ElementG>(UB_GPRE_OFFSET);
-                    AscendC::DataCopy(gPre, gmG[cube1Offsets.gOffset], cube1Offsets.blockTokens);
+                    LoadGate(gPre, cube1Offsets.gOffset, cube1Offsets.blockTokens);
                 }
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2);     // g -> next body's Vec2
                 MaskedNZToL1(MASKED_L1_OFFSET + maskedParity * MASKED_L1_SLOT,
