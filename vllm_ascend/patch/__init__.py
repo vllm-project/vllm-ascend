@@ -1501,6 +1501,26 @@
 #       accepts device indices without synchronization. Remove this patch
 #       entirely once the compiled allocator is also supported on Ascend.
 #
+# ** 33. File: worker/patch_v2/patch_worker_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.utils.copy_kv_cache_blocks_inplace` (and the reference
+#       imported into `vllm.v1.worker.gpu.model_runner`)
+#    Why:
+#       Ascend layer caches are tuples/lists of K/V or Mamba state tensors,
+#       while the upstream helper assumes one tensor per entry and crashes
+#       with `'list' object has no attribute 'device'` on preemption/rollback
+#       block copies in hybrid models (e.g. mixed Full/SWA DFlash).
+#    How:
+#       Rebind both module attributes to the Ascend implementation in
+#       vllm_ascend/worker/utils.py, which unpacks nested entries and
+#       deduplicates shared views before copying. The v2 model runner imported
+#       the upstream helper by name, so its namespace needs the rebind too.
+#    Related PR (if no, explain why):
+#       No; the crash only manifests with Ascend's per-layer cache containers.
+#    Future Plan:
+#       Remove this patch once the upstream helper natively handles nested
+#       cache entries.
+#
 # ** 34. File: platform/patch_vision.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.vision.FusedInputNorm.forward`
