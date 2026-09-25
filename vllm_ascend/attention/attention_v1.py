@@ -46,7 +46,6 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    _select_seq_lens,
     enable_dcp,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
@@ -314,19 +313,23 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
 
         block_table = common_attn_metadata.block_table_tensor
+        # Prefer _seq_lens_cpu (always available, updated during draft
+        # iterations) over seq_lens_cpu (None in async spec decode mode).
+        if common_attn_metadata._seq_lens_cpu is not None:
+            seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
+        elif common_attn_metadata.seq_lens_cpu is not None:
+            seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        else:
+            seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
 
-        # TODO: This will be moved to propose and deleted after fia ops fixed.
-        seq_lens = _select_seq_lens(
-            common_attn_metadata,
-            kv_cache_spec=self.kv_cache_spec,
-            speculative_config=self.speculative_config,
-            vllm_config=self.vllm_config,
-        )
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
         # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
         if isinstance(self.kv_cache_spec, CrossAttentionSpec):
+            seq_lens = common_attn_metadata.seq_lens
             slot_mapping = common_attn_metadata.slot_mapping.to(torch.int32)
+        elif self.speculative_config and self.speculative_config.parallel_drafting:
+            seq_lens = common_attn_metadata.seq_lens
 
         attn_state = common_attn_metadata.attn_state
 
