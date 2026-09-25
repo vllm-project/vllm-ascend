@@ -161,7 +161,6 @@ jobs:
             run: |
               VLLM_TARGET_DEVICE=empty uv pip install -e .
               pip uninstall -y triton
-              sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Get csrc hash
             id: get_csrc_hash
@@ -231,8 +230,9 @@ jobs:
             env:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
-              TORCH_DEVICE_BACKEND_AUTOLOAD: 0
+              PYTEST_ADDOPTS: -p upstream_test_plugin
             run: |
+              export PYTHONPATH="${{ github.workspace }}/tests${PYTHONPATH:+:$PYTHONPATH}"
               python3 ../.github/workflows/scripts/run_suite.py \
                 --suite e2e-upstream_pr \
                 --auto-partition-id "${{ matrix.part }}" \

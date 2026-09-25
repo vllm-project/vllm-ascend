@@ -118,7 +118,6 @@ jobs:
               pip install -e tests/plugins/prithvi_io_processor_plugin
               pip install -e tests/plugins/colbert_query_plugin
               pip install -e tests/plugins/vllm_add_dummy_endpoint_plugin
-              sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Get csrc hash
             id: get_csrc_hash
@@ -191,7 +190,9 @@ jobs:
             env:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
+              PYTEST_ADDOPTS: -p upstream_test_plugin
             run: |
+              export PYTHONPATH="${{ github.workspace }}/tests${PYTHONPATH:+:$PYTHONPATH}"
               python3 ../.github/workflows/scripts/run_suite.py \
                 --suite e2e-upstream_singlecard \
                 --auto-partition-id "${{ matrix.part }}" \
@@ -252,7 +253,6 @@ jobs:
             run: |
               VLLM_TARGET_DEVICE=empty uv pip install -e .
               pip uninstall -y triton
-              sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Get csrc hash
             id: get_csrc_hash
@@ -321,7 +321,9 @@ jobs:
             env:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
+              PYTEST_ADDOPTS: -p upstream_test_plugin
             run: |
+              export PYTHONPATH="${{ github.workspace }}/tests${PYTHONPATH:+:$PYTHONPATH}"
               python3 ../.github/workflows/scripts/run_suite.py \
                 --suite e2e-upstream_a2_${{ matrix.num_npus }} \
                 --auto-partition-id "${{ matrix.part }}" \
@@ -382,7 +384,6 @@ jobs:
             run: |
               VLLM_TARGET_DEVICE=empty uv pip install -e .
               pip uninstall -y triton
-              sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Get csrc hash
             id: get_csrc_hash
@@ -452,7 +453,9 @@ jobs:
             env:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
+              PYTEST_ADDOPTS: -p upstream_test_plugin
             run: |
+              export PYTHONPATH="${{ github.workspace }}/tests${PYTHONPATH:+:$PYTHONPATH}"
               mkdir -p tiktoken_encodings
               curl -L -o tiktoken_encodings/o200k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
               curl -L -o tiktoken_encodings/cl100k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
