@@ -420,6 +420,20 @@ class NPUPlatform(Platform):
         # early hook). M0/M5 A-B on 0.6B measured no significant difference;
         # keeping the upstream-derived value restores the CUDA-same default
         # surface (red line 2: via the upstream front door, not a side pin).
+        # Stage5 F1/U5 ruling: explicit user -cc.custom_ops is fully respected
+        # (upstream mechanism unchanged); ONLY when the user left it unset do
+        # we fill the track's own default ['all'] here — before the core base
+        # mode derivation — so an unset config lands on the measured optimum
+        # (M2 matrix: none regresses 8B/W8A8 by 4-12%). The single divergence
+        # from CUDA is the unset-default value; everything else is upstream.
+        if not compilation_config.custom_ops:
+            compilation_config.custom_ops = ["all"]
+            logger.info(
+                "Inductor compile-backend track: custom_ops unset — filling "
+                "the track default ['all'] (user-explicit -cc.custom_ops is "
+                "respected verbatim; M2 matrix measured none regressing "
+                "8B/W8A8 decode 4-12%%)."
+            )
         for flag in _INDUCTOR_TRACK_PASS_FLAGS_OFF:
             setattr(compilation_config.pass_config, flag, False)
         # combo kernels have no triton_experimental adaptation and can fail hard.

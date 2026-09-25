@@ -208,9 +208,9 @@ class TestApplyInductorTrackDefaults(TrackTestBase):
 
     def test_track_on_core_derives_custom_ops_none(self):
         """Full-chain: with the front door set at VllmConfig construction
-        time, vLLM core derives the CUDA-same defaults from
-        compilation_config.backend natively (the hook only pins off the
-        NPU-unsupported ones)."""
+        time, the unset custom_ops lands on the track default ['all']
+        (stage5 F1/U5 ruling — measured optimum; the upstream mechanism and
+        any explicit user value are untouched)."""
         with patch(
             "vllm_ascend.platform.NPUPlatform.check_and_update_config"
         ), patch(
@@ -224,11 +224,30 @@ class TestApplyInductorTrackDefaults(TrackTestBase):
             self.skipTest("current_platform did not resolve to npu")
         cc = vllm_config.compilation_config
         self.assertEqual(cc.backend, "inductor")
-        self.assertIn("none", cc.custom_ops)
-        self.assertNotIn("all", cc.custom_ops)
+        self.assertEqual(cc.custom_ops, ["all"])
         self.assertEqual(cc.mode, CompilationMode.VLLM_COMPILE)
         # Debt 2: default -O2 journey — the presets now own the track default.
         self.assertEqual(cc.cudagraph_mode, CUDAGraphMode.FULL_AND_PIECEWISE)
+
+    def test_track_on_user_explicit_custom_ops_survives(self):
+        """U5: an explicit -cc.custom_ops is respected verbatim through the
+        full construction chain (no overwrite, no default fill)."""
+        with patch(
+            "vllm_ascend.platform.NPUPlatform.check_and_update_config"
+        ), patch(
+            "vllm_ascend.platform._get_default_max_cudagraph_capture_size",
+            return_value=None,
+        ):
+            vllm_config = VllmConfig(
+                compilation_config=CompilationConfig(
+                    backend="inductor", custom_ops=["none"]
+                ),
+            )
+        if vllm_config.device_config.device_type != "npu":
+            self.skipTest("current_platform did not resolve to npu")
+        cc = vllm_config.compilation_config
+        self.assertIn("none", cc.custom_ops)
+        self.assertNotIn("all", cc.custom_ops)
 
     def test_track_on_with_enforce_eager_is_inert_upstream_semantics(self):
         """User ruling 2026-09-19 (born-upstream lens): enforce_eager with
