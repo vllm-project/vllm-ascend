@@ -407,7 +407,11 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve zai-org/GLM-5.3-Flash \
 Notes:
 
 - As above, `"enforce_eager": true` is required (the DFlash2 selector is
-  eager-only on model runner V2); the target keeps its own ACL graph mode.
+  eager-only on model runner V2). Unlike the Qwen targets, GLM-5.3-Flash
+  does not support graph-mode speculative decoding at all (see the
+  GLM-5.3-Flash tutorial), so keep the target eager for the first runs;
+  re-enabling target graphs under spec decode is a separate follow-up
+  experiment.
 - The draft's attention is GQA with a 2048 sliding window and runs
   non-causal, exactly like the Qwen3.8 DFlash2 drafter, so the same
   backend selection applies.
