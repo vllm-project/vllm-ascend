@@ -3011,8 +3011,12 @@ class MooncakeConnectorWorker:
             ]
             kernel_remote = list(meta.remote_block_ids[kv_cache_group_id])
             # Skip prefix-cached remote blocks at their own (smaller)
-            # token granularity.
-            remote_block_token_size = group_remote_size * self._group_compress_ratio(group_spec)
+            # token granularity. group_remote_size is the producer's
+            # tokens_per_block (block_size * compress_ratio), i.e. already a
+            # token size, so it must not be scaled by the compress ratio
+            # again (unlike the non-packing path, whose kernel_size is
+            # uncompressed).
+            remote_block_token_size = group_remote_size
             remote_start_idx = meta.num_computed_tokens // remote_block_token_size
             kernel_remote = kernel_remote[remote_start_idx:]
             num_kernel_blocks = min(len(kernel_remote), len(kernel_local))
