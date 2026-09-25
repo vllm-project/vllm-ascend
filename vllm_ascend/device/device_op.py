@@ -39,8 +39,6 @@ else:
 
 
 class BaseDeviceAdaptor:
-    supports_fla_gdn_prefill = True
-
     @classmethod
     def scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> None:
         """Write cache rows in place, falling back to the generic scatter.
@@ -906,8 +904,6 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
-    supports_fla_gdn_prefill = True
-
     @staticmethod
     def _scatter_cache(key, cache, slots) -> bool:
         operation = getattr(torch_npu, "npu_scatter_pa_cache", None)
@@ -1695,8 +1691,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
 
 class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
-    supports_fla_gdn_prefill = False
-
     @classmethod
     def reshape_and_cache(
         cls,
