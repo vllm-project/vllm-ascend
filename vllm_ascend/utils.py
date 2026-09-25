@@ -915,6 +915,47 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
+# Models whose sequence shards persist between layers and across PP stages.
+# Other models can opt in by adding their architectures here.
+_SP_ACROSS_PP_ARCHITECTURES = frozenset(
+    {
+        "KimiLinearForCausalLM",
+        "KimiK3ForCausalLM",
+        "KimiK3ForConditionalGeneration",
+    }
+)
+
+
+def _uses_sp_across_pp(vllm_config) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    architectures = getattr(hf_config, "architectures", None) or ()
+    return any(architecture in _SP_ACROSS_PP_ARCHITECTURES for architecture in architectures)
+
+
+def enable_sp_across_pp(vllm_config) -> bool:
+    """These models keep sequence shards between layers, including at DP=1."""
+    if not _uses_sp_across_pp(vllm_config):
+        return False
+    parallel_config = vllm_config.parallel_config
+    if not (parallel_config.enable_expert_parallel and parallel_config.tensor_parallel_size > 1):
+        return False
+    if parallel_config.pipeline_parallel_size > 1:
+        import vllm.envs as envs
+
+        if not envs.VLLM_USE_V2_MODEL_RUNNER:
+            # Stage-boundary sharding (sliced PP receives, aux-state
+            # transport, graph buffers) is only adapted on Model Runner V2.
+            # On V1 the dummy/profile run would feed full-width tensors into
+            # shard-local layers and crash with an opaque shape mismatch.
+            raise RuntimeError(
+                "Pipeline parallelism with sequence shards kept across "
+                "stages is only supported on Model Runner V2; rerun with "
+                "VLLM_USE_V2_MODEL_RUNNER=1."
+            )
+    return True
+
+
 def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         try:
@@ -927,6 +968,8 @@ def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
+    if _uses_sp_across_pp(vllm_config):
+        return enable_sp_across_pp(vllm_config)
     return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
 
 

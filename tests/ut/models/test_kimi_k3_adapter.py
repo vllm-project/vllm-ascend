@@ -239,6 +239,7 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
     layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
     nn.Module.__init__(layer)
     layer.use_sequence_parallel = True
+    layer.is_moe_layer = True
     layer.prev_valid_blocks = 0
     layer.is_block_write_layer = False
     layer.input_layernorm = nn.Identity()
@@ -515,3 +516,30 @@ def test_k3_dspark_embed_input_ids_merges_multimodal_embeddings():
             ]
         ),
     )
+
+
+def test_k3_dspark_pp_mapper_keeps_frozen_embed_but_drops_heads():
+    from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM as UpstreamK3DSpark
+
+    from vllm_ascend.models.kimi_k3_dspark import _pp_embed_keeping_mapper
+
+    pp_mapper = _pp_embed_keeping_mapper()
+    upstream_mapper = UpstreamK3DSpark.hf_to_vllm_mapper
+
+    # The frozen embedding copy must survive on PP stages that cannot alias
+    # the target's stage-0 embedding.
+    assert pp_mapper._map_name("embed_tokens.weight") == "model.embed_tokens.weight"
+    assert upstream_mapper._map_name("embed_tokens.weight") is None
+
+    # Everything else matches upstream: heads stay dropped, layers keep the
+    # model. prefix and the stacked projections map identically.
+    for name in ("lm_head.weight", "confidence_head.weight"):
+        assert pp_mapper._map_name(name) is None
+        assert upstream_mapper._map_name(name) is None
+    for name in (
+        "layers.0.self_attn.q_a_proj.weight",
+        "layers.0.self_attn.kv_a_proj_with_mqa.weight",
+        "layers.0.mlp.gate_proj.weight",
+        "context_proj.weight",
+    ):
+        assert pp_mapper._map_name(name) == upstream_mapper._map_name(name)
