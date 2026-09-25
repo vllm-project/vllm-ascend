@@ -14,6 +14,7 @@ from vllm_ascend.distributed.utils import get_decode_context_model_parallel_worl
 from vllm_ascend.ops.triton.compute_slot_mapping import (
     _compute_slot_mapping_kernel,
     _next_power_of_2,
+    compute_slot_mapping_fused_groups,
 )
 
 
@@ -394,6 +395,35 @@ class MultiGroupBlockTable:
                 )
             ]
 
+        active_block_tables = [block_table for block_table in self.block_tables if not block_table.is_mamba_group]
+        self._can_fuse_slot_mapping = len(active_block_tables) > 1 and all(
+            block_table.dcp_world_size == 1 for block_table in active_block_tables
+        )
+        if self._can_fuse_slot_mapping:
+            self._fused_slot_mapping_group_count = len(active_block_tables)
+            self._fused_max_num_batched_tokens = active_block_tables[0].max_num_batched_tokens
+            self._fused_block_table_addrs = torch.tensor(
+                [block_table.block_table.gpu.data_ptr() for block_table in active_block_tables],
+                dtype=torch.uint64,
+                device=device,
+            )
+            self._fused_slot_mapping_addrs = torch.tensor(
+                [block_table.slot_mapping.gpu.data_ptr() for block_table in active_block_tables],
+                dtype=torch.uint64,
+                device=device,
+            )
+            self._fused_block_table_strides = torch.tensor(
+                [block_table.block_table.gpu.stride(0) for block_table in active_block_tables],
+                dtype=torch.int64,
+                device=device,
+            )
+            self._fused_block_sizes = torch.tensor(
+                [block_table.block_size for block_table in active_block_tables],
+                dtype=torch.int32,
+                device=device,
+            )
+            self._fused_min_block_size = min(block_table.block_size for block_table in active_block_tables)
+
     def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
         for i, block_table in enumerate(self.block_tables):
             block_table.append_row(block_ids[i], row_idx)
@@ -422,6 +452,24 @@ class MultiGroupBlockTable:
         positions_compressed_list: list[np.ndarray] | None = None,
         req_indices_compressed_list: list[np.ndarray] | None = None,
     ) -> None:
+        num_tokens = positions.shape[0]
+        if self._can_fuse_slot_mapping and not positions_compressed_list and not req_indices_compressed_list:
+            compute_slot_mapping_fused_groups(
+                self._fused_slot_mapping_group_count,
+                num_reqs,
+                num_tokens,
+                self._fused_max_num_batched_tokens,
+                query_start_loc,
+                positions,
+                self._fused_block_table_addrs,
+                self._fused_slot_mapping_addrs,
+                self._fused_block_table_strides,
+                self._fused_block_sizes,
+                self._fused_min_block_size,
+                pad_id=PAD_SLOT_ID,
+            )
+            return
+
         for i, block_table in enumerate(self.block_tables):
             if block_table.is_mamba_group:
                 continue
