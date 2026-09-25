@@ -1189,3 +1189,66 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     assert forwarded["positions"].tolist() == [0, 1]
     assert forwarded["is_prefilling"] is True
     assert module.build_attn_metadata is stub
+
+
+def test_mrv2_binding_wraps_only_v41_slots():
+    from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+    from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache_to_layers
+
+    vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
+    v41_layer = DeepseekV41CacheLayer(vllm_config, "model.layers.0.self_attn.attn", object())
+    v41_indexer = DeepseekV41CacheLayer(vllm_config, "model.layers.2.self_attn.indexer.k_cache", object())
+    other_layer = SimpleNamespace(kv_cache=None)
+    kv_caches = {
+        # V4.1 reshape output: one slot tensor per layer.
+        "model.layers.0.self_attn.attn": torch.zeros(4, 2),
+        # Non-V4.1 Ascend allocation: a (k, v) tuple.
+        "model.layers.1.self_attn.attn": (torch.zeros(2, 2), torch.zeros(2, 2)),
+        # V4.1 indexer reshape output: a (kv, scale) tuple slot view.
+        "model.layers.2.self_attn.indexer.k_cache": (torch.zeros(2, 2), torch.zeros(2, 1)),
+    }
+    forward_context = {
+        "model.layers.0.self_attn.attn": v41_layer,
+        "model.layers.1.self_attn.attn": other_layer,
+        "model.layers.2.self_attn.indexer.k_cache": v41_indexer,
+    }
+
+    bind_kv_cache_to_layers(kv_caches, forward_context)
+
+    # vLLM main (#53781) routes init_kv_cache through bind_kv_cache_to_layers:
+    # V4.1 slots dispatch to their own bind_kv_cache (kv_cache[0] contract)
+    # while other layers keep the raw (k, v) allocation.
+    assert isinstance(v41_layer.kv_cache, list)
+    assert v41_layer.kv_cache[0] is kv_caches["model.layers.0.self_attn.attn"]
+    assert other_layer.kv_cache is kv_caches["model.layers.1.self_attn.attn"]
+    # The indexer consumer unpacks kv_cache[0] into (kv, scale).
+    kv_view, scale_view = v41_indexer.kv_cache[0]
+    assert kv_view is kv_caches["model.layers.2.self_attn.indexer.k_cache"][0]
+    assert scale_view is kv_caches["model.layers.2.self_attn.indexer.k_cache"][1]
+
+
+def test_ascend_init_kv_cache_reduces_slot_views_to_tensors(monkeypatch):
+    from vllm_ascend.patch.worker.patch_v2 import patch_attn_utils
+
+    tensor = torch.zeros(2)
+    kv_caches = {
+        # Plain allocation passes through untouched.
+        "attn": tensor,
+        # Regular Ascend (k, v) tuple reduces to the first tensor.
+        "mla": (tensor, torch.zeros(2)),
+        # V4.1 binding wraps slot views in a list; the indexer view is itself
+        # a (kv, scale) tuple, so both levels must reduce to one tensor for
+        # #53781's runner-side cache.device filter.
+        "v41_swa": [tensor],
+        "v41_indexer": [(tensor, torch.zeros(2))],
+        # Mamba state lists keep reducing to their first state.
+        "mamba": [torch.zeros(2), torch.zeros(2)],
+    }
+    monkeypatch.setattr(patch_attn_utils, "_orig_init_kv_cache", lambda *_args, **_kwargs: kv_caches)
+
+    unwrapped = patch_attn_utils._ascend_init_kv_cache()
+
+    for value in unwrapped.values():
+        assert isinstance(value, torch.Tensor)
+    assert unwrapped["attn"] is tensor
+    assert unwrapped["v41_indexer"] is tensor

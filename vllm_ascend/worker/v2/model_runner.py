@@ -57,6 +57,7 @@ from vllm_ascend.ascend_forward_context import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
@@ -69,7 +70,10 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_state,
+    skip_ring_state_update,
+)
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -83,7 +87,11 @@ from vllm_ascend.worker.v2.pp_utils import (
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
-from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+from vllm_ascend.worker.v2.utils import (
+    prepare_v41_dummy_ring_state,
+    prepare_v41_source_rope,
+    torch_cuda_wrapper,
+)
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -289,6 +297,13 @@ class NPUModelRunner(GPUModelRunner):
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
+        if any(is_circular_kv_cache_spec(group.kv_cache_spec) for group in self.kv_cache_config.kv_cache_groups):
+            from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
+
+            for module in self.model.modules():
+                if isinstance(module, DeepseekV41Compressor) and module.ratio == 2:
+                    module.prepare_ring_compressor(self.max_num_tokens, self.device)
+        prepare_v41_source_rope(self)
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
@@ -659,16 +674,20 @@ class NPUModelRunner(GPUModelRunner):
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         if self.pcp_manager is None:
-            return super().prepare_dummy_attn(
+            block_tables, slot_mappings = super().prepare_dummy_attn(
                 input_batch,
                 valid_state_slots=valid_state_slots,
             )
-        block_tables, slot_mappings = self.pcp_manager.prepare_dummy_attn(input_batch)
-        if valid_state_slots:
-            # Match the upstream state-slot contract in the persistent PCP views.
-            for block_table in block_tables:
-                state_slots = torch.arange(1, block_table.shape[0] + 1, dtype=torch.int32, device=block_table.device)
-                block_table[:, 0].copy_(state_slots)
+        else:
+            block_tables, slot_mappings = self.pcp_manager.prepare_dummy_attn(input_batch)
+            if valid_state_slots:
+                # Match the upstream state-slot contract in the persistent PCP views.
+                for block_table in block_tables:
+                    state_slots = torch.arange(
+                        1, block_table.shape[0] + 1, dtype=torch.int32, device=block_table.device
+                    )
+                    block_table[:, 0].copy_(state_slots)
+        prepare_v41_dummy_ring_state(self, input_batch.num_reqs)
         return block_tables, slot_mappings
 
     def _lmhead_tp_max_num_logits(self) -> int:
@@ -749,6 +768,7 @@ class NPUModelRunner(GPUModelRunner):
         **kwargs,
     ):
         """Join LM-head TP before stepping EPLB on an idle DP rank."""
+        skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
         # synthetic router hotspot cannot exhaust one EP rank during startup.
@@ -760,7 +780,7 @@ class NPUModelRunner(GPUModelRunner):
                 "the profile-run marker, which makes XLite bypass its graph path."
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
-        with load_balance_ctx:
+        with skip_ring_state_update(skip_ring), load_balance_ctx:
             hidden_states, sample_hidden_states = super()._dummy_run(
                 num_tokens,
                 *args,

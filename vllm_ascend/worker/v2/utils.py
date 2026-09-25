@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.compilation import breakable_cudagraph
@@ -11,7 +12,12 @@ from vllm_ascend.compilation.acl_graph import (
     weak_ref_workspaces,
 )
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.utils import super_kernel_scope, weak_ref_tensor, weak_ref_tensors
+from vllm_ascend.worker.v2.attn_utils import ring_state_update_skipped
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
 @contextmanager
@@ -74,3 +80,36 @@ def torch_npu_graph_wrapper(*args, **kwargs):
     finally:
         weak_ref_workspaces(get_graph_params())
         weak_ref_workspaces(get_draft_graph_params())
+
+
+def prepare_v41_source_rope(runner: "NPUModelRunner") -> None:
+    """Validate and cache V4.1 source RoPE tables on compressor builders."""
+    # Lazy import avoids the model/cache registration cycle.
+    from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
+
+    for groups in runner.attn_groups:
+        for attn_group in groups:
+            for builder in attn_group.metadata_builders:
+                if isinstance(builder, AscendDSAV41MetadataBuilder):
+                    builder.prepare_source_rope()
+
+
+def prepare_v41_dummy_ring_state(runner: "NPUModelRunner", num_reqs: int) -> None:
+    """Assign live ring pages to dummy requests for V4.1 graph runs."""
+    if ring_state_update_skipped():
+        return
+    for gid, group in enumerate(runner.kv_cache_config.kv_cache_groups):
+        if not is_circular_kv_cache_spec(group.kv_cache_spec):
+            continue
+        if num_reqs >= runner.kv_cache_config.num_blocks:
+            raise ValueError("Insufficient ring pages for dummy graph requests")
+        forward_context = runner.compilation_config.static_forward_context
+        block_table = runner.block_tables.input_block_tables[gid]
+        block_table[:num_reqs, 0] = torch.arange(
+            1,
+            num_reqs + 1,
+            dtype=block_table.dtype,
+            device=block_table.device,
+        )
+        for name in group.layer_names:
+            forward_context[name].kv_cache[0][1 : num_reqs + 1].zero_()

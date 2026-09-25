@@ -1,3 +1,4 @@
+import torch
 import vllm
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
@@ -37,7 +38,16 @@ _orig_init_kv_cache = vllm.v1.worker.gpu.model_runner.init_kv_cache
 
 def _ascend_init_kv_cache(*args, **kwargs):
     d = _orig_init_kv_cache(*args, **kwargs)
-    return {name: (v[0] if isinstance(v, (tuple, list)) and v else v) for name, v in d.items()}
+    unwrapped = {}
+    for name, value in d.items():
+        # V4.1 slots bind a single-entry list (their layers index kv_cache[0])
+        # whose slot view may itself be a (kv, scale) tuple; regular layers
+        # hold a (k, v) tuple or a Mamba state list. Reduce every level to the
+        # first tensor so the runner-side device filter sees one tensor.
+        while isinstance(value, (tuple, list)) and value and not isinstance(value, torch.Tensor):
+            value = value[0]
+        unwrapped[name] = value
+    return unwrapped
 
 
 vllm.v1.worker.gpu.model_runner.init_kv_cache = _ascend_init_kv_cache

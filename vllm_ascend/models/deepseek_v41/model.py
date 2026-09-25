@@ -967,7 +967,20 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
 
         self.hc_mult = config.hc_mult
-        self._mtp_hidden_buffer = None
+        spec_config = vllm_config.speculative_config
+        needs_mtp_hidden_states = spec_config is not None and (
+            spec_config.use_eagle() or spec_config.uses_draft_model()
+        )
+        self._mtp_hidden_buffer = (
+            torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                self.hc_mult * config.hidden_size,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
+            if get_pp_group().is_last_rank and needs_mtp_hidden_states
+            else None
+        )
         self.make_empty_intermediate_tensors = self._make_empty_intermediate_tensors
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
         topology = build_layer_plan(self.config)
@@ -1251,8 +1264,16 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 )
             hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=moe_input_ids)
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
+        # MTP needs full HC states
+        if self._mtp_hidden_buffer is not None:
+            if use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+                pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
+            num_tokens = hidden_states.shape[0]
+            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+
         hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
-        if use_sequence_parallel:
+        if use_sequence_parallel and self._mtp_hidden_buffer is None:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         hidden_states = self.norm(hidden_states)
         if aux_hidden_states:

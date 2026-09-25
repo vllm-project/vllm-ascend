@@ -49,18 +49,27 @@ from vllm_ascend.quantization.quant_type import QuantType
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
 
-def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
-    return _MoECommMethods.get(moe_comm_type)
+def _moe_config_key(moe_comm_type: MoECommType, moe_config: FusedMoEConfig) -> tuple[int, ...]:
+    """Return the execution shape that owns mutable MoE comm state."""
+    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
+    return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
+
+
+def get_moe_comm_method(
+    moe_comm_type: MoECommType | None,
+    moe_config: FusedMoEConfig | None = None,
+) -> MoECommMethod | None:
+    return _MoECommMethods.get(_moe_config_key(moe_comm_type, moe_config))
 
 
 def setup_moe_comm_method(moe_config):
     if moe_config.ep_size > 1:
-        _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
-        _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.ALLTOALL, moe_config)] = AlltoAllCommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.MC2, moe_config)] = MC2CommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.FUSED_MC2, moe_config)] = FusedMC2CommImpl(moe_config)
     else:
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
 
 
 @dataclass
