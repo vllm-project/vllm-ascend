@@ -357,8 +357,8 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         if self.token_dispatcher.need_shared_expert_args:
-            # A5 uses the operator automatic receive-buffer mode.
-            max_recv_token_num = 0
+            # A5 uses the same configured per-rank receive capacity as prefill.
+            max_recv_token_num = get_ascend_config().mega_moe_max_tokens
         elif is_decode_only_node:
             max_recv_token_num = absolute_safe_max_recv_token_num
         else:

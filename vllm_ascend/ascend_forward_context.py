@@ -336,6 +336,9 @@ def _select_capacity_and_world_size_moe_comm_method(
         cann_mega_moe_supported = get_model_cann_mega_moe_capability(model_instance).supported
     if (
         is_pure_prefill
+        # Local prefill flags are not EP consensus across DP ranks: idle
+        # workers can execute dummy decode batches.
+        and vllm_config.parallel_config.data_parallel_size == 1
         and get_ascend_config().enable_fused_mc2 == 1
         and is_mega_moe_supported()
         and cann_mega_moe_supported

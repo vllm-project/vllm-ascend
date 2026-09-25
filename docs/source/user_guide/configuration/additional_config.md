@@ -116,8 +116,12 @@ Notes for A5:
   contains that vendor directory. vLLM Ascend prepends its own bundled vendors
   path at startup, which otherwise shadows the installed package and makes the
   call fall back to the built-in older operator.
-- The symmetric buffer receive capacity uses the operator's automatic mode
-  (`max_recv_token_num=0`); `mega_moe_max_tokens` is not used on A5.
+- A5 passes `mega_moe_max_tokens` directly as the symmetric buffer's
+  `max_recv_token_num` (default `65536`). For example, use
+  `--additional-config '{"enable_fused_mc2": 2, "mega_moe_max_tokens": 131072}'`.
+  Set the same capacity on all EP ranks before starting the workers.
+- Pure-prefill MegaMoe selection requires `data_parallel_size=1`; local
+  prefill flags are not a collective consensus across DP ranks.
 - The MegaMoe path is mutually exclusive with
   `multistream_overlap_shared_expert`; the latter is force-disabled when
   `enable_fused_mc2=2`.
@@ -125,7 +129,7 @@ Notes for A5:
 ```bash
 vllm serve <model> \
     --tensor-parallel-size 8 --enable-expert-parallel \
-    --additional-config '{"enable_fused_mc2": 2}'
+    --additional-config '{"enable_fused_mc2": 2, "mega_moe_max_tokens": 131072}'
 ```
 
 **xlite_graph_config**

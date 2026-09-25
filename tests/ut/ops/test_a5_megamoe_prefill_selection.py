@@ -40,7 +40,7 @@ def test_a5_pure_prefill_only_without_capacity_gate(
 ):
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(top_k_experts=1)),
-        parallel_config=SimpleNamespace(enable_expert_parallel=True, world_size_across_dp=8),
+        parallel_config=SimpleNamespace(enable_expert_parallel=True, world_size_across_dp=8, data_parallel_size=1),
         lora_config=None,
     )
     monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
