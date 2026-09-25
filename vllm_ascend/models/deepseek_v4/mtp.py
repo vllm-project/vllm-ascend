@@ -11,6 +11,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
@@ -34,9 +35,32 @@ from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV2MixtureOfExperts,
     DeepseekV4DecoderLayer,
     DeepseekV4MoE,
-    get_spec_layer_idx_from_weight_name,
 )
 from vllm_ascend.utils import enable_dsa_cp
+
+
+def _normalize_mtp_checkpoint_name(name: str, num_mtp_layers: int) -> tuple[int, str] | None:
+    """Map a checkpoint key onto ``mtp.{i}.*`` for a constructed MTP layer.
+
+    The loader used to assume every draft tensor was ``mtp.0.*`` and asserted
+    that. Pro W4A8 also ships ``mtp.1.*`` and unindexed aliases
+    (``mtp.head.*``, ``head.weight``). Those hit A7 ``AssertionError``.
+    """
+    if name == "embed.weight":
+        name = "mtp.0.emb.tok_emb.weight"
+    elif name == "head.weight":
+        name = "mtp.0.head.weight"
+    if not name.startswith("mtp."):
+        return None
+    token = name.split(".", 2)[1]
+    if token.isdigit():
+        idx = int(token)
+        if idx >= num_mtp_layers:
+            return None
+        return idx, name
+    if num_mtp_layers < 1:
+        return None
+    return 0, "mtp.0." + name[4:]
 
 
 class SharedHead(nn.Module):
@@ -193,10 +217,17 @@ class DeepSeekMultiTokenPredictor(nn.Module):
                 )
             }
         )
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-        )
+        # PP=1 MTP rebinds embed_tokens from the target after load. Skip a
+        # second vocab table during draft construct.
+        use_compress = hasattr(vllm_config.model_config.hf_config, "compress_ratios")
+        self._share_target_embed = get_pp_group().world_size == 1 and not use_compress
+        if self._share_target_embed:
+            self.embed_tokens = PPMissingLayer()
+        else:
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+            )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -243,6 +274,7 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.model = DeepSeekMultiTokenPredictor(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp"))
+        self.has_own_embed_tokens = not getattr(self.model, "_share_target_embed", False)
         # Set MoE hyperparameters
         self.set_moe_parameters()
 
@@ -319,24 +351,17 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            if self.quant_config is not None and self.quant_config.get_name() == "deepseek_v4_fp8":
-                if name == "embed.weight":
-                    name = "mtp.0.emb.tok_emb.weight"
-
-                if name == "head.weight":
-                    name = "mtp.0.head.weight"
-
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
-            if spec_layer is None:
+            parsed = _normalize_mtp_checkpoint_name(name, self.model.num_mtp_layers)
+            if parsed is None:
                 continue
-
-            assert "mtp.0." in name
+            spec_layer, name = parsed
+            mtp_prefix = f"mtp.{spec_layer}."
             if ".emb.tok_emb." in name:
-                name = name.replace("mtp.0.", "model.")
+                name = name.replace(mtp_prefix, "model.")
             elif self.no_mtp_block_in_name(name):
-                name = name.replace("mtp.0.", "model.layers.0.")
+                name = name.replace(mtp_prefix, f"model.layers.{spec_layer}.")
             else:
-                name = name.replace("mtp.0.", "model.layers.0.mtp_block.")
+                name = name.replace(mtp_prefix, f"model.layers.{spec_layer}.mtp_block.")
 
             if ".w1." in name:
                 name = name.replace(".w1.", ".gate_proj.")
@@ -365,6 +390,9 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
             if ".attn_norm." in name:
                 name = name.replace(".attn_norm.", ".input_layernorm.")
+
+            if not self.has_own_embed_tokens and "embed_tokens" in name:
+                continue
 
             if ".gate.bias" in name:
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
