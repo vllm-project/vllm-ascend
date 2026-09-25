@@ -857,6 +857,32 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.assertIn(10, self.thread.invalid_block_ids)
         self.assertIn(20, self.thread.invalid_block_ids)
 
+    def _configure_group0_for_packing(self, kernel_size: int, remote_size: int) -> None:
+        # Group 0 is a plain attention group; block_size_scale left empty so
+        # local_scale is 1 and kernel_size == block_size.
+        self.thread.kv_group2layeridx = {
+            0: (
+                {"kv_cache_spec_type": "FullAttentionSpec", "kv_cache_group_id": 0},
+                [0],
+            )
+        }
+        self.thread.block_size = kernel_size
+        self.thread.block_size_scale = []
+
+    def test_mark_failed_recv_request_maps_packed_ids_to_kernel_blocks(self):
+        # Packed groups address the first group's ids at packing-slice
+        # granularity; they must map back to logical kernel block ids.
+        # kernel_size=1024, remote 128-token blocks -> packing = 8.
+        self._configure_group0_for_packing(kernel_size=1024, remote_size=128)
+        self.thread._mark_failed_recv_request("req1", [[0, 7, 8, 15]], (128,))
+        self.assertSetEqual(self.thread.invalid_block_ids, {0, 1})
+
+    def test_mark_failed_recv_request_scalar_ids_unchanged(self):
+        # Remote size matches the kernel: packing = 1, ids pass through.
+        self._configure_group0_for_packing(kernel_size=1024, remote_size=1024)
+        self.thread._mark_failed_recv_request("req1", [[10, 20]], (1024,))
+        self.assertSetEqual(self.thread.invalid_block_ids, {10, 20})
+
     def test_clear_failed_recv_request(self):
         self.thread._mark_failed_recv_request("req2", [[30]])
         self.thread._clear_failed_recv_request("req2")
