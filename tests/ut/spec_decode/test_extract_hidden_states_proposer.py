@@ -21,7 +21,7 @@ with Ascend-specific additions for ACL graph differences.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import call, create_autospec, patch
 
 import numpy as np
 import pytest
@@ -33,6 +33,7 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
 @pytest.fixture(autouse=True)
@@ -331,6 +332,9 @@ def _build_proposer_for_padding_test(data_parallel_size: int = 1):
     vllm_config.parallel_config.data_parallel_size = data_parallel_size
 
     runner = MagicMock()
+    # Bind the real interface so removed/unknown keyword arguments fail here,
+    # instead of being silently accepted by an unrestricted MagicMock.
+    runner._sync_metadata_across_dp = create_autospec(NPUModelRunner._sync_metadata_across_dp.__get__(runner))
     runner.pin_memory = False
     runner.dcp_size = 1
 
@@ -389,7 +393,15 @@ def test_determine_batch_execution_and_padding_dp1_sp_pads_and_skips_sync():
     runner._sync_metadata_across_dp.assert_not_called()
 
 
-def test_determine_batch_execution_and_padding_dp2_uses_runner_sync():
+@pytest.mark.parametrize(
+    "use_cudagraphs,local_mode,synced_mode",
+    [
+        (False, CUDAGraphMode.NONE, CUDAGraphMode.NONE),
+        (True, CUDAGraphMode.FULL, CUDAGraphMode.FULL),
+        (True, CUDAGraphMode.FULL, CUDAGraphMode.NONE),
+    ],
+)
+def test_determine_batch_execution_and_padding_dp2_uses_runner_sync(use_cudagraphs, local_mode, synced_mode):
     """With DP>1, must call ``runner._sync_metadata_across_dp`` (Ascend's
     shape ``[2, dp_size]`` path) and must NOT call upstream
     ``coordinate_batch_across_dp`` (shape ``[4, dp_size]``).
@@ -404,31 +416,33 @@ def test_determine_batch_execution_and_padding_dp2_uses_runner_sync():
     runner._pad_for_sequence_parallelism = lambda n: ((n + 3) // 4) * 4
     proposer.cudagraph_dispatcher.dispatch.side_effect = [
         # First dispatch (pre-sync) with SP-padded num_tokens=8
-        (CUDAGraphMode.NONE, _make_batch_desc(num_tokens=8)),
-        # Re-dispatch after sync; the agreed value happens to also be 8
-        (CUDAGraphMode.NONE, _make_batch_desc(num_tokens=8)),
+        (local_mode, _make_batch_desc(num_tokens=8)),
+        # Re-dispatch after sync with the larger DP rank's agreed value.
+        (synced_mode, _make_batch_desc(num_tokens=32)),
     ]
-    # Pretend both DP ranks agreed on 8 tokens
-    sync_tensor = torch.tensor([8, 8], dtype=torch.int32)
-    runner._sync_metadata_across_dp.return_value = (8, sync_tensor, CUDAGraphMode.NONE)
+    sync_tensor = torch.tensor([32, 32], dtype=torch.int32)
+    runner._sync_metadata_across_dp.return_value = (32, sync_tensor, synced_mode)
 
     with patch("vllm.v1.spec_decode.extract_hidden_states.coordinate_batch_across_dp") as mock_upstream_coord:
         cudagraph_mode, num_tokens_padded, num_tokens_across_dp = proposer._determine_batch_execution_and_padding(
-            num_tokens=6
+            num_tokens=6, use_cudagraphs=use_cudagraphs
         )
 
     # Upstream DP sync must NOT be used (it would post a [4, dp_size]
     # tensor and break gloo on the shared cpu_group).
     mock_upstream_coord.assert_not_called()
     # Runner sync called once, with the SP-padded value and is_draft_model=True.
-    runner._sync_metadata_across_dp.assert_called_once()
-    call_kwargs = runner._sync_metadata_across_dp.call_args.kwargs
-    assert call_kwargs["num_tokens"] == 8  # SP-padded 6 -> 8
-    assert call_kwargs["is_draft_model"] is True
+    runner._sync_metadata_across_dp.assert_called_once_with(
+        num_tokens=8, is_draft_model=True, cudagraph_mode=local_mode
+    )
+    assert proposer.cudagraph_dispatcher.dispatch.call_args_list == [
+        call(8, valid_modes=None if use_cudagraphs else {CUDAGraphMode.NONE}),
+        call(32, valid_modes={synced_mode}),
+    ]
 
-    assert num_tokens_padded == 8
-    assert num_tokens_across_dp is not None
-    assert num_tokens_across_dp[proposer.dp_rank].item() == 8
+    assert cudagraph_mode == synced_mode
+    assert num_tokens_padded == 32
+    assert num_tokens_across_dp is sync_tensor
 
 
 def test_determine_batch_execution_and_padding_dp2_keeps_tp_aligned_for_main_forward():
