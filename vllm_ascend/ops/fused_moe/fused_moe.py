@@ -384,15 +384,23 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        # Gate linears are unquantized. Their weight is normally pre-cast by
-        # AscendUnquantizedLinearMethod to avoid a Cast in this hot path.
+        """Compute router logits without extending a fresh FP32 cast's lifetime.
+
+        The FP32 activation stays local to this helper and becomes releasable
+        after the gate linear is enqueued. An existing FP32 ``router_logits``
+        remains caller-owned. Gates without a pre-cast weight keep using their
+        registered forward path and must not allocate an unused FP32 input.
+        """
         gate = self.gate
         assert gate is not None
-        hidden_states_fp32 = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
-        if hasattr(gate, "weight_fp32"):
-            return F.linear(hidden_states_fp32, gate.weight_fp32)
-        gate_out = gate(hidden_states)
-        return gate_out[0] if isinstance(gate_out, tuple) else gate_out
+        if not hasattr(gate, "weight_fp32"):
+            gate_out = gate(hidden_states)
+            return gate_out[0] if isinstance(gate_out, tuple) else gate_out
+
+        # AscendUnquantizedLinearMethod normally pre-casts the weight so the
+        # hot path only needs to materialize the FP32 activation when required.
+        router_input = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
+        return F.linear(router_input, gate.weight_fp32)
 
     def _prepare_router_and_milestones(
         self,
