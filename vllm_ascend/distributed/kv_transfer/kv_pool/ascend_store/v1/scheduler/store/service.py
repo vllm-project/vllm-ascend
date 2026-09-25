@@ -29,7 +29,7 @@ class StoreService:
     def is_enabled(self) -> bool:
         return self._enabled
 
-    def accepts_cached_request(self, is_decoding: bool) -> bool:
+    def accepts_cached_request(self, *, is_decoding: bool) -> bool:
         return not is_decoding or self._save_decode_cache
 
     def schedule_request(

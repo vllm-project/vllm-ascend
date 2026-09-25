@@ -104,9 +104,9 @@ class SchedulerService:
             cached_requests = scheduler_output.scheduled_cached_reqs
             for index, request_id in enumerate(cached_requests.req_ids):
                 new_block_ids = cached_requests.new_block_ids[index]
-                if not new_block_ids:
-                    continue
                 if request_id in self.preempted_req_ids:
+                    if not new_block_ids:
+                        continue
                     load_request, store_request = self._process_preempted_cached_request(
                         request_id, new_block_ids, scheduler_output
                     )
@@ -179,11 +179,11 @@ class SchedulerService:
         return self._schedule_request_transfer(tracker, load_candidate)
 
     def _process_running_cached_request(
-        self, request_id: str, new_block_ids: tuple[list[int], ...], scheduler_output: SchedulerOutput
+        self, request_id: str, new_block_ids: tuple[list[int], ...] | None, scheduler_output: SchedulerOutput
     ) -> tuple[LoadRequest | None, StoreRequest | None]:
         request = self.unfinished_requests.get(request_id)
         is_decoding = request is not None and request.num_computed_tokens >= request.num_prompt_tokens
-        if not self._store_service.accepts_cached_request(is_decoding):
+        if not self._store_service.accepts_cached_request(is_decoding=is_decoding):
             return None, None
         tracker = self.request_trackers.get(request_id)
         if tracker is None:

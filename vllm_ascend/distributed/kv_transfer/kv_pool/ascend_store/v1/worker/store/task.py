@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import torch
 from vllm.logger import logger
@@ -11,6 +12,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase
 
 from ...metadata import StoreRequest
+from ..layout import StridedKVPartitioner
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,8 +33,14 @@ class StoreTask:
     chunks: tuple[StoreChunk, ...]
 
 
-class StoreTaskBuilder:
-    """Resolve Store requests into Backend-neutral Worker-local tasks."""
+class StoreTaskBuilder(Protocol):
+    """Build one Backend-ready task from an approved Store request."""
+
+    def build(self, request: StoreRequest, source_ready_event: torch.npu.Event) -> StoreTask: ...
+
+
+class ContiguousStoreTaskBuilder:
+    """Map Store chunks to the contiguous segments of local KV blocks."""
 
     def __init__(
         self,
@@ -102,3 +110,33 @@ class StoreTaskBuilder:
             shard_size=self.pcp_size * tp_replicas,
         )
         return list(chunks)
+
+
+class StridedStoreTaskBuilder:
+    """Map Store chunks to the effective-TP head slices owned by this rank."""
+
+    def __init__(
+        self,
+        token_database: ChunkedTokenDatabase,
+        pcp_rank: int,
+        pcp_size: int,
+        kv_partitioner: StridedKVPartitioner,
+    ) -> None:
+        self.token_database = token_database
+        self.pcp_rank = pcp_rank
+        self.pcp_size = pcp_size
+        self.kv_partitioner = kv_partitioner
+
+    def build(self, request: StoreRequest, source_ready_event: torch.npu.Event) -> StoreTask:
+        token_chunks = self.token_database.process_token_key_strings_with_block_ids(
+            request.save_end_token,
+            list(request.block_hashes),
+            list(request.block_ids),
+            shard_rank=self.pcp_rank,
+            shard_size=self.pcp_size,
+        )
+        chunks = []
+        for start, end, base_key, _, block_id in token_chunks:
+            for key, addresses, sizes in self.kv_partitioner.partition(base_key, block_id, end - start):
+                chunks.append(StoreChunk(key, addresses, sizes))
+        return StoreTask(request.request_id, source_ready_event, tuple(chunks))

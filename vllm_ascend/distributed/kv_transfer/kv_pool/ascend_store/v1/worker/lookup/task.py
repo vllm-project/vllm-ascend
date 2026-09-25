@@ -24,16 +24,14 @@ class LookupTaskBuilder:
     def __init__(
         self,
         token_database: ChunkedTokenDatabase,
-        tp_size: int,
+        num_head_ranks: int,
         pp_size: int,
         dcp_size: int,
-        num_kv_heads: int,
     ) -> None:
         self.token_database = token_database
-        self.tp_size = tp_size
+        self.num_head_ranks = num_head_ranks
         self.pp_size = pp_size
         self.dcp_size = dcp_size
-        self.num_kv_heads = num_kv_heads
 
     def build(self, token_len: int, block_hashes: list[BlockHash] | list[str]) -> LookupTask:
         chunks = list(self.token_database.process_token_key_strings(token_len, block_hashes))
@@ -50,11 +48,10 @@ class LookupTaskBuilder:
 
     def _expand_rank_keys(self, keys: list[str]) -> list[str]:
         rank_keys = []
-        num_head_ranks = min(self.tp_size, self.num_kv_heads)
         # Keep each rank's chunks contiguous so exists results remain [rank][chunk].
         for pp_rank in range(self.pp_size):
             for dcp_rank in range(self.dcp_size):
-                for head_rank in range(num_head_ranks):
+                for head_rank in range(self.num_head_ranks):
                     for key in keys:
                         rank_key = self._replace_key_rank(key, "dcp", dcp_rank)
                         rank_key = self._replace_key_rank(rank_key, "head_or_tp_rank", head_rank)

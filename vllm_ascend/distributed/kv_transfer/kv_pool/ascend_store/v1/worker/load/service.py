@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase
-
 from ...metadata import LoadRequestBatch
 from .executor import LoadExecution, LoadExecutionResult, LoadTaskResult
 from .task import LoadTask, LoadTaskBuilder
@@ -25,18 +23,10 @@ class LoadService:
 
     def __init__(
         self,
-        token_database: ChunkedTokenDatabase,
-        block_size: int,
-        cache_transfer_granularity: int,
-        tp_rank: int,
+        task_builder: LoadTaskBuilder,
         executor: LoadExecution,
     ) -> None:
-        self._task_builder = LoadTaskBuilder(
-            token_database,
-            block_size,
-            cache_transfer_granularity,
-            tp_rank,
-        )
+        self._task_builder = task_builder
         self._executor = executor
         self._failed_block_ids: set[int] = set()
 
