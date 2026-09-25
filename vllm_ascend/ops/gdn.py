@@ -728,18 +728,19 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
             ascend_config = get_ascend_config()
-            if ascend_config.ascend_gdn_prefill_backend == "fla_npu":
-                if get_pcp_group().world_size != 1:
-                    raise RuntimeError("FLA fused GDN prefill currently requires PCP world size 1.")
-                initial_state = ssm_state[prefill_state_indices]
-                clear_ssm_states(initial_state, prefill_has_initial_state)
-                # A5 has the arch35 kernel chain (BSND, in-kernel L2 norm);
-                # A2/A3 only expose the Phase6 kernel and need the BNSD layout
-                # with the norm moved to the host.
-                if get_ascend_device_type() != AscendDeviceType.A5:
+            device_type = get_ascend_device_type()
+            if get_pcp_group().world_size == 1 and device_type in (
+                AscendDeviceType.A2,
+                AscendDeviceType.A3,
+                AscendDeviceType.A5,
+            ):
+                if device_type in (AscendDeviceType.A2, AscendDeviceType.A3):
                     fla_npu_prefill = _chunk_gated_delta_rule_fla_npu_a2a3
                 else:
                     fla_npu_prefill = _chunk_gated_delta_rule_fla_npu
+
+                initial_state = ssm_state[prefill_state_indices]
+                clear_ssm_states(initial_state, prefill_has_initial_state)
                 (core_attn_out_non_spec, last_recurrent_state) = fla_npu_prefill(
                     q=query_non_spec,
                     k=key_non_spec,
