@@ -197,7 +197,7 @@ jobs:
               VLLM_WORKER_MULTIPROC_METHOD: spawn
               PYTEST_ADDOPTS: -p upstream_test_plugin
             run: |
-              export PYTHONPATH="${{ github.workspace }}/tests${PYTHONPATH:+:$PYTHONPATH}"
+              export PYTHONPATH="${GITHUB_WORKSPACE}/tests${PYTHONPATH:+:$PYTHONPATH}"
               python3 ../.github/workflows/scripts/run_suite.py \
                 --suite e2e-upstream_singlecard \
                 --auto-partition-id "${{ matrix.part }}" \
