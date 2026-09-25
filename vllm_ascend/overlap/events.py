@@ -77,7 +77,7 @@ class EventLedger:
             with self._lock:
                 event = self._events.get(name)
                 if event is None:
-                    event = torch.npu.Event()
+                    event = torch.npu.Event(enable_timing=False)
                     self._events[name] = event
         if stream is None:
             stream = torch.npu.current_stream()
@@ -113,18 +113,14 @@ class EventLedger:
             self._events.pop(name, None)
 
 
-_LEDGER: EventLedger | None = None
+_LEDGER = EventLedger()
 
 
 def get_event_ledger() -> EventLedger:
     """Return the process-wide :class:`EventLedger`."""
-    global _LEDGER
-    if _LEDGER is None:
-        _LEDGER = EventLedger()
     return _LEDGER
 
 
 def reset_event_ledger() -> None:
     """Drop all named event slots. Intended for tests only."""
-    global _LEDGER
-    _LEDGER = None
+    _LEDGER.clear()
