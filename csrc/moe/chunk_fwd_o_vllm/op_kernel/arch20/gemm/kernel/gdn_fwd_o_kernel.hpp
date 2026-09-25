@@ -233,17 +233,15 @@ public:
     }
 
     // Vec1, NZ-native: consumes the cube staging buffer IN PLACE -- no ND deformat.
-    //   decay_nz = brcA * brcB * maskNZ
-    //   brcA = exp(g[mf*16+r])  : Broadcast<2,1> of exp(g) over 16 cols, replicated per nf
-    //   brcB = exp(-g[nf*16+c]) : Broadcast<2,0> per nf
-    // Verified against the ND reference on host to 2e-16.
+    // Broadcast g before exponentiating: exp(g_i) * exp(-g_j) overflows
+    // for perfectly valid cumulative log-decays (e.g. g_j < -89), and
+    // multiplying the resulting Inf by the causal mask produces NaN.
+    // Compute exp(min(g_i - g_j, 0)) in the same NZ layout instead.
     __aicore__ inline void Vec1NZ(uint32_t gOffset, uint32_t bt) {
         auto stage = resource.ubBuf.template GetBufferByByte<float>(UB_STAGE_OFFSET);
         auto brcA  = resource.ubBuf.template GetBufferByByte<float>(UB_BRC_A_OFFSET);
         auto brcB  = resource.ubBuf.template GetBufferByByte<float>(UB_BRC_B_OFFSET);
         auto gUb   = resource.ubBuf.template GetBufferByByte<float>(UB_GCOMP_OFFSET);
-        auto expg  = resource.ubBuf.template GetBufferByByte<float>(UB_GEXP_OFFSET);
-        auto expmg = resource.ubBuf.template GetBufferByByte<float>(UB_GNEG_OFFSET);
         auto shareT= resource.ubBuf.template GetBufferByByte<uint8_t>(UB_SHARE_OFFSET);
         auto maskNZ= resource.ubBuf.template GetBufferByByte<float>(UB_MASK_OFFSET);
         auto outH  = resource.ubBuf.template GetBufferByByte<half>(UB_OUTH_OFFSET);
@@ -262,23 +260,21 @@ public:
             AscendC::Cast(gUb, gTyped, AscendC::RoundMode::CAST_NONE, bt);
             AscendC::PipeBarrier<PIPE_V>();
         }
-        AscendC::Exp(expg, gUb, bt);
-        AscendC::Muls(expmg, gUb, (float)-1.0, bt);
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Exp(expmg, expmg, bt);
-        AscendC::PipeBarrier<PIPE_V>();
-
         const uint32_t NF = bt / 16, FRUN = NF * 256, N = bt * bt;
         { uint32_t d[2] = {bt, 16}, sr[2] = {bt, 1};
-          AscendC::Broadcast<float, 2, 1>(brcA, expg, d, sr, shareT); }
+          AscendC::Broadcast<float, 2, 1>(brcA, gUb, d, sr, shareT); }
         AscendC::PipeBarrier<PIPE_V>();
         for (uint32_t nf = 1; nf < NF; ++nf) AscendC::DataCopy(brcA[nf * FRUN], brcA, FRUN);
         for (uint32_t nf = 0; nf < NF; ++nf) {
             uint32_t d[2] = {bt, 16}, sr[2] = {1, 16};
-            AscendC::Broadcast<float, 2, 0>(brcB[nf * FRUN], expmg[nf * 16], d, sr, shareT);
+            AscendC::Broadcast<float, 2, 0>(brcB[nf * FRUN], gUb[nf * 16], d, sr, shareT);
         }
         AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Mul(brcA, brcA, brcB, N);
+        AscendC::Sub(brcA, brcA, brcB, N);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Mins(brcA, brcA, 0.0f, N);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Exp(brcA, brcA, N);
         AscendC::PipeBarrier<PIPE_V>();
         AscendC::Mul(brcA, brcA, maskNZ, N);
         AscendC::PipeBarrier<PIPE_V>();

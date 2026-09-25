@@ -206,7 +206,8 @@ class TestChunkFwdOVllm310:
         assert torch.equal(v.cpu(), v_cpu), "FwdO modified its value input"
 
     @pytest.mark.parametrize("g_dtype", [torch.float16, torch.float32])
-    def test_real_shape_distinct_gated_heads_and_chunks(self, g_dtype):
+    @pytest.mark.parametrize("decay_multiplier", [1, 4])
+    def test_real_shape_distinct_gated_heads_and_chunks(self, g_dtype, decay_multiplier):
         """Catch lost/reversed decay and wrong head, chunk or second-stage g indices."""
         heads, chunks, dim = 16, 30, 128
         tokens = chunks * CHUNK_SIZE
@@ -218,7 +219,9 @@ class TestChunkFwdOVllm310:
         h = torch.zeros(1, heads, chunks, dim, dim, dtype=torch.float16).npu()
         # Integer multiples of 1/512, rounded once to the selected input dtype.
         # Reversing head/block order must change a measurable number of outputs.
-        slopes = (torch.arange(heads * chunks).reshape(1, heads, chunks, 1) + 1) / 512
+        # The stronger decay crosses the FP32 exp(-g) overflow boundary;
+        # exp(g_i - g_j) remains finite on every causal element.
+        slopes = decay_multiplier * (torch.arange(heads * chunks).reshape(1, heads, chunks, 1) + 1) / 512
         g_cpu = (-slopes * torch.arange(CHUNK_SIZE)).to(g_dtype).contiguous()
         gv = g_cpu.double()
         gate = torch.exp((gv.unsqueeze(-1) - gv.unsqueeze(-2)).clamp(max=0)).tril()
