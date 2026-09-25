@@ -666,6 +666,7 @@ def _allocate_kv_cache(
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
+    is_glm5_next = any(getattr(spec, "model_version", None) == "glm5_next" for spec in layer_kv_cache_spec.values())
 
     # The restored DeepSeek-V4 planner on main computes capacity for one
     # shared-tuple backing and emits every KVCacheTensor as a view into it.
@@ -712,7 +713,7 @@ def _allocate_kv_cache(
     # once here; allocating tensor.size for every descriptor duplicates the
     # full cache pool and can OOM before the second tensor is initialized.
     hybrid_backing: torch.Tensor | None = None
-    if use_hybrid_layout and not is_dsv4_model:
+    if use_hybrid_layout and not is_dsv4_model and not is_glm5_next:
         tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
         if len(tensor_sizes) != 1:
             raise ValueError("Hybrid KV cache tensors must share one backing allocation.")
@@ -1111,19 +1112,30 @@ def _reshape_kv_cache_v2(
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError(f"KPool tail cache for {layer_name} must use one raw tensor.")
                 typed_slot = raw_cache.view(kv_cache_spec.dtype)
-                tail_block_el = kv_cache_spec.unpadded_page_size_bytes // get_dtype_size(kv_cache_spec.dtype)
-                num_tail_blocks = kv_cache_config.num_blocks
-                if num_tail_blocks * tail_block_el * 2 > typed_slot.numel():
+                dtype_size = get_dtype_size(kv_cache_spec.dtype)
+                num_blocks = kv_cache_config.num_blocks
+                page_el = typed_slot.numel() // num_blocks if num_blocks else 0
+                tail_block_el = kv_cache_spec.unpadded_page_size_bytes // dtype_size
+                if num_blocks and tail_block_el > page_el:
                     raise ValueError(
-                        f"KPool tail cache for {layer_name} exceeds half the small slot: "
-                        f"packed={num_tail_blocks * tail_block_el} elements, slot={typed_slot.numel()}."
+                        f"KPool tail cache for {layer_name} does not fit one small page: "
+                        f"tail={tail_block_el} elements, page={page_el} elements."
                     )
                 kv_caches[layer_name] = [
-                    typed_slot[typed_slot.numel() - num_tail_blocks * tail_block_el :].view(
-                        num_tail_blocks,
-                        2,
-                        kv_cache_spec.block_size,
-                        kv_cache_spec.head_size,
+                    torch.as_strided(
+                        typed_slot,
+                        size=(
+                            num_blocks,
+                            2,
+                            kv_cache_spec.block_size,
+                            kv_cache_spec.head_size,
+                        ),
+                        stride=(
+                            page_el,
+                            kv_cache_spec.block_size * kv_cache_spec.head_size,
+                            kv_cache_spec.head_size,
+                            1,
+                        ),
                     )
                 ]
                 continue
@@ -1181,9 +1193,9 @@ def _reshape_kv_cache_v2(
                 for dim_idx in range(len(shape) - 2, -1, -1):
                     strides[dim_idx] = strides[dim_idx + 1] * shape[dim_idx + 1]
                 typed_slot = raw_single.view(kv_cache_spec.dtype)
-                if strides[0] * shape[0] * 2 > typed_slot.numel():
+                if strides[0] * shape[0] != typed_slot.numel():
                     raise ValueError(
-                        f"Compressed indexer cache for {layer_name} exceeds half the small slot: "
+                        f"Compressed indexer cache for {layer_name} does not exactly fill the small slot: "
                         f"packed={strides[0] * shape[0]} elements, slot={typed_slot.numel()}."
                     )
                 cache = torch.as_strided(typed_slot, size=shape, stride=tuple(strides))
