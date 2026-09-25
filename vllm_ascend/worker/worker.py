@@ -102,6 +102,7 @@ from vllm_ascend.utils import (
     enable_sp,
     register_ascend_customop,
     register_device_print,
+    set_pp_boundary_sp_sharded,
     setup_ascend_local_comm_res,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -189,6 +190,10 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
+        # enable_sp() at execute time sees no model-init context and would
+        # return False, mis-routing SP-sharded PP boundary tensors through
+        # the replicated-tensor transport.
+        set_pp_boundary_sp_sharded(enable_sp(self.vllm_config))
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
         self._pp_send_work: list[Handle] = []
 

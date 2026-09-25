@@ -137,3 +137,42 @@ def test_kimi_k3_dspark_pp_supports_all_target_aliases(architecture):
 )
 def test_kimi_k3_dspark_pp_support_stays_scoped(config):
     assert resolve_spec_pp_support(config) is None
+
+
+def test_pp_boundary_shards_never_use_all_gather_transport():
+    """SP-sharded PP boundary tensors must take the full per-pair send/recv.
+
+    The slice-send + receive-side all-gather transport is only valid for
+    tensors replicated across the TP group; with rank-distinct shards it
+    would rebuild every receiver from pieces of different shards.
+    """
+    from vllm_ascend.patch.worker.patch_distributed import GroupCoordinatorPatch
+    from vllm_ascend.utils import pp_boundary_sp_sharded, set_pp_boundary_sp_sharded
+
+    coordinator = object.__new__(GroupCoordinatorPatch)
+    tp_group = SimpleNamespace(world_size=4)
+
+    set_pp_boundary_sp_sharded(True)
+    try:
+        assert pp_boundary_sp_sharded()
+        # Overrides both the numel-divisibility default and an explicit
+        # per-key opt-in from callers such as the spec-PP send path.
+        assert not GroupCoordinatorPatch._should_use_all_gather(
+            coordinator, "hidden_states", 4 * 7168, tp_group, None
+        )
+        assert not GroupCoordinatorPatch._should_use_all_gather(
+            coordinator, "residual", 4 * 7168, tp_group, {"residual": True}
+        )
+    finally:
+        set_pp_boundary_sp_sharded(False)
+
+    # With a replicated boundary, upstream semantics are untouched.
+    assert GroupCoordinatorPatch._should_use_all_gather(
+        coordinator, "hidden_states", 4 * 7168, tp_group, None
+    )
+    assert not GroupCoordinatorPatch._should_use_all_gather(
+        coordinator, "hidden_states", 7169, tp_group, None
+    )
+    assert not GroupCoordinatorPatch._should_use_all_gather(
+        coordinator, "residual", 4 * 7168, tp_group, {"residual": False}
+    )

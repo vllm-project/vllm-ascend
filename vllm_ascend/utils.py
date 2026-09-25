@@ -971,6 +971,22 @@ def enable_sp(vllm_config=None) -> bool:
     return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
 
 
+# Latched once per worker process: whether PP boundary tensors are
+# rank-distinct sequence shards. Bare ``enable_sp()`` resolves its config
+# from the model-init context, which is absent at execute time, so the PP
+# transport must not re-derive this per step.
+_pp_boundary_sp_sharded = False
+
+
+def set_pp_boundary_sp_sharded(enabled: bool) -> None:
+    global _pp_boundary_sp_sharded
+    _pp_boundary_sp_sharded = enabled
+
+
+def pp_boundary_sp_sharded() -> bool:
+    return _pp_boundary_sp_sharded
+
+
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp

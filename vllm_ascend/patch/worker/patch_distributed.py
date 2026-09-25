@@ -26,7 +26,7 @@ from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, 
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
-from vllm_ascend.utils import create_hccl_pg_options
+from vllm_ascend.utils import create_hccl_pg_options, pp_boundary_sp_sharded
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
 logger = logging.getLogger(__name__)
@@ -152,6 +152,21 @@ class GroupCoordinatorPatch(GroupCoordinator):
             except Exception:
                 logger.exception("Failed to clean up partially initialized GroupCoordinatorPatch")
             raise
+
+    def _should_use_all_gather(
+        self,
+        key: str,
+        numel: int,
+        all_gather_group: "GroupCoordinator | None",
+        all_gather_tensors: dict[str, bool] | None,
+    ) -> bool:
+        # Slice-send plus receive-side all-gather reconstruction assumes the
+        # sender's tensors are replicated across the all-gather group. The PP
+        # boundary of SP-across-PP models carries rank-distinct sequence
+        # shards, so every key must take the full per-pair send/recv.
+        if pp_boundary_sp_sharded():
+            return False
+        return super()._should_use_all_gather(key, numel, all_gather_group, all_gather_tensors)
 
     def _init_device_groups(self, create_cpu_group: bool) -> None:
         reuse_domain = _resolve_reuse_domain(self.group_name)
