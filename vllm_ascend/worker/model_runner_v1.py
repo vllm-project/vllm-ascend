@@ -240,6 +240,10 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+DP_METADATA_NUM_TOKENS = 0
+DP_METADATA_CUDAGRAPH_MODE = 1
+DP_METADATA_HAS_REAL_WORK = 2
+DP_METADATA_FIELD_COUNT = 3
 
 
 
@@ -726,6 +730,7 @@ class NPUModelRunner(GPUModelRunner):
         is_draft_model: bool = False,
         cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         allow_dp_padding: bool = False,
+        is_dummy_run: bool = False,
     ) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
         # our case, we still need to sync the other two flags as well. So we need to
@@ -740,15 +745,35 @@ class NPUModelRunner(GPUModelRunner):
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 
-        packed_tensor = torch.zeros(2, self.dp_size, device="cpu", dtype=torch.int32)
-        packed_tensor[0][self.dp_rank] = num_tokens
-        packed_tensor[1][self.dp_rank] = cudagraph_mode.value
+        packed_tensor = torch.zeros(DP_METADATA_FIELD_COUNT, self.dp_size, device="cpu", dtype=torch.int32)
+        packed_tensor[DP_METADATA_NUM_TOKENS][self.dp_rank] = num_tokens
+        packed_tensor[DP_METADATA_CUDAGRAPH_MODE][self.dp_rank] = cudagraph_mode.value
+        packed_tensor[DP_METADATA_HAS_REAL_WORK][self.dp_rank] = not is_dummy_run
         dist.all_reduce(packed_tensor, group=get_dp_group().cpu_group)
 
         # Unpack the results
-        num_tokens_across_dp = packed_tensor[0, :]
-        max_tokens_across_dp = int(num_tokens_across_dp.max().item())
-        synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor))
+        num_tokens_across_dp = packed_tensor[DP_METADATA_NUM_TOKENS, :]
+        active_dp_mask = packed_tensor[DP_METADATA_HAS_REAL_WORK, :].bool()
+        if not active_dp_mask.any():
+            active_dp_mask = torch.ones_like(active_dp_mask)
+
+        max_tokens_across_dp = int(num_tokens_across_dp[active_dp_mask].max().item())
+        synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor, active_dp_mask))
+
+        # Dummy ranks enter the same collective shape and graph chosen by ranks
+        # with real work without inflating the real ranks' batch size.
+        num_tokens_across_dp[~active_dp_mask] = max_tokens_across_dp
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "DP metadata synchronized: rank=%d role=%s local_tokens=%d "
+                "active_mask=%s synced_tokens=%s aclgraph_mode=%s",
+                self.dp_rank,
+                "dummy" if is_dummy_run else "active",
+                num_tokens,
+                active_dp_mask.tolist(),
+                num_tokens_across_dp.tolist(),
+                synced_cudagraph_mode.name,
+            )
 
         # Create a tensor for num_tokens_after_padding
         if allow_dp_padding or is_draft_model:
@@ -3134,6 +3159,7 @@ class NPUModelRunner(GPUModelRunner):
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
+        is_dummy_run: bool = False,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         has_initial_state = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
@@ -3192,6 +3218,7 @@ class NPUModelRunner(GPUModelRunner):
                                   or enable_sp(self.vllm_config)
                                   or oproj_tp_enable()
                                   or embedding_tp_enable()),
+                is_dummy_run=is_dummy_run,
             )
 
             # Extract DP padding if there is any
@@ -3701,6 +3728,7 @@ class NPUModelRunner(GPUModelRunner):
             # LoRA state when determining the batch descriptor for capture
             force_has_lora=num_active_loras > 0,
             force_num_active_loras=num_active_loras,
+            is_dummy_run=True,
         )
         dcp_dummy_metadata = None
         if cudagraph_runtime_mode is None:
@@ -5497,13 +5525,16 @@ class NPUModelRunner(GPUModelRunner):
         )
 
 
-def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
+def _post_process_cudagraph_mode(tensor: torch.Tensor, active_dp_mask: torch.Tensor | None = None) -> int:
     """
     Synchronize cudagraph_mode across DP ranks by taking the minimum.
     If any rank has NONE (0), all ranks use NONE.
     This ensures all ranks send consistent values (all padded or all unpadded).
     """
-    return int(tensor[1, :].min().item())
+    cudagraph_modes = tensor[DP_METADATA_CUDAGRAPH_MODE, :]
+    if active_dp_mask is not None:
+        cudagraph_modes = cudagraph_modes[active_dp_mask]
+    return int(cudagraph_modes.min().item())
 
 
 def _get_gpu_model_runner_module_name(model_runner) -> str:

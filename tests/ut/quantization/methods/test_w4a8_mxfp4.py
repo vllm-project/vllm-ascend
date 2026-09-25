@@ -6,10 +6,12 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicFusedMoEMethod,
     AscendW4A8MXFPDynamicLinearMethod,
 )
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestAscendW4A8MXFP4LinearMethod(TestBase):
@@ -199,3 +201,59 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
             shared_experts_input=None,
         )
         mock_comm.fused_experts.assert_called_once()
+
+    @patch(
+        "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_device_type",
+        return_value=AscendDeviceType.A5,
+    )
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4._EXTRA_CTX")
+    def test_apply_restores_stacked_layout_for_a5_kimi_mega_moe(self, mock_ctx, _mock_device):
+        tokens = 4
+        layer = nn.Module()
+        layer.w13_weight = nn.Parameter(
+            torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8).transpose(1, 2),
+            requires_grad=False,
+        )
+        layer.w2_weight = nn.Parameter(
+            torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8).transpose(1, 2),
+            requires_grad=False,
+        )
+        layer.w13_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 256, 2, 2), dtype=torch.uint8).transpose(1, 2),
+            requires_grad=False,
+        )
+        layer.w2_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 128, 4, 2), dtype=torch.uint8).transpose(1, 2),
+            requires_grad=False,
+        )
+        layer.activation = MoEActivation.SITU
+        layer.ascend_pertoken_scale = None
+        layer.apply_router_weight_on_input = False
+        layer.ascend_expert_map = None
+        layer.global_redundant_expert_num = 0
+        layer.ascend_mc2_mask = None
+        topk_weights = torch.randn(tokens, 2)
+        topk_ids = torch.randint(0, self.num_experts, (tokens, 2))
+        mock_comm = Mock()
+        mock_comm.fused_experts.return_value = torch.randn(tokens, self.hidden_size)
+        mock_ctx.moe_comm_method = mock_comm
+        mock_ctx.moe_comm_type = MoECommType.FUSED_MC2
+
+        self.scheme.apply(
+            layer,
+            torch.randn(tokens, self.hidden_size, dtype=torch.bfloat16),
+            topk_weights,
+            topk_ids,
+            shared_experts=None,
+            shared_experts_input=None,
+        )
+
+        fused_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertEqual(fused_input.weights.w1.shape, (8, 256, 64))
+        self.assertEqual(fused_input.weights.w2.shape, (8, 128, 128))
+        self.assertEqual(fused_input.weights.w1_scale.shape, (8, 256, 2, 2))
+        self.assertEqual(fused_input.weights.w2_scale.shape, (8, 128, 4, 2))
+        self.assertTrue(fused_input.weights.w1.is_contiguous())
+        self.assertTrue(fused_input.weights.w1_scale.is_contiguous())
+        self.assertEqual(fused_input.activation, MoEActivation.SITU)
+        self.assertEqual(fused_input.quant.mxfp.group_size, 32)
