@@ -16,6 +16,7 @@ from vllm_ascend.ops.triton.compute_slot_mapping import (
     _compute_slot_mapping_kernel,
     _next_power_of_2,
     compute_slot_mapping_fused_groups,
+    prewarm_fused_slot_mapping_kernels,
 )
 
 
@@ -446,7 +447,24 @@ class MultiGroupBlockTable:
                 dtype=torch.int32,
                 device=device,
             )
+            self._fused_any_circular = any(block_table.is_circular for block_table in active_block_tables)
             self._fused_min_block_size = min(block_table.block_size for block_table in active_block_tables)
+
+    def prewarm_fused_slot_mapping_kernels(self) -> None:
+        """Compile the fused slot-mapping kernels during engine warmup.
+
+        Without this warmup the first Triton JIT compilation happens on the
+        first real request and stalls it for seconds.
+        """
+        if not getattr(self, "_can_fuse_slot_mapping", False):
+            return
+        prewarm_fused_slot_mapping_kernels(
+            self._fused_min_block_size,
+            self._fused_max_num_batched_tokens,
+            PAD_SLOT_ID,
+            self._fused_block_table_addrs.device,
+            is_circular_ptr=self._fused_is_circular if self._fused_any_circular else None,
+        )
 
     def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
         for i, block_table in enumerate(self.block_tables):
@@ -491,7 +509,7 @@ class MultiGroupBlockTable:
                 self._fused_block_sizes,
                 self._fused_min_block_size,
                 pad_id=PAD_SLOT_ID,
-                is_circular_ptr=self._fused_is_circular,
+                is_circular_ptr=self._fused_is_circular if self._fused_any_circular else None,
             )
             return
 
