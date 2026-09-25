@@ -49,7 +49,7 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.utils import enable_sp_across_pp, use_updatable_graph
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -138,6 +138,8 @@ def _get_graph_update_backend(
 class ModelAclGraphManager(ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
+    intermediate_tensors: IntermediateTensors | None
+
     def __init__(  # type: ignore[misc]
         self,
         vllm_config: VllmConfig,
@@ -162,6 +164,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         )
         self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
         self.model_runner = model_runner
+        self._pp_sp_output_buffers: IntermediateTensors | None = None
         self.update_stream = self.model_runner.update_stream
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         if super().needs_capture():
@@ -187,7 +190,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
 
     def _graph_relay(self, attn_backend, desc, num_tokens, attn_metadata):
         self.update_stream.wait_stream(torch.npu.current_stream())
-        ret = super().run_fullgraph(desc)
+        ret = self._maybe_slice_pp_sp_output(super().run_fullgraph(desc), num_tokens)
 
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
@@ -223,14 +226,41 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         logger.info_once("ACL graph replay is active for the V2 target model (logged once).")
         return ret
 
+    def _maybe_slice_pp_sp_output(self, ret, num_tokens: int):
+        # Non-last PP stages emit sequence-sharded boundary tensors, while
+        # upstream graph replay reports outputs at the full token count.
+        if enable_sp_across_pp(self.vllm_config) and isinstance(ret, IntermediateTensors):
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            local_num_tokens = (num_tokens + tp_size - 1) // tp_size
+            ret = IntermediateTensors({name: tensor[:local_num_tokens] for name, tensor in ret.tensors.items()})
+        return ret
+
     def _updatable_graph_replay(self, desc, attn_metadata):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
         resolved_tasks = graph.resolve_tasks(ContextSource(attn_metadata))
         self.update_stream.wait_stream(torch.npu.current_stream())
-        ret = super().run_fullgraph(desc)
+        ret = self._maybe_slice_pp_sp_output(super().run_fullgraph(desc), desc.num_tokens)
         graph.update(self.update_stream, resolved_tasks)
         return ret
+
+    def _prepare_pp_sp_output(self, output: IntermediateTensors) -> None:
+        # Upstream saves graph output using [:full_num_tokens]. Give that copy
+        # a local-sized view, while all graph gears share the same backing.
+        if self._pp_sp_output_buffers is None:
+            self._pp_sp_output_buffers = IntermediateTensors.empty_like(output)
+        self.intermediate_tensors = IntermediateTensors(
+            {name: tensor[: output[name].shape[0]] for name, tensor in self._pp_sp_output_buffers.tensors.items()}
+        )
+
+    @contextmanager
+    def _pp_sp_capture_buffers(self):
+        self._pp_sp_output_buffers = self.intermediate_tensors
+        try:
+            yield
+        finally:
+            if self._pp_sp_output_buffers is not None:
+                self.intermediate_tensors = self._pp_sp_output_buffers
 
     def capture(
         self,
@@ -249,14 +279,21 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         pcp_manager: Any = None,
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
-        model = ModelWithContext(model)
+        pp_sp_tp_size = (
+            self.vllm_config.parallel_config.tensor_parallel_size if enable_sp_across_pp(self.vllm_config) else 1
+        )
+        model = ModelWithContext(
+            model,
+            pp_sp_tp_size=pp_sp_tp_size,
+            prepare_pp_output=self._prepare_pp_sp_output if pp_sp_tp_size > 1 else None,
+        )
         pcp_manager = getattr(self.model_runner, "pcp_manager", None)
         if pcp_manager is not None:
             cudagraph_utils.prepare_inputs_to_capture = partial(
                 _prepare_pcp_inputs_to_capture,
                 pcp_manager=pcp_manager,
             )
-        with communicator_switch():
+        with communicator_switch(), self._pp_sp_capture_buffers():
             return super().capture(
                 model,
                 model_state,
@@ -278,11 +315,21 @@ class ModelWithContext(nn.Module):
     so we can inherit vllm's CudaGraphManager._capture_full_graph.
     """
 
-    def __init__(self, original_model, is_draft_model=False, is_draft_model_prefill=False):
+    def __init__(
+        self,
+        original_model,
+        is_draft_model=False,
+        is_draft_model_prefill=False,
+        *,
+        pp_sp_tp_size: int = 1,
+        prepare_pp_output: Callable[[IntermediateTensors], None] | None = None,
+    ):
         super().__init__()
         self.original_model = original_model
         self.is_draft_model = is_draft_model
         self.is_draft_model_prefill = is_draft_model_prefill
+        self.pp_sp_tp_size = pp_sp_tp_size
+        self.prepare_pp_output = prepare_pp_output
 
     def forward(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -297,7 +344,17 @@ class ModelWithContext(nn.Module):
         if self.is_draft_model_prefill:
             _EXTRA_CTX.is_draft_model_prefill = True
 
-        return self.original_model(*args, **kwargs)
+        intermediate_tensors = kwargs.get("intermediate_tensors")
+        if self.pp_sp_tp_size > 1 and intermediate_tensors is not None:
+            num_tokens = kwargs["positions"].shape[0]
+            local_num_tokens = (num_tokens + self.pp_sp_tp_size - 1) // self.pp_sp_tp_size
+            kwargs["intermediate_tensors"] = IntermediateTensors(
+                {name: tensor[:local_num_tokens] for name, tensor in intermediate_tensors.tensors.items()}
+            )
+        output = self.original_model(*args, **kwargs)
+        if self.prepare_pp_output is not None and isinstance(output, IntermediateTensors):
+            self.prepare_pp_output(output)
+        return output
 
     def get_original_model(self):
         return self.original_model
