@@ -310,6 +310,18 @@ class NPUPlatform(Platform):
 
         register_deepseek_v4_vision_config_convertor()
 
+        # Eager side-effect import: registers the Ascend KV-cache dtype
+        # handlers (fp8 -> torch.float8_e4m3fn) via vLLM's
+        # register_kv_cache_dtype mechanism. This runs in the launcher
+        # process, so CacheConfig._validate_cache_dtype (which activates the
+        # platform before checking KV_CACHE_DTYPES membership) sees the
+        # registered dtypes. Worker processes re-run the registration through
+        # the eager import in vllm_ascend/worker/worker.py.
+        from vllm_ascend.core.kv_cache_dtype_handlers import (  # noqa: F401
+            Fp8AscendHandler,
+            Int8AscendHandler,
+        )
+
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
