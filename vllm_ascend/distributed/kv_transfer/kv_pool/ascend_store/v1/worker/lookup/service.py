@@ -5,9 +5,6 @@ from __future__ import annotations
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase
-
 from .executor import LookupExecutionResult, LookupExecutor
 from .task import LookupTask, LookupTaskBuilder
 
@@ -17,17 +14,13 @@ class LookupService:
 
     def __init__(
         self,
-        backend: Backend,
-        token_database: ChunkedTokenDatabase,
-        tp_size: int,
-        pp_size: int,
-        dcp_size: int,
-        num_kv_heads: int,
+        task_builder: LookupTaskBuilder,
+        executor: LookupExecutor,
         max_model_len: int,
         cache_transfer_granularity: int,
     ) -> None:
-        self._task_builder = LookupTaskBuilder(token_database, tp_size, pp_size, dcp_size, num_kv_heads)
-        self._executor = LookupExecutor(backend)
+        self._task_builder = task_builder
+        self._executor = executor
         self._max_model_len = max_model_len
         self._cache_transfer_granularity = cache_transfer_granularity
 

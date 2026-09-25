@@ -22,6 +22,6 @@ class RequestTracker:
         block_hashes: list[BlockHash],
     ) -> None:
         self.token_len += num_tokens
-        if new_block_ids is not None:
+        if new_block_ids:
             self.block_ids.extend(new_block_ids[0])
         self.block_hashes = block_hashes
