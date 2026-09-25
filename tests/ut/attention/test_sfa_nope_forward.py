@@ -25,11 +25,7 @@ def mock_scatter_nd_update(monkeypatch, request):
     def scatter_pa(values, slots, *, key_cache):
         scatter(key_cache.view(-1, key_cache.shape[-1]), slots.view(-1, 1), values.view(-1, values.shape[-1]))
 
-    def native_scatter(cache, indices, updates):
-        valid = indices[:, 0] >= 0
-        return scatter(cache, indices[valid], updates[valid])
-
-    monkeypatch.setattr(sparse_mla.torch_npu, "npu_scatter_nd_update_", native_scatter, raising=False)
+    monkeypatch.setattr(sparse_mla.torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
     monkeypatch.setattr(sparse_mla.torch_npu, "npu_scatter_pa_cache", scatter_pa, raising=False)
     monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", scatter, raising=False)
     monkeypatch.setattr(sparse_mla, "DeviceOperator", request.param)
@@ -117,11 +113,11 @@ def test_nope_exec_kv_trims_unused_slots_and_converts_values():
     assert torch.equal(cache, expected)
 
 
-def test_nope_exec_kv_full_graph_preserves_native_padding_behavior():
+def test_nope_exec_kv_full_graph_uses_device_scatter_cache():
     backing = torch.zeros(4, 4, 1, 8, dtype=torch.bfloat16)
     cache = backing[1:-1]
     values = torch.arange(24, dtype=torch.bfloat16).view(3, 8)
-    slots = torch.tensor([1, -1, 4], dtype=torch.int64)
+    slots = torch.tensor([1, 3, 4], dtype=torch.int64)
     impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=8, kv_a_layernorm=lambda x: x)
     with (
         patch.object(
@@ -129,17 +125,20 @@ def test_nope_exec_kv_full_graph_preserves_native_padding_behavior():
             "get_forward_context",
             return_value=SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.FULL),
         ),
-        patch.object(sparse_mla.DeviceOperator, "scatter_cache") as device_scatter,
         patch.object(
-            sparse_mla.torch_npu, "npu_scatter_nd_update_", wraps=sparse_mla.torch_npu.npu_scatter_nd_update_
-        ) as native_scatter,
+            sparse_mla.DeviceOperator, "scatter_cache", wraps=sparse_mla.DeviceOperator.scatter_cache
+        ) as device_scatter,
     ):
         AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, SimpleNamespace(num_actual_tokens=3))
-    device_scatter.assert_not_called()
-    native_scatter.assert_called_once()
-    assert torch.equal(native_scatter.call_args.args[1], slots.view(-1, 1))
+    device_scatter.assert_called_once()
+    stored_values, stored_cache, stored_slots, tokens = device_scatter.call_args.args
+    assert torch.equal(stored_values, values)
+    assert stored_cache is cache
+    assert stored_slots is slots
+    assert tokens == 3
     expected = torch.zeros_like(backing)
     expected[1, 1, 0] = values[0]
+    expected[1, 3, 0] = values[1]
     expected[2, 0, 0] = values[2]
     assert torch.equal(backing, expected)
 
