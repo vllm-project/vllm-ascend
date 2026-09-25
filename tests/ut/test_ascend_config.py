@@ -189,6 +189,7 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
+        self.assertFalse(ascend_config.enable_kimi_o_proj_mm_reduce_scatter)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
         self.assertEqual(ascend_config.mega_moe_max_tokens, 65536)
 
@@ -198,6 +199,14 @@ class TestAscendConfig(TestBase):
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertTrue(ascend_fusion_config.fusion_ops_gmmswigluquant)
         self.assertFalse(ascend_config.rl_config.enabled)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_kimi_o_proj_mm_reduce_scatter(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"enable_kimi_o_proj_mm_reduce_scatter": True}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertTrue(ascend_config.enable_kimi_o_proj_mm_reduce_scatter)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
