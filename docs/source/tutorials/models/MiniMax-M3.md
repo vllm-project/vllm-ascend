@@ -433,6 +433,87 @@ Multi-node deployment on A3 servers without prefill–decode disaggregation is n
       --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
     ```
 
+=== "A2 series(W8A8)"
+
+    Run the following command on node 0:
+
+    ```bash
+    local_ip="${NODE0_IP}"
+    node0_ip="${NODE0_IP}"
+
+    export HCCL_IF_IP=$local_ip
+    export IFNAME="${NETWORK_INTERFACE}"
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME="$IFNAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export TP_SOCKET_IFNAME="$IFNAME"
+    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+
+    vllm serve ${WEIGHT_PATH} \
+      --host 0.0.0.0 \
+      --port 11223 \
+      --served-model-name minimax-m3 \
+      --trust-remote-code \
+      --quantization ascend \
+      --max-model-len 131072 \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --max-num-seqs 8 \
+      --data-parallel-size 2 \
+      --data-parallel-size-local 1 \
+      --data-parallel-start-rank 0 \
+      --data-parallel-address $node0_ip \
+      --distributed-executor-backend mp \
+      --gpu-memory-utilization 0.92 \
+      --reasoning-parser minimax_m3 \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
+      --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"weight_nz_mode":2}' > ${LOG_PATH} 2>&1 &
+    ```
+
+    Run the following command on node 1:
+
+    ```bash
+    local_ip="${NODE1_IP}"
+    node0_ip="${NODE0_IP}"
+
+    export HCCL_IF_IP=$local_ip
+    export IFNAME="${NETWORK_INTERFACE}"
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME="$IFNAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export TP_SOCKET_IFNAME="$IFNAME"
+    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+
+    vllm serve ${WEIGHT_PATH} \
+      --host 0.0.0.0 \
+      --port 11223 \
+      --served-model-name minimax-m3 \
+      --trust-remote-code \
+      --headless \
+      --quantization ascend \
+      --max-model-len 131072 \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --max-num-seqs 8 \
+      --data-parallel-size 2 \
+      --data-parallel-size-local 1 \
+      --data-parallel-start-rank 1 \
+      --data-parallel-address $node0_ip \
+      --distributed-executor-backend mp \
+      --gpu-memory-utilization 0.92 \
+      --reasoning-parser minimax_m3 \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
+      --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"weight_nz_mode":2}' > ${LOG_PATH} 2>&1 &
+    ```
+
 ### 5.3 Prefill-Decode Disaggregation
 
 We'd like to show the deployment guide of MiniMax-M3 on a multi-node environment with 1P1D for better performance.
