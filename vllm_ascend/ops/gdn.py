@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from functools import wraps
+from functools import lru_cache, wraps
 
 import torch
 import torch_npu
@@ -32,7 +32,6 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # typ
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -47,6 +46,19 @@ from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
+
+
+@lru_cache(maxsize=1)
+def _get_fla_gdn_prefill_op():
+    try:
+        from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError(
+            "FLA NPU GDN prefill requires a current "
+            "flash-linear-attention-npu wheel providing "
+            "fla_npu.ops.ascendc.chunk_gated_delta_rule_fwd."
+        ) from exc
+    return chunk_gated_delta_rule_fwd
 
 
 def _get_base_conv1d(layer: nn.Module) -> nn.Module:
@@ -727,7 +739,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            ascend_config = get_ascend_config()
             device_type = get_ascend_device_type()
             if get_pcp_group().world_size == 1 and device_type in (
                 AscendDeviceType.A2,
@@ -750,7 +761,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     initial_state=initial_state,
                     scale=key_non_spec.shape[-1] ** -0.5,
                     prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
-                    fused_fwd=ascend_config._gdn_prefill_op,
+                    fused_fwd=_get_fla_gdn_prefill_op(),
                 )
                 ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
             # Use the fused CANN operator when available (probed once, cached on
