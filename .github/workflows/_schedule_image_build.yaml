@@ -93,7 +93,7 @@ on:
         description: 'Torch NPU version'
         required: false
         type: string
-        default: '26.1.0'
+        default: '26.2.0'
       torch_npu_date:
         description: 'Torch NPU date'
         required: false
@@ -108,12 +108,12 @@ on:
         description: 'CANN version for daily tag naming (e.g. 2026.08.03)'
         required: false
         type: string
-        default: '9.1.0_20260731131545'
+        default: '9.2.0_20260918144839'
       cann_image_version:
-        description: 'CANN version for the build container image tag (default matches Dockerfile FROM: 9.1.0)'
+        description: 'CANN version for the build container image tag (default matches Dockerfile FROM: 9.2.0)'
         required: false
         type: string
-        default: '9.1.0'
+        default: '9.2.0'
       soc:
         description: 'Ascend SoC type for the CANN base image (e.g. 910b, a3, 310p, 950)'
         required: false
