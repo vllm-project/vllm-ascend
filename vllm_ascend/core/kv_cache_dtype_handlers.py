@@ -50,9 +50,6 @@ if register_kv_cache_dtype is not None:
         def torch_dtype(self) -> torch.dtype:
             return torch.float8_e4m3fn
 
-        def is_quantized(self) -> bool:
-            return True
-
         def quant_mode(self):
             return KVQuantMode.CUSTOM
 
@@ -64,9 +61,6 @@ if register_kv_cache_dtype is not None:
 
         def torch_dtype(self) -> torch.dtype:
             return torch.int8
-
-        def is_quantized(self) -> bool:
-            return True
 
         def quant_mode(self):
             return KVQuantMode.CUSTOM
