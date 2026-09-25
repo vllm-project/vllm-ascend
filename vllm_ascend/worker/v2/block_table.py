@@ -44,9 +44,23 @@ class AscendBlockTables(BlockTables):
         cp_rank: int = 0,
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
+        circular: list[bool] | None = None,
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
+        if circular is not None:
+            if len(circular) != len(block_sizes):
+                raise ValueError("Circular flags must match the number of cache groups.")
+            if slot_mapping_enabled is not None:
+                circular = [ring and enabled for ring, enabled in zip(circular, slot_mapping_enabled, strict=True)]
+            if any(circular):
+                if cp_size != 1:
+                    raise ValueError("Circular tail caches do not support context parallelism.")
+                if any(
+                    ring and block_size != kernel_size
+                    for ring, block_size, kernel_size in zip(circular, block_sizes, kernel_block_sizes)
+                ):
+                    raise ValueError("Circular caches must retain their physical ring capacity.")
         super().__init__(
             block_sizes,
             max_num_reqs,
@@ -67,6 +81,9 @@ class AscendBlockTables(BlockTables):
         min_kernel_block_size = min(kernel_block_sizes)
         window_size = (self._triton_block_size + min_kernel_block_size - 1) // min_kernel_block_size + 1
         self._block_table_window_size = triton.next_power_of_2(window_size)
+        self.is_circular = (
+            torch.tensor(circular, dtype=torch.bool, device=device) if circular is not None and any(circular) else None
+        )
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.slot_mappings
@@ -110,5 +127,7 @@ class AscendBlockTables(BlockTables):
             BLOCK_TABLE_WINDOW_SIZE=self._block_table_window_size,
             slot_mapping_enabled=slot_mapping_enabled,
             HAS_SLOT_MAPPING_ENABLED=True,
+            is_circular_ptr=self.is_circular,
+            HAS_CIRCULAR=self.is_circular is not None,
         )
         return slot_mappings[:, :num_tokens_padded]

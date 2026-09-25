@@ -18,6 +18,7 @@
 #
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -57,10 +58,12 @@ from vllm_ascend.ascend_forward_context import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.models.glm5next.cache_views import build_kv_cache_copy_views
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
@@ -69,7 +72,10 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.attn_utils import (
+    _get_layer_kv_cache_specs,
+    build_attn_state,
+)
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -95,6 +101,7 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    kv_caches: list[torch.Tensor]
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -277,7 +284,7 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
-        with graph_manager_wrapper(self):
+        with graph_manager_wrapper(self, kv_cache_config):
             super().initialize_kv_cache(
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
@@ -289,6 +296,14 @@ class NPUModelRunner(GPUModelRunner):
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
+
+        layer_specs = _get_layer_kv_cache_specs(self.kv_cache_config)
+        self.kv_caches = build_kv_cache_copy_views(
+            self.kv_cache_config,
+            layer_specs,
+            lambda name: self.compilation_config.static_forward_context[name].kv_cache,
+            self.kv_caches,
+        )
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
@@ -918,9 +933,15 @@ class NPUModelRunner(GPUModelRunner):
 
 
 @contextmanager
-def graph_manager_wrapper(model_runner):
+def graph_manager_wrapper(model_runner, kv_cache_config: KVCacheConfig | None = None):
     """Context manager to override graph manager."""
     original_graph_manager = vllm_model_runner.ModelCudaGraphManager
+    original_block_tables = vllm_model_runner.BlockTables
+    circular = (
+        [is_circular_kv_cache_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups]
+        if kv_cache_config is not None
+        else []
+    )
 
     def factory(  # type: ignore[misc]
         vllm_config: VllmConfig,
@@ -944,6 +965,9 @@ def graph_manager_wrapper(model_runner):
 
     try:
         vllm_model_runner.ModelCudaGraphManager = factory
+        if any(circular):
+            vllm_model_runner.BlockTables = partial(original_block_tables, circular=circular)
         yield
     finally:
         vllm_model_runner.ModelCudaGraphManager = original_graph_manager
+        vllm_model_runner.BlockTables = original_block_tables

@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pooled-cache physical views for GLM-Next on Model Runner V1."""
+"""Pooled-cache physical views and copy-on-write layout for GLM-Next."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 
 import torch
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -140,3 +140,46 @@ def view_glm5_next_cache(
         if v_dim == 0:
             return _view_nope_main_mla_cache(kv_cache_spec, raw_cache, attn_backend, kernel_block_size)
     return None
+
+
+def build_kv_cache_copy_views(
+    kv_cache_config: KVCacheConfig,
+    layer_specs: Mapping[str, KVCacheSpec],
+    get_layer_cache: Callable[[str], torch.Tensor | Sequence[torch.Tensor]],
+    runner_caches: Iterable[torch.Tensor | Sequence[torch.Tensor]],
+) -> list[torch.Tensor]:
+    """Expose logical pages to upstream COW without changing layer bindings.
+
+    Main MLA/Mamba components alias complete pages, so copy their shared
+    page only once. Indexer/tail components occupy separate packed regions
+    and must retain their individual strides in the copy inventory.
+    """
+    packed_tail_layers = {name for name, spec in layer_specs.items() if isinstance(spec, AscendIndexerKPoolTailSpec)}
+    shared_cache_views: dict[int, torch.Tensor] = {}
+    for descriptor in kv_cache_config.kv_cache_tensors:
+        if (
+            len(descriptor.layers) < 2
+            or descriptor.layer_stride != 0
+            or packed_tail_layers.intersection(descriptor.layers)
+        ):
+            continue
+        caches = [get_layer_cache(name) for name in descriptor.layers]
+        first = caches[0]
+        if not isinstance(first, torch.Tensor):
+            first = first[0]
+        storage = first.untyped_storage()
+        base = first.storage_offset() * first.element_size()
+        assert base + descriptor.size <= storage.nbytes()
+        pages = torch.empty(0, dtype=torch.uint8, device=first.device).set_(
+            storage, base, (kv_cache_config.num_blocks, descriptor.block_stride)
+        )
+        for cache in caches:
+            shared_cache_views[id(cache)] = pages
+
+    copy_caches = (shared_cache_views.get(id(cache), cache) for cache in runner_caches)
+    return [
+        tensor
+        for cache in copy_caches
+        for tensor in ((cache,) if isinstance(cache, torch.Tensor) else cache)
+        if tensor.numel() > 0
+    ]

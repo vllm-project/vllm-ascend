@@ -27,6 +27,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     yarn_get_mscale,
 )
+from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.kv_cache import (
@@ -107,13 +108,14 @@ class Indexer(nn.Module):
             cache_config=cache_config,
             compress_ratio=self.index_kpool,
         )
-        # Request-owned FP32 K/gate ring retains the incomplete pool.
+        # Retain speculative history while keeping the ring compatible with
+        # the no-prefix coordinator's scheduler-block divisibility contract.
         self.tail_cache = Glm5NextTailCache(
             head_dim=self.head_dim,
             dtype=torch.float32,
             prefix=f"{prefix}.tail_cache",
             compress_ratio=self.index_kpool,
-            ring_capacity=get_kpool_tail_ring_capacity(vllm_config, self.index_kpool),
+            ring_capacity=next_power_of_2(get_kpool_tail_ring_capacity(vllm_config, self.index_kpool)),
         )
         self.prefix = prefix
 

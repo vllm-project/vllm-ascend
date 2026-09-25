@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -43,6 +44,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
 from vllm_ascend.worker.v2 import attn_utils
+from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
@@ -970,7 +972,7 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         enable_sparse_sfa_c8=sparse_c8,
         dtype=torch.bfloat16,
     )
-    layer.get_kv_cache_spec = lambda _cfg: SimpleNamespace(
+    layer.get_kv_cache_spec = lambda _cfg: AscendMLAAttentionSpec(
         block_size=16,
         num_kv_heads=1,
         head_size=128,
@@ -1189,3 +1191,30 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     assert forwarded["positions"].tolist() == [0, 1]
     assert forwarded["is_prefilling"] is True
     assert module.build_attn_metadata is stub
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_multistep_draft_capture_metadata_lifecycle(monkeypatch, fail):
+    module = SimpleNamespace(build_attn_metadata=lambda **kwargs: kwargs)
+    monkeypatch.setattr(attn_utils, "_BUILD_ATTN_METADATA_MODULE", module)
+    original_model = torch.nn.Identity()
+    speculator = SimpleNamespace(model=original_model, for_cudagraph_capture=False)
+    with pytest.raises(RuntimeError) if fail else nullcontext(), model_capture_wrapper(speculator, False):
+        # Each warmup/recording step rebuilds draft metadata under mode NONE.
+        for _ in range(3):
+            with attn_utils.build_draft_attn_metadata_factory(
+                torch.arange(4),
+                2,
+                False,
+                attn_state=AscendAttentionState.SpecDecoding,
+                for_cudagraph_capture=speculator.for_cudagraph_capture,
+            ):
+                metadata = module.build_attn_metadata()
+                assert metadata["for_cudagraph_capture"] is True
+                assert metadata["attn_state"] is AscendAttentionState.SpecDecoding
+        if fail:
+            raise RuntimeError("capture failed")
+    assert speculator.model is original_model
+    assert speculator.for_cudagraph_capture is False
+    with attn_utils.build_draft_attn_metadata_factory(torch.arange(4), 2, False):
+        assert "for_cudagraph_capture" not in module.build_attn_metadata()

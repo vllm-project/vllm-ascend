@@ -25,6 +25,8 @@ def _compute_slot_mappings_kernel(
     BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
     slot_mapping_enabled=None,
     HAS_SLOT_MAPPING_ENABLED: tl.constexpr = False,
+    is_circular_ptr=None,
+    HAS_CIRCULAR: tl.constexpr = False,
 ):
     group_id = tl.program_id(0)
     batch_idx = tl.program_id(1)
@@ -55,6 +57,9 @@ def _compute_slot_mappings_kernel(
     req_state_idx = tl.load(idx_mapping + batch_idx)
     start_idx = tl.load(query_start_loc + batch_idx)
     end_idx = tl.load(query_start_loc + batch_idx + 1)
+    is_circular = False
+    if HAS_CIRCULAR:
+        is_circular = tl.load(is_circular_ptr + group_id).to(tl.int1)
 
     lane_offsets = tl.arange(0, TRITON_BLOCK_SIZE)
     block_table_offsets = tl.arange(0, BLOCK_TABLE_WINDOW_SIZE)
@@ -80,6 +85,10 @@ def _compute_slot_mappings_kernel(
         # Replace the remainder with multiply/subtract to avoid scalar fallback
         # on Ascend.
         block_offsets = local_positions - kernel_block_size * block_indices
+        if HAS_CIRCULAR:
+            # Fixed rings retain the position offset but always use the first
+            # request block, as in the MRV1 circular slot-mapping path.
+            block_indices = tl.where(is_circular, 0, block_indices)
 
         # Stage only the contiguous portion of this request row used by the
         # current token tile. The window bound is selected at launch from the
@@ -98,6 +107,8 @@ def _compute_slot_mappings_kernel(
         block_numbers = tl.gather(block_table_window, relative_block_indices, 0).to(tl.int32)
 
         slot_ids = block_numbers * kernel_block_size + block_offsets
+        if HAS_CIRCULAR:
+            slot_ids = tl.where(is_circular & (positions < 0), PAD_ID, slot_ids)
         if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 

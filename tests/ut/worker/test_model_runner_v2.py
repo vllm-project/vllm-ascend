@@ -604,6 +604,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
 
     def _super(self, kv_cache_config, kv_cache_allocation_context=None):
         self.kv_cache_config = kv_cache_config
+        self.kv_caches = []
         self.attn_groups = []
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
         seen["cfg"] = kv_cache_config
@@ -653,6 +654,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
         called = True
         captured_kwargs.update(kwargs)
         self.kv_cache_config = kv_cache_config
+        self.kv_caches = []
         self.attn_groups = []
 
     with (
@@ -667,6 +669,61 @@ def test_initialize_kv_cache_forwards_allocation_context():
 
     assert called is True
     assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_cache_factory_passes_circular_flags_during_construction_and_restores(fail):
+    from vllm_ascend.worker.v2.model_runner import graph_manager_wrapper
+
+    original = vllm_model_runner.BlockTables
+    plan = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(is_circular=x)) for x in [False, True]],
+    )
+    factory = MagicMock()
+    with patch.object(vllm_model_runner, "BlockTables", factory):
+        with (
+            pytest.raises(RuntimeError) if fail else nullcontext(),
+            graph_manager_wrapper(_make_runner(), plan),
+        ):
+            vllm_model_runner.BlockTables(block_sizes=[128, 4])
+            factory.assert_called_once_with(block_sizes=[128, 4], circular=[False, True])
+            if fail:
+                raise RuntimeError("initialization failed")
+        assert vllm_model_runner.BlockTables is factory
+    assert vllm_model_runner.BlockTables is original
+
+
+@pytest.mark.parametrize("layer_stride,layer_names", [(0, ["single"]), (24, ["first", "second"])])
+def test_copy_inventory_preserves_nonshared_cache_components(layer_stride, layer_names):
+    runner = _make_runner()
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.pcp_manager = None
+    runner.speculator = None
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+    parts = [torch.arange(12).view(3, 4), torch.arange(6).view(3, 2)]
+    caches = [parts, torch.empty(3, 0)]
+    plan = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[SimpleNamespace(layer_stride=layer_stride, layers=layer_names)],
+        kv_cache_groups=[],
+    )
+
+    def initialize(_runner, cache_config, kv_cache_allocation_context=None):
+        _runner.kv_cache_config = cache_config
+        _runner.kv_caches = caches
+
+    with (
+        patch.object(GPUModelRunner, "initialize_kv_cache", initialize),
+        patch("vllm_ascend.worker.v2.model_runner.graph_manager_wrapper", return_value=nullcontext()),
+        patch("vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache"),
+    ):
+        runner.initialize_kv_cache(plan)
+
+    assert len(runner.kv_caches) == 2
+    assert all(actual is expected for actual, expected in zip(runner.kv_caches, parts))
+    assert caches[0] is parts
 
 
 @pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])

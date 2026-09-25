@@ -48,6 +48,7 @@ class AscendIndexerKPoolMetadata:
     cum_query_lens: torch.Tensor | None = None
     raw_seq_lens: torch.Tensor | None = None
     num_actual_tokens: int = 0
+    is_graph_capture: bool = False
 
 
 class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
@@ -80,19 +81,18 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             raise ValueError(f"Ascend Indexer KPool cache requires compress_ratio > 1, got {compress_ratio}.")
         if not layer_names or any(not name.endswith(".indexer.k_cache") for name in layer_names):
             raise ValueError(f"Invalid Indexer KPool cache layer names: {layer_names}.")
+        if getattr(kv_cache_spec, "indexes_kv_by_block_stride", False):
+            layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
+            # Restore logical addressing after AttentionGroup's size conversion,
+            # retaining the other fields of the grouped cache spec.
+            kv_cache_spec = kv_cache_spec.copy_with_new_block_size(layer.get_kv_cache_spec(vllm_config).block_size)
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.logical_block_size = vllm_config.cache_config.block_size
+        self.logical_block_size = kv_cache_spec.block_size
         self.storage_block_size = get_storage_block_size(kv_cache_spec)
         if self.storage_block_size <= 0:
             raise ValueError(f"Indexer KPool storage block size must be positive, got {self.storage_block_size}.")
         self.compress_ratio = compress_ratio
-        if self.logical_block_size % GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE:
-            raise ValueError(
-                "GLM-Next logical block size must be divisible by the SFA "
-                f"kernel block size: logical={self.logical_block_size}, "
-                f"kernel={GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE}."
-            )
-        self.kernel_row_block_size = GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE // self.compress_ratio
+        self.set_kernel_block_size(GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE)
         scheduler_config = vllm_config.scheduler_config
         self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
         self._max_num_seqs = scheduler_config.max_num_seqs
@@ -147,6 +147,26 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             )
             self._metadata_buffers[key] = buffers
         return buffers
+
+    def set_kernel_block_size(self, kernel_block_size: int) -> None:
+        if (
+            kernel_block_size <= 0
+            or self.logical_block_size % kernel_block_size
+            or kernel_block_size % self.compress_ratio
+        ):
+            raise ValueError(
+                "GLM-Next logical block size must be divisible by the SFA "
+                f"kernel block size: logical={self.logical_block_size}, "
+                f"kernel={kernel_block_size}."
+            )
+        self.kernel_block_size = kernel_block_size
+        self.kernel_row_block_size = kernel_block_size // self.compress_ratio
+
+    def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata) -> AscendIndexerKPoolMetadata:
+        metadata = self.build(0, common_attn_metadata)
+        # Capture warmup and recording must use the same full-capacity buffers.
+        metadata.is_graph_capture = True
+        return metadata
 
     def build(
         self,
@@ -464,8 +484,11 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         if not isinstance(tail_metadata, AscendIndexerKPoolTailMetadata):
             raise TypeError("GLM KPool backend requires tail-cache metadata.")
 
+        # MRV2 captures FULL graphs with runtime mode NONE. The capture
+        # must cover future sequence lengths, not the dummy's short prefix.
+        full_graph = context.cudagraph_runtime_mode == CUDAGraphMode.FULL or indexer_metadata.is_graph_capture
         num_tokens = hidden_states.shape[0]
-        if context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
+        if not full_graph:
             num_tokens = min(num_tokens, indexer_metadata.num_actual_tokens)
         hidden = hidden_states[:num_tokens]
         k_hidden = k_hidden_states[:num_tokens]
@@ -513,7 +536,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             index_kpool=self.index_kpool,
             max_pool_seq_len=(
                 indexer_metadata.block_table.shape[1] * indexer_cache.shape[1]
-                if context.cudagraph_runtime_mode == CUDAGraphMode.FULL or indexer_metadata.seq_lens_cpu is None
+                if full_graph or indexer_metadata.seq_lens_cpu is None
                 else int(indexer_metadata.seq_lens_cpu.max())
                 if indexer_metadata.seq_lens_cpu.numel()
                 else 0

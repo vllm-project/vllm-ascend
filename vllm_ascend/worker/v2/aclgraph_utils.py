@@ -328,8 +328,14 @@ class ModelWithContext(nn.Module):
 @contextmanager
 def model_capture_wrapper(speculator, is_draft_model_prefill):
     """Context manager to override speculator's model for speculator capturing."""
+    previous_capture = getattr(speculator, "for_cudagraph_capture", None)
     try:
+        if previous_capture is not None:
+            # Multi-step drafting rebuilds metadata inside warmup/recording.
+            speculator.for_cudagraph_capture = True
         speculator.model = ModelWithContext(speculator.model, True, is_draft_model_prefill)
         yield
     finally:
         speculator.model = speculator.model.get_original_model()
+        if previous_capture is not None:
+            speculator.for_cudagraph_capture = previous_capture

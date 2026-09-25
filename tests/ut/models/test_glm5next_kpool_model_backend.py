@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from torch import nn
+from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.indexer_kpool as backend_module
 from vllm_ascend.attention.indexer_kpool import (
@@ -211,8 +212,15 @@ class _RecordingKPool(nn.Module):
         return None
 
 
+@pytest.mark.parametrize(
+    "runtime_mode,capturing,expected_pool_len",
+    [(CUDAGraphMode.NONE, False, 1), (CUDAGraphMode.NONE, True, 2), (CUDAGraphMode.FULL, False, 2)],
+)
 def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     monkeypatch,
+    runtime_mode,
+    capturing,
+    expected_pool_len,
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
@@ -243,7 +251,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
         "get_forward_context",
         lambda: SimpleNamespace(
             attn_metadata={"indexer.tail": tail_metadata},
-            cudagraph_runtime_mode=None,
+            cudagraph_runtime_mode=runtime_mode,
             virtual_engine=0,
         ),
     )
@@ -251,6 +259,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     normalized_q_c = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
     hidden = torch.ones(2, 3)
     metadata = _indexer_metadata(num_tokens=2)
+    metadata.is_graph_capture = capturing
     metadata.num_actual_tokens = 2
     metadata.cum_query_lens = torch.tensor([1, 2], dtype=torch.int32)
     metadata.raw_seq_lens = torch.tensor([1, 1], dtype=torch.int32)
@@ -283,3 +292,4 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     assert backend.indexer_op.args[7] is tail_metadata
     assert backend.indexer_op.kwargs is not None
     assert backend.indexer_op.kwargs["compute_topk"] is True
+    assert backend.indexer_op.kwargs["max_pool_seq_len"] == expected_pool_len

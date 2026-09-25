@@ -75,6 +75,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     """
 
     model_state: "AscendModelState"
+    for_cudagraph_capture: bool = False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         """Override the upstream __init__ for Ascend NPUs.
@@ -350,6 +351,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # Reset indices to zeros to prevent stale values from prior
         # dummy runs to cause out-of-bounds indexing during capture.
         self.last_token_indices.zero_()
+        self.idx_mapping.zero_()
 
         # Capture the prefill routine (model forward + compute_logits +
         # sample).
@@ -359,6 +361,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
+        self.on_prefill_begin(self.max_num_reqs)
         with disable_target_pcp_for_replicated_draft(self):
             self.prefill_cudagraph_manager.capture(
                 self._prefill,
@@ -369,12 +372,14 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 self.kv_cache_config,
                 progress_bar_desc="Capturing prefill CUDA graphs",
             )
+        self.on_prefill_end(self.max_num_reqs)
 
         if self.num_speculative_steps == 1:
             return
 
         # Capture all decode draft generation steps as a single graph.
         assert self.decode_cudagraph_manager is not None
+        self.on_multi_step_decode_begin(self.max_num_reqs)
         with (
             disable_target_pcp_for_replicated_draft(self),
             build_attn_metadata_wrapper(),
@@ -388,6 +393,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 self.kv_cache_config,
                 progress_bar_desc="Capturing decode CUDA graphs",
             )
+        self.on_multi_step_decode_end(self.max_num_reqs)
 
     @torch.inference_mode()
     def _run_model(
@@ -523,6 +529,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             is_prefilling,
             seq_lens_cpu=seq_lens_cpu,
             parallel_config=self.draft_vllm_config.parallel_config,
+            for_cudagraph_capture=self.for_cudagraph_capture,
         ):
             # vLLM main restructured _build_draft_attn_metadata into
             # _build_uniform_attn_metadata / _build_attn_metadata, which
