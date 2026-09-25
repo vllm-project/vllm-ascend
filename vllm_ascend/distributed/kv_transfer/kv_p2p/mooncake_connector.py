@@ -1062,14 +1062,27 @@ class KVCacheRecvingThread(threading.Thread):
 
         req_end_time = time.perf_counter()
         req_transfer_elapsed = (req_end_time - req_start_time) * 1000
-        logger.info(
-            "KV cache transfer for request %s took %.2f ms. local_ip %s local_device_id %s remote_session_id %s",
-            remote_request_id,
-            req_transfer_elapsed,
-            get_ip(),
-            self.tp_rank,
-            session_id,
-        )
+        if self.transfer_backend == BACKEND_MEMFABRIC:
+            logger.debug(
+                "Prepared and transferred MemFabric KV cache task for request %s took %.2f ms: "
+                "segments=%d bytes=%d local_ip=%s local_device_id=%s remote_session_id=%s",
+                remote_request_id,
+                req_transfer_elapsed,
+                len(length_list),
+                sum(length_list),
+                get_ip(),
+                self.tp_rank,
+                session_id,
+            )
+        else:
+            logger.info(
+                "KV cache transfer for request %s took %.2f ms. local_ip %s local_device_id %s remote_session_id %s",
+                remote_request_id,
+                req_transfer_elapsed,
+                get_ip(),
+                self.tp_rank,
+                session_id,
+            )
 
         ready_attention_group_reformat_block_ids = []
         for reformat_group, is_group_transfer_end in attention_group_reformat_block_ids:
@@ -2671,7 +2684,7 @@ class MooncakeConnectorWorker:
                 self.block_size_scale[layer_idx].append(block_size_scale)
                 self.kv_caches_base_addr[layer_idx].append(single_kv_cache.data_ptr())
 
-        if self.sparse_shared_main_group_ids:
+        if self.sparse_shared_main_group_ids and self.tp_rank == 0:
             logger.info("Sparse shared Host KV groups: %s", self.sparse_shared_main_group_ids)
         self._sync_sparse_shared_main_across_tp = bool(
             self.transfer_backend == BACKEND_MEMFABRIC
@@ -2709,18 +2722,18 @@ class MooncakeConnectorWorker:
         else:
             global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
 
+        metadata_entry_count = sum(len(layer_entries) for layer_entries in self.block_len_per_addr)
+        registered_region_count = len(register_regions.ptrs)
+        registered_region_bytes = sum(register_regions.lengths)
         logger.debug(
-            "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "
-            "block_len_per_addr=%s, block_stride_per_addr=%s, block_shape_per_addr=%s, "
-            "block_size_scale=%s, ptrs=%s, lengths=%s",
-            self.kv_group2layeridx,
-            self.kv_caches_base_addr,
-            self.block_len_per_addr,
-            self.block_stride_per_addr,
-            self.block_shape_per_addr,
-            self.block_size_scale,
-            register_regions.ptrs,
-            register_regions.lengths,
+            "Mooncake register KV caches summary: groups=%d metadata_layers=%d metadata_entries=%d "
+            "sparse_shared_groups=%d registered_regions=%d registered_bytes=%d",
+            len(self.kv_group2layeridx),
+            len(self.block_len_per_addr),
+            metadata_entry_count,
+            len(self.sparse_shared_main_group_ids),
+            registered_region_count,
+            registered_region_bytes,
         )
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
