@@ -74,9 +74,7 @@ def test_run_fullgraph_uses_updatable_graph():
     manager.speculator = SimpleNamespace(
         attn_backend=backend,
         draft_vllm_config=draft_vllm_config,
-        build_draft_attn_metadatas=MagicMock(
-            return_value=draft_attn_metadatas
-        ),
+        build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),
     )
     manager._updatable_graph_replay = MagicMock(return_value="result")
     manager._graph_replay = MagicMock()
@@ -105,9 +103,7 @@ def test_run_fullgraph_uses_legacy_graph():
     manager.speculator = SimpleNamespace(
         attn_backend=backend,
         draft_vllm_config=draft_vllm_config,
-        build_draft_attn_metadatas=MagicMock(
-            return_value=draft_attn_metadatas
-        ),
+        build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),
     )
     manager._updatable_graph_replay = MagicMock()
     manager._graph_replay = MagicMock(return_value="result")
@@ -265,9 +261,7 @@ def test_graph_replay_updates_full_graph_params():
             "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph._EXTRA_CTX",
             extra_ctx,
         ),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.update_full_graph_params"
-        ) as update_params,
+        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.update_full_graph_params") as update_params,
     ):
         result = manager._graph_replay(
             desc,
@@ -304,9 +298,7 @@ def test_updatable_graph_replay_updates_resolved_tasks():
     graph.resolve_tasks.return_value = resolved_tasks
     manager.graphs = {desc: graph}
     fia_params = [{"layer_name": "draft"}]
-    manager.speculator = SimpleNamespace(
-        build_fia_params=MagicMock(return_value=fia_params)
-    )
+    manager.speculator = SimpleNamespace(build_fia_params=MagicMock(return_value=fia_params))
     source = object()
     current_stream = object()
     draft_attn_metadatas = [{"draft": object()}]

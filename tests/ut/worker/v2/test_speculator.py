@@ -224,7 +224,9 @@ def test_prefill_filters_target_only_metadata():
     speculator._prepare_replicated_prefill_attn = MagicMock(return_value=(attn_metadata, slot_mappings))
     with patch.object(AutoRegressiveSpeculator, "_prefill") as parent_prefill:
         speculator._prefill(2, 4, attn_metadata, slot_mappings, None)
-    parent_prefill.assert_called_once_with(2, 4,
+    parent_prefill.assert_called_once_with(
+        2,
+        4,
         {"draft": draft_metadata},
         slot_mappings,
         None,
@@ -240,9 +242,7 @@ def test_build_draft_attn_metadata_sets_decode_only():
     speculator.input_buffers = SimpleNamespace(positions=torch.tensor([0, 1]))
     speculator.use_dcp = False
     speculator.draft_vllm_config = SimpleNamespace(parallel_config=object())
-    speculator._build_uniform_attn_metadata = MagicMock(
-        return_value={"draft": metadata, "none": None}
-    )
+    speculator._build_uniform_attn_metadata = MagicMock(return_value={"draft": metadata, "none": None})
     speculator._update_decode_attn_metadata = MagicMock()
     seq_lens = torch.tensor([10, 20], dtype=torch.int32)
     with patch(
@@ -252,9 +252,7 @@ def test_build_draft_attn_metadata_sets_decode_only():
         result = speculator._build_draft_attn_metadata(2, 2, 2, seq_lens, 1)
     assert result["draft"] is metadata
     assert metadata.attn_state == AscendAttentionState.DecodeOnly
-    speculator._update_decode_attn_metadata.assert_called_once_with(
-        {"draft": metadata, "none": None}, 1, 2
-    )
+    speculator._update_decode_attn_metadata.assert_called_once_with({"draft": metadata, "none": None}, 1, 2)
 
 
 def test_build_uniform_attn_metadata_sets_decode_only():
@@ -267,8 +265,7 @@ def test_build_uniform_attn_metadata_sets_decode_only():
 
     with (
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator."
-            "build_draft_attn_metadata_factory",
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_draft_attn_metadata_factory",
             return_value=nullcontext(),
         ),
         patch.object(
@@ -551,11 +548,10 @@ def test_propose_replicated_pcp_disables_dp_sync():
     assert parent_propose.call_args.args[11] is None
     assert result is expected
 
+
 def test_init_dcp_disabled():
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
-    speculator.draft_vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1)
-    )
+    speculator.draft_vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
 
     speculator._init_dcp()
 
@@ -565,15 +561,11 @@ def test_init_dcp_disabled():
 
 def test_init_dcp_enabled():
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
-    speculator.draft_vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(decode_context_parallel_size=2)
-    )
+    speculator.draft_vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=2))
     speculator.max_num_tokens = 128
     speculator.max_num_reqs = 16
     speculator.device = torch.device("cpu")
-    speculator.vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(async_scheduling=True)
-    )
+    speculator.vllm_config = SimpleNamespace(scheduler_config=SimpleNamespace(async_scheduling=True))
     dcp_group = SimpleNamespace(rank_in_group=1)
 
     with (
@@ -581,9 +573,7 @@ def test_init_dcp_enabled():
             "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.get_dcp_group",
             return_value=dcp_group,
         ),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.DCPManager"
-        ) as dcp_manager_cls,
+        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.DCPManager") as dcp_manager_cls,
     ):
         speculator._init_dcp()
 
@@ -608,9 +598,7 @@ def test_update_decode_attn_metadata_mla_with_dcp():
 
     local_seq_lens = torch.tensor([6, 11, 0], dtype=torch.int32)
     dcp_manager = SimpleNamespace(
-        prepare_dcp_local_seq_lens_cpu=MagicMock(
-            return_value=local_seq_lens
-        ),
+        prepare_dcp_local_seq_lens_cpu=MagicMock(return_value=local_seq_lens),
         dcp_world_rank=1,
     )
     speculator.dcp_manager = dcp_manager
@@ -627,9 +615,7 @@ def test_update_decode_attn_metadata_mla_with_dcp():
         decode=decode_metadata,
     )
     seq_lens_cpu = torch.tensor([10, 20, 30], dtype=torch.int32)
-    speculator._get_seq_lens_cpu = MagicMock(
-        return_value=seq_lens_cpu
-    )
+    speculator._get_seq_lens_cpu = MagicMock(return_value=seq_lens_cpu)
 
     speculator._update_decode_attn_metadata(
         {"draft": metadata},
