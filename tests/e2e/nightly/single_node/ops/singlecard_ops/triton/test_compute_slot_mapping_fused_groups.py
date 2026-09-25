@@ -150,7 +150,7 @@ def _make_batch(device: str, seq_lens: list[int], position_offsets: list[int] | 
     if position_offsets is None:
         position_offsets = [(i * 37) % 512 for i in range(len(seq_lens))]
     lengths = [0]
-    positions = []
+    positions: list[int] = []
     for seq_len, offset in zip(seq_lens, position_offsets):
         positions.extend(range(offset, offset + seq_len))
         lengths.append(len(positions))
