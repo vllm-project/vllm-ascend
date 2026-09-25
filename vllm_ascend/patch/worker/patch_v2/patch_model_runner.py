@@ -4,7 +4,7 @@
 from contextlib import AbstractContextManager
 
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import HiddenStateCacheSpec, KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 
 from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_kv_cache_blocks_inplace
@@ -199,7 +199,15 @@ def init_kv_zero_meta(self) -> None:
         attn_groups_iter=(group for groups in self.attn_groups for group in groups),
         kernel_block_sizes=[[block_size] for block_size in self.kernel_block_sizes],
         cache_dtype=self.cache_config.cache_dtype,
-        runner_only_attn_layers=set(),
+        # Hidden-state extraction uses a single output tensor, not split K/V.
+        # Its valid slots are written by the cache-only layer before export.
+        runner_only_attn_layers={
+            layer_name
+            for groups in self.attn_groups
+            for group in groups
+            if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+            for layer_name in group.layer_names
+        },
         static_forward_context=self.compilation_config.static_forward_context,
     )
 

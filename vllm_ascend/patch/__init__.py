@@ -1528,7 +1528,9 @@
 #    How:
 #       Reuse AscendKVBlockZeroer and convert MRv2's flat kernel block sizes to
 #       the existing nested interface. Keep the shared MRv1 implementation and
-#       its supported cache layouts unchanged.
+#       its supported cache layouts unchanged. Exclude HiddenStateCacheSpec
+#       output buffers, which are single tensors written by cache-only layers,
+#       through the zeroer's runner_only_attn_layers argument.
 #    Related PR (if no, explain why):
 #       No. This is an Ascend zeroer integration for the MRv2 metadata interface.
 #    Future Plan:
