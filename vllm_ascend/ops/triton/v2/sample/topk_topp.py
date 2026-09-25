@@ -433,7 +433,12 @@ def _topk_topp_kernel(
                                     outlier_mask = (outlier_mask & ~duplicate_mask) | duplicate_keep_mask
                                     num_kept += tl.sum(tl.where(duplicate_keep_mask, 1, 0).to(tl.int32))
 
+                                # Persist the top-k mask before converting to
+                                # probabilities. The subsequent top-p search
+                                # must consume the masked candidate set rather
+                                # than stale BUFFER_ROW values.
                                 probs_blk = tl.where(outlier_mask, probs_blk, -float("inf"))
+                                tl.store(BUFFER_ROW + offs_n, probs_blk, mask=mask_n_2)
                                 probs_blk = probs_blk - max_logit
                                 probs_blk = tl.exp(probs_blk)
                                 sum_exp_logits += tl.sum(probs_blk)
