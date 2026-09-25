@@ -42,6 +42,7 @@ on:
           - 'releases/v0.20.2rc'
           - 'releases/v0.18.0'
           - 'tag:main'
+          - 'v0.27.1rc1'
           - 'v0.26.0rc1'
           - 'v0.23.0'
           - 'v0.23.0rc1'
