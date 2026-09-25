@@ -1,5 +1,9 @@
 """In-process observability counters for the inductor track (stage4 W4, U3).
 
+Relocated 2026-09-24 from ``vllm_ascend/compilation/`` to ``tests/`` per the
+stage4 debt-8 ruling (test-support code must not live in product sources);
+the module had zero product consumers at migration time.
+
 stage design/stage4/02_设计方案.md §四-4 promised an in-process
 ``AscendCompilationCounter`` (U3 "治理＋可观测全量收官"): the offline reporter
 (``docs/vllm/env/scripts/inductor_cache_stats.py``) scans compile artifacts
@@ -15,7 +19,7 @@ D5 tri-state (authoritative third state = the runtime-enumerated
 
 Usage (in-process, after the compiled engine is up)::
 
-    from vllm_ascend.compilation.inductor_track_counter import (
+    from tests.ut.compilation.inductor_track_counter import (
         AscendCompilationCounter,
     )
 

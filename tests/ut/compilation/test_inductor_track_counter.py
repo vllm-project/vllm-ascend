@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from vllm_ascend.compilation.inductor_track_counter import (
+from tests.ut.compilation.inductor_track_counter import (
     AscendCompilationCounter,
     _classify,
 )
