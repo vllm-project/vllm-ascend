@@ -11,6 +11,8 @@ def build_expert_replica_routing_table(
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,
     ep_rank: int,
+    *,
+    num_physical_experts: int | None = None,
 ) -> torch.Tensor:
     """Build a rank-aware table for routing logical experts to replicas."""
     if logical_to_physical_map.ndim != 2:
@@ -21,6 +23,11 @@ def build_expert_replica_routing_table(
         raise ValueError("Logical expert dimensions must match.")
 
     num_logical_experts = logical_replica_count.shape[0]
+    # Every logical expert has at least one physical copy. Equal counts
+    # therefore imply a single copy; use host metadata, never a device sync.
+    if num_physical_experts == num_logical_experts:
+        return logical_to_physical_map[:, 0].unsqueeze(0).to(torch.int32).contiguous()
+
     device = logical_to_physical_map.device
     table_rows = torch.arange(
         EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
@@ -45,23 +52,24 @@ def map_to_physical(
         raise ValueError("topk_ids must be a 2D tensor.")
 
     logical_ids = topk_ids.to(torch.int64) if topk_ids.device.type == "cpu" else topk_ids
+    routing_table_rows = expert_replica_routing_table.shape[0]
     num_rows, topk = topk_ids.shape
     num_full_blocks, tail_rows = divmod(
         num_rows,
-        EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
+        routing_table_rows,
     )
     mapped_blocks = []
 
     if num_full_blocks:
-        full_rows = num_full_blocks * EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS
+        full_rows = num_full_blocks * routing_table_rows
         routing_table_blocks = expert_replica_routing_table.view(
             1,
-            EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
+            routing_table_rows,
             expert_replica_routing_table.shape[1],
         ).expand(num_full_blocks, -1, -1)
         logical_id_blocks = logical_ids[:full_rows].view(
             num_full_blocks,
-            EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
+            routing_table_rows,
             topk,
         )
         mapped_blocks.append(
@@ -76,7 +84,7 @@ def map_to_physical(
             torch.gather(
                 expert_replica_routing_table[:tail_rows],
                 1,
-                logical_ids[num_full_blocks * EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS :],
+                logical_ids[num_full_blocks * routing_table_rows :],
             )
         )
 

@@ -4,8 +4,11 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+_MAP_BLOCK_SIZE = 256
+_MAX_HISTOGRAM_EXPERTS = 1024
 
-@triton.jit
+
+@triton.jit(do_not_specialize=["numel"])
 def _map_to_physical_and_record_kernel(
     topk_ids_ptr,
     routing_table_ptr,
@@ -16,9 +19,11 @@ def _map_to_physical_and_record_kernel(
     num_logical_experts,
     num_physical_experts,
     numel,
-    topk,
-    routing_table_rows,
+    topk: tl.constexpr,
+    routing_table_rows: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    NUM_BINS: tl.constexpr,
+    SINGLE_PROGRAM: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < numel
@@ -38,11 +43,23 @@ def _map_to_physical_and_record_kernel(
     tl.store(physical_ids_ptr + offsets, physical_id, mask=mask)
 
     record_enabled = tl.load(record_enabled_ptr) != 0
-    num_unpadded_tokens = tl.load(num_unpadded_tokens_ptr)
-    valid_physical_id = (physical_id >= 0) & (physical_id < num_physical_experts)
-    should_record = mask & valid_logical_id & valid_physical_id & record_enabled & (token_idx < num_unpadded_tokens)
-    safe_physical_id = tl.where(valid_physical_id, physical_id, 0)
-    tl.atomic_add(expert_load_ptr + safe_physical_id, 1, mask=should_record)
+    # Keep the device-side gate dynamic across graph replays.
+    if record_enabled:
+        num_unpadded_tokens = tl.load(num_unpadded_tokens_ptr)
+        valid_physical_id = (physical_id >= 0) & (physical_id < num_physical_experts)
+        should_record = mask & valid_logical_id & valid_physical_id & (token_idx < num_unpadded_tokens)
+        safe_physical_id = tl.where(valid_physical_id, physical_id, 0)
+        if SINGLE_PROGRAM:
+            # Layer forwards are ordered on the compute stream. With one program,
+            # each bin has a single writer, so no atomic updates are needed.
+            # Invalid/padded routes use a dedicated bin: negative histogram inputs
+            # are not ignored by every device implementation.
+            bins = tl.arange(0, NUM_BINS)
+            counts = tl.histogram(tl.where(should_record, physical_id, NUM_BINS - 1).to(tl.int32), NUM_BINS)
+            previous = tl.load(expert_load_ptr + bins, bins < num_physical_experts, other=0)
+            tl.store(expert_load_ptr + bins, previous + counts, (bins < num_physical_experts))
+        else:
+            tl.atomic_add(expert_load_ptr + safe_physical_id, 1, mask=should_record)
 
 
 def map_to_physical_and_record_triton(
@@ -71,6 +88,8 @@ def map_to_physical_and_record_triton(
         numel,
         topk_ids.shape[1],
         expert_replica_routing_table.shape[0],
-        BLOCK_SIZE=256,
+        BLOCK_SIZE=_MAP_BLOCK_SIZE,
+        NUM_BINS=triton.next_power_of_2(expert_load_view.numel() + 1),
+        SINGLE_PROGRAM=numel <= _MAP_BLOCK_SIZE and expert_load_view.numel() <= _MAX_HISTOGRAM_EXPERTS,
     )
     return physical_ids

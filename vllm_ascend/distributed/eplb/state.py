@@ -57,13 +57,14 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
     def refresh_expert_replica_routing_table(self) -> None:
         logical_to_physical_map = self.logical_to_physical_map
         logical_replica_count = self.logical_replica_count
-        if logical_to_physical_map is None or logical_replica_count is None:
+        if logical_to_physical_map is None or logical_replica_count is None or self.expert_load_view is None:
             raise RuntimeError("Cannot build the replica routing table before EPLB layer state is initialized.")
 
         new_routing_table = _eplb_ops.build_expert_replica_routing_table(
             logical_to_physical_map,
             logical_replica_count,
             get_ep_group().rank_in_group,
+            num_physical_experts=self.expert_load_view.numel(),
         )
         if (
             self.expert_replica_routing_table is not None

@@ -107,3 +107,28 @@ def test_map_to_physical_and_record_gates_load_collection():
         expert_load,
         torch.tensor([2, 1, 1, 2], dtype=torch.int32),
     )
+
+
+def test_single_replica_table_matches_full_table_across_periods():
+    logical_map = torch.tensor([[3, -1], [0, -1], [2, -1], [1, -1]])
+    replicas = torch.ones(4, dtype=torch.int64)
+    compact = build_expert_replica_routing_table(logical_map, replicas, 7, num_physical_experts=4)
+    full = build_expert_replica_routing_table(logical_map, replicas, 7)
+    assert compact.shape == (1, 4)
+    ids = torch.arange(2050 * 2, dtype=torch.int32).reshape(2050, 2) % 4
+    torch.testing.assert_close(map_to_physical(ids, compact), map_to_physical(ids, full))
+    compact_load = torch.zeros(4, dtype=torch.int32)
+    full_load = torch.zeros_like(compact_load)
+    for enabled in (True, False):
+        for table, load in ((compact, compact_load), (full, full_load)):
+            map_to_physical_and_record(ids, table, load, torch.tensor(enabled), torch.tensor(2049))
+        torch.testing.assert_close(compact_load, full_load)
+    assert compact_load.sum() == 2049 * 2
+    assert map_to_physical(ids[:0], compact).shape == (0, 2)
+
+
+def test_redundant_experts_keep_periodic_table():
+    logical_map, replicas = _eplb_inputs()
+    table = build_expert_replica_routing_table(logical_map, replicas, 1, num_physical_experts=5)
+    reference = build_expert_replica_routing_table(logical_map, replicas, 1)
+    torch.testing.assert_close(table, reference)

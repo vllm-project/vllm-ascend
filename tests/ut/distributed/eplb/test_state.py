@@ -197,3 +197,16 @@ def test_init_sets_cuda_device_index_for_npu(monkeypatch):
     state = AscendEplbState(parallel_config, torch.device("cpu"))
 
     assert state.cuda_device_index == 5
+
+
+def test_single_replica_refresh_preserves_compact_table_address(monkeypatch):
+    monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(rank_in_group=0))
+    state = AscendEplbLayerState()
+    logical_map = torch.tensor([[[2, -1], [0, -1], [1, -1]]])
+    state.set_layer_state(0, torch.zeros((1, 3), dtype=torch.int32), logical_map, torch.ones((1, 3)))
+    table = state.expert_replica_routing_table
+    assert table.shape == (1, 3)
+    logical_map[0, :, 0].copy_(torch.tensor([1, 2, 0]))
+    state.refresh_expert_replica_routing_table()
+    assert state.expert_replica_routing_table is table
+    torch.testing.assert_close(table, torch.tensor([[1, 2, 0]], dtype=torch.int32))
