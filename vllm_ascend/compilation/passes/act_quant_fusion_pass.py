@@ -60,7 +60,7 @@ from vllm.config.compilation import Range
 from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
-from vllm_ascend.utils import enable_custom_op, get_ascend_device_type
+from vllm_ascend.utils import get_ascend_device_type
 
 # aclnnSwiGluQuantV2 hard input-width limit (SwigluquantKernelNpuOpApi.cpp:66-74).
 _SWIGLU_QUANT_MAX_LAST_DIM = 8192
@@ -154,21 +154,31 @@ class ActQuantFusionPass(VllmInductorPass):
         self._uuid_factors: dict = {
             "dtype": str(vllm_config.model_config.dtype),
             "device": str(get_ascend_device_type()),
-            "custom_op": str(enable_custom_op()),
         }
 
         if vllm_config.model_config.dtype not in (torch.bfloat16, torch.float16):
             logger.debug("ActQuant fusion not enabled: unsupported dtype")
             return
-        if enable_custom_op():
+        # The npu_swiglu anchor exists when vLLM's CustomOp dispatch runs
+        # SiluAndMul out-of-tree (custom_ops base 'all' or '+silu_and_mul').
+        # Gate on the vllm-level custom_ops, NOT on vllm_ascend's
+        # enable_custom_op() (that one tracks the nge/torchair custom-op table
+        # and is False on the inductor-track environment — M4 e2e lesson).
+        ops = getattr(
+            vllm_config.compilation_config, "custom_ops", None
+        ) or []
+        dispatch_on = ("all" in ops) or any(
+            o.startswith("+silu_and_mul") for o in ops
+        )
+        self._uuid_factors["dispatch_on"] = str(dispatch_on)
+        if dispatch_on:
             SwiGluQuantPattern(vllm_config).register(self.pattern_match_passes)
         else:
-            # The npu_swiglu anchor only exists with custom-op dispatch enabled
-            # (custom_ops=all / '+silu_and_mul'); the aten silu+mul form is a
-            # follow-up pending the stage5 U5 ruling.
+            # The aten silu+mul form (custom_ops=none) is a follow-up
+            # (TODO-VA-6).
             logger.debug(
-                "ActQuant fusion: custom op dispatch off — npu_swiglu anchor "
-                "absent, pattern not registered."
+                "ActQuant fusion: vllm custom-op dispatch off — npu_swiglu "
+                "anchor absent, pattern not registered."
             )
 
     def uuid(self) -> str:

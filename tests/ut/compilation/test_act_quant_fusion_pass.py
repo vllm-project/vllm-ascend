@@ -145,16 +145,34 @@ class TestSwiGluQuantPattern(TestBase):
                 pass_config=SimpleNamespace(),
             ),
         )
-        with patch(
-            "vllm_ascend.compilation.passes.act_quant_fusion_pass.enable_custom_op",
-            return_value=True,
-        ), patch(
-            "vllm_ascend.compilation.passes.act_quant_fusion_pass.get_ascend_device_type",
-            return_value="910B",
-        ):
-            p = ActQuantFusionPass(cfg)
+        p = ActQuantFusionPass(cfg)
         gm = _build_graph(_chain(), twoI=16)
         p(gm)  # __call__ applies the pattern set
         self.assertEqual(
             len([n for n in gm.graph.nodes if n.target is _FUSED_OP]), 1
+        )
+
+    def test_pass_not_registered_under_custom_ops_none(self):
+        """M4 e2e lesson: the gate reads the vllm-level custom_ops (the
+        npu_swiglu anchor needs CustomOp dispatch), not the nge availability."""
+        from vllm_ascend.compilation.passes.act_quant_fusion_pass import (
+            ActQuantFusionPass,
+        )
+
+        cfg = SimpleNamespace(
+            model_config=SimpleNamespace(dtype=_DTYPE),
+            device_config=SimpleNamespace(device="npu"),
+            compilation_config=SimpleNamespace(
+                custom_ops=["none"],
+                inductor_compile_config={},
+                splitting_ops=[],
+                use_inductor_graph_partition=False,
+                pass_config=SimpleNamespace(),
+            ),
+        )
+        p = ActQuantFusionPass(cfg)
+        gm = _build_graph(_chain(), twoI=16)
+        p(gm)
+        self.assertEqual(
+            len([n for n in gm.graph.nodes if n.target is _FUSED_OP]), 0
         )
