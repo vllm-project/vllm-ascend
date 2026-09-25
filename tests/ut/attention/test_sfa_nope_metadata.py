@@ -427,6 +427,7 @@ def test_a5_smla_rebuilds_plan_for_the_draft_model(monkeypatch):
 
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla_metadata", plan)
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla", smla)
+    monkeypatch.setattr(sparse_mla, "is_forward_context_available", lambda: True)
     monkeypatch.setattr(sparse_mla, "get_forward_context", lambda: SimpleNamespace(is_draft_model=True))
     # query rows == topk_length rows: the shape check alone cannot detect the
     # stale plan.
@@ -439,7 +440,12 @@ def test_a5_smla_rebuilds_plan_for_the_draft_model(monkeypatch):
 def test_a5_smla_keeps_the_built_plan_for_the_target(monkeypatch):
     """The target refreshes the plan from unpadded host values every step, so an
     equal-shaped call must keep using the plan written during metadata
-    construction."""
+    construction.
+
+    Also pins the no-forward-context case: ``sparse_mla`` is a module-level
+    helper that unit tests call directly, so the draft check must not touch the
+    forward context when none is set.
+    """
     metadata = SimpleNamespace(
         query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
         seq_lens=torch.tensor([8, 0], dtype=torch.int32),

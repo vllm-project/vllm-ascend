@@ -7,7 +7,7 @@ import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.utils.math_utils import cdiv
@@ -178,7 +178,7 @@ def sparse_mla(query, cache, indices, metadata, scale):
         # draft replays one captured graph per step, so its pre-built plan can
         # describe a different step's rows; rebuild from the indices actually
         # passed whenever the draft model is running.
-        draft_model = getattr(get_forward_context(), "is_draft_model", False)
+        draft_model = is_forward_context_available() and getattr(get_forward_context(), "is_draft_model", False)
         if query.shape[0] != topk_length.shape[0] or draft_model:
             # Eager and piecewise steps trim the query to the unpadded token
             # count, while the plan built during metadata construction still
