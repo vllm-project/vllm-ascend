@@ -610,6 +610,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             self.input_buffers.positions,
             batch_desc.num_tokens,
             torch.from_numpy(self.input_batch.is_prefilling_np),
+            parallel_config=self.draft_vllm_config.parallel_config,
         ):
             attn_metadata = super()._build_uniform_attn_metadata(
                 batch_desc,
@@ -643,6 +644,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             self.input_buffers.positions,
             batch_desc.num_tokens,
             torch.from_numpy(self.input_batch.is_prefilling_np),
+            parallel_config=self.draft_vllm_config.parallel_config,
         ):
             attn_metadata = super()._build_attn_metadata(
                 num_reqs,

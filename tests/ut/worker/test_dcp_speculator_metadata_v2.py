@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the DSpark/MTP entry points, not just the length helper."""
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import numpy as np
@@ -9,6 +9,7 @@ import pytest
 import torch
 from vllm.config import AttentionConfig
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
+from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
 
 from vllm_ascend.attention.context_parallel import sfa_cp
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadata, AscendSFADCPMetadataBuilder
@@ -269,3 +270,28 @@ def test_sfa_consumer_uses_device_local_lengths_and_ignores_cpu(monkeypatch):
     result = builder._build_with_metadata_view(common, lambda: metadata)
     assert result.dcp_context.seq_lens.tolist() == [4, 16, 0, 0]
     assert common.dcp_local_seq_lens_cpu.tolist() == [999] * 4
+
+
+def test_draft_decode_hooks_forward_parallel_config(monkeypatch):
+    """DCP draft decode calls these hooks directly and needs parallel_config."""
+    spec, _, _ = _speculator(monkeypatch, "mtp", "SFA", 1, 2, 1)
+    seen: list[object] = []
+
+    @contextmanager
+    def factory(*_args, **kwargs):
+        seen.append(kwargs["parallel_config"])
+        yield
+
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_draft_attn_metadata_factory",
+        factory,
+    )
+    monkeypatch.setattr(AutoRegressiveSpeculator, "_build_uniform_attn_metadata", lambda *a, **k: None)
+    monkeypatch.setattr(AutoRegressiveSpeculator, "_build_attn_metadata", lambda *a, **k: None)
+    batch = SimpleNamespace(num_tokens=2, num_reqs=2)
+    seq_lens = spec.input_batch.seq_lens_cpu_upper_bound
+    dcp_local = spec.input_buffers.dcp_local_seq_lens
+    spec._build_uniform_attn_metadata(batch, 2, 1, seq_lens, 1, dcp_local_seq_lens=dcp_local)
+    spec._build_attn_metadata(2, batch, np.array([0, 1, 2]), seq_lens, 1, dcp_local_seq_lens=dcp_local)
+
+    assert seen == [spec.draft_vllm_config.parallel_config, spec.draft_vllm_config.parallel_config]
