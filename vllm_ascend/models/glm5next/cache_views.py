@@ -137,7 +137,7 @@ def view_glm5_next_cache(
         if get_kv_cache_compression_ratio(kv_cache_spec) > 1:
             return _view_compressed_indexer_cache(layer_name, kv_cache_spec, raw_cache, attn_backend, kernel_block_size)
         _k_dim, v_dim = get_kv_cache_dims(layer_name, kv_cache_spec)
-        if v_dim == 0:
+        if v_dim == 0 and kv_cache_spec.page_size_bytes == kv_cache_spec.unpadded_page_size_bytes:
             return _view_nope_main_mla_cache(kv_cache_spec, raw_cache, attn_backend, kernel_block_size)
     return None
 

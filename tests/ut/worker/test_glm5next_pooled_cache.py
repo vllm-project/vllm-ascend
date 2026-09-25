@@ -517,10 +517,16 @@ def test_mrv2_preserves_glm_cache_roles_and_auxiliary_page_sizes(monkeypatch):
     assert discovered[INDEXER].page_size_bytes < discovered[MAIN].page_size_bytes
 
 
-def test_mrv2_block_stride_capability_preserves_generic_backing(monkeypatch):
+@pytest.mark.parametrize("page_size_padded", [None, 128])
+def test_mrv2_block_stride_capability_preserves_generic_backing(monkeypatch, page_size_padded):
     config = _make_config()
     attention_spec = AscendMLAAttentionSpec(
-        block_size=8, num_kv_heads=1, head_size=4, dtype=torch.bfloat16, indexes_kv_by_block_stride=True
+        block_size=8,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.bfloat16,
+        indexes_kv_by_block_stride=True,
+        page_size_padded=page_size_padded,
     )
     state_spec = replace(_make_specs()[MAMBA], page_size_padded=attention_spec.page_size_bytes)
     num_blocks = 3
@@ -553,6 +559,9 @@ def test_mrv2_block_stride_capability_preserves_generic_backing(monkeypatch):
     assert raw["attention.1"].data_ptr() - raw["attention.0"].data_ptr() == layer_size
 
     monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda _name, _spec: (4, 0))
+    layer = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(layer)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: dict.fromkeys(raw, layer))
     attn_groups = [
         SimpleNamespace(
             kv_cache_group_id=i,
@@ -564,14 +573,19 @@ def test_mrv2_block_stride_capability_preserves_generic_backing(monkeypatch):
     ]
     views = attn_utils._reshape_kv_cache_v2(attn_groups, raw, "auto", [4, 8], {}, plan)
     cache, rope = views["attention.0"]
-    assert cache.shape == (6, 4, 1, 4)
     assert rope.numel() == 0
-    # Kernel block 2 starts at scheduler page 1, without a model marker.
-    cache[2].fill_(7)
-    physical_pages = raw["attention.0"].view(torch.bfloat16).view(num_blocks, 8, 1, 4)
-    assert torch.all(physical_pages[1, :4] == 7)
+    if page_size_padded is None:
+        assert cache.shape == (6, 4, 1, 4)
+        # Kernel block 2 starts at scheduler page 1, without a model marker.
+        cache[2].fill_(7)
+    else:
+        # Padded pages retain the generic page-strided view.
+        assert cache.shape == (3, 8, 1, 4)
+        cache[1, :4].fill_(7)
+    physical_pages = raw["attention.0"].view(torch.bfloat16).view(num_blocks, -1)
+    assert torch.all(physical_pages[1, :16] == 7)
     assert torch.count_nonzero(physical_pages[[0, 2]]) == 0
-    assert torch.count_nonzero(physical_pages[1, 4:]) == 0
+    assert torch.count_nonzero(physical_pages[1, 16:]) == 0
     assert torch.count_nonzero(raw["attention.1"]) == 0
 
 
