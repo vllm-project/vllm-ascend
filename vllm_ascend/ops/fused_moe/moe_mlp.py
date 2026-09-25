@@ -45,7 +45,7 @@ def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation=None):
 
 def _gmm_swiglu_quant_fusion_enabled(use_mxfp_quant, fusion, dynamic_eplb, activation=None):
     activation_name = getattr(activation, "value", activation)
-    return (use_mxfp_quant or (fusion and not dynamic_eplb)) and activation_name not in (
+    return ((use_mxfp_quant or fusion) and not dynamic_eplb) and activation_name not in (
         "situ",
         "swigluoai_uninterleave",
     )
@@ -557,7 +557,11 @@ def quant_apply_mlp(
             elif is_swigluoai_uninterleave:
                 scale = _prepare_swigluoai_grouped_matmul_scales(w1_scale, _output_dtype)
             else:
-                scale = [w1_scale[0].to(w2_scale[0].dtype)] if isinstance(w1_scale, list) else [w1_scale]
+                scale = (
+                    [item.to(w2_scale[0].dtype) for item in w1_scale]
+                    if isinstance(w1_scale, list)
+                    else [w1_scale]
+                )
             gmm1_kwargs = {
                 "x": [hidden_states],
                 "weight": w1 if isinstance(w1, list) else [w1],
