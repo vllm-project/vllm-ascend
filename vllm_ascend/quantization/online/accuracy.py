@@ -41,8 +41,11 @@ def default_module_filter(name: str, module: torch.nn.Module) -> bool:
 
 def _cosine_similarity(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-12) -> float:
     """Cosine of two flattened float32 tensors; 1.0 when both are (near) zero."""
+    # Capture hooks may observe tensors on different devices when the
+    # baseline and quantized models are placed independently. Align the
+    # comparison tensor explicitly before calling torch.dot.
     a_flat = a.detach().to(torch.float32).reshape(-1)
-    b_flat = b.detach().to(torch.float32).reshape(-1)
+    b_flat = b.detach().to(device=a_flat.device, dtype=torch.float32).reshape(-1)
     if a_flat.numel() != b_flat.numel():
         raise ValueError(
             f"Captured outputs have different element counts ({a_flat.numel()} vs {b_flat.numel()}); "
