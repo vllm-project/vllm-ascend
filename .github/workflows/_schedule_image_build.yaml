@@ -73,22 +73,22 @@ on:
         description: 'Memcache version'
         required: false
         type: string
-        default: '1.2.0'
+        default: '1.3.0'
       memcache_date:
         description: 'Memcache date'
         required: false
         type: string
-        default: '20260811.14'
+        default: '20260921.3'
       memfabric_version:
         description: 'Memfabric version'
         required: false
         type: string
-        default: '1.2.0'
+        default: '1.3.0'
       memfabric_date:
         description: 'Memfabric date'
         required: false
         type: string
-        default: '20260811.7'
+        default: '20260921.3'
       torch_npu_version:
         description: 'Torch NPU version'
         required: false
@@ -373,10 +373,10 @@ jobs:
           COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
           VLLM_COMMIT=${{ inputs.vllm_commit }}
           BUILD_TYPE=${{ inputs.build_type || 'release' }}
-          MEMCACHE_VERSION=${{ inputs.memcache_version || '1.2.0' }}
-          MEMCACHE_DATE=${{ inputs.memcache_date || '20260811.14' }}
-          MEMFABRIC_VERSION=${{ inputs.memfabric_version || '1.2.0' }}
-          MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260811.7' }}
+          MEMCACHE_VERSION=${{ inputs.memcache_version || '1.3.0' }}
+          MEMCACHE_DATE=${{ inputs.memcache_date || '20260921.3' }}
+          MEMFABRIC_VERSION=${{ inputs.memfabric_version || '1.3.0' }}
+          MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260921.3' }}
           TORCH_NPU_VERSION=${{ inputs.torch_npu_version || '26.1.0' }}
           TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260725.3' }}
           TRITON_ASCEND_VERSION=${{ inputs.triton_ascend_version || '' }}

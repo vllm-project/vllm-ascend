@@ -16,6 +16,7 @@ from .helpers import (
     make_full_spec,
     make_kpool_tail_spec,
     make_mamba_spec,
+    make_request,
     make_sliding_spec,
 )
 
@@ -209,8 +210,6 @@ def test_base_scheduler_abstract_contract_and_legacy_metadata_delegation() -> No
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
 
     with pytest.raises(NotImplementedError):
-        scheduler.on_new_request(MagicMock())
-    with pytest.raises(NotImplementedError):
         scheduler.update_connector_output(MagicMock())
     with pytest.raises(NotImplementedError):
         scheduler.get_num_new_matched_tokens(MagicMock(), 0)
@@ -225,3 +224,26 @@ def test_base_scheduler_abstract_contract_and_legacy_metadata_delegation() -> No
     metadata = {0: MagicMock()}
     scheduler.set_xfer_handshake_metadata(metadata)
     scheduler.set_xfer_handshake_metadata_from_workers.assert_called_once_with(metadata)
+
+
+@pytest.mark.parametrize("need_truncate", [False, True])
+@pytest.mark.parametrize("params", [None, {}, {"do_remote_prefill": True}, {"do_remote_decode": True}])
+def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_truncate, params):
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.need_truncate = need_truncate
+    request = make_request(
+        prompt_token_ids=[1, 2, 3],
+        num_prompt_tokens=3,
+        _all_token_ids=[1, 2, 3],
+        kv_transfer_params=None if params is None else dict(params),
+        max_tokens=8,
+    )
+
+    scheduler.on_new_request(request)
+    scheduler.on_new_request(request)
+
+    truncated = need_truncate and params is not None and params.get("do_remote_decode", False)
+    assert request.prompt_token_ids == ([1, 2] if truncated else [1, 2, 3])
+    assert request._all_token_ids == request.prompt_token_ids
+    assert request.num_prompt_tokens == (2 if truncated else 3)
+    assert request.max_tokens == (1 if truncated else 8)

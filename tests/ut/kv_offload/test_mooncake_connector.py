@@ -1803,6 +1803,10 @@ class MockRequest:
         self.kv_transfer_params = kv_transfer_params or {}
         self.status = status or "running"
         self.output_token_ids = [101, 102]
+        self.num_prompt_tokens: int = len(self.prompt_token_ids)
+        self._all_token_ids: list[int] = list(self.prompt_token_ids)
+        self.max_tokens: int = 8
+        self.prompt_embeds: torch.Tensor | None = None
 
 
 class MockKVCacheGroup:
@@ -1942,6 +1946,79 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(tokens, 4)
         self.assertTrue(async_flag)
         self.assertEqual(request.kv_transfer_params["num_computed_tokens"], 0)
+
+    def make_prefix_request(self, num_tokens, params, use_embeds=False):
+        request = MockRequest("prefill", prompt_token_ids=list(range(num_tokens)))
+        request.kv_transfer_params = params
+        request.num_prompt_tokens = num_tokens
+        request._all_token_ids = list(range(num_tokens))
+        request.max_tokens = 8
+        if use_embeds:
+            request.prompt_token_ids = None
+            request.prompt_embeds = torch.zeros(num_tokens, 4)
+        return request
+
+    def test_truncation_precedes_prefix_lookup(self):
+        self.scheduler.need_truncate = True
+        connector = MooncakeConnector.__new__(MooncakeConnector)
+        connector.connector_scheduler = self.scheduler
+        for num_tokens in (512, 513, 514):
+            for use_embeds in (False, True):
+                with self.subTest(num_tokens=num_tokens, use_embeds=use_embeds):
+                    request = self.make_prefix_request(num_tokens, {"do_remote_decode": True}, use_embeds)
+
+                    # Scheduler.add_request calls this facade before prefix lookup.
+                    connector.on_new_request(request)
+                    self.assertEqual(request.num_prompt_tokens, num_tokens - 1)
+                    self.assertEqual(len(request._all_token_ids), num_tokens - 1)
+                    if use_embeds:
+                        self.assertEqual(request.prompt_embeds.shape[0], num_tokens - 1)
+                    else:
+                        self.assertEqual(request.prompt_token_ids, list(range(num_tokens - 1)))
+                    self.assertEqual(request.max_tokens, 1)
+                    self.assertTrue(request.kv_transfer_params["_p_side_truncated"])
+
+                    # Model a full-block cache hit before the final prompt token.
+                    local_hit = ((request.num_prompt_tokens - 1) // 128) * 128
+                    self.assertEqual(local_hit, {512: 384, 513: 384, 514: 512}[num_tokens])
+                    self.assertEqual(connector.get_num_new_matched_tokens(request, local_hit), (0, False))
+                    self.assertGreater(request.num_prompt_tokens - local_hit, 0)
+
+                    # Reentry/preemption must not remove another token.
+                    connector.on_new_request(request)
+                    self.assertEqual(connector.get_num_new_matched_tokens(request, local_hit), (0, False))
+                    self.assertEqual(request.num_prompt_tokens, num_tokens - 1)
+
+    def test_non_producer_requests_are_not_truncated(self):
+        self.scheduler.need_truncate = True
+        for params in (None, {}, {"do_remote_prefill": True}, {"do_remote_decode": False}):
+            with self.subTest(params=params):
+                request = self.make_prefix_request(513, params)
+                self.scheduler.on_new_request(request)
+                self.assertEqual(request.num_prompt_tokens, 513)
+                self.assertEqual(len(request._all_token_ids), 513)
+                self.assertEqual(request.max_tokens, 8)
+                if params and params.get("do_remote_prefill"):
+                    self.assertEqual(self.scheduler.get_num_new_matched_tokens(request, 128), (384, True))
+                    self.assertEqual(request.num_prompt_tokens, 513)
+
+    def test_truncation_guards(self):
+        for need_truncate, num_tokens in ((False, 513), (True, 1)):
+            with self.subTest(need_truncate=need_truncate, num_tokens=num_tokens):
+                self.scheduler.need_truncate = need_truncate
+                request = self.make_prefix_request(num_tokens, {"do_remote_decode": True})
+                self.scheduler.on_new_request(request)
+                self.assertEqual(request.num_prompt_tokens, num_tokens)
+                self.assertEqual(request.max_tokens, 8)
+                self.assertNotIn("_p_side_truncated", request.kv_transfer_params)
+
+    def test_matched_token_query_does_not_change_prompt_length(self):
+        self.scheduler.need_truncate = True
+        request = self.make_prefix_request(513, {"do_remote_decode": True})
+        # Protect against reintroducing the late mutation, after a 512-token hit.
+        self.assertEqual(self.scheduler.get_num_new_matched_tokens(request, 512), (0, False))
+        self.assertEqual(request.num_prompt_tokens, 513)
+        self.assertEqual(len(request._all_token_ids), 513)
 
     def test_build_connector_meta(self):
         request = MockRequest("req1")

@@ -541,9 +541,6 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             if count > 0:
                 return count, True
 
-        if params is not None and params.get("do_remote_decode") and self.need_truncate:
-            self._truncate_request_for_prefill(request)
-
         return 0, False
 
     def update_state_after_alloc(
@@ -671,9 +668,6 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             "remote_port": self.side_channel_port,
             "last_token_id": request.output_token_ids[-1],
         }
-
-    def on_new_request(self, request: "Request") -> None:
-        pass
 
     def update_connector_output(
         self,
