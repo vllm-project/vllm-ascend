@@ -16,6 +16,9 @@
 #
 
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def _register_with_class_name_alias(name: str, module_path: str, class_name: str) -> None:
@@ -29,6 +32,13 @@ def _register_with_class_name_alias(name: str, module_path: str, class_name: str
     """
     KVConnectorFactory.register_connector(name, module_path, class_name)
     if class_name != name:
+        if class_name in KVConnectorFactory._registry:
+            logger.warning(
+                "Class name '%s' is already registered under a different "
+                "config name; overriding it with the alias for module %s.",
+                class_name,
+                module_path,
+            )
         KVConnectorFactory._registry.pop(class_name, None)
         KVConnectorFactory.register_connector(class_name, module_path, class_name)
 
@@ -139,6 +149,8 @@ def register_connector():
             "AscendSimpleCPUOffloadConnector",
         )
 
+    # No class-name alias here: this connector does not override
+    # get_kv_connector_stats, so it never emits stats to reconstruct.
     KVConnectorFactory.register_connector(
         "PreemptOffloadConnector",
         "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.preempt_offload_connector",
