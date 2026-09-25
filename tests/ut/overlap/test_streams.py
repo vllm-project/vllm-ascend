@@ -41,7 +41,7 @@ from vllm_ascend.overlap.streams import (
 
 
 def _npu_available() -> bool:
-    return bool(torch.npu.is_available())
+    return torch.npu.is_available() is True
 
 
 @pytest.fixture(autouse=True)
@@ -253,8 +253,11 @@ class TestEventLedger(PytestBase):
 
     def test_event_creation_disables_timing(self):
         ledger = get_event_ledger()
-        ledger.record("timing_disabled")
-        torch.npu.Event.assert_called_with(enable_timing=False)
+        with pytest.MonkeyPatch.context() as mp:
+            event_factory = MagicMock(return_value=MagicMock())
+            mp.setattr(torch.npu, "Event", event_factory)
+            ledger.record("timing_disabled")
+        event_factory.assert_called_once_with(enable_timing=False)
 
     def test_ledger_reset_preserves_singleton(self):
         ledger = get_event_ledger()
