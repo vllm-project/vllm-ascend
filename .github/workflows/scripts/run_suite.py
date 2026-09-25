@@ -14,7 +14,7 @@ import yaml
 
 multiprocessing.set_start_method("spawn", force=True)
 
-_CONFIG_UPSTREAM = Path(__file__).parent / "upstream_config.yaml"
+_CONFIG_UPSTREAM = Path(__file__).parent / "upstream_config1.yaml"
 
 # Each entry: (config_path, is_upstream)
 # When is_upstream is True, sanity_check is skipped for tests from that config.
