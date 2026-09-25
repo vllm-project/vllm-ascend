@@ -109,6 +109,13 @@ class TestQuantizeWeightInt8PerChannel(TestBase):
         self.assertEqual(scale[3].item(), 0.0)
         self.assertFalse(bool(torch.isnan(quantized.to(torch.float32)).any()))
 
+    def test_zero_row_matches_reference_without_nan(self):
+        weight = torch.zeros(2, 8)
+        quantized, scale = wo.quantize_weight_int8_per_channel(weight)
+        ref_quantized, ref_scale = wo.quantize_weight_int8_per_channel_reference(weight)
+        self.assertTrue(torch.equal(quantized, ref_quantized))
+        self.assertTrue(torch.equal(scale, ref_scale))
+
     def test_round_before_clamp_keeps_amax_exact(self):
         # round(w / (amax/127)) at w == amax is exactly +/-127 before any
         # clamp; the clamp exists only for fp edge cases, not this tensor.

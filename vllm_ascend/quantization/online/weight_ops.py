@@ -122,7 +122,8 @@ def quantize_weight_int8_per_channel(
         chunk_scale = torch.maximum(lo.abs(), hi.abs()) / 127.0
         # A zero row must stay all-zero rather than produce NaN.
         chunk_scale = torch.where(chunk_scale > 0, chunk_scale, torch.zeros_like(chunk_scale))
-        quantized = torch.round(chunk.to(torch.float32) / chunk_scale.unsqueeze(1))
+        safe_scale = torch.where(chunk_scale > 0, chunk_scale, torch.ones_like(chunk_scale))
+        quantized = torch.round(chunk.to(torch.float32) / safe_scale.unsqueeze(1))
         int8_weight[row_start:row_end] = quantized.clamp(-127, 127).to(torch.int8)
         scale[row_start:row_end] = chunk_scale
 
@@ -146,7 +147,8 @@ def quantize_weight_int8_per_channel_reference(
     amax = weight_fp32.abs().amax(dim=1)
     scale = amax / 127.0
     scale = torch.where(scale > 0, scale, torch.zeros_like(scale))
-    quantized = torch.round(weight_fp32 / scale.unsqueeze(1)).clamp(-127, 127).to(torch.int8)
+    safe_scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+    quantized = torch.round(weight_fp32 / safe_scale.unsqueeze(1)).clamp(-127, 127).to(torch.int8)
     return quantized, scale
 
 
