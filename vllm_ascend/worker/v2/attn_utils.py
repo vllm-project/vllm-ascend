@@ -1134,6 +1134,24 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = typed_cache.view(kv_cache_shape)
                 continue
 
+            if isinstance(kv_cache_spec, MambaSpec):
+                if not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError(f"Mamba cache for {layer_name} must use one raw tensor.")
+                if uses_padded_page_layout:
+                    num_blocks = raw_cache.numel() // kv_cache_spec.page_size_bytes
+                    mamba_cache = _adjust_kv_layout(
+                        raw_cache,
+                        [(num_blocks, *shape) for shape in kv_cache_spec.shapes],
+                        kv_cache_spec.dtypes,
+                        kv_cache_spec.page_size_bytes,
+                    )
+                else:
+                    mamba_cache = _reshape_mamba_kv_cache(raw_cache, kv_cache_spec)
+                if mamba_cache[0].shape[0] < kv_cache_config.num_blocks:
+                    raise ValueError(f"Mamba cache for {layer_name} has fewer blocks than KVCacheManager.")
+                kv_caches[layer_name] = mamba_cache
+                continue
+
             views = view_glm5_next_cache(
                 layer_name,
                 kv_cache_spec,
@@ -1163,24 +1181,6 @@ def _reshape_kv_cache_v2(
                     kv_cache_config,
                     mla_dims,
                 )
-                continue
-
-            if isinstance(kv_cache_spec, MambaSpec):
-                if not isinstance(raw_cache, torch.Tensor):
-                    raise ValueError(f"Mamba cache for {layer_name} must use one raw tensor.")
-                if uses_padded_page_layout:
-                    num_blocks = raw_cache.numel() // kv_cache_spec.page_size_bytes
-                    mamba_cache = _adjust_kv_layout(
-                        raw_cache,
-                        [(num_blocks, *shape) for shape in kv_cache_spec.shapes],
-                        kv_cache_spec.dtypes,
-                        kv_cache_spec.page_size_bytes,
-                    )
-                else:
-                    mamba_cache = _reshape_mamba_kv_cache(raw_cache, kv_cache_spec)
-                if mamba_cache[0].shape[0] < kv_cache_config.num_blocks:
-                    raise ValueError(f"Mamba cache for {layer_name} has fewer blocks than KVCacheManager.")
-                kv_caches[layer_name] = mamba_cache
                 continue
 
             if not isinstance(kv_cache_spec, AttentionSpec):
