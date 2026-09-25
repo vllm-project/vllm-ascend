@@ -546,6 +546,36 @@ class NPUPlatform(Platform):
                 os.environ.get("TORCH_COMPILE_DEBUG"),
             )
 
+    @classmethod
+    def _apply_auto_custom_ops(cls, vllm_config: VllmConfig) -> None:
+        """Activate all custom ops on AUTO_ENABLE_CUSTOM_OPS profiles.
+
+        Stage5 F1: on the *active* inductor compile-backend track, keep the
+        upstream-derived base ('none' — vllm/config/vllm.py derives it from
+        backend == "inductor" before this late hook runs) and any explicit
+        user -cc.custom_ops value; the ['all'] overwrite stays bit-identical
+        for the legacy track and for inert (mode=NONE) engines.
+        """
+        if not get_current_hardware_profile().supports(
+            HardwareCapability.AUTO_ENABLE_CUSTOM_OPS
+        ):
+            return
+        from vllm.config import CompilationMode
+
+        cc = vllm_config.compilation_config
+        if cc.backend == "inductor" and cc.mode not in (
+            CompilationMode.NONE,
+            None,
+        ):
+            logger.info(
+                "Inductor compile-backend track: keeping upstream-derived "
+                "custom_ops=%s (user-explicit values are respected; the "
+                "AUTO_ENABLE_CUSTOM_OPS overwrite only applies off the track).",
+                cc.custom_ops,
+            )
+        else:
+            cc.custom_ops = ["all"]
+
     def num_compute_units(cls, device_id: int = 0) -> int:
         """Return the number of Cube Cores on the NPU device.
         This is the NPU equivalent of CUDA's ``multi_processor_count``
@@ -1676,8 +1706,7 @@ def _setup_worker_and_scheduler(
     refresh_block_size(vllm_config)
 
     # Automatically activate all custom ops on profiles using the standard path.
-    if get_current_hardware_profile().supports(HardwareCapability.AUTO_ENABLE_CUSTOM_OPS):
-        vllm_config.compilation_config.custom_ops = ["all"]
+    NPUPlatform._apply_auto_custom_ops(vllm_config)
 
     # Select specialized scheduler class
     scheduler_config = ascend_config.scheduler_config

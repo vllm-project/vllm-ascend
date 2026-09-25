@@ -641,3 +641,60 @@ class TestBreakableArchAutoInject(TrackTestBase):
             vllm_config.__post_init__()
         self.assertEqual(os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH"), "1")
         self.assertEqual(vllm_config.compilation_config.mode, CompilationMode.NONE)
+
+
+class TestAutoCustomOpsOverwrite(TrackTestBase):
+    """Stage5 F1: the AUTO_ENABLE_CUSTOM_OPS ['all'] overwrite is
+    track-aware. On the active inductor compile-backend track the
+    upstream-derived base ('none', vllm/config/vllm.py) and any explicit
+    user -cc.custom_ops value are kept; off the track (legacy backend or
+    inert mode=NONE engine) the overwrite stays bit-identical to the
+    pre-stage5 behavior."""
+
+    def _apply(self, vllm_config, supports=True):
+        from vllm_ascend.platform import NPUPlatform
+
+        profile = SimpleNamespace(
+            supports=lambda cap: supports
+        )
+        with patch(
+            "vllm_ascend.platform.get_current_hardware_profile",
+            return_value=profile,
+        ):
+            NPUPlatform._apply_auto_custom_ops(vllm_config)
+        return vllm_config.compilation_config
+
+    def test_track_on_keeps_upstream_derived_none(self):
+        vllm_config = self._make_vllm_config(track=True)
+        vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        vllm_config.compilation_config.custom_ops = ["none"]
+        cc = self._apply(vllm_config)
+        self.assertEqual(cc.custom_ops, ["none"])
+
+    def test_track_on_respects_explicit_user_all(self):
+        vllm_config = self._make_vllm_config(track=True)
+        vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        vllm_config.compilation_config.custom_ops = ["all"]
+        cc = self._apply(vllm_config)
+        self.assertEqual(cc.custom_ops, ["all"])
+
+    def test_track_off_overwrites_all(self):
+        vllm_config = self._make_vllm_config(track=False)
+        vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        vllm_config.compilation_config.custom_ops = []
+        cc = self._apply(vllm_config)
+        self.assertEqual(cc.custom_ops, ["all"])
+
+    def test_track_on_but_inert_mode_none_overwrites_all(self):
+        vllm_config = self._make_vllm_config(track=True)
+        vllm_config.compilation_config.mode = CompilationMode.NONE
+        vllm_config.compilation_config.custom_ops = []
+        cc = self._apply(vllm_config)
+        self.assertEqual(cc.custom_ops, ["all"])
+
+    def test_non_supporting_profile_is_noop(self):
+        vllm_config = self._make_vllm_config(track=False)
+        vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        vllm_config.compilation_config.custom_ops = []
+        cc = self._apply(vllm_config, supports=False)
+        self.assertEqual(cc.custom_ops, [])
