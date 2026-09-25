@@ -205,6 +205,42 @@ public:
                   "chunk_fwd_o: gPre runs into the Vec2 out tile");
 
     // ---- NZ-native Vec1 -------------------------------------------------------
+    // On m200, Nd2Nz GM->L1 expands into many small GM->UB loads and
+    // vector copies. An aligned dense tile can instead use one GM burst
+    // followed by one strided UB->L1 descriptor per 16-column panel.
+    // Vec1/Vec2 scratch is dead at the beginning of a body; the fences below
+    // release it before the subsequent vector work. Partial tiles retain the
+    // library path, including its padding semantics.
+    __aicore__ inline void PrefetchDenseTile(
+        AscendC::GlobalTensor<half> src, uint32_t rows, uint32_t cols, uint32_t l1Offset) {
+        if (rows % 16 != 0 || cols % 16 != 0 ||
+            rows * cols * sizeof(half) > 2 * UB_TILE_F32) {
+            M200Gemm::HmLoadGmToL1<ArchTag>(resource, src, cols, rows, cols, l1Offset);
+            return;
+        }
+        auto scratch = resource.ubBuf.template GetBufferByByte<half>(UB_BRC_A_OFFSET);
+        auto dst = resource.l1Buf.template GetBufferByByte<half>(l1Offset);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID6);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID6);
+        AscendC::DataCopy(scratch, src, rows * cols);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID6);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID6);
+        AscendC::DataCopyParams p;
+        p.blockCount = static_cast<uint16_t>(rows);
+        p.blockLen = 1;
+        p.srcStride = static_cast<uint16_t>(cols / 16 - 1);
+        p.dstStride = 0;
+        for (uint32_t column = 0; column < cols / 16; ++column) {
+            AscendC::DataCopy(dst[column * rows * 16], scratch[column * 16], p);
+        }
+        // Protect the shared scratch against both the next prefetch and Vec2.
+        // MTE3 -> MTE2 also chains this L1 write into the caller's MTE2_MTE1.
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID6);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID6);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+    }
+
     // Causal mask in NZ fractal order, built once:
     //   maskNZ[(nf*4+mf)*256 + r*16 + c] = 1 iff (mf*16+r) >= (nf*16+c)
     // Whole fractals are all-ones (mf>nf) or all-zeros (mf<nf); only the diagonal
@@ -371,11 +407,9 @@ public:
                 // the previous mmads' internal MTE1_MTE2 fences.
                 GDNFwdOOffsets& cube1Offsets = cubeBlockScheduler.GetCube1Offsets();
                 const uint32_t pbt = cube1Offsets.blockTokens;
-                M200Gemm::HmLoadGmToL1<ArchTag>(
-                    resource, gmQ[cube1Offsets.qkOffset], kHeadDim,
+                PrefetchDenseTile(gmQ[cube1Offsets.qkOffset],
                     pbt, kHeadDim, Q_L1_OFFSET + maskedParity * Q_L1_SLOT);
-                M200Gemm::HmLoadGmToL1<ArchTag>(
-                    resource, gmK[cube1Offsets.qkOffset], kHeadDim,
+                PrefetchDenseTile(gmK[cube1Offsets.qkOffset],
                     pbt, kHeadDim, K_L1_OFFSET + maskedParity * K_L1_SLOT);
                 // C1's gate: only Q and K. h/v below carry their own flag, so
                 // C1 does not stall on the 64 KB it never reads.
@@ -387,8 +421,7 @@ public:
                                       M200Gemm::HmRoundUp16(kHeadDim) *
                                       M200Gemm::HmRoundUp16(vHeadDim));
                 }
-                M200Gemm::HmLoadGmToL1<ArchTag>(
-                    resource, gmV[cube1Offsets.ovOffset], vHeadDim,
+                PrefetchDenseTile(gmV[cube1Offsets.ovOffset],
                     pbt, vHeadDim, V_L1_OFFSET + maskedParity * V_L1_SLOT);
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID5);  // h/v -> next body's C2/C3
             }
