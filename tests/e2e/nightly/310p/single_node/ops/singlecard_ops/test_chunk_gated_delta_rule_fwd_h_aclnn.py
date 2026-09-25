@@ -95,7 +95,15 @@ class TestChunkGatedDeltaRuleFwdH310:
             initial_state=init.npu(),
             chunk_size=CHUNK_SIZE,
         )
-        h_npu = h_out.cpu().float()
+        # The 310P producer and FwdO consumer share zN(K,V) state images.
+        # Decode that physical layout before comparing with the ND reference.
+        h_npu = (
+            h_out.cpu()
+            .reshape(B, HV, -1, V // 16, K // 16, 16, 16)
+            .permute(0, 1, 2, 4, 5, 3, 6)
+            .reshape(B, HV, -1, K, V)
+            .float()
+        )
         NT = T // CHUNK_SIZE
 
         for c in range(min(NT + 1, h_npu.shape[2])):
