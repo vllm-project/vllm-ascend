@@ -72,10 +72,7 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import (
-    _get_layer_kv_cache_specs,
-    build_attn_state,
-)
+from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -297,10 +294,8 @@ class NPUModelRunner(GPUModelRunner):
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
 
-        layer_specs = _get_layer_kv_cache_specs(self.kv_cache_config)
         self.kv_caches = build_kv_cache_copy_views(
             self.kv_cache_config,
-            layer_specs,
             lambda name: self.compilation_config.static_forward_context[name].kv_cache,
             self.kv_caches,
         )

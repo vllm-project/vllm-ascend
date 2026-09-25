@@ -82,6 +82,7 @@ def _make_config():
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         max_in_flight_tokens=8,
         cache_config=SimpleNamespace(
+            cache_dtype="auto",
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
@@ -550,6 +551,28 @@ def test_mrv2_block_stride_capability_preserves_generic_backing(monkeypatch):
     assert all(cache.untyped_storage().data_ptr() == backing.data_ptr() for cache in raw.values())
     assert raw["state.0"].data_ptr() == raw["attention.0"].data_ptr()
     assert raw["attention.1"].data_ptr() - raw["attention.0"].data_ptr() == layer_size
+
+    monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda _name, _spec: (4, 0))
+    attn_groups = [
+        SimpleNamespace(
+            kv_cache_group_id=i,
+            kv_cache_spec=group.kv_cache_spec,
+            layer_names=group.layer_names,
+            backend=_AttentionBackend,
+        )
+        for i, group in enumerate(plan.kv_cache_groups)
+    ]
+    views = attn_utils._reshape_kv_cache_v2(attn_groups, raw, "auto", [4, 8], {}, plan)
+    cache, rope = views["attention.0"]
+    assert cache.shape == (6, 4, 1, 4)
+    assert rope.numel() == 0
+    # Kernel block 2 starts at scheduler page 1, without a model marker.
+    cache[2].fill_(7)
+    physical_pages = raw["attention.0"].view(torch.bfloat16).view(num_blocks, 8, 1, 4)
+    assert torch.all(physical_pages[1, :4] == 7)
+    assert torch.count_nonzero(physical_pages[[0, 2]]) == 0
+    assert torch.count_nonzero(physical_pages[1, 4:]) == 0
+    assert torch.count_nonzero(raw["attention.1"]) == 0
 
 
 @pytest.mark.parametrize("geometry", [{"offset": 1}, {"layer_stride": 64}, {"block_stride": 32}, {"size": 1}])

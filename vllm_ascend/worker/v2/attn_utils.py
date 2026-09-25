@@ -64,7 +64,6 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
-from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     calc_split_factor,
@@ -1135,19 +1134,18 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = typed_cache.view(kv_cache_shape)
                 continue
 
-            if is_glm5_next_cache_spec(kv_cache_spec):
-                views = view_glm5_next_cache(
-                    layer_name,
-                    kv_cache_spec,
-                    raw_cache,
-                    attn_backend=group.backend,
-                    kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
-                    num_blocks=kv_cache_config.num_blocks,
-                    get_kv_cache_dims=_get_attention_kv_cache_dims,
-                )
-                if views is not None:
-                    kv_caches[layer_name] = views
-                    continue
+            views = view_glm5_next_cache(
+                layer_name,
+                kv_cache_spec,
+                raw_cache,
+                attn_backend=group.backend,
+                kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
+                num_blocks=kv_cache_config.num_blocks,
+                get_kv_cache_dims=_get_attention_kv_cache_dims,
+            )
+            if views is not None:
+                kv_caches[layer_name] = views
+                continue
 
             if (is_dsv4_model or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)) and isinstance(
                 kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)

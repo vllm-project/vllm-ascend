@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pooled-cache physical views and copy-on-write layout for GLM-Next."""
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 import torch
 from vllm.utils.torch_utils import get_dtype_size
@@ -144,7 +144,6 @@ def view_glm5_next_cache(
 
 def build_kv_cache_copy_views(
     kv_cache_config: KVCacheConfig,
-    layer_specs: Mapping[str, KVCacheSpec],
     get_layer_cache: Callable[[str], torch.Tensor | Sequence[torch.Tensor]],
     runner_caches: Iterable[torch.Tensor | Sequence[torch.Tensor]],
 ) -> list[torch.Tensor]:
@@ -154,19 +153,17 @@ def build_kv_cache_copy_views(
     page only once. Indexer/tail components occupy separate packed regions
     and must retain their individual strides in the copy inventory.
     """
-    packed_tail_layers = {name for name, spec in layer_specs.items() if isinstance(spec, AscendIndexerKPoolTailSpec)}
     shared_cache_views: dict[int, torch.Tensor] = {}
     for descriptor in kv_cache_config.kv_cache_tensors:
-        if (
-            len(descriptor.layers) < 2
-            or descriptor.layer_stride != 0
-            or packed_tail_layers.intersection(descriptor.layers)
-        ):
+        if len(descriptor.layers) < 2 or descriptor.layer_stride != 0:
             continue
         caches = [get_layer_cache(name) for name in descriptor.layers]
-        first = caches[0]
-        if not isinstance(first, torch.Tensor):
-            first = first[0]
+        first_components = [cache if isinstance(cache, torch.Tensor) else cache[0] for cache in caches]
+        first = first_components[0]
+        # Packed regions start at different addresses and retain their own
+        # block strides. Only views with the same page origin alias pages.
+        if any(tensor.data_ptr() != first.data_ptr() for tensor in first_components[1:]):
+            continue
         storage = first.untyped_storage()
         base = first.storage_offset() * first.element_size()
         assert base + descriptor.size <= storage.nbytes()

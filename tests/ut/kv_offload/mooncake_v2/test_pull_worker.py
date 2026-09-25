@@ -1146,7 +1146,7 @@ def test_whole_block_address_generation_uses_independent_stride(cache_kind: str)
         thread.kv_caches_base_addr[0].append(0)
         thread.block_strides[0].append(256)
         thread.block_lens[0].append(0)
-        remote.metadata_by_tp_rank[0].kv_caches_base_addr[0].append(0)
+        remote.metadata_by_pcp_rank[0].metadata_by_tp_rank[0].kv_caches_base_addr[0].append(0)
         remote.block_strides[0].append(512)
         remote.block_lens[0].append(0)
     src: list[int] = []
@@ -1675,7 +1675,7 @@ def test_tail_tp_groups_preserve_replicated_k_and_gate(local_tp: int, remote_tp:
     for rank in range(local_tp):
         thread = make_thread(tp_size=local_tp, tp_rank=rank, block_shapes=[[(2, 2, 8)]])
         assert thread._get_layer_remote_tp_rank_groups(
-            0, 0, spec, remote, remote_tp_size=remote_tp, remote_dcp_size=1
+            0, 0, spec, remote, remote_pcp_size=1, remote_tp_size=remote_tp, remote_dcp_size=1
         ) == [list(range(remote_tp))]
 
 
