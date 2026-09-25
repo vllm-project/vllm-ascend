@@ -192,11 +192,15 @@ class TestApplyInductorTrackDefaults(TrackTestBase):
         vllm_config = self._make_vllm_config(track=True)
         # Early-hook timing: -O presets have not filled cudagraph_mode yet.
         vllm_config.compilation_config.cudagraph_mode = None
+        # Stage5 F6 (unpin): the early hook must not touch ir_enable_torch_wrap
+        # (a None value left in place lets the -O preset derive True for the
+        # inductor track right after the hook — CUDA-same default surface).
+        vllm_config.compilation_config.ir_enable_torch_wrap = None
         NPUPlatform._apply_inductor_track_defaults(vllm_config)
         cc = vllm_config.compilation_config
         self.assertEqual(cc.backend, "inductor")
         self.assertIsNone(cc.cudagraph_mode)
-        self.assertFalse(cc.ir_enable_torch_wrap)
+        self.assertIsNone(cc.ir_enable_torch_wrap)
         self.assertFalse(cc.inductor_compile_config["combo_kernels"])
         self.assertFalse(cc.inductor_compile_config["benchmark_combo_kernel"])
         for flag in _INDUCTOR_TRACK_PASS_FLAGS_OFF:

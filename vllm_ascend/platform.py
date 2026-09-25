@@ -414,8 +414,12 @@ class NPUPlatform(Platform):
                 "Inductor track: explicit cudagraph_mode=%s accepted (full-graph capture leg, stage3).",
                 compilation_config.cudagraph_mode,
             )
-        # Not verified on NPU; core would derive True once backend == "inductor".
-        compilation_config.ir_enable_torch_wrap = False
+        # Stage5 F6 (unpin): ir_enable_torch_wrap is no longer forced False —
+        # vLLM core derives True for the inductor track (vllm/config/vllm.py
+        # "ir_enable_torch_wrap" preset fills the None field right after this
+        # early hook). M0/M5 A-B on 0.6B measured no significant difference;
+        # keeping the upstream-derived value restores the CUDA-same default
+        # surface (red line 2: via the upstream front door, not a side pin).
         for flag in _INDUCTOR_TRACK_PASS_FLAGS_OFF:
             setattr(compilation_config.pass_config, flag, False)
         # combo kernels have no triton_experimental adaptation and can fail hard.
