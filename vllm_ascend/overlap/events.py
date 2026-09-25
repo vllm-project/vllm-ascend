@@ -49,7 +49,9 @@ def _is_graph_capturing() -> bool:
         # torch_npu builds without the probe cannot be detected; assume no
         # capture so eager-mode behavior is never accidentally disabled.
         return False
-    return bool(probe())
+    # The probe is a bool-returning NPU API. Do not treat an unconfigured
+    # MagicMock or other truthy placeholder as an active capture in tests.
+    return probe() is True
 
 
 class EventLedger:
