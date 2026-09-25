@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -40,6 +41,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3SparseMetadata,
     AscendMiniMaxM3SparseMetadataBuilder,
     AscendMiniMaxM3SparsePrefillMetadata,
+    _is_mrv2_idle_dp_dummy,
     _register_m3_sparse_packed_modules,
     _should_use_tp_sharded_index_decode,
     _sparse_proj_quant_type,
@@ -574,6 +576,126 @@ def test_non_a5_decode_keeps_tp_block_sharding() -> None:
         assert _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
         assert not _should_use_tp_sharded_index_decode(tp_size=1, num_prefills=0)
         assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=1)
+
+
+def _make_mrv2_padding_context(
+    *,
+    is_padding: bool = True,
+    tokens_across_dp: tuple[int, ...] = (370, 1),
+    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        is_padding=torch.tensor([is_padding]),
+        dp_metadata=SimpleNamespace(
+            num_tokens_across_dp_cpu=torch.tensor(tokens_across_dp),
+        ),
+        additional_kwargs={},
+        cudagraph_runtime_mode=cudagraph_mode,
+    )
+
+
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
+def test_mrv2_idle_dp_dummy_is_detected_and_cached(
+    mock_get_vllm_config: MagicMock,
+) -> None:
+    mock_get_vllm_config.return_value = SimpleNamespace(use_v2_model_runner=True)
+    forward_context = _make_mrv2_padding_context()
+
+    assert _is_mrv2_idle_dp_dummy(forward_context) is True
+    forward_context.is_padding[0] = False
+    assert _is_mrv2_idle_dp_dummy(forward_context) is True
+    mock_get_vllm_config.assert_called_once_with()
+
+
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
+def test_mrv1_padding_shape_is_not_classified_as_mrv2_dummy(
+    mock_get_vllm_config: MagicMock,
+) -> None:
+    mock_get_vllm_config.return_value = SimpleNamespace(use_v2_model_runner=False)
+
+    assert _is_mrv2_idle_dp_dummy(_make_mrv2_padding_context()) is False
+
+
+@pytest.mark.parametrize(
+    ("forward_context"),
+    [
+        _make_mrv2_padding_context(is_padding=False),
+        _make_mrv2_padding_context(tokens_across_dp=(1, 1)),
+        _make_mrv2_padding_context(cudagraph_mode=CUDAGraphMode.FULL),
+    ],
+    ids=["real_one_token_decode", "all_dp_ranks_one_token", "full_graph"],
+)
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
+def test_mrv2_non_dummy_forwards_are_not_skipped(
+    mock_get_vllm_config: MagicMock,
+    forward_context: SimpleNamespace,
+) -> None:
+    mock_get_vllm_config.return_value = SimpleNamespace(use_v2_model_runner=True)
+
+    assert _is_mrv2_idle_dp_dummy(forward_context) is False
+
+
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_tp_group")
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
+def test_mrv2_idle_dp_runs_first_indexer_layer_then_skips_repeats(
+    mock_get_forward_context: MagicMock,
+    mock_get_tp_group: MagicMock,
+    mock_get_vllm_config: MagicMock,
+) -> None:
+    impl = object.__new__(AscendMiniMaxM3IndexerImpl)
+    torch.nn.Module.__init__(impl)
+    impl.num_index_heads = 1
+    impl.index_head_dim = 4
+    impl.topk_blocks = 2
+    impl.init_blocks = 1
+    impl.local_blocks = 1
+    impl.index_cache = SimpleNamespace(
+        prefix="layer.attn.index_cache",
+        kv_cache=torch.zeros(4, 128, 4),
+    )
+    decode = AscendMiniMaxM3IndexerDecodeMetadata(
+        cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        context_lens=torch.tensor([0], dtype=torch.int32),
+        block_table=torch.tensor([[0]], dtype=torch.int32),
+        start_loc=torch.tensor([0], dtype=torch.int32),
+        max_seq_len=1,
+        decode_query_len=1,
+        tp_score=MagicMock(),
+    )
+    metadata = AscendMiniMaxM3IndexerMetadata(
+        seq_lens=decode.seq_lens,
+        max_seq_len=1,
+        slot_mapping=torch.zeros(1, dtype=torch.int64),
+        causal_mask=torch.zeros(1, 1, dtype=torch.bool),
+        num_actual_tokens=1,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+    )
+    forward_context = _make_mrv2_padding_context()
+    forward_context.attn_metadata = {impl.index_cache.prefix: metadata}
+    mock_get_forward_context.return_value = forward_context
+    mock_get_tp_group.return_value = SimpleNamespace(world_size=4)
+    mock_get_vllm_config.return_value = SimpleNamespace(use_v2_model_runner=True)
+    expected = torch.zeros(1, 1, 2, dtype=torch.int32)
+
+    with patch(
+        "vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_index_tp_block_parallel_decode",
+        return_value=expected,
+    ) as mock_decode:
+        first = impl.forward(torch.zeros(1, 4))
+        second = impl.forward(torch.zeros(1, 4))
+
+    assert first[0] is expected
+    assert first[1:] == (None, None)
+    assert second == (None, None, None)
+    mock_decode.assert_called_once()
+    assert forward_context.additional_kwargs[msa_m3_module._MRV2_DUMMY_INDEXER_TP_WARMED_KEY]
+    assert forward_context.additional_kwargs[msa_m3_module._MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY]
 
 
 def test_a5_indexer_forward_keeps_original_decode_path() -> None:
@@ -1608,6 +1730,44 @@ def test_speculative_decode_candidates_do_not_overforce_earlier_tp_shard() -> No
 
     assert torch.equal(indices, torch.tensor([[[0], [0]]], dtype=torch.int32))
     assert torch.equal(scores, torch.tensor([[[9.0], [9.0]]]))
+
+
+@patch("vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_sparse_attn")
+@patch("vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_sparse_attn_decode")
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
+def test_sparse_impl_zeros_mrv2_idle_dp_output_after_indexer_warmup(
+    mock_get_forward_context: MagicMock,
+    mock_sparse_attn_decode: MagicMock,
+    mock_sparse_attn_prefill: MagicMock,
+) -> None:
+    impl = AscendMiniMaxM3SparseImpl(
+        num_heads=2,
+        head_size=4,
+        scale=0.5,
+        num_kv_heads=2,
+        topk_blocks=8,
+        sparse_block_size=128,
+    )
+    mock_get_forward_context.return_value = SimpleNamespace(
+        attn_metadata={"layer.attn": object()},
+        additional_kwargs={
+            msa_m3_module._MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY: True,
+        },
+    )
+    output = torch.ones(1, 8)
+
+    result = impl.forward(
+        SimpleNamespace(layer_name="layer.attn"),
+        torch.zeros_like(output),
+        torch.empty(0),
+        (None, None, None),
+        output,
+    )
+
+    assert result is output
+    assert torch.count_nonzero(output) == 0
+    mock_sparse_attn_decode.assert_not_called()
+    mock_sparse_attn_prefill.assert_not_called()
 
 
 @patch("vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_sparse_attn")
