@@ -2,7 +2,7 @@
 
 import sys
 import tempfile
-from threading import Event, Lock, Thread
+from threading import Event, Thread
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -23,6 +23,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     RequestTracker as LegacyRequestTracker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import backend as v1_backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import connector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import factory as service_factory
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.metadata import (
@@ -1202,50 +1203,59 @@ def test_worker_stops_store_when_load_startup_fails() -> None:
     assert lifecycle == ["register", "start_store", "start_load", "close_store", "close_load", "close_resources"]
 
 
-def test_classic_mooncake_backend_releases_buffers_before_store(monkeypatch) -> None:
-    lifecycle = []
-    transfer_engine = SimpleNamespace(
-        batch_unregister_memory=lambda addresses: lifecycle.append(("unregister", addresses)) or 0
+@pytest.mark.parametrize(
+    ("backend_name", "backend_type_name"),
+    [
+        ("mooncake", "MooncakeBackend"),
+        ("memcache", "MemcacheBackend"),
+        ("yuanrong", "YuanrongBackend"),
+    ],
+)
+def test_worker_cache_resources_selects_configured_backend(monkeypatch, backend_name, backend_type_name) -> None:
+    class SelectedBackend:
+        def __init__(self, parallel_config, extra_config) -> None:
+            self.parallel_config = parallel_config
+            self.extra_config = extra_config
+
+    imported_modules = []
+    backend_module = ModuleType("selected_backend")
+    setattr(backend_module, backend_type_name, SelectedBackend)
+    monkeypatch.setattr(
+        v1_backend.importlib,
+        "import_module",
+        lambda module_path: imported_modules.append(module_path) or backend_module,
     )
-    managed_transfer_engine = SimpleNamespace(
-        transfer_engine=transfer_engine,
-        is_register_buffer=True,
-        register_buffer_lock=Lock(),
-    )
-    monkeypatch.setattr(worker_resources, "global_te", managed_transfer_engine)
+    parallel_config = object()
+    extra_config = {"backend": backend_name}
+    key_metadata = KeyMetadata("model", 0, 0, 0)
 
-    class Backend:
-        requires_exists_before_put = True
+    resources = worker_resources.WorkerCacheResources.create(parallel_config, extra_config, key_metadata, 4, 4, 8)
 
-        def __init__(self) -> None:
-            self.store = SimpleNamespace(close=lambda: lifecycle.append(("close_store",)) or 0)
+    assert imported_modules == [v1_backend.BACKEND_IMPORTS[backend_name][0]]
+    assert isinstance(resources.backend, SelectedBackend)
+    assert resources.backend.parallel_config is parallel_config
+    assert resources.backend.extra_config is extra_config
 
-        def register_buffer(self, addresses, lengths) -> None:
-            lifecycle.append(("register", addresses, lengths))
 
-        def set_device(self) -> None:
-            return
+def test_worker_cache_resources_closes_backend_once_when_supported() -> None:
+    close_calls = []
+    backend = SimpleNamespace(close=lambda: close_calls.append("close"))
+    resources = worker_resources.WorkerCacheResources(backend, SimpleNamespace(), 4)
+    resources.kv_caches = {"layers.0": object()}
 
-        def exists(self, keys):
-            return []
+    resources.close()
+    resources.close()
 
-        def put(self, keys, addresses, sizes):
-            return []
+    assert close_calls == ["close"]
+    assert resources.kv_caches is None
 
-        def get(self, keys, addresses, sizes):
-            return []
 
-    backend = worker_resources.ClassicMooncakeBackend(Backend())
-    backend.register_buffer([100, 200], [10, 20])
-    backend.close()
-    backend.close()
+def test_worker_cache_resources_skips_backend_close_when_unsupported() -> None:
+    resources = worker_resources.WorkerCacheResources(SimpleNamespace(), SimpleNamespace(), 4)
 
-    assert lifecycle == [
-        ("register", [100, 200], [10, 20]),
-        ("unregister", [100, 200]),
-        ("close_store",),
-    ]
-    assert not managed_transfer_engine.is_register_buffer
+    resources.close()
+
+    assert resources.kv_caches is None
 
 
 def test_store_executor_reports_failure_while_waiting_for_previous_batch() -> None:
@@ -1314,6 +1324,32 @@ def test_classic_connector_finished_hooks_do_not_delay_block_release() -> None:
 
     assert instance.request_finished(request, [1]) == (False, None)
     assert instance.request_finished_all_groups(request, ([1],)) == (False, None)
+
+
+@pytest.mark.parametrize("backend_name", ["mooncake", "memcache", "yuanrong"])
+def test_connector_accepts_classic_backends(monkeypatch, backend_name) -> None:
+    worker = object()
+    monkeypatch.setattr(connector, "build_worker_service", lambda vllm_config, kv_cache_config: worker)
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(rank=1),
+        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"backend": backend_name}),
+    )
+    kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
+
+    instance = connector.AscendStoreV1Connector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+
+    assert instance.worker is worker
+
+
+def test_connector_rejects_unknown_backend() -> None:
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(rank=1),
+        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"backend": "unknown"}),
+    )
+    kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
+
+    with pytest.raises(ValueError, match="Unsupported AscendStore v1 backend: unknown"):
+        connector.AscendStoreV1Connector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
 
 
 def test_connector_routes_store_batch_through_worker_service(monkeypatch) -> None:
@@ -1501,15 +1537,6 @@ def test_classic_connector_lookup_load_and_send_thread_store(monkeypatch) -> Non
     )
     monkeypatch.setattr(worker_layout, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=RecordedEvent), raising=False)
-    monkeypatch.setattr(
-        worker_resources,
-        "global_te",
-        SimpleNamespace(
-            transfer_engine=SimpleNamespace(batch_unregister_memory=lambda addresses: 0),
-            is_register_buffer=True,
-            register_buffer_lock=Lock(),
-        ),
-    )
 
     with tempfile.TemporaryDirectory(prefix="v1-", dir="/tmp") as lookup_directory:
         lookup_path = f"ipc://{lookup_directory}/lookup"
