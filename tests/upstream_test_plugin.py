@@ -8,7 +8,7 @@ def pytest_configure(config):
 
 def _bridge_routed_experts_forward_context():
     import vllm.model_executor.layers.fused_moe.routed_experts_capturer as rec
-    
+
     import vllm_ascend.patch.worker.patch_routed_experts_capture as patch_mod
 
     patch_mod.get_forward_context = lambda: rec.get_forward_context()
