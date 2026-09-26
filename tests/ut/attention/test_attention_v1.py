@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
@@ -53,11 +54,33 @@ class TestAttentionGraphHelpers(TestBase):
     def test_large_head_uses_paged_attention_on_a2(self):
         vllm_config = MagicMock()
         vllm_config.speculative_config = None
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         with patch(
             "vllm_ascend.attention.utils.get_current_hardware_profile",
             return_value=get_hardware_profile(AscendDeviceType.A2),
         ):
             self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
+
+    def test_large_head_uses_fia_inside_full_decode_graph(self):
+        vllm_config = MagicMock()
+        vllm_config.speculative_config = None
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        with patch(
+            "vllm_ascend.attention.utils.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A2),
+        ):
+            self.assertFalse(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
+
+    def test_large_head_uses_paged_attention_without_full_decode_graph(self):
+        for cudagraph_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
+            vllm_config = MagicMock()
+            vllm_config.speculative_config = None
+            vllm_config.compilation_config.cudagraph_mode = cudagraph_mode
+            with patch(
+                "vllm_ascend.attention.utils.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A2),
+            ):
+                self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
 
 
 class TestAscendAttentionBackend(TestBase):
@@ -134,6 +157,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.mock_vllm_config.cache_config.block_size = 64
         self.mock_vllm_config.compilation_config.cudagraph_mode = None
         self.mock_vllm_config.scheduler_config.max_num_seqs = 10
+        self.mock_vllm_config.scheduler_config.max_num_batched_tokens = 64
         self.mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         self.mock_device = "cpu:0"
         torch.Tensor.pin_memory = lambda x: x  # noqa
@@ -199,12 +223,15 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             positions=torch.tensor([10, 10]),
             attn_state=AscendAttentionState.ChunkedPrefill,
             num_computed_tokens_cpu=None,
-            seq_lens=None,
+            seq_lens=torch.tensor([4, 5, 6]),
             max_seq_len=6,
         )
         mock_model = MagicMock()
 
         self.builder.build(1, common_attn_metadata, mock_model)
+
+        metadata_kwargs = mock_ascend_metadata.call_args.kwargs
+        self.assertTrue(torch.equal(metadata_kwargs["seq_lens_device"], common_attn_metadata.seq_lens))
 
 
 def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
