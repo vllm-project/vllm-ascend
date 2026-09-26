@@ -101,6 +101,10 @@ a3:
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
+      - name: DeepSeek-V4-Pro-w4a8-mtp-prefix-cache-PD-MRV2
+        config_file_path: DeepSeek-V4-Pro-w4a8-mtp-prefix-cache-PD-MRV2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
       - name: QWEN3_235B_PD
         config_file_path: QWEN3_235B_PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
