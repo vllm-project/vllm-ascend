@@ -39,6 +39,7 @@ def packed_broadcast_producer(
     target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
+    source_stream = torch.npu.current_stream()
     buffer_idx = 0
 
     packing_tensor_list: list[list[torch.Tensor]] = [[] for _ in range(num_buffers)]
@@ -50,6 +51,9 @@ def packed_broadcast_producer(
         # Synchronize the current stream (waits for previous
         # iteration's work on this buffer to finish)
         streams[buffer_idx].synchronize()
+        # Source tensors may have been produced asynchronously on the caller's
+        # stream. Wait before the packing stream reads them in torch.cat.
+        streams[buffer_idx].wait_stream(source_stream)
         # Start tasks for the new buffer in a new stream
         with torch.npu.stream(streams[buffer_idx]):
             # Initialize the packing tensor list and sizes
