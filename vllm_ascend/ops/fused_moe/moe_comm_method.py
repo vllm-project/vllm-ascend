@@ -419,7 +419,9 @@ class FusedMC2CommImpl(MoECommMethod):
             num_max_tokens_per_rank,
             num_topk,
             hidden=self.moe_config.hidden_dim,
-            intermediate_hidden=2 * self.moe_config.intermediate_size_per_partition,
+            # The operator's intermediate_hidden is the weight2 input dim
+            # (= moe_intermediate_size); Linear1's full output width is 2x it.
+            intermediate_hidden=self.moe_config.intermediate_size_per_partition,
             max_recv_token_num=max_recv_token_num,
             dispatch_quant_mode=dispatch_quant_mode,
             dispatch_quant_out_dtype=dispatch_quant_out_dtype,
