@@ -8,6 +8,7 @@ and lookup the NPU runs.
 """
 
 from .common import engram_enabled, engram_gate
+from .gate_npu import engram_gate_fused
 from .hash_state import AscendEngramSlotCache, create_engram_hash_state, engram_dead_mask
 from .npu import engram_cpu_offload
 
@@ -18,4 +19,5 @@ __all__ = [
     "engram_dead_mask",
     "engram_enabled",
     "engram_gate",
+    "engram_gate_fused",
 ]
