@@ -168,6 +168,13 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         assert attn_metadata.pcp_slot_mapping is not None
         return attn_metadata.pcp_slot_mapping
 
+    def _get_sfa_kv_store_num_tokens(self, slot_mapping_sfa: torch.Tensor, attn_metadata: M) -> int:
+        if attn_metadata.attn_state in {AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding}:
+            return attn_metadata.num_actual_tokens
+        # Prefill KV rows are gathered across PCP ranks, while num_actual_tokens
+        # only describes this rank's local model input.
+        return slot_mapping_sfa.numel()
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,

@@ -470,6 +470,83 @@ def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "impl_cls,state,num_actual_tokens,num_decode_tokens,num_kv_rows,pcp_slots,expected_store_tokens",
+    [
+        pytest.param(AscendSFAImpl, AscendAttentionState.ChunkedPrefill, 2, 0, 4, None, 2, id="local-prefill-padding"),
+        pytest.param(
+            AscendSFAPCPImpl,
+            AscendAttentionState.ChunkedPrefill,
+            2,
+            0,
+            4,
+            [10, 11, 12, 13],
+            4,
+            id="pcp-prefill-gather",
+        ),
+        pytest.param(
+            AscendSFAPCPImpl,
+            AscendAttentionState.ChunkedPrefill,
+            3,
+            1,
+            5,
+            [10, 11, 12, 13, 14],
+            5,
+            id="pcp-mixed-prefill-decode",
+        ),
+        pytest.param(
+            AscendSFAPCPImpl,
+            AscendAttentionState.DecodeOnly,
+            2,
+            2,
+            2,
+            [10, 11, -1, -1],
+            2,
+            id="pcp-decode-padding",
+        ),
+        pytest.param(
+            AscendSFAPCPImpl,
+            AscendAttentionState.SpecDecoding,
+            2,
+            2,
+            2,
+            [10, 11, -1, -1],
+            2,
+            id="pcp-speculative-padding",
+        ),
+    ],
+)
+def test_sfa_c8_cache_write_uses_the_slot_layout(
+    impl_cls, state, num_actual_tokens, num_decode_tokens, num_kv_rows, pcp_slots, expected_store_tokens
+) -> None:
+    impl = impl_cls.__new__(impl_cls)
+    impl.enable_sparse_sfa_c8 = True
+    impl.sfa_qsfa_packed_kv_head_dim = 3
+    local_slots = torch.tensor(
+        list(range(10, 10 + num_actual_tokens)) + [-1] * (num_kv_rows - num_actual_tokens), dtype=torch.int32
+    )
+    metadata = SimpleNamespace(
+        slot_mapping=local_slots,
+        pcp_slot_mapping=torch.tensor(pcp_slots, dtype=torch.int32) if pcp_slots is not None else None,
+        attn_state=state,
+        num_actual_tokens=num_actual_tokens,
+        num_decode_tokens=num_decode_tokens,
+    )
+    slots = impl._get_sfa_kv_slot_mapping(metadata)
+    cache = torch.empty(16, 3)
+    k_nope, k_pe, scale = (torch.full((num_kv_rows, 1, 1), value) for value in (1, 2, 3))
+
+    with patch("vllm_ascend.attention.sfa_v1.DeviceOperator.scatter_cache") as scatter:
+        impl._store_parallel_kv(k_pe, k_nope, scale, None, [], (cache,), slots, metadata, False)
+
+    scatter.assert_called_once()
+    packed, stored_cache, stored_slots, count = scatter.call_args.args
+    assert packed.shape == (num_kv_rows, 3)
+    assert stored_cache is cache
+    assert stored_slots is (metadata.pcp_slot_mapping if pcp_slots is not None else local_slots)
+    assert count == expected_store_tokens
+
+
 def test_sfa_pcp_o_proj_switch_slices_the_tp_local_weight_by_pcp_rank() -> None:
     AscendSFAPCPImpl.o_proj_full_pools.clear()
     impl = _make_pcp_o_proj_impl()

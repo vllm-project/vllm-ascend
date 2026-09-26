@@ -1593,9 +1593,13 @@ class AscendSFAImpl(MLAAttentionImpl):
             packed_head_dim = self.sfa_qsfa_packed_kv_head_dim
             assert packed_kv.shape[-1] == packed_head_dim
             assert kv_cache is not None
-            DeviceOperator.scatter_cache(packed_kv, kv_cache[0], slot_mapping_sfa, attn_metadata.num_actual_tokens)
+            num_store_tokens = self._get_sfa_kv_store_num_tokens(slot_mapping_sfa, attn_metadata)
+            DeviceOperator.scatter_cache(packed_kv, kv_cache[0], slot_mapping_sfa, num_store_tokens)
 
         return k_pe, k_nope
+
+    def _get_sfa_kv_store_num_tokens(self, slot_mapping_sfa: torch.Tensor, attn_metadata: M) -> int:
+        return attn_metadata.num_actual_tokens
 
     def _get_parallel_forward_context(
         self,
