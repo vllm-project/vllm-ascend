@@ -282,6 +282,14 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
+            # Upstream block copies consume tensor views. Ascend layers keep
+            # K/V tuples or Mamba state lists; flatten only the runner's list
+            # so layer bindings and each view's block layout stay intact.
+            self.kv_caches[:] = [
+                cache
+                for layer_cache in self.kv_caches
+                for cache in (layer_cache if isinstance(layer_cache, (list, tuple)) else (layer_cache,))
+            ]
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
