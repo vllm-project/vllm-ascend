@@ -193,6 +193,8 @@ def _categorical_finalize_kernel(
     # One random value defines one point on the whole vocabulary-mass interval.
     seed = tl.load(seed_ptr + req_state_idx)
     position = tl.load(pos_ptr + resample_token_idx).to(tl.int32)
+    # Keep residual-resampling RNG independent from the acceptance draw.
+    position += tl.where(is_random_residual, 1 << 29, 0)
     uniform = tl.max(tl.rand(tl.randint(seed, position), tl.arange(0, 1)).to(tl.float32), axis=0)
 
     stored_block_mass = tl.load(
