@@ -30,6 +30,7 @@
 #include "ops.h"
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
+#include "aclnn_torch_adapter/cann_op_api.h"
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
 #include "moe/rms_norm_cast/rms_norm_cast_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
@@ -1132,7 +1133,15 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_npu(
                     "key_dequant_scale must be contiguous on all axes except axis 0");
     }
 
-    EXEC_NPU_CMD(aclnnQuantLightningIndexerV2, query, key, weights, query_dequant_scale, key_dequant_scale,
+    if (quant_mode == 5) {
+        TORCH_CHECK(query.scalar_type() == at::ScalarType::Float4_e2m1fn_x2 &&
+                    key.scalar_type() == at::ScalarType::Float4_e2m1fn_x2,
+                    "Official QLI quant_mode=5 requires torch.float4_e2m1fn_x2 query and key");
+    }
+    CannQliTensor query_wrapper{query};
+    CannQliTensor key_wrapper{key};
+    EXEC_NPU_CMD_WITH_RESOLVER(GetCannQliOpApiFuncAddr, aclnnQuantLightningIndexerV2,
+        query_wrapper, key_wrapper, weights, query_dequant_scale, key_dequant_scale,
         cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k, block_table, output_idx_offset, metadata,
         topk, quant_mode, max_seqlen_q, query_layout_ptr, key_layout_ptr, mask_mode, cmp_ratio, return_value,
         sparse_indices_out, sparse_values_out);
@@ -1284,6 +1293,7 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_npu(
     return output;
 }
 
+template <bool UseCann = false>
 at::Tensor npu_quant_lightning_indexer_v2_metadata_npu(
     int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t topk, int64_t quant_mode,
     const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
@@ -1318,7 +1328,10 @@ at::Tensor npu_quant_lightning_indexer_v2_metadata_npu(
     std::string layout_k_str = std::string(layout_k);
     char *layout_k_ptr = const_cast<char *>(layout_k_str.c_str());
 
-    EXEC_NPU_CMD(aclnnQuantLightningIndexerV2Metadata, cu_seqlens_q_val, cu_seqlens_k_val, seqused_q_val, seqused_k_val,
+    // Keep the existing custom metadata path for candidate/stride operators.
+    auto resolver = UseCann ? GetCannQliOpApiFuncAddr : GetOpApiFuncAddr;
+    EXEC_NPU_CMD_WITH_RESOLVER(resolver, aclnnQuantLightningIndexerV2Metadata,
+                 cu_seqlens_q_val, cu_seqlens_k_val, seqused_q_val, seqused_k_val,
                  cmp_residual_k_val, num_heads_q, num_heads_k, head_dim, topk, quant_mode, batch_size, max_seqlen_q,
                  max_seqlen_k, layout_q_ptr, layout_k_ptr, mask_mode, cmp_ratio, output);
 
@@ -3093,7 +3106,29 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "str device='npu') -> Tensor"
     );
     ops.impl("npu_quant_lightning_indexer_v2_metadata", torch::kPrivateUse1,
-             &vllm_ascend::npu_quant_lightning_indexer_v2_metadata_npu);
+             &vllm_ascend::npu_quant_lightning_indexer_v2_metadata_npu<>);
+    // Explicit official ABI entry points; do not redirect existing candidate
+    // operators or depend on process-global custom OPP search order.
+    ops.def(
+        "npu_quant_lightning_indexer_v2_cann(Tensor query, Tensor key, Tensor weights, "
+        "Tensor query_dequant_scale, Tensor key_dequant_scale, int topk, int quant_mode, *, "
+        "Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_k=None, Tensor? seqused_q=None, "
+        "Tensor? seqused_k=None, Tensor? cmp_residual_k=None, Tensor? block_table=None, "
+        "Tensor? output_idx_offset=None, Tensor? metadata=None, int max_seqlen_q=-1, "
+        "str layout_q='TND', str layout_k='PA_BBND', int mask_mode=3, int cmp_ratio=1, "
+        "int return_value=0) -> (Tensor, Tensor)"
+    );
+    ops.impl("npu_quant_lightning_indexer_v2_cann", torch::kPrivateUse1,
+             &vllm_ascend::npu_quant_lightning_indexer_v2_npu);
+    ops.def(
+        "npu_quant_lightning_indexer_v2_metadata_cann(int num_heads_q, int num_heads_k, int head_dim, int topk, "
+        "int quant_mode, *, Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_k=None, Tensor? seqused_q=None, "
+        "Tensor? seqused_k=None, Tensor? cmp_residual_k=None, int batch_size=0, int max_seqlen_q=0, "
+        "int max_seqlen_k=0, str layout_q='TND', str layout_k='PA_BBND', int mask_mode=3, int cmp_ratio=1, "
+        "str device='npu') -> Tensor"
+    );
+    ops.impl("npu_quant_lightning_indexer_v2_metadata_cann", torch::kPrivateUse1,
+             &vllm_ascend::npu_quant_lightning_indexer_v2_metadata_npu<true>);
     ops.def(
         "npu_quant_lightning_indexer_v3(Tensor query, Tensor key, Tensor weights, "
         "Tensor query_dequant_scale, Tensor key_dequant_scale, int topk, int quant_mode, *, "
