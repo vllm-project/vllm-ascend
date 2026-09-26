@@ -4,10 +4,10 @@ import pytest
 import torch
 from vllm.triton_utils import HAS_TRITON, triton
 
-from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
+from vllm_ascend.ops.triton.dsa_cp import BUILD_LOCAL_METADATA_BLOCK_SIZE, build_local_metadata_triton
 
-MAX_NUM_SEQS = 1024
-NUM_REQS_LIST = [1, 7, 32, 1024]
+MAX_NUM_SEQS = 2048
+NUM_REQS_LIST = [1, 7, 32, 127, 128, 129, 255, 256, 257, 1023, 1024, 1025, 2048]
 TP_SIZES = [1, 8]
 SEEDS = [0]
 DEVICES = [f"npu:{0}"]
@@ -63,7 +63,8 @@ def _run_triton(
         torch.zeros(MAX_NUM_SEQS, dtype=torch.int32, device=query_start_loc.device) if compute_start_pos else zero_i32
     )
 
-    build_local_metadata_triton[(1,)](
+    grid = (triton.cdiv(num_reqs, BUILD_LOCAL_METADATA_BLOCK_SIZE),)
+    build_local_metadata_triton[grid](
         query_start_loc,
         seq_lens,
         local_query_start_loc,
@@ -72,7 +73,6 @@ def _run_triton(
         local_end,
         num_reqs,
         start_pos_out,
-        BLOCK_NUM_REQS=triton.next_power_of_2(num_reqs),
         COMPUTE_START_POS=compute_start_pos,
     )
 
