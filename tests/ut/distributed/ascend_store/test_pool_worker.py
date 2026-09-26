@@ -1863,7 +1863,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.partial_load_gva_per_group, [202])
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
-    def test_multi_group_load_failure_stops_before_forward(self):
+    def test_multi_group_load_failure_reports_request_for_recompute(self):
         worker = self._make_gva_worker(2)
         valid_info = MagicMock()
         valid_info.size.return_value = 64
@@ -1885,14 +1885,11 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             ),
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "multi-group KV load failed",
-        ):
-            worker._prepare_load_gvas([request])
+        worker._prepare_load_gvas([request])
 
-        group0_key = worker._make_layerwise_full_key(0, "h0")
-        worker.m_store.batch_remove_lease.assert_called_once_with([group0_key])
+        self.assertEqual(worker.get_failed_recving(), {request.req_id})
+        self.assertEqual(worker.get_failed_recving(), set())
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
     def test_worker_physical_layer_index_supports_mtp_layers_namespace(self):
         worker = self._make_worker()

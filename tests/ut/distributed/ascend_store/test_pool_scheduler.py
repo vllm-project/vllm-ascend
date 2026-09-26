@@ -396,6 +396,17 @@ class TestKVPoolScheduler(unittest.TestCase):
         mock_client_cls.return_value.lookup.assert_not_called()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_failed_load_skips_external_lookup_once(self, mock_client_cls):
+        scheduler = KVPoolScheduler(self._make_config(block_size=16), use_layerwise=False)
+        scheduler.update_connector_output(SimpleNamespace(failed_recving={"r1"}, kv_connector_worker_meta=None))
+        request = MagicMock()
+        request.request_id = "r1"
+
+        self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
+        self.assertNotIn("r1", scheduler._skip_external_load_once)
+        mock_client_cls.return_value.lookup.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_update_state_after_alloc_no_load_spec(self, mock_client_cls):
         config = self._make_config()
         scheduler = KVPoolScheduler(config, use_layerwise=False)
@@ -756,6 +767,22 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
         _meta = scheduler.build_connector_meta(sched_output)
         self.assertNotIn("r1", scheduler._request_trackers)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_build_connector_meta_keeps_same_step_readmission(self, mock_client_cls):
+        scheduler = KVPoolScheduler(self._make_config(), use_layerwise=False)
+        new_blocks = [[5]]
+        scheduler._unfinished_requests["r1"] = (MagicMock(), new_blocks)
+        scheduler._process_new_request = MagicMock(return_value=None)
+        sched_output = MagicMock()
+        sched_output.finished_req_ids = set()
+        sched_output.preempted_req_ids = {"r1"}
+        sched_output.scheduled_new_reqs = [SimpleNamespace(req_id="r1")]
+        sched_output.scheduled_cached_reqs.req_ids = []
+
+        scheduler.build_connector_meta(sched_output)
+
+        self.assertEqual(scheduler._unfinished_requests["r1"][1], new_blocks)
 
 
 class TestLookupKeyClient(unittest.TestCase):

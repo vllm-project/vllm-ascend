@@ -205,6 +205,7 @@ class KVPoolWorker:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = extra_config.get("load_async", False)
         self._invalid_block_ids: set[int] = set()
+        self._failed_recving: set[str] = set()
         self._invalid_block_ids_lock = threading.Lock()
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend = extra_config.get("backend", "mooncake")
@@ -1896,32 +1897,20 @@ class KVPoolWorker:
                     lease_results = []
                     leased_keys = []
 
-                # Report invalid blocks to scheduler for recompute.
-                # Single-group models can safely report individual block IDs.
-                # Multi-group (hybrid) models must not report partial group
-                # failures, as the scheduler cannot handle inconsistent KV
-                # cache state across groups (see PR #9701 for rationale).
+                # Block IDs are safe for single-group recovery. Hybrid block
+                # IDs are only group-local, so report the request identity and
+                # let the scheduler preempt it for full recomputation.
                 if invalid_block_ids:
-                    if self.num_kv_cache_groups == 1:
-                        with self._invalid_block_ids_lock:
+                    with self._invalid_block_ids_lock:
+                        if self.num_kv_cache_groups == 1:
                             self._invalid_block_ids.update(invalid_block_ids)
-                    else:
-                        leased_keys_to_release = list(
-                            dict.fromkeys(
-                                [
-                                    *all_group_load_keys,
-                                    *leased_keys,
-                                ]
+                        else:
+                            self._failed_recving.add(request.req_id)
+                            logger.error(
+                                "Layerwise multi-group KV load failed; request %s will be recomputed. failed_blocks=%s",
+                                request.req_id,
+                                invalid_block_ids,
                             )
-                        )
-                        if leased_keys_to_release:
-                            self.m_store.batch_remove_lease(leased_keys_to_release)
-                        raise RuntimeError(
-                            "Layerwise multi-group KV load failed and cannot "
-                            "safely fall back to per-block recomputation: "
-                            f"request={request.req_id}, "
-                            f"failed_blocks={invalid_block_ids}"
-                        )
                 all_group_load_keys.extend(leased_keys)
 
                 logger.debug(
@@ -2616,6 +2605,12 @@ class KVPoolWorker:
             invalid_blocks = self._invalid_block_ids.copy()
             self._invalid_block_ids.clear()
         return invalid_blocks
+
+    def get_failed_recving(self) -> set[str]:
+        with self._invalid_block_ids_lock:
+            failed_recving = self._failed_recving.copy()
+            self._failed_recving.clear()
+        return failed_recving
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         # Match process_layer_data(), including stage-local draft layers.
