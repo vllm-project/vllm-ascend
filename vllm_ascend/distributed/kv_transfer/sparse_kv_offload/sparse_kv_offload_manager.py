@@ -1,4 +1,5 @@
 import contextlib
+import os
 import typing
 from dataclasses import dataclass
 from zlib import adler32
@@ -85,6 +86,14 @@ _SPARSE_KV_OFFLOAD_OP_NAMES = (
 
 def get_subscribed_compute_streams() -> set:
     return _SUBSCRIBED_COMPUTE_STREAMS
+
+
+def resolve_lru_workspace_threads(configured_threads: int, available_cpus: int) -> int:
+    if configured_threads <= 0:
+        raise ValueError("sparse_kv_offload_config.lru_max_threads must be positive")
+    if available_cpus <= 0:
+        raise ValueError("available_cpus must be positive")
+    return min(configured_threads, available_cpus)
 
 
 def _sparse_kv_ops():
@@ -915,7 +924,20 @@ class SparseKVOffloadManager:
         assert self.num_tokens_buffer_npu.shape == torch.Size([1])
 
         # topk cache reuse related
-        self.lru_workspace_threads = 8
+        # The native planner caps active threads by work rows; do not cap the
+        # workspace by max_num_reqs because fused overlap may use more rows.
+        try:
+            available_cpus = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            available_cpus = os.cpu_count() or 1
+        configured_threads = self.sparse_kv_offload_config.lru_max_threads
+        self.lru_workspace_threads = resolve_lru_workspace_threads(configured_threads, available_cpus)
+        logger.info(
+            "LRU thread budget: configured=%s, available_cpus=%s, workspace_threads=%s",
+            configured_threads,
+            available_cpus,
+            self.lru_workspace_threads,
+        )
         self._warmup_external_lru_planner_threads()
         self.lru_topk_indices_cpu = torch.empty(
             [self.max_num_topk_rows, self.topk],
