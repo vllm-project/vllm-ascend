@@ -14,6 +14,7 @@ from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
+from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive import (
@@ -626,7 +627,7 @@ def test_propose_preserves_dp_sync_state() -> None:
 
 
 @pytest.mark.parametrize("num_steps", [1, 3])
-def test_mtp_capture_uses_runtime_topk_reuse_phases(num_steps: int) -> None:
+def test_mtp_capture_uses_runtime_topk_reuse_phases(monkeypatch, num_steps: int) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.replicated_pcp = False
     speculator.pcp_manager = None
@@ -644,12 +645,19 @@ def test_mtp_capture_uses_runtime_topk_reuse_phases(num_steps: int) -> None:
         ),
     )
     captured = []
+    metadata_module = SimpleNamespace(build_attn_metadata=lambda **kwargs: kwargs)
+    monkeypatch.setattr(attn_utils, "_BUILD_ATTN_METADATA_MODULE", metadata_module)
+    monkeypatch.setattr(attn_utils, "build_attn_metadata", lambda **kwargs: kwargs)
     speculator.prefill_cudagraph_manager = SimpleNamespace(
         use_breakable_cg=False,
-        capture=lambda *args, **kwargs: captured.append(("prefill", state.skip_topk)),
+        capture=lambda *args, **kwargs: captured.append(
+            ("prefill", state.skip_topk, metadata_module.build_attn_metadata())
+        ),
     )
     speculator.decode_cudagraph_manager = SimpleNamespace(
-        capture=lambda *args, **kwargs: captured.append(("decode", state.skip_topk)),
+        capture=lambda *args, **kwargs: captured.append(
+            ("decode", state.skip_topk, metadata_module.build_attn_metadata())
+        ),
     )
     speculator.model_state = object()
     speculator.target_input_buffers = object()
@@ -659,10 +667,11 @@ def test_mtp_capture_uses_runtime_topk_reuse_phases(num_steps: int) -> None:
     speculator.attn_groups = []
     speculator.kv_cache_config = object()
 
-    with patch.object(speculator_module, "build_attn_metadata_wrapper", return_value=nullcontext()):
-        speculator.capture()
+    speculator.capture()
 
-    assert captured == [("prefill", False)] + ([("decode", True)] if num_steps > 1 else [])
+    assert captured == [("prefill", False, {})] + (
+        [("decode", True, {"for_cudagraph_capture": True})] if num_steps > 1 else []
+    )
     assert not state.skip_topk
     assert speculator.idx_mapping.tolist() == [0, 0]
     assert speculator.last_token_indices.tolist() == [0, 0]

@@ -75,7 +75,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     """
 
     model_state: "AscendModelState"
-    for_cudagraph_capture: bool = False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         """Override the upstream __init__ for Ascend NPUs.
@@ -382,7 +381,9 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         self.on_multi_step_decode_begin(self.max_num_reqs)
         with (
             disable_target_pcp_for_replicated_draft(self),
-            build_attn_metadata_wrapper(),
+            # Rebuilt metadata must retain capture semantics during every
+            # warmup/recording step, including calls through the new hooks.
+            build_attn_metadata_wrapper(for_cudagraph_capture=True),
         ):
             self.decode_cudagraph_manager.capture(
                 self._multi_step_decode,
@@ -529,7 +530,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             is_prefilling,
             seq_lens_cpu=seq_lens_cpu,
             parallel_config=self.draft_vllm_config.parallel_config,
-            for_cudagraph_capture=self.for_cudagraph_capture,
         ):
             # vLLM main restructured _build_draft_attn_metadata into
             # _build_uniform_attn_metadata / _build_attn_metadata, which

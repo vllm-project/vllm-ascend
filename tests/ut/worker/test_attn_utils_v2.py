@@ -44,7 +44,6 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
 from vllm_ascend.worker.v2 import attn_utils
-from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
@@ -1197,9 +1196,12 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
 def test_multistep_draft_capture_metadata_lifecycle(monkeypatch, fail):
     module = SimpleNamespace(build_attn_metadata=lambda **kwargs: kwargs)
     monkeypatch.setattr(attn_utils, "_BUILD_ATTN_METADATA_MODULE", module)
-    original_model = torch.nn.Identity()
-    speculator = SimpleNamespace(model=original_model, for_cudagraph_capture=False)
-    with pytest.raises(RuntimeError) if fail else nullcontext(), model_capture_wrapper(speculator, False):
+    original_builder = module.build_attn_metadata
+    monkeypatch.setattr(attn_utils, "build_attn_metadata", lambda **kwargs: kwargs)
+    with (
+        pytest.raises(RuntimeError) if fail else nullcontext(),
+        attn_utils.build_attn_metadata_wrapper(for_cudagraph_capture=True),
+    ):
         # Each warmup/recording step rebuilds draft metadata under mode NONE.
         for _ in range(3):
             with attn_utils.build_draft_attn_metadata_factory(
@@ -1207,14 +1209,15 @@ def test_multistep_draft_capture_metadata_lifecycle(monkeypatch, fail):
                 2,
                 False,
                 attn_state=AscendAttentionState.SpecDecoding,
-                for_cudagraph_capture=speculator.for_cudagraph_capture,
             ):
                 metadata = module.build_attn_metadata()
                 assert metadata["for_cudagraph_capture"] is True
                 assert metadata["attn_state"] is AscendAttentionState.SpecDecoding
         if fail:
             raise RuntimeError("capture failed")
-    assert speculator.model is original_model
-    assert speculator.for_cudagraph_capture is False
-    with attn_utils.build_draft_attn_metadata_factory(torch.arange(4), 2, False):
+    assert module.build_attn_metadata is original_builder
+    with (
+        attn_utils.build_attn_metadata_wrapper(),
+        attn_utils.build_draft_attn_metadata_factory(torch.arange(4), 2, False),
+    ):
         assert "for_cudagraph_capture" not in module.build_attn_metadata()

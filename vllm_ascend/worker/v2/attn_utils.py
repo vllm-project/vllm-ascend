@@ -20,6 +20,7 @@
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -1260,11 +1261,13 @@ _BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator
 
 
 @contextmanager
-def build_attn_metadata_wrapper():
+def build_attn_metadata_wrapper(*, for_cudagraph_capture: bool = False):
     """Context manager to override attention metadata building for Ascend NPUs."""
     original_func = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata
     try:
-        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = (
+            partial(build_attn_metadata, for_cudagraph_capture=True) if for_cudagraph_capture else build_attn_metadata
+        )
         yield
     finally:
         _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func
@@ -1272,14 +1275,7 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_draft_attn_metadata_factory(
-    positions,
-    pad,
-    is_prefilling,
-    seq_lens_cpu=None,
-    *,
-    attn_state=None,
-    parallel_config=None,
-    for_cudagraph_capture: bool = False,
+    positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None
 ):
     """Wrap build_attn_metadata with Ascend draft-model context.
 
@@ -1294,8 +1290,6 @@ def build_draft_attn_metadata_factory(
     def build_attn_metadata(*args, **kwargs):
         kwargs["positions"] = positions[:pad]
         kwargs["is_prefilling"] = is_prefilling
-        if for_cudagraph_capture:
-            kwargs["for_cudagraph_capture"] = True
         kwargs["attn_state"] = attn_state
         kwargs["parallel_config"] = parallel_config
         if seq_lens_cpu is not None:
