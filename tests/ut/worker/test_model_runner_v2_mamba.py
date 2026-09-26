@@ -547,11 +547,16 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     return_value=(4, 4),
 )
 @patch(
+    "vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config",
+    return_value={},
+)
+@patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
     return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
 )
 def test_attention_cache_reshape_uses_virtual_kernel_block_count(
     _mock_config,
+    _mock_layers,
     _mock_cache_dims,
 ):
     spec = AscendMLAAttentionSpec(
