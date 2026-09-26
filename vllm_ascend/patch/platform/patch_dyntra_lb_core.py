@@ -54,25 +54,6 @@ class _Modification(TypedDict):
     freeze: bool
 
 
-def _get_dyntra_lb_config(vllm_config) -> DyntraLBConfig:
-    try:
-        return get_ascend_config().scheduler_config.dyntra_lb_config
-    except Exception:
-        pass
-    additional_config = getattr(vllm_config, "additional_config", None) or {}
-    scheduler_config = additional_config.get("scheduler_config") or {}
-    if not isinstance(scheduler_config, dict):
-        return DyntraLBConfig()
-    dyntra_lb_config = scheduler_config.get("dyntra_lb_config") or {}
-    if not isinstance(dyntra_lb_config, dict):
-        return DyntraLBConfig()
-    return DyntraLBConfig(**dyntra_lb_config)
-
-
-def _dyntra_lb_enabled(vllm_config) -> bool:
-    return _get_dyntra_lb_config(vllm_config).enabled
-
-
 def _print_rank_0(message: str, dp_rank: int, enable_diagnostics: bool) -> None:
     if not enable_diagnostics or dp_rank != 0:
         return

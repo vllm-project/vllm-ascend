@@ -273,7 +273,6 @@ class TestProfilingChunkManager(TestBase):
 
 
 class TestProfilingChunkScheduler(TestBase):
-    @patch("vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config")
     # ProfilingChunkScheduler imports these names inside __init__, so patch the
     # source module from which that inline import resolves them.
     @patch("vllm_ascend.ascend_config.init_ascend_config")
@@ -285,7 +284,6 @@ class TestProfilingChunkScheduler(TestBase):
         self,
         mock_get_ascend_config,
         _mock_profiling_init_ascend_config,
-        mock_balance_init_ascend_config,
         srf_enabled=False,
     ):
         profiling_cfg = MagicMock()
@@ -298,7 +296,6 @@ class TestProfilingChunkScheduler(TestBase):
         short_request_first_cfg.threshold = 256
         short_request_first_cfg.long_max_wait_ms = 2000.0
         mock_get_ascend_config.return_value.scheduler_config.short_request_first_config = short_request_first_cfg
-        mock_balance_init_ascend_config.return_value.scheduler_config.short_request_first_config.enabled = False
 
         mock_hf_config = MagicMock()
         mock_hf_config.model_type = "qwen3"
@@ -383,7 +380,6 @@ class TestProfilingChunkScheduler(TestBase):
         scheduler = self.create_scheduler()
         self.assertIsNotNone(scheduler.profiling_chunk_manager)
         self.assertFalse(scheduler._profiling_initialized)
-        self.assertFalse(scheduler._short_request_first_enabled)
         self.assertNotIsInstance(
             scheduler.waiting,
             ShortRequestFirstRequestQueue,

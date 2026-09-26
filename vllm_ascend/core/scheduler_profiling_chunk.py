@@ -88,9 +88,8 @@ class ProfilingChunkScheduler(Scheduler):
         self.profiling_chunk_config = profiling_cfg
 
         short_request_first_config = scheduler_extension_config.short_request_first_config
-        self._short_request_first_enabled = short_request_first_config.enabled
 
-        if self._short_request_first_enabled:
+        if short_request_first_config.enabled:
             from vllm_ascend.core.short_request_first_scheduler import (
                 install_short_request_first_waiting_queue,
             )

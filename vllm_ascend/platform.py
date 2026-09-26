@@ -931,7 +931,6 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     initialized from vllm_config; env fallbacks are handled inside AscendConfig.
     """
     # Validate scheduler extension policies (read ascend_config.scheduler_config)
-    from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
     additional_config = vllm_config.additional_config
     if additional_config is None:
@@ -976,10 +975,6 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
             raise ValueError(
                 "ShortRequestFirst scheduling is supported only on prefill or PD-mixed nodes, "
                 "not PD-disaggregated D nodes (kv_role='kv_consumer')."
-            )
-        if vllm_config.scheduler_config.async_scheduling:
-            vllm_config.scheduler_config.scheduler_cls = (
-                "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
             )
 
     dyntra_lb_config = scheduler_extension_config.dyntra_lb_config
@@ -1035,14 +1030,6 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "recompute_scheduler_enable can only be enabled on PD-disaggregated D nodes "
                 f"(kv_role='kv_consumer', but got kv_role={kv_role!r}), and is not supported in PD-mixed mode."
             )
-        else:
-            async_scheduling = vllm_config.scheduler_config.async_scheduling
-            recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
-            recompute_scheduler_config.scheduler_cls = _get_recompute_scheduler_cls(
-                async_scheduling=async_scheduling,
-                dyntra_lb_enabled=dyntra_lb_config.enabled,
-            )
-            vllm_config.scheduler_config = recompute_scheduler_config
 
     # Checked here, not in AscendConfig: MultiConnector children re-validate the config
     # with per-child copies that cannot see sibling connectors.
@@ -1250,6 +1237,59 @@ def _setup_compile_backend(
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
 
 
+_SCHEDULER_QUALNAMES: dict[tuple[str, bool], str] = {
+    ("balance", False): "vllm_ascend.core.balance_scheduler.BalanceScheduler",
+    ("balance", True): "vllm_ascend.core.balance_scheduler.AsyncBalanceScheduler",
+    ("short_request_first", False): "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstScheduler",
+    ("short_request_first", True): "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler",
+    ("profiling_chunk", False): "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler",
+    ("profiling_chunk", True): "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler",
+    ("batch_job", False): "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler",
+    ("batch_job", True): "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareAsyncScheduler",
+    ("dyntra_lb", False): "vllm_ascend.core.dyntra_lb_scheduler.DyntraLBScheduler",
+    ("dyntra_lb", True): "vllm_ascend.core.dyntra_lb_scheduler.AsyncDyntraLBScheduler",
+    ("recompute", False): "vllm_ascend.core.recompute_scheduler.RecomputeScheduler",
+    ("recompute", True): "vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler",
+    ("dyntra_lb_recompute", False): "vllm_ascend.core.recompute_scheduler.DyntraLBRecomputeScheduler",
+    ("dyntra_lb_recompute", True): "vllm_ascend.core.recompute_scheduler.AsyncDyntraLBRecomputeScheduler",
+}
+
+
+def _recompute_scheduler_enabled(vllm_config: VllmConfig, scheduler_config) -> bool:
+    if not scheduler_config.recompute_scheduler_enable:
+        return False
+    kv_transfer_config = vllm_config.kv_transfer_config
+    return getattr(kv_transfer_config, "kv_role", None) == "kv_consumer"
+
+
+def _select_scheduler_qualname(
+    scheduler_config,
+    *,
+    async_scheduling: bool,
+    recompute_enabled: bool,
+) -> str | None:
+    dyntra_enabled = scheduler_config.dyntra_lb_config.enabled
+    # Keep the pre-refactor assignment precedence: batch-job was assigned
+    # last, followed by profiling chunk, recompute, DyntraLB and short-request.
+    if scheduler_config.batch_job_sched_config.enabled:
+        scheduler_name = "batch_job"
+    elif scheduler_config.profiling_chunk_config.enabled:
+        scheduler_name = "profiling_chunk"
+    elif recompute_enabled and dyntra_enabled:
+        scheduler_name = "dyntra_lb_recompute"
+    elif dyntra_enabled:
+        scheduler_name = "dyntra_lb"
+    elif recompute_enabled:
+        scheduler_name = "recompute"
+    elif scheduler_config.enable_balance_scheduling:
+        scheduler_name = "balance"
+    elif scheduler_config.short_request_first_config.enabled:
+        scheduler_name = "short_request_first"
+    else:
+        return None
+    return _SCHEDULER_QUALNAMES[(scheduler_name, async_scheduling)]
+
+
 def _setup_worker_and_scheduler(
     vllm_config: VllmConfig,
     ascend_config,
@@ -1272,33 +1312,27 @@ def _setup_worker_and_scheduler(
     if get_current_hardware_profile().supports(HardwareCapability.AUTO_ENABLE_CUSTOM_OPS):
         vllm_config.compilation_config.custom_ops = ["all"]
 
-    # Select specialized scheduler class
-    scheduler_config = ascend_config.scheduler_config
-    if scheduler_config.dyntra_lb_config.enabled and not scheduler_config.recompute_scheduler_enable:
-        vllm_config.scheduler_config.scheduler_cls = _get_dyntra_lb_scheduler_cls(
-            async_scheduling=vllm_config.scheduler_config.async_scheduling
-        )
+    scheduler_extension_config = ascend_config.scheduler_config
+    async_scheduling = vllm_config.scheduler_config.async_scheduling
+    recompute_enabled = _recompute_scheduler_enabled(vllm_config, scheduler_extension_config)
+    if recompute_enabled:
+        from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
-    # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
-    if scheduler_config.profiling_chunk_config.enabled:
-        vllm_config.scheduler_config.scheduler_cls = (
-            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
-        )
+        vllm_config.scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
+
+    scheduler_cls = _select_scheduler_qualname(
+        scheduler_extension_config,
+        async_scheduling=async_scheduling,
+        recompute_enabled=recompute_enabled,
+    )
+    if scheduler_cls is not None:
+        vllm_config.scheduler_config.scheduler_cls = scheduler_cls
+
+    if scheduler_cls == _SCHEDULER_QUALNAMES[("profiling_chunk", async_scheduling)]:
         # Apply the EngineCore.__init__ patch here for the InprocClient (in-process).
         # And the EngineCore.__init__ patch for EngineCoreProc (the spawned child process)
         # has been moved to patch_engine_core.py.
         import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
-
-    # Extend original scheduler_config to use BatchJobAwareScheduler.
-    if scheduler_config.batch_job_sched_config.enabled:
-        if vllm_config.scheduler_config.async_scheduling:
-            vllm_config.scheduler_config.scheduler_cls = (
-                "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareAsyncScheduler"
-            )
-        else:
-            vllm_config.scheduler_config.scheduler_cls = (
-                "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
-            )
 
 
 def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
@@ -1468,26 +1502,6 @@ def _config_deprecated_logging():
             warnings_logger.addHandler(handler)
 
     warnings_logger.propagate = False
-
-
-def _get_recompute_scheduler_cls(
-    *,
-    async_scheduling: bool,
-    dyntra_lb_enabled: bool,
-) -> str:
-    if dyntra_lb_enabled:
-        if async_scheduling:
-            return "vllm_ascend.core.recompute_scheduler.AsyncDyntraLBRecomputeScheduler"
-        return "vllm_ascend.core.recompute_scheduler.DyntraLBRecomputeScheduler"
-    if async_scheduling:
-        return "vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler"
-    return "vllm_ascend.core.recompute_scheduler.RecomputeScheduler"
-
-
-def _get_dyntra_lb_scheduler_cls(*, async_scheduling: bool) -> str:
-    if async_scheduling:
-        return "vllm_ascend.core.dyntra_lb_scheduler.AsyncDyntraLBScheduler"
-    return "vllm_ascend.core.dyntra_lb_scheduler.DyntraLBScheduler"
 
 
 def _validate_parallel_config(vllm_config: VllmConfig) -> None:

@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 from vllm.logger import logger
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
@@ -28,10 +28,8 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.scheduler import Scheduler
 
 
 class ShortRequestFirstRequestQueue(RequestQueue):
@@ -367,8 +365,8 @@ def install_short_request_first_waiting_queue(
     return queue
 
 
-class ShortRequestFirstAsyncScheduler(AsyncScheduler):
-    """Async scheduler that installs the ShortRequestFirst waiting queue."""
+class _ShortRequestFirstSchedulerMixin:
+    """Install the ShortRequestFirst queue on a vLLM scheduler."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -376,9 +374,16 @@ class ShortRequestFirstAsyncScheduler(AsyncScheduler):
         from vllm_ascend.ascend_config import init_ascend_config
 
         short_request_first_config = init_ascend_config(self.vllm_config).scheduler_config.short_request_first_config
-        if short_request_first_config.enabled:
-            install_short_request_first_waiting_queue(
-                self,
-                threshold=short_request_first_config.threshold,
-                long_max_wait_ms=short_request_first_config.long_max_wait_ms,
-            )
+        install_short_request_first_waiting_queue(
+            self,
+            threshold=short_request_first_config.threshold,
+            long_max_wait_ms=short_request_first_config.long_max_wait_ms,
+        )
+
+
+class ShortRequestFirstScheduler(_ShortRequestFirstSchedulerMixin, Scheduler):
+    """Synchronous scheduler with the ShortRequestFirst waiting queue."""
+
+
+class ShortRequestFirstAsyncScheduler(_ShortRequestFirstSchedulerMixin, AsyncScheduler):
+    """Async scheduler with the ShortRequestFirst waiting queue."""
