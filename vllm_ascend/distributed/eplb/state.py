@@ -4,6 +4,7 @@
 """Ascend-owned extensions for the upstream EPLB state."""
 
 import inspect
+import time
 from contextvars import ContextVar
 from dataclasses import fields
 from typing import Any
@@ -105,6 +106,12 @@ def refresh_model_routing_tables(
         layer_state = layer.eplb_state
         if isinstance(layer_state, AscendEplbLayerState):
             layer_state.refresh_expert_replica_routing_table()
+
+
+def _raise_if_async_worker_stopped(state: Any) -> None:
+    worker = getattr(state, "async_worker", None)
+    if worker is not None and not worker.is_alive():
+        raise RuntimeError("EPLB background worker terminated unexpectedly")
 
 
 class AscendEplbState(_eplb_state.EplbState):
@@ -359,6 +366,37 @@ class AscendEplbState(_eplb_state.EplbState):
         if not is_profile:
             self._has_fresh_recorded_load = False
         return result
+
+    def drain_async(self) -> None:
+        """Acknowledge changed-layer and no-op results through one lifecycle."""
+        if not self.is_async:
+            return
+        for model_state in self.model_states.values():
+            while model_state.rebalanced:
+                _raise_if_async_worker_stopped(self)
+                result = model_state.pending_result
+                if result is not None:
+                    if getattr(
+                        result,
+                        "is_last_result",
+                        result.layer_idx == model_state.model.num_moe_layers - 1,
+                    ):
+                        model_state.rebalanced = False
+                    model_state.pending_result = None
+                    result.consumed_event.record()
+                else:
+                    time.sleep(0.001)
+
+    def _all_ranks_result_ready(self, model_state: Any) -> bool:
+        """Consume results at the next shared rearrangement boundary."""
+        if self.expert_rearrangement_step < self.expert_rearrangement_step_interval:
+            return False
+        while model_state.pending_result is None:
+            _raise_if_async_worker_stopped(self)
+            if not model_state.rebalanced:
+                return False
+            time.sleep(0.001)
+        return True
 
     @classmethod
     def from_mapping(

@@ -19,6 +19,52 @@ def test_uses_upstream_policy_and_async_worker_lifecycle():
     assert AscendEplbState.start_async_loop is upstream_eplb_state.EplbState.start_async_loop
 
 
+def test_result_readiness_waits_for_next_rearrangement_boundary():
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.expert_rearrangement_step_interval = 10
+    model_state = SimpleNamespace(pending_result=object(), rebalanced=True)
+
+    state.expert_rearrangement_step = 9
+    assert not state._all_ranks_result_ready(model_state)
+
+    state.expert_rearrangement_step = 10
+    assert state._all_ranks_result_ready(model_state)
+
+
+def test_drain_async_accepts_last_changed_layer_before_model_end():
+    consumed_event = MagicMock()
+    model_state = SimpleNamespace(
+        rebalanced=True,
+        model=SimpleNamespace(num_moe_layers=3),
+        pending_result=SimpleNamespace(
+            layer_idx=0,
+            is_last_result=True,
+            consumed_event=consumed_event,
+        ),
+    )
+    state = SimpleNamespace(
+        is_async=True,
+        model_states={"model": model_state},
+    )
+
+    AscendEplbState.drain_async(state)
+
+    assert not model_state.rebalanced
+    assert model_state.pending_result is None
+    consumed_event.record.assert_called_once_with()
+
+
+def test_drain_async_fails_when_worker_stops():
+    state = SimpleNamespace(
+        is_async=True,
+        async_worker=SimpleNamespace(is_alive=lambda: False),
+        model_states={"model": SimpleNamespace(rebalanced=True, pending_result=None)},
+    )
+
+    with pytest.raises(RuntimeError, match="background worker terminated"):
+        AscendEplbState.drain_async(state)
+
+
 def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
     monkeypatch,
 ):
