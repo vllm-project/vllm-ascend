@@ -13,7 +13,6 @@
 #include "catlass/arch/cross_core_sync.hpp"
 #include "catlass/arch/resource.hpp"
 #include "catlass/catlass.hpp"
-#include "catlass/debug.hpp"
 #include "../block/block_scheduler_gdn_fwd_h.hpp"
 #include "catlass/epilogue/block/block_epilogue.hpp"
 #include "../../epilogue/block/block_epilogue_gdn_fwdh_update.hpp"
