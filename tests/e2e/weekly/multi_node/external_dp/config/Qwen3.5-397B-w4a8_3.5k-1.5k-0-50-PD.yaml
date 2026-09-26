@@ -80,7 +80,7 @@ templates:
       - --async-scheduling
       - --enforce-eager
       - --speculative-config
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 1, "enforce_eager": true}'
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - --additional-config
       - '{"enable_cpu_binding": true}'
       - --profiler-config
