@@ -172,6 +172,7 @@ def _create_mock_backend_app():
             return self._default
 
     queue = ScriptQueue()
+    requests: list[dict] = []
 
     def _dec_val(v):
         if isinstance(v, dict) and set(v.keys()) == {"__b64__"}:
@@ -187,7 +188,12 @@ def _create_mock_backend_app():
         data = await req.json()
         items = [_dec_val(it) for it in data.get("items", [])]
         queue.set([ScriptItem(**it) if isinstance(it, dict) else it for it in items])
+        requests.clear()
         return {"ok": True}
+
+    @app.get("/__requests__")
+    async def get_requests():
+        return {"requests": requests}
 
     async def _gen_stream(item: ScriptItem):
         emitted = 0
@@ -204,6 +210,7 @@ def _create_mock_backend_app():
     @app.post("/v1/chat/completions")
     @app.post("/v1/completions")
     async def handle(req: Request):
+        requests.append(await req.json())
         item = queue.pop()
         if item.kind == "json":
             if isinstance(item.body, dict):
@@ -456,6 +463,59 @@ def test_recompute(proxy_server):
     assert st == 200
     assert b"done" in body
     assert b"recomputed" not in body
+
+
+def _completion_chunk(content: str, stop_reason: str | None = None, reasoning: str = "") -> bytes:
+    message = {"role": "assistant", "content": content}
+    if reasoning:
+        message["reasoning_content"] = reasoning
+    return json.dumps(
+        {"choices": [{"index": 0, "message": message, "stop_reason": stop_reason}], "usage": {"completion_tokens": 1}}
+    ).encode()
+
+
+def test_recompute_preserves_chat_roles(proxy_server):
+    _set_script(
+        MOCK_DECODE_PORT,
+        [
+            {"kind": "stream", "chunks": [_completion_chunk("partial", stop_reason="recomputed")]},
+            {"kind": "stream", "chunks": [_completion_chunk("done")]},
+        ],
+    )
+    status, body = _post(proxy_server, _chat_req(stream=False))
+    assert status == 200
+    assert json.loads(body)["choices"][0]["message"]["content"] == "partialdone"
+    requests = httpx.get(f"http://127.0.0.1:{MOCK_DECODE_PORT}/__requests__").json()["requests"]
+    assert len(requests) == 2
+    assert requests[1]["messages"] == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "partial"},
+    ]
+    assert requests[1]["continue_final_message"] is True
+    assert requests[1]["add_generation_prompt"] is False
+
+
+def test_recompute_restarts_partial_reasoning(proxy_server):
+    _set_script(
+        MOCK_DECODE_PORT,
+        [
+            {
+                "kind": "stream",
+                "chunks": [_completion_chunk("", stop_reason="recomputed", reasoning="partial thought")],
+            },
+            {"kind": "stream", "chunks": [_completion_chunk("4")]},
+        ],
+    )
+    request = _chat_req(stream=False)
+    status, body = _post(proxy_server, request)
+    assert status == 200
+    assert json.loads(body)["choices"][0]["message"]["content"] == "4"
+    requests = httpx.get(f"http://127.0.0.1:{MOCK_DECODE_PORT}/__requests__").json()["requests"]
+    assert len(requests) == 2
+    assert requests[1]["messages"] == request["messages"]
+    assert requests[1]["max_tokens"] == request["max_tokens"]
+    assert "continue_final_message" not in requests[1]
+    assert "add_generation_prompt" not in requests[1]
 
 
 def test_mid_stream_error(proxy_server):

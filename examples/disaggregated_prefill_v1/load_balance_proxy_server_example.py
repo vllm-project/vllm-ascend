@@ -1049,6 +1049,9 @@ async def handle_completions_impl(api: str, request: Request):
         else:
             origin_prompt = ""
         origin_max_tokens = req_data.get("max_tokens", 16)
+        original_chat_flags = {
+            k: req_data[k] for k in ("continue_final_message", "add_generation_prompt") if k in req_data
+        }
 
         # Pre-open the decode response BEFORE committing the ASGI 200 head so an
         # initial decode 4xx/5xx/connection failure can be returned with the real
@@ -1097,7 +1100,8 @@ async def handle_completions_impl(api: str, request: Request):
             nonlocal instance_info
             nonlocal request_released
             nonlocal preopened_gen, preopened_first
-            generated_token = ""
+            generated_content = ""
+            generated_reasoning = ""
             released_kv = False
             retry_count = 0
             retry = True
@@ -1162,7 +1166,15 @@ async def handle_completions_impl(api: str, request: Request):
                         delta = choice.get("delta") or {}
                         message = choice.get("message") or {}
                         content = delta.get("content") or message.get("content") or choice.get("text") or ""
-                        generated_token += content
+                        reasoning = (
+                            delta.get("reasoning")
+                            or delta.get("reasoning_content")
+                            or message.get("reasoning")
+                            or message.get("reasoning_content")
+                            or ""
+                        )
+                        generated_content += content
+                        generated_reasoning += reasoning
 
                         stop_reason = choice.get("stop_reason")
                         usage = chunk_json.get("usage", {})
@@ -1174,16 +1186,35 @@ async def handle_completions_impl(api: str, request: Request):
                         if stop_reason == "recomputed":
                             retry = True
                             retry_count += 1
-                            if chat_flag:
-                                messages[0]["content"] = (
-                                    origin_prompt
-                                    + ([{"type": "text", "text": generated_token}] if generated_token else [])
-                                    if isinstance(origin_prompt, list)
-                                    else (origin_prompt or "") + generated_token
-                                )
+                            if chat_flag and not stream_flag and generated_reasoning and not generated_content:
+                                # Chat templates such as GLM close </think> when an
+                                # assistant message contains reasoning. A partial
+                                # thought cannot be resumed as the same thought;
+                                # restart from the original conversation instead.
+                                req_data["messages"] = messages
+                                for key in ("continue_final_message", "add_generation_prompt"):
+                                    if key in original_chat_flags:
+                                        req_data[key] = original_chat_flags[key]
+                                    else:
+                                        req_data.pop(key, None)
+                                generated_reasoning = ""
+                                generated_content = ""
+                                completion_tokens = 0
+                                req_data["max_tokens"] = origin_max_tokens
                             else:
-                                req_data["prompt"] = origin_prompt + generated_token
-                            req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                                if chat_flag:
+                                    # Preserve generated assistant content in its
+                                    # own role instead of rewriting the user prompt.
+                                    if generated_content or generated_reasoning:
+                                        assistant_message = {"role": "assistant", "content": generated_content}
+                                        if generated_reasoning:
+                                            assistant_message["reasoning"] = generated_reasoning
+                                        req_data["messages"] = [*messages, assistant_message]
+                                        req_data["continue_final_message"] = True
+                                        req_data["add_generation_prompt"] = False
+                                else:
+                                    req_data["prompt"] = origin_prompt + generated_content
+                                req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
                             instance_info = await reassign_instances(
                                 api,
@@ -1196,9 +1227,14 @@ async def handle_completions_impl(api: str, request: Request):
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
-                                choice["message"]["content"] = generated_token
+                                choice["message"]["content"] = generated_content
+                                if generated_reasoning:
+                                    reasoning_key = (
+                                        "reasoning_content" if "reasoning_content" in choice["message"] else "reasoning"
+                                    )
+                                    choice["message"][reasoning_key] = generated_reasoning
                             else:
-                                choice["text"] = generated_token
+                                choice["text"] = generated_content
                             chunk = encode_response_chunk(chunk_json, is_sse)
                         yield chunk
             except asyncio.CancelledError:
