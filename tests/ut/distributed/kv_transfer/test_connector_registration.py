@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import logging
 import sys
 import types
 
@@ -184,3 +185,64 @@ def test_multi_connector_stats_round_trip(monkeypatch: pytest.MonkeyPatch) -> No
     # package (stubbed to the base default, None) and is skipped.
     assert "AscendOffloadingConnector" in stats.data
     assert "UCMConnectorV1" not in stats.data
+
+
+def test_alias_override_pops_existing_entry_and_warns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A class name already registered under a different config name is
+    overridden by the alias: the real register_connector raises on duplicate
+    keys, so the pop is what makes the re-registration succeed, and the
+    override is only a one-time warning.
+    """
+    from vllm.logger import logger as vllm_logger
+
+    from vllm_ascend.distributed.kv_transfer import _register_with_class_name_alias
+    from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
+        AscendOffloadingConnector,
+    )
+
+    # Capture the warning directly on the vllm logger: in this environment
+    # caplog.records stays empty (the live-logs plugin keeps a second
+    # LogCaptureHandler on root).
+    captured: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record)
+
+    monkeypatch.setattr(vllm_logger, "handlers", [_Capture()])
+
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector"
+    # A different connector claims the class name as its config name.
+    other_module = "vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector.connector"
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    KVConnectorFactory.register_connector("AscendOffloadingConnector", other_module, "UCMConnectorV1")
+    old_entry = KVConnectorFactory._registry["AscendOffloadingConnector"]
+
+    _register_with_class_name_alias("OffloadingConnector", module, "AscendOffloadingConnector")
+
+    assert any("already registered" in record.getMessage() for record in captured)
+    # The stale closure was replaced and the key now resolves to the alias.
+    assert KVConnectorFactory._registry["AscendOffloadingConnector"] is not old_entry
+    assert KVConnectorFactory._registry["AscendOffloadingConnector"]() is AscendOffloadingConnector
+    assert "OffloadingConnector" in KVConnectorFactory._registry
+
+
+def test_offloading_connector_config_name_resolves_to_ascend_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-existing pop of the upstream OffloadingConnector entry must
+    leave the config name resolving to the Ascend class, and the alias must
+    not disturb that ordering.
+    """
+    from vllm_ascend.distributed.kv_transfer import register_connector
+    from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
+        AscendOffloadingConnector,
+    )
+
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    register_connector()
+
+    assert KVConnectorFactory._registry["OffloadingConnector"]() is AscendOffloadingConnector
+    assert KVConnectorFactory._registry["AscendOffloadingConnector"]() is AscendOffloadingConnector
