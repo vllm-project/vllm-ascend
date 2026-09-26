@@ -194,7 +194,7 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
     expr: return | attr num_scheduled_tokens | str
   - name: num_scheduled_tokens
     expr: return | attr num_scheduled_tokens | str
-- symbol: vllm_ascend.patch.platform.patch_balance_schedule:BalanceScheduler.schedule
+- symbol: vllm_ascend.core.balance_scheduler:BalanceScheduler.schedule
   min_version: "0.9.1"
   domain: Scheduler
   name: BalanceScheduler.schedule
