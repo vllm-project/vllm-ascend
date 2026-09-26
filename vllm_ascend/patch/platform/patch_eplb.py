@@ -15,16 +15,17 @@ from vllm.config import parallel as _parallel_config
 from vllm.distributed.eplb import async_worker as _async_worker
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
+from vllm.distributed.eplb.eplb_utils import device_stream
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import routed_experts as _routed_experts
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
-from vllm_ascend.distributed.eplb._compat import device_stream
 from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
 from vllm_ascend.distributed.eplb.state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-    AscendEplbState,
     EXPERT_MAPPING_EP_SIZE,
+    AscendEplbState,
     refresh_model_routing_tables,
 )
 
@@ -163,9 +164,9 @@ def _patch_initial_expert_layout() -> None:
     if not getattr(original_get, _PATCH_MARKER, False):
         routed_experts.get_expert_mapping = _with_expert_mapping_ep_size(
             original_get,
-            lambda self, *_args, **_kwargs: self.moe_config.ep_size
-            if getattr(self, "_use_v2_model_runner", False)
-            else 1,
+            lambda self, *_args, **_kwargs: (
+                self.moe_config.ep_size if getattr(self, "_use_v2_model_runner", False) else 1
+            ),
         )
 
     original_make = routed_experts.make_expert_params_mapping
@@ -189,6 +190,8 @@ def _patch_initial_expert_layout() -> None:
         routed_experts.make_expert_params_mapping = staticmethod(
             _with_expert_mapping_ep_size(original_make, model_ep_size)
         )
+
+
 def _has_explicit_sources(target) -> bool:
     return hasattr(target, "source_rank_ids") and hasattr(target, "source_slot_ids")
 
@@ -327,7 +330,8 @@ def _wrap_async_worker(original_worker):
                         transfer_stream_parameter: stream,
                     }
                     metadata = _async_worker.transfer_layer(**transfer_kwargs)
-                    stream.synchronize()
+                    with gpu_sync_allowed():
+                        stream.synchronize()
                     consumed_event = _async_worker.CpuGpuEvent()
                     model_state.pending_result = _AscendAsyncLayerResult(
                         layer_idx,
@@ -400,12 +404,13 @@ def _wrap_move_to_workspace(original_move):
             deferred_event = _DeferredConsumedEvent(consumed_event)
             pending_result.consumed_event = deferred_event
         try:
-            move = (
-                _move_changed_layer_to_workspace
-                if isinstance(pending_result, _AscendAsyncLayerResult)
-                else original_move
-            )
-            result = move(*bound.args, **bound.kwargs)
+            if isinstance(pending_result, _AscendAsyncLayerResult):
+                result = _move_changed_layer_to_workspace(
+                    model_state,
+                    bound.arguments["ep_rank"],
+                )
+            else:
+                result = original_move(*bound.args, **bound.kwargs)
             if layer_idx is not None:
                 refresh_model_routing_tables(model_state, layer_idx)
             if is_last_result:

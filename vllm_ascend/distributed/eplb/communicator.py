@@ -5,9 +5,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed import P2POp, batch_isend_irecv
 from vllm.distributed.eplb.eplb_communicator import TorchDistGlooStagedEplbCommunicator
+from vllm.distributed.eplb.eplb_utils import device_stream
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-
-from vllm_ascend.distributed.eplb._compat import communicator_stream, device_stream
 
 
 class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
@@ -76,7 +75,7 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
         if not self._ops:
             return
 
-        stream = communicator_stream(self)
+        stream = self._stream
         p2p_ops: list[P2POp] = []
         recv_staging: list[tuple[torch.Tensor, torch.Tensor]] = []
         buffer_indices: dict[tuple[torch.dtype, tuple[int, ...]], int] = {}

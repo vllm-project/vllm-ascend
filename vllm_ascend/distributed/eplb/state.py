@@ -108,6 +108,12 @@ def refresh_model_routing_tables(
             layer_state.refresh_expert_replica_routing_table()
 
 
+def _raise_if_async_worker_stopped(state: Any) -> None:
+    worker = getattr(state, "async_worker", None)
+    if worker is not None and not worker.is_alive():
+        raise RuntimeError("EPLB background worker terminated unexpectedly")
+
+
 class AscendEplbState(_eplb_state.EplbState):
     """Keep Ascend routing and load-recording state around upstream EPLB."""
 
@@ -367,6 +373,7 @@ class AscendEplbState(_eplb_state.EplbState):
             return
         for model_state in self.model_states.values():
             while model_state.rebalanced:
+                _raise_if_async_worker_stopped(self)
                 result = model_state.pending_result
                 if result is not None:
                     if getattr(
@@ -385,6 +392,7 @@ class AscendEplbState(_eplb_state.EplbState):
         if self.expert_rearrangement_step < self.expert_rearrangement_step_interval:
             return False
         while model_state.pending_result is None:
+            _raise_if_async_worker_stopped(self)
             if not model_state.rebalanced:
                 return False
             time.sleep(0.001)
