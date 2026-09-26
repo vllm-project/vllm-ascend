@@ -191,7 +191,7 @@ def _layout_swap12_reference(x):
 def test_kda_torch_bindings_have_shape_correct_meta_kernels():
     q = torch.empty((1, 64, 1, 128), device="meta", dtype=torch.bfloat16)
     k = torch.empty_like(q)
-    v = torch.empty((1, 64, 2, 256), device="meta", dtype=torch.bfloat16)
+    v = torch.empty((1, 64, 2, 128), device="meta", dtype=torch.bfloat16)
     raw_gate = torch.empty((1, 64, 2, 128), device="meta", dtype=torch.bfloat16)
     beta = torch.empty((1, 64, 2), device="meta", dtype=torch.float32)
     a_log = torch.empty((2,), device="meta", dtype=torch.float32)
@@ -214,23 +214,28 @@ def test_kda_torch_bindings_have_shape_correct_meta_kernels():
         dt_bias=dt_bias,
         disable_recompute=True,
         return_intermediate_states=True,
+        epsilon=1e-5,
+        use_qk_l2norm_in_kernel=True,
+        use_beta_sigmoid_in_kernel=True,
+        allow_neg_eigval=True,
+        use_exp2=False,
     )
     swapped = torch.ops._C_ascend.kda_layout_swap12(raw_gate)
 
     assert gk.shape == raw_gate.shape
     assert gk.dtype == torch.float32
     assert [tuple(output.shape) for output in outputs[:-1]] == [
-        (1, 64, 2, 256),
-        (1, 2, 128, 256),
+        (1, 64, 2, 128),
+        (1, 2, 128, 128),
         (1, 2, 64, 128),
         (1, 2, 64, 64),
         (1, 2, 64, 64),
         (1, 2, 64, 128),
-        (1, 2, 64, 256),
         (1, 2, 64, 128),
         (1, 2, 64, 128),
-        (1, 2, 64, 256),
-        (1, 1, 2, 128, 256),
+        (1, 2, 64, 128),
+        (1, 2, 64, 128),
+        (1, 1, 2, 128, 128),
     ]
     assert outputs[11] is None
     assert outputs[0].dtype == torch.bfloat16
@@ -313,13 +318,13 @@ def test_kda_layout_swap12_matches_reference(shape, dtype, with_dependency):
 @pytest.mark.parametrize(
     ("total_t", "hq", "hv", "kdim", "vdim", "dtype"),
     [
-        (64, 1, 1, 128, 128, torch.float16),
-        (128, 1, 2, 128, 256, torch.float16),
-        (128, 2, 2, 128, 256, torch.bfloat16),
+        (64, 1, 1, 64, 64, torch.float16),
+        (128, 1, 2, 128, 128, torch.float16),
+        (128, 2, 2, 128, 128, torch.bfloat16),
     ],
 )
 @torch.inference_mode()
-def test_chunk_kda_fwd_c128_v256_path(total_t, hq, hv, kdim, vdim, dtype):
+def test_chunk_kda_fwd_supported_head_dimensions(total_t, hq, hv, kdim, vdim, dtype):
     torch.manual_seed(20260720 + total_t + hq + hv + vdim)
 
     q = (torch.randn(1, total_t, hq, kdim, dtype=dtype) * 0.04).npu()
@@ -349,7 +354,7 @@ def test_chunk_kda_fwd_c128_v256_path(total_t, hq, hv, kdim, vdim, dtype):
         )
 
     is_a5_determinism_case = (
-        total_t == 128 and hq == 2 and hv == 2 and kdim == 128 and vdim == 256 and dtype == torch.bfloat16
+        total_t == 128 and hq == 2 and hv == 2 and kdim == 128 and vdim == 128 and dtype == torch.bfloat16
     )
     if is_a5_determinism_case:
         run_chunk_kda_fwd()
@@ -641,7 +646,7 @@ def test_chunk_kda_fwd_a5_profile_t8191(layout, cu_seqlens):
             6,
             12,
             128,
-            256,
+            128,
             128,
             torch.bfloat16,
             [0, 127, 383, 600],
@@ -654,7 +659,7 @@ def test_chunk_kda_fwd_a5_profile_t8191(layout, cu_seqlens):
             6,
             12,
             128,
-            256,
+            128,
             128,
             torch.bfloat16,
             None,

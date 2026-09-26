@@ -4,6 +4,8 @@
 # the BSD 3-Clause License (the "License"). Please refer to the License for details.
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
 # -----------------------------------------------------------------------------------------------------------
+include_guard(GLOBAL)
+
 add_op_to_compiled_list()
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnnExc PRIVATE

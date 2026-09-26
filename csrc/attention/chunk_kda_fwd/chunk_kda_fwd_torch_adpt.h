@@ -6,6 +6,7 @@
 #ifndef CHUNK_KDA_FWD_TORCH_ADPT_H
 #define CHUNK_KDA_FWD_TORCH_ADPT_H
 
+#include <cmath>
 #include <string>
 #include <tuple>
 
@@ -37,7 +38,12 @@ chunk_kda_fwd(
     const c10::optional<at::Tensor> &dt_bias,
     c10::optional<bool> disable_recompute,
     c10::optional<bool> return_intermediate_states,
-    c10::optional<bool> state_v_first)
+    c10::optional<bool> state_v_first,
+    double epsilon,
+    bool use_qk_l2norm_in_kernel,
+    bool use_beta_sigmoid_in_kernel,
+    bool allow_neg_eigval,
+    bool use_exp2)
 {
     std::string layout_str(layout.data(), layout.size());
     TORCH_CHECK(layout_str == "BSND" || layout_str == "BNSD" || layout_str == "TND" || layout_str == "NTD",
@@ -50,6 +56,10 @@ chunk_kda_fwd(
     bool disable_recompute_ = disable_recompute.value_or(false);
     bool return_intermediate_states_ = return_intermediate_states.value_or(false);
     bool state_v_first_ = state_v_first.value_or(false);
+    TORCH_CHECK(std::isfinite(static_cast<float>(epsilon)) && static_cast<float>(epsilon) > 0.0F,
+                "chunk_kda_fwd: epsilon must be a positive finite float32 number.");
+    TORCH_CHECK(!allow_neg_eigval || use_beta_sigmoid_in_kernel,
+                "chunk_kda_fwd: allow_neg_eigval=True requires use_beta_sigmoid_in_kernel=True.");
 
     bool is_tnd = layout_str == "TND";
     bool is_ntd = layout_str == "NTD";
@@ -72,8 +82,8 @@ chunk_kda_fwd(
     int64_t V = is_rank3 ? v_sizes[2] : v_sizes[3];
     TORCH_CHECK(H > 0 && HV >= H && HV % H == 0 && H <= 128 && HV <= 128,
                 "chunk_kda_fwd: H/HV must satisfy 0 < H <= HV <= 128 and HV % H == 0.");
-    TORCH_CHECK(K >= 16 && K <= 256 && K % 16 == 0 && V >= 16 && V <= 256 && V % 16 == 0,
-                "chunk_kda_fwd: K/V must be multiples of 16 and no greater than 256.");
+    TORCH_CHECK(K == V && (K == 64 || K == 128),
+                "chunk_kda_fwd: K/V must both be 64 or both be 128, but got K=", K, ", V=", V, ".");
     TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,
                 "chunk_kda_fwd: q/k/v must use float16 or bfloat16.");
     TORCH_CHECK(k.scalar_type() == q.scalar_type() && v.scalar_type() == q.scalar_type(),
@@ -137,6 +147,30 @@ chunk_kda_fwd(
     }
 
     int64_t total_chunks = get_kda_total_chunks(B, T, chunk_size, cu_seqlens, chunk_indices_for_call);
+    // Keep upstream's small-workload fused path for already-normalized inputs.
+    // Kimi K3 requests in-kernel normalization and therefore selects V2 whenever
+    // its shape/dtype and host sequence metadata satisfy the three-stage contract.
+    constexpr int64_t KDA_FWD_V2_MIN_WORK_ITEMS = 4096;
+    constexpr double KDA_FWD_DEFAULT_EPSILON = 1.0e-6;
+    bool strictly_increasing = true;
+    if (cu_seqlens.has_value()) {
+        auto cu = cu_seqlens.value();
+        for (size_t i = 0; i + 1 < cu.size(); ++i) {
+            if (cu[i] >= cu[i + 1]) {
+                strictly_increasing = false;
+                break;
+            }
+        }
+    }
+    const bool v2_scenario = q.scalar_type() == at::kBFloat16 && K == 128 && V == 128 &&
+                             chunk_size == 64 && strictly_increasing;
+    const bool needs_v2 = use_qk_l2norm_in_kernel || use_beta_sigmoid_in_kernel ||
+                          allow_neg_eigval || !use_exp2;
+    TORCH_CHECK(!needs_v2 || v2_scenario,
+                "chunk_kda_fwd: non-default gate/L2norm switches require bfloat16 q/k/v, "
+                "K=V=128, chunk_size=64 and strictly increasing cu_seqlens.");
+    const bool use_v2 = v2_scenario && (needs_v2 || epsilon != KDA_FWD_DEFAULT_EPSILON ||
+                                       HV * total_chunks >= KDA_FWD_V2_MIN_WORK_ITEMS);
     std::vector<int64_t> attn_shape = is_rank3 ? std::vector<int64_t>{T, HV, V}
                                                : std::vector<int64_t>{B, T, HV, V};
     std::vector<int64_t> matrix_shape = is_rank3 ? std::vector<int64_t>{HV, T, chunk_size}
@@ -172,12 +206,26 @@ chunk_kda_fwd(
     const at::Tensor &A_log_ = c10::value_or_else(A_log, [] { return at::Tensor(); });
     const at::Tensor &dt_bias_ = c10::value_or_else(dt_bias, [] { return at::Tensor(); });
     const char *layout_cstr = layout_str.c_str();
-    EXEC_NPU_CMD(
-        aclnnChunkKdaFwd,
-        q, k, v, g, beta, A_log_, dt_bias_, initial_state_, cu_seqlens, chunk_indices_for_call,
-        layout_cstr, scale, chunk_size, safe_gate_, lower_bound_, use_gate_in_kernel_, state_v_first_,
-        attn_out, final_state, gk_out, aqk, akk, w, u, qg, kg, v_new, h
-    );
+    if (use_v2) {
+        // Backward-only qHat/kHat/qRstd/kRstd/betaEff outputs are not requested
+        // by the inference API. Undefined tensors become null ACL handles.
+        const at::Tensor unused_saved_output;
+        EXEC_NPU_CMD(
+            aclnnChunkKdaFwdV2,
+            q, k, v, g, beta, A_log_, dt_bias_, initial_state_, cu_seqlens, chunk_indices_for_call,
+            layout_cstr, scale, chunk_size, safe_gate_, lower_bound_, use_gate_in_kernel_, state_v_first_,
+            epsilon, use_qk_l2norm_in_kernel, use_beta_sigmoid_in_kernel, allow_neg_eigval, use_exp2,
+            attn_out, final_state, gk_out, aqk, akk, w, u, qg, kg, v_new, h,
+            unused_saved_output, unused_saved_output, unused_saved_output, unused_saved_output, unused_saved_output
+        );
+    } else {
+        EXEC_NPU_CMD(
+            aclnnChunkKdaFwd,
+            q, k, v, g, beta, A_log_, dt_bias_, initial_state_, cu_seqlens, chunk_indices_for_call,
+            layout_cstr, scale, chunk_size, safe_gate_, lower_bound_, use_gate_in_kernel_, state_v_first_,
+            attn_out, final_state, gk_out, aqk, akk, w, u, qg, kg, v_new, h
+        );
+    }
 
     c10::optional<at::Tensor> final_state_out =
         final_state.defined() ? c10::optional<at::Tensor>(final_state) : c10::nullopt;

@@ -80,13 +80,15 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
     keep = torch.tensor([0]) if compact else None
     metadata = SimpleNamespace(
         keep_meta=keep,
-        cu_seqlens_host=torch.tensor([0, 3] if compact else [0, 1, 3]),
+        cu_seqlens_host=(0, 3) if compact else (0, 1, 3),
         cu_seqlens_kern=None,
-        chunk_indices_chunk64_host=torch.tensor([[0, 0]] if compact else [[0, 0], [1, 0]]),
+        chunk_indices_chunk64_host=(0, 0) if compact else (0, 0, 1, 0),
     )
 
     def chunk(q_arg, k_arg, v, g, beta, scale, chunk_size, **kwargs):
         assert kwargs["state_v_first"] and kwargs["use_gate_in_kernel"] and kwargs["safe_gate"]
+        assert kwargs["use_qk_l2norm_in_kernel"]
+        assert not kwargs["use_beta_sigmoid_in_kernel"]
         assert kwargs["cu_seqlens"] is metadata.cu_seqlens_host
         assert kwargs["chunk_indices"] is metadata.chunk_indices_chunk64_host
         assert kwargs["initial_state"].dtype == torch.float32

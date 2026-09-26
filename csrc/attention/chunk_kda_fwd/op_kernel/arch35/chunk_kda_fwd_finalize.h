@@ -256,6 +256,7 @@ private:
         mte3ToVEvent_ = pipe_->AllocEventID<HardEvent::MTE3_V>();
         mte2ToMte3Event_ = pipe_->AllocEventID<HardEvent::MTE2_MTE3>();
         mte3ToMte2Event_ = pipe_->AllocEventID<HardEvent::MTE3_MTE2>();
+        vToSEvent_ = pipe_->AllocEventID<HardEvent::V_S>();
         sToVEvent_ = pipe_->AllocEventID<HardEvent::S_V>();
         sToMte2Event_ = pipe_->AllocEventID<HardEvent::S_MTE2>();
         vectorEventsAllocated_ = true;
@@ -272,6 +273,7 @@ private:
         pipe_->ReleaseEventID<HardEvent::MTE3_V>(mte3ToVEvent_);
         pipe_->ReleaseEventID<HardEvent::MTE2_MTE3>(mte2ToMte3Event_);
         pipe_->ReleaseEventID<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        pipe_->ReleaseEventID<HardEvent::V_S>(vToSEvent_);
         pipe_->ReleaseEventID<HardEvent::S_V>(sToVEvent_);
         pipe_->ReleaseEventID<HardEvent::S_MTE2>(sToMte2Event_);
         vectorEventsAllocated_ = false;
@@ -512,9 +514,9 @@ private:
             Cast(
                 coefficients, coefficientTyped, RoundMode::CAST_NONE,
                 static_cast<uint32_t>(curT));
-            // Earlier megakernel stages reuse V_S event IDs. Drain the cast
-            // before the first scalar coefficient read in this tail row.
-            PipeBarrier<PIPE_ALL>();
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_S>(vToSEvent_);
+            WaitFlag<HardEvent::V_S>(vToSEvent_);
             Duplicate(dstRow, 0.0f, static_cast<uint32_t>(V_));
             PipeBarrier<PIPE_V>();
             for (uint64_t j = 0; j < curT; ++j) {
@@ -552,9 +554,9 @@ private:
             Cast(
                 coefficients, coefficientTyped, RoundMode::CAST_NONE,
                 static_cast<uint32_t>(K_));
-            // Earlier megakernel stages reuse V_S event IDs. Drain the cast
-            // before the first scalar coefficient read in this tail row.
-            PipeBarrier<PIPE_ALL>();
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_S>(vToSEvent_);
+            WaitFlag<HardEvent::V_S>(vToSEvent_);
             Duplicate(dstRow, 0.0f, static_cast<uint32_t>(V_));
             PipeBarrier<PIPE_V>();
             for (uint64_t d = 0; d < K_; ++d) {
@@ -1378,6 +1380,7 @@ private:
     TEventID mte3ToVEvent_ = 0;
     TEventID mte2ToMte3Event_ = 0;
     TEventID mte3ToMte2Event_ = 0;
+    TEventID vToSEvent_ = 0;
     TEventID sToVEvent_ = 0;
     TEventID sToMte2Event_ = 0;
     bool vectorEventsAllocated_ = false;

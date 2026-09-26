@@ -1,3 +1,4 @@
+#include <cmath>
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
@@ -1833,13 +1834,33 @@ chunk_kda_fwd_meta(
     const c10::optional<at::Tensor> &dt_bias,
     c10::optional<bool> disable_recompute,
     c10::optional<bool> return_intermediate_states,
-    c10::optional<bool> state_v_first)
+    c10::optional<bool> state_v_first,
+    double epsilon,
+    bool use_qk_l2norm_in_kernel,
+    bool use_beta_sigmoid_in_kernel,
+    bool allow_neg_eigval,
+    bool use_exp2)
 {
     std::string layout_str = std::string(layout);
+    TORCH_CHECK(layout_str == "BSND" || layout_str == "BNSD" || layout_str == "TND" || layout_str == "NTD",
+                "chunk_kda_fwd: layout must be one of BSND, BNSD, TND, NTD and must be uppercase.");
+    TORCH_CHECK(chunk_size == 64 || chunk_size == 128, "chunk_kda_fwd: chunk_size must be 64 or 128.");
+    TORCH_CHECK(std::isfinite(static_cast<float>(epsilon)) && static_cast<float>(epsilon) > 0.0F,
+                "chunk_kda_fwd: epsilon must be a positive finite number.");
+    TORCH_CHECK(!allow_neg_eigval || use_beta_sigmoid_in_kernel,
+                "chunk_kda_fwd: allow_neg_eigval requires use_beta_sigmoid_in_kernel=True.");
     bool is_tnd = layout_str == "TND";
     bool is_ntd = layout_str == "NTD";
     bool is_bnsd = layout_str == "BNSD";
     bool is_rank3 = is_tnd || is_ntd;
+    TORCH_CHECK(
+        (is_rank3 && q.dim() == 3 && k.dim() == 3 && v.dim() == 3 && g.dim() == 3 && beta.dim() == 2) ||
+            (!is_rank3 && q.dim() == 4 && k.dim() == 4 && v.dim() == 4 && g.dim() == 4 && beta.dim() == 3),
+        "chunk_kda_fwd: input ranks do not match layout.");
+    TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,
+                "chunk_kda_fwd: q/k/v must use float16 or bfloat16.");
+    TORCH_CHECK(k.scalar_type() == q.scalar_type() && v.scalar_type() == q.scalar_type(),
+                "chunk_kda_fwd: q/k/v dtype must match.");
     bool output_final_state_ = output_final_state.value_or(false);
     bool use_gate_in_kernel_ = use_gate_in_kernel.value_or(false);
     bool disable_recompute_ = disable_recompute.value_or(false);
@@ -1853,6 +1874,19 @@ chunk_kda_fwd_meta(
     c10::SymInt HV = is_tnd ? v.sym_size(1) :
         (is_ntd ? v.sym_size(0) : (is_bnsd ? v.sym_size(1) : v.sym_size(2)));
     c10::SymInt V = is_rank3 ? v.sym_size(2) : v.sym_size(3);
+    TORCH_CHECK(B > 0 && T > 0, "chunk_kda_fwd: batch and sequence dimensions must be positive.");
+    TORCH_CHECK((K == 64 && V == 64) || (K == 128 && V == 128),
+                "chunk_kda_fwd: K/V must both be 64 or both be 128.");
+    if (use_qk_l2norm_in_kernel || use_beta_sigmoid_in_kernel || allow_neg_eigval || !use_exp2) {
+        TORCH_CHECK(q.scalar_type() == at::kBFloat16 && K == 128 && V == 128 && chunk_size == 64,
+                    "chunk_kda_fwd: non-default gate/L2norm switches require bfloat16, K=V=128, chunk_size=64.");
+        if (cu_seqlens.has_value()) {
+            for (size_t i = 0; i + 1 < cu_seqlens->size(); ++i) {
+                TORCH_CHECK((*cu_seqlens)[i] < (*cu_seqlens)[i + 1],
+                            "chunk_kda_fwd: non-default gate/L2norm switches require strictly increasing cu_seqlens.");
+            }
+        }
+    }
     // symbolic-meta-ok: cu_seqlens is an IntArrayRef schema argument, not a Tensor shape.
     c10::SymInt seq_num = cu_seqlens.has_value() ?
         c10::SymInt(static_cast<int64_t>(cu_seqlens->size()) - 1) : B;
