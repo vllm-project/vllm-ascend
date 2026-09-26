@@ -228,8 +228,8 @@ def compressor_ratio2_reference(compressor, x, start_pos: int, state_cache, stat
         first = start_pos - start_pos % compressor.ratio
         for position in range(first, start_pos + x.shape[0]):
             state_row(position)
-    kv = compressor.wkv(x.float())
-    score = compressor.wgate(x.float())
+    kv = torch.nn.functional.linear(x.float(), compressor.wkv.weight.float())
+    score = torch.nn.functional.linear(x.float(), compressor.wgate.weight.float())
     completed = []
     for token in range(x.shape[0]):
         position = start_pos + token

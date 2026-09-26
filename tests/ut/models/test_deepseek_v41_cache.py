@@ -940,8 +940,8 @@ def test_compressor_chunk_boundary_matches_vector_reference(config, chunks):
     torch.manual_seed(7)
     compressor = DeepseekV41Compressor(config, 2)
     x = torch.randn(7, 16, dtype=torch.bfloat16)
-    kv = compressor.wkv(x.float())[:6].reshape(3, 2, 8)
-    gate = compressor.wgate(x.float())[:6].reshape(3, 2, 8)
+    kv = torch.nn.functional.linear(x.float(), compressor.wkv.weight.float())[:6].reshape(3, 2, 8)
+    gate = torch.nn.functional.linear(x.float(), compressor.wgate.weight.float())[:6].reshape(3, 2, 8)
     expected = compressor.norm((kv * gate.softmax(dim=1)).sum(dim=1).to(x.dtype))
     state = torch.full((6, 32, 16), float("nan"), dtype=torch.float32)
     block_table = [4]
@@ -951,7 +951,9 @@ def test_compressor_chunk_boundary_matches_vector_reference(config, chunks):
         actual.append(compressor_ratio2_reference(compressor, x[start : start + size], start, state, block_table))
         start += size
     torch.testing.assert_close(torch.cat(actual), expected)
-    torch.testing.assert_close(state[4, 6, :8], compressor.wkv(x[-1:].float())[0])
+    torch.testing.assert_close(
+        state[4, 6, :8], torch.nn.functional.linear(x[-1:].float(), compressor.wkv.weight.float())[0]
+    )
 
 
 @pytest.mark.parametrize(
@@ -983,16 +985,11 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
     hidden_states = torch.randn(num_tokens, 8, dtype=dtype)
     original_hidden_states = hidden_states.clone()
 
-    def pool(kv, score, metadata):
-        assert kv.dtype == score.dtype == torch.float32
-        # Identity projections must receive the same FP32 conversion.
-        assert kv is score
-        torch.testing.assert_close(kv, hidden_states.float(), rtol=0, atol=0)
-        if dtype == torch.float32:
-            assert kv is hidden_states
+    def pool(x, metadata):
+        assert x is hidden_states
         assert metadata is state
         events.append("pool")
-        return kv.to(torch.bfloat16)
+        return x.to(torch.bfloat16)
 
     expected = slots.clone()
 
@@ -1010,7 +1007,7 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
     monkeypatch.setattr(dsa_v41, "scatter_cache_sk", store)
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False)
     attn = SimpleNamespace(
-        compressor=SimpleNamespace(wkv=lambda x: x, wgate=lambda x: x, pool_projected=pool),
+        compressor=SimpleNamespace(compress_native=pool),
         indexer=SimpleNamespace(update_keys=update_keys),
         long_kv_cache=SimpleNamespace(kv_cache=[torch.empty(0)]),
         head_dim=8,
@@ -1047,30 +1044,54 @@ def test_state_uses_one_ring_page_and_block_table_entry(config, runtime):
     assert spec.max_memory_usage_bytes(runtime) == spec.page_size_bytes
 
 
-def test_projected_model_entry_keeps_fp32_state_and_existing_norm(config, monkeypatch):
+def test_native_compressor_uses_bf16_weights(config, runtime, monkeypatch):
+    from vllm_ascend.models.deepseek_v41 import compressor as compressor_module
+
+    config.hidden_size, config.head_dim = 1024, 128
+    monkeypatch.setattr(compressor_module, "DeepseekV41CacheLayer", lambda *args: SimpleNamespace())
+    monkeypatch.setattr(
+        compressor_module, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda capability: True)
+    )
+    native = DeepseekV41Compressor(config, 2, runtime)
+    assert native.wkv.weight.dtype == native.wgate.weight.dtype == torch.bfloat16
+    monkeypatch.setattr(torch.ops._C_ascend, "compressor_v2", lambda *args: None, raising=False)
+    native.prepare_ring_compressor()
+    monkeypatch.setattr(
+        compressor_module, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda capability: False)
+    )
+    with pytest.raises(ValueError, match="A2/A3"):
+        native.prepare_ring_compressor()
+    config.head_dim = 8
+    with pytest.raises(ValueError, match="D=128/512"):
+        DeepseekV41Compressor(config, 2, runtime).prepare_ring_compressor()
+
+
+@pytest.mark.parametrize("complete", [[False, True, True, False, True], [False] * 5])
+def test_native_compressor_restores_token_rows(config, monkeypatch, complete):
     compressor = DeepseekV41Compressor(config, 2)
-    compressor.register_buffer("_ring_pooled", torch.empty(4, 8, dtype=torch.bfloat16), persistent=False)
-    compressor._ring_num_cores = 1
+    compressor.register_buffer("_ring_pooled", torch.empty(5, 8, dtype=torch.bfloat16), persistent=False)
     state = torch.zeros(3, 32, 1, 16, dtype=torch.float32)
     compressor.state_cache = SimpleNamespace(kv_cache=[state])
-    metadata = SimpleNamespace(c2_ring_metadata=torch.zeros(5, 1, dtype=torch.int32), max_query_len=2)
-    pooled = torch.randn(2, 8, dtype=torch.bfloat16)
-    expected = compressor.norm(pooled).clone()
-    pointer = compressor._ring_pooled.data_ptr()
+    ring = torch.tensor([[0, 1, 0], [2, 2, 0], [0, 2, 4], [0, 2, 4], [1, 2, 0]], dtype=torch.int32)
+    metadata = SimpleNamespace(c2_ring_metadata=ring, c2_complete_mask=torch.tensor(complete))
+    compact = torch.randn(5, 8, dtype=torch.bfloat16)
+    compact[sum(complete) :].fill_(float("nan"))
 
-    def kernel(kv, scores, state_view, controls, out, **kwargs):
-        assert kv.dtype == scores.dtype == state_view.dtype == torch.float32
-        assert state_view.data_ptr() == state.data_ptr()
-        assert controls is metadata.c2_ring_metadata
-        assert out.data_ptr() == pointer and out.dtype == torch.bfloat16
-        out.copy_(pooled)
-        return out
+    def native(x, wkv, wgate, cache, blocks, offsets, used, starts, ratio):
+        assert x.dtype == wkv.dtype == wgate.dtype == torch.bfloat16 and ratio == 2
+        assert cache.dtype == torch.float32
+        assert cache.data_ptr() == state.data_ptr()
+        assert offsets.tolist() == [0, 2, 4, 5]
+        assert used.tolist() == [2, 2, 0]
+        assert blocks.tolist() == [1, 2, 0]
+        return compact
 
-    monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.compressor_from_projected", kernel)
-    hidden = torch.randn(2, 16, dtype=torch.bfloat16)
-    actual = compressor.pool_projected(compressor.wkv(hidden.float()), compressor.wgate(hidden.float()), metadata)
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert compressor.wkv.weight.dtype == compressor.wgate.weight.dtype == torch.float32
+    monkeypatch.setattr(torch.ops._C_ascend, "compressor_v2", native, raising=False)
+    expected = torch.zeros(5, 8, dtype=torch.bfloat16)
+    expected[metadata.c2_complete_mask] = compact[: sum(complete)]
+    actual = compressor.compress_native(torch.randn(5, 16, dtype=torch.bfloat16), metadata)
+    torch.testing.assert_close(actual, compressor.norm(expected), rtol=0, atol=0)
+    assert torch.isfinite(actual).all()
 
 
 @torch.inference_mode()
