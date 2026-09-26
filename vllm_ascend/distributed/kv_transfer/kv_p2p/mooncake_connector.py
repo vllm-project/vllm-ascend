@@ -3033,7 +3033,7 @@ class MooncakeConnectorWorker:
             kernel_remote = kernel_remote[remote_start_idx:]
             num_kernel_blocks = min(len(kernel_remote), len(kernel_local))
             return kernel_local[:num_kernel_blocks], kernel_remote[:num_kernel_blocks]
-        if group_remote_size is not None:
+        if group_remote_size is not None and group_remote_size > 0:
             if group_remote_size % kernel_size == 0:
                 remote_block_size = group_remote_size
             else:
@@ -4425,6 +4425,7 @@ def group_kernel_block_size(
     local_scale = 1
     if layer_indices and layer_indices[0] < len(block_size_scale) and block_size_scale[layer_indices[0]]:
         local_scale = block_size_scale[layer_indices[0]][0]
+    assert local_scale > 0, f"block size scale must be positive, got {local_scale}"
     group_block_size = group_spec.get("kv_cache_spec_block_size")
     if not isinstance(group_block_size, int) or group_block_size <= 0:
         group_block_size = block_size
@@ -4459,6 +4460,8 @@ def group_packing_factor(
     if not remote_block_sizes or kv_cache_group_id >= len(remote_block_sizes):
         return 1
     group_remote_size = remote_block_sizes[kv_cache_group_id]
+    if group_remote_size <= 0:
+        return 1
     kernel_size = group_kernel_block_size(group_spec, layer_indices, block_size, block_size_scale)
     if group_remote_size < kernel_size and kernel_size % group_remote_size == 0:
         return kernel_size // group_remote_size
