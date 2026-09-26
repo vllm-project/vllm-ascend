@@ -87,6 +87,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Whether to use the Triton apply_top_k_top_p op in sampling
+    # (vllm_ascend.ops.triton.apply_top_k_top_p: CANN npu_top_k_top_p
+    # semantics + optional fused softmax; takes per-request [B] k/p tensors
+    # directly, no .item() CPU sync). Performance-critical decode path.
+    # Default: 0 (disabled). Valid values: 0 or 1. Not sensitive.
+    "VLLM_ASCEND_USE_TRITON_APPLY_TOPK_TOPP": lambda: _strict_binary_env("VLLM_ASCEND_USE_TRITON_APPLY_TOPK_TOPP"),
 }
 
 # end-env-vars-definition
