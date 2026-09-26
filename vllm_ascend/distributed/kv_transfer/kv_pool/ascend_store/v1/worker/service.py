@@ -1,19 +1,18 @@
-"""Worker-side classic Lookup, Load and queued Store."""
+"""Worker-side Lookup, Load and queued Store."""
 
 from __future__ import annotations
 
 import torch
-from vllm.v1.core.kv_cache_utils import BlockHash
 
 from ..metadata import LoadRequestBatch, StoreRequestBatch
 from .load import LoadResult, LoadService
-from .lookup import LookupService
+from .lookup import LookupService, WorkerLookupRequest
 from .resources import WorkerCacheResources
 from .store import StoreService
 
 
 class WorkerService:
-    """Orchestrate the classic Worker Lookup, Load and Store operations."""
+    """Orchestrate Worker Lookup, Load and Store operations."""
 
     def __init__(
         self,
@@ -47,8 +46,8 @@ class WorkerService:
         finally:
             self._cache_resources.close()
 
-    def lookup(self, token_len: int, block_hashes: list[BlockHash] | list[str]) -> int:
-        return self._lookup_service.lookup(token_len, block_hashes)
+    def lookup(self, request: WorkerLookupRequest) -> int:
+        return self._lookup_service.lookup(request)
 
     def load(self, request_batch: LoadRequestBatch) -> None:
         self._load_service.load(request_batch)

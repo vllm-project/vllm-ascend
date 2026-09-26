@@ -1,4 +1,4 @@
-"""Execution of fully resolved classic Lookup tasks."""
+"""Execution of fully resolved Lookup tasks."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .task import LookupTask
 class LookupExecutionResult:
     """Raw Backend presence codes aligned with a Lookup task's keys."""
 
-    presence: tuple[int, ...]
+    presence_codes: tuple[int, ...]
 
 
 class LookupExecutor:

@@ -1,8 +1,8 @@
-"""Business entry point for classic Scheduler Lookup."""
+"""Business entry point for Scheduler Lookup."""
 
 from __future__ import annotations
 
-from .client import LookupKeyClient
+from .client import LookupClient
 from .request import SchedulerLookupRequest, SchedulerLookupResult
 
 
@@ -13,39 +13,46 @@ class LookupService:
         self,
         lookup_address: str,
         *,
+        transfer_group_ids: tuple[int, ...],
         cache_transfer_granularity: int,
         discard_partial_chunks: bool,
         enabled: bool,
     ) -> None:
         self.lookup_address = lookup_address
+        self.transfer_group_ids = transfer_group_ids
         self.cache_transfer_granularity = cache_transfer_granularity
         self.discard_partial_chunks = discard_partial_chunks
         self.enabled = enabled
-        self.client: LookupKeyClient | None = None
+        self.client: LookupClient | None = None
 
     def lookup(self, request: SchedulerLookupRequest) -> SchedulerLookupResult:
         if not self.enabled:
             return SchedulerLookupResult(0, None)
 
-        token_len = request.prompt_token_len
+        lookup_end_token = request.prompt_token_len
         if self.discard_partial_chunks:
-            token_len -= token_len % self.cache_transfer_granularity
-        if token_len < self.cache_transfer_granularity or request.num_computed_tokens >= token_len:
+            lookup_end_token -= lookup_end_token % self.cache_transfer_granularity
+        if lookup_end_token < self.cache_transfer_granularity or request.local_cached_tokens >= lookup_end_token:
             return SchedulerLookupResult(0, None)
 
         if self.client is None:
-            self.client = LookupKeyClient(self.lookup_address)
-        num_external_hit_tokens = self.client.lookup(token_len, request.block_hashes, request.num_computed_tokens)
-        if num_external_hit_tokens == 0:
+            self.client = LookupClient(self.lookup_address)
+        kv_pool_cached_tokens = self.client.lookup(
+            lookup_end_token,
+            self.transfer_group_ids,
+            request.block_hashes,
+            request.local_cached_tokens,
+        )
+        if kv_pool_cached_tokens == 0:
             return SchedulerLookupResult(0, None)
 
-        if num_external_hit_tokens == request.num_tokens:
-            num_external_hit_tokens -= 1
-        need_to_allocate = max(num_external_hit_tokens - request.num_computed_tokens, 0)
+        if kv_pool_cached_tokens == request.request_token_len:
+            kv_pool_cached_tokens -= 1
+        need_to_allocate = max(kv_pool_cached_tokens - request.local_cached_tokens, 0)
         if need_to_allocate == 0:
             return SchedulerLookupResult(0, None)
 
-        return SchedulerLookupResult(need_to_allocate, num_external_hit_tokens)
+        return SchedulerLookupResult(need_to_allocate, kv_pool_cached_tokens)
 
     def close(self) -> None:
         if self.client is not None:

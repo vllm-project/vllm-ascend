@@ -1,4 +1,4 @@
-"""Classic Worker Load execution."""
+"""Worker Load execution."""
 
 from .service import LoadResult, LoadService
 

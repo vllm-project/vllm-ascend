@@ -10,8 +10,8 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 @dataclass
 class RequestTracker:
     request_id: str
-    token_len: int
-    block_ids: list[int]
+    request_token_len: int
+    block_ids_by_group: list[list[int]]
     block_hashes: list[BlockHash]
     num_prompt_tokens: int
 
@@ -21,7 +21,8 @@ class RequestTracker:
         new_block_ids: tuple[list[int], ...] | None,
         block_hashes: list[BlockHash],
     ) -> None:
-        self.token_len += num_tokens
+        self.request_token_len += num_tokens
         if new_block_ids:
-            self.block_ids.extend(new_block_ids[0])
+            for block_ids, new_ids in zip(self.block_ids_by_group, new_block_ids, strict=True):
+                block_ids.extend(new_ids)
         self.block_hashes = block_hashes

@@ -1,4 +1,4 @@
-"""Operation-owned requests carried across the classic role boundary."""
+"""Operation-owned requests carried across the Scheduler/Worker boundary."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ class LoadRequest:
 
     request_id: str
     transfer_end_token: int
-    block_ids: tuple[int, ...]
+    block_ids_by_group: tuple[tuple[int, ...], ...]
     block_hashes: tuple[BlockHash, ...]
-    vllm_cached_tokens: int
-    kvpool_cached_tokens: int
+    local_cached_tokens: int
+    kv_pool_cached_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,8 +25,8 @@ class StoreRequest:
     """A Scheduler-approved asynchronous Store command."""
 
     request_id: str
-    save_end_token: int
-    block_ids: tuple[int, ...]
+    store_end_token: int
+    block_ids_by_group: tuple[tuple[int, ...], ...]
     block_hashes: tuple[BlockHash, ...]
     num_prompt_tokens: int
 

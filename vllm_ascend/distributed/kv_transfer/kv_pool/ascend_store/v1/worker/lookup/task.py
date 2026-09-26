@@ -1,4 +1,4 @@
-"""Build executable classic Lookup tasks from content hashes and topology."""
+"""Build executable Lookup tasks from content hashes and topology."""
 
 from __future__ import annotations
 
@@ -8,12 +8,17 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase
 
+from ..coordinator import LookupChunkSelection
+from .request import WorkerLookupRequest
+
 
 @dataclass(frozen=True, slots=True)
 class LookupTask:
-    """Backend keys and result layout required by one Worker Lookup."""
+    """Backend keys and result layout required by one cache-group Lookup."""
 
+    group_id: int
     chunk_ends: tuple[int, ...]
+    chunk_hashes: tuple[BlockHash | str, ...]
     backend_keys: tuple[str, ...]
     num_ranks: int
 
@@ -21,27 +26,33 @@ class LookupTask:
 class LookupTaskBuilder:
     """Resolve Lookup inputs into rank-expanded Backend keys."""
 
-    def __init__(
-        self,
-        token_database: ChunkedTokenDatabase,
-        num_head_ranks: int,
-        pp_size: int,
-        dcp_size: int,
-    ) -> None:
+    def __init__(self, token_database: ChunkedTokenDatabase, num_head_ranks: int, pp_size: int, dcp_size: int) -> None:
         self.token_database = token_database
         self.num_head_ranks = num_head_ranks
         self.pp_size = pp_size
         self.dcp_size = dcp_size
 
-    def build(self, token_len: int, block_hashes: list[BlockHash] | list[str]) -> LookupTask:
-        chunks = list(self.token_database.process_token_key_strings(token_len, block_hashes))
+    def build(self, request: WorkerLookupRequest, selection: LookupChunkSelection) -> LookupTask:
+        group_id = selection.group_id
+        block_size = self.token_database.get_block_size(group_id)
+        chunks = list(
+            self.token_database.process_token_key_strings(
+                request.lookup_end_token,
+                list(request.block_hashes),
+                mask_num=selection.query_start_token,
+                kv_cache_group_id=group_id,
+                chunk_filter=lambda start: selection.includes(start, block_size),
+            )
+        )
         if not chunks:
-            return LookupTask((), (), 0)
+            return LookupTask(group_id, (), (), (), 0)
 
         keys = [key for _, _, key, _ in chunks]
         rank_keys = self._expand_rank_keys(keys)
         return LookupTask(
+            group_id=group_id,
             chunk_ends=tuple(end for _, end, _, _ in chunks),
+            chunk_hashes=tuple(chunk_hash for _, _, _, chunk_hash in chunks),
             backend_keys=tuple(rank_keys),
             num_ranks=len(rank_keys) // len(keys),
         )
