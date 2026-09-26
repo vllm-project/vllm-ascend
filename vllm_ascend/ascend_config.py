@@ -362,7 +362,6 @@ class AscendConfig:
             "mlapo_keep_prefill_weights": false,
             "msmonitor_use_daemon": false,
             "enable_transpose_kv_cache_by_block": true,
-            "block_table_no_commit_optimize": 0,
             "weight_nz_mode": 1,
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
@@ -526,8 +525,6 @@ class AscendConfig:
     mlapo_keep_prefill_weights: bool = False
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
-    # MRv1 only: 0 uses dirty-range commits; 1 restores a full-table H2D copy.
-    block_table_no_commit_optimize: Literal[0, 1] = 0
     weight_nz_mode: int = 1
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
@@ -713,14 +710,12 @@ class AscendConfig:
 
         finegrained_tp_enabled = (
             self.finegrained_tp_config.oproj_tensor_parallel_size > 0
-            or self.finegrained_tp_config.embedding_tensor_parallel_size > 0
             or self.finegrained_tp_config.mlp_tensor_parallel_size > 0
-            or self.finegrained_tp_config.lmhead_tensor_parallel_size > 0
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
-                "finegrained_tp_config requires recompute_scheduler_enable=true: "
-                "it keeps decode-node steps decode-shaped.",
+                "oproj_tensor_parallel_size / mlp_tensor_parallel_size require "
+                "recompute_scheduler_enable=true: it keeps decode-node steps decode-shaped.",
             )
 
         # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable

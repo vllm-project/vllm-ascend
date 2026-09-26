@@ -768,7 +768,15 @@ def _fake_async_copy(src, device=None, out=None):
     return tensor
 
 
-def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc):
+def _run_prepare_inputs(
+    runner,
+    scheduler_output,
+    batch_req_state,
+    batch_desc,
+    *,
+    prefill_inputs=None,
+    combine_tokens=None,
+):
     batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
 
     def _partition(_pcp_manager, input_batch, **_kwargs):
@@ -777,12 +785,13 @@ def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc):
     with (
         patch("vllm_ascend.worker.v2.model_runner.async_copy_to_gpu", side_effect=_fake_async_copy),
         patch("vllm_ascend.worker.v2.model_runner.build_attn_state", return_value="attn"),
-        patch("vllm_ascend.worker.v2.model_runner.prepare_prefill_inputs"),
+        patch("vllm_ascend.worker.v2.model_runner.prepare_prefill_inputs", side_effect=prefill_inputs),
         patch("vllm_ascend.worker.v2.model_runner.prepare_pos_seq_lens"),
         patch("vllm_ascend.worker.v2.model_runner.prepare_dcp_local_seq_lens", create=True),
         patch(
             "vllm_ascend.worker.v2.model_runner.combine_sampled_and_draft_tokens",
             return_value=torch.tensor([0, 1], dtype=torch.int32),
+            side_effect=combine_tokens,
         ),
         patch(
             "vllm_ascend.worker.v2.model_runner.expand_idx_mapping",
@@ -805,6 +814,75 @@ def test_prepare_inputs_common_path():
     assert out is partitioned
     runner.eplb.set_batch_phase.assert_called_once_with(True)
     np.testing.assert_array_equal(runner.input_buffers.seq_lens_cpu[:2], np.array([3, 4], dtype=np.int32))
+
+
+@pytest.mark.parametrize("num_spec_tokens", [0, 1, 5])
+@pytest.mark.parametrize("full_cg", [False, True])
+def test_pd_tail_input_survives_decode_reclassification(num_spec_tokens, full_cg):
+    runner, scheduler_output, _, batch_desc = _prepare_inputs_runner(full_cg=full_cg)
+    query_len = 1 + num_spec_tokens
+    runner.decode_query_len = query_len
+    batch_state = _make_batch_state([127, 128], [query_len, query_len], [128, 128])
+    batch_state = batch_state._replace(req_ids=["r0", "r1"])
+    scheduler_output.num_scheduled_tokens = dict.fromkeys(batch_state.req_ids, query_len)
+    scheduler_output.scheduled_spec_decode_tokens = (
+        {req_id: [-1] * num_spec_tokens for req_id in batch_state.req_ids} if num_spec_tokens else {}
+    )
+    batch_desc.num_tokens = 2 * query_len
+    runner.input_buffers.input_ids.fill_(-999)
+    runner.req_states.num_computed_tokens.gpu = torch.tensor([127, 128], dtype=torch.int32)
+    runner.req_states.prefill_len.gpu = torch.tensor([128, 128], dtype=torch.int32)
+    runner.req_states.all_token_ids.gpu = torch.arange(2 * 144, dtype=torch.int32).reshape(2, 144)
+    runner.req_states.last_sampled_tokens = torch.tensor([700, 701], dtype=torch.int32)
+    runner.req_states.draft_tokens = torch.full((2, num_spec_tokens), 702, dtype=torch.int32)
+    runner.req_states.next_prefill_tokens = torch.full((1, 2), -999, dtype=torch.int32)
+
+    with (
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
+        patch("vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled", return_value=True),
+    ):
+        gathered, uniform = runner.gather_batch_req_state(scheduler_output, False)
+    assert not gathered.has_prefill
+    assert uniform == query_len
+
+    def prepare_prefill(input_ids, next_tokens, idx_mapping, query_start, all_tokens, prefill_len, computed):
+        # CPU reference for the upstream kernel: prepare actual prompt tails,
+        # independently of the graph-dispatch classification.
+        for row, idx in enumerate(idx_mapping.tolist()):
+            pos = int(computed[idx])
+            if pos >= int(prefill_len[idx]):
+                continue
+            start, end = query_start[row : row + 2].tolist()
+            input_ids[start:end] = all_tokens[idx, pos : pos + end - start]
+            next_tokens[:, idx] = 0  # This step reaches the end of the prompt.
+
+    def combine(input_ids, idx_mapping, sampled, query_start, seq_lens, prefill_len, drafts, *args):
+        # The upstream combine kernel preserves the prompt-tail position.
+        # It must already contain the real token, never the stale buffer value
+        # or last_sampled_tokens for this newly admitted request.
+        assert input_ids[0].item() == 127
+        assert runner.req_states.next_prefill_tokens[0, 0].item() == 0
+        input_ids[query_len] = sampled[1]
+        for row in range(2):
+            start = row * query_len + 1
+            input_ids[start : start + num_spec_tokens] = drafts[row]
+        return torch.arange(2 * query_len, dtype=torch.int32)
+
+    _run_prepare_inputs(
+        runner, scheduler_output, gathered, batch_desc, prefill_inputs=prepare_prefill, combine_tokens=combine
+    )
+    expected = [127] + [702] * num_spec_tokens + [701] + [702] * num_spec_tokens
+    assert runner.input_buffers.input_ids[: 2 * query_len].tolist() == expected
+    assert not gathered.has_prefill  # Keep decode graph eligibility.
+
+
+def test_decode_without_prompt_tail_skips_prefill_preparation():
+    runner, scheduler_output, batch_state, batch_desc = _prepare_inputs_runner()
+    batch_state.has_prefill = False
+    batch_state.num_computed_prefill_tokens_np = batch_state.prefill_len_np.copy()
+    prepare = Mock()
+    _run_prepare_inputs(runner, scheduler_output, batch_state, batch_desc, prefill_inputs=prepare)
+    prepare.assert_not_called()
 
 
 def test_prepare_inputs_covers_draft_full_dcp_pp_and_rswa():

@@ -45,6 +45,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
+from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.sample.rejection_sampler import AscendRejectionSampler310
@@ -734,6 +735,13 @@ class NPUModelRunner310(NPUModelRunner):
         """
         # init kv cache tensors
         kv_cache: dict[str, list[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]] = {}
+        layout_resolver = getattr(self.cache_config, "get_resolved_kv_cache_layout", None)
+        share_slots = (
+            get_310p_shared_cache_slots(kv_cache_config.kv_cache_groups, layout_resolver())
+            if callable(layout_resolver)
+            else {}
+        )
+        mamba_slot_caches: dict[int, list[torch.Tensor]] = {}
         # get kv cache spec for each layer
         layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
         for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
@@ -756,10 +764,14 @@ class NPUModelRunner310(NPUModelRunner):
                     assert per_layer_size % cache_spec.page_size_bytes == 0
                     num_blocks = per_layer_size // cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
-                    # main: every layer owns its own region; allocate private
-                    # state tensors per layer so blocks don't collide.
+                    # Standardized descriptors name each layer separately.
+                    # Compatible Mamba groups reuse one state cache per slot.
                     for layer_name_inner in shared_names:
                         if "linear_attn" in layer_name_inner:
+                            slot = share_slots.get(layer_name_inner)
+                            if slot is not None and slot in mamba_slot_caches:
+                                kv_cache[layer_name_inner] = mamba_slot_caches[slot]
+                                continue
                             raw_tensor = torch.zeros(per_layer_size, dtype=torch.int8, device=self.device)
                             state_tensors = []
                             target_idx = 0
@@ -771,6 +783,8 @@ class NPUModelRunner310(NPUModelRunner):
                                 start_idx = target_idx
                                 state_tensors.append(tensor)
                             kv_cache[layer_name_inner] = state_tensors
+                            if slot is not None:
+                                mamba_slot_caches[slot] = state_tensors
                 elif "attn" in layer_name and layer_name not in kv_cache:
                     kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(kv_cache_spec, AttentionSpec)
