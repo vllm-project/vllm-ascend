@@ -246,3 +246,44 @@ def test_offloading_connector_config_name_resolves_to_ascend_class(
 
     assert KVConnectorFactory._registry["OffloadingConnector"]() is AscendOffloadingConnector
     assert KVConnectorFactory._registry["AscendOffloadingConnector"]() is AscendOffloadingConnector
+
+
+def test_no_alias_connectors_stay_out_of_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The no-alias decision for the two stats-silent connectors is
+    comment-only in the source; pin the negative case so a class-name key
+    cannot appear in the registry without someone updating the comments.
+    """
+    from vllm_ascend.distributed.kv_transfer import register_connector
+
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    register_connector()
+
+    assert "AscendSimpleCPUOffloadConnector" not in KVConnectorFactory._registry
+    assert "PreemptOffloadConnectorV1" not in KVConnectorFactory._registry
+
+
+def test_no_alias_connectors_inherit_base_stats_default() -> None:
+    """The no-alias decision rests on these connectors never emitting stats;
+    pin the premise so a future get_kv_connector_stats override (upstream
+    vllm-project/vllm#41790 would add one to SimpleCPUOffload) is caught here
+    instead of reviving the #16932 crash.
+    """
+    from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.preempt_offload_connector import (
+        PreemptOffloadConnectorV1,
+    )
+    from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector import (
+        AscendSimpleCPUOffloadConnector,
+    )
+
+    for cls in (AscendSimpleCPUOffloadConnector, PreemptOffloadConnectorV1):
+        # The defining class in the MRO must be the vllm base - compare by
+        # qualified name, not identity, because the base module can be loaded
+        # under a second path in the same process.
+        for klass in cls.__mro__:
+            if "get_kv_connector_stats" in klass.__dict__:
+                assert klass.__name__ == "KVConnectorBase_V1", (
+                    f"{cls.__name__} overrides get_kv_connector_stats in {klass.__name__}"
+                )
+                break
+        else:
+            raise AssertionError(f"{cls.__name__} does not define get_kv_connector_stats")
