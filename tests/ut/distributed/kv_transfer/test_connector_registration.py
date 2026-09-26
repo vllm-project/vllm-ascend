@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import sys
+import types
+
 import pytest
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
@@ -122,3 +125,62 @@ def test_d2rh_connector_class_name_matches_its_config_name() -> None:
     assert d2rh.MooncakeD2RHConnectorV1.__name__ == "MooncakeD2RHConnectorV1"
     assert d2rh.MooncakeConnector is d2rh.MooncakeD2RHConnectorV1
     assert d2rh.MooncakeD2RHConnector is d2rh.MooncakeD2RHConnectorV1
+
+
+def _stub_ucm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ucm package is not installed in the CPU UT environment."""
+    connector_mod = types.ModuleType("ucm.integration.vllm.ucm_connector")
+
+    class UCMConnector:
+        @classmethod
+        def build_kv_connector_stats(cls, data: dict | None = None):
+            return None
+
+    connector_mod.UCMConnector = UCMConnector  # type: ignore[attr-defined]
+    for name in ("ucm", "ucm.integration", "ucm.integration.vllm"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "ucm.integration.vllm.ucm_connector", connector_mod)
+
+
+def test_stats_keys_resolve_through_real_loader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """get_connector_class_by_name runs the real importlib loader; the
+    membership tests above would pass with a typo in the registered module
+    path or class name, so resolve every alias end-to-end.
+    """
+    from vllm_ascend.distributed.kv_transfer import register_connector
+
+    _stub_ucm(monkeypatch)
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    register_connector()
+
+    for stats_key, (module_path, class_name) in CLASS_NAME_ALIASES.items():
+        cls = KVConnectorFactory.get_connector_class_by_name(stats_key)
+        assert cls.__name__ == class_name
+        assert cls.__module__ == module_path
+
+
+def test_multi_connector_stats_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The exact #16932 path: MultiConnector rebuilds per-connector stats from
+    keys equal to the connector class names. Without the aliases this raises
+    ValueError in get_connector_class_by_name and tears down EngineCore.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+
+    from vllm_ascend.distributed.kv_transfer import register_connector
+
+    _stub_ucm(monkeypatch)
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    register_connector()
+
+    stats = MultiConnector.build_kv_connector_stats(
+        data={
+            "UCMConnectorV1": {"dummy": [1.0]},
+            "AscendOffloadingConnector": {"dummy": [1.0]},
+        }
+    )
+    assert stats is not None
+    # OffloadingConnector overrides build_kv_connector_stats, so this key
+    # yields real reconstructed stats; UCMConnectorV1 delegates to the ucm
+    # package (stubbed to the base default, None) and is skipped.
+    assert "AscendOffloadingConnector" in stats.data
+    assert "UCMConnectorV1" not in stats.data
