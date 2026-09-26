@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -357,6 +358,24 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """Return KV block IDs that failed to load on the worker."""
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
+
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        results = super().get_transfer_results(finished_req_ids)
+        assert self.connector_worker is not None
+        failed_recving = self.connector_worker.get_failed_recving()
+        results.failed_recving.update(failed_recving)
+        # The multi-worker aggregator only publishes a failure once every
+        # worker reports receive completion, including workers that succeeded.
+        if self.use_layerwise and not self.connector_worker.load_async:
+            metadata = self._get_connector_metadata()
+            results.finished_recving.update(
+                request.req_id
+                for request in metadata.requests
+                if request.load_spec is not None and request.load_spec.can_load
+            )
+        else:
+            results.finished_recving.update(failed_recving)
+        return results
 
     def get_kv_connector_kv_cache_events(self) -> AscendStoreKVEvents | None:
         """

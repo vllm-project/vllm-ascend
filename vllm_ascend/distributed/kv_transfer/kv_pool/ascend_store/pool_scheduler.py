@@ -149,6 +149,7 @@ class KVPoolScheduler:
         )
         self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
         self._loading_req_ids: set[str] = set()
+        self._skip_external_load_once: set[str] = set()
 
         self._block_pool: BlockPool | None = None
         self.sending_event_id = 0
@@ -578,6 +579,13 @@ class KVPoolScheduler:
         """
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
+        if request.request_id in self._skip_external_load_once:
+            self._skip_external_load_once.discard(request.request_id)
+            logger.warning(
+                "Reqid: %s bypasses external KV once after a load failure",
+                request.request_id,
+            )
+            return 0, False
 
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
@@ -951,10 +959,15 @@ class KVPoolScheduler:
             self._preempted_req_ids.discard(finished_req_id)
             self._loading_req_ids.discard(finished_req_id)
 
+        # A failed load may be preempted and re-admitted in the same step.
+        # update_state_after_alloc already registered its replacement blocks.
+        rescheduled_req_ids = {req.req_id for req in scheduler_output.scheduled_new_reqs}
+        rescheduled_req_ids.update(scheduler_output.scheduled_cached_reqs.req_ids)
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
             self._request_trackers.pop(req_id, None)
-            self._unfinished_requests.pop(req_id, None)
+            if req_id not in rescheduled_req_ids:
+                self._unfinished_requests.pop(req_id, None)
             self._loading_req_ids.discard(req_id)
 
         meta = AscendConnectorMetadata(
@@ -1056,6 +1069,7 @@ class KVPoolScheduler:
         """
         hand the connector_output, free non-null mamba blocks and so on.
         """
+        self._skip_external_load_once.update(connector_output.failed_recving)
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata) or self._block_pool is None:
             return

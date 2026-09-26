@@ -1063,7 +1063,8 @@ def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
     if kv_transfer_config is None:
         return
     if getattr(kv_transfer_config, "kv_load_failure_policy", "fail") == "recompute":
-        if getattr(vllm_config.model_config, "is_hybrid", False):
+        connector_name = kv_transfer_config.kv_connector
+        if getattr(vllm_config.model_config, "is_hybrid", False) and connector_name != "AscendStoreConnector":
             raise AssertionError("Hybrid models do not support recompute mode kv load failure policy now.")
 
 
