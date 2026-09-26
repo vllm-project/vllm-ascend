@@ -216,13 +216,17 @@ class CpuAlloc:
 
     @staticmethod
     def cpu_to_mask(cpu: int) -> str:
+        """Convert a CPU index to a /proc/irq/*/smp_affinity hex mask.
+
+        The kernel expects comma-separated 32-bit hex groups ordered from the
+        lowest to the highest bits, so the bit for ``cpu`` belongs to the last
+        group: CPU 33 -> "00000000,00000002".
+        """
         group = cpu // MASK_BIT
         bit = cpu % MASK_BIT
-        value = 1 << bit
-        mask = f"{value:08x}"
-        for _ in range(1, group + 1):
-            mask = f"{mask},{'0' * (MASK_BIT // 4)}"
-        return mask
+        groups = ["00000000"] * group
+        groups.append(f"{1 << bit:08x}")
+        return ",".join(groups)
 
     @staticmethod
     def get_threads_map(thread_message: str) -> dict[str, dict[str, list[str]]]:
