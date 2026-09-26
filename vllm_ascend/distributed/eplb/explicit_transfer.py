@@ -4,13 +4,12 @@
 """Execution helpers for policy-provided explicit migration plans."""
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
 import torch
 from vllm.distributed.eplb.rebalance_execute import TransferMetadata
-
-from vllm_ascend.distributed.eplb.communicator import device_stream
 
 
 def stage_explicit_layer_transfer(
@@ -110,7 +109,7 @@ def stage_explicit_layer_transfer(
     recv_count = 0
     communicator.set_transfer_context(old, layer_idx)
 
-    with device_stream(stream):
+    with stream if stream is not None else nullcontext():
         for dst_rank in range(num_ranks):
             for dst_slot in range(slots_per_rank):
                 expert = int(new_placement[dst_rank, dst_slot])

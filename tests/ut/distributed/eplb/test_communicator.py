@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-from contextlib import nullcontext
 from unittest.mock import MagicMock, call
 
 import pytest
@@ -11,7 +10,7 @@ from vllm.distributed.eplb.eplb_communicator import (
     TorchDistGlooStagedEplbCommunicator,
 )
 
-from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator, device_stream
+from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
 
 
 @pytest.fixture
@@ -25,19 +24,6 @@ def test_communicator_reuses_upstream_gloo_staging(communicator):
     assert communicator.needs_profile_buffer_reservation is False
 
 
-def test_device_stream_restores_previous_stream(monkeypatch):
-    previous_stream = object()
-    stream = object()
-    set_stream = MagicMock()
-    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: previous_stream)
-    monkeypatch.setattr(torch.accelerator, "set_stream", set_stream)
-
-    with device_stream(stream):
-        set_stream.assert_called_once_with(stream)
-
-    assert set_stream.call_args_list == [call(stream), call(previous_stream)]
-
-
 def test_execute_uses_group_local_peer_ranks(communicator, monkeypatch):
     send_tensor = torch.arange(2)
     recv_tensor = torch.zeros(2)
@@ -48,10 +34,6 @@ def test_execute_uses_group_local_peer_ranks(communicator, monkeypatch):
         communicator,
         "_acquire_staging_buffer",
         MagicMock(side_effect=staging_tensors),
-    )
-    monkeypatch.setattr(
-        "vllm_ascend.distributed.eplb.communicator.device_stream",
-        lambda _stream: nullcontext(),
     )
     p2p_op = MagicMock(side_effect=lambda *args, **kwargs: (args, kwargs))
     monkeypatch.setattr("vllm_ascend.distributed.eplb.communicator.P2POp", p2p_op)
@@ -90,10 +72,6 @@ def test_execute_uses_current_device_stream_when_stream_is_unset(communicator, m
     tensor = torch.zeros(1)
     communicator._ops.append(("send", tensor, 0))
     monkeypatch.setattr(communicator, "_acquire_staging_buffer", lambda *_args: tensor)
-    monkeypatch.setattr(
-        "vllm_ascend.distributed.eplb.communicator.device_stream",
-        lambda _stream: nullcontext(),
-    )
     monkeypatch.setattr(
         "vllm_ascend.distributed.eplb.communicator.P2POp",
         lambda *_args, **_kwargs: object(),

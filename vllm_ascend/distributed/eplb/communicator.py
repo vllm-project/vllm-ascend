@@ -1,27 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-from contextlib import contextmanager
+from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
 from torch.distributed import P2POp, batch_isend_irecv
 from vllm.distributed.eplb.eplb_communicator import TorchDistGlooStagedEplbCommunicator
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-
-
-@contextmanager
-def device_stream(stream: torch.Stream | None):
-    """Temporarily make an accelerator stream current."""
-    if stream is None:
-        yield
-        return
-    previous_stream = torch.accelerator.current_stream()
-    torch.accelerator.set_stream(stream)
-    try:
-        yield
-    finally:
-        torch.accelerator.set_stream(previous_stream)
 
 
 class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
@@ -64,7 +50,7 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
         recv_staging: list[tuple[torch.Tensor, torch.Tensor]] = []
         buffer_indices: dict[tuple[torch.dtype, tuple[int, ...]], int] = {}
         try:
-            with device_stream(stream):
+            with stream if stream is not None else nullcontext():
                 for operation, tensor, peer_rank in self._ops:
                     cpu_tensor = self._acquire_staging_buffer(tensor, buffer_indices)
                     if operation == "send":
@@ -99,7 +85,7 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
         for request in batch_isend_irecv(p2p_ops):
             request.wait()
 
-        with device_stream(stream):
+        with stream if stream is not None else nullcontext():
             for dst_tensor, cpu_tensor in recv_staging:
                 dst_tensor.copy_(cpu_tensor, non_blocking=True)
 

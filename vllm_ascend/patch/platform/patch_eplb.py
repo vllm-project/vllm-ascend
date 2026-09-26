@@ -4,6 +4,7 @@
 """Narrow vLLM EPLB construction, execution, and commit adapters for Ascend."""
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import wraps
 from inspect import signature
@@ -19,7 +20,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import routed_experts as _routed_experts
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
-from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator, device_stream
+from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
 from vllm_ascend.distributed.eplb.state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,
@@ -293,7 +294,7 @@ def _wrap_async_worker(original_worker):
             eplb_cpu_group = _async_worker.get_eplb_group().cpu_group
             for model_state in state.model_states.values():
                 model_state.communicator.set_stream(stream)
-                with device_stream(stream):
+                with stream if stream is not None else nullcontext():
                     old_mapping = model_state.physical_to_logical_map.cpu()
                 new_mapping = _async_worker.run_rebalance_experts(model_state, state, old_mapping, stream)
                 if old_mapping.shape != new_mapping.shape:

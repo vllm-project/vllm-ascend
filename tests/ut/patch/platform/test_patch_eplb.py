@@ -256,10 +256,6 @@ def test_async_worker_only_publishes_changed_layers(monkeypatch, changed_layer):
         model_state.rebalanced = False
         model_state.pending_result = None
 
-    @contextmanager
-    def device_stream(_stream):
-        yield
-
     monkeypatch.setattr(patch_eplb, "AscendEplbState", SimpleNamespace)
     monkeypatch.setattr(
         patch_eplb._async_worker,
@@ -270,7 +266,6 @@ def test_async_worker_only_publishes_changed_layers(monkeypatch, changed_layer):
     monkeypatch.setattr(patch_eplb._async_worker, "CpuGpuEvent", lambda: SimpleNamespace(wait=consume_result))
     monkeypatch.setattr(patch_eplb._async_worker, "transfer_layer", MagicMock(return_value=object()))
     monkeypatch.setattr(patch_eplb.torch.distributed, "all_reduce", MagicMock())
-    monkeypatch.setattr(patch_eplb, "device_stream", device_stream)
     state = SimpleNamespace(
         rearrange_event=SimpleNamespace(wait=wait_for_cycle),
         model_states={"model": model_state},
