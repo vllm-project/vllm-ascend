@@ -134,6 +134,17 @@ class ReqMeta:
     remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]]
     num_prompt_blocks: int
     remote_block_size: int
+    # Per-group remote physical block sizes, indexed by KV cache group id
+    # (same ordering as remote_block_ids). Hybrid layouts mix group sizes
+    # (e.g. 1024-token full-attention blocks next to a 128-token sliding
+    # window group), so the scalar remote_block_size is not enough to expand
+    # block ids on the receiver side. Empty tuple = legacy metadata.
+    # Units: entries are tokens per remote block id (block_size *
+    # compress_ratio for compressed MLA-like groups) — the same unit the
+    # per-group block ids are counted in. The scalar remote_block_size is
+    # the producer's physical max in logical block units and only serves as
+    # a fallback for legacy/mixed metadata.
+    remote_block_sizes: tuple[int, ...] = ()
     local_full_block_ids: BlockIds = tuple()
     do_virtual: bool = False
 
@@ -460,6 +471,7 @@ class KVCacheRecvingThread(threading.Thread):
         if kv_group2layeridx is None:
             kv_group2layeridx = {}
         self.kv_group2layeridx = kv_group2layeridx
+        self.block_size = vllm_config.cache_config.block_size if vllm_config is not None else None
         self.group_compress_ratios: dict[int, int] = {}
         for group_id, (group_spec, _) in self.kv_group2layeridx.items():
             compress_ratio = 1
@@ -576,6 +588,7 @@ class KVCacheRecvingThread(threading.Thread):
         remote_host: str,
         remote_handshake_port: int,
         remote_block_size=None,
+        remote_block_sizes: tuple[int, ...] = (),
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
         num_computed_tokens: int = 0,
         all_task_done: bool = False,
@@ -602,6 +615,7 @@ class KVCacheRecvingThread(threading.Thread):
             "all_task_done": all_task_done,
             "shard_idx": shard_idx,
             "remote_block_size": remote_block_size,
+            "remote_block_sizes": remote_block_sizes,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
         self.request_queue.put(trans_info)
@@ -625,10 +639,25 @@ class KVCacheRecvingThread(threading.Thread):
         with self.failed_recv_requests_lock:
             return request_id in self.failed_recv_requests
 
-    def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds) -> None:
+    def _mark_failed_recv_request(
+        self,
+        request_id: str,
+        local_block_ids: BlockIds,
+        remote_block_sizes: tuple[int, ...] = (),
+    ) -> None:
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
-            self.invalid_block_ids.update(local_block_ids[0])
+            # Packed groups address the first group's ids at packing-slice
+            # granularity; map them back to the logical kernel block ids
+            # before invalidating.
+            packing = 1
+            kv_group2layeridx = getattr(self, "kv_group2layeridx", None)
+            if kv_group2layeridx and 0 in kv_group2layeridx:
+                group_spec, layer_indices = kv_group2layeridx[0]
+                packing = group_packing_factor(
+                    0, group_spec, layer_indices, self.block_size, self.block_size_scale, remote_block_sizes
+                )
+            self.invalid_block_ids.update(bid // packing for bid in local_block_ids[0])
 
     def _clear_failed_recv_request(self, request_id: str) -> None:
         with self.failed_recv_requests_lock:
@@ -724,11 +753,12 @@ class KVCacheRecvingThread(threading.Thread):
         remote_handshake_port = req_meta["remote_handshake_port"]
         remote_port_send_num = req_meta["remote_port_send_num"]
         all_task_done = req_meta["all_task_done"]
+        remote_block_sizes: tuple[int, ...] = req_meta.get("remote_block_sizes", ())
         transfer_failed = self._is_failed_recv_request(request_id)
 
         try:
             if transfer_failed:
-                self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                self._mark_failed_recv_request(request_id, req_meta["local_block_ids"], remote_block_sizes)
                 logger.warning("Skipping KV cache transfer for request. remote_request_id=%s. ", remote_request_id)
             else:
                 try:
@@ -737,7 +767,7 @@ class KVCacheRecvingThread(threading.Thread):
                     logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
                 except Exception as e:
                     transfer_failed = True
-                    self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                    self._mark_failed_recv_request(request_id, req_meta["local_block_ids"], remote_block_sizes)
                     logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
         finally:
             all_tasks_done = self._mark_request_task_done(request_id, all_task_done)
@@ -750,7 +780,7 @@ class KVCacheRecvingThread(threading.Thread):
                         self._reformat_pending_kv_caches(request_id)
                     except Exception as e:
                         transfer_failed = True
-                        self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                        self._mark_failed_recv_request(request_id, req_meta["local_block_ids"], remote_block_sizes)
                         with self.pending_reformat_lock:
                             self.pending_reformat.pop(request_id, None)
                         logger.exception(
@@ -798,6 +828,7 @@ class KVCacheRecvingThread(threading.Thread):
         remote_engine_id = req_meta["remote_engine_id"]
         remote_host = req_meta["remote_host"]
         remote_handshake_port = req_meta["remote_handshake_port"]
+        remote_block_sizes: tuple[int, ...] = req_meta.get("remote_block_sizes", ())
         # Full prefix cache hit: do not need to read remote blocks, just notify
         # P worker that we have the blocks we need.
         num_local_blocks = sum(len(group_block_ids) for group_block_ids in local_block_ids)
@@ -879,6 +910,11 @@ class KVCacheRecvingThread(threading.Thread):
             group_spec, layer_indices = self.kv_group2layeridx[group_idx]
             kv_cache_group_id = group_spec.get("kv_cache_group_id", group_idx)
             raw_layer_indices = layer_indices
+            # Remote blocks packed contiguously into one local kernel block for
+            # this group (1 = historical one-to-one or expansion direction).
+            group_packing = group_packing_factor(
+                group_idx, group_spec, raw_layer_indices, self.block_size, self.block_size_scale, remote_block_sizes
+            )
             layer_indices = pp_layer_indices(layer_indices, group_pull.prefill_pp_rank, group_spec)
 
             if not layer_indices:
@@ -995,6 +1031,26 @@ class KVCacheRecvingThread(threading.Thread):
                     block_stride = self.block_stride_per_addr[layer_idx][cache_idx]
                     remote_block_stride = remote_block_stride_per_addr[remote_layer_idx][cache_idx]
                     inner_block_len = block_len // tp_num_need_pulls
+                    # Packed groups address their local kernel blocks at
+                    # packing-slice granularity: each local id covers
+                    # 1/group_packing of a kernel block, and the copies move
+                    # one remote block each.
+                    local_block_stride = block_stride // group_packing
+                    local_block_len = inner_block_len // group_packing
+                    if group_packing > 1:
+                        # The packed slices must tile the local kernel block
+                        # exactly (identical per-token layouts on both sides);
+                        # anything else cannot be addressed by slice offsets
+                        # and must fail loudly instead of misplacing KV.
+                        assert remote_block_stride * group_packing == block_stride, (
+                            f"Packed group {group_idx} cannot be addressed by slice offsets: "
+                            f"remote_block_stride({remote_block_stride}) * packing({group_packing}) "
+                            f"!= block_stride({block_stride})"
+                        )
+                        assert inner_block_len % group_packing == 0, (
+                            f"Packed group {group_idx} has an inner block length that "
+                            f"does not divide by the packing factor: {inner_block_len} % {group_packing}"
+                        )
                     is_sfa_indexer_group = group_spec["kv_cache_spec_type"] == "AscendSFAIndexerCacheSpec"
                     if is_sfa_indexer_group and has_replicate_k_blocks:
                         transfer_remote_block_ids = grouped_remote_k_block_ids
@@ -1006,13 +1062,17 @@ class KVCacheRecvingThread(threading.Thread):
                             grouped_remote_block_ids,
                             grouped_local_block_ids,
                             src_block_stride=remote_block_stride,
-                            dst_block_stride=block_stride,
-                            block_len=inner_block_len,
+                            dst_block_stride=local_block_stride,
+                            block_len=local_block_len,
                         )
                     for remote_block_id, local_block_id in zip(transfer_remote_block_ids, transfer_local_block_ids):
-                        src = src_layer_base_addr + local_block_id[0] * block_stride + inner_offset * inner_block_len
+                        src = (
+                            src_layer_base_addr
+                            + local_block_id[0] * local_block_stride
+                            + inner_offset * local_block_len
+                        )
                         dst = dst_layer_base_addr + remote_block_id[0] * remote_block_stride
-                        length = inner_block_len * len(local_block_id)
+                        length = local_block_len * len(local_block_id)
                         src_list.append(src)
                         dst_list.append(dst)
                         length_list.append(length)
@@ -1600,6 +1660,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
             remote_block_size=kv_transfer_params.get("remote_block_size", 0),
+            remote_block_sizes=tuple(kv_transfer_params.get("remote_block_sizes", ())),
             local_full_block_ids=local_full_block_ids or tuple(),
             do_virtual=kv_transfer_params.get("do_virtual", False),
         )
@@ -1743,6 +1804,33 @@ class MooncakeConnectorScheduler:
         init_ascend_config(vllm_config)
         self.ascend_config = get_ascend_config()
         self.block_size = vllm_config.cache_config.block_size
+        # The P2P meta remote_block_size must be in physical KV block units.
+        # Under a hybrid (Mamba) layout the physical block is unified to the
+        # lcm of the page sizes, while cache_config.block_size lags at the
+        # CLI value in the P-side EngineCore process; emitting it directly
+        # trips the D-side kernel-expansion assertion (128 not divisible by
+        # 1024). Take the max physical block size across the kv_cache_config
+        # group specs, only ever raising, never lowering; when the layout is
+        # consistent it equals self.block_size (verified paths such as MTP
+        # are unchanged). Mamba state groups are excluded: their block_size
+        # is not a physical KV page (the cache_config value, or
+        # max_model_len without prefix caching) and the CP path never
+        # block-expands them, so letting it win the max would inflate the
+        # scalar the CP path expands every attention group with.
+        spec_block_sizes = [
+            spec.block_size
+            for group in kv_cache_config.kv_cache_groups
+            for spec in self._get_group_unique_specs(group)
+            if not isinstance(spec, MambaSpec) and isinstance(getattr(spec, "block_size", None), int)
+        ]
+        self.transfer_block_size = max([self.block_size, *spec_block_sizes])
+        if self.transfer_block_size != self.block_size:
+            logger.warning(
+                "Mooncake transfer block size aligned %d -> %d (physical kv spec), pid=%s",
+                self.block_size,
+                self.transfer_block_size,
+                os.getpid(),
+            )
         self.engine_id = engine_id
         self.local_ip = get_ip()
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
@@ -2042,7 +2130,7 @@ class MooncakeConnectorScheduler:
         if not params.get("do_remote_decode") or request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
             return False, None
 
-        num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
+        num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.transfer_block_size)
         computed_block_ids = self._get_transfer_block_ids(block_ids, len(request.prompt_token_ids))
         computed_block_ids = self._get_swa_transfer_block_ids(computed_block_ids)
         computed_block_lens = [len(block_id_list) for block_id_list in computed_block_ids]
@@ -2065,7 +2153,8 @@ class MooncakeConnectorScheduler:
             last_token_id=request.output_token_ids[-1],
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
             num_prompt_blocks=num_prompt_blocks,
-            remote_block_size=self.block_size,
+            remote_block_size=self.transfer_block_size,
+            remote_block_sizes=tuple(group_info.tokens_per_block for group_info in self.group_transfer_info),
         )
 
     def _port_offset_from_handshake_metadata(
@@ -2288,6 +2377,14 @@ class MooncakeConnectorWorker:
         }
         if kv_cache_group_id is not None:
             serialized["kv_cache_group_id"] = kv_cache_group_id
+        # This group's own page size in tokens. ``cache_config.block_size`` is
+        # the hybrid LCM across groups (e.g. 1536 for Mamba-aligned layouts),
+        # not this group's page, so kernel-size and packing resolution must use
+        # the spec (e.g. a 128-token sliding-window draft group next to
+        # 1536-token full-attention groups). Unset/0 falls back to the LCM.
+        spec_block_size = getattr(kv_cache_spec, "block_size", None)
+        if isinstance(spec_block_size, int) and spec_block_size > 0:
+            serialized["kv_cache_spec_block_size"] = spec_block_size
         if isinstance(kv_cache_spec, MambaSpec):
             serialized["shapes"] = [list(shape) for shape in kv_cache_spec.shapes]
             serialized["dtype_sizes"] = [
@@ -2876,6 +2973,19 @@ class MooncakeConnectorWorker:
             return self.block_size_scale[layer_indices[0]][0]
         return 1
 
+    def _group_packing_factor(
+        self,
+        group_idx: int,
+        group_spec: dict[str, Any],
+        layer_indices: list[int],
+        remote_block_sizes: tuple[int, ...],
+    ) -> int:
+        """Remote blocks packed contiguously into one local kernel block. See
+        :func:`group_packing_factor`."""
+        return group_packing_factor(
+            group_idx, group_spec, layer_indices, self.block_size, self.block_size_scale, remote_block_sizes
+        )
+
     def _get_kernel_block_ids(self, layer_indices, meta, group_idx, group_spec):
         """No-CP per-group block ids at kernel granularity: (local, remote).
 
@@ -2888,11 +2998,59 @@ class MooncakeConnectorWorker:
         if group_spec["kv_cache_spec_type"] == "MambaSpec":
             return list(meta.local_block_ids[kv_cache_group_id]), list(meta.remote_block_ids[kv_cache_group_id])
 
-        remote_block_size = meta.remote_block_size or self.block_size
-
         # kernel_size is the shared (P==D) granularity; remote_scale is derived from it.
         local_scale = self._get_kernel_block_scale(layer_indices)
-        kernel_size = self.block_size // local_scale
+        kernel_size = group_kernel_block_size(group_spec, layer_indices, self.block_size, self.block_size_scale)
+        # Hybrid layouts mix physical block sizes across groups (e.g. a 128-token
+        # sliding-window group next to 1024-token full-attention groups), so the
+        # scalar remote_block_size is only a fallback for legacy metadata.
+        remote_sizes = meta.remote_block_sizes
+        group_remote_size = (
+            remote_sizes[kv_cache_group_id] if remote_sizes and kv_cache_group_id < len(remote_sizes) else None
+        )
+        remote_block_size = meta.remote_block_size or self.block_size
+        packing = self._group_packing_factor(group_idx, group_spec, layer_indices, remote_sizes)
+        if packing > 1:
+            # Pack the remote blocks (each smaller than the local kernel
+            # granularity) contiguously into local kernel blocks: remote ids
+            # stay at their own granularity, local ids expand to the packing
+            # slice index inside each kernel block. Both lists are aligned
+            # one-to-one at the remote-block granularity afterwards.
+            kernel_local = [
+                bid * packing + offset
+                for bid in self._expand_block_ids(list(meta.local_block_ids[kv_cache_group_id]), local_scale)
+                for offset in range(packing)
+            ]
+            kernel_remote = list(meta.remote_block_ids[kv_cache_group_id])
+            # Skip prefix-cached remote blocks at their own (smaller)
+            # token granularity. group_remote_size is the producer's
+            # tokens_per_block (block_size * compress_ratio), i.e. already a
+            # token size, so it must not be scaled by the compress ratio
+            # again (unlike the non-packing path, whose kernel_size is
+            # uncompressed).
+            remote_block_token_size = group_remote_size
+            remote_start_idx = meta.num_computed_tokens // remote_block_token_size
+            kernel_remote = kernel_remote[remote_start_idx:]
+            num_kernel_blocks = min(len(kernel_remote), len(kernel_local))
+            return kernel_local[:num_kernel_blocks], kernel_remote[:num_kernel_blocks]
+        if group_remote_size is not None and group_remote_size > 0:
+            if group_remote_size % kernel_size == 0:
+                remote_block_size = group_remote_size
+            else:
+                # A group may report a physical size that the local kernel
+                # granularity cannot tile (producer and consumer resolved
+                # different page sizes for it). Keep the historical scalar
+                # behavior instead of failing the transfer.
+                logger.warning(
+                    "Mooncake consumer group %s (%s) reports remote physical block size %s, which does not tile the "
+                    "local kernel size %s (local_scale=%s, scalar=%s); falling back to the scalar",
+                    kv_cache_group_id,
+                    group_spec.get("kv_cache_spec_type"),
+                    group_remote_size,
+                    kernel_size,
+                    local_scale,
+                    remote_block_size,
+                )
         assert remote_block_size % kernel_size == 0, (
             f"remote_block_size({remote_block_size}) not divisible by kernel_size({kernel_size})"
         )
@@ -2918,7 +3076,7 @@ class MooncakeConnectorWorker:
             if group_spec["kv_cache_spec_type"] == "MambaSpec":
                 continue
             local_scale = self._get_kernel_block_scale(layer_indices)
-            kernel_size = self.block_size // local_scale
+            kernel_size = group_kernel_block_size(group_spec, layer_indices, self.block_size, self.block_size_scale)
             assert remote_block_size % kernel_size == 0, (
                 f"remote_block_size({remote_block_size}) not divisible by kernel_size({kernel_size})"
             )
@@ -2926,11 +3084,48 @@ class MooncakeConnectorWorker:
             group_kernel_params[group_idx] = (local_scale, remote_scale, kernel_size)
         return group_kernel_params
 
+    def _assert_cp_layout_single_block_size(self, meta: ReqMeta) -> None:
+        """Reject mixed per-group layouts on the CP path.
+
+        The CP/DCP paths expand every attention group's ids with the scalar
+        ``remote_block_size``. A producer with mixed per-group physical
+        sizes (e.g. a 128-token sliding-window group next to 1024-token
+        full-attention groups) would have the mismatched groups silently
+        misplaced there, so fail loudly; the non-CP path expands per group
+        in ``_get_kernel_block_ids`` and is unaffected. Mamba groups are
+        exempt: the CP path passes their ids through unexpanded, so their
+        ``tokens_per_block`` (a state page, not a KV page) must not trip the
+        check.
+        """
+        remote_block_sizes = getattr(meta, "remote_block_sizes", ())
+        if not remote_block_sizes:
+            return
+        kv_group2layeridx = getattr(self, "kv_group2layeridx", {})
+        # remote_block_sizes is indexed by kv_cache_group_id, while
+        # kv_group2layeridx is keyed by transfer_group_id; a KV cache group
+        # can be split into several transfer groups, so remap the keys.
+        group_spec_types: dict[int, list[str]] = {}
+        for transfer_group_id, (group_spec, _) in kv_group2layeridx.items():
+            g_id = group_spec.get("kv_cache_group_id", transfer_group_id)
+            group_spec_types.setdefault(g_id, []).append(group_spec.get("kv_cache_spec_type"))
+        expanded_sizes = []
+        for group_idx, size in enumerate(remote_block_sizes):
+            if "MambaSpec" in group_spec_types.get(group_idx, []):
+                continue
+            expanded_sizes.append(size)
+        if len(set(expanded_sizes)) > 1:
+            raise AssertionError(
+                f"CP/DCP transfer with mixed per-group remote block sizes {remote_block_sizes} "
+                f"is not supported; the CP path expands all groups with the scalar "
+                f"remote_block_size={meta.remote_block_size}"
+            )
+
     def _get_local_remote_cp_params(self, meta: ReqMeta):
         """Resolve CP geometry: (remote_block_size, local_cp_rank, local_cp_size,
         remote_cp_size, r_blk), where r_blk = Bd/Bp (>=1) is the D/P block-size ratio.
         Also validates that P/D block sizes are compatible under D-side CP.
         """
+        self._assert_cp_layout_single_block_size(meta)
         remote_block_size = meta.remote_block_size or self.block_size
         # MRV2's DCP group already spans PCP; PCP is not another KV shard axis.
         local_cp_rank = self.dcp_rank
@@ -2963,6 +3158,7 @@ class MooncakeConnectorWorker:
         assert (meta.remote_block_size or self.block_size) == self.block_size, (
             "Decode-only DCP requires equal P/D block sizes."
         )
+        self._assert_cp_layout_single_block_size(meta)
         if self._is_hma_required:
             chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
         else:
@@ -3911,6 +4107,7 @@ class MooncakeConnectorWorker:
                         ),
                         shard_idx=shard_idx,
                         remote_block_size=meta.remote_block_size,
+                        remote_block_sizes=meta.remote_block_sizes,
                         local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
                         remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,
                     )
@@ -4208,6 +4405,67 @@ def ensure_zmq_recv(
             else:
                 logger.error("Receive failed after all retries. source=%s, error=%s. ", path, e)
                 raise RuntimeError(f"Failed to receive data after {max_retries} retries: {e}")
+
+
+def group_kernel_block_size(
+    group_spec: dict[str, Any],
+    layer_indices: list[int],
+    block_size: int,
+    block_size_scale: list[list[int]],
+) -> int:
+    """Token size of one local kernel block for a KV cache group.
+
+    ``block_size`` is the connector's global block size. Under a hybrid
+    (Mamba) layout it is the LCM across groups (e.g. 1536), so it is only a
+    fallback: each group carries its own page (a 128-token sliding-window
+    draft group next to 1536-token full-attention groups) in
+    ``kv_cache_spec_block_size``. ``block_size_scale`` then subdivides that
+    page into the tensor's kernel blocks (logical -> tensor expansion).
+    """
+    local_scale = 1
+    if layer_indices and layer_indices[0] < len(block_size_scale) and block_size_scale[layer_indices[0]]:
+        local_scale = block_size_scale[layer_indices[0]][0]
+    assert local_scale > 0, f"block size scale must be positive, got {local_scale}"
+    group_block_size = group_spec.get("kv_cache_spec_block_size")
+    if not isinstance(group_block_size, int) or group_block_size <= 0:
+        group_block_size = block_size
+    assert group_block_size % local_scale == 0, (
+        f"kernel block size {group_block_size} not divisible by block size scale {local_scale}"
+    )
+    return group_block_size // local_scale
+
+
+def group_packing_factor(
+    group_idx: int,
+    group_spec: dict[str, Any],
+    layer_indices: list[int],
+    block_size: int,
+    block_size_scale: list[list[int]],
+    remote_block_sizes: tuple[int, ...],
+) -> int:
+    """Number of remote blocks packed contiguously into one local kernel block.
+
+    A hybrid producer may ship a group whose physical block is smaller than
+    the local kernel granularity (e.g. a 128-token sliding-window group next
+    to 1024-token full-attention kernels): ``kernel_size // group_size`` such
+    blocks pack into one local kernel block. Returns 1 when the group size
+    matches the kernel or expands over it (the historical expansion
+    direction), when no per-group size is available (legacy metadata), for
+    Mamba groups, or when the size tiles neither direction (the scalar
+    fallback keeps its loud assert).
+    """
+    if group_spec["kv_cache_spec_type"] == "MambaSpec":
+        return 1
+    kv_cache_group_id = group_spec.get("kv_cache_group_id", group_idx)
+    if not remote_block_sizes or kv_cache_group_id >= len(remote_block_sizes):
+        return 1
+    group_remote_size = remote_block_sizes[kv_cache_group_id]
+    if group_remote_size <= 0:
+        return 1
+    kernel_size = group_kernel_block_size(group_spec, layer_indices, block_size, block_size_scale)
+    if group_remote_size < kernel_size and kernel_size % group_remote_size == 0:
+        return kernel_size // group_remote_size
+    return 1
 
 
 def transfer_groups_need_independent_block_ids(
