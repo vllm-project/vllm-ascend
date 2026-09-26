@@ -406,6 +406,8 @@ function(add_ops_src_copy)
         file(GLOB SRC_FILES ${SRC_COPY_SRC}/*)
     endif()
     list(FILTER SRC_FILES EXCLUDE REGEX "op_host")
+    file(GLOB_RECURSE SRC_DEP_FILES ${SRC_COPY_SRC}/*)
+    list(FILTER SRC_DEP_FILES EXCLUDE REGEX "op_host")
 
     get_filename_component(PARENT_PTH "${SRC_COPY_SRC}" DIRECTORY)
     get_filename_component(CUR_NAME "${SRC_COPY_SRC}" NAME)
@@ -424,12 +426,14 @@ function(add_ops_src_copy)
                     COMMAND cp -rf ${SRC_FILES} ${SRC_COPY_DST}
                     COMMAND rm -rf ${SRC_COPY_DST}/op_kernel/
                     COMMAND touch ${_BUILD_FLAG}
+                    DEPENDS ${SRC_DEP_FILES}
             )
         else()
             add_custom_command(OUTPUT ${_BUILD_FLAG}
                     COMMAND mkdir -p ${SRC_COPY_DST}
                     COMMAND cp -rf ${SRC_FILES} ${SRC_COPY_DST}
                     COMMAND touch ${_BUILD_FLAG}
+                    DEPENDS ${SRC_DEP_FILES}
             )
         endif()
 
@@ -608,6 +612,7 @@ function(add_bin_compile_target)
         if (_compile_flag)
             set(_BUILD_COMMAND)
             set(_BUILD_FLAG ${GEN_OUT_DIR}/${OP_TARGET_NAME}_${op_index}.done)
+            set(_SRC_COPY_BUILD_FLAG ${OP_SRC_OUT_DIR}/${OP_TARGET_NAME}_src_copy.done)
             if (ENABLE_OPS_HOST OR ENABLE_HOST_TILING)
                 list(APPEND _BUILD_COMMAND export ASCEND_CUSTOM_OPP_PATH=${CUSTOM_DIR} &&)
             endif ()
@@ -623,6 +628,7 @@ function(add_bin_compile_target)
                     COMMAND ${_BUILD_COMMAND}
                     COMMAND touch ${_BUILD_FLAG}
                     WORKING_DIRECTORY ${GEN_OUT_DIR}
+                    DEPENDS ${_SRC_COPY_BUILD_FLAG}
             )
 
             add_custom_target(${OP_TARGET_NAME}_${op_index}
