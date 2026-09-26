@@ -6,7 +6,7 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_dcp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
@@ -771,6 +771,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.qk_head_dim = kwargs["qk_head_dim"]
         self.v_head_dim = kwargs["v_head_dim"]
         self.q_proj = kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
+        self.dcp_q_replicate = getattr(self.q_proj, "qrep_active", False) is True
         self.fused_qkv_a_proj = kwargs.get("fused_qkv_a_proj")
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
@@ -862,6 +863,22 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
 
         self.enable_sp = enable_sp()
+        if self.dcp_q_replicate:
+            self._validate_dcp_q_replicate()
+
+    def _validate_dcp_q_replicate(self) -> None:
+        # This optimization replaces head gathering, not the token gathering
+        # used by the separate DSA-CP execution layout.
+        if not getattr(self, "supports_dcp", False) or self._parallel_query_gather_dim() != 1:
+            raise ValueError("SFA dcp_q_replicate requires the head-sharded DCP backend, without DSA-CP")
+        # Native preprocessing already validates Q-LoRA. NoPE uses a different
+        # backend/layout, which this group-head implementation does not cover.
+        if self.qk_rope_head_dim == 0:
+            raise ValueError("SFA dcp_q_replicate requires the RoPE SFA backend")
+        # Check resolved flags too: fused/C8 paths do not have the required
+        # replicated-head preprocessing and quantization-scale handling.
+        if self.enable_mlapo or self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
+            raise ValueError("SFA dcp_q_replicate requires native preprocessing and unquantized main/indexer KV")
 
     @property
     def skip_topk(self) -> bool:
@@ -929,11 +946,17 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
             self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
 
+        if getattr(self, "dcp_q_replicate", False):
+            self.q_proj.prepare_local_weight()
+            group_weight = get_dcp_group().all_gather(W_UK.permute(1, 2, 0).contiguous(), dim=0)
+            group_weight = maybe_trans_nz(group_weight)
+            self.W_UK_T_dcp_qrep = group_weight
+
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory.
         # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight
         # update re-derives them from this parameter and the parameter must stay
         # loadable (#15463).
-        if not self.rl_weight_update_enabled:
+        if not self.rl_weight_update_enabled and not getattr(self, "dcp_q_replicate", False):
             dispose_layer(self.kv_b_proj)
         self.preprocess_type = self._resolve_preprocess_type(act_dtype)
 
@@ -1245,10 +1268,18 @@ class AscendSFAImpl(MLAAttentionImpl):
         return None, None
 
     # Return `ql_nope`, `q_pe`
-    def _q_proj_and_k_up_proj(self, x):
+    def _q_proj_and_k_up_proj(self, x, *, local_q=False):
+        qrep = getattr(self, "dcp_q_replicate", False)
+        group_q = qrep and not local_q
+        projection_heads = self.local_num_heads * (self.q_proj.group_size if group_q else 1)
+        weight = self.W_UK_T_dcp_qrep if group_q else self.W_UK_T
+        # Prefill/mixed DCP batches attend to gathered KV with local heads.
+        # Keep both GEMMs at the original TP width, rather than computing
+        # group heads and slicing after shape-dependent rounding has occurred.
+        project = self.q_proj.forward_local if qrep and local_q else self.q_proj
         q_nope, q_pe = (
-            self.q_proj(x)[0]
-            .view(-1, self.local_num_heads, self.qk_head_dim)
+            project(x)[0]
+            .view(x.shape[0], projection_heads, self.qk_head_dim)
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
 
@@ -1261,7 +1292,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # (N, B, P) x (N, P, L) -> (B, N, L)
             ql_nope = torch_npu.npu_transpose_batchmatmul(
                 q_nope,
-                self.W_UK_T,
+                weight,
                 perm_x1=(1, 0, 2),
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
@@ -1272,7 +1303,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Convert from (B, N, P) to (N, B, P)
             q_nope = q_nope.transpose(0, 1)
             # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-            ql_nope = torch.bmm(q_nope, self.W_UK_T)
+            ql_nope = torch.bmm(q_nope, weight)
             # Convert from (N, B, L) to (B, N, L)
             ql_nope = ql_nope.transpose(0, 1)
         return ql_nope, q_pe
@@ -1866,7 +1897,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 parallel_context.gather_full_o_proj,
             )
 
-            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
+            ql_nope, q_pe = self._q_proj_and_k_up_proj(
+                q_c,
+                local_q=getattr(self, "dcp_q_replicate", False) and attn_metadata.num_prefills > 0,
+            )
             if self.qk_rope_head_dim:
                 q_pe = self.rope_single(q_pe, cos, sin)
             self._record_query_gather_context(

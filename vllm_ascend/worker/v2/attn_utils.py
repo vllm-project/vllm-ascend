@@ -119,8 +119,10 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         else 1
     )
 
+    indexer_kv_dtype = vllm_config.attention_config.indexer_kv_dtype
+    # IndexerKVDType accepts "bf16", but the generic KV dtype converter only recognizes "bfloat16".
     c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
-        vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
+        "bfloat16" if indexer_kv_dtype == "bf16" else indexer_kv_dtype, vllm_config.model_config
     )
     if c8_k_cache_dtype == torch.float8_e4m3fn:
         c8_k_scale_cache_dtype = torch.float32

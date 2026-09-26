@@ -1348,7 +1348,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         # Prefill/mixed batches gather compact KV after its cache write instead.
         # Keeping Q local avoids a full query all-gather and the subsequent LSE
         # output merge in the all-KV attention path.
-        if self._has_prefill(attn_metadata):
+        if self._has_prefill(attn_metadata) or getattr(self, "dcp_q_replicate", False):
             return
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         attn_metadata.dcp_context.gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
@@ -1411,6 +1411,13 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."
         dcp_context = attn_metadata.dcp_context
+        qrep = getattr(self, "dcp_q_replicate", False)
+        if qrep:
+            expected_heads = self.local_num_heads * (1 if self._has_prefill(attn_metadata) else self.dcp_size)
+            if ql_nope.shape[1] != expected_heads or q_pe.shape[1] != expected_heads:
+                raise ValueError(
+                    "SFA Q must contain local heads for prefill or the complete DCP group head set for decode"
+                )
         if self._has_prefill(attn_metadata):
             gather_context = dcp_context.gather_context
             dcp_context.gather_context = None
@@ -1447,7 +1454,10 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
 
         gather_context = dcp_context.gather_context
         dcp_context.gather_context = None
-        if gather_context is None:
+        if qrep:
+            if gather_context is not None:
+                raise RuntimeError("Replicated SFA decode must not carry a pending Q gather")
+        elif gather_context is None:
             gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
         dsa_cp_context = getattr(attn_metadata, "dsa_cp_context", None)
         if dsa_cp_context is not None:
@@ -1466,10 +1476,14 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         # [T, H, D] storage behind the views;
         # additional-config sfa_dcp_force_tmajor_restore=true keeps the
         # t-major materialization selectable for comparison runs.
-        ql_nope, q_pe = self._finish_dcp_gather(
-            gather_context,
-            keep_view=not enable_sfa_dcp_force_tmajor_restore(),
-        )
+        if not qrep:
+            ql_nope, q_pe = self._finish_dcp_gather(
+                gather_context,
+                keep_view=not enable_sfa_dcp_force_tmajor_restore(),
+            )
+        else:
+            ql_nope = ql_nope.contiguous()
+            q_pe = q_pe.contiguous()
         sfa_output, softmax_max, softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,

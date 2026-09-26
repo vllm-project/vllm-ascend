@@ -128,3 +128,40 @@ def test_aux_setter_preserves_v1_behavior(native):
     else:
         model._set_aux_hidden_state_layers.assert_not_called()
         assert model.aux_hidden_state_layers == layers
+
+
+@pytest.mark.parametrize("q_rank", [None, 4])
+@pytest.mark.parametrize("input_size", [None, 7])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_q_replication_selects_both_projection_branches(monkeypatch, q_rank, input_size, enabled):
+    """Run the patched model constructor, including Eagle's wider input."""
+    ordinary, replicated = Mock(), Mock()
+    monkeypatch.setattr(patch_deepseek_v2, "ColumnParallelLinear", ordinary)
+    monkeypatch.setattr(patch_deepseek_v2, "AscendDCPGroupColumnParallelLinear", replicated)
+    monkeypatch.setattr(patch_deepseek_v2, "use_dcp_q_replicate", lambda *args: enabled)
+    for name in ("ReplicatedLinear", "RowParallelLinear", "DeepSeekV2FusedQkvAProjLinear", "RMSNorm", "get_rope"):
+        monkeypatch.setattr(patch_deepseek_v2, name, Mock())
+    monkeypatch.setattr(patch_deepseek_v2, "get_tensor_model_parallel_world_size", lambda: 4)
+    wrapper = Mock()
+    monkeypatch.setattr(patch_deepseek_v2, "MultiHeadLatentAttentionWrapper", wrapper)
+    model = torch.nn.Module()
+    patch_deepseek_v2._deepseek_v2_mla_attention_init(
+        model,
+        SimpleNamespace(),
+        _config(rms_norm_eps=1e-6, rope_parameters={"rope_type": "default"}),
+        hidden_size=8,
+        num_heads=8,
+        qk_nope_head_dim=3,
+        qk_rope_head_dim=2,
+        v_head_dim=3,
+        q_lora_rank=q_rank,
+        kv_lora_rank=2,
+        input_size=input_size,
+        prefix="model.layers.0.self_attn",
+    )
+    projection = replicated if enabled else ordinary
+    call = next(c for c in projection.call_args_list if c.kwargs["prefix"].endswith((".q_proj", ".q_b_proj")))
+    assert call.args == (q_rank if q_rank is not None else input_size or 8, 40)
+    modules = wrapper.call_args.args[8]
+    assert (modules.q_proj if q_rank is None else modules.q_b_proj) is projection.return_value
+    assert (modules.q_b_proj if q_rank is None else modules.q_proj) is None

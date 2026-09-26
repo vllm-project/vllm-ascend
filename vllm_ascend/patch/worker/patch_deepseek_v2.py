@@ -34,6 +34,7 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
+from vllm_ascend.ops.dcp_linear import AscendDCPGroupColumnParallelLinear, use_dcp_q_replicate
 from vllm_ascend.utils import is_mtp_layer
 from vllm_ascend.worker.v2 import pp_utils
 
@@ -124,12 +125,14 @@ def _deepseek_v2_mla_attention_init(
             prefix=f"{prefix}.kv_a_proj_with_mqa",
         )
 
+    qrep_enabled = use_dcp_q_replicate(vllm_config, config, quant_config)
+    q_proj_cls = AscendDCPGroupColumnParallelLinear if qrep_enabled else ColumnParallelLinear
     if self.q_lora_rank is not None:
         self.q_a_layernorm = RMSNorm(
             self.q_lora_rank,
             eps=config.rms_norm_eps,
         )
-        self.q_b_proj = ColumnParallelLinear(
+        self.q_b_proj = q_proj_cls(
             self.q_lora_rank,
             self.num_heads * self.qk_head_dim,
             bias=False,
@@ -137,7 +140,7 @@ def _deepseek_v2_mla_attention_init(
             prefix=f"{prefix}.q_b_proj",
         )
     else:
-        self.q_proj = ColumnParallelLinear(
+        self.q_proj = q_proj_cls(
             proj_input_size,
             self.num_heads * self.qk_head_dim,
             bias=False,
