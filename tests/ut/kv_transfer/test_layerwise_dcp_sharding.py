@@ -105,5 +105,33 @@ class TestGlobalGroupAllocSize:
         assert stride >= total, "aligned stride must still cover the shard"
 
 
+class TestDecodeOnlyDcpLayout:
+    """P-side dcp==1 / D-side dcp==N share one shard-major region layout."""
+
+    def _sized_worker(self, block_len, put_step, dcp_size, layout_dcp_size):
+        return _bare_worker(
+            group_block_len={0: block_len},
+            group_num_layers={0: len(block_len)},
+            num_layers=len(block_len),
+            total_layers=len(block_len),
+            page_size_bytes=4096,
+            put_step=put_step,
+            pcp_size=1,
+            dcp_size=dcp_size,
+            dcp_rank=0,
+            layout_dcp_size=layout_dcp_size,
+        )
+
+    def test_producer_dcp1_allocates_decoder_layout(self):
+        # decode-only DCP: producer has dcp=1, peer dcp=8 -> layout_dcp=8.
+        worker = self._sized_worker([32768] * 4, put_step=4, dcp_size=1, layout_dcp_size=8)
+        stride = GVA_ALIGN
+        assert worker._global_group_alloc_size(0) == stride * 8
+
+    def test_symmetric_uses_local_dcp(self):
+        worker = self._sized_worker([32768] * 4, put_step=4, dcp_size=2, layout_dcp_size=2)
+        assert worker._global_group_alloc_size(0) == GVA_ALIGN * 2
+
+
 if __name__ == "__main__":
     raise SystemExit(__import__("pytest").main([__file__, "-v"]))

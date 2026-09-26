@@ -50,10 +50,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_cache_family,
     infer_cache_transfer_granularity,
     infer_cacheable_group_ids,
+    infer_decode_only_dcp,
     infer_group_block_sizes,
     infer_group_cache_families,
+    infer_peer_cp_sizes,
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
+    resolve_layout_dcp_size,
     uses_hybrid_kv_cache,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
@@ -115,6 +118,13 @@ class KVPoolScheduler:
         self.load_specs: dict[str, LoadSpec] = {}
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
+        self.peer_dcp_size, self.peer_pcp_size = infer_peer_cp_sizes(
+            self.kv_role, extra_config, self.dcp_size, self.pcp_size
+        )
+        self.is_decode_only_dcp = infer_decode_only_dcp(
+            self.dcp_size, self.pcp_size, self.peer_dcp_size, self.peer_pcp_size
+        )
+        self.layout_dcp_size = resolve_layout_dcp_size(self.is_decode_only_dcp, self.dcp_size, self.peer_dcp_size)
 
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
@@ -124,13 +134,13 @@ class KVPoolScheduler:
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
         if self.use_layerwise and len(cacheable_block_sizes) != len(self.original_block_size):
             raise ValueError("AscendStore private KV state requires non-layerwise transfer")
-        self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
+        self.grouped_block_size = [block_size * self.layout_dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
             requested_hash_block_size if requested_hash_block_size is not None else min(cacheable_block_sizes)
-        ) * self.dcp_size
+        ) * self.layout_dcp_size
         for group_id in self.cacheable_group_ids:
             group_block_size = self.grouped_block_size[group_id]
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
