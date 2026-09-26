@@ -5,6 +5,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from heapq import heapify, heappop, heappush
 
 import numpy as np
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
@@ -232,15 +233,22 @@ class StairEplbPolicy(AbstractEplbPolicy):
     ) -> np.ndarray | None:
         """Greedily allocate slots by descending risk per existing replica."""
         allocated_counts = replica_counts.copy()
+        candidates = [
+            (-(expert_risks[expert] / allocated_counts[expert]), expert)
+            for expert in eligible_experts
+            if allocated_counts[expert] < num_ranks
+        ]
+        heapify(candidates)
         for _ in range(extra_slots):
-            allocatable_experts = [expert for expert in eligible_experts if allocated_counts[expert] < num_ranks]
-            if not allocatable_experts:
+            if not candidates:
                 return None
-            expert = max(
-                allocatable_experts,
-                key=lambda expert_id: (expert_risks[expert_id] / allocated_counts[expert_id], -expert_id),
-            )
+            _, expert = heappop(candidates)
             allocated_counts[expert] += 1
+            if allocated_counts[expert] < num_ranks:
+                heappush(
+                    candidates,
+                    (-(expert_risks[expert] / allocated_counts[expert]), expert),
+                )
         return allocated_counts
 
     @staticmethod
