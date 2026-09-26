@@ -7,7 +7,9 @@ head-weighted query: a paged-cache gather plus a 128-dim matvec. Doing that in
 torch lowers to an aclnnIndex/SearchSorted small-op flood, so it stays in one
 triton kernel that writes the raw pool scores to a scratch buffer. The top-k
 selection itself is a single fused aclnn ``topk`` call, followed by a few
-element-wise ops for pool->token expansion and causal tail append.
+element-wise ops for pool->token expansion and causal tail append in the
+reference path. The model selects compact_indices=True to fuse that postprocess
+and graph-padding masking into one kernel per token chunk.
 
 There is no hard length limit: the kernel tiles pools dynamically, and the
 wrapper chunks the token dimension so the fp32 scores scratch stays under
@@ -31,6 +33,8 @@ TRITON_POOL_CHUNK_SIZE = 2048
 TRITON_POOL_SUB_TILE_SIZE = 128
 # Chunk tokens to limit the FP32 score buffer to this budget where possible.
 TRITON_SCORES_CHUNK_BYTES = 256 * 1024 * 1024
+# Bound the postprocess vector working set independently of output width.
+TRITON_INDEX_POSTPROCESS_TILE_SIZE = 256
 
 # CANN's fused TopKV2 high_performance kernel faults (aicore VEC 507035) on -inf
 # cells produced by a ragged mask at a non-aligned width. The fp32-lowest finite
@@ -119,6 +123,71 @@ def _glm5_next_lightning_indexer_score_kernel(
         tl.store(scores_ptr + local_token_idx * max_pool_seq_len + pool_offsets, scores, mask=in_range)
 
 
+@triton.jit(do_not_specialize=["token_offset", "num_reqs"])
+def _glm5_next_kpool_postprocess_kernel(
+    pool_ids_ptr,
+    topk_vals_ptr,
+    positions_ptr,
+    cum_query_lens_ptr,
+    output_ptr,
+    token_offset,
+    num_reqs,
+    TOPK: tl.constexpr,
+    INDEX_TOPK: tl.constexpr,
+    POOL_SIZE: tl.constexpr,
+    BLOCK: tl.constexpr,
+    INVALID_SCORE: tl.constexpr,
+):
+    """Write expanded history, compact causal tail and graph padding once."""
+    row = tl.program_id(0)
+    token = token_offset + row
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    width = INDEX_TOPK + POOL_SIZE - 1
+    actual_tokens = tl.load(cum_query_lens_ptr + num_reqs - 1)
+    valid_row = token < actual_tokens
+    pos = tl.load(positions_ptr + token).to(tl.int64)
+    tail_start = (pos + 1) // POOL_SIZE * POOL_SIZE
+    # Match append_causal_tail: the tail immediately follows available
+    # complete pools, rather than leaving holes at a fixed top-k column.
+    tail_col = tl.minimum(tail_start, INDEX_TOPK)
+    tail_count = pos + 1 - tail_start
+    value = tl.full((BLOCK,), -1, tl.int32)
+    if TOPK > 0:
+        slot = col // POOL_SIZE
+        history_mask = valid_row & (col < width) & (col < INDEX_TOPK) & (slot < TOPK)
+        pool = tl.load(pool_ids_ptr + row * TOPK + slot, mask=history_mask, other=0).to(tl.int32)
+        score = tl.load(topk_vals_ptr + row * TOPK + slot, mask=history_mask, other=float("-inf"))
+        value = tl.where(history_mask & (score > INVALID_SCORE), pool * POOL_SIZE + col % POOL_SIZE, -1)
+    # The legacy scatter writes POOL_SIZE-1 lanes, including -1 lanes.
+    # Preserve that overwrite behavior even for inconsistent/stale metadata.
+    is_tail = (col >= tail_col) & (col < tail_col + POOL_SIZE - 1)
+    tail_value = tl.where(col - tail_col < tail_count, tail_start + col - tail_col, -1)
+    value = tl.where(is_tail, tail_value, value)
+    value = tl.where(valid_row, value, -1).to(tl.int32)
+    tl.store(output_ptr + token * width + col, value, mask=col < width)
+
+
+def _write_compact_indices(
+    pool_ids, topk_vals, positions, cum_query_lens, output, token_offset, rows, topk, index_topk, index_kpool
+):
+    # Tile the output width to keep vector working sets bounded at real top-k.
+    block = TRITON_INDEX_POSTPROCESS_TILE_SIZE
+    _glm5_next_kpool_postprocess_kernel[(rows, triton.cdiv(output.shape[-1], block))](
+        pool_ids,
+        topk_vals,
+        positions,
+        cum_query_lens,
+        output,
+        token_offset,
+        cum_query_lens.shape[0],
+        topk,
+        index_topk,
+        index_kpool,
+        block,
+        NEG_INF_SENTINEL,
+    )
+
+
 def glm5_next_lightning_indexer_triton(
     query: torch.Tensor,
     indexer_cache: torch.Tensor,
@@ -131,6 +200,7 @@ def glm5_next_lightning_indexer_triton(
     index_topk: int,
     index_kpool: int,
     max_pool_seq_len: int,
+    compact_indices: bool = False,
 ) -> torch.Tensor:
     pool_topk = index_topk // index_kpool
     output_width = index_topk + index_kpool - 1
@@ -147,6 +217,13 @@ def glm5_next_lightning_indexer_triton(
         dtype=torch.int32,
         device=query.device,
     )
+    if max_pool_seq_len == 0 and compact_indices:
+        # TOPK=0 removes all pool loads at compile time; use existing tensors
+        # as unused pointer arguments, without allocating dummy device buffers.
+        _write_compact_indices(
+            positions, positions, positions, cum_query_lens, output, 0, num_tokens, 0, index_topk, index_kpool
+        )
+        return output
     if max_pool_seq_len == 0:
         output.fill_(-1)
         tail_offsets = torch.arange(index_kpool - 1, device=query.device)
@@ -161,8 +238,9 @@ def glm5_next_lightning_indexer_triton(
     block_pool = TRITON_POOL_CHUNK_SIZE
     num_chunks = (max_pool_seq_len + block_pool - 1) // block_pool
     topk = min(pool_topk, max_pool_seq_len)
-    token_offsets = torch.arange(index_kpool, device=query.device)
-    tail_offsets = torch.arange(index_kpool - 1, device=query.device)
+    if not compact_indices:
+        token_offsets = torch.arange(index_kpool, device=query.device)
+        tail_offsets = torch.arange(index_kpool - 1, device=query.device)
 
     # Chunk the token dimension so the fp32 scores scratch stays bounded;
     # long-context prefill would otherwise need num_tokens x max_pool_seq_len
@@ -218,6 +296,11 @@ def glm5_next_lightning_indexer_triton(
         # score (the default rewrite to 0.0 could).
         scores.nan_to_num_(nan=NEG_INF_SENTINEL, neginf=NEG_INF_SENTINEL)
         topk_vals, pool_ids = torch.topk(scores, topk, dim=1)
+        if compact_indices:
+            _write_compact_indices(
+                pool_ids, topk_vals, positions, cum_query_lens, output, token_start, rows, topk, index_topk, index_kpool
+            )
+            continue
         pool_ids = torch.where(
             topk_vals <= NEG_INF_SENTINEL,
             torch.full_like(pool_ids, -1),
