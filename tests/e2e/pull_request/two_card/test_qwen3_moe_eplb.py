@@ -43,7 +43,13 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
         "--compilation-config",
         compilation_config,
     ]
-    env_dict = {"HCCL_BUFFSIZE": "1024"}
+    env_dict = {
+        # Qwen3MoeForCausalLM now defaults to MRv2, which rejects V1 dynamic
+        # EPLB fields. Both servers must stay on V1 so the output comparison
+        # is not mixed across runners.
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
+        "HCCL_BUFFSIZE": "1024",
+    }
     with RemoteOpenAIServer(model, server_args, server_port=port, auto_port=False, env_dict=env_dict) as server:
         client = server.get_async_client()
         batch = await client.completions.create(

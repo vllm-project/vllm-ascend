@@ -2,7 +2,6 @@ test_cases:
   - name: "GLM-5.2-W4A8-DSpark-A3-V2"
     model: "Eco-Tech/GLM-5.2-w4a8"
     envs:
-      VLLM_USE_V2_MODEL_RUNNER: "1"
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "1"
       HCCL_OP_EXPANSION_MODE: "AIV"
