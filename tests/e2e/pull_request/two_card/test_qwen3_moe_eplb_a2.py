@@ -67,7 +67,7 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
             "expert_heat_collection_interval": 100,
             "algorithm_execution_interval": 20,
             "num_redundant_experts": 2,
-            "eplb_policy_type": 2,
+            "eplb_policy_type": 2,  # SwiftBalance
         }
     }
     server_args.extend(["--additional-config", json.dumps(additional_config)])
