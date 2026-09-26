@@ -271,6 +271,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             topk_buffer_size=1,
             topk=1,
             use_fused_overlap=False,
+            local_kv_writeback_overlap=False,
             dram_size_per_dp_GB=dram_size_per_dp_gb,
         )
         return vllm_config, kv_cache_config, offload_config

@@ -32,6 +32,9 @@ def _make_sparse_kv_ops():
 
 def _make_plan_manager():
     manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+    manager.local_kv_writeback_overlap = False
+    manager.local_kv_active = False
+    manager.local_writeback = None
     manager.use_fused_overlap = True
     manager.tp_rank = 0
     manager.topk = 4
@@ -388,3 +391,41 @@ def test_current_kv_injection_uses_planner_linear_slots_and_sentinel():
     torch.testing.assert_close(selection_kv[0], torch.tensor([0.0, 1.0]))
     torch.testing.assert_close(selection_rope[0], torch.tensor([0.0]))
     assert scatter_op.call_count == 2
+
+
+@pytest.mark.parametrize("has_prefill", [False, True])
+def test_local_writeback_option_disabled_preserves_existing_path(has_prefill):
+    manager = _make_plan_manager()
+    manager._offload_new_kv_existing = MagicMock()
+    manager.offload_new_kv("layer.0", None, None, None, None, None, None, None, has_prefill=has_prefill)
+    manager._offload_new_kv_existing.assert_called_once()
+    assert manager.local_kv_active is False
+
+
+def test_local_writeback_prefill_preserves_existing_path():
+    manager = _make_plan_manager()
+    manager.local_kv_writeback_overlap = True
+    manager._offload_new_kv_existing = MagicMock()
+    manager.offload_new_kv("layer.0", None, None, None, None, None, None, None, has_prefill=True)
+    manager._offload_new_kv_existing.assert_called_once()
+    assert manager.local_kv_active is False
+
+
+def test_local_writeback_missing_buffers_fails_explicitly():
+    manager = _make_plan_manager()
+    manager.local_kv_writeback_overlap = True
+    manager.tp_size = 1
+    manager.mtp_layer_id = -1
+    with pytest.raises(RuntimeError, match="buffers are not initialized"):
+        manager.offload_new_kv("layer.0", None, None, None, None, None, None, None)
+
+
+@pytest.mark.parametrize("layer_id, expected_joins", [(0, 0), (3, 1), (4, 1)])
+def test_local_writeback_joins_only_at_target_or_mtp_boundary(layer_id, expected_joins):
+    manager = _make_plan_manager()
+    manager.local_kv_active = True
+    manager.num_target_layers = 4
+    manager.mtp_layer_id = 4
+    manager.local_writeback = MagicMock()
+    manager.finish_local_kv_forward(f"layer.{layer_id}")
+    assert manager.local_writeback.finish_forward.call_count == expected_joins

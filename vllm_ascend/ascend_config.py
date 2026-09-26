@@ -1622,6 +1622,7 @@ class SparseKVOffloadConfig:
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
+    local_kv_writeback_overlap: bool = False
 
     @model_validator(mode="after")
     def _validate_values(self):
