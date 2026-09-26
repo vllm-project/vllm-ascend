@@ -1117,9 +1117,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         mirroring the SFA backend's dispose of kv_b_proj.
 
         Two conditions must hold before freeing:
-        - The worker must be a KV consumer. Nodes that still prefill
-          (recompute / fallback / preempt on producer or hybrid workers)
-          call kv_b_proj; freeing it there crashes with UndefinedTensorImpl.
+        - The worker must be a pure KV consumer. Producer and hybrid workers
+          can still execute prefill/recompute paths that call kv_b_proj;
+          freeing it there crashes with UndefinedTensorImpl.
         - No RL weight transfer engine may be configured. Layerwise reload
           copies checkpoint values back into the original parameter storage,
           which a disposed (0-numel) tensor cannot hold.

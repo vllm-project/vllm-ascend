@@ -2438,7 +2438,10 @@ class TestAscendMLAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        self.assertGreater(layer.weight.numel(), 0)
+        self.assertEqual(
+            layer.weight.numel(),
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim) * self.impl.kv_lora_rank,
+        )
 
     def test_compute_prefill_context_none(self):
         batch_size = 4
