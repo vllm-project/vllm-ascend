@@ -16,6 +16,7 @@ from vllm_ascend.distributed.eplb.state import (
 
 
 def test_uses_upstream_policy_and_async_worker_lifecycle():
+    assert AscendEplbState.add_model is upstream_eplb_state.EplbState.add_model
     assert AscendEplbState.start_async_loop is upstream_eplb_state.EplbState.start_async_loop
 
 
@@ -28,7 +29,7 @@ def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
     monkeypatch.setattr(
         eplb_state,
         "get_ep_group",
-        lambda: SimpleNamespace(rank_in_group=1, world_size=2),
+        lambda: SimpleNamespace(rank_in_group=1),
     )
     monkeypatch.setattr(
         eplb_state._eplb_ops,
