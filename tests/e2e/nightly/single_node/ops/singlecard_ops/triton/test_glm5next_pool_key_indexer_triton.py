@@ -16,7 +16,7 @@ CACHE_BLOCK_SIZE = 16
 OUTPUT_WIDTH = INDEX_TOPK + POOL_SIZE - 1
 
 
-def _assert_selection(result, query, cache, weights, ends, pool_lens, table, positions):
+def _assert_selection(result, query, cache, weights, ends, pool_lens, table, positions, pack_tail=False):
     """CPU reference: score each query head before applying the head weights."""
     result, query, cache, weights = (x.cpu() for x in (result, query, cache, weights))
     start = 0
@@ -33,7 +33,8 @@ def _assert_selection(result, query, cache, weights, ends, pool_lens, table, pos
             expected = torch.full((OUTPUT_WIDTH,), -1, dtype=torch.int32)
             expected[: history.numel()] = history.to(torch.int32)
             tail = torch.arange((pos + 1) // POOL_SIZE * POOL_SIZE, pos + 1, dtype=torch.int32)
-            expected[INDEX_TOPK : INDEX_TOPK + tail.numel()] = tail
+            tail_column = min((pos + 1) // POOL_SIZE * POOL_SIZE, INDEX_TOPK) if pack_tail else INDEX_TOPK
+            expected[tail_column : tail_column + tail.numel()] = tail
             actual = result[row, 0]
             # Top-k ordering may differ for tied scores; token membership,
             # multiplicity, fixed tail columns, and every padding lane must match.
@@ -44,6 +45,8 @@ def _assert_selection(result, query, cache, weights, ends, pool_lens, table, pos
                 atol=0,
             )
             torch.testing.assert_close(actual[INDEX_TOPK:], expected[INDEX_TOPK:], rtol=0, atol=0)
+            if pack_tail:
+                torch.testing.assert_close(actual[tail_column : tail_column + tail.numel()], tail, rtol=0, atol=0)
         start = end
 
 
@@ -53,7 +56,7 @@ def _assert_selection(result, query, cache, weights, ends, pool_lens, table, pos
 def test_pool_selection_real_shape_paging_and_causal_tail(max_pool_seq_len, use_graph, monkeypatch):
     generator = torch.Generator().manual_seed(19)
     # Three requests exercise non-power-of-two bucketization. Two extra rows
-    # model graph padding; the caller is responsible for ignoring their output.
+    # model graph padding, which the fused expansion clears.
     ends = torch.tensor([3, 5, 8], dtype=torch.int32)
     num_tokens = 10
     pages = (max_pool_seq_len + CACHE_BLOCK_SIZE - 1) // CACHE_BLOCK_SIZE
@@ -69,6 +72,11 @@ def test_pool_selection_real_shape_paging_and_causal_tail(max_pool_seq_len, use_
     device_lens, device_positions = pool_lens.npu(), positions.npu()
     args = (query, cache, weights, ends.npu(), device_lens, table.npu(), device_positions)
     kwargs = dict(index_topk=INDEX_TOPK, index_kpool=POOL_SIZE, max_pool_seq_len=max_pool_seq_len)
+    if use_graph:
+        # Exercise the model's packed-tail path and a strided SFA output view.
+        backing_output = torch.full((2 * num_tokens, 2080), 77, dtype=torch.int32, device="npu")
+        output_buffer = backing_output[::2]
+        kwargs.update(output_buffer=output_buffer, pack_tail=True)
     # Force several token chunks without a large scratch allocation. This also
     # checks that request lookup uses the batch-global token offset.
     monkeypatch.setattr(indexer, "TRITON_SCORES_CHUNK_BYTES", max(1, max_pool_seq_len) * 4 * 3)
@@ -93,7 +101,12 @@ def test_pool_selection_real_shape_paging_and_causal_tail(max_pool_seq_len, use_
             result = indexer.glm5_next_lightning_indexer_triton(*args, **kwargs)
         assert result.shape == (num_tokens, 1, OUTPUT_WIDTH)
         assert result.dtype == torch.int32
-        _assert_selection(result, query, cache, weights, ends, pool_lens, table, positions)
+        _assert_selection(result, query, cache, weights, ends, pool_lens, table, positions, pack_tail=use_graph)
+        assert (result[int(ends[-1]) :] == -1).all()
+        if use_graph:
+            assert result.data_ptr() == output_buffer.data_ptr()
+            assert (output_buffer[:, OUTPUT_WIDTH:] == -1).all()
+            assert (backing_output[1::2] == 77).all()
         torch.testing.assert_close(cache.cpu(), backing[:, :CACHE_BLOCK_SIZE], rtol=0, atol=0)
 
 
