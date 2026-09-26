@@ -13,6 +13,7 @@ from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.worker.v2.block_table import AscendBlockTables
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -25,6 +26,7 @@ def _make_runner(need_timing: bool = True):
     )
     runner.vllm_config = SimpleNamespace()
     runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    runner.block_tables = MagicMock(spec=AscendBlockTables)
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
@@ -672,27 +674,50 @@ def test_initialize_kv_cache_forwards_allocation_context():
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_cache_factory_passes_circular_flags_during_construction_and_restores(fail):
-    from vllm_ascend.worker.v2.model_runner import graph_manager_wrapper
-
+def test_initialize_kv_cache_configures_shared_block_tables_after_parent(fail):
+    runner = _make_runner()
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.pcp_manager = None
+    runner.speculator = SimpleNamespace()
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
     original = vllm_model_runner.BlockTables
+    original_graph_manager = vllm_model_runner.ModelCudaGraphManager
     plan = KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(is_circular=x)) for x in [False, True]],
     )
-    factory = MagicMock()
-    with patch.object(vllm_model_runner, "BlockTables", factory):
-        with (
-            pytest.raises(RuntimeError) if fail else nullcontext(),
-            graph_manager_wrapper(_make_runner(), plan),
-        ):
-            vllm_model_runner.BlockTables(block_sizes=[128, 4])
-            factory.assert_called_once_with(block_sizes=[128, 4], circular=[False, True])
-            if fail:
-                raise RuntimeError("initialization failed")
-        assert vllm_model_runner.BlockTables is factory
+    tables = AscendBlockTables.__new__(AscendBlockTables)
+    tables.block_sizes = tables.kernel_block_sizes = [128, 4]
+    tables.num_kv_cache_groups = 2
+    tables._slot_mapping_enabled = [True, True]
+    tables.cp_size = 1
+    tables.device = torch.device("cpu")
+    tables.is_circular = None
+
+    def initialize(self, kv_cache_config, **kwargs):
+        assert vllm_model_runner.BlockTables is original
+        self.kv_cache_config = kv_cache_config
+        self.kv_caches = []
+        self.block_tables = tables
+        self.speculator.block_tables = tables
+        if fail:
+            raise RuntimeError("initialization failed")
+
+    with (
+        patch.object(GPUModelRunner, "initialize_kv_cache", initialize),
+        patch("vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache"),
+        pytest.raises(RuntimeError, match="initialization failed") if fail else nullcontext(),
+    ):
+        runner.initialize_kv_cache(plan)
+
     assert vllm_model_runner.BlockTables is original
+    assert vllm_model_runner.ModelCudaGraphManager is original_graph_manager
+    assert runner.block_tables is runner.speculator.block_tables is tables
+    if fail:
+        assert tables.is_circular is None
+    else:
+        torch.testing.assert_close(tables.is_circular, torch.tensor([False, True]))
 
 
 @pytest.mark.parametrize("layer_stride,layer_names", [(0, ["single"]), (24, ["first", "second"])])

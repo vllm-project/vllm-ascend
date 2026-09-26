@@ -18,8 +18,7 @@
 #
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -87,6 +86,9 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.block_table import AscendBlockTables
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -281,7 +283,7 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
-        with graph_manager_wrapper(self, kv_cache_config):
+        with graph_manager_wrapper(self):
             super().initialize_kv_cache(
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
@@ -294,6 +296,9 @@ class NPUModelRunner(GPUModelRunner):
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
 
+        cast("AscendBlockTables", self.block_tables).configure_circular(
+            [is_circular_kv_cache_spec(group.kv_cache_spec) for group in self.kv_cache_config.kv_cache_groups]
+        )
         self.kv_caches = build_kv_cache_copy_views(
             self.kv_cache_config,
             lambda name: self.compilation_config.static_forward_context[name].kv_cache,
@@ -928,15 +933,9 @@ class NPUModelRunner(GPUModelRunner):
 
 
 @contextmanager
-def graph_manager_wrapper(model_runner, kv_cache_config: KVCacheConfig | None = None):
+def graph_manager_wrapper(model_runner):
     """Context manager to override graph manager."""
     original_graph_manager = vllm_model_runner.ModelCudaGraphManager
-    original_block_tables = vllm_model_runner.BlockTables
-    circular = (
-        [is_circular_kv_cache_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups]
-        if kv_cache_config is not None
-        else []
-    )
 
     def factory(  # type: ignore[misc]
         vllm_config: VllmConfig,
@@ -960,9 +959,6 @@ def graph_manager_wrapper(model_runner, kv_cache_config: KVCacheConfig | None = 
 
     try:
         vllm_model_runner.ModelCudaGraphManager = factory
-        if any(circular):
-            vllm_model_runner.BlockTables = partial(original_block_tables, circular=circular)
         yield
     finally:
         vllm_model_runner.ModelCudaGraphManager = original_graph_manager
-        vllm_model_runner.BlockTables = original_block_tables

@@ -37,6 +37,7 @@ def _parent_init(
     self.cp_rank = cp_rank
     self.cp_interleave = cp_interleave
     self.slot_mapping_enabled = slot_mapping_enabled
+    self._slot_mapping_enabled = [True] * len(block_sizes) if slot_mapping_enabled is None else slot_mapping_enabled
     self.block_tables = [SimpleNamespace(gpu=torch.zeros(2, 8))]
     self.block_table_ptrs = MagicMock()
     self.block_table_strides = MagicMock()
@@ -240,7 +241,7 @@ def test_init_block_table_layout_tensors_keeps_main_contract():
         ([True, True], [False, True], 1, [8, 4], None, [False, True]),
     ],
 )
-def test_constructor_validates_circular_layout(circular, enabled, cp_size, kernel_sizes, error, expected_circular):
+def test_configure_circular_validates_active_layout(circular, enabled, cp_size, kernel_sizes, error, expected_circular):
     from contextlib import nullcontext
 
     with pytest.raises(error) if error else nullcontext():
@@ -252,10 +253,12 @@ def test_constructor_validates_circular_layout(circular, enabled, cp_size, kerne
             torch.device("cpu"),
             kernel_block_sizes=kernel_sizes,
             cp_size=cp_size,
-            circular=circular,
             slot_mapping_enabled=enabled,
         )
+        tables.configure_circular(circular)
         if expected_circular is not None:
             torch.testing.assert_close(tables.is_circular, torch.tensor(expected_circular))
         else:
             assert tables.is_circular is None
+        tables.configure_circular([False, False])
+        assert tables.is_circular is None
