@@ -53,6 +53,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     get_zmq_rpc_path_lookup,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.load_failure_registry import finish_load_generation
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
@@ -273,6 +274,17 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             ],
         )
         self.connector_worker.start_load_kv(metadata)
+
+    def clear_connector_metadata(self) -> None:
+        metadata = self._get_connector_metadata()
+        generations = [
+            (request.req_id, request.load_generation) for request in metadata.requests if request.load_generation
+        ]
+        try:
+            super().clear_connector_metadata()
+        finally:
+            for req_id, generation in generations:
+                finish_load_generation(req_id, generation)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:

@@ -95,6 +95,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.distributed.kv_transfer.load_failure_registry import (
+    begin_load_generation,
+    record_failed_load,
+)
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -1127,6 +1131,8 @@ class KVPoolWorker:
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
             return
+        for request in metadata.requests:
+            request.load_generation = begin_load_generation(request.req_id)
         if self.use_layerwise:
             self.process_layer_data(metadata.requests)
             return
@@ -1905,6 +1911,7 @@ class KVPoolWorker:
                     if self.num_kv_cache_groups == 1:
                         with self._invalid_block_ids_lock:
                             self._invalid_block_ids.update(invalid_block_ids)
+                        record_failed_load(((request.req_id, request.load_generation),))
                     else:
                         leased_keys_to_release = list(
                             dict.fromkeys(

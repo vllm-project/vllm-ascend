@@ -26,6 +26,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     AscendStoreConnector,
     AscendStoreKVEvents,
 )
+from vllm_ascend.distributed.kv_transfer.load_failure_registry import (
+    begin_load_generation,
+    get_load_generation,
+)
 
 # isort: on
 
@@ -85,6 +89,22 @@ class TestAscendStoreConnector(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual(metadata, original_metadata)
+
+    def test_clear_connector_metadata_finishes_load_generation(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        req_id = "req-generation-cleanup"
+        generation = begin_load_generation(req_id)
+        metadata = types.SimpleNamespace(requests=[types.SimpleNamespace(req_id=req_id, load_generation=generation)])
+        connector._get_connector_metadata = MagicMock(return_value=metadata)
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store."
+            "ascend_store_connector.KVConnectorBase_V1.clear_connector_metadata"
+        ) as base_clear:
+            connector.clear_connector_metadata()
+
+        base_clear.assert_called_once_with()
+        self.assertEqual(get_load_generation(req_id), 0)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
     def test_init_scheduler_role(self, mock_scheduler_cls):

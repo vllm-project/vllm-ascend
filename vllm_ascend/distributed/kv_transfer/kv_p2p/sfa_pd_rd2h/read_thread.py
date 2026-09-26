@@ -30,6 +30,8 @@ READ_THREAD_POLL_TIMEOUT_MS = 100
 THREAD_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 DEST_BLOCK_WAIT_TIMEOUT = 2.0
 DEST_BLOCK_WAIT_INTERVAL = 0.001
+DISCARDED_TOMBSTONE_TTL_SECONDS = 900.0
+ReqKey = tuple[str, str]
 
 
 @dataclass
@@ -43,7 +45,8 @@ class ConsumerReadState:
     main_block_lens: list[tuple[int, int]]
     indexer_tensors: list[Any | None]
     indexer_scale_tensors: list[Any | None]
-    dest_blocks_by_req: dict[str, tuple[list[int], list[int]]]
+    dest_blocks_by_req: dict[ReqKey, tuple[list[int], list[int]]]
+    active_generation_by_ext: dict[str, str]
     get_offload_layer_id: Callable[[str], int]
 
 
@@ -105,45 +108,124 @@ class MembPullReadThread(threading.Thread):
         self._p_sessions: dict[bytes, str] = {}
         self._p_layer_metas: dict[bytes, dict[str, Any]] = {}
         self._p_pp_topology: dict[bytes, tuple[int, int]] = {}
-        self._done_requests: set[str] = set()
-        self._failed_requests: set[str] = set()
+        self._done_requests: set[ReqKey] = set()
+        self._failed_requests: set[ReqKey] = set()
+        self._completed_req_keys: set[ReqKey] = set()
+        self._discarded_req_keys: dict[ReqKey, float] = {}
+        self._pending_failures: set[ReqKey] = set()
         # Request completion needs every flattened PP/TP contributor.
-        self._done_contributors: dict[str, set[int]] = {}
-        self._expected_ratio: dict[str, int] = {}
+        self._done_contributors: dict[ReqKey, set[int]] = {}
+        self._expected_ratio: dict[ReqKey, int] = {}
         self._lock = threading.Lock()
         self._host = get_ip()
         self._stop_event = threading.Event()
         self.startup_error: BaseException | None = None
 
-    def _record_chunk_done(self, done_ext_ids: list[str], group_member_idx: int, ratio: int) -> None:
+    def _record_chunk_done(self, done_req_keys: list[ReqKey], group_member_idx: int, ratio: int) -> None:
         """Accumulate a contributor's last-layer arrival."""
         with self._lock:
-            for ext_id in done_ext_ids:
-                previous = self._expected_ratio.setdefault(ext_id, ratio)
-                if previous != ratio:
-                    self._failed_requests.add(ext_id)
+            for req_key in done_req_keys:
+                if not self._is_active_key(req_key):
                     continue
-                contributors = self._done_contributors.setdefault(ext_id, set())
+                previous = self._expected_ratio.setdefault(req_key, ratio)
+                if previous != ratio:
+                    self._failed_requests.add(req_key)
+                    self._discarded_req_keys.setdefault(req_key, time.monotonic())
+                    continue
+                contributors = self._done_contributors.setdefault(req_key, set())
                 contributors.add(group_member_idx)
                 if len(contributors) >= ratio:
-                    self._done_requests.add(ext_id)
-                    self._done_contributors.pop(ext_id, None)
-                    self._expected_ratio.pop(ext_id, None)
+                    self._done_requests.add(req_key)
+                    self._completed_req_keys.add(req_key)
+                    self._done_contributors.pop(req_key, None)
+                    self._expected_ratio.pop(req_key, None)
 
-    def discard_requests(self, ext_ids: set[str]) -> None:
-        """Drop partial contributor state for finished/cancelled requests."""
+    def discard_requests(self, req_keys: set[ReqKey]) -> None:
+        """Drop request state and retain tombstones for late batches."""
+        now = time.monotonic()
         with self._lock:
-            for ext_id in ext_ids:
-                self._done_contributors.pop(ext_id, None)
-                self._expected_ratio.pop(ext_id, None)
+            for req_key in req_keys:
+                self._done_contributors.pop(req_key, None)
+                self._expected_ratio.pop(req_key, None)
+                self._completed_req_keys.discard(req_key)
+                self._discarded_req_keys[req_key] = now
+            self._prune_tombstones_locked(now)
 
-    def get_and_clear_done(self) -> set[str]:
+    def rearm_requests(self, req_keys: set[ReqKey]) -> None:
+        """Clear state for the exact transfer generation being registered."""
+        with self._lock:
+            for req_key in req_keys:
+                self._done_requests.discard(req_key)
+                self._failed_requests.discard(req_key)
+                self._completed_req_keys.discard(req_key)
+                self._discarded_req_keys.pop(req_key, None)
+                self._pending_failures.discard(req_key)
+                self._done_contributors.pop(req_key, None)
+                self._expected_ratio.pop(req_key, None)
+
+    def mark_failed_requests(self, req_keys: set[ReqKey]) -> None:
+        """Queue failure terminals to be serialized with the copy loop."""
+        with self._lock:
+            self._pending_failures.update(req_keys)
+
+    def _prune_tombstones_locked(self, now: float) -> None:
+        expired = [
+            req_key
+            for req_key, recorded_at in self._discarded_req_keys.items()
+            if now - recorded_at > DISCARDED_TOMBSTONE_TTL_SECONDS
+        ]
+        for req_key in expired:
+            del self._discarded_req_keys[req_key]
+
+    def _drain_pending_failures(self) -> None:
+        """Apply queued failure terminals between transfer batches."""
+        with self._lock:
+            if not self._pending_failures:
+                return
+            pending = self._pending_failures
+            self._pending_failures = set()
+            now = time.monotonic()
+            for req_key in pending:
+                if not self._is_active_key(req_key):
+                    continue
+                self._completed_req_keys.discard(req_key)
+                self._discarded_req_keys[req_key] = now
+                self._done_requests.discard(req_key)
+                self._failed_requests.add(req_key)
+                self._done_contributors.pop(req_key, None)
+                self._expected_ratio.pop(req_key, None)
+
+    def _is_active_key(self, req_key: ReqKey) -> bool:
+        ext_id, generation = req_key
+        return self._state.active_generation_by_ext.get(ext_id) == generation
+
+    def _filter_stale_batch(
+        self,
+        read_reqs: list[tuple[Any, ...]],
+        done_req_keys: list[ReqKey],
+    ) -> tuple[list[tuple[Any, ...]], list[ReqKey]]:
+        """Remove duplicate or late requests before touching destination blocks."""
+        now = time.monotonic()
+        with self._lock:
+            self._prune_tombstones_locked(now)
+            stale_req_keys = self._completed_req_keys | self._discarded_req_keys.keys()
+            fresh_reqs = [
+                entry
+                for entry in read_reqs
+                if (entry[0], entry[1]) not in stale_req_keys and self._is_active_key((entry[0], entry[1]))
+            ]
+            fresh_done = [
+                req_key for req_key in done_req_keys if req_key not in stale_req_keys and self._is_active_key(req_key)
+            ]
+        return fresh_reqs, fresh_done
+
+    def get_and_clear_done(self) -> set[ReqKey]:
         with self._lock:
             d = self._done_requests
             self._done_requests = set()
             return d
 
-    def get_and_clear_failed(self) -> set[str]:
+    def get_and_clear_failed(self) -> set[ReqKey]:
         with self._lock:
             failed = self._failed_requests
             self._failed_requests = set()
@@ -178,6 +260,7 @@ class MembPullReadThread(threading.Thread):
             decoder = msgspec.msgpack.Decoder(type=tuple)
             encoder = msgspec.msgpack.Encoder()
             while not self._stop_event.is_set():
+                self._drain_pending_failures()
                 try:
                     frames = sock.recv_multipart()
                     if len(frames) < 2:
@@ -246,15 +329,17 @@ class MembPullReadThread(threading.Thread):
                         # destination offsets to zero.
                         read_reqs = [
                             (
-                                entry[0],
-                                list(entry[1]),
-                                list(entry[2] if len(entry) > 2 else entry[1]),
-                                int(entry[3]) if len(entry) > 3 else 0,
-                                int(entry[4]) if len(entry) > 4 else 0,
+                                str(entry[0]),
+                                str(entry[1]),
+                                list(entry[2]),
+                                list(entry[3]),
+                                int(entry[4]),
+                                int(entry[5]),
                             )
                             for entry in msg[3]
                         ]
-                        done_ext_ids = list(msg[4]) if len(msg) > 4 else []
+                        done_req_keys = [(str(item[0]), str(item[1])) for item in msg[4]] if len(msg) > 4 else []
+                        read_reqs, done_req_keys = self._filter_stale_batch(read_reqs, done_req_keys)
                         # Contributor identity (unequal P/D TP). Absent = legacy single
                         # contributor: member 0 of a 1-member group pulls everything.
                         group_member_idx = int(msg[5]) if len(msg) > 5 else 0
@@ -264,7 +349,7 @@ class MembPullReadThread(threading.Thread):
                             layer_idx,
                             layer_name,
                             len(read_reqs),
-                            len(done_ext_ids),
+                            len(done_req_keys),
                         )
                         succeeded = False
                         try:
@@ -290,7 +375,7 @@ class MembPullReadThread(threading.Thread):
                                 layer_idx,
                                 layer_name,
                                 len(read_reqs),
-                                len(done_ext_ids),
+                                len(done_req_keys),
                             )
                         except Exception as e:
                             logger.error(
@@ -302,14 +387,18 @@ class MembPullReadThread(threading.Thread):
                             )
                             failure_payload = encoder.encode((READ_FAILED, layer_idx, str(e)))
                             sock.send_multipart((identity, b"", failure_payload))
-                            failed_ids = {entry[0] for entry in read_reqs}
-                            failed_ids.update(done_ext_ids)
+                            failed_keys = {(entry[0], entry[1]) for entry in read_reqs}
+                            failed_keys.update(done_req_keys)
                             with self._lock:
-                                self._failed_requests.update(failed_ids)
-                        if succeeded and done_ext_ids:
+                                self._failed_requests.update(failed_keys)
+                                now = time.monotonic()
+                                for failed_key in failed_keys:
+                                    self._discarded_req_keys.setdefault(failed_key, now)
+                                    self._completed_req_keys.discard(failed_key)
+                        if succeeded and done_req_keys:
                             pp_rank, pp_size = self._p_pp_topology[identity]
                             self._record_chunk_done(
-                                done_ext_ids,
+                                done_req_keys,
                                 pp_rank * ratio + group_member_idx,
                                 pp_size * ratio,
                             )
@@ -460,11 +549,14 @@ class MembPullReadThread(threading.Thread):
 
     def _wait_for_dest_blocks(
         self,
-        ext_req_id: str,
+        req_key: ReqKey,
         layer_name: str,
     ) -> tuple[list[int], list[int]]:
         state = self._state
-        dest = state.dest_blocks_by_req.get(ext_req_id)
+        ext_req_id, _ = req_key
+        if not self._is_active_key(req_key):
+            raise RuntimeError(f"MembPull stale transfer generation for req {ext_req_id}")
+        dest = state.dest_blocks_by_req.get(req_key)
         if dest is not None:
             return dest
 
@@ -477,7 +569,9 @@ class MembPullReadThread(threading.Thread):
         while time.monotonic() < deadline:
             if stop_event is not None:
                 stop_event.wait(interval)
-            dest = state.dest_blocks_by_req.get(ext_req_id)
+            if not self._is_active_key(req_key):
+                raise RuntimeError(f"MembPull stale transfer generation for req {ext_req_id}")
+            dest = state.dest_blocks_by_req.get(req_key)
             if dest is not None:
                 logger.debug(
                     "MembPull D waited for destination blocks: req=%s, layer=%s",
@@ -492,6 +586,7 @@ class MembPullReadThread(threading.Thread):
         self,
         layer: dict[str, Any],
         ext_req_id: str,
+        transfer_generation: str,
         p_main_block_ids: list[int],
         p_indexer_block_ids: list[int],
         want_info: bool,
@@ -503,7 +598,7 @@ class MembPullReadThread(threading.Thread):
         state = self._state
         layer_name = layer["layer_name"]
 
-        dest = self._wait_for_dest_blocks(ext_req_id, layer_name)
+        dest = self._wait_for_dest_blocks((ext_req_id, transfer_generation), layer_name)
         all_d_main_ids, all_d_indexer_ids = dest
         # Only the group's first contributor (group_member_idx == 0) pulls main; the rest
         # skip it entirely. P broadcasts the full p_main_block_ids to every contributor, so
@@ -716,7 +811,7 @@ class MembPullReadThread(threading.Thread):
     def _do_read_batch(
         self,
         layer_name: str,
-        read_reqs: list[tuple[str, list[int], list[int], int, int]],
+        read_reqs: list[tuple[str, str, list[int], list[int], int, int]],
         p_session: str | None = None,
         p_layer_meta: dict[str, Any] | None = None,
         group_member_idx: int = 0,
@@ -738,6 +833,7 @@ class MembPullReadThread(threading.Thread):
         read_infos: list[dict[str, Any]] = []
         for (
             ext_req_id,
+            transfer_generation,
             p_main_block_ids,
             p_indexer_block_ids,
             main_start_block,
@@ -746,6 +842,7 @@ class MembPullReadThread(threading.Thread):
             local_ptrs, peer_ptrs, lengths, read_info = self._build_req_descriptors(
                 layer,
                 ext_req_id,
+                transfer_generation,
                 p_main_block_ids,
                 p_indexer_block_ids,
                 want_info,

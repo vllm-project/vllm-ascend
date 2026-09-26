@@ -1812,12 +1812,17 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 can_load=True,
             ),
         )
+        request.load_generation = 4
 
-        worker._prepare_load_gvas([request])
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.record_failed_load"
+        ) as record_failed_load:
+            worker._prepare_load_gvas([request])
 
         self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [0])
         self.assertEqual(request.load_keys, [])
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
+        record_failed_load.assert_called_once_with((("r1", 4),))
 
     def test_partial_lease_retries_until_snapshot_is_readable(self):
         worker = self._make_gva_worker()
