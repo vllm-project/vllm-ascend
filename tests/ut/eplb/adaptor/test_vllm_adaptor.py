@@ -212,9 +212,11 @@ class TestVllmAdaptor(unittest.TestCase):
         # Worker payload (int64): rank 1 owns physical experts 5..9 in slots 0..4.
         new_map = torch.tensor([-1, -1, -1, -1, -1, 0, 1, 2, 3, 4], dtype=torch.int64)
         layer.moe_config = SimpleNamespace(ep_rank=1)
+        global_expert_map = torch.stack([torch.full((10,), -1, dtype=torch.int32), old_map])
+        local_phys_ids = torch.zeros(5, dtype=torch.int64)
         layer.ascend_expert_map = old_map
-        layer.global_expert_map = torch.stack([torch.full((10,), -1, dtype=torch.int32), old_map])
-        layer.local_phys_expert_ids = torch.zeros(5, dtype=torch.int64)
+        layer.global_expert_map = global_expert_map
+        layer.local_phys_expert_ids = local_phys_ids
 
         adaptor = VllmEplbAdaptor.__new__(VllmEplbAdaptor)
         adaptor.moe_layers = [layer]
@@ -226,6 +228,12 @@ class TestVllmAdaptor(unittest.TestCase):
         self.assertTrue(torch.equal(layer.ascend_expert_map, new_map.to(torch.int32)))
         self.assertTrue(torch.equal(layer.global_expert_map[1], new_map.to(torch.int32)))
         self.assertTrue(torch.equal(layer.local_phys_expert_ids, torch.tensor([5, 6, 7, 8, 9], dtype=torch.int64)))
+        # The refresh must update the maps in place (copy_): a captured ACL
+        # graph holds references to the original tensor objects, and
+        # rebinding the attributes would leave it reading the stale map.
+        self.assertIs(layer.ascend_expert_map, old_map)
+        self.assertIs(layer.global_expert_map, global_expert_map)
+        self.assertIs(layer.local_phys_expert_ids, local_phys_ids)
 
     def test_export_tensor_to_file_writes_logical_expert_ids(self):
         # expert_maps is [num_layers, ep, physical]; entries index physical
