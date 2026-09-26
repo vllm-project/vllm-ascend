@@ -36,9 +36,37 @@ _orig_init_kv_cache = vllm.v1.worker.gpu.model_runner.init_kv_cache
 
 
 def _ascend_init_kv_cache(*args, **kwargs):
-    d = _orig_init_kv_cache(*args, **kwargs)
-    return {name: (v[0] if isinstance(v, (tuple, list)) and v else v) for name, v in d.items()}
+    """Expose one tensor per layer to the runner, keep the complete K/V views.
+
+    Model Runner V2 builds ``self.kv_caches`` from ``kv_caches_dict.values()``
+    filtered by ``.device``, which needs a single tensor per layer, while
+    Ascend allocates K and V as separate views. KV cache offloading has to
+    register every one of those views, so carry the untouched mapping next to
+    the runner-facing one.
+    """
+    kv_caches = _orig_init_kv_cache(*args, **kwargs)
+
+    class _AscendRunnerKVCaches(dict):
+        def __init__(self, runner_view, full_view) -> None:
+            super().__init__(runner_view)
+            self.full_view = full_view
+
+    runner_view = {
+        name: (value[0] if isinstance(value, (tuple, list)) and value else value) for name, value in kv_caches.items()
+    }
+    return _AscendRunnerKVCaches(runner_view, kv_caches)
+
+
+def _ascend_get_kv_connector(vllm_config, kv_caches_dict, *args, **kwargs):
+    """Register every K/V view with the connector, not only the runner tensor."""
+    from vllm.v1.worker.gpu.kv_connector import get_kv_connector
+
+    full_view = getattr(kv_caches_dict, "full_view", kv_caches_dict)
+    return get_kv_connector(vllm_config, full_view, *args, **kwargs)
 
 
 vllm.v1.worker.gpu.model_runner.init_kv_cache = _ascend_init_kv_cache
+vllm.v1.worker.gpu.model_runner.get_kv_connector = _ascend_get_kv_connector
+
+
 vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec

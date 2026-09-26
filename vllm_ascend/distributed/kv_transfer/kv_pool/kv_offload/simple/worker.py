@@ -105,14 +105,24 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
         # *separate* allocations, so we must iterate every sub-tensor
         # — taking only ``value[0]`` would silently drop the V cache.
         unique_caches: dict[str, torch.Tensor] = {}
-        seen_ptrs: set[int] = set()
+        seen_views: set[tuple] = set()
         for layer_name, value in kv_caches.items():
             for sub_idx, tensor in enumerate(_flatten_kv_value(value)):
                 storage = tensor.untyped_storage()
-                ptr = storage.data_ptr()
-                if ptr in seen_ptrs:
+                # Distinct caches can share one NPU allocation: Model Runner V2
+                # slices K and V out of the same backing store. Keying the
+                # dedup on the storage pointer alone would drop every V cache,
+                # so include the view geometry as well.
+                view_key = (
+                    storage.data_ptr(),
+                    tensor.storage_offset(),
+                    tuple(tensor.shape),
+                    tuple(tensor.stride()),
+                    tensor.dtype,
+                )
+                if view_key in seen_views:
                     continue
-                seen_ptrs.add(ptr)
+                seen_views.add(view_key)
 
                 key = layer_name if sub_idx == 0 else f"{layer_name}.{sub_idx}"
                 unique_caches.update(self._build_block_views(key, tensor, num_blocks))
