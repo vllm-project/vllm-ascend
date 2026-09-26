@@ -116,12 +116,12 @@ def _treat_single_token_prefills_with_state_as_decodes(
 class GDNChunkedPrefillMetadata:
     cu_seqlens_host: tuple[int, ...]
     chunk_indices_chunk64_host: tuple[int, ...]
-    chunk_indices_chunk64: torch.Tensor
-    chunk_offsets_chunk64: torch.Tensor
-    update_chunk_offsets_chunk64: torch.Tensor
-    final_chunk_indices_chunk64: torch.Tensor
-    chunk_indices_large_block: torch.Tensor
-    block_indices_cumsum: torch.Tensor
+    chunk_indices_chunk64: torch.Tensor | None
+    chunk_offsets_chunk64: torch.Tensor | None
+    update_chunk_offsets_chunk64: torch.Tensor | None
+    final_chunk_indices_chunk64: torch.Tensor | None
+    chunk_indices_large_block: torch.Tensor | None
+    block_indices_cumsum: torch.Tensor | None
     num_decodes: int = 0
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
@@ -267,29 +267,32 @@ def _build_non_spec_chunked_prefill_metadata(
     builder,
     cu_seqlens_cpu: torch.Tensor,
     device: torch.device,
+    build_device_metadata: bool = True,
 ) -> GDNChunkedPrefillMetadata:
-    hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
-    linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
-    if isinstance(linear_attn_config, dict) and linear_attn_config.get("num_heads") is not None:
-        gdn_num_heads = linear_attn_config["num_heads"] // builder.vllm_config.parallel_config.tensor_parallel_size
-    elif hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):
-        gdn_num_heads = (
-            hf_text_config.linear_num_value_heads // builder.vllm_config.parallel_config.tensor_parallel_size
-        )
-    else:
-        gdn_num_heads = builder.vllm_config.model_config.get_num_attention_heads(builder.vllm_config.parallel_config)
-    cumsum_chunks = max(1, _GDN_CUMSUM_WORKING_SET // (gdn_num_heads * _GDN_CHUNK_SIZE))
-    cumsum_chunk_size = 1 if cumsum_chunks <= 1 else 1 << (cumsum_chunks - 1).bit_length()
-
     chunk_indices_chunk64 = prepare_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
-    chunk_offsets_chunk64 = prepare_chunk_offsets(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
-    update_chunk_offsets_chunk64 = prepare_update_chunk_offsets(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
-    final_chunk_indices_chunk64 = prepare_final_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
-    chunk_indices_large_block = prepare_chunk_indices(
-        cu_seqlens_cpu,
-        _GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE,
-    )
-    block_indices_cumsum = prepare_chunk_indices(cu_seqlens_cpu, cumsum_chunk_size)
+    if build_device_metadata:
+        hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
+        linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
+        if isinstance(linear_attn_config, dict) and linear_attn_config.get("num_heads") is not None:
+            gdn_num_heads = linear_attn_config["num_heads"] // builder.vllm_config.parallel_config.tensor_parallel_size
+        elif hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):
+            gdn_num_heads = (
+                hf_text_config.linear_num_value_heads // builder.vllm_config.parallel_config.tensor_parallel_size
+            )
+        else:
+            gdn_num_heads = builder.vllm_config.model_config.get_num_attention_heads(
+                builder.vllm_config.parallel_config
+            )
+        cumsum_chunks = max(1, _GDN_CUMSUM_WORKING_SET // (gdn_num_heads * _GDN_CHUNK_SIZE))
+        cumsum_chunk_size = 1 if cumsum_chunks <= 1 else 1 << (cumsum_chunks - 1).bit_length()
+        chunk_offsets_chunk64 = prepare_chunk_offsets(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
+        update_chunk_offsets_chunk64 = prepare_update_chunk_offsets(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
+        final_chunk_indices_chunk64 = prepare_final_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
+        chunk_indices_large_block = prepare_chunk_indices(
+            cu_seqlens_cpu,
+            _GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE,
+        )
+        block_indices_cumsum = prepare_chunk_indices(cu_seqlens_cpu, cumsum_chunk_size)
 
     cu_seqlens_host = tuple(cu_seqlens_cpu.to(torch.int64).reshape(-1).tolist())
     # Pre-compute compact cu_seqlens for AscendC kernels so each layer
@@ -300,15 +303,29 @@ def _build_non_spec_chunked_prefill_metadata(
     else:
         cu_seqlens_kern = tuple(cu_seqlens_kern)
 
+    if build_device_metadata:
+        device_chunk_metadata = {
+            "chunk_indices_chunk64": chunk_indices_chunk64.to(device=device, non_blocking=True),
+            "chunk_offsets_chunk64": chunk_offsets_chunk64.to(device=device, non_blocking=True),
+            "update_chunk_offsets_chunk64": update_chunk_offsets_chunk64.to(device=device, non_blocking=True),
+            "final_chunk_indices_chunk64": final_chunk_indices_chunk64.to(device=device, non_blocking=True),
+            "chunk_indices_large_block": chunk_indices_large_block.to(device=device, non_blocking=True),
+            "block_indices_cumsum": block_indices_cumsum.to(device=device, non_blocking=True),
+        }
+    else:
+        device_chunk_metadata = {
+            "chunk_indices_chunk64": None,
+            "chunk_offsets_chunk64": None,
+            "update_chunk_offsets_chunk64": None,
+            "final_chunk_indices_chunk64": None,
+            "chunk_indices_large_block": None,
+            "block_indices_cumsum": None,
+        }
+
     return GDNChunkedPrefillMetadata(
         cu_seqlens_host=cu_seqlens_host,
         chunk_indices_chunk64_host=tuple(chunk_indices_chunk64.to(torch.int64).reshape(-1).tolist()),
-        chunk_indices_chunk64=chunk_indices_chunk64.to(device=device, non_blocking=True),
-        chunk_offsets_chunk64=chunk_offsets_chunk64.to(device=device, non_blocking=True),
-        update_chunk_offsets_chunk64=update_chunk_offsets_chunk64.to(device=device, non_blocking=True),
-        final_chunk_indices_chunk64=final_chunk_indices_chunk64.to(device=device, non_blocking=True),
-        chunk_indices_large_block=chunk_indices_large_block.to(device=device, non_blocking=True),
-        block_indices_cumsum=block_indices_cumsum.to(device=device, non_blocking=True),
+        **device_chunk_metadata,
         cu_seqlens_kern=cu_seqlens_kern,
         keep_meta=keep_meta,
     )
@@ -316,6 +333,7 @@ def _build_non_spec_chunked_prefill_metadata(
 
 class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+    build_device_chunk_metadata = True
 
     def __init__(
         self,
@@ -885,6 +903,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     self,
                     prefill_query_start_loc_cpu,
                     query_start_loc.device,
+                    build_device_metadata=self.build_device_chunk_metadata,
                 )
                 # Common GDN/KDA callers also consume the upstream chunk fields.
                 chunk_indices = non_spec_chunked_prefill_metadata.chunk_indices_chunk64
@@ -971,4 +990,30 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 class AscendGDNAttentionBackend(GDNAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
+        return AscendGDNAttentionMetadataBuilder
+
+
+class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
+    """Build only the descriptors consumed by AscendC host-metadata paths."""
+
+    build_device_chunk_metadata = False
+
+
+class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
+    @staticmethod
+    def get_builder_cls() -> type[AscendGDNHostMetadataBuilder]:
+        return AscendGDNHostMetadataBuilder
+
+
+class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):
+    """Select host-only metadata when Qwen can use the fused prefill op."""
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
+        # Import lazily to avoid the gdn <-> builder import cycle at module
+        # initialization.  The probe result is cached by the attention class.
+        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+
+        if AscendGatedDeltaNetAttention._probe_fused_chunk() and get_pcp_group().world_size == 1:
+            return AscendGDNHostMetadataBuilder
         return AscendGDNAttentionMetadataBuilder

@@ -33,7 +33,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
@@ -239,7 +239,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self.conv1d.quant_method.process_weights_after_loading = process_weights_and_pack
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return AscendGDNAttentionBackend
+        return AscendGDNHostMetadataBackend
 
     def forward(
         self,
