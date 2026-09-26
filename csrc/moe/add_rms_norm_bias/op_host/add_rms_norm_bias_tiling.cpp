@@ -312,6 +312,14 @@ static void DetermineModeParameters(
             ubFactor = UB_FACTOR_B16;
         }
     }
+    if (modeKey == MODE_NORMAL) {
+        // NORMAL keeps whole rows in UB, so the kernel only ever touches
+        // numColAlign elements per row; size the buffers to that instead of
+        // the dtype's worst-case factor to keep per-core UB headroom for the
+        // hoisted gamma/beta fp32 buffers (e.g. hidden=7168 with beta used to
+        // allocate for 11264 columns and waste ~76KB of the 192KB UB).
+        ubFactor = numColAlign;
+    }
     uint32_t rowLoop = CeilDiv(blockFactor, rowFactor);
     uint32_t lastBlockRowLoop = CeilDiv(latsBlockFactor, rowFactor);
     uint32_t rowTail = blockFactor - (rowLoop - 1) * rowFactor;
