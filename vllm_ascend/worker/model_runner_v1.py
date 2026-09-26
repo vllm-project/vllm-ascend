@@ -187,7 +187,6 @@ from vllm_ascend.spec_decode.utils import (
 from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
-    embedding_tp_enable,
     enable_dsa_cp,
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
@@ -200,7 +199,6 @@ from vllm_ascend.utils import (
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
     model_uses_kpool_indexer,
-    oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
     weak_ref_tensor,
@@ -232,6 +230,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_ascend_forward_context,
     set_mc2_mask,
     set_mc2_tokens_capacity,
+    use_cann_megamoe,
 )
 
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
@@ -797,7 +796,6 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens: int,
         is_draft_model: bool = False,
         cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        allow_dp_padding: bool = False,
     ) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
         # our case, we still need to sync the other two flags as well. So we need to
@@ -823,7 +821,34 @@ class NPUModelRunner(GPUModelRunner):
         synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor))
 
         # Create a tensor for num_tokens_after_padding
-        if allow_dp_padding or is_draft_model:
+        comm_method = select_moe_comm_method(max_tokens_across_dp, self.vllm_config)
+        needs_uniform_moe_input = comm_method in {MoECommType.ALLGATHER, MoECommType.MC2}
+        needs_uniform_mega_moe_input = comm_method == MoECommType.FUSED_MC2 and use_cann_megamoe(self.vllm_config)
+        finegrained_tp = self.ascend_config.finegrained_tp_config
+        needs_finegrained_tp = any(
+            size > 1
+            for size in (
+                finegrained_tp.oproj_tensor_parallel_size,
+                finegrained_tp.lmhead_tensor_parallel_size,
+                finegrained_tp.embedding_tensor_parallel_size,
+                finegrained_tp.mlp_tensor_parallel_size,
+            )
+        )
+        # Routing capture assumes padding is at the end of the full DP batch,
+        # not inside each SP shard after MC2 prepare.
+        needs_uniform_routing_capture = self.vllm_config.model_config.enable_return_routed_experts
+        # Graph replay, these MoE paths and cross-DP fine-grained TP require
+        # uniform runner inputs.
+        # Draft models retain their padding until their communication policy
+        # is selected independently.
+        if (
+            synced_cudagraph_mode != CUDAGraphMode.NONE
+            or is_draft_model
+            or needs_uniform_moe_input
+            or needs_uniform_mega_moe_input
+            or needs_finegrained_tp
+            or needs_uniform_routing_capture
+        ):
             num_tokens_after_padding = torch.tensor(
                 [max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32
             )
@@ -2357,7 +2382,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
                 if self.dynamic_eplb:
-                    self.update_eplb_heat_collection_status(num_tokens_padded)
+                    self.update_eplb_heat_collection_status(num_tokens_padded, num_tokens_across_dp)
 
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
@@ -3421,10 +3446,6 @@ class NPUModelRunner(GPUModelRunner):
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
                 num_tokens=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode,
-                allow_dp_padding=((cudagraph_mode != CUDAGraphMode.NONE)
-                                  or enable_sp(self.vllm_config)
-                                  or oproj_tp_enable()
-                                  or embedding_tp_enable()),
             )
 
             # Extract DP padding if there is any
@@ -4010,7 +4031,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens = np.pad(num_scheduled_tokens, (0, num_reqs_padded - num_reqs))
 
         if self.dynamic_eplb:
-            self.update_eplb_heat_collection_status(num_tokens_padded)
+            self.update_eplb_heat_collection_status(num_tokens_padded, num_tokens_across_dp)
 
         # vllm-ascend does not support ubatch now
         ubatch_slices, ubatch_slices_padded = None, None
@@ -4336,7 +4357,14 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
 
-    def update_eplb_heat_collection_status(self, num_tokens_padded: int):
+    def update_eplb_heat_collection_status(
+        self, num_tokens_padded: int, num_tokens_across_dp: torch.Tensor | None = None
+    ):
+        # Stage-specific collection controls the EPLB iteration counter and
+        # therefore when ranks enter its collectives. Use the common CPU DP
+        # metadata even when eager computation keeps different local lengths.
+        if num_tokens_across_dp is not None and self.eplb_heat_collection_stage in {"prefill", "decode"}:
+            num_tokens_padded = int(num_tokens_across_dp.max().item())
         if self.eplb_heat_collection_stage == "prefill":
             # collect eplb heat for prefill requests.
             self.eplb_heat_collection_status = num_tokens_padded > self.eplb_pd_thresholds
