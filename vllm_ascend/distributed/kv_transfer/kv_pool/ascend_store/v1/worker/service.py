@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import torch
 
-from ..metadata import LoadRequestBatch, StoreRequestBatch
+from ..protocol.lookup import LookupRequest, LookupResult
+from ..protocol.transfer import LoadRequestBatch, StoreRequestBatch
 from .load import LoadResult, LoadService
-from .lookup import LookupService, WorkerLookupRequest
+from .lookup import LookupService
 from .resources import WorkerCacheResources
 from .store import StoreService
 
@@ -46,7 +47,7 @@ class WorkerService:
         finally:
             self._cache_resources.close()
 
-    def lookup(self, request: WorkerLookupRequest) -> int:
+    def lookup(self, request: LookupRequest) -> LookupResult:
         return self._lookup_service.lookup(request)
 
     def load(self, request_batch: LoadRequestBatch) -> None:
@@ -59,10 +60,6 @@ class WorkerService:
     def wait_for_previous_store(self) -> None:
         if self._store_service is not None:
             self._store_service.wait_for_previous_store()
-
-    def finish_store_step(self, request_batch: StoreRequestBatch) -> None:
-        if self._store_service is not None:
-            self._store_service.finish_step(request_batch)
 
     def collect_load_result(self) -> LoadResult:
         return self._load_service.collect_result()

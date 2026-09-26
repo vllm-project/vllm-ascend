@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from vllm.utils.math_utils import cdiv
 
-from ...metadata import StoreRequest
+from ...protocol.transfer import StoreRequest
 from ..request_tracker import RequestTracker
 
 

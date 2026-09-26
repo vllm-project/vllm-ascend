@@ -9,7 +9,7 @@ from typing import Protocol
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase
 
-from ...metadata import LoadRequest
+from ...protocol.transfer import LoadRequest
 from ..coordinator import ChunkSelection
 from ..layout import StridedKVPartitioner
 

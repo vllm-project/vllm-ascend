@@ -8,8 +8,8 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase
 
+from ...protocol.lookup import LookupRequest
 from ..coordinator import LookupChunkSelection
-from .request import WorkerLookupRequest
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +32,7 @@ class LookupTaskBuilder:
         self.pp_size = pp_size
         self.dcp_size = dcp_size
 
-    def build(self, request: WorkerLookupRequest, selection: LookupChunkSelection) -> LookupTask:
+    def build(self, request: LookupRequest, selection: LookupChunkSelection) -> LookupTask:
         group_id = selection.group_id
         block_size = self.token_database.get_block_size(group_id)
         chunks = list(

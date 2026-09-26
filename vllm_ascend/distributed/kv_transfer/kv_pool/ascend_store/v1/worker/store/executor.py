@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import queue
 import threading
-from collections import defaultdict
 
 from vllm.logger import logger
 
@@ -32,10 +31,7 @@ class StoreExecutor(threading.Thread):
         self._lifecycle_lock = threading.Lock()
         self._has_started = False
         self._closed = False
-        self._completion_lock = threading.Lock()
         self._task_queue: queue.Queue[StoreTask | StoreBatchBarrier | None] = queue.Queue()
-        self._pending_task_counts: defaultdict[str, int] = defaultdict(int)
-        self._completed_request_ids: set[str] = set()
         self._fatal_error: BaseException | None = None
         self._previous_batch_barrier: StoreBatchBarrier | None = None
 
@@ -65,11 +61,6 @@ class StoreExecutor(threading.Thread):
         with self._lifecycle_lock:
             self._raise_if_not_running()
             batch_barrier = StoreBatchBarrier()
-            # Register every task before the thread may complete the first one.
-            with self._completion_lock:
-                for task in tasks:
-                    self._completed_request_ids.discard(task.request_id)
-                    self._pending_task_counts[task.request_id] += 1
             for task in tasks:
                 self._task_queue.put(task)
             self._task_queue.put(batch_barrier)
@@ -95,27 +86,6 @@ class StoreExecutor(threading.Thread):
             raise RuntimeError(f"{self.name} has not started")
         if self._closed:
             raise RuntimeError(f"{self.name} is closed")
-
-    def finish_step(self, preempted_request_ids: frozenset[str]) -> None:
-        """Forget preempted Stores and consume completion bookkeeping for this step."""
-        for request_id in preempted_request_ids:
-            self._discard_pending_request(request_id)
-        self._discard_completed_requests(preempted_request_ids)
-        self._take_completed_request_ids()
-
-    def _discard_completed_requests(self, request_ids: frozenset[str]) -> None:
-        with self._completion_lock:
-            self._completed_request_ids -= request_ids
-
-    def _take_completed_request_ids(self) -> set[str]:
-        with self._completion_lock:
-            completed_request_ids = self._completed_request_ids.copy()
-            self._completed_request_ids.clear()
-            return completed_request_ids
-
-    def _discard_pending_request(self, request_id: str) -> None:
-        with self._completion_lock:
-            self._pending_task_counts.pop(request_id, None)
 
     def run(self) -> None:
         try:
@@ -146,21 +116,10 @@ class StoreExecutor(threading.Thread):
             task.completed.set()
             return
 
-        request_id = task.request_id
-        with self._completion_lock:
-            tracked_request = request_id in self._pending_task_counts
         try:
-            if tracked_request:
-                self._execute_task(task)
+            self._execute_task(task)
         except Exception:
-            logger.exception("Failed to store KV cache for request %s", request_id)
-        finally:
-            with self._completion_lock:
-                if tracked_request and request_id in self._pending_task_counts:
-                    self._pending_task_counts[request_id] -= 1
-                    if self._pending_task_counts[request_id] == 0:
-                        del self._pending_task_counts[request_id]
-                        self._completed_request_ids.add(request_id)
+            logger.exception("Failed to store KV cache for request %s", task.request_id)
 
     def _execute_task(self, task: StoreTask) -> None:
         chunks = self._select_missing_chunks(task)

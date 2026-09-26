@@ -27,7 +27,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import backend as v1_backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import connector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import factory as service_factory
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.metadata import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import (
+    LookupCodec,
+    LookupRequest,
+    LookupResult,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
     AscendStoreV1Metadata,
     LoadRequest,
     LoadRequestBatch,
@@ -81,7 +86,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.load.tas
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.lookup import LookupService
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.lookup.executor import LookupExecutor
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.lookup.request import WorkerLookupRequest
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.lookup.task import LookupTaskBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.store import StoreService
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.store.executor import StoreExecutor
@@ -331,7 +335,7 @@ def test_connector_adapts_scheduler_lookup_request() -> None:
 
     def lookup(lookup_request):
         received.append(lookup_request)
-        return 4, False
+        return scheduler_lookup.SchedulerLookupResult(4, False)
 
     instance = connector.AscendStoreV1Connector.__new__(connector.AscendStoreV1Connector)
     instance.scheduler = SimpleNamespace(lookup=lookup)
@@ -346,9 +350,9 @@ def test_connector_adapts_scheduler_lookup_request() -> None:
 def test_scheduler_lookup_preserves_full_hit_allocation() -> None:
     calls = []
 
-    def lookup(*args):
-        calls.append(args)
-        return 12
+    def lookup(request):
+        calls.append(request)
+        return LookupResult(12)
 
     lookup_service = scheduler_lookup.LookupService(
         "ipc:///unused/lookup",
@@ -364,11 +368,20 @@ def test_scheduler_lookup_preserves_full_hit_allocation() -> None:
     block_hashes = [b"a", b"b", b"c"]
     request = scheduler_lookup.SchedulerLookupRequest("request", 12, 12, block_hashes, 0)
 
-    assert service.lookup(request) == (11, False)
-    assert calls == [(12, (0,), block_hashes, 0)]
+    assert service.lookup(request) == scheduler_lookup.SchedulerLookupResult(11, False)
+    assert calls == [LookupRequest(12, (0,), 0, tuple(block_hashes))]
     load_candidate = service._load_service._pending_candidates["request"]
     assert load_candidate is not None
     assert load_candidate.kv_pool_cached_tokens == 11
+
+
+def test_lookup_protocol_round_trip_preserves_business_messages() -> None:
+    codec = LookupCodec()
+    request = LookupRequest(12, (1, 3), 4, (b"a", b"b"))
+    result = LookupResult(8)
+
+    assert codec.decode_request(codec.encode_request(request)) == request
+    assert codec.decode_result(codec.encode_result(result)) == result
 
 
 def test_disabled_scheduler_lookup_skips_rpc() -> None:
@@ -381,14 +394,14 @@ def test_disabled_scheduler_lookup_skips_rpc() -> None:
     )
     request = scheduler_lookup.SchedulerLookupRequest("request", 12, 12, [b"a", b"b", b"c"], 0)
 
-    assert lookup_service.lookup(request) == scheduler_lookup.SchedulerLookupResult(0, None)
+    assert lookup_service.lookup(request) is None
     assert lookup_service.client is None
 
 
 def test_scheduler_publishes_async_load_after_allocation() -> None:
     service = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
     configure_scheduler_transfer_boundary(service)
-    service._lookup_service = SimpleNamespace(lookup=lambda request: scheduler_lookup.SchedulerLookupResult(11, 11))
+    service._lookup_service = SimpleNamespace(lookup=lambda request: 11)
     service._load_service = make_scheduler_load_service(deferred=True)
     service._store_service = make_scheduler_store_service()
     service.request_trackers = {}
@@ -398,7 +411,7 @@ def test_scheduler_publishes_async_load_after_allocation() -> None:
     lookup_request = scheduler_lookup.SchedulerLookupRequest("request", 12, 12, block_hashes, 0)
     request = SimpleNamespace(request_id="request", prompt_token_ids=[0] * 12, block_hashes=block_hashes)
 
-    assert service.lookup(lookup_request) == (11, True)
+    assert service.lookup(lookup_request) == scheduler_lookup.SchedulerLookupResult(11, True)
     service.update_state_after_alloc(request, ([1, 2, 3], [10, 11, 12]), 11)
     empty_cached = SimpleNamespace(req_ids=[], new_block_ids=[])
     output = SimpleNamespace(
@@ -598,7 +611,7 @@ def test_preempted_cached_request_matches_legacy(resume_load: bool) -> None:
     current_preempted = current.build_connector_meta(preempt_step)
     assert legacy_preempted.requests == []
     assert current_preempted.load.requests == current_preempted.store.requests == ()
-    assert legacy_preempted.preempted_req_ids == current_preempted.store.preempted_request_ids == {"request"}
+    assert legacy_preempted.preempted_req_ids == {"request"}
     assert "request" not in legacy._request_trackers
     assert "request" not in current.request_trackers
 
@@ -1134,7 +1147,7 @@ def test_classic_lookup_service_returns_continuous_rank_hit(present, max_model_l
         LookupTaskBuilder(database, 2, 1, 1),
         LookupExecutor(Backend()),
     )
-    assert service.lookup(WorkerLookupRequest(12, (0,), 0, tuple(block_hashes))) == expected_hit
+    assert service.lookup(LookupRequest(12, (0,), 0, tuple(block_hashes))) == LookupResult(expected_hit)
 
 
 def test_classic_lookup_service_returns_zero_on_backend_error() -> None:
@@ -1149,7 +1162,7 @@ def test_classic_lookup_service_returns_zero_on_backend_error() -> None:
         LookupTaskBuilder(database, 1, 1, 1),
         LookupExecutor(Backend()),
     )
-    assert service.lookup(WorkerLookupRequest(4, (0,), 0, (b"a",))) == 0
+    assert service.lookup(LookupRequest(4, (0,), 0, (b"a",))) == LookupResult(0)
 
 
 @pytest.mark.parametrize("presence_codes", ((), (1, 1)))
@@ -1161,7 +1174,7 @@ def test_lookup_returns_zero_for_misaligned_backend_results(presence_codes) -> N
         LookupExecutor(SimpleNamespace(exists=lambda keys: presence_codes)),
     )
 
-    assert service.lookup(WorkerLookupRequest(4, (0,), 0, (b"a",))) == 0
+    assert service.lookup(LookupRequest(4, (0,), 0, (b"a",))) == LookupResult(0)
 
 
 def test_lookup_empty_selection_skips_backend_and_preserves_observation() -> None:
@@ -1183,7 +1196,7 @@ def test_lookup_empty_selection_skips_backend_and_preserves_observation() -> Non
         LookupExecutor(SimpleNamespace(exists=lambda keys: pytest.fail("Backend must not receive an empty Lookup"))),
     )
 
-    assert service.lookup(WorkerLookupRequest(4, (0,), 0, (b"a",))) == 0
+    assert service.lookup(LookupRequest(4, (0,), 0, (b"a",))) == LookupResult(0)
 
 
 def test_tp_mismatch_lookup_checks_every_effective_tp_rank() -> None:
@@ -1201,7 +1214,7 @@ def test_tp_mismatch_lookup_checks_every_effective_tp_rank() -> None:
         LookupExecutor(Backend()),
     )
 
-    assert service.lookup(WorkerLookupRequest(4, (0,), 0, (b"a",))) == 0
+    assert service.lookup(LookupRequest(4, (0,), 0, (b"a",))) == LookupResult(0)
     assert [f"@head_or_tp_rank:{rank}@" in key for rank, key in enumerate(queried_keys)] == [True] * 4
 
 
@@ -1244,7 +1257,7 @@ def test_grouped_lookup_returns_common_contiguous_hit() -> None:
         LookupExecutor(Backend()),
     )
 
-    assert service.lookup(WorkerLookupRequest(12, (0, 1), 0, (b"a", b"b", b"c"))) == 8
+    assert service.lookup(LookupRequest(12, (0, 1), 0, (b"a", b"b", b"c"))) == LookupResult(8)
 
 
 def test_grouped_lookup_queries_only_reachable_chunks_after_hbm_hit() -> None:
@@ -1282,7 +1295,7 @@ def test_grouped_lookup_queries_only_reachable_chunks_after_hbm_hit() -> None:
         LookupExecutor(Backend()),
     )
 
-    assert service.lookup(WorkerLookupRequest(16, (0, 1), 4, (b"a", b"b", b"c", b"d"))) == 8
+    assert service.lookup(LookupRequest(16, (0, 1), 4, (b"a", b"b", b"c", b"d"))) == LookupResult(8)
     assert len(queries[0]) == 3
     assert len(queries[1]) == 1
 
@@ -1754,29 +1767,6 @@ def test_store_service_keeps_task_build_failures_inside_the_store_batch(monkeypa
     assert all(task.source_ready_event is source_ready_event for task in submitted_tasks)
 
 
-def test_classic_connector_discards_store_completion_bookkeeping(monkeypatch) -> None:
-    executor = StoreExecutor(SimpleNamespace())
-    executor._pending_task_counts.update({"preempted": 1, "active": 1})
-    executor._completed_request_ids.update({"preempted", "finished"})
-    worker = worker_module.WorkerService.__new__(worker_module.WorkerService)
-    store_service = StoreService.__new__(StoreService)
-    store_service._executor = executor
-    worker._store_service = store_service
-    worker._load_service = SimpleNamespace(
-        collect_result=lambda: LoadResult(frozenset({"loaded"}), frozenset(), frozenset({3}))
-    )
-    instance = connector.AscendStoreV1Connector.__new__(connector.AscendStoreV1Connector)
-    instance.worker = worker
-    instance._pending_load_result = None
-    metadata = AscendStoreV1Metadata(store=StoreRequestBatch(preempted_request_ids=frozenset({"preempted"})))
-    monkeypatch.setattr(instance, "_get_connector_metadata", lambda: metadata)
-
-    assert instance.get_finished(set()) == (set(), {"loaded"})
-    assert instance.get_block_ids_with_load_errors() == {3}
-    assert executor._pending_task_counts == {"active": 1}
-    assert executor._completed_request_ids == set()
-
-
 def test_connector_rejects_request_level_load_failure(monkeypatch) -> None:
     worker = worker_module.WorkerService.__new__(worker_module.WorkerService)
     worker._store_service = None
@@ -2044,13 +2034,7 @@ def test_grouped_connector_preserves_original_group_ids_across_mainline(monkeypa
         def __init__(self, address) -> None:
             self.address = address
 
-        def lookup(self, token_len, transfer_group_ids, block_hashes, local_cached_tokens):
-            request = WorkerLookupRequest(
-                token_len,
-                transfer_group_ids,
-                local_cached_tokens,
-                tuple(block_hash.hex() for block_hash in block_hashes),
-            )
+        def lookup(self, request):
             return lookup_callbacks[self.address](request)
 
         def close(self) -> None:
