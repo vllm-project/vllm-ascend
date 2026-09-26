@@ -227,8 +227,11 @@ class ComplexExpRotaryEmbedding(nn.Module):
         self.rotary_dim = rotary_dim
         beta_fast = extra_kwargs.get("beta_fast", 32)
         beta_slow = extra_kwargs.get("beta_slow", 1)
-        original_seq_len = extra_kwargs.get("original_max_position_embeddings", max_position_embeddings)
-        apply_yarn_scaling = extra_kwargs.get("apply_yarn_scaling", True)
+        original_seq_len = extra_kwargs.get(
+            "original_seq_len",
+            extra_kwargs.get("original_max_position_embeddings", max_position_embeddings),
+        )
+        apply_yarn_scaling = extra_kwargs.get("apply_yarn_scaling", original_seq_len > 0)
         config_key = (
             f"rotary_dim{rotary_dim}_max_position_embeddings{max_position_embeddings}_"
             f"original_seq_len{original_seq_len}_apply_yarn{apply_yarn_scaling}_base{base}_scaling_factor{scaling_factor}_"

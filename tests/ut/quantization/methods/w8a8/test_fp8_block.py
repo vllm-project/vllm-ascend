@@ -187,7 +187,7 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         params = scheme.get_pergroup_param(300, 200, torch.bfloat16)
         self.assertEqual(params["weight_scale_inv"].shape, (2, 3))
 
-    def _make_layer(self, out_features=8, in_features=64, block=(4, 32)):
+    def _make_layer(self, out_features=8, in_features=128, block=(4, 32)):
         weight, scale_inv = make_block_weight(out_features, in_features, block[0], block[1], seed=3)
         layer = nn.Module()
         layer.prefix = "model.layers.0.mlp.down_proj"
@@ -210,8 +210,8 @@ class TestAscendFp8BlockLinearMethod(TestBase):
     def test_requantizes_to_mxfp8_on_950(self):
         scheme = self.build_scheme(is_950=True, block_size=(4, 32))
         layer, _, _ = self._make_layer()
-        num_groups = 64 // MX_GROUP_SIZE
-        quantized = torch.zeros(8, 64).to(torch.float8_e4m3fn)
+        num_groups = 128 // MX_GROUP_SIZE
+        quantized = torch.zeros(8, 128).to(torch.float8_e4m3fn)
         # npu_dynamic_mx_quant hands back the group axis split in two.
         mx_scale = torch.zeros(8, num_groups // 2, 2, dtype=torch.uint8)
 
@@ -366,7 +366,8 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         scheme = self.build_scheme(is_950=True)
         # Both weights need an even group count so the operator's split layout
         # is representable for each of them.
-        layer = self._make_moe_layer(intermediate=64)
+        intermediate = hidden = 128
+        layer = self._make_moe_layer(intermediate=intermediate, hidden=hidden)
         num_experts = layer.w13_weight.shape[0]
 
         def fake_mx_quant(tensor, **kwargs):
@@ -383,7 +384,7 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
 
         self.assertEqual(mock_npu.npu_dynamic_mx_quant.call_count, 2 * num_experts)
         self.assertEqual(layer.w13_weight.dtype, torch.float8_e4m3fn)
-        self.assertEqual(layer.w13_weight_scale.shape, (num_experts, 128, 64 // MX_GROUP_SIZE))
+        self.assertEqual(layer.w13_weight_scale.shape, (num_experts, 2 * intermediate, hidden // MX_GROUP_SIZE))
         self.assertEqual(layer.w13_weight_scale.dtype, torch.uint8)
         self.assertFalse(hasattr(layer, "w13_weight_scale_inv"))
         scheme.mxfp8_method.process_weights_after_loading.assert_called_once_with(layer)

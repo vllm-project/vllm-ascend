@@ -5232,13 +5232,11 @@ class NPUModelRunner(GPUModelRunner):
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
         uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
-        layer_tuple_strides = {}
+        v41_placements = {}
         if is_deepseek_v41_cache(layer_kv_cache_spec):
-            layer_tuple_strides = {
-                name: descriptor.block_stride
-                for descriptor in kv_cache_config.kv_cache_tensors
-                for name in descriptor.layers
-            }
+            from vllm_ascend.models.deepseek_v41.cache_config import plan_v41_layer_placements
+
+            v41_placements = plan_v41_layer_placements(layer_kv_cache_spec)
         is_glm5_next = any(is_glm5_next_cache_spec(spec) for spec in layer_kv_cache_spec.values())
 
         for group in self._kv_cache_spec_attn_group_iterator():
@@ -5250,43 +5248,21 @@ class NPUModelRunner(GPUModelRunner):
 
                 current_kv_cache_spec = layer_kv_cache_spec[layer_name]
 
-                if layer_name in layer_tuple_strides:
-                    block_stride = layer_tuple_strides[layer_name]
-                    initial_offset = 0
-                    kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        kv_cache_config.num_blocks,
-                        get_storage_block_size(current_kv_cache_spec),
-                        current_kv_cache_spec.num_kv_heads,
-                        current_kv_cache_spec.head_size,
-                    )
-                    kv_cache_shape_list = [kv_cache_shape]
-                    kv_cache_dtype_list = [current_kv_cache_spec.dtype]
-                    is_index = (
-                        isinstance(current_kv_cache_spec, AscendMLAAttentionSpec)
-                        and current_kv_cache_spec.scale_dim
-                    )
-                    if is_index:
-                        source_name = layer_name.removesuffix(".indexer.k_cache") + ".long_kv_cache"
-                        source_spec = layer_kv_cache_spec[source_name]
-                        initial_offset = source_spec.unpadded_page_size_bytes
-                        kv_cache_shape_list.append(
-                            attn_backend.get_kv_cache_shape(
-                                kv_cache_config.num_blocks,
-                                get_storage_block_size(current_kv_cache_spec),
-                                current_kv_cache_spec.num_kv_heads,
-                                current_kv_cache_spec.scale_dim,
-                            )
-                        )
-                        kv_cache_dtype_list.append(current_kv_cache_spec.scale_dtype)
-                    views = self._adjust_kv_layout(
+                if layer_name in v41_placements:
+                    initial_offset, block_stride = v41_placements[layer_name]
+                    from vllm_ascend.models.deepseek_v41.cache_config import reshape_v41_cache
+                    kv_caches[layer_name] = reshape_v41_cache(
                         kv_cache_raw_tensors[layer_name],
-                        kv_cache_shape_list,
-                        kv_cache_dtype_list,
-                        block_stride,
-                        initial_offset_bytes=initial_offset,
+                        current_kv_cache_spec,
+                        num_blocks=kv_cache_config.num_blocks,
+                        offset=initial_offset,
+                        block_stride=block_stride,
                     )
-                    kv_caches[layer_name] = tuple(views) if is_index else views[0]
                     continue
+                if is_deepseek_v41_cache(layer_kv_cache_spec):
+                    raise RuntimeError(
+                        f"V4.1 cache plane {layer_name!r} is missing from plan_v41_layer_placements"
+                    )
                 if is_glm5_next:
                     views = view_glm5_next_cache(
                         layer_name,

@@ -5,20 +5,21 @@
 import torch
 import torch_npu
 from torch import nn
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
     scatter_cache_sk,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.models.deepseek_v41.cache_config import DeepseekV41IndexerSpec
 from vllm_ascend.ops.triton.prepare_indexer_indices import prepare_indexer_indices
 from vllm_ascend.ops.triton.quantize_indexer_query import quantize_indexer_query
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     wait_for_device_metadata,
 )
+
+from .compressor import DeepseekV41RMSNorm
 
 
 class DeepseekV41Indexer(nn.Module):
@@ -69,18 +70,16 @@ class DeepseekV41Indexer(nn.Module):
                 bias=False,
                 dtype=torch.bfloat16,
             )
-            self.k_norm = RMSNorm(self.width, eps=config.rms_norm_eps, dtype=torch.bfloat16)
+            self.k_norm = DeepseekV41RMSNorm(self.width, config.rms_norm_eps)
             self.k_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.k_cache",
-                AscendMLAAttentionSpec(
+                DeepseekV41IndexerSpec(
                     block_size=vllm_config.cache_config.block_size,
                     num_kv_heads=1,
                     head_size=self.width,
                     dtype=torch.int8,
                     tokens_per_state=compress_ratio,
-                    model_version="deepseek_v41",
-                    storage_block_size=(vllm_config.cache_config.block_size // compress_ratio),
                     scale_dim=1,
                     scale_dtype=torch.float16,
                 ),
@@ -177,15 +176,27 @@ class DeepseekV41Indexer(nn.Module):
         block IDs only within this forward. Query quantization and position
         ordering stay outside the native QLI/candidate operator.
         """
+        if is_candidate_source and uses_candidate_filter:
+            raise ValueError("A candidate source must use the unfiltered position TopK")
+        if uses_candidate_filter and candidates is None:
+            raise RuntimeError("V4.1 candidate-filtering indexer ran before its source")
+        if self.width != 128 or self.n_heads not in (32, 64):
+            raise ValueError("QLI requires index_head_dim=128 and 32 or 64 index heads")
+        if not 1 <= self.index_topk <= 2048:
+            raise ValueError("QLI requires index_topk in [1, 2048]")
+        if self.compress_ratio not in (1, 2):
+            raise ValueError("Aurora QLI supports compression ratios 1 and 2")
+        if is_candidate_source or uses_candidate_filter:
+            if not 0 < candidate_topk_blocks <= 2048 or candidate_topk_blocks % 64:
+                raise ValueError("candidate_topk_blocks must be a multiple of 64 in [64, 2048]")
+            if candidate_block_size != 8:
+                raise ValueError("The candidate kernel requires candidate_block_size=8")
         candidate_shape = (query.shape[0], 1, candidate_topk_blocks)
+        if uses_candidate_filter and (candidates.shape != candidate_shape or candidates.dtype != torch.int32):
+            raise ValueError("Candidate consumer requires INT32 block IDs with matching query rows")
         topk = self.index_topk
         if query.shape[0] == 0:
             selected = torch.full((0, topk), -1, dtype=torch.int32, device=query.device)
-            if is_candidate_source:
-                candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query.device)
-            return selected, candidates
-        if source_metadata.max_cache_seq_len == 0:
-            selected = torch.full((query.shape[0], 0), -1, dtype=torch.int32, device=query.device)
             if is_candidate_source:
                 candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query.device)
             return selected, candidates
@@ -197,6 +208,13 @@ class DeepseekV41Indexer(nn.Module):
         cu_seqlens_q = source_metadata.query_start_loc
         seqused_k = source_metadata.cache_seq_lens
         residual = source_metadata.cmp_residual
+        if self.compress_ratio != 1 and residual is None:
+            seq = getattr(source_metadata, "seq_lens", None)
+            n = int(getattr(source_metadata, "num_reqs", 0) or (seq.shape[0] if seq is not None else 0))
+            if seq is not None and n:
+                residual = torch.remainder(seq[:n], self.compress_ratio).to(dtype=torch.int32)
+            else:
+                residual = torch.zeros((max(n, 1),), dtype=torch.int32, device=query.device)
         common = dict(
             cu_seqlens_q=cu_seqlens_q,
             seqused_k=seqused_k,
@@ -208,8 +226,13 @@ class DeepseekV41Indexer(nn.Module):
             cmp_ratio=self.compress_ratio,
         )
         op_metadata = source_metadata.qli_metadata
-        wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata))
-        mode = 1 if is_candidate_source else 2 if uses_candidate_filter else 3
+        if op_metadata is None:
+            raise RuntimeError("V4.1 QLI metadata was not built")
+        if not getattr(source_metadata, "_skip_qli_wait", False):
+            wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata))
+        # DAV_3510 / A5 QLI has no two-level candidate TopK (source=1, consumer=2).
+        # Main v2 is 2-output and drops candidate_out; v3 matches DSV4F's v2.
+        mode = 3
         selected, _, candidate_out = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
             quantized_query,
             key,
@@ -220,7 +243,7 @@ class DeepseekV41Indexer(nn.Module):
             2,
             block_table=source_metadata.block_table,
             metadata=op_metadata,
-            candidate_topk_index=candidates if uses_candidate_filter else None,
+            candidate_topk_index=None,
             candidate_mode=mode,
             candidate_topk_blocks=candidate_topk_blocks,
             candidate_block_size=candidate_block_size,

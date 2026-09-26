@@ -361,6 +361,8 @@ class AscendDSAReqMetadata:
     ori_win_left: int | None = None
     ori_win_right: int | None = None
     dspark_swa_indices: torch.Tensor | None = None
+    dspark_swa_topk_length: torch.Tensor | None = None
+    dspark_block_table: torch.Tensor | None = None
     vision_swa_indices: torch.Tensor | None = None
 
 
@@ -405,6 +407,12 @@ def _require_req_metadata(metadata: AscendDSAMetadata) -> AscendDSAReqMetadata:
     return metadata.req_metadata
 
 
+def _dspark_use_sfm_logical(vllm_config) -> bool:
+    # DSV4F only enables SFM logical SWA indices for BF16 KV. Auto/FP8 KV
+    # must keep physical slots; the A5 SFM path otherwise zeros later draft.
+    return is_a5_bf16_kv_enabled(vllm_config)
+
+
 def get_dspark_sparse_sas_window(vllm_config: Any) -> tuple[int, int]:
     hf_config = vllm_config.model_config.hf_config
     window_size = int(hf_config.sliding_window)
@@ -430,6 +438,8 @@ def build_dspark_swa_indices(
     buffer: torch.Tensor | None = None,
     *,
     use_logical_indices: bool = False,
+    use_logical_positions: bool | None = None,
+    compact_table_output: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
@@ -462,21 +472,35 @@ def build_dspark_swa_indices(
 
     # Per-request visible-position grid [req_count, index_width]. Columns
     # j >= visible_len are out of range and masked to -1 below.
+    if use_logical_positions is None:
+        use_logical_positions = use_logical_indices
     cols = torch.arange(index_width, device=start_pos.device)
     col_mask = cols[None, :] < visible_lens[:, None]
     pos = start_pos[:, None] + cols[None, :]
-    if use_logical_indices:
-        slot_ids = pos.to(torch.int32)
+    start_block = torch.div(start_pos, block_size, rounding_mode="floor")
+    if use_logical_positions:
+        # SparseFlashMla PA_BBND maps ori_sparse_indices through
+        # block_table[b, idx // block_size] itself, so hand it logical
+        # positions; physical slot IDs would be mapped twice. When the caller
+        # also takes a compacted block table, those positions have to be
+        # rebased onto its first column.
+        if compact_table_output is not None:
+            pos = pos - start_block[:, None] * int(block_size)
+        token_ids = pos.to(torch.int32)
+        token_ids = token_ids.where(col_mask, torch.full_like(token_ids, -1))
+        per_token_slots = torch.repeat_interleave(
+            token_ids, query_lens, dim=0, output_size=num_decode_tokens
+        ).unsqueeze(1)
     else:
         block_nums = pos // block_size
-        # Clamp out-of-range columns before gathering; col_mask discards them.
         safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
         block_offsets = pos % block_size
         block_ids = torch.gather(block_table, 1, safe_nums)
         slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
-    slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
-
-    per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
+        slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
+        per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(
+            1
+        )
     per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0, output_size=num_decode_tokens)
 
     if indices_output is not None:
@@ -499,6 +523,18 @@ def build_dspark_swa_indices(
         )
         buffer[:num_rows].copy_(per_token_slots)
         per_token_slots = buffer[:num_rows]
+
+    if compact_table_output is not None:
+        compact_table_output.zero_()
+        compact_width = min(
+            int(block_table.shape[1]),
+            (int(index_width) + int(block_size) - 1) // int(block_size) + 1,
+        )
+        table_cols = torch.arange(compact_width, device=block_table.device)
+        src_cols = (start_block[:, None] + table_cols[None, :]).clamp(min=0, max=int(block_table.shape[1]) - 1)
+        gathered = torch.gather(block_table, 1, src_cols)
+        n_req = gathered.shape[0]
+        compact_table_output[:n_req, :compact_width].copy_(gathered)
 
     return per_token_slots, per_token_lens
 
@@ -650,6 +686,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 dtype=torch.int32,
                 device=self.device,
             )
+            self.dspark_swa_topk_length_buffer = torch.zeros(
+                (max_dspark_rows, 1),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self.dspark_block_table_buffer: torch.Tensor | None = None
             self.decode_threshold += spec_token_num
             assert self.decode_threshold <= 16, (
                 f"decode_threshold exceeded \
@@ -1103,6 +1145,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_seqlens_ori_kv = None
         cu_seqlens_cmp_kv = None
         dspark_swa_indices = None
+        dspark_swa_topk_length = None
+        dspark_block_table = None
         vision_swa_indices = None
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
         if not has_prefill and not common_attn_metadata.causal:
@@ -1112,8 +1156,19 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             # current step's block table / sequence lengths, so they must be
             # rebuilt whenever a DSpark draft step runs.
             assert self.speculative_config is not None
-            dspark_swa_indices, _ = build_dspark_swa_indices(
-                self.block_table[: self.num_decodes],
+            src_bt = self.block_table[: self.num_decodes]
+            dspark_block_table = None
+            use_logical = _dspark_use_sfm_logical(self.vllm_config)
+            if use_logical:
+                if (
+                    self.dspark_block_table_buffer is None
+                    or self.dspark_block_table_buffer.shape[1] != src_bt.shape[1]
+                    or self.dspark_block_table_buffer.shape[0] < src_bt.shape[0]
+                ):
+                    self.dspark_block_table_buffer = torch.zeros(src_bt.shape, dtype=src_bt.dtype, device=src_bt.device)
+                dspark_block_table = self.dspark_block_table_buffer[: src_bt.shape[0]]
+            dspark_swa_indices, dspark_swa_lens = build_dspark_swa_indices(
+                src_bt,
                 self.speculative_config.num_speculative_tokens,
                 self.model_config.hf_config.sliding_window,
                 self.storage_block_size,
@@ -1121,8 +1176,27 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self.seq_lens[: self.num_decodes],
                 self.num_decode_tokens,
                 buffer=self.dspark_swa_indices_buffer,
+                use_logical_positions=use_logical,
+                compact_table_output=dspark_block_table,
             )
-            ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
+            dspark_swa_topk_length = dspark_swa_lens.to(torch.int32).unsqueeze(-1)
+            if getattr(self, "dspark_swa_topk_length_buffer", None) is not None:
+                n = dspark_swa_topk_length.shape[0]
+                self.dspark_swa_topk_length_buffer[:n].copy_(dspark_swa_topk_length)
+                dspark_swa_topk_length = self.dspark_swa_topk_length_buffer[:n]
+            if use_logical:
+                # Keep Band SWA (mask 4) on this metadata path. Sparse-ori
+                # (mask 0, win -1) nans on draft layers 1-2 even when layer 0
+                # is finite. The drafting builder still uses logical indices.
+                ori_win_left, ori_win_right = (
+                    self.model_config.hf_config.sliding_window - 1,
+                    0,
+                )
+                dspark_swa_indices = None
+                dspark_swa_topk_length = None
+                dspark_block_table = None
+            else:
+                ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
         # Text-only requests and lightweight metadata fixtures do not carry
         # multimodal document ranges. Treat those as having no vision spans.
         mm_ranges = getattr(common_attn_metadata, "mm_req_doc_ranges", None)
@@ -1268,6 +1342,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
+            dspark_swa_topk_length=dspark_swa_topk_length,
+            dspark_block_table=dspark_block_table,
             vision_swa_indices=vision_swa_indices,
         )
         if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
@@ -1369,6 +1445,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         has_prefill = self.num_prefills > 0
 
         dspark_swa_indices = None
+        dspark_swa_topk_length = None
+        dspark_block_table = None
         build_dspark_swa = None
         ori_win_left = self.model_config.hf_config.sliding_window - 1
         ori_win_right = 0
@@ -1394,14 +1472,58 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                         f"active={self.num_actual_tokens}, capacity={self.dspark_swa_indices_buffer.shape[0]}"
                     )
                 dspark_swa_indices = self.dspark_swa_indices_buffer[: self.num_actual_tokens]
-                build_dspark_swa = lambda: build_dspark_swa_indices(
-                    *dspark_swa_args,
-                    indices_output=dspark_swa_indices,
-                )
+                use_logical = _dspark_use_sfm_logical(self.vllm_config)
+                src_bt = dspark_swa_args[0]
+                dspark_block_table = None
+                if use_logical:
+                    table_buffer = getattr(self, "dspark_block_table_buffer", None)
+                    if (
+                        table_buffer is None
+                        or table_buffer.shape[1] != src_bt.shape[1]
+                        or table_buffer.shape[0] < src_bt.shape[0]
+                    ):
+                        table_buffer = torch.zeros(src_bt.shape, dtype=src_bt.dtype, device=src_bt.device)
+                        self.dspark_block_table_buffer = table_buffer
+                    dspark_block_table = table_buffer[: src_bt.shape[0]]
+                topk_buf = None
+                if getattr(self, "dspark_swa_topk_length_buffer", None) is not None:
+                    topk_buf = self.dspark_swa_topk_length_buffer[: self.num_actual_tokens]
+                    dspark_swa_topk_length = topk_buf
+
+                def build_dspark_swa():
+                    _, lens = build_dspark_swa_indices(
+                        *dspark_swa_args,
+                        indices_output=dspark_swa_indices,
+                        use_logical_positions=_dspark_use_sfm_logical(self.vllm_config),
+                        compact_table_output=dspark_block_table,
+                    )
+                    if topk_buf is not None:
+                        topk_buf.copy_(lens.to(torch.int32).unsqueeze(-1))
             else:
-                dspark_swa_indices, _ = build_dspark_swa_indices(*dspark_swa_args)
+                use_logical = _dspark_use_sfm_logical(self.vllm_config)
+                src_bt = dspark_swa_args[0]
+                dspark_block_table = None
+                if use_logical:
+                    table_buffer = getattr(self, "dspark_block_table_buffer", None)
+                    if (
+                        table_buffer is None
+                        or table_buffer.shape[1] != src_bt.shape[1]
+                        or table_buffer.shape[0] < src_bt.shape[0]
+                    ):
+                        table_buffer = torch.zeros(src_bt.shape, dtype=src_bt.dtype, device=src_bt.device)
+                        self.dspark_block_table_buffer = table_buffer
+                    dspark_block_table = table_buffer[: src_bt.shape[0]]
+                dspark_swa_indices, dspark_swa_lens = build_dspark_swa_indices(
+                    *dspark_swa_args,
+                    use_logical_positions=use_logical,
+                    compact_table_output=dspark_block_table,
+                )
                 dspark_swa_indices = dspark_swa_indices[: self.num_actual_tokens]
-            ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
+                dspark_swa_topk_length = dspark_swa_lens.to(torch.int32).unsqueeze(-1)[: self.num_actual_tokens]
+            if _dspark_use_sfm_logical(self.vllm_config):
+                ori_win_left, ori_win_right = -1, -1
+            else:
+                ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
         cu_seqlens_ori_kv = (
             query_start_loc
@@ -1492,6 +1614,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
+            dspark_swa_topk_length=dspark_swa_topk_length,
+            dspark_block_table=dspark_block_table,
         )
 
     def build_for_graph_capture(
@@ -1637,6 +1761,38 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # before ACL graph capture (profiling run triggers it).
         pass
 
+    def _get_batched_wo_a_weight(self, num_groups: int) -> torch.Tensor:
+        """Return wo_a in the DSA batched-matmul layout [group, input, rank]."""
+        weight = self.wo_a.weight
+        if weight.ndim == 3:
+            if weight.shape[0] == num_groups:
+                return weight
+            if weight.shape[1] == num_groups:
+                return weight.permute(1, 0, 2)
+            raise RuntimeError(
+                "DSA wo_a weight has no group axis matching the o_proj input: "
+                f"weight_shape={tuple(weight.shape)}, num_groups={num_groups}."
+            )
+        linear_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
+        if isinstance(linear_method, AscendUnquantizedLinearMethod):
+            return weight.reshape(num_groups, -1, weight.shape[-1]).transpose(1, 2)
+        return weight.reshape(weight.shape[0], num_groups, -1).permute(1, 0, 2)
+
+    def _get_batched_wo_a_scale(self, num_groups: int) -> torch.Tensor:
+        """Move the output-sharded wo_a scale's group axis to the front."""
+        scale = self.wo_a.weight_scale
+        if scale.ndim == 1:
+            return scale.reshape(num_groups, -1)
+        if scale.shape[0] == num_groups:
+            return scale
+        if scale.shape[1] % num_groups != 0:
+            raise RuntimeError(
+                "DSA wo_a scale cannot be reshaped by o_proj group: "
+                f"scale_shape={tuple(scale.shape)}, num_groups={num_groups}."
+            )
+        scale = scale.reshape(scale.shape[0], num_groups, -1, *scale.shape[2:])
+        return scale.permute(1, 0, 2, *range(3, scale.ndim))
+
     def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         num_tokens = o_proj_input.shape[0]
         group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
@@ -1647,15 +1803,33 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
         if use_a5_quant_o_proj:
             o = o_proj_input
+            orig_shape = o.shape
+            if o.dim() > 2:
+                o = o.reshape(-1, orig_shape[-1])
             o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
+            # A5 DynamicMxQuant returns 2D [rows, K/32]; CANN 9.1 may return
+            # 3D [rows, K/64, 2]. Pair the 2D layout first, then unflatten to
+            # the rank-4 x1Scale [T, G, K/64, 2] TransposeQuantBMM requires.
+            if swiglu_out_scale.dim() == 2:
+                if swiglu_out_scale.shape[-1] % 2 != 0:
+                    raise ValueError(f"Invalid MXFP o_proj act scale shape: {tuple(swiglu_out_scale.shape)}")
+                swiglu_out_scale = swiglu_out_scale.reshape(
+                    swiglu_out_scale.shape[0], swiglu_out_scale.shape[-1] // 2, 2
+                )
+            if len(orig_shape) > 2:
+                o = o.reshape(*orig_shape[:-1], -1)
+                if swiglu_out_scale.dim() == 3:
+                    swiglu_out_scale = swiglu_out_scale.reshape(
+                        orig_shape[0], orig_shape[1], swiglu_out_scale.shape[-2], swiglu_out_scale.shape[-1]
+                    )
             o = torch_npu.npu_transpose_quant_batchmatmul(
                 o,
-                self.wo_a.weight,
+                self._get_batched_wo_a_weight(self.n_local_groups),
                 dtype=torch.bfloat16,
                 bias=None,
                 group_sizes=(0, 0, 32),
                 x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
-                x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
+                x2_scale=self._get_batched_wo_a_scale(self.n_local_groups).view(torch.float8_e8m0fnu),
                 perm_x1=(1, 0, 2),
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
@@ -2245,7 +2419,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         attn_kwargs.update(
             ori_kv=swa_kv_cache,
-            ori_block_table=swa_req_metadata.block_table,
+            ori_block_table=(
+                swa_req_metadata.dspark_block_table
+                if getattr(swa_req_metadata, "dspark_block_table", None) is not None
+                else swa_req_metadata.block_table
+            ),
             cu_seqlens_q=actual_seq_lengths_query,
             seqused_kv=actual_seq_lengths_key,
             sinks=self.attn_sink,
@@ -2268,6 +2446,18 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if self.compress_ratio <= 1:
             if swa_req_metadata.dspark_swa_indices is not None:
                 attn_kwargs["ori_sparse_indices"] = swa_req_metadata.dspark_swa_indices
+                if kv_plan.uses_sparse_flash_mla:
+                    # SparseFlashMla reads the window out of the indices, so the
+                    # band mask has to go; the shared-KV operator keeps mask 4
+                    # and rejects anything else here. It also derives the
+                    # per-token count from the -1 padding rather than a tensor.
+                    if swa_req_metadata.dspark_swa_topk_length is None:
+                        raise RuntimeError("DSpark SWA ori_topk_length is missing")
+                    attn_kwargs["ori_topk_length"] = swa_req_metadata.dspark_swa_topk_length
+                    attn_kwargs["ori_mask_mode"] = 0
+                    attn_kwargs["cmp_mask_mode"] = 0
+                    attn_kwargs["ori_win_left"] = -1
+                    attn_kwargs["ori_win_right"] = -1
         else:
             assert compressor_metadata is not None
             attn_kwargs.update(

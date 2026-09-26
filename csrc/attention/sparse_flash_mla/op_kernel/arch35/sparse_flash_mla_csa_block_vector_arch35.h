@@ -58,6 +58,47 @@ using AscendC::Reg::StoreDist;
 #else
 #include "../common/attn_buffer.h"
 #endif
+template <typename T>
+__aicore__ inline uint32_t Align8Count(uint32_t n)
+{
+    uint32_t aligned = (n + 7) / 8 * 8;
+    return aligned == 0 ? 8 : aligned;
+}
+
+template <typename T>
+__aicore__ inline void InitSoftmaxFromSinks(LocalTensor<T> &sumUb, LocalTensor<T> &maxUb, LocalTensor<T> &sinksUb,
+                                            int64_t mStart, int64_t gSize, T initSum, uint32_t dealCount)
+{
+    if (dealCount == 0) {
+        return;
+    }
+    uint32_t aligned = Align8Count<T>(dealCount);
+    uint32_t gAlign = Align8Count<T>(static_cast<uint32_t>(gSize > 0 ? gSize : 1));
+    if (gSize > 0 && (mStart % gSize == 0) && (dealCount % static_cast<uint32_t>(gSize) == 0)) {
+        uint32_t nTok = dealCount / static_cast<uint32_t>(gSize);
+        for (uint32_t t = 0; t < nTok; t++) {
+            DataCopy(maxUb[t * static_cast<uint32_t>(gSize)], sinksUb, gAlign);
+        }
+    } else {
+        SetFlag<HardEvent::V_S>(INNERCORE_SINKS_SYNC);
+        WaitFlag<HardEvent::V_S>(INNERCORE_SINKS_SYNC);
+        for (uint32_t i = 0; i < dealCount; i++) {
+            int64_t head = gSize > 0 ? ((mStart + static_cast<int64_t>(i)) % gSize) : 0;
+            maxUb.SetValue(i, sinksUb.GetValue(head));
+        }
+        SetFlag<HardEvent::S_V>(INNERCORE_SINKS_SYNC);
+        WaitFlag<HardEvent::S_V>(INNERCORE_SINKS_SYNC);
+    }
+    Duplicate(sumUb, initSum, aligned);
+}
+
+template <typename T>
+__aicore__ inline void ComputeLse(const LocalTensor<T> &dst, const LocalTensor<T> &sumUb,
+                                  const LocalTensor<T> &maxUb, uint32_t dealCount)
+{
+    FaVectorApi::ComputeLseOutputVF<T>(dst, sumUb, maxUb, dealCount);
+}
+
 #if __has_include("../../common/op_kernel/init_output.h")
 #include "../../common/op_kernel/init_output.h"
 #else
@@ -338,7 +379,6 @@ private:
     StaticBuffer<T> softmaxExpBufs[2];
     StaticBuffer<float> batchReduceTmpUb;
     StaticBuffer<float> outLseUbs[2];
-    TBuf<> vselrIndexesBuf[2];
     AttentionCommon::FdBuffers<StaticBuffer<uint8_t>> fdBuffers;
     uint32_t pingPongV0 = 0;
     __gm__ uint8_t *fdStagingBase = nullptr;
@@ -748,15 +788,15 @@ __aicore__ inline void CSABlockVec<TEMPLATE_ARGS>::ComputeVec1Softmax(LocalTenso
 {
     if (likely(runInfo.s2RealSize == 128 && runInfo.s2RealSizeUpdate == 128)) {
         ProcessVec1Vf<T, Q_T, UPDATE, s1BaseSize, s2BaseSize, FaVectorApi::OriginNRange::EQ_128_SFA>(
-            stage1CastTensor, mmRes, sumUb, maxUb, maxUb, apiTmpBuffer, vselrIndexesBuf, runInfo.halfMRealSize,
+            stage1CastTensor, mmRes, sumUb, maxUb, maxUb, apiTmpBuffer, runInfo.halfMRealSize,
             runInfo.s2RealSizeUpdate, static_cast<T>(constInfo.softmaxScale), negativeFloatScalar);
     } else if (runInfo.s2RealSize <= 64) {
         ProcessVec1Vf<T, Q_T, UPDATE, s1BaseSize, s2BaseSize, FaVectorApi::OriginNRange::GT_0_AND_LTE_64_SFA>(
-            stage1CastTensor, mmRes, sumUb, maxUb, maxUb, apiTmpBuffer, vselrIndexesBuf, runInfo.halfMRealSize,
+            stage1CastTensor, mmRes, sumUb, maxUb, maxUb, apiTmpBuffer, runInfo.halfMRealSize,
             runInfo.s2RealSizeUpdate, static_cast<T>(constInfo.softmaxScale), negativeFloatScalar);
     } else if (runInfo.s2RealSize < 128 || runInfo.s2RealSizeUpdate < 128) {
         ProcessVec1Vf<T, Q_T, UPDATE, s1BaseSize, s2BaseSize, FaVectorApi::OriginNRange::GT_64_AND_LTE_128_SFA>(
-            stage1CastTensor, mmRes, sumUb, maxUb, maxUb, apiTmpBuffer, vselrIndexesBuf, runInfo.halfMRealSize,
+            stage1CastTensor, mmRes, sumUb, maxUb, maxUb, apiTmpBuffer, runInfo.halfMRealSize,
             runInfo.s2RealSizeUpdate, static_cast<T>(constInfo.softmaxScale), negativeFloatScalar);
     }
 }
@@ -785,7 +825,7 @@ __aicore__ inline void CSABlockVec<TEMPLATE_ARGS>::InitVec1SoftmaxFromSinks(Loca
         }
     }
     LocalTensor<T> sinksUb = this->sinksUb.tensor;
-    InitSoftmaxFromSinks<T>(sumUb, maxUb, sinksUb, sinksOffset, R0, runInfo.halfMRealSize);
+    InitSoftmaxFromSinks<T>(sumUb, maxUb, sinksUb, sinksOffset, constInfo.gSize, R0, runInfo.halfMRealSize);
 }
 
 TEMPLATES_DEF_NO_DEFAULT

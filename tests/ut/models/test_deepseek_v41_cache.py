@@ -45,6 +45,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
+    MAX_VALIDATED_SLOT_BYTES,
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
     get_layer_tuples,
@@ -241,6 +242,50 @@ def test_production_layout_matches_design(config, runtime):
     assert cache_config.num_blocks == 3
     _, caches = allocate_cache_views(cache_config)
     assert sum(caches[n].is_contiguous() for n in padded if n.endswith(".swa_cache") and ".mtp." not in f".{n}") == 30
+
+
+def _force_compressed_cache_soc(monkeypatch, supported):
+    # builds_scatter_nd_update_sk() reads the profile through its defining
+    # module, so patch it there rather than at the call site.
+    monkeypatch.setattr(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        lambda: SimpleNamespace(supports=lambda capability: supported),
+    )
+
+
+def test_addressing_clamp_bounds_slot_tensors(config, runtime, monkeypatch):
+    runtime.cache_config.block_size = 128
+    overrides = {"head_dim": 512, "index_head_dim": 128}
+    specs = build_v41_cache_specs(SimpleNamespace(**(vars(config) | overrides)), runtime)
+    groups = make_cache_groups(group_cache_specs(specs))
+    padded = {name: spec for group in groups for name, spec in group.kv_cache_spec.kv_cache_specs.items()}
+
+    # SoCs that build scatter_nd_update_sk address the whole pool, so they keep it.
+    _force_compressed_cache_soc(monkeypatch, False)
+    page_sizes, _ = get_layer_tuples(padded)
+    safe_blocks = MAX_VALIDATED_SLOT_BYTES // max(page_sizes)
+    unclamped = safe_blocks * 4
+    memory = sum(page_sizes) * unclamped
+    assert get_deepseek_v41_kv_cache_config(runtime, groups, memory).num_blocks == unclamped
+
+    # The dense store pads each page up for its own row alignment, so the bound
+    # has to be measured under the profile that applies it.
+    _force_compressed_cache_soc(monkeypatch, True)
+    dense_page_sizes, _ = get_layer_tuples(padded)
+    dense_safe_blocks = MAX_VALIDATED_SLOT_BYTES // max(dense_page_sizes)
+    clamped = get_deepseek_v41_kv_cache_config(runtime, groups, memory)
+    assert clamped.num_blocks == dense_safe_blocks
+    assert max(t.size for t in clamped.kv_cache_tensors) <= MAX_VALIDATED_SLOT_BYTES
+
+    # A pool that already fits stays untouched.
+    fits = sum(dense_page_sizes) * (dense_safe_blocks - 1)
+    assert get_deepseek_v41_kv_cache_config(runtime, groups, fits).num_blocks == dense_safe_blocks - 1
+
+    # An override cannot raise the pool past the addressable bound either.
+    runtime.cache_config.num_gpu_blocks_override = dense_safe_blocks * 2
+    assert get_deepseek_v41_kv_cache_config(runtime, groups, memory).num_blocks == dense_safe_blocks
+    runtime.cache_config.num_gpu_blocks_override = dense_safe_blocks // 2
+    assert get_deepseek_v41_kv_cache_config(runtime, groups, memory).num_blocks == dense_safe_blocks // 2
 
 
 def test_shared_slots_isolate_groups_and_recycled_ids(config, runtime):
@@ -1420,21 +1465,28 @@ def test_v41_cp_resolves_own_planes_with_native_draft_metadata_present():
 
 
 @pytest.mark.parametrize("overlap", [False, True])
-def test_v41_query_preparation_uses_multistream(overlap):
+def test_v41_query_preparation_uses_multistream(monkeypatch, overlap):
     from unittest.mock import Mock
 
+    from vllm_ascend.attention import dsa_v41 as dsa_v41_module
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
 
     impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
     impl.role = SimpleNamespace(is_kv_source=True)
     impl.multistream_preprocess = Mock(return_value=("q", "qr"))
+    impl.preprocess = Mock(return_value=("q", "qr"))
     impl._write_compressed_source = Mock()
+    # The overlap decision comes from the ascend config, not from the layer.
+    monkeypatch.setattr(dsa_v41_module, "v41_multistream_preprocess_enabled", lambda: overlap)
     attn = SimpleNamespace(
         dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
     )
     metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6))
     assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
-    impl.multistream_preprocess.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
+    chosen = impl.multistream_preprocess if overlap else impl.preprocess
+    other = impl.preprocess if overlap else impl.multistream_preprocess
+    chosen.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
+    other.assert_not_called()
     impl._write_compressed_source.assert_called_once_with(attn, "hidden", "positions", "cos", "sin", metadata)
 
 

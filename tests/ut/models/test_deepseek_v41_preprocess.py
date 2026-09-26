@@ -189,12 +189,16 @@ def test_forward_uses_multistream_preprocess(monkeypatch, enabled):
     hidden = torch.zeros(1, 8)
     q, qr = torch.zeros(1, 2, 4), torch.zeros(1, 6)
     metadata = SimpleNamespace(
-        positions=torch.zeros(1), swa=SimpleNamespace(num_actual_tokens=1), rope=lambda *args: (None, None)
+        positions=torch.zeros(1),
+        swa=SimpleNamespace(num_actual_tokens=1, num_reqs=1),
+        rope=lambda *args: (None, None),
     )
     impl._get_layer_metadata = Mock(return_value=metadata)
     impl.multistream_preprocess = Mock(return_value=(q, qr))
+    impl.preprocess = Mock(return_value=(q, qr))
     impl._select_sparse_indices = Mock(return_value=None)
     impl._forward_attention = Mock(return_value=q)
+    monkeypatch.setattr(dsa_v41, "v41_multistream_preprocess_enabled", lambda: enabled)
     v1_impl = SimpleNamespace(
         multistream_dsv4_dsa_overlap=enabled,
         _forward_o_proj=lambda q, output: output.zero_(),
@@ -210,7 +214,12 @@ def test_forward_uses_multistream_preprocess(monkeypatch, enabled):
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False)
     output = torch.full_like(hidden, 1)
     result = impl.forward(attn, None, hidden, output)
-    impl.multistream_preprocess.assert_called_once()
+    if enabled:
+        impl.multistream_preprocess.assert_called_once()
+        impl.preprocess.assert_not_called()
+    else:
+        impl.preprocess.assert_called_once()
+        impl.multistream_preprocess.assert_not_called()
     assert result is output
     assert torch.count_nonzero(output) == 0
 
@@ -225,12 +234,12 @@ def test_cp_multistream_forward_preserves_full_cache_updates(monkeypatch, local_
     global_cos, global_sin = torch.ones(4), torch.ones(4)
     local_cos, local_sin = global_cos[2 : 2 + local_tokens], global_sin[2 : 2 + local_tokens]
     metadata = SimpleNamespace(
-        swa=SimpleNamespace(num_actual_tokens=local_tokens, cp_token_range=(2, 4, 2, 4)),
+        swa=SimpleNamespace(num_actual_tokens=local_tokens, num_reqs=1, cp_token_range=(2, 4, 2, 4)),
         positions=torch.arange(2, 2 + local_tokens),
         rope=lambda *args: (local_cos, local_sin),
     )
     global_metadata = SimpleNamespace(
-        swa=SimpleNamespace(num_actual_tokens=4),
+        swa=SimpleNamespace(num_actual_tokens=4, num_reqs=1),
         positions=torch.arange(4),
         rope=lambda *args: (global_cos, global_sin),
     )

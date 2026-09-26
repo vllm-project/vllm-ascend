@@ -17,6 +17,10 @@
 #include "kernel_operator_list_tensor_intf.h"
 #include "util_regbase.h"
 #include "sparse_flash_mla_common_arch35.h"
+#if __has_include("../../common/op_kernel/attn_buffer.h")
+#include "../../common/op_kernel/attn_buffer.h"
+#include "../../common/op_kernel/attn_buffer_manager.h"
+#endif
 #include "common/static_matmul.h"
 
 #if __has_include("../../common/op_kernel/offset_calculator.h")

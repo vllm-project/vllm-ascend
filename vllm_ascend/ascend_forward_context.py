@@ -412,6 +412,12 @@ def select_moe_comm_method(
             is_draft_model,
             draft_moe_quant_type,
         )
+    if moe_comm_type in (MoECommType.MC2, MoECommType.ALLTOALL) and get_current_hardware_profile().supports(
+        HardwareCapability.DSV4_COMPRESSED_CACHE
+    ):
+        # A5 rejects aclnnMoeDistributeDispatchV4 with 561000. MegaMoE
+        # (FUSED_MC2) dispatches through its own kernel and still works.
+        moe_comm_type = MoECommType.ALLGATHER
     logger.debug(
         "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "
         "is_draft_model=%s, draft_moe_quant_type=%r",

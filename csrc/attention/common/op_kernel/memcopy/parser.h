@@ -31,12 +31,12 @@ enum class ActualSeqLensMode
     ACCUM = 1,
 };
 
-template <ActualSeqLensMode MODE, typename ACTLEN_T = uint64_t>
+template <ActualSeqLensMode MODE, typename ACTLEN_T = uint64_t, bool HAS_SEQUSED = false>
 class ActualSeqLensParser {
 };
 
-template <typename ACTLEN_T>
-class ActualSeqLensParser<ActualSeqLensMode::ACCUM, ACTLEN_T> {
+template <typename ACTLEN_T, bool HAS_SEQUSED>
+class ActualSeqLensParser<ActualSeqLensMode::ACCUM, ACTLEN_T, HAS_SEQUSED> {
 public:
     __aicore__ inline ActualSeqLensParser() = default;
 
@@ -45,6 +45,28 @@ public:
     {
         this->actualSeqLengthsGm = actualSeqLengthsGm;
         this->actualLenDims = actualLenDims;
+        (void)defaultVal;
+        (void)HAS_SEQUSED;
+    }
+
+    __aicore__ inline void Init(__gm__ uint8_t *cuSeqlens, uint32_t actualLenDims,
+                                __gm__ uint8_t *seqused, uint32_t sequsedSize)
+    {
+        this->actualSeqLengthsGm.SetGlobalBuffer(reinterpret_cast<__gm__ ACTLEN_T *>(cuSeqlens));
+        this->actualLenDims = actualLenDims;
+        (void)seqused;
+        (void)sequsedSize;
+        (void)HAS_SEQUSED;
+    }
+
+    __aicore__ inline GlobalTensor<ACTLEN_T> GetGm() const
+    {
+        return actualSeqLengthsGm;
+    }
+
+    __aicore__ inline uint32_t GetActualLenDims() const
+    {
+        return actualLenDims;
     }
 
     __aicore__ inline uint64_t GetTBase(uint32_t bIdx) const
@@ -84,8 +106,8 @@ private:
     uint32_t actualLenDims;
 };
 
-template <typename ACTLEN_T>
-class ActualSeqLensParser<ActualSeqLensMode::BY_BATCH, ACTLEN_T> {
+template <typename ACTLEN_T, bool HAS_SEQUSED>
+class ActualSeqLensParser<ActualSeqLensMode::BY_BATCH, ACTLEN_T, HAS_SEQUSED> {
 public:
     __aicore__ inline ActualSeqLensParser() = default;
 
