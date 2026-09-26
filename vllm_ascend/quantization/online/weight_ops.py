@@ -23,7 +23,8 @@ weight into the exact layouts the tree's W8A8 production schemes consume:
   float32 scale per output channel, matching what ``W8A8_DYNAMIC`` loads from
   an offline-quantized checkpoint (``get_perchannel_param`` in
   ``methods/w8a8/w8a8_dynamic.py``: weight ``int8 [out, in]``, scale
-  ``[out, 1]`` later flattened).
+  ``[out, 1]`` later flattened). Symmetric quantization has an implicit
+  zero ``weight_offset``; an adapter must materialize that offset as zeros.
 * :func:`quantize_weight_mx_fp8` produces ``float8_e4m3fn [out, in]`` plus one
   uint8 E8M0-encoded scale per 32-element group along the reduction dim,
   matching what ``W8A8_MXFP8`` loads (``get_pergroup_param`` in
@@ -124,7 +125,9 @@ def quantize_weight_int8_per_channel(
         chunk_scale = torch.where(chunk_scale > 0, chunk_scale, torch.zeros_like(chunk_scale))
         safe_scale = torch.where(chunk_scale > 0, chunk_scale, torch.ones_like(chunk_scale))
         quantized = torch.round(chunk.to(torch.float32) / safe_scale.unsqueeze(1))
-        int8_weight[row_start:row_end] = quantized.clamp(-127, 127).to(torch.int8)
+        quantized = quantized.clamp(-127, 127)
+        quantized = torch.where(chunk_scale.unsqueeze(1) > 0, quantized, torch.zeros_like(quantized))
+        int8_weight[row_start:row_end] = quantized.to(torch.int8)
         scale[row_start:row_end] = chunk_scale
 
     return int8_weight, scale
@@ -148,7 +151,9 @@ def quantize_weight_int8_per_channel_reference(
     scale = amax / 127.0
     scale = torch.where(scale > 0, scale, torch.zeros_like(scale))
     safe_scale = torch.where(scale > 0, scale, torch.ones_like(scale))
-    quantized = torch.round(weight_fp32 / safe_scale.unsqueeze(1)).clamp(-127, 127).to(torch.int8)
+    quantized = torch.round(weight_fp32 / safe_scale.unsqueeze(1)).clamp(-127, 127)
+    quantized = torch.where(scale.unsqueeze(1) > 0, quantized, torch.zeros_like(quantized))
+    quantized = quantized.to(torch.int8)
     return quantized, scale
 
 
