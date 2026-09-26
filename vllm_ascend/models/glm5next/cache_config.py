@@ -106,11 +106,7 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
         max(_unpadded_page_size(spec) for spec in main_candidates),
     )
     small_candidates = (*indexer_specs, *tail_specs)
-    small_page_size = max(
-        main_page_size,
-        max(spec.page_size_bytes for spec in small_candidates),
-        max(_unpadded_page_size(spec) for spec in small_candidates),
-    )
+    small_page_size = max(_unpadded_page_size(spec) for spec in small_candidates)
 
     for spec in main_candidates:
         object.__setattr__(spec, "page_size_padded", main_page_size)
