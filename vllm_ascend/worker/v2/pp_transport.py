@@ -15,6 +15,8 @@ import vllm.envs as vllm_envs
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.utils import should_reuse_topk
+
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -32,10 +34,14 @@ def use_legacy_spec_pp() -> bool:
     return False
 
 
-class _PPAuxHiddenStateModel(Protocol):
+class _PPTransportModel(Protocol):
     config: "PretrainedConfig"
     start_layer: int
+    end_layer: int
     aux_hidden_state_layers: tuple[int, ...]
+    topk_indices_buffer: torch.Tensor | None
+    receive_pp_topk_indices: bool
+    send_pp_topk_indices: bool
 
 
 @dataclass(frozen=True)
@@ -136,13 +142,94 @@ class PPTransportDataType(str, Enum):
     """Data types carried between PP ranks via ``IntermediateTensors``."""
 
     AUX_HIDDEN_STATES = "aux_hidden_states"
+    TOPK_INDICES = "topk_indices"
+
+
+_PPTransportBufferFactory = Callable[
+    [_PPTransportModel, IntermediateTensors, int, torch.dtype, torch.device],
+    IntermediateTensors,
+]
+
+
+def configure_pp_topk_transport(
+    model: _PPTransportModel,
+    data_types: tuple[PPTransportDataType, ...],
+) -> None:
+    """Initialize model state required by selected PP transports."""
+    if PPTransportDataType.TOPK_INDICES not in data_types:
+        return
+
+    topk_indices_buffer = model.topk_indices_buffer
+    model.receive_pp_topk_indices = topk_indices_buffer is not None and pp_stage_requires_topk_indices(
+        model.config, model.start_layer
+    )
+    model.send_pp_topk_indices = topk_indices_buffer is not None and pp_stage_requires_topk_indices(
+        model.config, model.end_layer
+    )
+
+
+def _add_aux_hidden_state_buffers(
+    model: _PPTransportModel,
+    intermediate_tensors: IntermediateTensors,
+    batch_size: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> IntermediateTensors:
+    num_incoming_aux_layers = sum(layer_idx <= model.start_layer for layer_idx in model.aux_hidden_state_layers)
+    return add_pp_transport_buffers(
+        intermediate_tensors,
+        PPTransportDataType.AUX_HIDDEN_STATES,
+        num_incoming_aux_layers,
+        (batch_size, model.config.hidden_size),
+        dtype,
+        device,
+    )
+
+
+def _add_topk_indices_buffer(
+    model: _PPTransportModel,
+    intermediate_tensors: IntermediateTensors,
+    batch_size: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> IntermediateTensors:
+    del dtype, device
+    if not model.receive_pp_topk_indices:
+        return intermediate_tensors
+
+    topk_indices_buffer = model.topk_indices_buffer
+    assert topk_indices_buffer is not None
+    if batch_size > topk_indices_buffer.shape[0]:
+        raise ValueError(
+            "PP Top-K receive buffer exceeds the model buffer capacity: "
+            f"requested {batch_size} tokens, capacity {topk_indices_buffer.shape[0]}."
+        )
+    return add_pp_transport_tensors(
+        intermediate_tensors,
+        PPTransportDataType.TOPK_INDICES,
+        [topk_indices_buffer[:batch_size]],
+    )
+
+
+_PP_TRANSPORT_BUFFER_FACTORIES: Mapping[PPTransportDataType, _PPTransportBufferFactory] = MappingProxyType(
+    {
+        PPTransportDataType.AUX_HIDDEN_STATES: _add_aux_hidden_state_buffers,
+        PPTransportDataType.TOPK_INDICES: _add_topk_indices_buffer,
+    }
+)
 
 
 def make_empty_intermediate_tensors(
-    model: _PPAuxHiddenStateModel,
+    model: _PPTransportModel,
     tensor_factory: Callable[[int, torch.dtype, torch.device], IntermediateTensors],
+    data_types: tuple[PPTransportDataType, ...] = (PPTransportDataType.AUX_HIDDEN_STATES,),
 ) -> Callable[[int, torch.dtype, torch.device], IntermediateTensors]:
-    """Wrap a model's PP tensor factory with auxiliary receive buffers."""
+    """Wrap a model's PP tensor factory with typed receive buffers."""
+    if len(set(data_types)) != len(data_types):
+        raise ValueError(f"Duplicate PP transport data types: {data_types}.")
+    unsupported_data_types = set(data_types) - _PP_TRANSPORT_BUFFER_FACTORIES.keys()
+    if unsupported_data_types:
+        raise ValueError(f"Unsupported PP transport data types: {unsupported_data_types}.")
 
     def wrapped_tensor_factory(
         batch_size: int,
@@ -150,15 +237,15 @@ def make_empty_intermediate_tensors(
         device: torch.device,
     ) -> IntermediateTensors:
         intermediate_tensors = tensor_factory(batch_size, dtype, device)
-        num_incoming_aux_layers = sum(layer_idx <= model.start_layer for layer_idx in model.aux_hidden_state_layers)
-        return add_pp_transport_buffers(
-            intermediate_tensors,
-            PPTransportDataType.AUX_HIDDEN_STATES,
-            num_incoming_aux_layers,
-            (batch_size, model.config.hidden_size),
-            dtype,
-            device,
-        )
+        for data_type in data_types:
+            intermediate_tensors = _PP_TRANSPORT_BUFFER_FACTORIES[data_type](
+                model,
+                intermediate_tensors,
+                batch_size,
+                dtype,
+                device,
+            )
+        return intermediate_tensors
 
     return wrapped_tensor_factory
 
@@ -208,3 +295,16 @@ def add_pp_transport_buffers(
     """Add empty receive buffers for one PP transport data type."""
     tensors = [torch.zeros(shape, dtype=dtype, device=device) for _ in range(count)]
     return add_pp_transport_tensors(intermediate_tensors, data_type, tensors)
+
+
+def pp_stage_requires_topk_indices(config: object, start_layer: int) -> bool:
+    """Return whether a PP stage needs Top-K indices from its predecessor."""
+    num_hidden_layers = getattr(config, "num_hidden_layers", 0)
+    if start_layer <= 0 or start_layer >= num_hidden_layers:
+        return False
+
+    indexer_types = getattr(config, "indexer_types", None)
+    if indexer_types is not None and start_layer < len(indexer_types):
+        return indexer_types[start_layer].lower() == "shared"
+
+    return bool(getattr(config, "use_index_cache", False)) and should_reuse_topk(config, start_layer)
