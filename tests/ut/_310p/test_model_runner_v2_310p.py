@@ -553,6 +553,32 @@ def test_sampler_accepts_temperature_and_rejects_penalties() -> None:
         sampler.add_request(2, 4, SamplingParams(temperature=0, frequency_penalty=0.5))
 
 
+@pytest.mark.parametrize(
+    ("sampling_kwargs", "message", "temperature"),
+    [
+        # vLLM normalizes min_p to its greedy default when
+        # temperature=0, so this case must use temperature=1.0 to reach
+        # the sampler guard.
+        ({"min_p": 0.1}, "min_p", 1.0),
+        ({"repetition_penalty": 1.1}, "repetition_penalty", 0),
+        ({"presence_penalty": 0.1}, "presence/frequency penalty", 0),
+        ({"frequency_penalty": 0.1}, "presence/frequency penalty", 0),
+        (
+            {"presence_penalty": 0.1, "frequency_penalty": 0.1},
+            "presence/frequency penalty",
+            0,
+        ),
+        ({"logprobs": 1}, "logprobs", 0),
+        ({"prompt_logprobs": 1}, "logprobs", 0),
+        ({"logit_bias": {1: 0.1}}, "logits processors", 0),
+    ],
+)
+def test_sampler_rejects_unsupported_sampling_parameters(sampling_kwargs, message, temperature) -> None:
+    sampler = Ascend310PSampler()
+    with pytest.raises(NotImplementedError, match=message):
+        sampler.add_request(0, 4, SamplingParams(temperature=temperature, **sampling_kwargs))
+
+
 def test_sampler_temperature_scales_logits_before_argmax() -> None:
     """Non-1 temperature must change relative logits before greedy/top paths."""
     from vllm_ascend._310p.worker.v2.sampler import _apply_temperature_pytorch
