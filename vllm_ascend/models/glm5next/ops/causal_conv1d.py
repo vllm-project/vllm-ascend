@@ -3,6 +3,7 @@
 """AscendC short convolution for GLM prefill, decode and MTP verification."""
 
 import torch
+from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.ops.triton.kda.conv_state import copy_conv_state
@@ -35,21 +36,32 @@ def causal_conv1d(
         kernel_state = torch.empty((requests, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
         kernel_indices = torch.empty(requests, dtype=torch.int32, device=cache_indices.device)
         copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=False)
-    # Return the declared result so graph functionalization retains the call.
-    result = torch.ops._C_ascend.npu_causal_conv1d_custom(
-        output,
-        x,
-        weight,
-        conv_state=kernel_state,
-        bias_opt=None,
-        query_start_loc_opt=query_start_loc,
-        cache_indices_opt=kernel_indices,
-        initial_state_mode_opt=initial_state_mode,
-        num_accepted_tokens_opt=num_accepted_tokens,
-        activation_mode=1,
-        pad_slot_id=PAD_SLOT_ID,
-        run_mode=run_mode,
-    )
+    kernel_indices = kernel_indices.contiguous()
+    if run_mode == 0:
+        result = causal_conv1d_fn(
+            x,
+            weight,
+            None,
+            conv_states=kernel_state,
+            query_start_loc=query_start_loc,
+            cache_indices=kernel_indices,
+            has_initial_state=initial_state_mode,
+            activation="silu",
+            pad_slot_id=PAD_SLOT_ID,
+            null_block_id=0,
+        )
+    else:
+        result = causal_conv1d_update(
+            x,
+            kernel_state,
+            weight,
+            bias=None,
+            activation="silu",
+            conv_state_indices=kernel_indices,
+            num_accepted_tokens=num_accepted_tokens,
+            query_start_loc=query_start_loc,
+            null_block_id=0,
+        )
     if not conv_state.is_contiguous():
         copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=True)
     return result

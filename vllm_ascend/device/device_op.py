@@ -157,8 +157,8 @@ class BaseDeviceAdaptor:
 
         return torch_npu.npu_fused_infer_attention_score(
             query=query,
-            key=key.contiguous(),
-            value=value.contiguous(),
+            key=key,
+            value=value,
             num_key_value_heads=num_key_value_heads,
             num_heads=num_heads,
             scale=scale,
@@ -887,8 +887,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     ):
         return torch_npu.npu_fused_infer_attention_score(
             query=query,
-            key=key.contiguous(),
-            value=value.contiguous(),
+            key=key,
+            value=value,
             num_key_value_heads=num_key_value_heads,
             num_heads=num_heads,
             scale=scale,

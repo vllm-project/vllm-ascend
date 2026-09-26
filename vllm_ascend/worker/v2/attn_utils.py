@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import math
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
@@ -27,6 +28,7 @@ import torch
 import vllm
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.distributed import get_dcp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
@@ -485,6 +487,41 @@ def _adjust_dsv4_kv_layout(
         )
         offset_bytes += stride[0] * dtype_size
     return caches
+
+
+def _reshape_combined_attention_kv_cache(
+    raw_cache: torch.Tensor,
+    kv_cache_shape: tuple[int, ...],
+    dtype: torch.dtype,
+    page_stride_bytes: int,
+    num_blocks_per_kv_block: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Create block-strided K/V views over padded physical pages."""
+    if len(kv_cache_shape) != 5 or kv_cache_shape[0] != 2:
+        raise ValueError("Combined Attention cache must have shape [K/V, blocks, block_size, heads, dim].")
+    dtype_size = get_dtype_size(dtype)
+    if page_stride_bytes % dtype_size:
+        raise ValueError("Physical Attention page is not aligned to its dtype.")
+
+    hidden_size = math.prod(kv_cache_shape[2:])
+    if num_blocks_per_kv_block != 1:
+        # Match MRV1: interleave K/V per kernel block inside an unpadded page.
+        # A padded page cannot be flattened to kernel blocks with one stride.
+        kernel_page_bytes = 2 * hidden_size * dtype_size
+        if page_stride_bytes != num_blocks_per_kv_block * kernel_page_bytes:
+            raise ValueError("Padded combined Attention pages do not support kernel block splitting.")
+        page_stride_bytes = kernel_page_bytes
+    dense_strides = [math.prod(kv_cache_shape[dim + 1 :]) for dim in range(len(kv_cache_shape))]
+    combined_cache = torch.as_strided(
+        raw_cache.view(dtype),
+        size=kv_cache_shape,
+        stride=(
+            hidden_size,
+            page_stride_bytes // dtype_size,
+            *dense_strides[2:],
+        ),
+    )
+    return combined_cache[0], combined_cache[1]
 
 
 def _view_dsv4_cache(
@@ -965,30 +1002,20 @@ def _reshape_mamba_kv_cache(
     raw_cache: torch.Tensor,
     kv_cache_spec: MambaSpec,
 ) -> list[torch.Tensor]:
-    """Create the contiguous per-state views used by the Ascend v1 runner."""
-    page_size_bytes = kv_cache_spec.page_size_bytes
-    assert raw_cache.numel() % page_size_bytes == 0
-    num_blocks = raw_cache.numel() // page_size_bytes
-
-    state_tensors: list[torch.Tensor] = []
-    start_idx = 0
-    # Keep the same hybrid storage layout as model_runner_v1:
-    #
-    # tensor1: [(kv_padding), conv, ...]
-    # tensor2: [k,            ssm,  ...]
-    # tensor3: [v,            (mamba_padding), ...]
-    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-        target_shape = (num_blocks, *shape)
-        end_idx = start_idx + torch.empty(
-            target_shape,
-            device="meta",
-        ).numel() * get_dtype_size(dtype)
-        state = raw_cache[start_idx:end_idx].view(dtype).view(target_shape)
-        state_tensors.append(state)
-        start_idx = end_idx
-
-    assert start_idx <= raw_cache.numel()
-    return state_tensors
+    """Create logical state views over padded physical hybrid pages."""
+    physical_page_size = (
+        kv_cache_spec.page_size_padded if kv_cache_spec.page_size_padded is not None else kv_cache_spec.page_size_bytes
+    )
+    if raw_cache.numel() % physical_page_size:
+        raise ValueError("Mamba cache allocation is not a whole number of physical pages.")
+    num_blocks = raw_cache.numel() // physical_page_size
+    cache_shapes = [(num_blocks, *shape) for shape in kv_cache_spec.shapes]
+    return _adjust_dsv4_kv_layout(
+        raw_cache,
+        cache_shapes,
+        list(kv_cache_spec.dtypes),
+        physical_page_size,
+    )
 
 
 def _reshape_kv_cache_v2(
@@ -1145,6 +1172,17 @@ def _reshape_kv_cache_v2(
                 if mamba_cache[0].shape[0] < kv_cache_config.num_blocks:
                     raise ValueError(f"Mamba cache for {layer_name} has fewer blocks than KVCacheManager.")
                 kv_caches[layer_name] = mamba_cache
+                logger.debug(
+                    "[non-contiguous-kv-cache][mrv2] mamba layer=%s "
+                    "logical_page=%s physical_page=%s shapes=%s strides=%s "
+                    "contiguous=%s",
+                    layer_name,
+                    kv_cache_spec.page_size_bytes,
+                    kv_cache_spec.page_size_padded,
+                    [tuple(tensor.shape) for tensor in mamba_cache],
+                    [tensor.stride() for tensor in mamba_cache],
+                    [tensor.is_contiguous() for tensor in mamba_cache],
+                )
                 continue
 
             if not isinstance(kv_cache_spec, AttentionSpec):
@@ -1153,13 +1191,20 @@ def _reshape_kv_cache_v2(
             if isinstance(raw_cache, tuple):
                 raw_k_tensor, raw_v_tensor = raw_cache
                 total_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
+                page_stride_bytes = kv_cache_spec.page_size_bytes
             else:
-                # Attention and Mamba share one aligned raw allocation.
+                # Attention and Mamba use independent logical views over one
+                # physical padded-page geometry.
                 total_bytes = raw_cache.numel()
+                page_stride_bytes = (
+                    kv_cache_spec.page_size_padded
+                    if kv_cache_spec.page_size_padded is not None
+                    else kv_cache_spec.page_size_bytes
+                )
 
-            if total_bytes % kv_cache_spec.page_size_bytes:
+            if total_bytes % page_stride_bytes:
                 raise ValueError(f"KV cache for {layer_name} is not a whole number of pages.")
-            num_blocks = total_bytes // kv_cache_spec.page_size_bytes
+            num_blocks = total_bytes // page_stride_bytes
             num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
             kv_cache_shape = group.backend.get_kv_cache_shape(
@@ -1223,16 +1268,25 @@ def _reshape_kv_cache_v2(
                 v_cache = raw_v_tensor.view(v_dtype).view(v_shape)
                 kv_caches[layer_name] = (k_cache, v_cache)
             else:
-                # Keep Attention K/V contiguous across the tail of the hybrid
-                # allocation, matching the model_runner_v1 storage contract.
-                k_size = torch.empty(k_shape, device="meta").numel() * get_dtype_size(k_dtype)
-                v_size = torch.empty(v_shape, device="meta").numel() * get_dtype_size(v_dtype)
-                kv_start = raw_cache.numel() - k_size - v_size
-                if kv_start < 0:
-                    raise ValueError(f"Attention cache views exceed the allocation for {layer_name}.")
-                k_cache = raw_cache[kv_start : kv_start + k_size].view(k_dtype).view(k_shape)
-                v_cache = raw_cache[kv_start + k_size :].view(v_dtype).view(v_shape)
+                if k_dtype != v_dtype:
+                    raise ValueError("Combined hybrid K/V cache requires matching K/V dtypes.")
+                k_cache, v_cache = _reshape_combined_attention_kv_cache(
+                    raw_cache,
+                    kv_cache_shape,
+                    k_dtype,
+                    page_stride_bytes,
+                    num_blocks_per_kv_block,
+                )
                 kv_caches[layer_name] = (k_cache, v_cache)
+                logger.debug(
+                    "[non-contiguous-kv-cache][mrv2] attention layer=%s "
+                    "shape=%s stride=%s k_contiguous=%s v_contiguous=%s",
+                    layer_name,
+                    tuple(kv_cache_shape),
+                    (k_cache.stride(), v_cache.stride()),
+                    k_cache.is_contiguous(),
+                    v_cache.is_contiguous(),
+                )
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
