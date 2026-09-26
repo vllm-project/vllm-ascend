@@ -694,13 +694,16 @@ Once the preparation is done, you can start the server with the following comman
 1. Prefill node 0
 
     ```shell
-    bash run_dp_template.sh
+    # $1=visible_devices $2=port $3=dp_size $4=dp_rank $5=dp_address $6=dp_rpc_port $7=tp_size
+    # prefill topology here: dp_size=1, tp_size=16 (from the kv-transfer-config above)
+    bash run_dp_template.sh <visible_devices> <port> 1 0 <dp_address> <dp_rpc_port> 16
     ```
 
 2. Prefill node 1
 
     ```shell
-    bash run_dp_template.sh
+    # adjust visible_devices / port / dp_address to this node
+    bash run_dp_template.sh <visible_devices> <port> 1 0 <dp_address> <dp_rpc_port> 16
     ```
 
 3. Decode node 0
