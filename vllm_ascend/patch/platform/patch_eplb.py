@@ -242,11 +242,12 @@ def _clear_transfer_target(communicator, target=None) -> None:
 
 def _wrap_async_rebalance(original_rebalance):
     rebalance_signature = signature(original_rebalance)
+    stream_parameter = "stream" if "stream" in rebalance_signature.parameters else "cuda_stream"
     required = {
         "model_state",
         "eplb_state",
         "physical_to_logical_map_cpu",
-        "stream",
+        stream_parameter,
     }
     if not required.issubset(rebalance_signature.parameters):
         raise RuntimeError("Unsupported vLLM EPLB contract: asynchronous rebalance signature changed.")
@@ -267,7 +268,8 @@ def _wrap_async_rebalance(original_rebalance):
         ):
             target = original_rebalance(*bound.args, **bound.kwargs)
         else:
-            with _async_worker.device_stream(bound.arguments["stream"]):
+            stream = bound.arguments[stream_parameter]
+            with stream if stream is not None else nullcontext():
                 cpu_stats = PreparedLoadStats(
                     prepared_stats.values.cpu(),
                     prepared_stats.sample_counts,
