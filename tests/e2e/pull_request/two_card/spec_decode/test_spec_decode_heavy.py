@@ -415,6 +415,9 @@ def test_qwen36_35b_dspark_spec_decoding(
         Counter,
         Vector,
     )
+    for pos, rate in enumerate(acceptance_per_pos):
+        print(f"acceptance_per_pos[{pos}] = {rate:.6f}", flush=True)
+
     golden = [0.78, 0.61, 0.49, 0.39, 0.33, 0.29, 0.25]
     match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
