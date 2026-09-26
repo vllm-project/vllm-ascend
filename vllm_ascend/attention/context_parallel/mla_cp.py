@@ -799,12 +799,24 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             attn_output = attn_output.permute(0, 2, 1, 3).reshape(B_attn * S, N_attn, D)
             softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
-        # Update out&lse
-        attn_output = self._merge_dcp_attention_output(
-            attn_output,
-            softmax_lse,
-            self.kv_lora_rank,
-        )
+        # Update out&lse. This unsplit path serves the draft single-token
+        # decode steps: merge the DCP shards with the fused pack + all-to-all
+        # + combine kernels (same primitives as the split path) instead of
+        # the legacy cast/cat/attention-update chain.
+        if self.dcp_size > 1:
+            attn_output = torch.ops.vllm.sfa_dcp_a2a_fused(
+                attn_output.float(),
+                softmax_lse.float(),
+                self.dcp_size,
+                1,
+                self.dcp_group.unique_name,
+            )
+        else:
+            attn_output = self._merge_dcp_attention_output(
+                attn_output,
+                softmax_lse,
+                self.kv_lora_rank,
+            )
         return self._v_up_proj_batch_major(attn_output)
 
     def _reorg_kvcache(
