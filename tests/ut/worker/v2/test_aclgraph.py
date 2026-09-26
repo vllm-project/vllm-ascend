@@ -9,7 +9,6 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 
-from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import AutoRegressiveAclGraphManager
 
 
@@ -293,7 +292,7 @@ def test_updatable_graph_replay_updates_resolved_tasks():
     manager.is_draft_model_prefill = False
     desc = MagicMock()
     desc.num_reqs = 2
-    graph = MagicMock(spec=UpdatableGraph)
+    graph = MagicMock()
     resolved_tasks = object()
     graph.resolve_tasks.return_value = resolved_tasks
     manager.graphs = {desc: graph}
@@ -304,6 +303,10 @@ def test_updatable_graph_replay_updates_resolved_tasks():
     draft_attn_metadatas = [{"draft": object()}]
 
     with (
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.UpdatableGraph",
+            MagicMock,
+        ),
         patch(
             "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.SharedSource",
             return_value=source,
@@ -333,7 +336,4 @@ def test_updatable_graph_replay_updates_resolved_tasks():
     graph.resolve_tasks.assert_called_once_with(source)
     manager.update_stream.wait_stream.assert_called_once_with(current_stream)
     parent_replay.assert_called_once_with(desc)
-    graph.update.assert_called_once_with(
-        manager.update_stream,
-        resolved_tasks,
-    )
+    graph.update.assert_called_once_with(manager.update_stream, resolved_tasks)
