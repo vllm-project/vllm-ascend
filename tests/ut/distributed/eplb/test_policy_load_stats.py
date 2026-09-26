@@ -115,6 +115,20 @@ def test_collect_global_load_stats_maps_physical_to_logical(monkeypatch):
     ]
 
 
+def test_maps_aggregated_physical_stats_to_logical():
+    model_state = _model_state(
+        model=SimpleNamespace(num_logical_experts=2),
+        physical_to_logical_map=torch.tensor([[1, 0, 1]]),
+    )
+
+    result = AscendEplbState._map_physical_stats_to_logical(
+        model_state,
+        PreparedLoadStats(torch.tensor([[2, 3, 5]])),
+    )
+
+    torch.testing.assert_close(result.values, torch.tensor([[3, 7]]))
+
+
 def test_collect_global_load_stats_skips_empty_window(monkeypatch):
     state = AscendEplbState.__new__(AscendEplbState)
     state.policy = _custom_policy()

@@ -190,11 +190,13 @@ class AscendEplbState(_eplb_state.EplbState):
             model_state.physical_to_logical_map >= 0,
             model_state.physical_to_logical_map,
             invalid_expert,
-        ).long()
+        ).to(device=values.device, dtype=torch.long)
         logical_values = values.new_zeros((*values.shape[:-1], num_logical_experts + 1))
+        if values.ndim > logical_indices.ndim:
+            logical_indices = logical_indices.unsqueeze(0).expand(values.shape[0], -1, -1)
         logical_values.scatter_add_(
             -1,
-            logical_indices.unsqueeze(0).expand(values.shape[0], -1, -1),
+            logical_indices,
             values,
         )
         return PreparedLoadStats(logical_values[..., :-1], physical_stats.sample_counts)
