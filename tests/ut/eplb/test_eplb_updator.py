@@ -6,6 +6,9 @@ import torch
 
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 
+# Qwen3-30B-A3B's expert count: the tests build full-length maps over it.
+NUM_EXPERTS = 256
+
 
 def _fetch_shared_dict_value(shared_dict, queue):
     """Module-level helper so the spawn context can pickle it."""
@@ -103,7 +106,7 @@ class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
             self.updator.warm_up_eplb()
 
     def test_warm_up_eplb_stores_cpu_phys_to_logical(self):
-        phys_to_logical = torch.arange(256, dtype=torch.int32)
+        phys_to_logical = torch.arange(NUM_EXPERTS, dtype=torch.int32)
         self.adaptor.phys_to_logical = phys_to_logical
         self._run_warm_up_eplb()
 
@@ -126,7 +129,7 @@ class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
         # Only real tensors may cross the Manager IPC; MagicMock values are
         # not picklable.
         self.adaptor.get_global_expert_map.return_value = torch.zeros(2, 4, 64, dtype=torch.int32)
-        self.adaptor.phys_to_logical = torch.arange(256, dtype=torch.int32)
+        self.adaptor.phys_to_logical = torch.arange(NUM_EXPERTS, dtype=torch.int32)
         self._run_warm_up_eplb()
 
         ctx = multiprocessing.get_context("spawn")
