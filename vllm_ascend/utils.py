@@ -201,6 +201,44 @@ def clear_enable_sp():
     _libc_getenv.cache_clear()
 
 
+def own_as_non_persistent_buffer(module: torch.nn.Module, name: str, *, strict: bool = False) -> bool:
+    """Re-register a plain tensor attribute of ``module`` as a non-persistent buffer.
+
+    Some tensors a forward reads are held as *plain attributes* rather than as
+    parameters or buffers. ``RMSNorm(has_weight=False)`` is the main one: it
+    assigns ``self.weight = torch.ones(...)`` without registering it (so the
+    weightless path can pass ``None`` upstream, while the Ascend
+    ``forward_oot`` still hands ``self.weight`` to ``torch_npu.npu_rms_norm``).
+    Two things then go wrong in the RL weight-update lanes:
+
+    * ``Module.named_buffers()`` does not yield them, and the level-2 sleep
+      backup is built from exactly that, while ``CaMemAllocator.sleep()``
+      discards every allocation taken from the sleep-managed pool. The tensor
+      therefore comes back from a level-2 wake as zeros -- a weightless norm
+      multiplied by zeros collapses its activations, and the lane can no longer
+      reproduce a server that loaded the same payload at startup.
+    * If such a tensor *is* registered persistently instead, it enters
+      ``state_dict()`` and ``--load-format dummy`` seeds it with the dummy
+      value, which a live weight update never puts back.
+
+    A non-persistent buffer avoids both: it leaves ``state_dict()`` and joins
+    the sleep backup. ``Module.to()`` still moves it, and in-place updates
+    (``.fill_()``/``.copy_()``) keep working because the tensor object is
+    unchanged.
+
+    Returns True when the attribute held a tensor and is now a non-persistent
+    buffer. Raises when ``strict`` and there was nothing to adopt.
+    """
+    tensor = getattr(module, name, None)
+    if not isinstance(tensor, torch.Tensor) or name in getattr(module, "_buffers", {}):
+        if strict:
+            raise AttributeError(f"{type(module).__name__}.{name} is not a plain tensor attribute")
+        return False
+    delattr(module, name)
+    module.register_buffer(name, tensor, persistent=False)
+    return True
+
+
 _IS_RC_DEVICE: bool | None = None
 
 

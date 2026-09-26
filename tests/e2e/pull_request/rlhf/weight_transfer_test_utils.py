@@ -20,7 +20,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -42,12 +42,15 @@ class WeightUpdateModelCase:
     checkpoint_name_map: Callable[[str], str] | None = None
     expert_intermediate_size: int | None = None
     extra_server_args: tuple[str, ...] = ()
-    skip_reason: str | None = None
-    """Why neither lane can carry this case yet.
+    skip_reasons: dict[str, str] = field(default_factory=dict)
+    """Per-lane reasons why a lane cannot carry this case yet.
 
-    A case whose model is not ready for the transaction is skipped in both lanes
-    instead of being reported as a transfer regression; the reason is attached to
-    the case so the report says which prerequisite is missing.
+    Keyed by the weight-transfer backend that names the lane (``npu_ipc`` for the
+    one-card suite, ``hccl`` for the two-card suite). A case whose model is not
+    ready for *a* lane's transaction is skipped in that lane only, instead of
+    being reported as a transfer regression; the reason travels with the case so
+    the report says which prerequisite is missing. An absent key means the lane
+    carries the case.
     """
 
     def server_args(self) -> list[str]:
@@ -181,12 +184,30 @@ MODEL_CASES = (
         # served model - use ``moe_intermediate_size`` (2048); verified against
         # the real safetensors header of ``experts.0.w1.weight`` == [2048, 4096].
         expert_intermediate_size=2048,
-        extra_server_args=("--tokenizer-mode", "deepseek_v4"),
-        skip_reason=(
-            "DeepSeek-V4-Flash is skipped in both lanes for now: its reload needs "
-            "the attention-sink fix that lives in #16355, and the two-card HCCL "
-            "lane has an open problem with the model as well"
+        extra_server_args=(
+            # The DeepSeek-V4 indexer always quantises its key to int8 and
+            # scatters it into the indexer K cache, so the cache has to be int8
+            # too. With the default ``auto`` (bf16) cache the ACL-graph capture
+            # of the first forward dies in
+            # ``npu_scatter_nd_update_sk`` with "updates dtype DT_INT8 should be
+            # same with varRef dtype DT_BFLOAT16", before any transfer runs.
+            # Every other DeepSeek-V4 e2e lane passes the same value; the
+            # dotted form is the one ``patch_indexer_kv_dtype`` widens the
+            # ``AttentionConfig`` Literal for.
+            "--attention-config.indexer_kv_dtype",
+            "int8",
+            "--tokenizer-mode",
+            "deepseek_v4",
         ),
+        # The NPU IPC lane carries the case now that the attention sinks go
+        # through the weight loader (#16958): a direct ``param.data.copy_`` landed
+        # on the layer parked on the meta device and was silently dropped, so a
+        # live update left the sinks at their dummy values. The two-card HCCL
+        # lane still has an open problem with the model, so it stays skipped
+        # there.
+        skip_reasons={
+            "hccl": "DeepSeek-V4-Flash is skipped in the HCCL lane: the model still has an open problem there",
+        },
     ),
     WeightUpdateModelCase(
         id="glm-5.1-sfa-derived-kv",
@@ -199,7 +220,7 @@ MODEL_CASES = (
             # single-chip IPC budget by keeping only the first 8 experts.
             "n_routed_experts": 8,
         },
-        # No skip_reason left. The "SFA runtime-weight refresh" this case used to
+        # No skip_reasons left. The "SFA runtime-weight refresh" this case used to
         # wait for is not a prerequisite: the state that *is* weight-derived (the
         # KPool indexer's FP32 _wk/_gate/_norm copies, SFA's W_UK_T/W_UV) is
         # re-derived by the layerwise reload, which finalizes deferred attention

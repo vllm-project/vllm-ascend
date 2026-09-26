@@ -94,6 +94,7 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
+    own_as_non_persistent_buffer,
 )
 from vllm_ascend.worker.v2.pp_utils import (
     PPTransportDataType,
@@ -502,6 +503,7 @@ class DeepseekV4Attention(nn.Module):
         )
         self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
         self.q_norm_without_weight = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
+        own_as_non_persistent_buffer(self.q_norm_without_weight, "weight")
         wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
         self.wq_b = wq_b_cls(
             self.q_lora_rank,
@@ -873,6 +875,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
         self.hc_norm = RMSNorm(hc_dim, eps=config.rms_norm_eps, has_weight=False, dtype=torch.float32)
+        own_as_non_persistent_buffer(self.hc_norm, "weight")
 
         # Pre-hc_head residual stream buffer for the speculative draft
         # (MTP / DSpark / DFlash). Only needed when the decoder consumes
@@ -1218,12 +1221,20 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
+                # Route the write through the parameter's loader. A live weight
+                # update runs inside vLLM's layerwise reload, which parks the
+                # layer on the meta device and buffers every load made through
+                # ``weight_loader`` so it can replay it onto the materialized
+                # layer. A direct ``param.data.copy_`` bypasses that buffer: it
+                # lands on the meta tensor (a no-op), so attention sinks would
+                # silently keep their dummy values after an update.
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if enable_dsa_cp():
-                    param.data.copy_(loaded_weight)
+                    weight_loader(param, loaded_weight)
                 else:
                     # Handle attention sinks (distributed across ranks)
                     narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    param.data.copy_(narrow_weight)
+                    weight_loader(param, narrow_weight)
                 loaded_params.add(name)
                 continue
 

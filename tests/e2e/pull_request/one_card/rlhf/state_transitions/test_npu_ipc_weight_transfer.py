@@ -7,10 +7,10 @@ Qwen3-0.6B cannot expose missing START/FINISH hooks because its checkpoint and
 runtime weight representations are compatible. This matrix instead targets
 architectures whose correctness depends on the transaction: fused-MoE layout
 restoration, derived FP32 routing weights, and SFA source/derived-state
-restoration. Cases whose model is not ready for the transaction are skipped in
-both lanes with a per-case ``skip_reason`` — DeepSeek-V4-Flash needs the
-attention-sink fix that lives in #16355 — so the matrix carries Qwen3.5-35B-A3B
-and GLM-5.1 today.
+restoration. Cases whose model is not ready for a lane's transaction are skipped
+in that lane with a per-case ``skip_reasons`` entry — the two-card HCCL lane
+still has an open problem with DeepSeek-V4-Flash — so this lane carries
+Qwen3.5-35B-A3B, DeepSeek-V4-Flash and GLM-5.1.
 
 The correctness oracle is *normal startup loading of the same payload*, not the
 first live update: the generator also writes a temporary checkpoint, a reference
@@ -81,8 +81,8 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, params=None, tim
 @pytest.mark.parametrize("case", pytest_model_cases())
 @pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
 def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
-    if case.skip_reason is not None:
-        pytest.skip(f"{case.id}: {case.skip_reason}")
+    if (skip_reason := case.skip_reasons.get("npu_ipc")) is not None:
+        pytest.skip(f"{case.id}: {skip_reason}")
 
     torch.npu.set_device(INFERENCE_DEVICE_INDEX)
     source = FixedRandomWeightSource(case, torch.device("npu", INFERENCE_DEVICE_INDEX))

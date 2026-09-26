@@ -508,12 +508,19 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
                 break
             else:
                 if "attn_sink" in name:
+                    param = params_dict[name]
+                    # Route the write through the parameter's loader, like the
+                    # target model does. A live weight update runs inside vLLM's
+                    # layerwise reload, which parks the layer on the meta device
+                    # and only replays loads made through ``weight_loader``; a
+                    # direct ``copy_`` lands on the meta tensor and is lost, so
+                    # the draft model's sinks would keep their dummy values.
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     if enable_dsa_cp():
-                        narrow = loaded_weight
+                        weight_loader(param, loaded_weight)
                     else:
-                        narrow = loaded_weight[head_start:head_end]
-                    with torch.no_grad():
-                        params_dict[name].copy_(narrow)
+                        # Handle attention sinks (distributed across ranks)
+                        weight_loader(param, loaded_weight[head_start:head_end])
                     loaded_params.add(name)
                     continue
                 param = params_dict[name]
