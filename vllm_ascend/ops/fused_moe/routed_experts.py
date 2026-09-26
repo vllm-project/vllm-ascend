@@ -525,7 +525,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             # Map each local slot to its global physical expert ID so the load
             # collector can gather per-slot counts from the dispatcher's
             # global per-expert histogram.
-            self.local_phys_expert_ids = compute_local_phys_expert_ids(self.ascend_expert_map).npu()
+            self.local_phys_expert_ids = compute_local_phys_expert_ids(self.ascend_expert_map).to(
+                device=self.ascend_expert_map.device
+            )
         # Keep ExpertMapManager's physical-expert map until checkpoint loading
         # finishes. The upstream loader uses it to place both original and
         # redundant physical experts. Ascend execution uses ascend_expert_map,
