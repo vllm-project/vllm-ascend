@@ -9,6 +9,7 @@ classes: main MLA/KDA pages and compressed-indexer/tail pages.
 """
 
 from dataclasses import dataclass
+from dataclasses import fields as dataclass_fields
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
@@ -23,10 +24,15 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, get_kv_cache_compression_ratio
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
+    AscendSpecDecodeDraftSlidingWindowSpec,
+    get_kv_cache_compression_ratio,
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +47,7 @@ class _Glm5NextCacheLayout:
     small_page_size: int
     main_slot_count: int
     small_slot_count: int
+    foreign_groups: tuple[KVCacheGroupSpec, ...] = ()
 
 
 def _is_glm5_next_spec(spec: KVCacheSpec) -> bool:
@@ -202,24 +209,28 @@ def _get_glm5_next_cache_layout(
     full_groups: list[KVCacheGroupSpec] = []
     tail_groups: list[KVCacheGroupSpec] = []
     mamba_groups: list[KVCacheGroupSpec] = []
+    foreign_groups: list[KVCacheGroupSpec] = []
     for group in kv_cache_groups:
         group_spec = group.kv_cache_spec
         if isinstance(group_spec, MambaSpec):
             mamba_groups.append(group)
             continue
-        if not isinstance(group_spec, UniformTypeKVCacheSpecs):
-            continue
-
-        values = list(group_spec.kv_cache_specs.values())
-        if (
-            values
-            and all(isinstance(spec, MLAAttentionSpec) and _is_glm5_next_spec(spec) for spec in values)
-            and any(_is_glm5_next_main_spec(spec) for spec in values)
-            and any(_is_glm5_next_indexer_spec(spec) for spec in values)
-        ):
-            full_groups.append(group)
-        elif values and all(_is_glm5_next_tail_spec(spec) for spec in values):
-            tail_groups.append(group)
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+            values = list(group_spec.kv_cache_specs.values())
+            if (
+                values
+                and all(isinstance(spec, MLAAttentionSpec) and _is_glm5_next_spec(spec) for spec in values)
+                and any(_is_glm5_next_main_spec(spec) for spec in values)
+                and any(_is_glm5_next_indexer_spec(spec) for spec in values)
+            ):
+                full_groups.append(group)
+                continue
+            if values and all(_is_glm5_next_tail_spec(spec) for spec in values):
+                tail_groups.append(group)
+                continue
+        # Non-GLM-Next groups (for example a DFlash2 draft's own attention
+        # cache) keep the generic grouping alongside the pooled layout.
+        foreign_groups.append(group)
 
     has_glm5_next_group = bool(full_groups or tail_groups)
     if not has_glm5_next_group:
@@ -228,7 +239,7 @@ def _get_glm5_next_cache_layout(
         raise ValueError(
             "GLM-Next requires exactly one combined main/indexer group and one compressor-tail KV cache group."
         )
-    if len(full_groups) + len(tail_groups) + len(mamba_groups) != len(kv_cache_groups):
+    if len(full_groups) + len(tail_groups) + len(mamba_groups) + len(foreign_groups) != len(kv_cache_groups):
         raise ValueError("GLM-Next KV cache groups contain an unsupported cache spec.")
 
     full_group = full_groups[0]
@@ -281,6 +292,7 @@ def _get_glm5_next_cache_layout(
         small_page_size=next(iter(small_page_sizes)),
         main_slot_count=main_slot_count,
         small_slot_count=len(indexer_names),
+        foreign_groups=tuple(foreign_groups),
     )
 
 
@@ -340,6 +352,21 @@ def _create_mamba_groups(
     return create_kv_cache_group_specs(mamba_specs, sorted_groups)
 
 
+def _wrap_foreign_draft_spec(spec: KVCacheSpec) -> KVCacheSpec:
+    """Opt a foreign draft cache out of prefix hashing.
+
+    The engine core recomputes ``cache_config.block_size`` as the minimum
+    over prefix-cacheable groups. A sliding-window draft's small kernel block
+    would drag that below the platform-aligned GLM-Next blocks and desync
+    every consumer of the logical block size.
+    """
+    if isinstance(spec, SlidingWindowSpec) and not isinstance(spec, AscendIndexerKPoolTailSpec):
+        return AscendSpecDecodeDraftSlidingWindowSpec(
+            **{f.name: getattr(spec, f.name) for f in dataclass_fields(spec) if f.init}
+        )
+    return spec
+
+
 def get_glm5_next_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -355,15 +382,26 @@ def get_glm5_next_kv_cache_groups(
 
     _align_glm5_next_cache_specs(kv_cache_spec)
     mamba_specs = {name: spec for name, spec in kv_cache_spec.items() if isinstance(spec, MambaSpec)}
-    attention_specs = {name: spec for name, spec in kv_cache_spec.items() if not isinstance(spec, MambaSpec)}
-    groups = _create_glm5_next_attention_groups(attention_specs)
-    if not mamba_specs:
-        # The standalone MTP runner has the same attention/tail pairing but
-        # no recurrent groups.
-        return groups
-
-    grouped_names = _group_glm5_next_mamba_layer_names(kv_cache_spec, mamba_specs)
-    groups.extend(_create_mamba_groups(mamba_specs, grouped_names))
+    # Non-GLM-Next attention specs (for example a DFlash2 draft's sliding
+    # window cache integrated as extra target layers) keep the generic
+    # grouping instead of the pooled GLM-Next layout.
+    glm5_attention_specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if not isinstance(spec, MambaSpec) and _is_glm5_next_spec(spec)
+    }
+    foreign_specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if not isinstance(spec, MambaSpec) and not _is_glm5_next_spec(spec)
+    }
+    groups = _create_glm5_next_attention_groups(glm5_attention_specs)
+    if mamba_specs:
+        grouped_names = _group_glm5_next_mamba_layer_names(kv_cache_spec, mamba_specs)
+        groups.extend(_create_mamba_groups(mamba_specs, grouped_names))
+    if foreign_specs:
+        wrapped_foreign = {name: _wrap_foreign_draft_spec(spec) for name, spec in foreign_specs.items()}
+        groups.extend(create_kv_cache_group_specs(wrapped_foreign, [list(wrapped_foreign)]))
     return groups
 
 
@@ -373,7 +411,11 @@ def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec]) -> int:
     layout = _get_glm5_next_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
-    return layout.main_slot_count * layout.main_page_size + layout.small_slot_count * layout.small_page_size
+    return (
+        layout.main_slot_count * layout.main_page_size
+        + layout.small_slot_count * layout.small_page_size
+        + sum(group.kv_cache_spec.page_size_bytes for group in layout.foreign_groups)
+    )
 
 
 def get_glm5_next_kv_cache_config(
@@ -425,6 +467,20 @@ def get_glm5_next_kv_cache_config(
                 layout.small_page_size * num_blocks,
                 [indexer_name, tail_name],
                 layout.small_page_size,
+            )
+        )
+
+    # Foreign groups (a DFlash2 draft's own cache) use the generic packed
+    # descriptor layout: one contiguous per-layer region per group.
+    for group in layout.foreign_groups:
+        page_size = group.kv_cache_spec.page_size_bytes
+        tensors.append(
+            KVCacheTensor(
+                size=num_blocks * page_size * len(group.layer_names),
+                layers=list(group.layer_names),
+                offset=0,
+                layer_stride=num_blocks * page_size,
+                block_stride=page_size,
             )
         )
 

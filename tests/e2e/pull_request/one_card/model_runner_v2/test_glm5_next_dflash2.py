@@ -232,7 +232,7 @@ def _engine_args(draft: str | None) -> dict:
         "max_num_batched_tokens": 256,
         "block_size": 128,
         "gpu_memory_utilization": 0.7,
-        "enable_prefix_caching": False,
+        "enable_prefix_caching": True,
         "disable_log_stats": False,
         "seed": 0,
         # Left eager on purpose: MRV2 hybrid (KDA + sparse MLA) ACL graph capture
