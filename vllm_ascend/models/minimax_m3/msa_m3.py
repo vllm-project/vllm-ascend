@@ -11,6 +11,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import divide, get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -60,12 +61,44 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 _USE_ASCENDC_INDEX_SCORE_PREFILL = True
 _USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5
 
+_MRV2_PADDING_DUMMY_KEY = "minimax_m3_mrv2_padding_dummy"
+_MRV2_DUMMY_INDEXER_TP_WARMED_KEY = "minimax_m3_mrv2_dummy_indexer_tp_warmed"
+_MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY = "minimax_m3_mrv2_skip_dummy_sparse_attn"
+
 if get_ascend_device_type() == AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,
     )
+
+
+def _is_mrv2_idle_dp_dummy(forward_context: ForwardContext) -> bool:
+    """Return whether this is an eager MRV2 idle-DP padding-only forward."""
+    is_padding = getattr(forward_context, "is_padding", None)
+    dp_metadata = getattr(forward_context, "dp_metadata", None)
+    additional_kwargs = getattr(forward_context, "additional_kwargs", None)
+    if is_padding is None or dp_metadata is None or additional_kwargs is None:
+        return False
+
+    cached = additional_kwargs.get(_MRV2_PADDING_DUMMY_KEY)
+    if cached is not None:
+        return bool(cached)
+
+    is_dummy = False
+    if (
+        get_current_vllm_config().use_v2_model_runner
+        and forward_context.cudagraph_runtime_mode == CUDAGraphMode.NONE
+        and is_padding.numel() == 1
+        and dp_metadata.num_tokens_across_dp_cpu.numel() > 1
+        and int(dp_metadata.num_tokens_across_dp_cpu.max().item()) > 1
+    ):
+        # is_padding is an NPU tensor. Cache this device-to-host read once per
+        # model forward instead of synchronizing in every sparse layer.
+        is_dummy = bool(is_padding[0].item())
+
+    additional_kwargs[_MRV2_PADDING_DUMMY_KEY] = is_dummy
+    return is_dummy
 
 
 def _should_use_tp_sharded_index_decode(tp_size: int, num_prefills: int) -> bool:
@@ -488,11 +521,32 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
-        attn_metadata = get_forward_context().attn_metadata
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
         if not isinstance(attn_metadata, dict):
             return None, None, None
         index_md = attn_metadata[self.index_cache.prefix]
         assert isinstance(index_md, AscendMiniMaxM3IndexerMetadata)
+
+        # MRV2 represents an idle DP rank as a one-token decode-like padding
+        # forward. Run the first sparse layer normally to preserve TP/HCCL
+        # communicator initialization order, then skip the repeated indexer
+        # collectives in the remaining layers. MRV1 is explicitly excluded.
+        if (
+            _USE_ASCENDC_INDEX_SCORE_DECODE
+            and index_md.num_decodes > 0
+            and index_md.num_prefills == 0
+            and get_tp_group().world_size > 1
+            and _is_mrv2_idle_dp_dummy(forward_context)
+        ):
+            if forward_context.additional_kwargs.get(
+                _MRV2_DUMMY_INDEXER_TP_WARMED_KEY,
+                False,
+            ):
+                forward_context.additional_kwargs[_MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY] = True
+                return None, None, None
+            forward_context.additional_kwargs[_MRV2_DUMMY_INDEXER_TP_WARMED_KEY] = True
+
         num_tokens = index_md.num_actual_tokens
         num_decode_tokens = index_md.num_decode_tokens
         iq = index_query[:num_tokens].view(-1, self.num_index_heads, self.index_head_dim)
@@ -904,9 +958,15 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         ],
         output: torch.Tensor,
     ) -> torch.Tensor:
-        attn_metadata = get_forward_context().attn_metadata
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
         if not isinstance(attn_metadata, dict):
             return output
+        if getattr(forward_context, "additional_kwargs", {}).get(
+            _MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY,
+            False,
+        ):
+            return output.zero_()
         main_md = attn_metadata[layer.layer_name]
         assert isinstance(main_md, AscendMiniMaxM3SparseMetadata)
         decode_topk, prefill_topk, decode_select_num_idx = topk_idx
