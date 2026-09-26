@@ -22,6 +22,7 @@ import torch_npu
 
 from vllm_ascend.utils import maybe_trans_nz
 
+from .qbmm_custom import custom_qbmm_enabled, ensure_registered, qbmm
 from .registry import register_scheme
 from .w8a8_base import AscendW8A8Linear310pScheme
 
@@ -65,6 +66,14 @@ class AscendW8A8LinearMethod310(AscendW8A8Linear310pScheme):
         # - This is a temporary workaround. The planned replacement quant-matmul op will accept the
         #   canonical (non-transposed) weight layout directly, so this explicit transpose will be removed
         #   once that op is enabled on 310P.
+        if custom_qbmm_enabled():
+            return qbmm(
+                x,
+                layer.weight.data,
+                layer.deq_scale,
+                bias=quant_bias,
+                output_dtype=layer.params_dtype,
+            )
         return torch_npu.npu_quant_matmul(
             x,
             layer.weight.data,
@@ -74,6 +83,7 @@ class AscendW8A8LinearMethod310(AscendW8A8Linear310pScheme):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        ensure_registered()
         expanding_factor = layer.weight.data.shape[1]
 
         # ---- quant stage tensors ----
