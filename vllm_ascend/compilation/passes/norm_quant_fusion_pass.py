@@ -171,7 +171,9 @@ class AddRMSNormDynamicQuantPattern(BasePattern):
             output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
-            quantized_output = torch.ops.npu.npu_dynamic_quant(out0)
+            # The replacement only produces INT8. An omitted dst_type also
+            # matches FP8 calls in the graph pattern matcher.
+            quantized_output = torch.ops.npu.npu_dynamic_quant(out0, dst_type=torch.int8)
             return quantized_output[0], quantized_output[1], out1
 
         return pattern
@@ -222,7 +224,7 @@ class AddRMSNormDynamicQuantPatternWithBias(BasePattern):
             )
             out0 = output[0]
             out1 = output[2]
-            quantized_output = torch.ops.npu.npu_dynamic_quant(out0)
+            quantized_output = torch.ops.npu.npu_dynamic_quant(out0, dst_type=torch.int8)
             return quantized_output[0], quantized_output[1], out1
 
         return pattern
