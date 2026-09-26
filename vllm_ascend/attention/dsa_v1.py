@@ -971,23 +971,18 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_q: int,
         max_seqlen_kv: int,
     ) -> torch.Tensor:
+        # Each builder owns the buffers consumed by its QLI invocation, even
+        # when the generated scheduling metadata is shared with another group.
+        seq_lens_i32 = seq_lens
+        if seq_lens_i32.dtype != torch.int32:
+            seq_lens_i32 = seq_lens_i32.to(torch.int32)
+        num_reqs = seq_lens_i32.shape[0]
+        qli_seqused_k = self.qli_seqused_k[:num_reqs]
+        qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
+        torch.div(seq_lens_i32, 4, rounding_mode="floor", out=qli_seqused_k)
+        torch.remainder(seq_lens_i32, 4, out=qli_cmp_residual_k)
         qli_metadata = metadata_cache.get("qli")
         if qli_metadata is None:
-            # QLI v2 PA_BBND reads the compressed K length plus the residual
-            # from the original length. Write both into persistent builder
-            # buffers so their addresses remain stable during graph replay.
-            seq_lens_i32 = seq_lens
-            if seq_lens_i32.dtype != torch.int32:
-                seq_lens_i32 = seq_lens_i32.to(torch.int32)
-            num_reqs = seq_lens_i32.shape[0]
-            qli_seqused_k = self.qli_seqused_k[:num_reqs]
-            qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
-            torch.div(seq_lens_i32, 4, rounding_mode="floor", out=qli_seqused_k)
-            torch.remainder(
-                seq_lens_i32,
-                4,
-                out=qli_cmp_residual_k,
-            )
             qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
                 num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
                 num_heads_k=1,
