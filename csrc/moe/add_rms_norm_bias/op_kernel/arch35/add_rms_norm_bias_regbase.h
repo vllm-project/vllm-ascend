@@ -24,7 +24,7 @@
 #include "kernel_operator.h"
 #include "deps/reduce_common_regbase.h"
 
-namespace AddRmsNormBiasA5 {
+namespace AddRmsNorm {
 using namespace AscendC;
 constexpr uint64_t ALIGN_32_FACTOR = 32;
 constexpr int32_t CONST_FACTOR_2 = 2;
@@ -88,7 +88,7 @@ public:
         pPipe->InitBuffer(inQueueX2, DOUBLE_BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
         pPipe->InitBuffer(inQueueGamma, BUFFER_NUM, numColAlign * sizeof(T));
         pPipe->InitBuffer(outQueueY, DOUBLE_BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
-        pPipe->InitBuffer(outQueueX, nullptrBeta ? DOUBLE_BUFFER_NUM : BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
+        pPipe->InitBuffer(outQueueX, DOUBLE_BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
         pPipe->InitBuffer(outQueueRstd, DOUBLE_BUFFER_NUM, rstdUbSizeAlignSize);
         pPipe->InitBuffer(xReduceBuff, rstdUbSizeAlignSize);
         pPipe->InitBuffer(xFp32Buff, numColAlign * sizeof(float) * rowFactor);
@@ -375,5 +375,5 @@ private:
     uint32_t nullptrBeta{1};
     uint64_t rowWork{1};
 };
-} // namespace AddRmsNormBiasA5
+} // namespace AddRmsNorm
 #endif // ADD_RMS_NORM_BIAS_REGBASE_H
