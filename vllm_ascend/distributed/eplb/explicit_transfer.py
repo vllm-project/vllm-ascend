@@ -8,8 +8,9 @@ from typing import Any
 
 import numpy as np
 import torch
-from vllm.distributed.eplb.eplb_utils import device_stream
 from vllm.distributed.eplb.rebalance_execute import TransferMetadata
+
+from vllm_ascend.distributed.eplb.communicator import device_stream
 
 
 def stage_explicit_layer_transfer(

@@ -15,12 +15,11 @@ from vllm.config import parallel as _parallel_config
 from vllm.distributed.eplb import async_worker as _async_worker
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
-from vllm.distributed.eplb.eplb_utils import device_stream
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import routed_experts as _routed_experts
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
-from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
+from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator, device_stream
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
 from vllm_ascend.distributed.eplb.state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,

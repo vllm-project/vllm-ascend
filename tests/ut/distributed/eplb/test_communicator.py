@@ -11,7 +11,7 @@ from vllm.distributed.eplb.eplb_communicator import (
     TorchDistGlooStagedEplbCommunicator,
 )
 
-from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
+from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator, device_stream
 
 
 @pytest.fixture
@@ -23,6 +23,19 @@ def communicator(monkeypatch):
 def test_communicator_reuses_upstream_gloo_staging(communicator):
     assert isinstance(communicator, TorchDistGlooStagedEplbCommunicator)
     assert communicator.needs_profile_buffer_reservation is False
+
+
+def test_device_stream_restores_previous_stream(monkeypatch):
+    previous_stream = object()
+    stream = object()
+    set_stream = MagicMock()
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: previous_stream)
+    monkeypatch.setattr(torch.accelerator, "set_stream", set_stream)
+
+    with device_stream(stream):
+        set_stream.assert_called_once_with(stream)
+
+    assert set_stream.call_args_list == [call(stream), call(previous_stream)]
 
 
 def test_execute_uses_group_local_peer_ranks(communicator, monkeypatch):
