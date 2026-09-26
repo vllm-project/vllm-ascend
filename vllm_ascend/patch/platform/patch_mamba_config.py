@@ -24,6 +24,20 @@ def _get_sparse_index_kpool(model_config) -> int | None:
     return None
 
 
+def _using_sparse_sfa_c8(vllm_config, model_config) -> bool:
+    """Mirror AscendConfig.enable_sparse_sfa_c8 gating at config time.
+
+    This runs from ModelConfig.__post_init__, which precedes
+    init_ascend_config(), so the derivation is repeated from vllm_config
+    primitives instead of reading the not-yet-existing AscendConfig.
+    """
+    if vllm_config.cache_config.cache_dtype not in ("fp8", "int8"):
+        return False
+    from vllm_ascend.utils import model_uses_kpool_indexer, model_uses_sfa_sparse
+
+    return model_uses_sfa_sparse(model_config) or model_uses_kpool_indexer(model_config)
+
+
 def _using_kv_store(vllm_config) -> bool:
     """
     Check whether AscendStoreConnector is used.
@@ -109,6 +123,18 @@ def verify_and_update_config(cls, vllm_config) -> None:
 
     index_kpool = _get_sparse_index_kpool(model_config)
     if index_kpool is not None:
+        sfa_c8_packed = model_config.use_mla and _using_sparse_sfa_c8(vllm_config, model_config)
+        if sfa_c8_packed:
+            # A C8-packed SFA page holds one token in kv_lora_rank int8 bytes
+            # plus fp32 scale metadata, roughly half the bf16 page. Size the
+            # shared mamba page from the packed page, otherwise it stays at
+            # bf16 geometry and the C8 capacity gain is lost to padding.
+            from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
+
+            attn_token_page_size = get_sfa_qsfa_packed_head_dim(
+                model_config.hf_text_config.kv_lora_rank,
+                model_config.hf_text_config.qk_rope_head_dim,
+            )
         # The compressed indexer storage block is consumed by a CANN kernel
         # whose block size must be a multiple of 16. Keep the scheduler block
         # C128-aligned while making block_size / index_kpool C16-aligned too.
@@ -116,6 +142,16 @@ def verify_and_update_config(cls, vllm_config) -> None:
         min_block_size = cdiv(mamba_raw_page_size, attn_token_page_size)
         requested_block_size = cache_config.block_size or kernel_block_size
         attn_block_size = alignment_tokens * cdiv(max(requested_block_size, min_block_size), alignment_tokens)
+        if sfa_c8_packed:
+            # The packed C8 page must cover the mamba state page, otherwise
+            # the page-strided KV view gains a per-block hole and the CANN
+            # operator's AutoContiguous copies the whole KV pool once per
+            # layer per decode step. The covering size is what the alignment
+            # formula derives from min_block_size alone (544 -> 640 for
+            # GLM-5.3-Flash); cap larger requests at it, since they only
+            # coarsen scheduling granularity without adding coverage.
+            c8_block_size = alignment_tokens * cdiv(min_block_size, alignment_tokens)
+            attn_block_size = min(attn_block_size, c8_block_size)
         if cache_config.block_size != attn_block_size:
             cache_config.block_size = attn_block_size
             logger.info(

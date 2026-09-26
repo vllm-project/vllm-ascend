@@ -4745,6 +4745,11 @@ class NPUModelRunner(GPUModelRunner):
             )
             attn_layer = attn_layers[layer_name]
             if isinstance(attn_layer, MLAAttention):
+                if getattr(kv_cache_spec, "cache_sparse_sfa_c8", False) and attn_layer.qk_rope_head_dim == 0:
+                    # RoPE0 C8 packs latent bytes and per-tile scales into one
+                    # int8 row of spec.head_size width; no separate rope part.
+                    # rope>0 C8 keeps the legacy logical split below.
+                    return kv_cache_spec.head_size, 0
                 # DeepSeek MLA: K=kv_lora_rank, V=qk_rope_head_dim
                 return attn_layer.kv_lora_rank, attn_layer.qk_rope_head_dim
             # CacheOnlyAttentionLayer uses AscendMLAAttentionSpec but isn't MLAAttention
@@ -5102,9 +5107,7 @@ class NPUModelRunner(GPUModelRunner):
                     # and rope head dim.
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(current_kv_cache_spec, AttentionSpec)
-                    current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
-                        current_kv_cache_spec
-                    )
+                    current_sparse_sfa_c8 = kv_cache_spec_uses_sparse_sfa_c8(current_kv_cache_spec)
 
                     # vLLM #51718 packs every layer of a group into a single
                     # KVCacheTensor on main; the per-layer size is the block
@@ -5420,9 +5423,7 @@ class NPUModelRunner(GPUModelRunner):
                     # _allocate_kv_cache_tensors; route them to the dedicated
                     # elif branch below before the sparse branch tries to
                     # unpack them as a K/V tuple.
-                    current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
-                        current_kv_cache_spec
-                    )
+                    current_sparse_sfa_c8 = kv_cache_spec_uses_sparse_sfa_c8(current_kv_cache_spec)
                     if self.sparse_kv_offload_enabled:
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
@@ -5437,7 +5438,7 @@ class NPUModelRunner(GPUModelRunner):
                         kv_caches[layer_name] = reshaped_tensors
                         continue
                     raw_kv_is_combined = False
-                    if self.use_sparse and "cache_only_layers" not in layer_name:
+                    if (self.use_sparse or current_sparse_sfa_c8) and "cache_only_layers" not in layer_name:
                         raw_cache = kv_cache_raw_tensors[layer_name]
                         if not isinstance(raw_cache, tuple):
                             raw_k_tensor = raw_v_tensor = raw_cache
@@ -5954,7 +5955,9 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
             elif isinstance(attn_module, MLAAttention):
-                if self.use_sparse:
+                if self.use_sparse or getattr(
+                    getattr(attn_module, "impl", None), "enable_sparse_sfa_c8", False
+                ):
                     impl = attn_module.impl
                     cache_sparse_sfa_c8 = bool(
                         getattr(impl, "enable_sparse_sfa_c8", False)
@@ -5971,6 +5974,12 @@ class NPUModelRunner(GPUModelRunner):
                             + self.model_config.hf_text_config.qk_rope_head_dim
                         )
                         dtype = self.kv_cache_dtype
+                    # Preserve model-specific layout markers (e.g. glm5_next's
+                    # hybrid kpool grouping needs model_version /
+                    # indexes_kv_by_block_stride) that the model publishes on
+                    # the attention layer itself.
+                    model_version = getattr(attn_module, "model_version", None)
+                    indexes_kv_by_block_stride = bool(getattr(attn_module, "indexes_kv_by_block_stride", False))
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=self.block_size,
                         num_kv_heads=1,
@@ -5979,6 +5988,8 @@ class NPUModelRunner(GPUModelRunner):
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                         cache_sparse_sfa_c8=cache_sparse_sfa_c8,
                         store_on_host=self.sparse_kv_offload_enabled,
+                        model_version=model_version,
+                        indexes_kv_by_block_stride=indexes_kv_by_block_stride,
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     if getattr(attn_module.impl, "fa_quant_layer", False):
