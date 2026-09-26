@@ -425,6 +425,7 @@ class AscendConfig:
             "enable_reduce_sample": false,
             "enable_dsa_cp": false,
             "sfa_dcp_force_tmajor_restore": false,
+            "enable_sfa_split_kv": false,
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": false,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
@@ -567,6 +568,7 @@ class AscendConfig:
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
+    enable_sfa_split_kv: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = False
     enable_pcp_embedding_lmhead_weight_sharding: bool = True

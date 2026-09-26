@@ -242,6 +242,7 @@ def test_rope_sfa_preserves_cache_composition_and_device_dispatch(sfa_c8, li_c8)
     impl.layer_name = "model.layers.0.self_attn"
     impl.has_indexer = True
     impl.enable_sparse_sfa_c8, impl.enable_sparse_li_c8 = sfa_c8, li_c8
+    impl.enable_sfa_split_kv = False
     main = tuple(torch.empty(1) for _ in range(1 if sfa_c8 else 2))
     indexer = tuple(torch.empty(1) for _ in range(2 if li_c8 else 1))
     impl.indexer = SimpleNamespace(k_cache=SimpleNamespace(kv_cache=indexer), num_cache_tensors=len(indexer))
@@ -254,7 +255,18 @@ def test_rope_sfa_preserves_cache_composition_and_device_dispatch(sfa_c8, li_c8)
             q, rope, composed, indices, metadata, query_lens, seq_lens
         )
     assert result is dispatch.return_value
-    dispatch.assert_called_once_with(impl, q, rope, composed, indices, metadata, query_lens, seq_lens, block_table=None)
+    dispatch.assert_called_once_with(
+        impl,
+        q,
+        rope,
+        composed,
+        indices,
+        metadata,
+        query_lens,
+        seq_lens,
+        block_table=None,
+        allow_split_kv=False,
+    )
 
 
 @pytest.mark.parametrize("a5", [False, True])
