@@ -13,11 +13,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import dataclasses
 import json
+import math
 import os
 import subprocess
 import sys
 from importlib.util import find_spec as real_find_spec
+from statistics import NormalDist
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -206,6 +209,130 @@ class TestAscendConfig(TestBase):
         )
         with self.assertRaisesRegex(ValueError, "load_collection_phase must be one of"):
             EplbConfig(load_collection_phase="prompt")
+
+    def test_stair_config_defaults_and_overrides(self):
+        defaults = EplbConfig().stair_config
+        config = EplbConfig(stair_config={"rank_transfer_limit": 2, "load_risk_quantile": 0.9})
+
+        self.assertEqual(
+            dataclasses.asdict(defaults),
+            {
+                "load_window_bins": 64,
+                "load_risk_quantile": 0.75,
+                "relative_balance_threshold": 0.95,
+                "absolute_balance_threshold": 0.90,
+                "rank_transfer_limit": 1,
+                "cross_node_transfer_limit": 1,
+                "replica_search_num_stages": 4,
+                "replica_search_radius": 8,
+                "replica_search_beam_size": 64,
+                "placement_search_backtrack_limit": 32,
+            },
+        )
+        self.assertEqual(config.stair_config.rank_transfer_limit, 2)
+        self.assertEqual(config.stair_config.z_score, NormalDist().inv_cdf(0.9))
+
+    def test_stair_config_default_factory_and_frozen_contract(self):
+        first = EplbConfig().stair_config
+        second = EplbConfig().stair_config
+
+        self.assertIsNot(first, second)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            first.load_window_bins = 2
+
+    def test_stair_config_accepts_boundaries(self):
+        for value in (
+            {"load_window_bins": 2},
+            {"load_window_bins": 256},
+            {"load_risk_quantile": 0.500001},
+            {"load_risk_quantile": 0.999999},
+            {"relative_balance_threshold": 0.000001},
+            {"relative_balance_threshold": 1},
+            {"absolute_balance_threshold": 0.000001},
+            {"absolute_balance_threshold": 1},
+            {"rank_transfer_limit": 1},
+            {"rank_transfer_limit": -1},
+            {"cross_node_transfer_limit": 0},
+            {"cross_node_transfer_limit": -1},
+            {"replica_search_num_stages": 1},
+            {"replica_search_num_stages": 8},
+            {"replica_search_radius": 0},
+            {"replica_search_radius": 32},
+            {"replica_search_beam_size": 1},
+            {"replica_search_beam_size": 128},
+            {"placement_search_backtrack_limit": 0},
+            {"placement_search_backtrack_limit": 64},
+        ):
+            with self.subTest(value=value):
+                EplbConfig(stair_config=value)
+
+    def test_stair_config_rejects_invalid_values(self):
+        for value in (
+            {"load_window_bins": 1},
+            {"load_window_bins": 257},
+            {"load_risk_quantile": 0.5},
+            {"load_risk_quantile": 1},
+            {"relative_balance_threshold": 0},
+            {"relative_balance_threshold": 1.001},
+            {"absolute_balance_threshold": 0},
+            {"absolute_balance_threshold": 1.001},
+            {"rank_transfer_limit": 0},
+            {"cross_node_transfer_limit": -2},
+            {"replica_search_num_stages": 0},
+            {"replica_search_num_stages": 9},
+            {"replica_search_radius": -1},
+            {"replica_search_radius": 33},
+            {"replica_search_beam_size": 0},
+            {"replica_search_beam_size": 129},
+            {"placement_search_backtrack_limit": -1},
+            {"placement_search_backtrack_limit": 65},
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                EplbConfig(stair_config=value)
+
+    def test_stair_config_rejects_boolean_and_non_finite_numbers(self):
+        names = dataclasses.asdict(EplbConfig().stair_config)
+        for name in names:
+            with self.subTest(name=name, value=True), self.assertRaisesRegex(ValueError, "must not be booleans"):
+                EplbConfig(stair_config={name: True})
+            for value in (math.nan, math.inf, -math.inf):
+                with self.subTest(name=name, value=value), self.assertRaises(ValueError):
+                    EplbConfig(stair_config={name: value})
+
+    def test_eplb_config_rejects_algorithm_selection(self):
+        for algorithm in ("default", "stair"):
+            with self.subTest(algorithm=algorithm), self.assertRaises(ValueError):
+                EplbConfig(**{"algorithm": algorithm})
+
+    def test_stair_config_rejects_removed_options(self):
+        for name in (
+            "flash_tree_depth",
+            "flash_tree_width",
+            "hysteresis_absolute",
+            "hysteresis_relative",
+            "imbalance_threshold",
+            "lpt_max_backtracks",
+            "max_load_window_bins",
+            "max_candidates_per_layer",
+            "max_expert_transfers_per_rank_pair",
+            "min_relative_score_improvement",
+            "min_absolute_score_improvement",
+            "p95_regression_tolerance",
+            "risk_quantile",
+            "sample_size",
+            "score_tie_tolerance",
+        ):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                EplbConfig(stair_config={name: 0})
+
+    def test_stair_config_rejects_unknown_option(self):
+        with self.assertRaises(ValueError):
+            EplbConfig(stair_config={"unknown_option": 0})
+
+    def test_stair_config_rejects_internal_policy_controls(self):
+        for name in ("z_score", "use_covariance", "hysteresis_enabled"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                EplbConfig(stair_config={name: 0})
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -784,6 +911,34 @@ class TestSparseKVOffloadConfig(TestBase):
         self.assertEqual(config.dram_size_per_dp_GB, 64)
         self.assertFalse(config.keep_device_kv_cache)
         self.assertTrue(config.use_fused_overlap)
+
+    def test_fused_copy_sfa_rejects_dspark(self):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            use_v2_model_runner=False,
+            speculative_config=SimpleNamespace(method="dspark", num_speculative_tokens=3),
+        )
+        with self.assertRaisesRegex(ValueError, "fused_copy_sfa does not support DSpark"):
+            SparseKVOffloadConfig.from_additional_config(
+                vllm_config,
+                {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 8192},
+            )
+
+        # The restriction is specific to fused Copy-SFA; baseline offload is unchanged.
+        config = SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
+        self.assertFalse(config.use_fused_copy_sfa)
+        vllm_config.speculative_config.method = "mtp"
+        config = SparseKVOffloadConfig.from_additional_config(
+            vllm_config,
+            {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 8192},
+        )
+        self.assertTrue(config.use_fused_copy_sfa)
 
     def test_unknown_key_is_rejected_even_when_disabled(self):
         with self.assertRaises(ValueError):

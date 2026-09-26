@@ -12,8 +12,9 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState  # noqa: E40
 from vllm_ascend.attention.sfa_kv_offload import (  # noqa: E402
     AscendSFAKVOffloadImpl,
     AscendSFAKVOffloadMetadataBuilder,
+    AscendSFAOffloadMetadata,
 )
-from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder  # noqa: E402
+from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata, AscendSFAMetadataBuilder  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (  # noqa: E402
     FSA_EXTERNAL_PLAN_READY_MARKER,
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
@@ -45,7 +46,7 @@ def _make_boundary_decode_metadata():
 )
 def test_pd_decode_consumer_is_derived_from_kv_role(kv_transfer_config, expected):
     vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
-    with patch.object(AscendSFAMetadataBuilder, "__init__", return_value=None):
+    with patch.object(AscendSFAMetadataBuilder, "__init__", return_value=None) as init:
         builder = AscendSFAKVOffloadMetadataBuilder(
             kv_cache_spec=None,
             layer_names=[],
@@ -54,6 +55,9 @@ def test_pd_decode_consumer_is_derived_from_kv_role(kv_transfer_config, expected
         )
 
     assert builder.is_pd_decode_consumer is expected
+    assert init.call_args.args[4] is AscendSFAOffloadMetadata
+    assert "copy_sfa_seq_lens" in AscendSFAOffloadMetadata.__dataclass_fields__
+    assert "copy_sfa_seq_lens" not in AscendSFAMetadata.__dataclass_fields__
 
 
 @pytest.mark.parametrize(
@@ -69,6 +73,7 @@ def test_boundary_token_classification_depends_on_pd_decode_role(
     expected_prefills,
 ):
     builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
+    builder.use_fused_copy_sfa = False
     builder.decode_threshold = 1
     builder.is_pd_decode_consumer = is_pd_decode_consumer
     metadata = SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly)
@@ -89,6 +94,7 @@ def test_boundary_token_classification_depends_on_pd_decode_role(
 
 def test_pd_decode_consumer_still_rejects_long_prefill_classification():
     builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
+    builder.use_fused_copy_sfa = False
     builder.decode_threshold = 1
     builder.is_pd_decode_consumer = True
     metadata = SimpleNamespace()

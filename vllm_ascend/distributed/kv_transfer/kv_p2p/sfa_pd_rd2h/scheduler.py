@@ -32,6 +32,11 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     get_external_request_id,
     infer_sfa_component_group_ids,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
+    CopySfaTopkSlotAllocator,
+    copy_sfa_pool_capacity,
+    copy_sfa_prefill_dest_geometry,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -272,6 +277,11 @@ class SFAPDRD2HScheduler:
         # time, forwarded to the worker via build_connector_meta, and dropped
         # when the request finishes (vLLM owns the blocks themselves).
         self._request_trackers: dict[str, tuple[list[int], list[int]]] = {}
+        # req_id -> (pool_slot, tail_tokens, tail_block_index, kv_tokens, dense)
+        self._copy_sfa_bindings: dict[str, tuple[int, int, int, int, bool]] = {}
+        self.main_block_size = self.block_size[self.main_group_idx]
+        self._copy_sfa_hot_tokens = self._resolve_copy_sfa_hot_tokens()
+        self._copy_sfa_slot_allocator = self._try_create_copy_sfa_slot_allocator(vllm_config)
         # req_ids awaiting their first build_connector_meta seed (so the worker
         # can build request_map for get_finished even while async-waiting KV).
         self._reqs_need_recv: set[str] = set()
@@ -316,6 +326,24 @@ class SFAPDRD2HScheduler:
         indexer_block_ids = list(block_ids_by_group[self.indexer_group_idx])
         self._request_trackers[request.request_id] = (main_block_ids, indexer_block_ids)
         self._reqs_need_recv.add(request.request_id)
+        allocator = getattr(self, "_copy_sfa_slot_allocator", None)
+        if allocator is not None:
+            kv_tokens = request.num_computed_tokens + num_external_tokens
+            if kv_tokens <= 0:
+                prompt_token_ids = getattr(request, "prompt_token_ids", None) or []
+                kv_tokens = len(prompt_token_ids)
+            block_size = getattr(self, "main_block_size", None) or min(self.block_size)
+            dense, tail_tokens, tail_block_index = copy_sfa_prefill_dest_geometry(
+                kv_tokens, block_size, getattr(self, "_copy_sfa_hot_tokens", 0)
+            )
+            pool_slot = allocator.bind(request.request_id)
+            self._copy_sfa_bindings[request.request_id] = (
+                pool_slot,
+                tail_tokens,
+                tail_block_index,
+                kv_tokens,
+                dense,
+            )
 
         # Notify P via the metaserver rendezvous that D is ready to pull this
         # request. D does NOT send its block ids to P — D keeps them (passed to
@@ -367,7 +395,21 @@ class SFAPDRD2HScheduler:
             if tracker is None:
                 continue
             main_block_ids, indexer_block_ids = tracker
-            meta.add_request(req_id, main_block_ids, indexer_block_ids)
+            binding = getattr(self, "_copy_sfa_bindings", {}).get(req_id)
+            if binding is None:
+                meta.add_request(req_id, main_block_ids, indexer_block_ids)
+            else:
+                pool_slot, tail_tokens, tail_block_index, kv_tokens, dense = binding
+                meta.add_request(
+                    req_id,
+                    main_block_ids,
+                    indexer_block_ids,
+                    pool_slot=pool_slot,
+                    tail_tokens=tail_tokens,
+                    tail_block_index=tail_block_index,
+                    kv_tokens=kv_tokens,
+                    dense=dense,
+                )
         self._reqs_need_recv.clear()
         return meta
 
@@ -382,6 +424,12 @@ class SFAPDRD2HScheduler:
         # vLLM owns the block lifecycle; the connector only drops its lookup.
         self._request_trackers.pop(request.request_id, None)
         self._reqs_need_recv.discard(request.request_id)
+        copy_sfa_bindings = getattr(self, "_copy_sfa_bindings", None)
+        if copy_sfa_bindings is not None:
+            copy_sfa_bindings.pop(request.request_id, None)
+        allocator = getattr(self, "_copy_sfa_slot_allocator", None)
+        if allocator is not None:
+            allocator.release(request.request_id)
         with self._metaserver_lock:
             self._cancelled_metaserver_requests.add(request.request_id)
             future = self._metaserver_futures.pop(request.request_id, None)
@@ -395,6 +443,29 @@ class SFAPDRD2HScheduler:
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_copy_sfa_hot_tokens() -> int:
+        try:
+            from vllm_ascend.ascend_config import get_ascend_config
+
+            if not get_ascend_config().sparse_kv_offload_config.use_fused_copy_sfa:
+                return 0
+            return int(get_ascend_config().sparse_kv_offload_config.topk_buffer_size)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _try_create_copy_sfa_slot_allocator(vllm_config: VllmConfig) -> CopySfaTopkSlotAllocator | None:
+        try:
+            from vllm_ascend.ascend_config import get_ascend_config
+
+            if not get_ascend_config().sparse_kv_offload_config.use_fused_copy_sfa:
+                return None
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        except Exception:
+            return None
+        return CopySfaTopkSlotAllocator(copy_sfa_pool_capacity(max_num_seqs))
+
     def _access_metaserver(self, url: str, message: dict[str, Any]):
         with httpx.Client(
             limits=httpx.Limits(max_connections=100000),

@@ -1488,6 +1488,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
         return hidden_states, ql_nope, q_pe, q_c
 
+    def _prepare_indexer_metadata(self, indexer_metadata, attn_metadata) -> None:
+        """Allow an attention backend to supply indexer selection metadata."""
+        return
+
     def _get_indexcache_topk_indices(self, num_tokens: int) -> torch.Tensor:
         if self.topk_indices_buffer is None:
             raise RuntimeError("IndexCache requires topk_indices_buffer when skip_topk is enabled.")
@@ -1900,6 +1904,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # independently built metadata.
             assert k_hidden_states is not None
             assert indexer_attn_metadata is not None
+            self._prepare_indexer_metadata(indexer_attn_metadata, attn_metadata)
             topk_indices = self.indexer(
                 hidden_states,
                 q_c,
