@@ -33,6 +33,7 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
+    split_decodes_and_prefills,
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
@@ -516,6 +517,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         if self.nope:
             self.nope_indexer = layer.impl.indexer
 
+        self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         if self.speculative_config:
@@ -690,15 +692,17 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             block_size=block_size,
             **parallel_metadata,
         )
+        (
+            metadata.num_decodes,
+            metadata.num_prefills,
+            metadata.num_decode_tokens,
+            _,
+        ) = split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+            treat_short_extends_as_decodes=not self.use_pcp,
+        )
         if self.nope:
-            query_lens = (
-                common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
-                - common_attn_metadata.query_start_loc_cpu[:num_reqs]
-            )
-            is_prefilling = query_lens > getattr(common_attn_metadata, "decode_token_per_req", 1)
-            metadata.num_prefills = int(is_prefilling.sum())
-            metadata.num_decodes = num_reqs - metadata.num_prefills
-            metadata.num_decode_tokens = int(query_lens[~is_prefilling].sum())
             if draft_index not in self.nope_states:
                 self.nope_states[draft_index] = SparseMLAMetadataState(
                     self.kv_cache_spec, self.vllm_config, self.device, self.nope_indexer, self.kernel_block_size
@@ -1313,12 +1317,18 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos: torch.Tensor,
         sin: torch.Tensor,
         slot_mapping: torch.Tensor,
+        *,
+        attn_metadata: M | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
         torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
     ]:
+        assert slot_mapping.numel() == hidden_states.shape[0], (
+            "SFA Prolog V3 requires one cache index per input token, "
+            f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping.numel()}."
+        )
         assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized for PROLOG_V3"
         assert self.kv_a_layernorm is not None, "kv_a_layernorm must be initialized for PROLOG_V3"
 
@@ -1790,11 +1800,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             gate_hidden_states = gate_hidden_states[:num_input_tokens]
 
         if fused_type != PreprocessType.NATIVE:
-            if fused_type == PreprocessType.PROLOG_V3:
-                assert slot_mapping_sfa.numel() == hidden_states.shape[0], (
-                    "SFA Prolog V3 requires one cache index per input token, "
-                    f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping_sfa.numel()}."
-                )
             # Keep the raw hidden states for the indexer's k path: the fused
             # preprocess below returns new tensors and does not modify this
             # one in place.
@@ -1815,6 +1820,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     # the per-step conversion so all layers of a step share
                     # one Cast kernel (the .to() inside is a no-op on int64).
                     slot_mapping=_int64_kv_slots(slot_mapping_sfa, attn_metadata),
+                    attn_metadata=attn_metadata,
                 )
             else:
                 hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_mlapo(
