@@ -44,6 +44,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.graph_query_metadata import GraphQueryMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_dcp,
@@ -183,6 +184,13 @@ class AscendMetadata:
     seq_lens_list: list[int] = None  # type: ignore
     actual_seq_lengths_q: list[int] = None  # type: ignore
 
+    # Private eager DFlash correctness prototype; expanded read-only FIA
+    # metadata is reused across layers, never used for cache writes.
+    query_invariant_fia: object | None = None
+    # Separately prepared outside graph capture. The metadata builder strongly
+    # owns the underlying per-shape table across capture and all replays.
+    query_invariant_graph_fia: object | None = None
+
     query_start_loc: torch.Tensor = None
     # Maximum query length in the batch (None for decoding).
     max_query_len: int | None = None
@@ -240,6 +248,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
 
         self.speculative_config = vllm_config.speculative_config
+        self.query_invariant_graph_builder = None
+        if (
+            (self.speculative_config is None or self.speculative_config.method == "dflash")
+            and self.model_config.dtype == torch.bfloat16
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            self.query_invariant_graph_builder = GraphQueryMetadataBuilder()
         self.decode_threshold = 1
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
@@ -405,6 +420,23 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if self.pcp_enabled:
             assert expanded_slot_mapping is not None
             self._finalize_pcp_metadata(attn_metadata, expanded_slot_mapping)
+        # Metadata is built before set_ascend_forward_context. DFlash draft
+        # attention is noncausal, so use the explicit metadata to exclude it;
+        # _EXTRA_CTX is only valid inside the subsequent model forward.
+        if (
+            self.query_invariant_graph_builder is not None
+            and attn_metadata.causal
+            and attn_metadata.max_query_len <= self.decode_threshold
+        ):
+            # This runs before entering the captured model. Rebuild lengths
+            # and refresh the same strongly-owned table for every step.
+            attn_metadata.query_invariant_graph_fia = self.query_invariant_graph_builder.build(
+                attn_metadata.actual_seq_lengths_q,
+                attn_metadata.seq_lens_list,
+                attn_metadata.block_tables,
+                common_attn_metadata.num_actual_tokens,
+                self.decode_threshold,
+            )
         return attn_metadata
 
     def _finalize_pcp_metadata(
@@ -865,6 +897,50 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key = key[:num_tokens]
             value = value[:num_tokens]
         # Get workspace from cache or calculate it if not present.
+        speculative = self.vllm_config.speculative_config
+        if (
+            (speculative is None or speculative.method == "dflash")
+            and not _EXTRA_CTX.is_draft_model
+            and attn_metadata.causal
+            and self.attn_type != AttentionType.ENCODER_DECODER
+            and (block_table is not None or self.key_cache is not None)
+            and self.sinks is None
+            and self.sliding_window is None
+            and not self.enable_hamming_sparse
+            and query.dtype == key.dtype == value.dtype == torch.bfloat16
+        ):
+            from vllm_ascend.attention.query_invariant import expand_query_metadata, query_invariant_attention
+
+            # Cold Prefill has already written the original KV cache in
+            # reshape_and_cache. Read those same pages, just like cached or
+            # chunked Prefill. No KV write/ownership mapping is changed.
+            if block_table is None:
+                assert attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+                num_blocks, block_size = self.key_cache.shape[:2]
+                key = self.key_cache.view(num_blocks, block_size, -1)
+                value = self.value_cache.view(num_blocks, block_size, -1)
+                block_table = attn_metadata.block_tables
+                actual_seq_lengths_kv = attn_metadata.seq_lens_list
+
+            # Canonicalize all target queries, not only short Verify. Long
+            # Prefill and arbitrary chunk boundaries also change FIA rounding.
+            if attn_metadata.query_invariant_fia is None:
+                attn_metadata.query_invariant_fia = expand_query_metadata(
+                    attn_metadata.actual_seq_lengths_q,
+                    actual_seq_lengths_kv,
+                    block_table,
+                    num_tokens,
+                )
+            if attn_metadata.query_invariant_fia is not None:
+                attn_output = query_invariant_attention(
+                    torch_npu.npu_fused_infer_attention_score, query, key, value,
+                    attn_metadata.query_invariant_fia, block_size=block_size,
+                    num_heads=self.num_heads, num_kv_heads=self.num_kv_heads,
+                    scale=self.scale, mask=attn_metadata.attn_mask,
+                )
+                output[:num_tokens] = attn_output.view(num_tokens, self.num_heads, self.head_size)
+                return output
+
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
