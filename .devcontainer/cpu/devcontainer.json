@@ -1,0 +1,29 @@
+{
+  "name": "vllm-ascend Dev Container (CPU)",
+  "workspaceFolder": "/workspace/vllm-ascend",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/vllm-ascend,type=bind,consistency=cached",
+  "remoteUser": "root",
+  "image": "m.daocloud.io/quay.io/ascend/vllm-ascend:nightly-main",
+  "runArgs": [
+    "--shm-size=1g",
+    "--publish=8000:8000"
+  ],
+  "mounts": [
+    "source=${localEnv:HOME}/.cache,target=/root/.cache,type=bind,consistency=cached"
+  ],
+  "postCreateCommand": "bash .devcontainer/cpu/postCreateCommand.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "redhat.vscode-yaml"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  }
+}
