@@ -133,6 +133,29 @@ pip show vllm-ascend
 
 Expected result: The version information is displayed, matching the pulled image version.
 
+### 4.2 A3 Prefill Scheduling Metadata (Optional Vendor Package)
+
+The metadata-aware `MinimaxSparseAttentionSplitKv` package can be used for A3 BF16 prefill. Its ACLNN interface adds a metadata tensor to the existing function signature. The legacy and metadata-aware packages export the same symbol names, so the ABI must be selected explicitly before starting the service.
+
+Use the matching two-operator package from `msa_a3_a5_run_20260918.tar.gz`: `msa_a3_20260918.run` on A3 or `msa_a5_20260918.run` on A5. Install it in an isolated directory and configure the process with:
+
+```bash
+bash msa_a3_20260918.run --install-path=/path/to/msa-metadata  # use msa_a5_20260918.run on A5
+export ASCEND_CUSTOM_OPP_PATH=/path/to/msa-metadata/vendors/custom_transformer${ASCEND_CUSTOM_OPP_PATH:+:$ASCEND_CUSTOM_OPP_PATH}
+export LD_LIBRARY_PATH=/path/to/msa-metadata/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}
+export VLLM_ASCEND_MINIMAX_M3_PREFILL_METADATA=1
+```
+
+A3 and A5 allocate a 4 KiB device buffer per prefill call. The C++ binding invokes `MinimaxSparseAttentionSplitKvMetadata` and then `MinimaxSparseAttentionSplitKv` on the current stream. Graph replay regenerates the schedule from the current device-side K2Q row pointers. Both ACLNN operators are provided by the same platform-specific vendor package; a separate Python wheel or Torch registration library is not required. Existing device-side K2Q construction and each platform's precision path are preserved. The earlier fused-consumer-only package is not supported by this opt-in path.
+
+`VLLM_ASCEND_MINIMAX_M3_PREFILL_METADATA` accepts `0` or `1` and defaults to `0` (legacy ABI). Set it to `1` only with the matching A3 or A5 two-operator package; do not load that consumer with the legacy ABI. To return to the legacy package, remove the metadata package paths, unset the flag, and restart the service.
+
+Validate the installed package on A3 or A5 with:
+
+```bash
+pytest -v tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py -k prefill_schedule_metadata
+```
+
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
 Start the online serving service with the following command:

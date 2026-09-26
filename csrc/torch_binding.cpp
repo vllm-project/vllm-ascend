@@ -2021,7 +2021,8 @@ at::Tensor npu_sparse_attention_score_prefill(
     int64_t num_key_value_heads, double scale_value, int64_t block_size,
     int64_t top_k, int64_t inner_precise,
     const c10::optional<at::Tensor> &actual_seq_lengths,
-    const c10::optional<at::Tensor> &actual_seq_lengths_kv)
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
+    const c10::optional<at::Tensor> &metadata)
 {
     for (size_t i = 0; i < query.sizes().size(); i++) {
         TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
@@ -2040,6 +2041,42 @@ at::Tensor npu_sparse_attention_score_prefill(
     bool softmax_lse_flag = false;
     std::string input_layout = "TND";
     char *input_layout_ptr = const_cast<char *>(input_layout.c_str());
+
+    if (metadata.has_value()) {
+        constexpr int64_t PREFILL_SCHEDULE_METADATA_SIZE = 1024;
+        TORCH_CHECK(metadata->scalar_type() == at::kInt && metadata->dim() == 1 &&
+                        metadata->numel() == PREFILL_SCHEDULE_METADATA_SIZE && metadata->is_contiguous(),
+                    "MiniMax-M3 prefill metadata must be contiguous int32[1024]");
+        TORCH_CHECK(metadata->device() == query.device(),
+                    "MiniMax-M3 prefill metadata must be on the query device");
+        TORCH_CHECK(query.dim() == 3, "MiniMax-M3 prefill query must use TND layout");
+        // Produce the schedule on the current stream before its consumer. Both
+        // launches are captured together, so replay regenerates it from the
+        // current K2Q row pointers rather than reusing a stale schedule.
+        const int64_t total_q_tokens = query.size(0);
+        const int64_t num_query_heads = query.size(1);
+        EXEC_NPU_CMD(
+            aclnnMinimaxSparseAttentionSplitKvMetadata,
+            k2q_row_ptr, total_q_tokens, num_query_heads, num_key_value_heads,
+            block_size, inner_precise, *metadata
+        );
+        // Mixed decode/prefill batches pass a suffix of the query tensor. The
+        // metadata-aware consumer creates an internal view whose storage shape
+        // can reject that nonzero offset. contiguous() alone retains the offset
+        // for an already contiguous slice, so materialize only offset queries.
+        const at::Tensor query_arg = query.storage_offset() == 0
+            ? query : query.clone(at::MemoryFormat::Contiguous);
+        // This vendor ABI adds metadata before num_key_value_heads. Keep the
+        // legacy call separate: the symbol name alone cannot distinguish them.
+        EXEC_NPU_CMD(
+            aclnnMinimaxSparseAttentionSplitKv,
+            query_arg, key, value, block_table, k2q_row_ptr, k2q_q_indices,
+            k2q_slot_indices, actual_seq_lengths, actual_seq_lengths_kv, metadata,
+            num_key_value_heads, scale_value, block_size, top_k, inner_precise,
+            softmax_lse_flag, input_layout_ptr, output, softmax_lse
+        );
+        return output;
+    }
 
     EXEC_NPU_CMD(
         aclnnMinimaxSparseAttentionSplitKv,
@@ -3063,7 +3100,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           Tensor block_table,Tensor k2q_row_ptr,Tensor k2q_q_indices,Tensor k2q_slot_indices,"
         "                           int num_key_value_heads, float scale_value,"
         "                           int block_size, int top_k, int inner_precise, *,"
-        "                           Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None"
+        "                           Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None,"
+        "                           Tensor(a!)? metadata=None"
         "                           ) -> Tensor "
     );
     ops.impl("npu_sparse_attention_score_prefill", torch::kPrivateUse1, &vllm_ascend::npu_sparse_attention_score_prefill);

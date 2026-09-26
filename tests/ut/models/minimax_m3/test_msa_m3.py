@@ -1683,6 +1683,7 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
 
 
 @pytest.mark.parametrize(("supports_fp8", "expected_inner_precise"), [(False, 0), (True, 1)])
+@pytest.mark.parametrize("enable_metadata", [False, True])
 @patch.object(
     torch.ops._C_ascend,
     "npu_sparse_attention_score_prefill",
@@ -1694,7 +1695,10 @@ def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
     mock_sparse_attention_score_prefill: MagicMock,
     supports_fp8: bool,
     expected_inner_precise: int,
+    enable_metadata: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("VLLM_ASCEND_MINIMAX_M3_PREFILL_METADATA", str(int(enable_metadata)))
     q = torch.zeros(3, 4, 4, dtype=torch.bfloat16)
     kv_cache = torch.zeros(2, 8, 128, 2, 4, dtype=torch.bfloat16)
     topk_idx = torch.tensor(
@@ -1750,6 +1754,14 @@ def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
     assert args[7:12] == (2, 0.5, 128, 2, expected_inner_precise)
     assert torch.equal(kwargs["actual_seq_lengths"], torch.tensor([1, 2], dtype=torch.int32))
     assert torch.equal(kwargs["actual_seq_lengths_kv"], seq_lens)
+    if enable_metadata:
+        metadata = kwargs["metadata"]
+        assert metadata.shape == (1024,)
+        assert metadata.dtype == torch.int32
+        assert metadata.device == q.device
+        assert metadata.is_contiguous()
+    else:
+        assert "metadata" not in kwargs
     assert torch.equal(output, torch.ones_like(output))
 
 
