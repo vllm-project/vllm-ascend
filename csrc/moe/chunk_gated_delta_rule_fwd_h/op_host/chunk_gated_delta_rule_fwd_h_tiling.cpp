@@ -120,6 +120,8 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     tilingCtx.useGk = useGk;
     tilingCtx.aicCoreNum = ascendcPlatform.GetCoreNumAic();
     tilingCtx.libApiWorkSpaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
+    tilingCtx.skipResidentWorkspaces =
+        ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND310P;
 
     if (tilingCtx.vNumHead % tilingCtx.kNumHead != 0) {
         OP_LOGE(context->GetNodeName(), "Check head num failed, vNumHead should be divisible by kNumHead.");

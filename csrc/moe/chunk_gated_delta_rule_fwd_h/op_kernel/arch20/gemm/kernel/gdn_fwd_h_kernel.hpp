@@ -15,45 +15,15 @@
 #include "catlass/arch/resource.hpp"
 #include "catlass/catlass.hpp"
 #include "catlass/epilogue/block/block_epilogue.hpp"
-#include "../../epilogue/block/block_epilogue_gdn_fwdh_update.hpp"
 #include "../../epilogue/block/block_epilogue_gdn_fwdh_vnew.hpp"
-#include "catlass/gemm/block/block_mmad.hpp"
-#include "kernel_utils/block/block_mmad_pingpong_tla_multi.hpp"
-#include "catlass/gemm/block/block_swizzle.hpp"
-#include "../block/block_scheduler_gdn_fwd_h.hpp"
-#include "catlass/gemm/dispatch_policy.hpp"
+#include "kernel_utils/gemm/hand_mmad_310p.hpp"
 #include "catlass/gemm/gemm_type.hpp"
 #include "catlass/layout/layout.hpp"
 #include "catlass/gemm_coord.hpp"
-#include "tla/tensor.hpp"
-#include "tla/layout.hpp"
-#include "tla/tensor.hpp"
-
-using _0 = tla::Int<0>;
-using _1 = tla::Int<1>;
-using _2 = tla::Int<2>;
-using _4 = tla::Int<4>;
-using _8 = tla::Int<8>;
-using _16 = tla::Int<16>;
-using _32 = tla::Int<32>;
-using _64 = tla::Int<64>;
-using _128 = tla::Int<128>;
-using _256 = tla::Int<256>;
-using _512 = tla::Int<512>;
-using _1024 = tla::Int<1024>;
-using _2048 = tla::Int<2048>;
-using _4096 = tla::Int<4096>;
-using _8192 = tla::Int<8192>;
-using _16384 = tla::Int<16384>;
-using _32768 = tla::Int<32768>;
-using _65536 = tla::Int<65536>;
-
-
-
+#include "../block/block_scheduler_gdn_fwd_h.hpp"
 
 #include "kernel_operator.h"
 using namespace Catlass;
-using namespace tla;
 
 namespace Catlass::Gemm::Kernel {
 
@@ -68,37 +38,16 @@ public:
     
     using ArchTag = Arch::AtlasA2;
     using CubeScheduler = typename Catlass::Gemm::Block::BlockSchedulerGdnFwdHCube;
-    using VecScheduler = typename Catlass::Gemm::Block::BlockSchedulerGdnFwdHVec;
 
-    using DispatchPolicyTla = Gemm::MmadPingpongTlaMulti<ArchTag, true, false>;
-    using L1TileShapeTla = Shape<_128, _128, _128>;
-    using L0TileShapeTla = L1TileShapeTla;
-
-    using WType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
-    using HType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
+    // Only the vnew epilogue still takes GemmType wrappers; the hand mmads use
+    // the element types directly.
     using VworkType = Gemm::GemmType<WORKSPACE_TYPE, layout::RowMajor>;
-    using KType = Gemm::GemmType<INPUT_TYPE, layout::ColumnMajor>;
-    using HworkType = Gemm::GemmType<WORKSPACE_TYPE, layout::RowMajor>;
     using VType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
     using GType = Gemm::GemmType<G_TYPE, layout::RowMajor>;
     using UType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
-    using FinalStateType = Gemm::GemmType<STATE_TYPE, layout::RowMajor>;
 
-    // cube 1
-    using TileCopyWH = Catlass::Gemm::Tile::PackedTileCopyTla<ArchTag, INPUT_TYPE, layout::RowMajor, INPUT_TYPE, layout::RowMajor, WORKSPACE_TYPE, layout::RowMajor>;
-    using BlockMmadWH = Gemm::Block::BlockMmadTla<DispatchPolicyTla, L1TileShapeTla, L0TileShapeTla, INPUT_TYPE, INPUT_TYPE, WORKSPACE_TYPE, void, TileCopyWH>;
-
-    // cube 2
-    using TileCopyKV = Catlass::Gemm::Tile::PackedTileCopyTla<ArchTag, INPUT_TYPE, layout::ColumnMajor, INPUT_TYPE, layout::RowMajor, WORKSPACE_TYPE, layout::RowMajor>;
-    using BlockMmadKV = Gemm::Block::BlockMmadTla<DispatchPolicyTla, L1TileShapeTla, L0TileShapeTla, INPUT_TYPE, INPUT_TYPE, WORKSPACE_TYPE, void, TileCopyKV>;
-
-    // vec 1
     using DispatchPolicyGDNFwdHVnew = Epilogue::EpilogueAtlasGDNFwdHVnew;
     using EpilogueGDNFwdHVnew = Epilogue::Block::BlockEpilogue<DispatchPolicyGDNFwdHVnew, VType, GType, UType, VworkType>;
-
-    // vec 2
-    using DispatchPolicyGDNFwdHUpdate = Epilogue::EpilogueAtlasGDNFwdHUpdate;
-    using EpilogueGDNFwdHUpdate = Epilogue::Block::BlockEpilogue<DispatchPolicyGDNFwdHUpdate, HType, GType, HType, HworkType, FinalStateType>;
 
     using GDNFwdHOffsets = Catlass::Gemm::Block::GDNFwdHOffsets;
 
@@ -108,15 +57,8 @@ public:
     using ElementG = G_TYPE;
     using ElementH = INPUT_TYPE;
     using ElementV = INPUT_TYPE;
-    using ElementVWork = WORKSPACE_TYPE;
-    using ElementHWork = WORKSPACE_TYPE;
     using ElementInitialState = STATE_TYPE;
     using ElementFinalState = STATE_TYPE;
-    
-    using LayoutW = Catlass::layout::RowMajor;
-    using LayoutH = Catlass::layout::RowMajor;
-    using LayoutV = Catlass::layout::RowMajor;
-    using LayoutK = Catlass::layout::ColumnMajor;
 
     
     uint32_t batch;
@@ -132,9 +74,7 @@ public:
     uint32_t isVariedLen;
     uint32_t shapeBatch;
     uint32_t tokenBatch;
-    uint32_t vWorkspaceOffset;
     uint32_t vUpdateWorkspaceOffset;
-    uint32_t hWorkspaceOffset;
     uint32_t numSeqWorkspaceOffset;
     uint32_t numChunksWorkspaceOffset;
     
@@ -146,16 +86,13 @@ public:
     AscendC::GlobalTensor<ElementH> gmH;
     AscendC::GlobalTensor<ElementV> gmV;
     AscendC::GlobalTensor<ElementFinalState> gmFinalState;
-    AscendC::GlobalTensor<ElementVWork> gmVWorkspace;
     AscendC::GlobalTensor<ElementV> gmVUpdateWorkspace;
-    AscendC::GlobalTensor<ElementHWork> gmHWorkspace;
     
     AscendC::GlobalTensor<int64_t> gmSeqlen;
     AscendC::GlobalTensor<int64_t> gmNumSeq;
     AscendC::GlobalTensor<int64_t> gmNumChunks;
 
     CubeScheduler cubeBlockScheduler;
-    VecScheduler vecBlockScheduler;
 
     Arch::Resource<ArchTag> resource;
 
@@ -181,9 +118,7 @@ public:
         isVariedLen = gdnFwdHTilingData->isVariedLen;
         shapeBatch = gdnFwdHTilingData->shapeBatch;
         tokenBatch = gdnFwdHTilingData->tokenBatch;
-        vWorkspaceOffset = gdnFwdHTilingData->vWorkspaceOffset;
         vUpdateWorkspaceOffset = gdnFwdHTilingData->vUpdateWorkspaceOffset;
-        hWorkspaceOffset = gdnFwdHTilingData->hWorkspaceOffset;
         numSeqWorkspaceOffset = gdnFwdHTilingData->numSeqWorkspaceOffset;
         numChunksWorkspaceOffset = gdnFwdHTilingData->numChunksWorkspaceOffset;
         
@@ -195,9 +130,7 @@ public:
         gmH.SetGlobalBuffer((__gm__ ElementH *)h);
         gmV.SetGlobalBuffer((__gm__ ElementV *)v_new);
         gmFinalState.SetGlobalBuffer((__gm__ ElementFinalState *)final_state);
-        gmVWorkspace.SetGlobalBuffer((__gm__ ElementVWork *)(user + vWorkspaceOffset));
         gmVUpdateWorkspace.SetGlobalBuffer((__gm__ ElementV *)(user + vUpdateWorkspaceOffset));
-        gmHWorkspace.SetGlobalBuffer((__gm__ ElementHWork *)(user + hWorkspaceOffset));
 
         gmSeqlen.SetGlobalBuffer((__gm__ int64_t *)cu_seqlens);
         gmNumSeq.SetGlobalBuffer((__gm__ int64_t *)(user + numSeqWorkspaceOffset));
@@ -210,87 +143,147 @@ public:
         ProcessUnifiedCore();
     }
 
-    __aicore__ inline void ProcessUnifiedCore() {
-        uint32_t coreNum = AscendC::GetBlockNum();
+    // ---- hand-mmad scratch (unified core only) --------------------------------
+    // The Catlass BlockMmadTla path is gone from ProcessUnifiedCore, so L1 and the
+    // low UB are free outside the epilogues' own windows. Stage (NZ) and the ND
+    // copy-out sit in [0, 128K): the epilogues' MTE3_MTE2 guards order their MTE2
+    // loads after our MTE3 reads, V-pipe order covers the epilogues' calc buffer,
+    // and MTE3-in-order covers overlap with their outstanding GM stores.
+    static constexpr uint32_t HM_STAGE_OFFSET = 0;          // <=128x128 f32 = 64 KB
+    static constexpr uint32_t HM_ND_OFFSET    = 64 * 1024;  // same max
+    static constexpr uint32_t HM_L1A_OFFSET   = 0;
+    static constexpr uint32_t HM_L1B_OFFSET   = 64 * 1024;
+    // ---- L1-resident h ------------------------------------------------------
+    // The recurrence state h[k x v] never leaves the chip between chunks: it
+    // lives in L1 as zN f16, one bank per interleaved head (the scheduler
+    // alternates two heads per core). Cube1 takes it as its B operand with no
+    // load at all; the update phase pulls m-tiles L1->UB (MTE1), computes the
+    // new state NZ-native against the cube staging buffer, writes it back
+    // (MTE3) and deformats an f16 ND copy only for the gmH output store.
+    // Chunk 0 of a task bootstraps the bank straight from gmH with the same
+    // Nd2Nz the old GM path used.
+    static constexpr uint32_t HRES_L1_SLOT   = 48 * 1024;   // zN(192,128) f16 max
+    static constexpr uint32_t HRES_L1_OFFSET = 128 * 1024;
+    // Update-phase UB map (all below vnew's pong region lifetimes):
+    // Single-tile update (m = kHeadDim <= 192): the h_work stage grows to
+    // 96 KB at [0,96K); the resident h tile sits above it. No f32 calc buffer:
+    // Axpy fuses h*scale straight into the stage. [144K,192K) is scratch for
+    // the (rare) final_state deformats.
+    static constexpr uint32_t UB_UPD_H16   = 96 * 1024;   // f16 tile, <=48 KB
+    static constexpr uint32_t UB_UPD_NDOUT = 144 * 1024;  // final-state + exp(g_last) scratch
 
-        BlockMmadWH blockMmadWH(resource);
-        BlockMmadKV blockMmadKV(resource);
-        EpilogueGDNFwdHVnew epilogueGDNFwdHVnew(resource);
-
-        auto wLayout = tla::MakeLayout<ElementW, LayoutW>(shapeBatch * kNumHead * cubeBlockScheduler.totalTokens, kHeadDim);
-        auto hLayout = tla::MakeLayout<ElementH, LayoutH>(shapeBatch * vNumHead * cubeBlockScheduler.totalChunks * kHeadDim, vHeadDim);
-        auto vLayout = tla::MakeLayout<ElementVWork, LayoutV>(coreNum * chunkSize * PING_PONG_STAGES, vHeadDim);
-        auto kLayout = tla::MakeLayout<ElementK, LayoutK>(kHeadDim, shapeBatch * kNumHead * cubeBlockScheduler.totalTokens);
-        auto vworkLayout = tla::MakeLayout<ElementV, LayoutV>(coreNum * chunkSize * PING_PONG_STAGES, vHeadDim);
-        auto hworkLayout = tla::MakeLayout<ElementHWork, LayoutH>(coreNum * kHeadDim * PING_PONG_STAGES, vHeadDim);
-
-        if (useInitialState) {
-            AscendC::LocalTensor<ElementInitialState> stateUbTensorPing = resource.ubBuf.template GetBufferByByte<ElementInitialState>(0);
-            AscendC::LocalTensor<ElementInitialState> stateUbTensorPong = resource.ubBuf.template GetBufferByByte<ElementInitialState>(96 * 1024);
-            AscendC::LocalTensor<ElementH> hUbTensorPing = resource.ubBuf.template GetBufferByByte<ElementH>(64 * 1024);
-            AscendC::LocalTensor<ElementH> hUbTensorPong = resource.ubBuf.template GetBufferByByte<ElementH>(160 * 1024);
-            uint32_t totalChunks = isVariedLen ? cubeBlockScheduler.totalChunks : ((seqlen + chunkSize - 1) / chunkSize);
-            uint32_t stateBlockSize = kHeadDim * vHeadDim;
-            uint32_t pingpongFlag = 1;
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
-            for (uint32_t shapeBatchIdx = 0; shapeBatchIdx < shapeBatch; shapeBatchIdx++) {
-                for (uint32_t vHeadIdx = 0; vHeadIdx < vNumHead; vHeadIdx++) {
-                    for (uint32_t tokenBatchIdx = 0; tokenBatchIdx < cubeBlockScheduler.tokenBatch; tokenBatchIdx++) {
-                        uint32_t batchIdx = isVariedLen ? tokenBatchIdx : shapeBatchIdx;
-                        uint32_t chunkOffset = isVariedLen ? gmNumChunks.GetValue(tokenBatchIdx) : 0;
-                        uint32_t initialStateOffset = (batchIdx * vNumHead + vHeadIdx) * stateBlockSize;
-                        uint32_t hOffset = (shapeBatchIdx * vNumHead * totalChunks + vHeadIdx * totalChunks + chunkOffset) * stateBlockSize;
-                        AscendC::LocalTensor<ElementInitialState> stateUbTensor = pingpongFlag ? stateUbTensorPing : stateUbTensorPong;
-                        AscendC::LocalTensor<ElementH> hUbTensor = pingpongFlag ? hUbTensorPing : hUbTensorPong;
-                        auto event_id = pingpongFlag ? EVENT_ID1 : EVENT_ID0;
-                        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
-                        if constexpr(!std::is_same<ElementInitialState, ElementH>::value) {
-                            AscendC::DataCopy(stateUbTensor, gmInitialState[initialStateOffset], stateBlockSize);
-                            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_id);
-                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_id);
-                            AscendC::Cast(hUbTensor, stateUbTensor, AscendC::RoundMode::CAST_NONE, stateBlockSize);
-                            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(event_id);
-                            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(event_id);
-                            AscendC::DataCopy(gmH[hOffset], hUbTensor, stateBlockSize);
-                        } else {
-                            AscendC::DataCopy(stateUbTensor, gmInitialState[initialStateOffset], stateBlockSize);
-                            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
-                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
-                            AscendC::DataCopy(gmH[hOffset], stateUbTensor, stateBlockSize);
-                        }
-                        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
-                        pingpongFlag = 1 - pingpongFlag;
-                    }
-                }
-            }
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+    // m-tile of the resident bank <-> UB, one strided descriptor each way.
+    // zN(kR, v): fractal column nf stride kR*16 elems; a tile is nFracs runs of
+    // mActual*16 elems starting at mOff*16.
+    __aicore__ inline void ExtractResidentH(uint32_t slot, uint32_t kR,
+                                            uint32_t mOff, uint32_t mActual, uint32_t nFracs) {
+        auto src = resource.l1Buf.template GetBufferByByte<half>(
+            HRES_L1_OFFSET + slot * HRES_L1_SLOT);
+        auto dst = resource.ubBuf.template GetBufferByByte<half>(UB_UPD_H16);
+        AscendC::DataCopyParams p;
+        p.blockCount = static_cast<uint16_t>(nFracs);
+        p.blockLen = static_cast<uint16_t>(mActual);            // mActual*16 f16 / 32B
+        p.srcStride = static_cast<uint16_t>(kR - mActual);
+        p.dstStride = 0;
+        AscendC::DataCopy(dst, src[mOff * 16], p);
+    }
+    __aicore__ inline void WritebackResidentH(uint32_t slot, uint32_t kR,
+                                              uint32_t mOff, uint32_t mActual, uint32_t nFracs) {
+        auto src = resource.ubBuf.template GetBufferByByte<half>(UB_UPD_H16);
+        auto dst = resource.l1Buf.template GetBufferByByte<half>(
+            HRES_L1_OFFSET + slot * HRES_L1_SLOT);
+        AscendC::DataCopyParams p;
+        p.blockCount = static_cast<uint16_t>(nFracs);
+        p.blockLen = static_cast<uint16_t>(mActual);
+        p.srcStride = 0;
+        p.dstStride = static_cast<uint16_t>(kR - mActual);
+        AscendC::DataCopy(dst[mOff * 16], src, p);
+    }
+    // NZ -> ND for f16 (h_out store) or f32 (final_state store), same walk as
+    // DeformatStagingToUb. UB->UB rides V; caller supplies src/dst offsets.
+    template <typename T>
+    __aicore__ inline void DeformatNzToNd(uint32_t dstOff, uint32_t srcOff,
+                                          uint32_t mActual, uint32_t nActual) {
+        auto src = resource.ubBuf.template GetBufferByByte<T>(srcOff);
+        auto dst = resource.ubBuf.template GetBufferByByte<T>(dstOff);
+        uint32_t mAligned = (mActual + 15) / 16 * 16;
+        uint32_t nAligned = (nActual + 15) / 16 * 16;
+        uint32_t mFracs = mAligned / 16;
+        uint32_t nFracs = nAligned / 16;
+        AscendC::DataCopyParams p;
+        p.blockCount = static_cast<uint16_t>(mAligned);
+        p.blockLen = static_cast<uint16_t>(16 * sizeof(T) / 32);
+        p.srcStride = 0;
+        p.dstStride = static_cast<uint16_t>((nAligned - 16) * sizeof(T) / 32);
+        for (uint32_t nf = 0; nf < nFracs; ++nf) {
+            AscendC::DataCopy(dst[nf * 16], src[nf * mFracs * 256], p);
         }
+    }
 
+    // NZ cube staging -> ND, one strided descriptor per Z-column (same move as
+    // chunk_fwd_o's DeformatL0CStagingToUb; MTE3, reads after HandMmad's V_MTE3
+    // drain, feeds the MTE3 GM store in pipe order).
+    // v_work: NZ staging -> ND at HM_ND_OFFSET for the (still ND) vnew epilogue.
+    // MTE3_V before: epilogue GM stores still read the dst window. V_MTE3 after:
+    // the ND store... none remains -- kept so the next MTE3 reader (none today,
+    // vnew consumes on V) stays ordered if one returns.
+    __aicore__ inline void DeformatStagingToUb(uint32_t mActual, uint32_t nActual) {
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+        DeformatNzToNd<float>(HM_ND_OFFSET, HM_STAGE_OFFSET, mActual, nActual);
+        // No V_MTE3 tail: no MTE3 reader of the ND window remains, and
+        // reduce_flags (fwd_h_v3.yaml) proves the epilogue's kept fences
+        // order everything that follows.
+    }
+
+    __aicore__ inline void ProcessUnifiedCore() {
+        // NOTE: the runtime registers this binary with mixType=0 (plain launch),
+        // so exactly one instance runs per core and GetSubBlockIdx() is NOT
+        // meaningful here -- an early-return gate on it killed every core once
+        // the host stack was rebuilt. The epilogues are hardcoded to a single
+        // subblock; no gate is needed.
+        EpilogueGDNFwdHVnew epilogueGDNFwdHVnew(resource);
         while (cubeBlockScheduler.isRunning) {
             cubeBlockScheduler.InitTask();
             GDNFwdHOffsets& stage1Offsets = cubeBlockScheduler.GetStage1Offsets();
 
-            // CUBE1: v_work = w @ h[i]
+            // CUBE1: v_work = w @ h[i], hand mmad. h[i] and the workspaces are
+            // MTE3-written (previous chunk's Vec2 / the initial-state pre-loop),
+            // so drain MTE3 before the GM->L1 loads.
             if (cubeBlockScheduler.NeedProcessStage1()) {
-                auto tensorW = tla::MakeTensor(gmW[stage1Offsets.wOffset], wLayout, Catlass::Arch::PositionGM{});
-                auto tensorH = tla::MakeTensor(gmH[stage1Offsets.hSrcOffset], hLayout, Catlass::Arch::PositionGM{});
-                auto tensorV = tla::MakeTensor(gmVWorkspace[stage1Offsets.vWorkOffset], vLayout, Catlass::Arch::PositionGM{});
-                GemmCoord cube1Shape{stage1Offsets.blockTokens, vHeadDim, kHeadDim};
-                auto tensorBlockW = GetTile(tensorW, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.m(), cube1Shape.k()));
-                auto tensorBlockH = GetTile(tensorH, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.k(), cube1Shape.n()));
-                auto tensorBlockV = GetTile(tensorV, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.m(), cube1Shape.n()));
-                blockMmadWH.preSetFlags();
-                blockMmadWH(tensorBlockW, tensorBlockH, tensorBlockV, cube1Shape);
-                blockMmadWH.finalWaitFlags();
+                // Drain MTE3 first: the resident bank's last writeback and the
+                // workspaces are MTE3-written; the MTE2 A load chains MTE1 after
+                // it through HandMmad's MTE2_MTE1 pair.
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
+                if (stage1Offsets.isInitialState) {
+                    // Chunk 0: the host pre-fills h slot 0 with the zN image of
+                    // initial_state (or leaves the zeros the binding allocates),
+                    // so seeding the resident bank is one flat 48 KB burst.
+                    auto bank = resource.l1Buf.template GetBufferByByte<half>(
+                        HRES_L1_OFFSET + stage1Offsets.slot * HRES_L1_SLOT);
+                    AscendC::DataCopy(bank, gmH[stage1Offsets.hSrcOffset],
+                                      kHeadDim * vHeadDim);
+                }
+                M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/false,
+                                   /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/true,
+                                   /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true, /*NO_M_MTE1=*/true>(
+                    resource,
+                    gmW[stage1Offsets.wOffset], kHeadDim,
+                    gmH[stage1Offsets.hSrcOffset], vHeadDim,
+                    stage1Offsets.blockTokens, vHeadDim, kHeadDim,
+                    HM_L1A_OFFSET,
+                    HRES_L1_OFFSET + stage1Offsets.slot * HRES_L1_SLOT,
+                    HM_STAGE_OFFSET, 0);
+                DeformatStagingToUb(stage1Offsets.blockTokens, vHeadDim);
+                // v_work stays in UB at HM_ND_OFFSET; Vec1 consumes it in place.
             }
 
             // VEC1: v_new epilogue
             if (cubeBlockScheduler.NeedProcessStage1()) {
                 epilogueGDNFwdHVnew(
                     gmV[stage1Offsets.uvOffset], gmVUpdateWorkspace[stage1Offsets.vWorkOffset],
-                    gmG[stage1Offsets.gOffset], gmU[stage1Offsets.uvOffset], gmVWorkspace[stage1Offsets.vWorkOffset],
+                    gmG[stage1Offsets.gOffset], gmU[stage1Offsets.uvOffset], HM_ND_OFFSET,
                     stage1Offsets.blockTokens, kHeadDim, vHeadDim, cubeBlockScheduler.cube1Done
                 );
             }
@@ -298,212 +291,114 @@ public:
             if (cubeBlockScheduler.iterId > 1) {
                 GDNFwdHOffsets& stage2Offsets = cubeBlockScheduler.GetStage2Offsets();
 
-                // CUBE2: h_work = k.T @ v_update
-                // BlockMmadTla has no outer M loop; m must be split when kHeadDim > L1_TILE_M.
+                // CUBE2 + VEC2, single fused m=192 tile. h_work never touches
+                // GM: mmad -> NZ stage (96 KB) -> Axpy(stage += scale*h16) ->
+                // cast -> bank writeback + strided zN h store. One tile means
+                // half the fences and descriptors the m-loop paid.
                 if (cubeBlockScheduler.NeedProcessStage2()) {
-                    auto tensorK = tla::MakeTensor(gmK[stage2Offsets.wkOffset], kLayout, Catlass::Arch::PositionGM{});
-                    auto tensorVwork = tla::MakeTensor(gmVUpdateWorkspace[stage2Offsets.vWorkOffset], vworkLayout, Catlass::Arch::PositionGM{});
-                    auto tensorHwork = tla::MakeTensor(gmHWorkspace[stage2Offsets.hWorkOffset], hworkLayout, Catlass::Arch::PositionGM{});
-                    constexpr uint32_t L1_TILE_M_C2 = tla::get<0>(L1TileShapeTla{});
-                    uint32_t mLoopC2 = (kHeadDim + L1_TILE_M_C2 - 1) / L1_TILE_M_C2;
-                    for (uint32_t mIdx = 0; mIdx < mLoopC2; ++mIdx) {
-                        uint32_t mOff = mIdx * L1_TILE_M_C2;
-                        uint32_t mTail = kHeadDim - mOff;
-                        uint32_t mActual = (mTail < L1_TILE_M_C2) ? mTail : L1_TILE_M_C2;
-                        GemmCoord cube2Shape{mActual, vHeadDim, stage2Offsets.blockTokens};
-                        auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(mOff, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.k()));
-                        auto tensorBlockVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.k(), cube2Shape.n()));
-                        auto tensorBlockHwork = GetTile(tensorHwork, tla::MakeCoord(mOff, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.n()));
-                        blockMmadKV.preSetFlags();
-                        blockMmadKV(tensorBlockK, tensorBlockVwork, tensorBlockHwork, cube2Shape);
-                        blockMmadKV.finalWaitFlags();
+                    // v_update and the epilogue outputs are MTE3-written just
+                    // above: drain MTE3 into MTE2 (loads) and V (our writes).
+                    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
+                    // (MTE3_V drain dropped: reduce_flags proves the V stream is
+                    // already ordered behind the epilogue's kept store fences.)
+                    // exp(g_last) once per chunk (scalar dance; the GM read is
+                    // L2-warm here -- an MTE2 hoist measured neutral-to-worse).
+                    float hDecayScale;
+                    {
+                        AscendC::LocalTensor<float> gl =
+                            resource.ubBuf.template GetBufferByByte<float>(UB_UPD_NDOUT);
+                        gl.SetValue(0, gmG[stage2Offsets.gOffset].GetValue(stage2Offsets.blockTokens - 1));
+                        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
+                        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
+                        AscendC::Exp(gl, gl, 1);
+                        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID5);
+                        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID5);
+                        hDecayScale = gl.GetValue(0);
+                        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
+                        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
                     }
-                }
-
-                // VEC2: h update epilogue
-                if (cubeBlockScheduler.NeedProcessStage2()) {
-                    EpilogueGDNFwdHUpdate epilogueGDNFwdHUpdate(resource);
-                    epilogueGDNFwdHUpdate(
-                        gmH[stage2Offsets.hDstOffset], gmFinalState[stage2Offsets.finalStateOffset],
-                        gmG[stage2Offsets.gOffset], gmH[stage2Offsets.hSrcOffset],
-                        gmHWorkspace[stage2Offsets.hWorkOffset],
-                        stage2Offsets.blockTokens, kHeadDim, vHeadDim, cubeBlockScheduler.cube2Done,
-                        (stage2Offsets.isFinalState && storeFinalState)
-                    );
-                }
-            }
-        }
-    }
-
-    __aicore__ inline void ProcessSplitCore() {
-
-        if ASCEND_IS_AIC {
-            uint32_t coreIdx = AscendC::GetBlockIdx();
-            uint32_t coreNum = AscendC::GetBlockNum();
-
-            BlockMmadWH blockMmadWH(resource);
-            BlockMmadKV blockMmadKV(resource);
-
-            auto wLayout = tla::MakeLayout<ElementW, LayoutW>(shapeBatch * kNumHead * cubeBlockScheduler.totalTokens, kHeadDim);
-            auto hLayout = tla::MakeLayout<ElementH, LayoutH>(shapeBatch * vNumHead * cubeBlockScheduler.totalChunks * kHeadDim, vHeadDim);
-            auto vLayout = tla::MakeLayout<ElementVWork, LayoutV>(coreNum * chunkSize * PING_PONG_STAGES, vHeadDim);
-
-            auto kLayout = tla::MakeLayout<ElementK, LayoutK>(kHeadDim, shapeBatch * kNumHead * cubeBlockScheduler.totalTokens);
-            auto vworkLayout = tla::MakeLayout<ElementV, LayoutV>(coreNum * chunkSize * PING_PONG_STAGES, vHeadDim);
-            auto hworkLayout = tla::MakeLayout<ElementHWork, LayoutH>(coreNum * kHeadDim * PING_PONG_STAGES, vHeadDim);
-
-            while (cubeBlockScheduler.isRunning) {
-                cubeBlockScheduler.InitTask();
-                // step 1: v_work = w @ h[i]
-                GDNFwdHOffsets& cube1Offsets = cubeBlockScheduler.GetStage1Offsets();
-                Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done);
-                if (cubeBlockScheduler.NeedProcessStage1()) {
-                    int64_t cube1OffsetW = cube1Offsets.wOffset;
-                    int64_t cube1OffsetH = cube1Offsets.hSrcOffset;
-                    int64_t cube1OffsetVwork = cube1Offsets.vWorkOffset;
-                    auto tensorW = tla::MakeTensor(gmW[cube1OffsetW], wLayout, Catlass::Arch::PositionGM{});
-                    auto tensorH = tla::MakeTensor(gmH[cube1OffsetH], hLayout, Catlass::Arch::PositionGM{});
-                    auto tensorV = tla::MakeTensor(gmVWorkspace[cube1OffsetVwork], vLayout, Catlass::Arch::PositionGM{});
-                    GemmCoord cube1Shape {cube1Offsets.blockTokens, vHeadDim, kHeadDim};
-                    auto tensorBlockW = GetTile(tensorW, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.m(), cube1Shape.k()));
-                    auto tensorBlockH = GetTile(tensorH, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.k(), cube1Shape.n()));
-                    auto tensorBlockV = GetTile(tensorV, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.m(), cube1Shape.n()));
-                    blockMmadWH.preSetFlags();
-                    blockMmadWH(tensorBlockW, tensorBlockH, tensorBlockV, cube1Shape);
-                    blockMmadWH.finalWaitFlags();
-                }
-                Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube1Done);
-
-                if (cubeBlockScheduler.iterId > 1) {
-                    Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
-                    GDNFwdHOffsets& cube2Offsets = cubeBlockScheduler.GetStage2Offsets();
-                    if (cubeBlockScheduler.NeedProcessStage2()) {
-                        // step 3: h[i+1] = k.T @ v_work
-                        // BlockMmadTla has no outer M loop; m must be split when kHeadDim > L1_TILE_M.
-                        int64_t cube2OffsetK = cube2Offsets.wkOffset;
-                        int64_t cube2OffsetVwork = cube2Offsets.vWorkOffset;
-                        int64_t cube2OffsetH = cube2Offsets.hWorkOffset;
-                        auto tensorK = tla::MakeTensor(gmK[cube2OffsetK], kLayout, Catlass::Arch::PositionGM{});
-                        auto tensorVwork = tla::MakeTensor(gmVUpdateWorkspace[cube2OffsetVwork], vworkLayout, Catlass::Arch::PositionGM{});
-                        auto tensorHwork = tla::MakeTensor(gmHWorkspace[cube2OffsetH], hworkLayout, Catlass::Arch::PositionGM{});
-                        constexpr uint32_t L1_TILE_M_C2 = tla::get<0>(L1TileShapeTla{});
-                        uint32_t mLoopC2 = (kHeadDim + L1_TILE_M_C2 - 1) / L1_TILE_M_C2;
-                        for (uint32_t mIdx = 0; mIdx < mLoopC2; ++mIdx) {
-                            uint32_t mOff = mIdx * L1_TILE_M_C2;
-                            uint32_t mTail = kHeadDim - mOff;
-                            uint32_t mActual = (mTail < L1_TILE_M_C2) ? mTail : L1_TILE_M_C2;
-                            GemmCoord cube2Shape{mActual, vHeadDim, cube2Offsets.blockTokens};
-                            auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(mOff, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.k()));
-                            auto tensorBlockVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.k(), cube2Shape.n()));
-                            auto tensorBlockHwork = GetTile(tensorHwork, tla::MakeCoord(mOff, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.n()));
-                            blockMmadKV.preSetFlags();
-                            blockMmadKV(tensorBlockK, tensorBlockVwork, tensorBlockHwork, cube2Shape);
-                            blockMmadKV.finalWaitFlags();
+                    // v_update (B) loaded once.
+                    {
+                        AscendC::Nd2NzParams pb;
+                        pb.ndNum = 1;
+                        pb.nValue = stage2Offsets.blockTokens;
+                        pb.dValue = vHeadDim;
+                        pb.srcNdMatrixStride = 0;
+                        pb.srcDValue = vHeadDim;
+                        pb.dstNzC0Stride = (stage2Offsets.blockTokens + 15) / 16 * 16;
+                        pb.dstNzNStride = 1;
+                        pb.dstNzMatrixStride = 0;
+                        auto l1B = resource.l1Buf.template GetBufferByByte<half>(HM_L1B_OFFSET);
+                        AscendC::DataCopy(l1B, gmVUpdateWorkspace[stage2Offsets.vWorkOffset], pb);
+                    }
+                    M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false,
+                                       /*A_FROM_L1=*/false, /*A_COL_MAJOR=*/true,
+                                       /*B_FROM_L1=*/true,
+                                       /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true, /*NO_M_MTE1=*/true>(
+                        resource,
+                        gmK[stage2Offsets.wkOffset], kHeadDim,
+                        gmVUpdateWorkspace[stage2Offsets.vWorkOffset], vHeadDim,
+                        kHeadDim, vHeadDim, stage2Offsets.blockTokens,
+                        HM_L1A_OFFSET, HM_L1B_OFFSET, HM_STAGE_OFFSET, 0);
+                    uint32_t kR = (kHeadDim + 15) / 16 * 16;
+                    uint32_t nFr = vHeadDim / 16;
+                    uint32_t elems = kHeadDim * vHeadDim;
+                    uint32_t slot2 = stage2Offsets.slot;
+                    // (V_MTE1 + MTE3_MTE1 pairs dropped: reduce_flags proves the
+                    // extract is ordered through the mmad's kept M/V chain and
+                    // the stage-top MTE3_MTE2 drain.)
+                    ExtractResidentH(slot2, kR, 0, kHeadDim, nFr);
+                    AscendC::SetFlag<AscendC::HardEvent::MTE1_V>(EVENT_ID5);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE1_V>(EVENT_ID5);
+                    AscendC::LocalTensor<float> stageT =
+                        resource.ubBuf.template GetBufferByByte<float>(HM_STAGE_OFFSET);
+                    AscendC::LocalTensor<half> h16 =
+                        resource.ubBuf.template GetBufferByByte<half>(UB_UPD_H16);
+                    // h_new = h_work + scale * h  (f32 dst, f16 src, fused)
+                    AscendC::Axpy(stageT, h16, (half)hDecayScale, elems);
+                    AscendC::PipeBarrier<PIPE_V>();
+                    AscendC::Cast(h16, stageT, AscendC::RoundMode::CAST_NONE, elems);
+                    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+                    WritebackResidentH(slot2, kR, 0, kHeadDim, nFr);
+                    if (stage2Offsets.isFinalState && storeFinalState) {
+                        if constexpr (std::is_same<ElementFinalState, float>::value) {
+                            // ND f32 from the (still-live) f32 stage, staged over
+                            // the h16 scratch after the writeback consumed it.
+                            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                            DeformatNzToNd<float>(UB_UPD_H16, HM_STAGE_OFFSET, kHeadDim, vHeadDim);
+                            AscendC::LocalTensor<float> ndF =
+                                resource.ubBuf.template GetBufferByByte<float>(UB_UPD_H16);
+                            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+                            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+                            AscendC::DataCopy(gmFinalState[stage2Offsets.finalStateOffset], ndF, elems);
+                            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                        } else {
+                            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                            DeformatNzToNd<half>(UB_UPD_NDOUT, UB_UPD_H16, kHeadDim, vHeadDim);
+                            AscendC::LocalTensor<ElementFinalState> ndH =
+                                resource.ubBuf.template GetBufferByByte<ElementFinalState>(UB_UPD_NDOUT);
+                            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+                            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+                            AscendC::DataCopy(gmFinalState[stage2Offsets.finalStateOffset], ndH, elems);
+                            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
                         }
-                    }
-                    Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube2Done);
-                }
-            }
-            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done);
-
-        }
-
-        if ASCEND_IS_AIV {
-            uint32_t coreIdx = AscendC::GetBlockIdx();
-            uint32_t coreNum = AscendC::GetBlockNum();
-            uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
-            uint32_t subBlockNum = AscendC::GetSubBlockNum();
-
-            EpilogueGDNFwdHVnew epilogueGDNFwdHVnew(resource);
-
-            if (useInitialState) {
-                AscendC::LocalTensor<ElementInitialState> stateUbTensorPing = resource.ubBuf.template GetBufferByByte<ElementInitialState>(0);
-                AscendC::LocalTensor<ElementInitialState> stateUbTensorPong = resource.ubBuf.template GetBufferByByte<ElementInitialState>(96 * 1024);
-                AscendC::LocalTensor<ElementH> hUbTensorPing = resource.ubBuf.template GetBufferByByte<ElementH>(64 * 1024);
-                AscendC::LocalTensor<ElementH> hUbTensorPong = resource.ubBuf.template GetBufferByByte<ElementH>(160 * 1024);
-                uint32_t totalChunks = isVariedLen ? vecBlockScheduler.totalChunks : ((seqlen + chunkSize - 1) / chunkSize);
-                uint32_t stateBlockSize = kHeadDim * vHeadDim;
-                uint32_t pingpongFlag = 1;
-                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
-                AscendC::DataCopyParams repeatParams = {static_cast<uint16_t>(kHeadDim), static_cast<uint16_t>(vHeadDim * sizeof(ElementInitialState) / 32), 
-                    static_cast<uint16_t>((initalStateStride0 - vHeadDim)* sizeof(ElementInitialState) / 32), static_cast<uint16_t>(0)};
-                for (uint32_t shapeBatchIdx = 0; shapeBatchIdx < shapeBatch; shapeBatchIdx++) {
-                    for (uint32_t vHeadIdx = 0; vHeadIdx < vNumHead; vHeadIdx++) {
-                        for (uint32_t tokenBatchIdx = 0; tokenBatchIdx < vecBlockScheduler.tokenBatch; tokenBatchIdx++) {
-                            uint32_t batchIdx = isVariedLen ? tokenBatchIdx : shapeBatchIdx;
-                            uint32_t chunkOffset = isVariedLen ? gmNumChunks.GetValue(tokenBatchIdx) : 0;
-                            uint32_t initialStateSrcOffset = (batchIdx * vNumHead + vHeadIdx) * kHeadDim * initalStateStride0;
-                            uint32_t hOffset = (shapeBatchIdx * vNumHead * totalChunks + vHeadIdx * totalChunks + chunkOffset) * stateBlockSize;
-                            AscendC::LocalTensor<ElementInitialState> stateUbTensor = pingpongFlag ? stateUbTensorPing : stateUbTensorPong;
-                            AscendC::LocalTensor<ElementH> hUbTensor = pingpongFlag ? hUbTensorPing : hUbTensorPong;
-                            auto event_id = pingpongFlag ? EVENT_ID1 : EVENT_ID0;
-                            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
-                            if constexpr(!std::is_same<ElementInitialState, ElementH>::value) {
-                                AscendC::DataCopy(stateUbTensor, gmInitialState[initialStateSrcOffset], repeatParams);
-                                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_id);
-                                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_id);
-                                AscendC::Cast(hUbTensor, stateUbTensor, AscendC::RoundMode::CAST_RINT, stateBlockSize);
-                                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(event_id);
-                                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(event_id);
-                                AscendC::DataCopy(gmH[hOffset], hUbTensor, stateBlockSize);
-                            } else {
-                                AscendC::DataCopy(stateUbTensor, gmInitialState[initialStateSrcOffset], repeatParams);
-                                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
-                                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
-                                AscendC::DataCopy(gmH[hOffset], stateUbTensor, stateBlockSize);
-                            }
-                            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
-                            pingpongFlag = 1 - pingpongFlag;
-                        }
-
-                    }
-                }
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
-            }
-
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done);
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done);
-            while (vecBlockScheduler.isRunning) {
-                vecBlockScheduler.InitTask();
-                // step 2:
-                GDNFwdHOffsets& vec1Offsets = vecBlockScheduler.GetStage1Offsets();
-                // gmV = gmU - gmVWorkspace
-                // g_buf = gmG[-1] - gmG
-                // g_buf = exp(g_buf)
-                // gmVWorkspace = g_buf * gmV
-                if (vecBlockScheduler.NeedProcessStage1()) {
-                    epilogueGDNFwdHVnew(
-                        gmV[vec1Offsets.uvOffset], gmVUpdateWorkspace[vec1Offsets.vWorkOffset],
-                        gmG[vec1Offsets.gOffset], gmU[vec1Offsets.uvOffset], gmVWorkspace[vec1Offsets.vWorkOffset],
-                        vec1Offsets.blockTokens, kHeadDim, vHeadDim, vecBlockScheduler.cube1Done
-                    );
-                } else {
-                    Arch::CrossCoreWaitFlag(vecBlockScheduler.cube1Done);
-                }
-                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec1Done);
-
-                if (vecBlockScheduler.iterId > 1) {
-                    GDNFwdHOffsets& vec2Offsets = vecBlockScheduler.GetStage2Offsets();
-                    if (vecBlockScheduler.NeedProcessStage2()) {
-                        // step 4:  h[i+1] += h_work if i < num_chunks - 1 else None
-                        EpilogueGDNFwdHUpdate epilogueGDNFwdHUpdate(resource);
-                        epilogueGDNFwdHUpdate(
-                            gmH[vec2Offsets.hDstOffset], gmFinalState[vec2Offsets.finalStateOffset],
-                            gmG[vec2Offsets.gOffset],
-                            gmH[vec2Offsets.hSrcOffset],
-                            gmHWorkspace[vec2Offsets.hWorkOffset],
-                            vec2Offsets.blockTokens, kHeadDim, vHeadDim, vecBlockScheduler.cube2Done,
-                            (vec2Offsets.isFinalState && storeFinalState)
-                        );
                     } else {
-                        Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done);
+                        // gmH zN image: strided store straight from the tile.
+                        AscendC::DataCopyParams hp;
+                        hp.blockCount = static_cast<uint16_t>(nFr);
+                        hp.blockLen = static_cast<uint16_t>(kHeadDim);
+                        hp.srcStride = 0;
+                        hp.dstStride = static_cast<uint16_t>(kR - kHeadDim);
+                        AscendC::DataCopy(gmH[stage2Offsets.hDstOffset], h16, hp);
                     }
-                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done);
                 }
             }
-
         }
     }
 
