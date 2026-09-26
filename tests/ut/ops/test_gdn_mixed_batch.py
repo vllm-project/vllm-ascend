@@ -165,6 +165,10 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
             return_value=SimpleNamespace(world_size=1),
         ),
         patch(
+            "vllm_ascend.ops.gdn.get_current_hardware_profile",
+            return_value=SimpleNamespace(supports=lambda _: False),
+        ),
+        patch(
             "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
             return_value=gating,
         ),
