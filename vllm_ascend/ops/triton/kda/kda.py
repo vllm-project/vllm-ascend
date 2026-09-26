@@ -230,8 +230,9 @@ def layer_norm_gated_fwd_kernel(
         b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
     b_rstd = 1 / tl.sqrt(b_var + eps)
 
-    p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
-    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
+    if rstd is not None:
+        p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
+        tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
 
     if HAS_WEIGHT:
         b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
@@ -309,7 +310,8 @@ def layer_norm_gated_fwd_kernel1(
         b_xbar = tl.where(m_d, b_x, 0.0)
         b_var = tl.sum(b_xbar * b_xbar, axis=0) / D
     b_rstd = 1 / tl.sqrt(b_var + eps)
-    tl.store(rstd + i_t, b_rstd)
+    if rstd is not None:
+        tl.store(rstd + i_t, b_rstd)
 
     if HAS_WEIGHT:
         b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
@@ -342,6 +344,7 @@ def layer_norm_gated_fwd(
     out_dtype: torch.dtype = None,
     residual_dtype: torch.dtype = None,
     is_rms_norm: bool = False,
+    return_stats: bool = True,
 ):
     if residual is not None:
         residual_dtype = residual.dtype
@@ -359,7 +362,7 @@ def layer_norm_gated_fwd(
     else:
         residual_out = None
     mean = torch.empty((T,), dtype=torch.float, device=x.device) if not is_rms_norm else None
-    rstd = torch.empty((T,), dtype=torch.float, device=x.device)
+    rstd = torch.empty((T,), dtype=torch.float, device=x.device) if return_stats else None
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BD = min(MAX_FUSED_SIZE, next_power_of_2(D))
@@ -368,7 +371,7 @@ def layer_norm_gated_fwd(
     # heuristics for number of warps
 
     if D <= 512:
-        BT = 32
+        BT = min(32, next_power_of_2(max(1, T)))
         layer_norm_gated_fwd_kernel[(cdiv(T, BT),)](
             x=x,
             g=g,
@@ -440,6 +443,7 @@ def rms_norm_gated(
         out_dtype=x.dtype,  # Preserve the input, as in the v0.26 K3 fused norm gate.
         residual_dtype=residual_dtype,
         is_rms_norm=True,
+        return_stats=False,
     )
     y = y.reshape(x_shape_og)
     return y if not prenorm else (y, residual_out.reshape(x_shape_og))
