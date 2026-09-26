@@ -89,15 +89,6 @@ class AscendCompilationConfig:
     # accepted behind this explicit flag (default-off also honors the original
     # hold-design 3.2 "first version off, enable experiment-driven" promise).
     fuse_norm_quant_dynamic: bool = False
-    # stage5 F4: SwiGLU + static W8A8 quant fusion (act_quant_fusion_pass,
-    # replacement route mirroring upstream act_quant_fusion.py via
-    # torch_npu.npu_swiglu_quant / aclnnSwiGluQuantV2). Default-off
-    # (proved-then-flip, D1): max 1-LSB rounding difference vs npu_quantize
-    # and the fused kernel's input-width hard limit 8192 (Qwen3-8B TP1/TP2
-    # 2I=24576/12288 exceeds it — pattern fails closed there; W8A8 TP4
-    # 2I=6144 fits). Dynamic-quant chain NOT fused (quant_mode=1 crashes the
-    # AIV kernel on 910B3 / CANN 9.1.0-beta.1, M0 probe).
-    fuse_act_quant: bool = False
 
     @model_validator(mode="after")
     def _apply_unsupported_hardware_downgrade_and_static_kernel_check(self):

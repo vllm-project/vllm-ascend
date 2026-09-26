@@ -222,15 +222,6 @@ class AscendPostGradPassManager(PostGradPassManager):
 
             self.passes.append(MulsAddFusionPass(config))
 
-        # stage5 F4: SwiGlu + static W8A8 quant fusion (default-off switch,
-        # proved-then-flip). Only meaningful with custom-op dispatch (the
-        # npu_swiglu anchor); the pass itself also fails closed on the fused
-        # kernel's 8192 input-width hard limit.
-        if acc.fuse_act_quant and not is_310p():
-            from .passes.act_quant_fusion_pass import ActQuantFusionPass
-
-            self.passes.append(ActQuantFusionPass(config))
-
         if _required_custom_ops_missing(config):
             logger.warning(
                 "Ascend fusion passes are enabled (fuse_norm_quant/fuse_qknorm_rope) but "
