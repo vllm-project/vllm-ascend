@@ -1,0 +1,420 @@
+test_name: "GLM-5.1-Memcache-no-Layerwise-PD-perf"
+model: "Eco-Tech/GLM-5.1-w8a8"
+num_nodes: 4
+npu_per_node: 16
+
+env_common: &env_common
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  ASCEND_AGGREGATE_ENABLE: "1"
+  ASCEND_TRANSPORT_PRINT: "1"
+  ACL_OP_INIT_MODE: "1"
+  ASCEND_A3_ENABLE: "1"
+  VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
+  PYTHONHASHSEED: "0"
+  VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: "8078"
+  VLLM_PP_LAYER_PARTITION: "${PP_LAYER_PARTITION}"
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0, 1 ]
+    decoder: [ 2, 3 ]
+
+kv_pool:
+  type: memcache
+  meta_service_port: 5000
+  config_store_port: 6000
+  config:
+    meta:
+      ock.mmc.log_level: error
+    local:
+      ock.mmc.log_level: error
+      ock.mmc.local_service.world_size: 256
+      ock.mmc.local_service.protocol: device_sdma
+      ock.mmc.local_service.dram.size: 10GB
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 1
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 16
+    pp_size: 2
+    pp_group_id: 0
+    pp_layer_partition: "41,37"
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 1
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 16
+    pp_size: 2
+    pp_group_id: 0
+    pp_layer_partition: "41,37"
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 2
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+    pp_size: 1
+    pp_group_id: 1
+    pp_layer_partition: "41,37"
+    dp_address: "${NODE_2_IP}"
+
+  - node_index: 3
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 4
+    dp_rank_start: 4
+    tp_size: 4
+    pp_size: 1
+    pp_group_id: 1
+    pp_layer_partition: "41,37"
+    dp_address: "${NODE_2_IP}"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_common
+      HCCL_BUFFSIZE: "256"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --pipeline-parallel-size
+      - ${PP_SIZE}
+      - --nnodes
+      - ${NNODES}
+      - --node-rank
+      - ${PP_NODE_RANK}
+      - --master-addr
+      - ${PP_MASTER_ADDR}
+      - --master-port
+      - "7600"
+      - --distributed-executor-backend
+      - "mp"
+      - --enable-expert-parallel
+      - --hf-overrides
+      - '{"use_index_cache": true, "index_topk_freq": 4}'
+      - --speculative-config
+      - '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager":true}'
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "202752"
+      - --additional-config
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}, "recompute_scheduler_enable" : false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
+      - --max-num-batched-tokens
+      - "164"
+      - --trust-remote-code
+      - --max-num-seqs
+      - "64"
+      - --quantization
+      - "ascend"
+      - --gpu-memory-utilization
+      - "0.92"
+      - --enforce-eager
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - "glm47"
+      - --reasoning-parser
+      - "glm45"
+      - --kv-transfer-config
+      - '{
+              "kv_connector": "MultiConnector",
+              "kv_role": "kv_producer",
+              "kv_port": "30000",
+              "engine_id": "0",
+              "kv_connector_extra_config": {
+                  "connectors":[
+                  {
+                      "kv_connector": "MooncakeConnectorV1",
+                      "kv_role": "kv_producer",
+                      "kv_port": "30000",
+                      "kv_connector_extra_config": {
+                          "use_ascend_direct": true,
+                          "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                          "decode": { "dp_size": 8, "tp_size": 4}
+                      }
+                  },
+                  {
+                      "kv_connector": "AscendStoreConnector",
+                      "kv_role": "kv_producer",
+                      "kv_connector_extra_config": {
+                          "lookup_rpc_port":"0",
+                          "backend": "memcache",
+                          "use_layerwise": false
+                      }
+                  }
+                  ]
+              }
+      }'
+  - node_index: 1
+    envs:
+      <<: *env_common
+      HCCL_BUFFSIZE: "256"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --pipeline-parallel-size
+      - ${PP_SIZE}
+      - --nnodes
+      - ${NNODES}
+      - --node-rank
+      - ${PP_NODE_RANK}
+      - --master-addr
+      - ${PP_MASTER_ADDR}
+      - --master-port
+      - "7600"
+      - --distributed-executor-backend
+      - "mp"
+      - --enable-expert-parallel
+      - --hf-overrides
+      - '{"use_index_cache": true, "index_topk_freq": 4}'
+      - --speculative-config
+      - '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager":true}'
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "202752"
+      - --additional-config
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}, "recompute_scheduler_enable" : false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
+      - --max-num-batched-tokens
+      - "164"
+      - --trust-remote-code
+      - --max-num-seqs
+      - "64"
+      - --quantization
+      - "ascend"
+      - --gpu-memory-utilization
+      - "0.92"
+      - --enforce-eager
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - "glm47"
+      - --reasoning-parser
+      - "glm45"
+      - --kv-transfer-config
+      - '{
+              "kv_connector": "MultiConnector",
+              "kv_role": "kv_producer",
+              "kv_port": "30000",
+              "engine_id": "0",
+              "kv_connector_extra_config": {
+                  "connectors":[
+                  {
+                      "kv_connector": "MooncakeConnectorV1",
+                      "kv_role": "kv_producer",
+                      "kv_port": "30000",
+                      "kv_connector_extra_config": {
+                          "use_ascend_direct": true,
+                          "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                          "decode": { "dp_size": 8, "tp_size": 4}
+                      }
+                  },
+                  {
+                      "kv_connector": "AscendStoreConnector",
+                      "kv_role": "kv_producer",
+                      "kv_connector_extra_config": {
+                          "lookup_rpc_port":"0",
+                          "backend": "memcache",
+                          "use_layerwise": false
+                      }
+                  }
+                  ]
+              }
+      }'
+  - node_index: 2
+    envs:
+      <<: *env_common
+      HCCL_BUFFSIZE: "900"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --hf-overrides
+      - '{"use_index_cache": true, "index_topk_freq": 4}'
+      - --speculative-config
+      - '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager":true}'
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "202752"
+      - --max-num-batched-tokens
+      - "164"
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16, 20, 24, 28, 32, 64, 96, 128, 192, 256, 384, 512]}'
+      - --additional-config
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
+      - --trust-remote-code
+      - --max-num-seqs
+      - "32"
+      - --gpu-memory-utilization
+      - "0.92"
+      - --async-scheduling
+      - --quantization
+      - "ascend"
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - "glm47"
+      - --reasoning-parser
+      - "glm45"
+      - --kv-transfer-config
+      - '{
+              "kv_connector": "MultiConnector",
+              "kv_role": "kv_consumer",
+              "kv_port": "30200",
+              "engine_id": "0",
+              "kv_connector_extra_config": {
+                  "connectors":[
+                  {
+                      "kv_connector": "MooncakeConnectorV1",
+                      "kv_role": "kv_consumer",
+                      "kv_port": "30200",
+                      "kv_connector_extra_config": {
+                          "use_ascend_direct": true,
+                          "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                          "decode": { "dp_size": 8, "tp_size": 4}
+                      }
+                  },
+                  {
+                      "kv_connector": "AscendStoreConnector",
+                      "kv_role": "kv_consumer",
+                      "kv_connector_extra_config": {
+                          "lookup_rpc_port":"0",
+                          "backend": "memcache",
+                          "use_layerwise": false
+                      }
+                  }
+                  ]
+              }
+      }'
+  - node_index: 3
+    envs:
+      <<: *env_common
+      HCCL_BUFFSIZE: "900"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --hf-overrides
+      - '{"use_index_cache": true, "index_topk_freq": 4}'
+      - --speculative-config
+      - '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager":true}'
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "202752"
+      - --max-num-batched-tokens
+      - "164"
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16, 20, 24, 28, 32, 64, 96, 128, 192, 256, 384, 512]}'
+      - --additional-config
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
+      - --trust-remote-code
+      - --max-num-seqs
+      - "32"
+      - --gpu-memory-utilization
+      - "0.92"
+      - --async-scheduling
+      - --quantization
+      - "ascend"
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - "glm47"
+      - --reasoning-parser
+      - "glm45"
+      - --kv-transfer-config
+      - '{
+                    "kv_connector": "MultiConnector",
+                    "kv_role": "kv_consumer",
+                    "kv_port": "30200",
+                    "engine_id": "0",
+                    "kv_connector_extra_config": {
+                        "connectors":[
+                        {
+                            "kv_connector": "MooncakeConnectorV1",
+                            "kv_role": "kv_consumer",
+                            "kv_port": "30200",
+                            "kv_connector_extra_config": {
+                                "use_ascend_direct": true,
+                                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                                "decode": { "dp_size": 8, "tp_size": 4}
+                            }
+                        },
+                        {
+                            "kv_connector": "AscendStoreConnector",
+                            "kv_role": "kv_consumer",
+                            "kv_connector_extra_config": {
+                                "lookup_rpc_port":"0",
+                                "backend": "memcache",
+                                "use_layerwise": false
+                            }
+                        }
+                        ]
+                    }
+            }'
+benchmarks:
+      perf_TPOT20:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 160
+        max_out_len: 1500
+        batch_size: 40
+        request_rate: 6.87
+        baseline: 1
+        threshold: 0.97
