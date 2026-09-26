@@ -52,6 +52,15 @@ constexpr int64_t ITER_TIMES_ATTR_IDX = 1;
 constexpr int64_t HC_EPS_ATTR_IDX = 2;
 constexpr int64_t NORM_EPS_ATTR_IDX = 3;
 constexpr int64_t DEFAULT_ITER_TIMES = 20;
+constexpr int64_t X_DTYPE_SIZE = 2;              // x and y are bfloat16
+constexpr int64_t PRE_POST_MIX_NUM = 2;          // the mixes01 buffers carry pre and post together
+constexpr int64_t SQUARE_SUM_SIZE = 16;          // must match SQUARE_SUM_SIZE in the kernel
+constexpr int64_t MASK_PATTERN_ELEM_NUM = 128;   // MASK_PATTERN_BASE_SIZE * MASK_PATTERN_REPEAT_SIZE
+// MHC runs with four residual streams
+constexpr int64_t EXPECTED_HC_MULT = 4;
+// batching gain flattens before this point and the UB is worth more to the x/y
+// buffers; COMB_ROW_FACTOR_MAX * EXPECTED_HC_MULT stays within the 255 repeat limit
+constexpr int64_t COMB_ROW_FACTOR_MAX = 32;
 }
 
 ge::graphStatus HcPreTiling::GetPlatformInfo()
@@ -141,9 +150,72 @@ ge::graphStatus HcPreTiling::GetShapeAttrsInfoInner()
                   OPS_LOG_E(context_->GetNodeName(), "get attr failed."),
                   return ge::GRAPH_FAILED);
 
+    // GetAttr has the final word on hcMult_
+    OPS_ERR_IF(hcMult_ != EXPECTED_HC_MULT,
+                    OPS_LOG_E(context_->GetNodeName(),
+                             "hc_mult should be %ld, but is %ld", EXPECTED_HC_MULT, hcMult_),
+                    return ge::GRAPH_FAILED);
+
     return ge::GRAPH_SUCCESS;
 }
 
+
+// UB bytes the stage-2 kernel Init allocates; mirrors its InitBuffer calls one for
+// one, keep in step when a buffer is added there
+int64_t HcPreTiling::CalcStage2UbSize(int64_t rowFactor, int64_t dFactor, int64_t combRowFactor)
+{
+    const int64_t kBlockNum = tilingData_.get_cubeBlockDimK();
+    const int64_t floatSize = static_cast<int64_t>(sizeof(float));
+    const int64_t floatPerBlock = BLOCK_SIZE / floatSize;
+    // the kernel aligns the d axis on x's dtype for both the b16 and the fp32 copies
+    const int64_t dFactorAlign = RoundUp(dFactor, BLOCK_SIZE / X_DTYPE_SIZE);
+    const int64_t xElemNum = rowFactor * hcMult_ * dFactorAlign;
+
+    int64_t queSize = DOUBLE_BUFFER *
+        (kBlockNum * rowFactor * hcMultAlign_ * PRE_POST_MIX_NUM * floatSize +  // mixesQue01
+         kBlockNum * rowFactor * hcMult_ * hcMultAlign_ * floatSize +           // mixesQue2
+         kBlockNum * rowFactor * SQUARE_SUM_SIZE * floatSize +                  // squareSumQue
+         xElemNum * X_DTYPE_SIZE +                                             // xQue
+         rowFactor * dFactorAlign * X_DTYPE_SIZE +                             // yQue
+         rowFactor * hcMultAlign_ * floatSize +                                // postQue
+         combRowFactor * hcMult_ * hcMultAlign_ * floatSize);                  // combFragQue
+
+    int64_t bufSize =
+        (PRE_POST_MIX_NUM + hcMult_) * hcMultAlign_ * floatSize +              // hcBaseBuf0/1/2
+        RoundUp(rowFactor, floatPerBlock) * BLOCK_SIZE +                       // rowBrcbBuf0
+        RoundUp(combRowFactor * hcMultAlign_, floatPerBlock) * BLOCK_SIZE +    // hcBrcbBuf1
+        combRowFactor * hcMultAlign_ * floatSize +                             // reduceBuf
+        rowFactor * hcMultAlign_ * PRE_POST_MIX_NUM * floatSize +              // mixes01ReduceBuf
+        rowFactor * hcMultAlign_ * hcMult_ * floatSize +                       // mixes02ReduceBuf
+        rowFactor * hcMultAlign_ * floatSize +                                 // squareReduceBuf
+        xElemNum * floatSize +                                                 // xCastBuf
+        rowFactor * dFactorAlign * floatSize +                                 // yCastBuf
+        RoundUp(rowFactor, floatPerBlock) * floatSize +                        // rsqrtBuf
+        RoundUp(MASK_PATTERN_ELEM_NUM, floatPerBlock) * floatSize +            // maskPatternBuf
+        rowFactor * hcMultAlign_ * floatSize;                                  // preMixBuf
+
+    return queSize + bufSize;
+}
+
+// comb rows staged per batched sinkhorn burst, grown against the real UB budget.
+// Whole stage2RowFactor groups only: the kernel flushes on >=, so a bound that is
+// not a multiple would be stepped over. Starting from stage2RowFactor keeps the
+// no-slack case identical to the unbatched footprint.
+void HcPreTiling::CalcCombRowFactor()
+{
+    // Zero-batch dynamic shapes can drive rowFactor_ to 0; the growth loop below
+    // would then never terminate, so bail out early.
+    if (rowFactor_ <= 0) {
+        combRowFactor_ = 0;
+        return;
+    }
+    int64_t maxCombRows = std::min(COMB_ROW_FACTOR_MAX, rowOfFormerBlock_);
+    combRowFactor_ = rowFactor_;
+    while (combRowFactor_ + rowFactor_ <= maxCombRows &&
+           CalcStage2UbSize(rowFactor_, dFactor_, combRowFactor_ + rowFactor_) <= static_cast<int64_t>(ubSize_)) {
+        combRowFactor_ += rowFactor_;
+    }
+}
 
 ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
 {
@@ -254,6 +326,7 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
     rowLoopOfTailBlock_ = CeilDiv(rowOfTailBlock_, rowFactor_);
     tailRowFactorOfFormerBlock_ = rowOfFormerBlock_ % rowFactor_ == 0 ? rowFactor_ : rowOfFormerBlock_ % rowFactor_;
     tailRowFactorOfTailBlock_ = rowOfTailBlock_ % rowFactor_ == 0 ? rowFactor_ : rowOfTailBlock_ % rowFactor_;
+    CalcCombRowFactor();
 
     tilingData_.set_bs(bs_);
     tilingData_.set_hcMix(hcMix_);
@@ -270,6 +343,7 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
     tilingData_.set_dLoop(dLoop_);
     tilingData_.set_dFactor(dFactor_);
     tilingData_.set_tailDFactor(tailDFactor_);
+    tilingData_.set_combRowFactor(combRowFactor_);
     tilingData_.set_iterTimes(iterTimes_);
     tilingData_.set_hcEps(hcEps_);
     tilingData_.set_normEps(normEps_);
