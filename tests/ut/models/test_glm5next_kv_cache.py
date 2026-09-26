@@ -228,17 +228,21 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size, k
         max_query_len=3,
         query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
         seq_lens=torch.tensor([logical_size + pool_size], dtype=torch.int32),
-        _seq_lens_cpu=None,
+        _seq_lens_cpu=torch.tensor([logical_size + pool_size], dtype=torch.int32),
         seq_lens_cpu=None,
         positions=torch.tensor([logical_size - 1, logical_size, logical_size + pool_size - 1, 0]),
         slot_mapping=torch.tensor([8 * logical_size - 1, 2 * logical_size, 2 * logical_size + pool_size - 1, -1]),
         block_table_tensor=expanded,
     )
     captured = builders[0].build_for_cudagraph_capture(common)
-    assert captured.is_graph_capture
+    legacy_capture = builders[0].build_for_graph_capture(common)
+    assert captured.num_tokens == legacy_capture.num_tokens == 4
+    assert captured.max_pool_seq_len == legacy_capture.max_pool_seq_len == 3 * storage_block_size
     first, draft = [builder.build(0, common) for builder in builders]
-    assert not first.is_graph_capture and not draft.is_graph_capture
-    assert captured.is_graph_capture
+    assert first.num_tokens == draft.num_tokens == 3
+    assert first.max_pool_seq_len == draft.max_pool_seq_len == storage_block_size + 1
+    assert captured.num_tokens == 4
+    assert captured.max_pool_seq_len == 3 * storage_block_size
     # Kernel-granularity blocks: the metadata reports the natural kernel rows
     # (kernel size / pool ratio) and passes the common expanded table through
     # as a view, so both builders observe the same persistent buffer.
@@ -418,7 +422,17 @@ def test_indexer_metadata_preserves_raw_request_boundaries():
     assert metadata.cum_query_lens.tolist() == [2, 5]
     assert metadata.raw_seq_lens.tolist() == [18, 35]
     assert metadata.seq_lens.tolist() == [1, 2]
-    assert metadata.num_actual_tokens == 5
+    assert metadata.num_tokens == 5
+    assert metadata.max_pool_seq_len == 2
+
+    common._seq_lens_cpu = None
+    common.seq_lens_cpu = None
+    assert builder.build(0, common).max_pool_seq_len == 16
+
+    common.num_reqs = common.num_input_tokens = common.num_actual_tokens = 0
+    common._seq_lens_cpu = torch.empty(0, dtype=torch.int32)
+    empty = builder.build(0, common)
+    assert empty.num_tokens == empty.max_pool_seq_len == 0
 
 
 def test_indexer_metadata_request_buffers_cover_graph_token_padding():
