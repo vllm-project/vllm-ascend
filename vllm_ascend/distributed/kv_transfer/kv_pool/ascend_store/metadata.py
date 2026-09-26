@@ -840,8 +840,10 @@ class RequestTracker:
     gva_block_offset: int = 0
     last_block_gva: int | None = None
 
-    # Number of speculative scratch blocks for each Mamba cache group.
-    num_speculative_blocks_by_group: dict[int, int] | None = None
+    mamba_group_ids: list[int] | None = None
+
+    # spec blocks for mamba cache group
+    num_speculative_blocks: int = 0
 
     block_sizes: list[int] | None = None
 
@@ -858,12 +860,14 @@ class RequestTracker:
         block_gvas_by_group: list[list[int]] | None = None,
         gva_block_offset: int = 0,
         last_block_gva: int | None = None,
-        num_speculative_blocks_by_group: dict[int, int] | None = None,
+        mamba_group_ids: list[int] | None = None,
+        num_speculative_blocks: int = 0,
         block_sizes: list[int] | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
-        self.num_speculative_blocks_by_group = num_speculative_blocks_by_group
+        self.mamba_group_ids = mamba_group_ids
+        self.num_speculative_blocks = num_speculative_blocks
         block_ids = allocated_block_ids_by_group
         if block_ids is None:
             block_ids = normalize_block_ids_by_group(allocated_block_ids or [])
@@ -909,27 +913,24 @@ class RequestTracker:
         so, if a speculative block is moved to last position and replaced with null block,
         we also need to update the previous allocated_block_ids to 0.
         """
-        if (
-            self.num_speculative_blocks_by_group is not None
-            and (num_speculative_blocks := self.num_speculative_blocks_by_group.get(kv_cache_group_id)) is not None
-        ):
+        if self.mamba_group_ids and kv_cache_group_id in self.mamba_group_ids:
             assert self.block_sizes is not None and len(self.block_sizes) > kv_cache_group_id
             num_skipped_blocks = (
-                max(num_computed_tokens - num_speculative_blocks - 1, 0) // self.block_sizes[kv_cache_group_id]
+                max(num_computed_tokens - self.num_speculative_blocks - 1, 0) // self.block_sizes[kv_cache_group_id]
             )
             num_skipped_blocks = min(len(self.allocated_block_ids_by_group[kv_cache_group_id]), num_skipped_blocks)
             if num_skipped_blocks > 0:
                 self.allocated_block_ids_by_group[kv_cache_group_id][:num_skipped_blocks] = [0] * num_skipped_blocks
-            if not block_ids or num_speculative_blocks <= 0:
+            if not block_ids or self.num_speculative_blocks <= 0:
                 return
-            mask_spec_count = min(len(block_ids) - 1, num_speculative_blocks)
+            mask_spec_count = min(len(block_ids) - 1, self.num_speculative_blocks)
             group_block_ids = self.allocated_block_ids_by_group[kv_cache_group_id]
-            if mask_spec_count >= num_speculative_blocks:
-                group_block_ids[-num_speculative_blocks:] = [0] * num_speculative_blocks
+            if mask_spec_count >= self.num_speculative_blocks:
+                group_block_ids[-self.num_speculative_blocks :] = [0] * self.num_speculative_blocks
             else:
-                group_block_ids[-num_speculative_blocks : mask_spec_count - num_speculative_blocks] = [0] * (
-                    mask_spec_count
-                )
+                group_block_ids[-self.num_speculative_blocks : mask_spec_count - self.num_speculative_blocks] = [
+                    0
+                ] * mask_spec_count
 
 
 @dataclass(init=False)
