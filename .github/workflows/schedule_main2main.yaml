@@ -56,6 +56,7 @@ jobs:
       source_ref: ${{ steps.source.outputs.source_ref }}
       base_ref: ${{ steps.source.outputs.base_ref }}
       base_sha: ${{ steps.source.outputs.base_sha }}
+      target_sha: ${{ steps.target.outputs.sha }}
     env:
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
       HEAD_FORK: dev-submitter/vllm-ascend
@@ -72,6 +73,10 @@ jobs:
           ref: ${{ env.TARGET_COMMIT != '' && env.TARGET_COMMIT || 'main' }}
           path: vllm-upstream
           fetch-depth: 0
+
+      - name: Freeze vLLM target
+        id: target
+        run: echo "sha=$(git -C vllm-upstream rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Resolve fixed vllm-ascend source
         id: source
@@ -157,6 +162,80 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
+  interface-report:
+    needs: resolve-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      ascend_tree: ${{ steps.prepare.outputs.ascend_tree }}
+    steps:
+      # Keep the workflow's engine separate from the selected adaptation baseline.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: interface-tools
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ needs.resolve-source.outputs.source_repository }}
+          ref: ${{ needs.resolve-source.outputs.source_ref }}
+          fetch-depth: 0
+          path: ascend-source
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ needs.resolve-source.outputs.target_sha }}
+          fetch-depth: 0
+          path: vllm-source
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Prepare exact analysis inputs
+        id: prepare
+        env:
+          BASE_SHA: ${{ needs.resolve-source.outputs.base_sha }}
+          ENGINE_SHA: ${{ github.sha }}
+          TARGET_SHA: ${{ needs.resolve-source.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          git -C ascend-source config user.name dev-submitter
+          git -C ascend-source config user.email 330005789+dev-submitter@users.noreply.github.com
+          if [ -n "$BASE_SHA" ]; then
+            git -C ascend-source fetch https://github.com/vllm-project/vllm-ascend.git "$BASE_SHA"
+            git -C ascend-source rebase "$BASE_SHA"
+          fi
+          echo "ascend_tree=$(git -C ascend-source rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+          python -B interface-tools/tools/main2main_interface/run.py prepare \
+            --engine-root "$GITHUB_WORKSPACE/interface-tools" \
+            --vllm-root "$GITHUB_WORKSPACE/vllm-source" \
+            --ascend-root "$GITHUB_WORKSPACE/ascend-source" \
+            --engine-sha "$ENGINE_SHA" --new "$TARGET_SHA" \
+            --old "$(cat ascend-source/.github/vllm-main-verified.commit)" \
+            --ascend-sha "$(git -C ascend-source rev-parse HEAD)" \
+            --output "$RUNNER_TEMP/interface-report" --github-output "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/interface-cache
+          key: ${{ steps.prepare.outputs.cache_key }}
+      - name: Analyze source contracts (CPU only)
+        run: |
+          python -B interface-tools/tools/main2main_interface/run.py scan \
+            --output "$RUNNER_TEMP/interface-report" --cache-dir "$RUNNER_TEMP/interface-cache"
+          python -c 'import pathlib, sys; p = pathlib.Path(sys.argv[1]); assert 0 < p.stat().st_size <= 1_000_000; assert p.read_text(encoding="utf-8").strip()' \
+            "$RUNNER_TEMP/interface-report/qa-review.md"
+          cat "$RUNNER_TEMP/interface-report/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload single QA report
+        uses: actions/upload-artifact@v4
+        with:
+          name: main2main-interface-report
+          path: ${{ runner.temp }}/interface-report/qa-review.md
+          if-no-files-found: error
+          retention-days: 14
+
   ensure-csrc-cache:
     needs: resolve-source
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
@@ -170,7 +249,7 @@ jobs:
       base_sha: ${{ needs.resolve-source.outputs.base_sha }}
 
   main2main:
-    needs: [resolve-source, ensure-csrc-cache]
+    needs: [resolve-source, ensure-csrc-cache, interface-report]
     runs-on: linux-aarch64-a3-16-sh-001
     timeout-minutes: 2880
     concurrency:
@@ -201,7 +280,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.DEV_SUBMITTER_TOKEN }}
       MAIN2MAIN_IMAGE_TAG: 9.1.0-a3-ubuntu22.04-py3.12
-      TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+      TARGET_COMMIT: ${{ needs.resolve-source.outputs.target_sha }}
       PUSH_TO_GITHUB: 'true'
       GITHUB_REPO: vllm-project/vllm-ascend
       HEAD_FORK: dev-submitter/vllm-ascend
@@ -239,7 +318,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: vllm-project/vllm
-          ref: ${{ env.TARGET_COMMIT != '' && env.TARGET_COMMIT || 'main' }}
+          ref: ${{ needs.resolve-source.outputs.target_sha }}
           path: vllm-upstream
           fetch-depth: 0
 
@@ -498,10 +577,28 @@ jobs:
             vllm_ascend/include
           key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
+      - name: Download interface evidence for adapter QA
+        uses: actions/download-artifact@v4
+        with:
+          name: main2main-interface-report
+          path: ${{ runner.temp }}/main2main-interface
+
+      - name: Verify interface handoff
+        env:
+          EXPECTED_TREE: ${{ needs.interface-report.outputs.ascend_tree }}
+        run: |
+          set -euo pipefail
+          # Check the pre-adaptation commit tree, ignoring build outputs.
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          test -s "$RUNNER_TEMP/main2main-interface/qa-review.md"
+          # Merge the companion main2main_flow PR before enabling this workflow.
+          python -c 'from main2main_flow.flow import Main2MainFlow; assert Main2MainFlow.INTERFACE_REPORT_VERSION == 1'
+
       - name: Run main2main flow
         id: run-main2main
         working-directory: ${{ github.workspace }}
         env:
+          MAIN2MAIN_INTERFACE_REPORT: ${{ runner.temp }}/main2main-interface/qa-review.md
           RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: True
         run: |
           set -euo pipefail
