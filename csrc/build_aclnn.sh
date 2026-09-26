@@ -209,6 +209,11 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
 
     CUSTOM_OPS_ARRAY=(
         "add_rms_norm_bias"
+        "flash_attn"
+        "flash_attn_metadata"
+        "flash_attn_c8"
+        "flash_attn_c8_quant_stats"
+        "flash_attn_c8_prepare"
         "moe_gating_top_k_hash"
         "inplace_partial_rotary_mul"
         "kv_compress_epilog"

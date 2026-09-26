@@ -44,6 +44,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.flash_attn import flash_attn_prefill
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_dcp,
@@ -852,6 +853,32 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
+        if (
+            get_current_hardware_profile().supports(HardwareCapability.FLASH_ATTN_TND_PREFILL)
+            and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+            and self.attn_type == AttentionType.DECODER
+            and self.head_size == 64
+            and query.dtype == torch.bfloat16
+            and self.sinks is None
+            and self.sliding_window is None
+            and not self.pcp_enabled
+            and not enable_dcp()
+            and not envs_vllm.VLLM_BATCH_INVARIANT
+        ):
+            num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+            ends = attn_metadata.actual_seq_lengths_q
+            lengths = [end - start for start, end in zip([0] + ends[:-1], ends)]
+            mask = attn_metadata.attn_mask.to(torch.int8) if attn_metadata.causal else None
+            output[:num_tokens] = flash_attn_prefill(
+                query[:num_tokens],
+                key[:num_tokens],
+                value[:num_tokens],
+                attn_metadata.query_start_loc[: len(lengths) + 1],
+                lengths,
+                self.scale,
+                mask,
+            )
+            return output
         passed_value = value
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
