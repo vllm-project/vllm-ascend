@@ -1,0 +1,148 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import os
+
+import pytest
+import vllm
+import vllm.config
+from vllm.assets.image import ImageAsset
+from vllm.lora.request import LoRARequest
+
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+
+MODEL_PATH = "Qwen/Qwen3.6-35B-A3B"
+
+LORA_2D_ID = 1
+LORA_3D_ID = 2
+LORA_2D_EXPECTED_OUTPUT = [
+    "A red stop sign stands prominently in the foreground.",
+    (
+        "A vibrant display of pink cherry blossoms frames the Tokyo Skytree, "
+        "creating a picturesque blend of nature and modern architecture against "
+        "a clear blue sky."
+    ),
+]
+LORA_3D_EXPECTED_OUTPUT = [
+    (
+        "A red STOP sign stands prominently in the foreground, "
+        "with a traditional Chinese gate adorned with red lanterns "
+        'and the Chinese characters "中華門" in the background, '
+        "signaling the entrance to a Chinatown. A black car passes by on the street, "
+        "and stone lion statues guard the entrance to the culturally rich area."
+    ),
+    (
+        "A vibrant blue sky serves as a backdrop for the iconic Tokyo Skytree, "
+        "partially obscured by the delicate pink blossoms of cherry trees in full bloom."
+    ),
+]
+
+PROMPT_TEMPLATE = """<|im_start|>user
+<|vision_start|><|image_pad|><|vision_end|>What is in the image?<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+"""
+
+# Visual captioning prompts: each image will be paired with one LoRA in the
+# mixed-batch case so we can check per-prompt routing.
+VL_TEST_IMAGES = [
+    ImageAsset("stop_sign"),
+    ImageAsset("cherry_blossom"),
+]
+
+os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "0"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+
+def _build_prompts() -> list[dict]:
+    return [
+        {
+            "prompt": PROMPT_TEMPLATE,
+            "multi_modal_data": {"image": asset.pil_image},
+        }
+        for asset in VL_TEST_IMAGES
+    ]
+
+
+def _generate(llm: vllm.LLM, lora_request) -> list[str]:
+    outputs = llm.generate(
+        _build_prompts(),
+        vllm.SamplingParams(temperature=0, max_tokens=128),
+        lora_request=lora_request,
+    )
+    return [out.outputs[0].text.strip() for out in outputs]
+
+
+def _run_mixed_2d_3d_lora_test(
+    lora_2d_files: str,
+    lora_3d_files: str,
+    tensor_parallel_size: int,
+    fully_sharded_loras: bool,
+) -> None:
+    with VllmRunner(
+        MODEL_PATH,
+        max_model_len=4096,
+        enable_lora=True,
+        enable_mixed_moe_lora_format=True,
+        max_loras=2,
+        max_lora_rank=8,
+        max_num_seqs=4,
+        enforce_eager=True,
+        tensor_parallel_size=tensor_parallel_size,
+        enable_expert_parallel=not fully_sharded_loras,
+        fully_sharded_loras=fully_sharded_loras,
+        enable_tower_connector_lora=True,
+        mm_processor_cache_gb=0,
+        limit_mm_per_prompt={"image": 1},
+        compilation_config=vllm.config.CompilationConfig(
+            cudagraph_specialize_lora=False,
+        ),
+    ) as vllm_runner:
+        llm = vllm_runner.model
+
+        lora_2d = LoRARequest(
+            "lora_2d",
+            LORA_2D_ID,
+            lora_2d_files,
+            is_3d_lora_weight=False,
+        )
+        lora_3d = LoRARequest(
+            "lora_3d",
+            LORA_3D_ID,
+            lora_3d_files,
+            is_3d_lora_weight=True,
+        )
+
+        # Reference: each adapter alone over both prompts.
+        outputs_2d_alone = _generate(llm, lora_2d)
+        outputs_3d_alone = _generate(llm, lora_3d)
+
+        assert len(outputs_2d_alone) == len(VL_TEST_IMAGES)
+        assert len(outputs_3d_alone) == len(VL_TEST_IMAGES)
+        for text in outputs_2d_alone + outputs_3d_alone:
+            assert text, "Empty output from single-adapter LoRA generation"
+
+        assert outputs_2d_alone[0] == LORA_2D_EXPECTED_OUTPUT[0]
+        assert outputs_2d_alone[1] == LORA_2D_EXPECTED_OUTPUT[1]
+        assert outputs_3d_alone[0] == LORA_3D_EXPECTED_OUTPUT[0]
+        assert outputs_3d_alone[1] == LORA_3D_EXPECTED_OUTPUT[1]
+
+
+@pytest.mark.parametrize("fully_sharded_loras", [True, False])
+@wait_until_npu_memory_free()
+def test_qwen36_moe_2d_3d_lora_tp2(
+    qwen36_moe_2d_lora_files,
+    qwen36_moe_3d_lora_files,
+    fully_sharded_loras,
+):
+    _run_mixed_2d_3d_lora_test(
+        lora_2d_files=qwen36_moe_2d_lora_files,
+        lora_3d_files=qwen36_moe_3d_lora_files,
+        tensor_parallel_size=2,
+        fully_sharded_loras=fully_sharded_loras,
+    )
