@@ -194,9 +194,28 @@ def layer_norm_gated_fwd_kernel(
     residual_out,  # pointer to the residual
     mean,  # pointer to the mean
     rstd,  # pointer to the 1/std
-    eps,  # epsilon to avoid division by zero
-    T,  # number of rows in x
+    eps: tl.constexpr,  # epsilon to avoid division by zero
+    T: tl.constexpr,  # number of rows in x
     D: tl.constexpr,  # number of columns in x
+    X_S0: tl.constexpr,
+    X_S1: tl.constexpr,
+    X_S2: tl.constexpr,
+    X_S3: tl.constexpr,
+    X_N1: tl.constexpr,
+    X_N2: tl.constexpr,
+    G_S0: tl.constexpr,
+    G_S1: tl.constexpr,
+    G_S2: tl.constexpr,
+    G_S3: tl.constexpr,
+    G_N1: tl.constexpr,
+    G_N2: tl.constexpr,
+    Y_S0: tl.constexpr,
+    Y_S1: tl.constexpr,
+    Y_S2: tl.constexpr,
+    Y_S3: tl.constexpr,
+    Y_N1: tl.constexpr,
+    Y_N2: tl.constexpr,
+    STORE_RSTD: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
     ACTIVATION: tl.constexpr,
@@ -211,8 +230,14 @@ def layer_norm_gated_fwd_kernel(
     o_d = tl.arange(0, BD)
     m_d = o_d < D
 
-    p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
+    rows = i_t * BT + tl.arange(0, BT)
+    mask = (rows[:, None] < T) & m_d[None, :]
+    x_rows = (
+        rows // (X_N1 * X_N2) * X_S0
+        + (rows // X_N2 - rows // (X_N1 * X_N2) * X_N1) * X_S1
+        + (rows - rows // X_N2 * X_N2) * X_S2
+    )
+    b_x = tl.load(x + x_rows[:, None] + o_d[None, :] * X_S3, mask, other=0).to(tl.float32)
     if HAS_RESIDUAL:
         p_res = tl.make_block_ptr(residual, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
         b_x += tl.load(p_res, boundary_check=(0, 1)).to(tl.float32)
@@ -230,8 +255,9 @@ def layer_norm_gated_fwd_kernel(
         b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
     b_rstd = 1 / tl.sqrt(b_var + eps)
 
-    p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
-    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
+    if STORE_RSTD:
+        p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
+        tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
 
     if HAS_WEIGHT:
         b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
@@ -243,16 +269,24 @@ def layer_norm_gated_fwd_kernel(
         b_y = b_y + b_b[None, :]
 
     # swish/sigmoid output gate
-    p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+    g_rows = (
+        rows // (G_N1 * G_N2) * G_S0
+        + (rows // G_N2 - rows // (G_N1 * G_N2) * G_N1) * G_S1
+        + (rows - rows // G_N2 * G_N2) * G_S2
+    )
+    b_g = tl.load(g + g_rows[:, None] + o_d[None, :] * G_S3, mask, other=0).to(tl.float32)
     if ACTIVATION == "swish" or ACTIVATION == "silu":
         b_y = b_y * b_g * tl.sigmoid(b_g)
     elif ACTIVATION == "sigmoid":
         b_y = b_y * tl.sigmoid(b_g)
 
     # Write output
-    p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
+    y_rows = (
+        rows // (Y_N1 * Y_N2) * Y_S0
+        + (rows // Y_N2 - rows // (Y_N1 * Y_N2) * Y_N1) * Y_S1
+        + (rows - rows // Y_N2 * Y_N2) * Y_S2
+    )
+    tl.store(y + y_rows[:, None] + o_d[None, :] * Y_S3, b_y.to(y.dtype.element_ty), mask)
 
 
 @triton.heuristics(
@@ -382,6 +416,25 @@ def layer_norm_gated_fwd(
             eps=eps,
             T=T,
             D=D,
+            X_S0=0,
+            X_S1=0,
+            X_S2=x.stride(0),
+            X_S3=x.stride(1),
+            X_N1=1,
+            X_N2=x.shape[0],
+            G_S0=0,
+            G_S1=0,
+            G_S2=g.stride(0),
+            G_S3=g.stride(1),
+            G_N1=1,
+            G_N2=g.shape[0],
+            Y_S0=0,
+            Y_S1=0,
+            Y_S2=y.stride(0),
+            Y_S3=y.stride(1),
+            Y_N1=1,
+            Y_N2=y.shape[0],
+            STORE_RSTD=True,
             BD=BD,
             BT=BT,
             ACTIVATION=activation,
@@ -420,8 +473,74 @@ def rms_norm_gated(
     prenorm: bool = False,
     residual_in_fp32: bool = False,
     eps: float = 1e-6,
+    out: torch.Tensor | None = None,
 ):
     x_shape_og = x.shape
+    # K3 gates are views into the packed BFG projection. Flattening their
+    # token/head dimensions would materialize the projection gaps each layer.
+    if residual is None and not prenorm and x.shape[-1] <= 512 and 2 <= x.ndim <= 4 and 2 <= g.ndim <= 4:
+        if g.numel() != x.numel() or g.shape[-1] != x.shape[-1]:
+            raise ValueError("The norm input and gate must have matching rows and features.")
+        if out is not None and (out.shape != x.shape or out.dtype != x.dtype or out.device != x.device):
+            raise ValueError("The norm output must match the input shape, dtype and device.")
+        if weight is not None:
+            assert weight.shape == (x.shape[-1],)
+        if bias is not None:
+            assert bias.shape == (x.shape[-1],)
+        y = torch.empty_like(x) if out is None else out
+        rows = x.numel() // x.shape[-1]
+        if rows:
+            # Spread small decode batches over the vector cores, while keeping
+            # the original per-program row count for chunked prefill.
+            small_batch_rows = 256
+            decode_batch_rows = 768
+            if rows <= small_batch_rows:
+                block_rows = 4
+            elif rows <= decode_batch_rows:
+                block_rows = 16
+            else:
+                block_rows = 32
+            layer_norm_gated_fwd_kernel[(cdiv(rows, block_rows),)](
+                x=x,
+                g=g,
+                y=y,
+                w=weight,
+                b=bias,
+                residual=None,
+                residual_out=None,
+                mean=None,
+                rstd=None,
+                eps=eps,
+                T=rows,
+                D=x.shape[-1],
+                X_S0=x.stride(-4) if x.ndim == 4 else 0,
+                X_S1=x.stride(-3) if x.ndim >= 3 else 0,
+                X_S2=x.stride(-2),
+                X_S3=x.stride(-1),
+                X_N1=x.shape[-3] if x.ndim >= 3 else 1,
+                X_N2=x.shape[-2],
+                G_S0=g.stride(-4) if g.ndim == 4 else 0,
+                G_S1=g.stride(-3) if g.ndim >= 3 else 0,
+                G_S2=g.stride(-2),
+                G_S3=g.stride(-1),
+                G_N1=g.shape[-3] if g.ndim >= 3 else 1,
+                G_N2=g.shape[-2],
+                Y_S0=y.stride(-4) if y.ndim == 4 else 0,
+                Y_S1=y.stride(-3) if y.ndim >= 3 else 0,
+                Y_S2=y.stride(-2),
+                Y_S3=y.stride(-1),
+                Y_N1=y.shape[-3] if y.ndim >= 3 else 1,
+                Y_N2=y.shape[-2],
+                STORE_RSTD=False,
+                BD=next_power_of_2(x.shape[-1]),
+                BT=block_rows,
+                ACTIVATION=activation,
+                IS_RMS_NORM=True,
+                num_warps=4,
+            )
+        return y
+    if out is not None:
+        raise ValueError("Direct norm output requires RMS normalization without a residual and head dim <= 512.")
     # reshape input data into 2D tensor
     x = x.contiguous().reshape(-1, x.shape[-1])
     g = g.contiguous().reshape(-1, g.shape[-1])

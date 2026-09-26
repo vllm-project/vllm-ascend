@@ -683,24 +683,35 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             maybe_save_kv_layer_to_connector("", [])
             return
 
-        # Reuse the caller-owned result buffer. FULL graphs can leave rows
-        # outside the live spec/non-spec index sets, so define them before the
-        # two index copies rather than allocating a temporary merged tensor.
-        core_attn_out[:, :num_actual_tokens].zero_()
+        output = core_attn_out
+        if num_actual_tokens != core_attn_out.shape[1]:
+            output = core_attn_out[:, :num_actual_tokens]
         if core_spec is not None and core_non_spec is not None:
             assert spec_token_indices is not None
             assert non_spec_token_indices is not None
             assert spec_token_indices.numel() + non_spec_token_indices.numel() <= num_actual_tokens
-            core_attn_out[:, :num_actual_tokens].index_copy_(1, spec_token_indices, core_spec)
-            core_attn_out[:, :num_actual_tokens].index_copy_(1, non_spec_token_indices, core_non_spec)
+            # The two index sets cover the live tokens. Graph padding outside
+            # those sets has no output contract and needs no initialization.
+            output.index_copy_(1, spec_token_indices, core_spec)
+            output.index_copy_(1, non_spec_token_indices, core_non_spec)
+            norm_input = output
         elif core_spec is not None:
-            core_attn_out[:, :num_actual_tokens] = core_spec
-        elif core_non_spec is not None:
-            core_attn_out[:, :num_actual_tokens] = core_non_spec
+            norm_input = core_spec
+        else:
+            norm_input = core_non_spec
 
         # The registered Ascend FusedRMSNormGated uses the fused norm-gate
-        # kernel while preserving the upstream parameter/loading contract.
-        normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2)
-        core_attn_out[:, :num_actual_tokens].copy_(normalized)
-        core_attn_out[:, num_actual_tokens:].zero_()
+        # kernel. Pure decode/prefill batches can consume the kernel result
+        # directly, without clearing and copying an intermediate output.
+        # Only a pure prefill batch enters the new native specialization.
+        # Decode (regardless of token count), mixed batches and speculation
+        # keep the existing module dispatch and operator graph.
+        if attn_metadata.num_prefills > 0 and attn_metadata.num_decodes == 0 and core_spec is None:
+            prefill_norm = getattr(self.o_norm, "forward_prefill", None)
+            if prefill_norm is not None:
+                prefill_norm(norm_input, g2, out=output)
+                maybe_save_kv_layer_to_connector("", [])
+                return
+        self.o_norm(norm_input, g2, out=output)
+
         maybe_save_kv_layer_to_connector("", [])
