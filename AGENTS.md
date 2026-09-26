@@ -384,6 +384,13 @@ Before merging, verify:
 - [ ] PR description is complete, following the PR template
 - [ ] All review comments addressed
 
+### ommit messages
+Add attribution using commit trailers such as Co-authored-by: (other projects use Assisted-by: or Generated-by:):
+
+Your commit message here
+
+Co-authored-by: Agent Name Here
+Signed-off-by: Your Name <your.email@example.com>
 ---
 
 ## Quick Start for Contributors
