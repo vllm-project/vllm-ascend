@@ -8,7 +8,7 @@
  */
 
 /*!
- * \file chunk_fwd_o_tiling.h
+ * \file chunk_fwd_o_vllm_tiling.h
  * \brief
  */
 
@@ -20,7 +20,7 @@
 
 namespace optiling {
 
-BEGIN_TILING_DATA_DEF(ChunkFwdOTilingData)
+BEGIN_TILING_DATA_DEF(ChunkFwdOVllmTilingData)
 TILING_DATA_FIELD_DEF(int64_t, shapeBatch);
 TILING_DATA_FIELD_DEF(int64_t, seqlen);
 TILING_DATA_FIELD_DEF(int64_t, kNumHead);
@@ -40,7 +40,7 @@ TILING_DATA_FIELD_DEF(int64_t, maskWorkspaceOffset);
 TILING_DATA_FIELD_DEF(float, scale);
 END_TILING_DATA_DEF;
 
-REGISTER_TILING_DATA_CLASS(ChunkFwdO, ChunkFwdOTilingData)
+REGISTER_TILING_DATA_CLASS(ChunkFwdOVllm, ChunkFwdOVllmTilingData)
 
-struct ChunkFwdOCompileInfo {};
+struct ChunkFwdOVllmCompileInfo {};
 } // namespace optiling

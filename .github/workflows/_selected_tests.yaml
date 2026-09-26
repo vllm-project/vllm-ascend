@@ -249,13 +249,13 @@ jobs:
           import sys, torch
           import vllm_ascend.vllm_ascend_C  # noqa: F401
           ops = torch.ops._C_ascend
-          missing = [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o") if not hasattr(ops, n)]
+          missing = [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o_vllm") if not hasattr(ops, n)]
           if missing:
               print(f"::error::Missing AscendC ops after install: {missing}. "
                     f"Cache contents are stale or build skipped registration.", file=sys.stderr)
               sys.exit(1)
           print("AscendC chunk-gdr ops registered:",
-                [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o") if hasattr(ops, n)])
+                [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o_vllm") if hasattr(ops, n)])
           PY
 
       - name: Install vllm-project/vllm-ascend no device

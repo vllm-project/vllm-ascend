@@ -201,7 +201,7 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
         )
         monkeypatch.setattr(
             torch.ops._C_ascend,
-            "chunk_fwd_o",
+            "chunk_fwd_o_vllm",
             lambda *args, **kwargs: _DummyTensor("o_ascend"),
             raising=False,
         )
@@ -293,7 +293,7 @@ def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolis
     )
     monkeypatch.setattr(
         torch.ops._C_ascend,
-        "chunk_fwd_o",
+        "chunk_fwd_o_vllm",
         lambda *args, **kwargs: _DummyTensor("o_ascend"),
         raising=False,
     )
@@ -395,7 +395,7 @@ def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
     )
     monkeypatch.setattr(
         torch.ops._C_ascend,
-        "chunk_fwd_o",
+        "chunk_fwd_o_vllm",
         lambda *a, **kw: _DummyTensor("o_ascendc"),
         raising=False,
     )

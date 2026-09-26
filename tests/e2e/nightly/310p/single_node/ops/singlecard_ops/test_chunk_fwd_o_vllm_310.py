@@ -1,5 +1,5 @@
 """
-chunk_fwd_o correctness tests on Ascend 310P via torch.ops._C_ascend binding.
+chunk_fwd_o_vllm correctness tests on Ascend 310P via torch.ops._C_ascend binding.
 """
 
 import pytest
@@ -13,7 +13,7 @@ CHUNK_SIZE = 64
 
 def npu_chunk_fwd_o(q, k, v, h, g, scale):
     enable_custom_op()
-    return torch.ops._C_ascend.chunk_fwd_o(
+    return torch.ops._C_ascend.chunk_fwd_o_vllm(
         q,
         k,
         v,
@@ -70,8 +70,8 @@ def golden_chunk_fwd_o(q, k, v, h_state, g, scale):
     return o
 
 
-class TestChunkFwdO310:
-    """chunk_fwd_o kernel correctness on Ascend 310P."""
+class TestChunkFwdOVllm310:
+    """chunk_fwd_o_vllm kernel correctness on Ascend 310P."""
 
     @pytest.mark.parametrize(
         "B,Hk,Hv,L,Dk,Dv",

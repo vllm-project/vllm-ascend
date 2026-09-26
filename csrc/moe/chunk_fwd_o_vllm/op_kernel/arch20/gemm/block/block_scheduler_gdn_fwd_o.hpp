@@ -104,7 +104,7 @@ struct BlockSchedulerGdnFwdO {
 
     CATLASS_DEVICE
     void Init(GM_ADDR cu_seqlens, GM_ADDR chunk_offsets, GM_ADDR tiling, uint32_t coreIdx, uint32_t coreNum) {
-        __gm__ ChunkFwdOTilingData *__restrict gdnFwdOTilingData = reinterpret_cast<__gm__ ChunkFwdOTilingData *__restrict>(tiling);
+        __gm__ ChunkFwdOVllmTilingData *__restrict gdnFwdOTilingData = reinterpret_cast<__gm__ ChunkFwdOVllmTilingData *__restrict>(tiling);
         shapeBatch = gdnFwdOTilingData->shapeBatch;
         seqlen = gdnFwdOTilingData->seqlen;
         kNumHead = gdnFwdOTilingData->kNumHead;

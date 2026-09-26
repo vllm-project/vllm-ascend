@@ -8,11 +8,11 @@
  */
 
 /*!
- * \file chunk_fwd_o_tiling.cpp
+ * \file chunk_fwd_o_vllm_tiling.cpp
  * \brief
  */
 
-#include "chunk_fwd_o_tiling.h"
+#include "chunk_fwd_o_vllm_tiling.h"
 #include <register/op_impl_registry.h>
 #include "../tiling_base/data_copy_transpose_tiling.h"
 #include "../tiling_base/tiling_templates_registry.h"
@@ -35,10 +35,10 @@ static constexpr size_t DIM_SEQLEN = 2;
 static constexpr size_t DIM_HEAD_DIM = 3;
 
 
-static void ChunkFwdOTilingDataPrint(gert::TilingContext *context, ChunkFwdOTilingData &tiling)
+static void ChunkFwdOVllmTilingDataPrint(gert::TilingContext *context, ChunkFwdOVllmTilingData &tiling)
 {
     auto nodeName = context->GetNodeName();
-    OP_LOGD(nodeName, ">>>>>>>>>>>>>>> Start to print ChunkFwdO tiling data <<<<<<<<<<<<<<<<");
+    OP_LOGD(nodeName, ">>>>>>>>>>>>>>> Start to print ChunkFwdOVllm tiling data <<<<<<<<<<<<<<<<");
     OP_LOGD(nodeName, "=== batch: %ld", tiling.get_shapeBatch());
     OP_LOGD(nodeName, "=== seqlen: %ld", tiling.get_seqlen());
     OP_LOGD(nodeName, "=== kNumHead: %ld", tiling.get_kNumHead());
@@ -49,13 +49,13 @@ static void ChunkFwdOTilingDataPrint(gert::TilingContext *context, ChunkFwdOTili
     OP_LOGD(nodeName, "=== dataType: %ld", tiling.get_dataType());
     OP_LOGD(nodeName, "=== isVariedLen: %ld", tiling.get_isVariedLen());
     OP_LOGD(nodeName, "=== tokenBatch: %f", tiling.get_tokenBatch());
-    OP_LOGD(nodeName, ">>>>>>>>>>>>>>> Print ChunkFwdO tiling data end <<<<<<<<<<<<<<<<");
+    OP_LOGD(nodeName, ">>>>>>>>>>>>>>> Print ChunkFwdOVllm tiling data end <<<<<<<<<<<<<<<<");
 }
 
-ge::graphStatus Tiling4ChunkFwdO(gert::TilingContext *context)
+ge::graphStatus Tiling4ChunkFwdOVllm(gert::TilingContext *context)
 {
-    OP_LOGD(context->GetNodeName(), "Tiling4ChunkFwdO start.");
-    ChunkFwdOTilingData tiling;
+    OP_LOGD(context->GetNodeName(), "Tiling4ChunkFwdOVllm start.");
+    ChunkFwdOVllmTilingData tiling;
     
     gert::Shape qStorageShape = context->GetOptionalInputShape(INPUT_Q_IDX)->GetStorageShape();
     gert::Shape vStorageShape = context->GetOptionalInputShape(INPUT_V_IDX)->GetStorageShape();
@@ -139,19 +139,19 @@ ge::graphStatus Tiling4ChunkFwdO(gert::TilingContext *context)
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
 
-    ChunkFwdOTilingDataPrint(context, tiling);
-    OP_LOGD(context->GetNodeName(), "Tiling4ChunkFwdO end.");
+    ChunkFwdOVllmTilingDataPrint(context, tiling);
+    OP_LOGD(context->GetNodeName(), "Tiling4ChunkFwdOVllm end.");
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus TilingPrepareForChunkFwdO(gert::TilingParseContext *context)
+ge::graphStatus TilingPrepareForChunkFwdOVllm(gert::TilingParseContext *context)
 {
     (void)context;
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP_OPTILING(ChunkFwdO)
-    .Tiling(Tiling4ChunkFwdO)
-    .TilingParse<ChunkFwdOCompileInfo>(TilingPrepareForChunkFwdO);
+IMPL_OP_OPTILING(ChunkFwdOVllm)
+    .Tiling(Tiling4ChunkFwdOVllm)
+    .TilingParse<ChunkFwdOVllmCompileInfo>(TilingPrepareForChunkFwdOVllm);
 
 } // namespace optiling

@@ -7,8 +7,8 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#include "aclnn_chunk_fwd_o.h"
-#include "chunk_fwd_o.h"
+#include "aclnn_chunk_fwd_o_vllm.h"
+#include "chunk_fwd_o_vllm.h"
 #include <dlfcn.h>
 #include <new>
 
@@ -35,7 +35,7 @@ using namespace op;
 extern "C" {
 #endif
 
-struct ChunkFwdOParams {
+struct ChunkFwdOVllmParams {
     const aclTensor *q = nullptr;
     const aclTensor *k = nullptr;
     const aclTensor *v = nullptr;
@@ -48,7 +48,7 @@ struct ChunkFwdOParams {
     const aclTensor *oOut = nullptr;
 };
 
-static aclnnStatus CheckNotNull(ChunkFwdOParams params)
+static aclnnStatus CheckNotNull(ChunkFwdOVllmParams params)
 {
     CHECK_COND(params.q != nullptr, ACLNN_ERR_PARAM_NULLPTR, "q must not be nullptr.");
     CHECK_COND(params.k != nullptr, ACLNN_ERR_PARAM_NULLPTR, "k must not be nullptr.");
@@ -60,12 +60,12 @@ static aclnnStatus CheckNotNull(ChunkFwdOParams params)
     return ACLNN_SUCCESS;
 }
 
-static aclnnStatus CheckFormat(ChunkFwdOParams params)
+static aclnnStatus CheckFormat(ChunkFwdOVllmParams params)
 {
     return ACLNN_SUCCESS;
 }
 
-static aclnnStatus CheckShape(ChunkFwdOParams params)
+static aclnnStatus CheckShape(ChunkFwdOVllmParams params)
 {
     return ACLNN_SUCCESS;
 }
@@ -77,7 +77,7 @@ static aclnnStatus DataContiguous(const aclTensor *&tensor, aclOpExecutor *execu
     return ACLNN_SUCCESS;
 }
 
-static aclnnStatus ParamsDataContiguous(ChunkFwdOParams &params, aclOpExecutor *executorPtr)
+static aclnnStatus ParamsDataContiguous(ChunkFwdOVllmParams &params, aclOpExecutor *executorPtr)
 {
     CHECK_COND(DataContiguous(params.q, executorPtr) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
                "Contiguous q failed.");
@@ -93,12 +93,12 @@ static aclnnStatus ParamsDataContiguous(ChunkFwdOParams &params, aclOpExecutor *
     return ACLNN_SUCCESS;
 }
 
-static aclnnStatus CheckDtype(ChunkFwdOParams params)
+static aclnnStatus CheckDtype(ChunkFwdOVllmParams params)
 {
     return ACLNN_SUCCESS;
 }
 
-static aclnnStatus CheckParams(ChunkFwdOParams params)
+static aclnnStatus CheckParams(ChunkFwdOVllmParams params)
 {
     CHECK_RET(CheckNotNull(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckFormat(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
@@ -107,7 +107,7 @@ static aclnnStatus CheckParams(ChunkFwdOParams params)
     return ACLNN_SUCCESS;
 }
 
-aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
+aclnnStatus aclnnChunkFwdOVllmGetWorkspaceSize(
     const aclTensor *q,
     const aclTensor *k,
     const aclTensor *v,
@@ -121,9 +121,9 @@ aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor)
 {
-    ChunkFwdOParams params{q, k, v, h, g, cuSeqlensOptional, chunkOffsetsOptional, scale, chunkSize, oOut};
+    ChunkFwdOVllmParams params{q, k, v, h, g, cuSeqlensOptional, chunkOffsetsOptional, scale, chunkSize, oOut};
     // Standard syntax, Check parameters.
-    L2_DFX_PHASE_1(aclnnChunkFwdO, DFX_IN(q, k, v, h, g, cuSeqlensOptional, chunkOffsetsOptional),
+    L2_DFX_PHASE_1(aclnnChunkFwdOVllm, DFX_IN(q, k, v, h, g, cuSeqlensOptional, chunkOffsetsOptional),
                    DFX_OUT(oOut));
     // 固定写法，创建OpExecutor
     auto uniqueExecutor = CREATE_EXECUTOR();
@@ -134,7 +134,7 @@ aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
     CHECK_RET(ret == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_COND(ParamsDataContiguous(params, executorPtr) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
                "ParamsDataContiguous failed.");
-    auto result = l0op::ChunkFwdO(params.q, params.k, params.v, params.h, params.g, params.cuSeqlensOptional, params.chunkOffsetsOptional, params.scale, params.chunkSize, params.oOut, executorPtr);
+    auto result = l0op::ChunkFwdOVllm(params.q, params.k, params.v, params.h, params.g, params.cuSeqlensOptional, params.chunkOffsetsOptional, params.scale, params.chunkSize, params.oOut, executorPtr);
     CHECK_RET(result[0] != nullptr, ACLNN_ERR_PARAM_NULLPTR);
 
     // If the output tensor is non-contiguous, convert the calculated contiguous tensor to non-contiguous.
@@ -148,11 +148,11 @@ aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
 }
 
 
-aclnnStatus aclnnChunkFwdO(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream)
+aclnnStatus aclnnChunkFwdOVllm(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream)
 {
-    L2_DFX_PHASE_2(aclnnChunkFwdO);
+    L2_DFX_PHASE_2(aclnnChunkFwdOVllm);
     CHECK_COND(CommonOpExecutorRun(workspace, workspaceSize, executor, stream) == ACLNN_SUCCESS, ACLNN_ERR_INNER,
-               "This is an error in ChunkFwdO launch aicore.");
+               "This is an error in ChunkFwdOVllm launch aicore.");
     return ACLNN_SUCCESS;
 }
 

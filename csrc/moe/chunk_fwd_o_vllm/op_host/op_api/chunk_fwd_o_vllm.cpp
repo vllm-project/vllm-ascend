@@ -11,14 +11,14 @@
 #include "opdev/op_log.h"
 #include "opdev/op_dfx.h"
 #include "opdev/make_op_executor.h"
-#include "chunk_fwd_o.h"
+#include "chunk_fwd_o_vllm.h"
 
 using namespace op;
 
 namespace l0op {
-OP_TYPE_REGISTER(ChunkFwdO);
+OP_TYPE_REGISTER(ChunkFwdOVllm);
 
-const std::array<const aclTensor *, 1> ChunkFwdO(
+const std::array<const aclTensor *, 1> ChunkFwdOVllm(
     const aclTensor *q,
     const aclTensor *k,
     const aclTensor *v,
@@ -31,7 +31,7 @@ const std::array<const aclTensor *, 1> ChunkFwdO(
     const aclTensor *oOut,
     aclOpExecutor *executor)
 {
-    L0_DFX(ChunkFwdO, q, k, v, h, g, cuSeqlensOptional, chunkOffsetsOptional, scale, chunkSize, oOut);
+    L0_DFX(ChunkFwdOVllm, q, k, v, h, g, cuSeqlensOptional, chunkOffsetsOptional, scale, chunkSize, oOut);
 
     const aclTensor *actualCuSeqlens = nullptr;
     if (cuSeqlensOptional) {
@@ -53,7 +53,7 @@ const std::array<const aclTensor *, 1> ChunkFwdO(
         actualChunkOffsets = nullptr;
     }
 
-    auto ret = ADD_TO_LAUNCHER_LIST_AICORE(ChunkFwdO,
+    auto ret = ADD_TO_LAUNCHER_LIST_AICORE(ChunkFwdOVllm,
         OP_INPUT(q, k, v, h, g, actualCuSeqlens, actualChunkOffsets),
         OP_OUTPUT(oOut),
         OP_ATTR(scale, chunkSize));

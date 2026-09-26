@@ -8,11 +8,11 @@
  */
 
 /*!
- * \file chunk_fwd_o.cpp
+ * \file chunk_fwd_o_vllm.cpp
  * \brief
  */
 
-// #include "chunk_fwd_o.h"
+// #include "chunk_fwd_o_vllm.h"
 #if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
 #include "arch20/compat_310p.h"
 #include "arch20/gemm/kernel/gdn_fwd_o_kernel.hpp"
@@ -23,7 +23,7 @@
 
 using namespace Catlass;
 
-extern "C" __global__ __aicore__ void chunk_fwd_o(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h,
+extern "C" __global__ __aicore__ void chunk_fwd_o_vllm(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h,
                                                          GM_ADDR g, GM_ADDR cu_seqlens, GM_ADDR chunk_offsets,
                                                          GM_ADDR o, GM_ADDR workspace, GM_ADDR tiling)
 {
@@ -35,7 +35,7 @@ extern "C" __global__ __aicore__ void chunk_fwd_o(GM_ADDR q, GM_ADDR k, GM_ADDR 
 
     GM_ADDR user = AscendC::GetUserWorkspace(workspace);
 
-    __gm__ ChunkFwdOTilingData *__restrict gdnFwdOTilingData = reinterpret_cast<__gm__ ChunkFwdOTilingData *__restrict>(tiling);
+    __gm__ ChunkFwdOVllmTilingData *__restrict gdnFwdOTilingData = reinterpret_cast<__gm__ ChunkFwdOVllmTilingData *__restrict>(tiling);
     using workspaceType = float;
     // dtype: 0 - fp16, 1 - bf16, 2 - fp32
 #ifndef CATLASS_UNIFIED_CORE

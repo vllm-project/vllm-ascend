@@ -7,13 +7,13 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#ifndef OP_API_INC_LEVEL0_OP_CHUNK_FWD_O_H
-#define OP_API_INC_LEVEL0_OP_CHUNK_FWD_O_H
+#ifndef OP_API_INC_LEVEL0_OP_CHUNK_FWD_O_VLLM_H
+#define OP_API_INC_LEVEL0_OP_CHUNK_FWD_O_VLLM_H
 
 #include "opdev/op_executor.h"
 
 namespace l0op {
-const std::array<const aclTensor *, 1> ChunkFwdO(
+const std::array<const aclTensor *, 1> ChunkFwdOVllm(
     const aclTensor *q,
     const aclTensor *k,
     const aclTensor *v,

@@ -16,10 +16,10 @@
 
 namespace ops {
 
-class ChunkFwdO : public OpDef {
+class ChunkFwdOVllm : public OpDef {
 
 public:
-    explicit ChunkFwdO(const char *name) : OpDef(name)
+    explicit ChunkFwdOVllm(const char *name) : OpDef(name)
     {
         // Define inputs
         this->Input("q")
@@ -100,6 +100,6 @@ public:
     }
 };
 
-OP_ADD(ChunkFwdO);
+OP_ADD(ChunkFwdOVllm);
 
 } // namespace ops

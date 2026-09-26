@@ -1787,7 +1787,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta
     }
 }
 
-at::Tensor chunk_fwd_o_meta(
+at::Tensor chunk_fwd_o_vllm_meta(
     const at::Tensor & q,
     const at::Tensor & k,
     const at::Tensor & v,
@@ -2080,8 +2080,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_recurrent_gated_delta_rule_310", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_310_meta);
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
-    // chunk_fwd_o
-    ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // chunk_fwd_o_vllm
+    ops.impl("chunk_fwd_o_vllm", &vllm_ascend::meta::chunk_fwd_o_vllm_meta);
     // chunk_kda_fwd
     ops.impl("chunk_kda_fwd", &vllm_ascend::meta::chunk_kda_fwd_meta);
     // kda_gate_cumsum
@@ -2185,8 +2185,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_mla_prolog_v3_k3", &vllm_ascend::meta::npu_mla_prolog_v3_k3_meta);
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
-    // chunk_fwd_o
-    ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // chunk_fwd_o_vllm
+    ops.impl("chunk_fwd_o_vllm", &vllm_ascend::meta::chunk_fwd_o_vllm_meta);
     // chunk_kda_fwd
     ops.impl("chunk_kda_fwd", &vllm_ascend::meta::chunk_kda_fwd_meta);
     // kda_gate_cumsum

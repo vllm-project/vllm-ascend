@@ -7,15 +7,15 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#ifndef OP_API_INC_ACLNN_CHUNK_FWD_O_H
-#define OP_API_INC_ACLNN_CHUNK_FWD_O_H
+#ifndef OP_API_INC_ACLNN_CHUNK_FWD_O_VLLM_H
+#define OP_API_INC_ACLNN_CHUNK_FWD_O_VLLM_H
 #include "aclnn/aclnn_base.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* function: aclnnChunkFwdOGetWorkspaceSize
+/* function: aclnnChunkFwdOVllmGetWorkspaceSize
  * parameters :
  * q : required
  * k : required
@@ -31,7 +31,7 @@ extern "C" {
  * executor : executor context(output).
  */
 __attribute__((visibility("default")))
-aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
+aclnnStatus aclnnChunkFwdOVllmGetWorkspaceSize(
     const aclTensor *q,
     const aclTensor *k,
     const aclTensor *v,
@@ -45,7 +45,7 @@ aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
-/* function: aclnnChunkFwdO
+/* function: aclnnChunkFwdOVllm
  * parameters :
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).
@@ -53,7 +53,7 @@ aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
  * stream : acl stream.
  */
 __attribute__((visibility("default")))
-aclnnStatus aclnnChunkFwdO(
+aclnnStatus aclnnChunkFwdOVllm(
     void *workspace,
     uint64_t workspaceSize,
     aclOpExecutor *executor,

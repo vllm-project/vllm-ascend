@@ -194,7 +194,7 @@ def chunk_gated_delta_rule_fwd(
             h = h.transpose(1, 2).contiguous()
             v_new = v_new.transpose(1, 2).contiguous()
 
-    o_ascendc = torch.ops._C_ascend.chunk_fwd_o(
+    o_ascendc = torch.ops._C_ascend.chunk_fwd_o_vllm(
         q_ascendc,
         k_ascendc,
         v_new,
