@@ -1,12 +1,15 @@
 /**
- * This program is free software, you can redistribute it and/or modify it.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Copyright (c) 2025 Tianjin University, Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * the BSD 3-Clause License (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING
- * BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ */
+
+/*!
+ * \file causal_conv1d_update.h
+ * \brief CausalConv1d UPDATE (decode) kernel.
  */
 
 #ifndef CAUSAL_CONV1D_UPDATE_H
@@ -22,8 +25,8 @@ class CausalConv1dUpdate
                           CAUSAL_CONV1D_TPL_FN_PLAN_INVALID> {
 public:
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates, GM_ADDR queryStartLoc,
-                                GM_ADDR cacheIndices, GM_ADDR, GM_ADDR numAcceptedTokens, GM_ADDR y, GM_ADDR workspace,
-                                const CausalConv1dTilingData *tilingData)
+                                GM_ADDR convStateIndices, GM_ADDR, GM_ADDR numAcceptedTokens, GM_ADDR y,
+                                GM_ADDR workspace, const CausalConv1dTilingData *tilingData)
     {
         (void)workspace;
         this->ResetRuntimeState(tilingData);
@@ -31,27 +34,12 @@ public:
         this->weightGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(weight));
         this->biasGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(bias));
         this->convStatesGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(convStates));
-        if (tilingData->hasQueryStartLoc != 0) {
-            if (tilingData->queryStartLocUseInt64 != 0) {
-                this->queryStartLocGmInt64.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(queryStartLoc));
-            } else {
-                this->queryStartLocGmInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(queryStartLoc));
-            }
-        }
-        if (tilingData->hasCacheIndices != 0) {
-            if (tilingData->cacheIndicesUseInt64 != 0) {
-                this->cacheIndicesGmInt64.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(cacheIndices));
-            } else {
-                this->cacheIndicesGmInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(cacheIndices));
-            }
-        }
-        if (tilingData->hasNumAcceptedTokens != 0) {
-            if (tilingData->numAcceptedTokensUseInt64 != 0) {
-                this->numAcceptedTokensGmInt64.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(numAcceptedTokens));
-            } else {
-                this->numAcceptedTokensGmInt32.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(numAcceptedTokens));
-            }
-        }
+        this->queryStartLocGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(queryStartLoc));
+        this->queryStartLocI32Gm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(queryStartLoc));
+        this->cacheIndicesGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(convStateIndices));
+        this->cacheIndicesI32Gm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(convStateIndices));
+        this->numAcceptedTokensGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(numAcceptedTokens));
+        this->numAcceptedTokensI32Gm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(numAcceptedTokens));
         this->yGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(y));
         this->InitSharedBuffersAndEvents();
     }
@@ -76,16 +64,17 @@ public:
 
 template <typename T>
 __aicore__ inline void RunCausalConv1dUpdate(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates,
-                                             GM_ADDR queryStartLoc, GM_ADDR cacheIndices, GM_ADDR initialStateMode,
-                                             GM_ADDR numAcceptedTokens, GM_ADDR y, GM_ADDR workspace,
+                                             GM_ADDR queryStartLoc, GM_ADDR convStateIndices,
+                                             GM_ADDR hasInitialState, GM_ADDR numAcceptedTokens, GM_ADDR y,
+                                             GM_ADDR workspace,
                                              const CausalConv1dTilingData *tilingData)
 {
     CausalConv1dUpdate<T> op;
-    op.Init(x, weight, bias, convStates, queryStartLoc, cacheIndices, initialStateMode, numAcceptedTokens, y, workspace,
-            tilingData);
+    op.Init(x, weight, bias, convStates, queryStartLoc, convStateIndices, hasInitialState, numAcceptedTokens, y,
+            workspace, tilingData);
     op.Process();
 }
 
-} // namespace NsCausalConv1d
+}
 
-#endif // CAUSAL_CONV1D_UPDATE_H
+#endif

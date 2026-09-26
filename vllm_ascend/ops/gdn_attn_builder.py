@@ -132,6 +132,7 @@ class GDNCausalConv1dMetadata:
     query_start_loc: torch.Tensor
     cache_indices: torch.Tensor
     initial_state_mode: torch.Tensor | None
+    max_query_len: int = -1
 
 
 @dataclass
@@ -139,6 +140,7 @@ class GDNSpecCausalConv1dMetadata:
     query_start_loc: torch.Tensor
     cache_indices: torch.Tensor
     num_accepted_tokens: torch.Tensor
+    max_query_len: int
 
 
 @dataclass
@@ -457,6 +459,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 query_start_loc=attn_metadata.non_spec_query_start_loc,
                 cache_indices=non_spec_cache_indices[:prefill_num_rows],
                 initial_state_mode=initial_state_mode,
+                max_query_len=-1,
             ),
             chunk=chunk_metadata,
         )
@@ -489,6 +492,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 query_start_loc=attn_metadata.spec_query_start_loc,
                 cache_indices=attn_metadata.spec_state_indices_tensor[:spec_num_rows],
                 num_accepted_tokens=attn_metadata.num_accepted_tokens[:spec_num_rows],
+                max_query_len=self.num_spec + 1,
             ),
             actual_seq_lengths=(
                 _build_actual_seq_lengths(
@@ -530,6 +534,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 query_start_loc=attn_metadata.non_spec_query_start_loc,
                 cache_indices=non_spec_cache_indices[:non_spec_num_rows],
                 initial_state_mode=None,
+                max_query_len=1,
             ),
             actual_seq_lengths=_build_actual_seq_lengths(
                 attn_metadata.non_spec_query_start_loc,
