@@ -1111,26 +1111,29 @@ def _make_shared_expert_events():
 
 
 @pytest.mark.parametrize(
-    ("quant_type", "has_scales", "has_active_lora", "expected_path"),
+    ("quant_type", "has_scales", "has_scale_bias", "has_active_lora", "expected_path"),
     [
-        (QuantType.W8A8, True, False, SharedExpertMLPPath.A8_INT_FUSED),
-        (QuantType.W4A8, True, False, SharedExpertMLPPath.A8_INT_FUSED),
-        (QuantType.W4A8MXFP, True, False, SharedExpertMLPPath.A8_MXFP_FUSED),
+        (QuantType.W8A8, True, False, False, SharedExpertMLPPath.A8_INT_FUSED),
+        (QuantType.W4A8, True, False, False, SharedExpertMLPPath.A8_INT_FUSED),
+        (QuantType.W4A8MXFP, True, False, False, SharedExpertMLPPath.A8_MXFP_FUSED),
+        # Scale-bias formats must retain their registered linear math.
+        (QuantType.W4A8, True, True, False, SharedExpertMLPPath.LINEAR_WRAPPER),
         # These schemes retain their registered linear implementation.
-        (QuantType.W8A8MXFP, True, False, SharedExpertMLPPath.LINEAR_WRAPPER),
-        (QuantType.W8A8FP, True, False, SharedExpertMLPPath.LINEAR_WRAPPER),
-        (QuantType.W4A4MXFP, True, False, SharedExpertMLPPath.LINEAR_WRAPPER),
-        (QuantType.NONE, False, False, SharedExpertMLPPath.LINEAR_WRAPPER),
+        (QuantType.W8A8MXFP, True, False, False, SharedExpertMLPPath.LINEAR_WRAPPER),
+        (QuantType.W8A8FP, True, False, False, SharedExpertMLPPath.LINEAR_WRAPPER),
+        (QuantType.W4A4MXFP, True, False, False, SharedExpertMLPPath.LINEAR_WRAPPER),
+        (QuantType.NONE, False, False, False, SharedExpertMLPPath.LINEAR_WRAPPER),
         # LoRA must not bypass the linear wrappers even for A8 quantization.
-        (QuantType.W8A8, True, True, SharedExpertMLPPath.LINEAR_WRAPPER),
+        (QuantType.W8A8, True, False, True, SharedExpertMLPPath.LINEAR_WRAPPER),
         # A partially initialized quant layer must fail closed to wrappers.
-        (QuantType.W8A8, False, False, SharedExpertMLPPath.LINEAR_WRAPPER),
+        (QuantType.W8A8, False, False, False, SharedExpertMLPPath.LINEAR_WRAPPER),
     ],
 )
 def test_shared_expert_mlp_path_preserves_quant_and_lora_semantics(
     monkeypatch,
     quant_type,
     has_scales,
+    has_scale_bias,
     has_active_lora,
     expected_path,
 ):
@@ -1140,6 +1143,9 @@ def test_shared_expert_mlp_path_preserves_quant_and_lora_semantics(
     if has_scales:
         gate_up_proj.weight_scale = torch.ones(1)
         down_proj.weight_scale = torch.ones(1)
+    if has_scale_bias:
+        gate_up_proj.scale_bias = torch.ones(1)
+        down_proj.scale_bias = torch.ones(1)
     shared_experts.layer = SimpleNamespace(
         gate_up_proj=gate_up_proj,
         down_proj=down_proj,

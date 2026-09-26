@@ -542,6 +542,12 @@ class AscendSharedExperts:
             and hasattr(self.layer.gate_up_proj, "weight_scale")
             and hasattr(self.layer.down_proj, "weight_scale")
         )
+        # A scale bias is part of the registered linear scheme's math, while
+        # the direct A8 path below has no scale-bias input. Keep such formats on
+        # their linear wrappers instead of silently dropping that correction.
+        has_scale_bias = hasattr(self.layer.gate_up_proj, "scale_bias") or hasattr(self.layer.down_proj, "scale_bias")
+        if has_scale_bias:
+            return SharedExpertMLPPath.LINEAR_WRAPPER
         if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
             return SharedExpertMLPPath.A8_INT_FUSED
         if has_quantized_shared_without_lora and self.quant_type == QuantType.W4A8MXFP:

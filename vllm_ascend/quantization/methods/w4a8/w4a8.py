@@ -21,7 +21,7 @@ import numpy as np
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -37,8 +37,131 @@ from vllm_ascend.utils import (
     maybe_trans_nz,
 )
 
-from ..base import AscendMoEScheme, QuantType
+from ..base import AscendLinearScheme, AscendMoEScheme, QuantType
 from ..registry import register_scheme
+
+
+@register_scheme("W4A8_DYNAMIC", "linear")
+class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
+    """ModelSlim per-channel W4A8 dynamic linear scheme.
+
+    The packed INT4 weights use ``scale_bias`` and execute as a single group in
+    grouped matmul.  This keeps the implementation tied to the weight format,
+    rather than to a model that happens to use it for shared experts.
+    """
+
+    def __init__(self) -> None:
+        quant_description = get_current_vllm_config().quant_config.quant_description
+        group_size = quant_description.get("group_size", 0)
+        if group_size != 0:
+            raise ValueError("W4A8 dynamic linear requires per-channel weights (group_size=0).")
+        quant_version = quant_description.get("version", "0")
+        if quant_version != "1.0.0":
+            raise ValueError("W4A8 dynamic linear requires quantization version 1.0.0.")
+        self.tp_size = get_tensor_model_parallel_world_size()
+
+    def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
+        del params_dtype
+        pack_factor = 2
+        required_divisibility = pack_factor * 4
+        if output_size % required_divisibility != 0:
+            raise ValueError(
+                f"W4A8 dynamic linear output size {output_size} must be divisible by {required_divisibility}."
+            )
+        return {
+            "weight": torch.empty(output_size // pack_factor, input_size, dtype=torch.int8),
+            "_packed_dim": 0,
+            "_packed_factor": pack_factor,
+        }
+
+    def get_pergroup_param(
+        self,
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        layer_type: str | None = None,
+    ) -> dict[str, Any]:
+        del input_size
+        scale_bias_width = 16 if layer_type == "row" else 1
+        return {
+            "weight_scale": torch.empty(output_size, 1, dtype=params_dtype),
+            "weight_offset": torch.empty(output_size, 1, dtype=params_dtype),
+            "scale_bias": torch.empty(output_size, scale_bias_width, dtype=torch.float32),
+        }
+
+    def _local_scale_bias(self, layer: torch.nn.Module, tp_rank: int | None = None) -> torch.Tensor:
+        scale_bias = layer.scale_bias
+        if scale_bias.dim() != 2 or scale_bias.shape[1] == 1:
+            return scale_bias.flatten()
+
+        tp_size = getattr(layer, "tp_size", self.tp_size)
+        rank = getattr(layer, "tp_rank", None)
+        if rank is None:
+            rank = tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+        num_offline_shards = scale_bias.shape[1]
+        if tp_size <= 0 or num_offline_shards % tp_size != 0:
+            raise ValueError(
+                f"scale_bias width {num_offline_shards} must be divisible by the projection TP size {tp_size}"
+            )
+        if rank < 0 or rank >= tp_size:
+            raise ValueError(f"tp_rank {rank} exceeds projection TP size {tp_size}")
+
+        shards_per_rank = num_offline_shards // tp_size
+        start = rank * shards_per_rank
+        return scale_bias[:, start : start + shards_per_rank].sum(dim=1)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = None,
+    ) -> torch.Tensor:
+        input_shape = x.shape
+        x_2d = x.reshape(-1, input_shape[-1])
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x_2d)
+
+        # Build the single-expert token count on device so ACL Graph capture
+        # does not introduce a synchronous host-to-device copy.
+        group_list = torch.full(
+            (1,),
+            quantized_x.shape[0],
+            dtype=torch.int64,
+            device=quantized_x.device,
+        )
+        scale_bias = self._local_scale_bias(layer, tp_rank)
+        output = torch_npu.npu_grouped_matmul(
+            x=[quantized_x],
+            weight=[layer.weight],
+            scale=[layer.weight_scale.reshape(1, 1, -1)],
+            bias=[scale_bias.reshape(1, -1)],
+            per_token_scale=[pertoken_scale],
+            split_item=2,
+            group_list=group_list,
+            group_type=0,
+            group_list_type=1,
+            output_dtype=x.dtype,
+        )[0]
+        if bias is not None:
+            output = output + bias
+        return output.reshape(*input_shape[:-1], output.shape[-1])
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        layer.weight_scale.data = layer.weight_scale.data.flatten()
+        layer.weight_offset.data = layer.weight_offset.data.flatten()
+
+        # Grouped matmul expects each FP32 bit pattern stored in an int64 element.
+        # Keep the conversion on device to avoid a synchronous host-device copy.
+        layer.weight_scale.data = (
+            layer.weight_scale.data.to(torch.float32).view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+        )
+
+        layer.scale_bias.data = self._local_scale_bias(layer).contiguous()
+        # Model the projection as one grouped-matmul group. Preserve the packed
+        # INT4 bytes while converting to WeightNZ, then expose groups of four
+        # bytes as the int32 storage required by grouped matmul.
+        layer.weight.data = maybe_trans_nz(layer.weight.data.unsqueeze(0)).contiguous().view(torch.int32)
 
 
 @register_scheme("W4A8_DYNAMIC", "moe")
