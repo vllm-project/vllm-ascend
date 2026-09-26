@@ -1,5 +1,6 @@
 import importlib
 import math
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -60,6 +61,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
 
+# While a request cannot be admitted (allocate_slots fails, e.g. its KV
+# footprint exceeds the available blocks), the scheduler re-enters
+# get_num_new_matched_tokens every step. Warn once a request has been starving
+# for this long so the deadlock is visible instead of retrying silently.
+POOL_LOAD_ADMISSION_WARN_SECS = 30.0
+
 
 class KVPoolScheduler:
     def __init__(
@@ -113,6 +120,12 @@ class KVPoolScheduler:
         )
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
+        # request_id -> monotonic timestamp of the first pool-load spec of the
+        # current admission attempt; reset once blocks are allocated so a
+        # re-queued (e.g. preempted) request is timed from its new attempt.
+        self._load_spec_first_seen: dict[str, float] = {}
+        # request_ids that already got the admission-starvation warning.
+        self._load_spec_warned: set[str] = set()
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
@@ -650,13 +663,43 @@ class KVPoolScheduler:
         else:
             need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
-        logger.info(
+        # The scheduler retries admission every step while the request cannot
+        # be allocated, re-entering this function each time. Log the lookup
+        # result once per admission attempt (repeat attempts at DEBUG) and
+        # warn when a request has been starving for KV cache capacity.
+        first_seen = self._load_spec_first_seen.get(request.request_id)
+        now = time.monotonic()
+        if first_seen is None:
+            self._load_spec_first_seen[request.request_id] = now
+            log_hit = logger.info
+        else:
+            log_hit = logger.debug
+        log_hit(
             "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",
             request.request_id,
             request.num_tokens,
             num_external_hit_tokens,
             need_to_allocate,
         )
+        if (
+            first_seen is not None
+            and need_to_allocate > 0
+            and request.request_id not in self._load_spec_warned
+            and now - first_seen >= POOL_LOAD_ADMISSION_WARN_SECS
+        ):
+            self._load_spec_warned.add(request.request_id)
+            logger.warning(
+                "Request %s has been waiting %.1fs for KV cache admission "
+                "(needs to load %d tokens from the KV pool). Its KV footprint "
+                "likely exceeds the available KV cache blocks, so it stays in "
+                "the waiting queue until capacity frees up. Watch "
+                'vllm:num_requests_waiting_by_reason{reason="capacity"}; if '
+                "this persists, increase --gpu-memory-utilization or reduce "
+                "--max-model-len / --limit-mm-per-prompt.",
+                request.request_id,
+                now - first_seen,
+                need_to_allocate,
+            )
 
         # In layerwise mode, even when vLLM has local cached tokens, we still
         # need to load KV cache from the pool because layerwise transfer loads
@@ -691,6 +734,10 @@ class KVPoolScheduler:
         For SharedStorageConnector, update _request_needs_load
         if the CacheManager this allocated blocks for us.
         """
+        # Admission succeeded: stop tracking the starvation window so a later
+        # re-queue (e.g. after preemption) is timed from its new attempt.
+        self._load_spec_first_seen.pop(request.request_id, None)
+        self._load_spec_warned.discard(request.request_id)
         local_block_ids: list[list[int]] = [[] for _ in self.kv_cache_group_ids]
         if num_external_tokens > 0:
             local_block_ids = normalize_block_ids_by_group(blocks.get_block_ids())
@@ -1082,6 +1129,8 @@ class KVPoolScheduler:
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         """Allow the scheduler to free blocks after synchronous saving."""
+        self._load_spec_first_seen.pop(request.request_id, None)
+        self._load_spec_warned.discard(request.request_id)
         return False, None
 
     def request_finished_all_groups(
@@ -1090,6 +1139,8 @@ class KVPoolScheduler:
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         """Allow the scheduler to free all groups after synchronous saving."""
+        self._load_spec_first_seen.pop(request.request_id, None)
+        self._load_spec_warned.discard(request.request_id)
         return False, None
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:

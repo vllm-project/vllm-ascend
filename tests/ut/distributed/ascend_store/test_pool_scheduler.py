@@ -1281,3 +1281,74 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPoolLoadAdmissionLogging(unittest.TestCase):
+    """Admission-retry logging: the INFO hit line fires once, and a request
+    that keeps failing admission raises exactly one capacity warning."""
+
+    def _make_config(self):
+        config = MagicMock()
+        config.kv_transfer_config.kv_role = "kv_producer"
+        config.kv_transfer_config.kv_connector_extra_config = {}
+        config.kv_transfer_config.get_from_extra_config.return_value = True
+        config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.prefill_context_parallel_size = 1
+        config.parallel_config.decode_context_parallel_size = 1
+        config.parallel_config.tensor_parallel_size = 1
+        config.parallel_config.pipeline_parallel_size = 1
+        config.parallel_config.rank = 0
+        config.parallel_config.world_size = 1
+        config.cache_config.block_size = 16
+        config.cache_config.hash_block_size = 16
+        config.model_config.model = "org/llama-7b"
+        config.model_config.use_mla = False
+        config.model_config.hf_text_config = MagicMock(spec=[])
+        config.model_config.get_total_num_kv_heads.return_value = 1
+        config.model_config.get_num_layers.return_value = 2
+        return config
+
+    @staticmethod
+    def _request(request_id):
+        return MagicMock(
+            prompt_token_ids=list(range(64)),
+            num_tokens=64,
+            request_id=request_id,
+            block_hashes=[b"h"] * 4,
+        )
+
+    def _make_scheduler_and_request(self, request_id, lookup_hit=32):
+        """Keep the LookupKeyClient patch alive for the whole test: the first
+        get_num_new_matched_tokens call constructs the (real, socket-bound)
+        client, which must stay mocked."""
+        config = self._make_config()
+        request = self._request(request_id)
+        patcher = patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+        mock_client_cls = patcher.start()
+        mock_client_cls.return_value.lookup.return_value = lookup_hit
+        self.addCleanup(patcher.stop)
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        return scheduler, request
+
+    def test_repeated_lookup_tracked_once(self):
+        scheduler, request = self._make_scheduler_and_request("r-log")
+        for _ in range(3):
+            scheduler.get_num_new_matched_tokens(request, 0)
+        # Only the first attempt is tracked as a new admission attempt.
+        self.assertIn("r-log", scheduler._load_spec_first_seen)
+        self.assertEqual(scheduler._load_spec_warned, set())
+
+    def test_warns_once_when_admission_starves(self):
+        scheduler, request = self._make_scheduler_and_request("r-starve")
+        scheduler._load_spec_first_seen[request.request_id] = -1.0e9  # long overdue
+        for _ in range(3):
+            scheduler.get_num_new_matched_tokens(request, 0)
+        # Exactly one warning per admission attempt, not one per retry.
+        self.assertEqual(scheduler._load_spec_warned, {request.request_id})
+
+    def test_admission_clears_starvation_tracking(self):
+        scheduler, request = self._make_scheduler_and_request("r-clear")
+        scheduler.get_num_new_matched_tokens(request, 0)
+        self.assertIn("r-clear", scheduler._load_spec_first_seen)
+        scheduler.update_state_after_alloc(request, MagicMock(), 0)
+        self.assertNotIn("r-clear", scheduler._load_spec_first_seen)
