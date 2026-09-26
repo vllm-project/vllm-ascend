@@ -29,6 +29,30 @@ You can use our official docker image to run `Qwen3-VL-Reranker` model directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
+=== "A5"
+
+    The following command uses the Ubuntu A5 image to start the container.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    docker run --rm \
+        --name vllm-ascend \
+        --net=host \
+        --shm-size=1g \
+        --device /dev/davinci0 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
+
 === "A3 series"
 
     Start the docker image on each node.
@@ -149,11 +173,9 @@ Judge whether the Document meets the requirements based on the Query and the Ins
 
 Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
 
-=== "A3/A2 series"
+=== "A5/A3/A2"
 
     ```shell
-    #!/bin/sh
-    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
         --served-model-name Qwen/Qwen3-VL-Reranker-2B \
         --runner pooling \
