@@ -3101,10 +3101,16 @@ class MooncakeConnectorWorker:
         if not remote_block_sizes:
             return
         kv_group2layeridx = getattr(self, "kv_group2layeridx", {})
+        # remote_block_sizes is indexed by kv_cache_group_id, while
+        # kv_group2layeridx is keyed by transfer_group_id; a KV cache group
+        # can be split into several transfer groups, so remap the keys.
+        group_spec_types: dict[int, list[str]] = {}
+        for transfer_group_id, (group_spec, _) in kv_group2layeridx.items():
+            g_id = group_spec.get("kv_cache_group_id", transfer_group_id)
+            group_spec_types.setdefault(g_id, []).append(group_spec.get("kv_cache_spec_type"))
         expanded_sizes = []
         for group_idx, size in enumerate(remote_block_sizes):
-            entry = kv_group2layeridx.get(group_idx)
-            if entry is not None and entry[0].get("kv_cache_spec_type") == "MambaSpec":
+            if "MambaSpec" in group_spec_types.get(group_idx, []):
                 continue
             expanded_sizes.append(size)
         if len(set(expanded_sizes)) > 1:
