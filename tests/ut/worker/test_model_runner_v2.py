@@ -486,6 +486,10 @@ def test_init_without_spec_pp():
         patch("torch.npu.Event", return_value="event"),
         patch("torch.npu.Stream", return_value="stream"),
         patch("torch.empty", return_value=torch.zeros(2, dtype=torch.int32)),
+        patch(
+            "vllm_ascend.observability.runtime_guard.processor.RuntimeGuardProcessor.bind",
+            return_value=MagicMock(name="runtime_guard"),
+        ),
     ):
         runner = NPUModelRunner(vllm_config, torch.device("cpu"))
     assert runner.eplb == "eplb"
@@ -536,6 +540,10 @@ def test_init_spec_pp_full_graph_and_speculator():
         patch("torch.npu.Event", return_value="event"),
         patch("torch.empty", return_value=torch.zeros(2, dtype=torch.int32)),
         patch(
+            "vllm_ascend.observability.runtime_guard.processor.RuntimeGuardProcessor.bind",
+            return_value=MagicMock(name="runtime_guard"),
+        ),
+        patch(
             "vllm_ascend.worker.v2.model_runner.breakable_cudagraph.is_breakable_cudagraph_enabled",
             return_value=True,
         ),
@@ -581,6 +589,9 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler = MagicMock()
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
+    # The spec-PP broadcast is functional (guard-independent): it fires
+    # inline in sample_tokens, also on the guard-less ``__new__`` UT path.
+    runner.pp_handler.broadcast_drafts.assert_called_once_with()
     runner.pp_handler.broadcast_draft_tokens.assert_not_called()
 
 

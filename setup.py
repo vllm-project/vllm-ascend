@@ -496,7 +496,7 @@ setup(
     ],
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
     package_data={
-        "vllm_ascend.observability": ["config/*.yaml"],
+        "vllm_ascend.observability.metrics": ["config/*.yaml"],
     },
     python_requires=">=3.10",
     install_requires=get_requirements(),

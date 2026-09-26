@@ -17,5 +17,5 @@ def get_metric_provider():
         priority=200,
         framework_package="vllm_ascend",
         owned_symbol_prefixes=("vllm_ascend.",),
-        handler_module_prefixes=("vllm_ascend.observability.",),
+        handler_module_prefixes=("vllm_ascend.observability.metrics.",),
     )

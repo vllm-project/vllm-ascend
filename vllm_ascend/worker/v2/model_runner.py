@@ -61,6 +61,11 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.observability.runtime_guard.hooks import (
+    runtime_guard_sample_tokens,
+    runtime_guard_step,
+)
+from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
@@ -209,6 +214,8 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
 
+        self.runtime_guard = RuntimeGuardProcessor.bind(self)
+
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
         return AscendPCPManager
@@ -249,6 +256,7 @@ class NPUModelRunner(GPUModelRunner):
             pcp_manager._sampling_hidden_restored = True
         self.execute_model_state = state
 
+    @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
         pcp_manager = self.pcp_manager
         if pcp_manager is not None and not self.is_last_pp_rank and self.execute_model_state is not None:
@@ -310,7 +318,10 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.model_state.kvpp_runtime = self.kvpp
 
+    # runtime_guard_step must stay INNER (below @torch.inference_mode()) so the
+    # wave sync keeps running inside the inference-mode context.
     @torch.inference_mode()
+    @runtime_guard_step
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
