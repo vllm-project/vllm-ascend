@@ -20,6 +20,7 @@ from vllm_ascend.platform import (
     _validate_eplb_config,
     _validate_parallel_config,
     _validate_sfa_dcp_kv_sp,
+    _validate_speculative_pipeline_parallel_config,
 )
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -81,6 +82,42 @@ def test_sfa_dcp_validation_only_bypasses_separate_draft(model_role):
             with pytest.raises(AssertionError, match="DCP for SFA"):
                 _validate_parallel_config(config)
             enable_sfa.assert_called_once_with(config)
+
+
+def _spec_pp_config(use_v2: bool, pp_size: int, spec=True, kv_role=None):
+    return SimpleNamespace(
+        use_v2_model_runner=use_v2,
+        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
+        speculative_config=SimpleNamespace(method="mtp") if spec else None,
+        kv_transfer_config=SimpleNamespace(
+            is_kv_producer=kv_role == "producer", is_kv_consumer=kv_role == "both"
+        )
+        if kv_role
+        else None,
+    )
+
+
+def test_speculative_pp_rejected_on_v1_model_runner():
+    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
+        _validate_speculative_pipeline_parallel_config(_spec_pp_config(use_v2=False, pp_size=2))
+    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
+        _validate_speculative_pipeline_parallel_config(
+            _spec_pp_config(use_v2=False, pp_size=2, kv_role="both")
+        )
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        _spec_pp_config(use_v2=True, pp_size=2),
+        _spec_pp_config(use_v2=False, pp_size=1),
+        _spec_pp_config(use_v2=False, pp_size=2, spec=False),
+        _spec_pp_config(use_v2=False, pp_size=2, kv_role="producer"),
+    ],
+    ids=["v2-runner", "no-pp", "no-spec", "pd-prefill-node"],
+)
+def test_speculative_pp_allowed_cases(config):
+    _validate_speculative_pipeline_parallel_config(config)
 
 
 @pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
