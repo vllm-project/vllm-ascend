@@ -35,6 +35,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 )
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.kda_state_copy import copy_kda_states, supports_kda_state_copy
+from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
@@ -54,6 +56,48 @@ def _kda_bfg_stream() -> torch.npu.Stream:
     if _KDA_BFG_STREAM is None:
         _KDA_BFG_STREAM = torch_npu.npu.Stream()
     return _KDA_BFG_STREAM
+
+
+def _copy_strided_recurrent_states(
+    state: torch.Tensor,
+    packed_states: torch.Tensor,
+    indices: torch.Tensor,
+    *,
+    to_cache: bool,
+) -> None:
+    """Copy selected [H,V,K] states using the existing Mamba byte-copy kernel."""
+    if state.ndim != 4 or packed_states.shape != (indices.numel(), *state.shape[1:]):
+        raise ValueError("KDA state copy requires matching [N,H,V,K] tensors.")
+    if packed_states.dtype != state.dtype or not packed_states.is_contiguous():
+        raise ValueError("KDA state copy requires a contiguous buffer with the cache dtype.")
+    state_elements = 1
+    for size, stride in zip(reversed(state.shape[1:]), reversed(state.stride()[1:])):
+        if size > 1 and stride != state_elements:
+            raise ValueError("KDA state copy supports only first-axis strided caches.")
+        state_elements *= size
+    if state.stride(0) < state_elements or state.shape[0] == 0:
+        raise ValueError("KDA state pages must contain nonoverlapping states.")
+    num_states = indices.numel()
+    if num_states == 0:
+        return
+    # Widen before multiplying: the selected state can be beyond 4 GiB.
+    indices = indices.reshape(-1).to(torch.int64)
+    valid = (indices >= 0) & (indices < state.shape[0])
+    state_bytes = state_elements * state.element_size()
+    # data_ptr already includes the layer/state storage offset. Copy only the
+    # state payload, never the page stride containing other layers' state.
+    cache_ptrs = state.data_ptr() + indices.clamp(0, state.shape[0] - 1) * (state.stride(0) * state.element_size())
+    packed_ptrs = (
+        packed_states.data_ptr() + torch.arange(num_states, device=indices.device, dtype=torch.int64) * state_bytes
+    )
+    sizes = valid.to(torch.int64) * state_bytes
+    if to_cache:
+        src_ptrs, dst_ptrs = packed_ptrs, cache_ptrs
+    else:
+        # PAD_SLOT_ID rows have no source state and must not read the last page.
+        packed_states.zero_()
+        src_ptrs, dst_ptrs = cache_ptrs, packed_ptrs
+    batch_memcpy_kernel[(num_states,)](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=8192)
 
 
 class _KDAFusedBFGLinear(MergedColumnParallelLinear):
@@ -467,8 +511,19 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         # The recurrent cache uses [H,V,K]. The fused prefill operator accepts
         # that state layout directly through state_v_first.
-        initial_state_vk = recurrent_state[state_indices].contiguous()
-        clear_ssm_states(initial_state_vk, has_initial_state)
+        native_state_copy = supports_kda_state_copy(recurrent_state)
+        if native_state_copy:
+            initial_state_vk = recurrent_state.new_empty((state_indices.numel(), *recurrent_state.shape[1:]))
+            copy_kda_states(recurrent_state, initial_state_vk, state_indices, has_initial_state=has_initial_state)
+        elif recurrent_state.is_contiguous():
+            initial_state_vk = recurrent_state[state_indices].contiguous()
+        else:
+            # CANN advanced indexing normalizes the whole strided view and
+            # fails for large shared-cache spans. Gather only live states.
+            initial_state_vk = recurrent_state.new_empty((state_indices.numel(), *recurrent_state.shape[1:]))
+            _copy_strided_recurrent_states(recurrent_state, initial_state_vk, state_indices, to_cache=False)
+        if not native_state_copy:
+            clear_ssm_states(initial_state_vk, has_initial_state)
 
         output, final_state = run_chunk_kda(
             q,
@@ -483,7 +538,13 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self.dt_bias,
             lower_bound=self.gate_lower_bound,
         )
-        recurrent_state[state_indices] = final_state.to(recurrent_state.dtype)
+        final_state = final_state.to(recurrent_state.dtype)
+        if native_state_copy:
+            copy_kda_states(recurrent_state, final_state.contiguous(), state_indices, to_cache=True)
+        elif recurrent_state.is_contiguous():
+            recurrent_state[state_indices] = final_state
+        else:
+            _copy_strided_recurrent_states(recurrent_state, final_state.contiguous(), state_indices, to_cache=True)
         return output
 
     @eager_break_during_capture

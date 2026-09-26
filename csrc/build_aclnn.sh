@@ -208,6 +208,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "kda_state_copy"
         "add_rms_norm_bias"
         "moe_gating_top_k_hash"
         "inplace_partial_rotary_mul"
