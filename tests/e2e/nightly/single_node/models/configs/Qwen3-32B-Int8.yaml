@@ -3,15 +3,13 @@
 # ==========================================
 
 _envs: &envs
-  TASK_QUEUE_ENABLE: "1"
-  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
   - "--quantization"
   - "ascend"
-  - "--no-enable-prefix-caching"
   - "--tensor-parallel-size"
   - "4"
   - "--max-num-seqs"
@@ -27,6 +25,8 @@ _server_cmd: &server_cmd
   - "--trust-remote-code"
   - "--gpu-memory-utilization"
   - "0.9"
+  - "--additional-config"
+  - '{"enable_flashcomm1": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": true}}'
 
 _benchmarks: &benchmarks
   acc:
@@ -37,7 +37,7 @@ _benchmarks: &benchmarks
     max_out_len: 10240
     batch_size: 32
     baseline: 96
-    threshold: 10
+    threshold: 2
   perf:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs400
@@ -55,18 +55,15 @@ _benchmarks: &benchmarks
 
 test_cases:
   - name: "Qwen3-32B-W8A8-aclgraph-a3"
-    model: "vllm-ascend/Qwen3-32B-W8A8"
+    model: "vllm-ascend/Qwen3-32B-W8A8-QuaRot"
     envs:
       <<: *envs
     server_cmd: *server_cmd
-    server_cmd_extra:
-      - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,12,16,20,24,32,48,60,64,68,72,76,80]}'
     benchmarks:
       <<: *benchmarks
 
-  - name: "Qwen3-32B-W8A8-single-a3"
-    model: "vllm-ascend/Qwen3-32B-W8A8"
+  - name: "Qwen3-32B-W8A8-eager-a3"
+    model: "vllm-ascend/Qwen3-32B-W8A8-QuaRot"
     envs:
       <<: *envs
     server_cmd: *server_cmd

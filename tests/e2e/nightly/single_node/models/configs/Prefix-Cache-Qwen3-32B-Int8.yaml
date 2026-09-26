@@ -3,10 +3,9 @@
 # ==========================================
 
 test_cases:
-  - name: "prefix-cache-qwen3-32b-w8a8"
-    model: "vllm-ascend/Qwen3-32B-W8A8"
+  - name: "prefix-cache-qwen3-32b-w8a8-quarot"
+    model: "vllm-ascend/Qwen3-32B-W8A8-QuaRot"
     envs:
-      TASK_QUEUE_ENABLE: "1"
       HCCL_OP_EXPANSION_MODE: "AIV"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
@@ -28,7 +27,7 @@ test_cases:
       - "--gpu-memory-utilization"
       - "0.9"
       - "--additional-config"
-      - '{"weight_nz_mode": 1}'
+      - '{"weight_nz_mode": 1, "enable_flashcomm1": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": true}}'
     test_content:
       - "benchmark_comparisons"
     benchmark_comparisons_args:
