@@ -27,7 +27,7 @@ def _assert_selection(result, query, cache, weights, ends, pool_lens, table, pos
             ids = torch.arange(count)
             keys = cache[table[req, ids // CACHE_BLOCK_SIZE].long(), ids % CACHE_BLOCK_SIZE, 0].float()
             per_head_scores = query[row].float() @ keys.T
-            scores = (per_head_scores.relu() * weights[row].float()[:, None]).sum(0)
+            scores = (per_head_scores * weights[row].float()[:, None]).sum(0)
             selected = torch.topk(scores, min(INDEX_TOPK // POOL_SIZE, count)).indices
             history = (selected[:, None] * POOL_SIZE + torch.arange(POOL_SIZE)).flatten()
             expected = torch.full((OUTPUT_WIDTH,), -1, dtype=torch.int32)
