@@ -19,6 +19,9 @@ import dataclasses
 import importlib.util
 import json
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import ConfigDict, TypeAdapter, model_validator
@@ -33,6 +36,16 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 _MEGA_MOE_SUPPORTED = None
+_DRAFT_CONFIG_LOADING: ContextVar[bool] = ContextVar("ascend_draft_config_loading", default=False)
+
+
+@contextmanager
+def draft_config_loading() -> Iterator[None]:
+    token = _DRAFT_CONFIG_LOADING.set(True)
+    try:
+        yield
+    finally:
+        _DRAFT_CONFIG_LOADING.reset(token)
 
 
 def is_mega_moe_supported() -> bool:
@@ -55,6 +68,19 @@ def validate_additional_config_bool(value: Any, path: str) -> bool:
         return TypeAdapter(bool).validate_python(value)
     except ValueError as exc:
         raise ValueError(f"{path} must be a boolean, got {value!r}.") from exc
+
+
+def _is_draft_model_config(vllm_config: VllmConfig) -> bool:
+    # DSpark and DFlash retain the target model_config while reconstructing a
+    # draft VllmConfig, so object identity alone cannot identify those paths.
+    if _DRAFT_CONFIG_LOADING.get():
+        return True
+    speculative_config = vllm_config.speculative_config
+    return (
+        speculative_config is not None
+        and vllm_config.model_config is speculative_config.draft_model_config
+        and vllm_config.model_config is not speculative_config.target_model_config
+    )
 
 
 @config(config=ConfigDict(frozen=True))
@@ -611,7 +637,11 @@ class AscendConfig:
                     max_batched,
                 )
                 self.scheduler_config.profiling_chunk_config.min_chunk = max_batched
-        if self.scheduler_config.profiling_chunk_config.enabled and vc.parallel_config.pipeline_parallel_size <= 1:
+        if (
+            not _is_draft_model_config(vc)
+            and self.scheduler_config.profiling_chunk_config.enabled
+            and vc.parallel_config.pipeline_parallel_size <= 1
+        ):
             raise ValueError(
                 "profiling_chunk_config requires pipeline parallelism (pp > 1). "
                 "Please set --pipeline-parallel-size to a value greater than 1, "

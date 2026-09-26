@@ -45,6 +45,7 @@ from vllm_ascend.ascend_config import (
     ShortRequestFirstConfig,
     SparseKVOffloadConfig,
     clear_ascend_config,
+    draft_config_loading,
     get_ascend_config,
     init_ascend_config,
     is_mega_moe_supported,
@@ -382,6 +383,76 @@ class TestAscendConfig(TestBase):
         self.assertTrue(scheduler_config.short_request_first_config.enabled)
         self.assertEqual(scheduler_config.short_request_first_config.threshold, 512)
         self.assertFalse(scheduler_config.profiling_chunk_config.enabled)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_profiling_chunk_rejects_pp1_for_target_model(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "scheduler_config": {"profiling_chunk_config": {"enabled": True}}
+        }
+        test_vllm_config.parallel_config.pipeline_parallel_size = 1
+
+        with self.assertRaisesRegex(ValueError, "requires pipeline parallelism"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_profiling_chunk_allows_pp1_for_separate_draft_model(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        draft_model_config = test_vllm_config.model_config
+        test_vllm_config.speculative_config = SimpleNamespace(
+            draft_model_config=draft_model_config,
+            target_model_config=object(),
+        )
+        test_vllm_config.additional_config = {
+            "scheduler_config": {"profiling_chunk_config": {"enabled": True}}
+        }
+        test_vllm_config.parallel_config.pipeline_parallel_size = 1
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.scheduler_config.profiling_chunk_config.enabled)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_profiling_chunk_allows_pp1_in_external_draft_loader(self, mock_fix_incompatible_config):
+        for method in ("dspark", "dflash"):
+            with self.subTest(method=method):
+                clear_ascend_config()
+                test_vllm_config = VllmConfig()
+                target_model_config = test_vllm_config.model_config
+                test_vllm_config.speculative_config = SimpleNamespace(
+                    method=method,
+                    draft_model_config=object(),
+                    target_model_config=target_model_config,
+                )
+                test_vllm_config.additional_config = {
+                    "scheduler_config": {"profiling_chunk_config": {"enabled": True}}
+                }
+                test_vllm_config.parallel_config.pipeline_parallel_size = 1
+
+                with draft_config_loading():
+                    ascend_config = init_ascend_config(test_vllm_config)
+
+                self.assertTrue(ascend_config.scheduler_config.profiling_chunk_config.enabled)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_profiling_chunk_rejects_pp1_for_aliased_draft_model(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        model_config = test_vllm_config.model_config
+        test_vllm_config.speculative_config = SimpleNamespace(
+            draft_model_config=model_config,
+            target_model_config=model_config,
+        )
+        test_vllm_config.additional_config = {
+            "scheduler_config": {"profiling_chunk_config": {"enabled": True}}
+        }
+        test_vllm_config.parallel_config.pipeline_parallel_size = 1
+
+        with self.assertRaisesRegex(ValueError, "requires pipeline parallelism"):
+            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

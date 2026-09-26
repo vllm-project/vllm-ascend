@@ -19,6 +19,9 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive import (
     speculator as speculator_module,
 )
+from vllm_ascend.worker.v2.spec_decode.eagle import (
+    speculator as eagle_speculator_module,
+)
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
     AscendMTPSpeculator,
@@ -72,6 +75,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         rank=7,
         data_parallel_size=2,
         data_parallel_rank=1,
+        pipeline_parallel_size=2,
     )
     target_cache_config = SimpleNamespace(
         block_size=128,
@@ -86,6 +90,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             cudagraph_mode=SimpleNamespace(decode_mode=lambda: None),
         ),
         cache_config=target_cache_config,
+        additional_config={"scheduler_config": {"profiling_chunk_config": {"enabled": True}}},
     )
     draft_model_config = object()
     captured: dict[str, SimpleNamespace] = {}
@@ -95,7 +100,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             assert changes["decode_context_parallel_size"] == (1 if target_pcp_size > 1 else dcp_size)
         if "model_config" in changes:
             assert changes["parallel_config"].decode_context_parallel_size == (1 if target_pcp_size > 1 else dcp_size)
-        if config is target_config and "model_config" not in changes:
+        if config is target_config and "parallel_config" in changes and "model_config" not in changes:
             reconstructed_parallel = changes["parallel_config"]
             captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
         values = vars(config).copy()
@@ -170,6 +175,42 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     assert draft_config.parallel_config.cp_kv_cache_interleave_size == 128
     assert draft_config.parallel_config.pipeline_parallel_size == 1
     assert draft_config.parallel_config.decode_context_parallel_size == dcp_size
+    # The draft inherits CPP from the target. Its PP=1 topology is accepted by
+    # AscendConfig because it is identified as a separate draft model.
+    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
+    assert target_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
+
+
+def _fake_config_replace(config, **changes):
+    values = vars(config).copy()
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+def test_eagle_draft_config_preserves_profiling_chunk() -> None:
+    target_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=2,
+            prefill_context_parallel_size=2,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+        ),
+        additional_config={"scheduler_config": {"profiling_chunk_config": {"enabled": True}}},
+    )
+    speculator = object.__new__(AscendEagleSpeculator)
+    speculator.vllm_config = target_config
+    speculator.draft_model_config = object()
+
+    with (
+        patch.object(speculator_module, "replace", side_effect=_fake_config_replace),
+        patch.object(eagle_speculator_module, "replace", side_effect=_fake_config_replace),
+    ):
+        draft_config = speculator._create_draft_vllm_config()
+
+    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
+    assert target_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
+    assert draft_config.model_config is speculator.draft_model_config
+    assert draft_config.parallel_config.pipeline_parallel_size == 1
 
 
 @pytest.mark.parametrize("replicated_pcp", [False, True])

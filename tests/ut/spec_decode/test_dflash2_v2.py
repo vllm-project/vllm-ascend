@@ -23,8 +23,11 @@ from unittest.mock import patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
+from vllm_ascend.ascend_config import _DRAFT_CONFIG_LOADING
 from vllm_ascend.worker.v2.spec_decode import init_speculator
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
     AscendDFlash2Speculator,
     _selector_walk_kernel_ascend,
@@ -61,6 +64,21 @@ def test_init_speculator_routes_dflash2_draft_model():
     ):
         assert init_speculator(cfg, torch.device("cpu")) is d1.return_value
         d2.assert_not_called()
+
+
+def test_dflash_load_draft_model_sets_config_context(monkeypatch):
+    assert AscendDFlash2Speculator.load_draft_model is AscendDFlashSpeculator.load_draft_model
+    draft = object()
+
+    def load(*args):
+        assert _DRAFT_CONFIG_LOADING.get()
+        return draft
+
+    monkeypatch.setattr(DFlashSpeculator, "load_draft_model", load)
+    speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+
+    assert speculator.load_draft_model(object(), set()) is draft
+    assert not _DRAFT_CONFIG_LOADING.get()
 
 
 def test_init_cudagraph_manager_requires_enforce_eager(monkeypatch):
