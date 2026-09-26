@@ -1,0 +1,278 @@
+{
+  "format": "glm5x-perf-result-v1",
+  "status": "CALIBRATED_MEDIAN_OF_3_STARTS",
+  "hardware": "linux-x86_64-a3-800i-8-167",
+  "identity": {
+    "model": "Eco-Tech/GLM-5.2-w4a8",
+    "hardware": "linux-x86_64-a3-800i-8-167",
+    "main_layers": 11,
+    "retained_mtp_layers": 1,
+    "mtp_execution": false,
+    "engine_settings": {
+      "model": "Eco-Tech/GLM-5.2-w4a8",
+      "tensor_parallel_size": 8,
+      "enable_expert_parallel": true,
+      "max_model_len": 8192,
+      "max_num_seqs": 16,
+      "max_num_batched_tokens": 8192,
+      "gpu_memory_utilization": 0.92,
+      "block_size": 128,
+      "seed": 1024,
+      "trust_remote_code": true,
+      "quantization": "ascend",
+      "enforce_eager": true,
+      "enable_prefix_caching": false,
+      "enable_chunked_prefill": false,
+      "async_scheduling": false,
+      "additional_config": {
+        "enable_reduce_sample": false
+      }
+    },
+    "workloads": [
+      [
+        128,
+        128,
+        1
+      ],
+      [
+        4096,
+        128,
+        8
+      ],
+      [
+        128,
+        1024,
+        8
+      ]
+    ],
+    "warmup_iterations": 1,
+    "measured_iterations": 3
+  },
+  "runs": [
+    {
+      "input_tokens": 128,
+      "output_tokens": 128,
+      "concurrency": 1,
+      "warmup_iterations": 1,
+      "measured_iterations": 3,
+      "aggregate": {
+        "output_tokens_per_second": {
+          "median": 29.82046895124171,
+          "min": 29.560256423506665,
+          "max": 34.38260291497975
+        },
+        "ttft_seconds": {
+          "median": 0.038140783086419106,
+          "min": 0.033948373049497604,
+          "max": 0.04202714888378978
+        },
+        "tpot_seconds": {
+          "median": 0.0333518712436707,
+          "min": 0.029046083818827794,
+          "max": 0.03373417257529309
+        },
+        "seconds": {
+          "median": 4.292353691998869,
+          "min": 3.722812967840582,
+          "max": 4.330138350836933
+        }
+      }
+    },
+    {
+      "input_tokens": 4096,
+      "output_tokens": 128,
+      "concurrency": 8,
+      "warmup_iterations": 1,
+      "measured_iterations": 3,
+      "aggregate": {
+        "output_tokens_per_second": {
+          "median": 164.30409110223508,
+          "min": 159.0462158431897,
+          "max": 172.29389990935172
+        },
+        "ttft_seconds": {
+          "median": 0.9390976619906723,
+          "min": 0.9376193166244775,
+          "max": 0.9564219429157674
+        },
+        "tpot_seconds": {
+          "median": 0.04110860309057583,
+          "min": 0.03824471824758459,
+          "max": 0.04189450052332162
+        },
+        "seconds": {
+          "median": 6.232346334960312,
+          "min": 5.94333287794143,
+          "max": 6.438380156178027
+        }
+      }
+    },
+    {
+      "input_tokens": 128,
+      "output_tokens": 1024,
+      "concurrency": 8,
+      "warmup_iterations": 1,
+      "measured_iterations": 3,
+      "aggregate": {
+        "output_tokens_per_second": {
+          "median": 210.87494700239975,
+          "min": 201.97867625144713,
+          "max": 221.9881460853801
+        },
+        "ttft_seconds": {
+          "median": 0.07478714198805392,
+          "min": 0.07455147057771683,
+          "max": 0.07675220910459757
+        },
+        "tpot_seconds": {
+          "median": 0.037896752074353564,
+          "min": 0.03598322909765077,
+          "max": 0.039571658305082746
+        },
+        "seconds": {
+          "median": 38.84766832878813,
+          "min": 36.90287136705592,
+          "max": 40.55873695202172
+        }
+      }
+    }
+  ],
+  "provenance": {
+    "measured_on": "2026-09-22",
+    "host": "192.168.13.167",
+    "calibration_dir": "/mnt/share/wangyinliang/reports/glm5x-perf-0922/{calibration-1,calibration-2,calibration-3}",
+    "command": "python run_perf_baseline.py --warmup-iterations 1 --measured-iterations 3",
+    "single_launch_reference": {
+      "report_dir": "/mnt/share/wangyinliang/reports/glm5x-perf-0922/baseline-1",
+      "note": "the earlier single-launch baseline was an optimistic outlier and is superseded by the median of the three calibration starts"
+    },
+    "runtime": {
+      "vllm": "0.28.1rc1.dev676+g84030bbe3",
+      "vllm_ascend": "0.19.1rc2.dev2329+g18d161d76",
+      "transformers": "5.12.0",
+      "tokenizers": "0.22.2",
+      "torch": "2.10.0+cpu",
+      "torch_npu": "2.10.0.post4"
+    },
+    "engine_image": "glm52-baseline-a1-env:0922 / f2a84fe1736a",
+    "note": "Median of three independent starts; eager mode; MTP disabled; host-scoped. Reduced8's 3% relative-MAD stability cap is NOT met on this shared host."
+  },
+  "calibration": {
+    "starts": 3,
+    "protocol": "3 independent launches on the same host; each 1 warmup + 3 measured iterations; the baseline is the median of the per-start medians",
+    "hardware": "linux-x86_64-a3-800i-8-167",
+    "workloads": {
+      "128x128x1": {
+        "output_tokens_per_second": {
+          "cal1": 29.82046895124171,
+          "cal2": 34.38260291497975,
+          "cal3": 29.560256423506665,
+          "median": 29.82046895124171,
+          "relMAD": 0.008725970344749085,
+          "max_relative_deviation": 0.15298666064565938
+        },
+        "ttft_seconds": {
+          "cal1": 0.038140783086419106,
+          "cal2": 0.033948373049497604,
+          "cal3": 0.04202714888378978,
+          "median": 0.038140783086419106,
+          "relMAD": 0.1018952806649243,
+          "max_relative_deviation": 0.10991934873026517
+        },
+        "tpot_seconds": {
+          "cal1": 0.0333518712436707,
+          "cal2": 0.029046083818827794,
+          "cal3": 0.03373417257529309,
+          "median": 0.0333518712436707,
+          "relMAD": 0.011462665132917885,
+          "max_relative_deviation": 0.12910182440393145
+        },
+        "seconds": {
+          "cal1": 4.292353691998869,
+          "cal2": 3.722812967840582,
+          "cal3": 4.330138350836933,
+          "median": 4.292353691998869,
+          "relMAD": 0.008802783169638536,
+          "max_relative_deviation": 0.13268727719710874
+        }
+      },
+      "4096x128x8": {
+        "output_tokens_per_second": {
+          "cal1": 159.0462158431897,
+          "cal2": 172.29389990935172,
+          "cal3": 164.30409110223508,
+          "median": 164.30409110223508,
+          "relMAD": 0.032000878516005735,
+          "max_relative_deviation": 0.048628179332096726
+        },
+        "ttft_seconds": {
+          "cal1": 0.9564219429157674,
+          "cal2": 0.9390976619906723,
+          "cal3": 0.9376193166244775,
+          "median": 0.9390976619906723,
+          "relMAD": 0.0015742189827851237,
+          "max_relative_deviation": 0.01844779475690693
+        },
+        "tpot_seconds": {
+          "cal1": 0.04189450052332162,
+          "cal2": 0.03824471824758459,
+          "cal3": 0.04110860309057583,
+          "median": 0.04110860309057583,
+          "relMAD": 0.019117590325660048,
+          "max_relative_deviation": 0.06966631380495121
+        },
+        "seconds": {
+          "cal1": 6.438380156178027,
+          "cal2": 5.94333287794143,
+          "cal3": 6.232346334960312,
+          "median": 6.232346334960312,
+          "relMAD": 0.03305878880029022,
+          "max_relative_deviation": 0.04637313805840068
+        }
+      },
+      "128x1024x8": {
+        "output_tokens_per_second": {
+          "cal1": 201.97867625144713,
+          "cal2": 221.9881460853801,
+          "cal3": 210.87494700239975,
+          "median": 210.87494700239975,
+          "relMAD": 0.04218742376661456,
+          "max_relative_deviation": 0.05270042383391269
+        },
+        "ttft_seconds": {
+          "cal1": 0.07478714198805392,
+          "cal2": 0.07675220910459757,
+          "cal3": 0.07455147057771683,
+          "median": 0.07478714198805392,
+          "relMAD": 0.0031512289956839817,
+          "max_relative_deviation": 0.026275467470832613
+        },
+        "tpot_seconds": {
+          "cal1": 0.039571658305082746,
+          "cal2": 0.03598322909765077,
+          "cal3": 0.037896752074353564,
+          "median": 0.037896752074353564,
+          "relMAD": 0.04419656406023953,
+          "max_relative_deviation": 0.050493060010748596
+        },
+        "seconds": {
+          "cal1": 40.55873695202172,
+          "cal2": 36.90287136705592,
+          "cal3": 38.84766832878813,
+          "median": 38.84766832878813,
+          "relMAD": 0.04404559390159322,
+          "max_relative_deviation": 0.05006212844674164
+        }
+      }
+    },
+    "derived_thresholds": {
+      "min_throughput_fraction": 0.9,
+      "max_latency_fraction": 1.2,
+      "rule": "cover the worst observed low-side throughput ratio and worst high-side latency ratio with a safety factor, rounded to 0.90 / 1.20"
+    },
+    "observed": {
+      "worst_low_side_throughput_shortfall": 0.04218742376661455,
+      "worst_high_side_latency_excess": 0.10189528066492426
+    }
+  }
+}

@@ -272,6 +272,17 @@ a3-560t:
       - name: glm-5.2-w4a8-mtp
         os: linux-aarch64-a3-800i-16
         config_file_path: GLM-5.2-W4A8-MTP-A3.yaml
+      - name: GLM-5.2-W4A8-A3-Logits11
+        os: linux-aarch64-a3-800i-8
+        config_file_path: GLM-5.2-W4A8-A3-Logits11.yaml
+      # GLM-5.2-W4A8-A3-Perf11 is the offline 11-layer performance gate. Its pinned
+      # baseline is host-scoped to linux-x86_64-a3-800i-8-167 (the lab x86_64 A3 host)
+      # and the nightly matrix has no x86_64 runner, so enabling it on an aarch64 runner
+      # would fail closed on the hardware identity check by design. Enable it here only
+      # after calibrating an aarch64 baseline (or adding an x86_64 runner):
+      # - name: GLM-5.2-W4A8-A3-Perf11
+      #   os: linux-aarch64-a3-800i-8
+      #   config_file_path: GLM-5.2-W4A8-A3-Perf11.yaml
       - name: glm-5.2-w4a8-dspark-v2
         os: linux-aarch64-a3-800i-16
         config_file_path: GLM-5.2-W4A8-DSpark-A3-V2.yaml

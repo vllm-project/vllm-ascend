@@ -1,0 +1,23 @@
+{
+ "model": "THUDM--chatglm3-6b",
+ "tensor_count": 200,
+ "patterns": [
+  "transformer.embedding.word_embeddings.weight",
+  "transformer.encoder.final_layernorm.weight",
+  "transformer.encoder.layers.{N}.input_layernorm.weight",
+  "transformer.encoder.layers.{N}.mlp.dense_4h_to_h.weight",
+  "transformer.encoder.layers.{N}.mlp.dense_h_to_4h.weight",
+  "transformer.encoder.layers.{N}.post_attention_layernorm.weight",
+  "transformer.encoder.layers.{N}.self_attention.dense.weight",
+  "transformer.encoder.layers.{N}.self_attention.query_key_value.bias",
+  "transformer.encoder.layers.{N}.self_attention.query_key_value.weight",
+  "transformer.output_layer.weight",
+  "transformer.rotary_pos_emb.inv_freq"
+ ],
+ "shards": [
+  "model-00001-of-00007.safetensors",
+  "model-00002-of-00007.safetensors",
+  "model-00003-of-00007.safetensors"
+ ],
+ "shard_count": 7
+}
