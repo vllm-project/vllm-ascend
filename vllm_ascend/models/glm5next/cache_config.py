@@ -432,6 +432,7 @@ def get_glm5_next_kv_cache_config(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
         kv_cache_groups=groups,
+        prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
     )
 
 

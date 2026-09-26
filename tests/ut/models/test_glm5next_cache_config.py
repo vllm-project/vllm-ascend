@@ -31,7 +31,7 @@ def _ratio_kwargs(ratio: int) -> dict[str, int]:
     return {"tokens_per_state": ratio}
 
 
-def make_config():
+def make_config(*, retention_interval: int | None = 0):
     return SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=2048),
         parallel_config=SimpleNamespace(
@@ -44,6 +44,7 @@ def make_config():
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
+            prefix_cache_retention_interval=retention_interval,
         ),
     )
 
@@ -155,6 +156,19 @@ def test_standalone_mtp_layout_has_no_mamba_groups():
     assert len(groups) == 2
     assert layout is not None
     assert layout.mamba_groups == ()
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0, 4096])
+def test_kv_cache_config_preserves_retention_interval(retention_interval):
+    config = make_config(retention_interval=retention_interval)
+    groups = get_glm5_next_kv_cache_groups(config, make_specs())
+    layout = _get_glm5_next_cache_layout(groups)
+    assert layout is not None
+
+    budget = 10 * (layout.main_page_size + layout.small_page_size)
+    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+
+    assert plan.prefix_cache_retention_interval == retention_interval
 
 
 def test_pipeline_projection_supports_a_mamba_only_worker():
