@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E402
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock
@@ -1315,7 +1316,10 @@ def test_v41_cp_output_exchange_only_pads_partial_ranks(monkeypatch, local_token
 
     impl = AscendDSAV41CPImpl("layer", SimpleNamespace(is_kv_source=False), None, None, None)
     calls = []
-    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_v41_cp.get_tp_group", lambda: None)
+    monkeypatch.setattr(
+        "vllm_ascend.attention.context_parallel.dsa_v41_cp.get_tp_group",
+        lambda: SimpleNamespace(rank_in_group=0, world_size=1),
+    )
 
     def exchange(tensor, group):
         calls.append(tensor)
@@ -1328,7 +1332,9 @@ def test_v41_cp_output_exchange_only_pads_partial_ranks(monkeypatch, local_token
         assert tensor.shape == (num_tokens, 2, 3)
         output.copy_(tensor.flatten(1))
 
-    projection = SimpleNamespace(_forward_o_proj=project)
+    # Full-weight switching is available, but a pure decode batch must retain
+    # the activation exchange path.
+    projection = SimpleNamespace(enable_dsa_cp_full_o_proj=True, _forward_o_proj=project)
     attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projection)))
     destination = torch.empty((num_tokens, 6))
     local_output = torch.ones((local_tokens, 4, 3))
@@ -1347,6 +1353,81 @@ def test_v41_cp_output_exchange_only_pads_partial_ranks(monkeypatch, local_token
     assert torch.count_nonzero(calls[0][local_tokens:]) == 0
     assert output.shape == (num_tokens, 6)
     torch.testing.assert_close(output, torch.ones_like(destination))
+
+
+def test_v41_cp_output_exchange_reduce_scatters_full_token_projection(monkeypatch):
+    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
+
+    impl = AscendDSAV41CPImpl("layer", SimpleNamespace(is_kv_source=False), None, None, None)
+    monkeypatch.setattr(
+        "vllm_ascend.attention.context_parallel.dsa_v41_cp.get_tp_group",
+        lambda: SimpleNamespace(rank_in_group=2, world_size=3),
+    )
+    exchanged = torch.arange(6, dtype=torch.float32).reshape(6, 1, 1)
+    monkeypatch.setattr(
+        "vllm_ascend.attention.context_parallel.dsa_v41_cp.restore_tp_heads",
+        lambda tensor, group: exchanged,
+    )
+
+    def project(tensor):
+        torch.testing.assert_close(tensor, exchanged)
+        return tensor.flatten(1)
+
+    def reduce_scatter(tensor):
+        assert tensor.shape == (6, 1)
+        return tensor[4:6] + 10
+
+    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_v41_cp.sp_reduce_scatter", reduce_scatter)
+    projection = SimpleNamespace(enable_dsa_cp_full_o_proj=False, _forward_o_proj=project)
+    attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projection), need_gather_q_kv=True))
+    destination = torch.empty((2, 1))
+    impl._project_output(
+        attn,
+        torch.ones((2, 3, 1)),
+        torch.empty((2, 1)),
+        SimpleNamespace(swa=SimpleNamespace(cp_token_range=(4, 6, 2, 6))),
+        projected=destination,
+    )
+    torch.testing.assert_close(destination[:, 0], torch.tensor([14.0, 15.0]))
+
+
+def test_v41_cp_full_o_proj_skips_activation_exchange(monkeypatch):
+    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
+
+    impl = AscendDSAV41CPImpl("layer", SimpleNamespace(is_kv_source=False), None, None, None)
+    exchange = Mock(side_effect=AssertionError("full o_proj must not exchange activations"))
+    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_v41_cp.restore_tp_heads", exchange)
+    calls: list[Any] = []
+
+    def project(tensor, output, *, full_gather_wo_a_enabled=False):
+        calls.append((tensor.clone(), full_gather_wo_a_enabled))
+        output.copy_(tensor.flatten(1))
+
+    v1_impl = SimpleNamespace(
+        enable_dsa_cp_full_o_proj=True,
+        _switch_o_proj_to_full_weight=lambda: calls.append("full"),
+        _switch_o_proj_to_local_weight=lambda: calls.append("local"),
+        _forward_o_proj=project,
+    )
+    attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=v1_impl)))
+    local = torch.arange(12, dtype=torch.float32).reshape(1, 2, 6)
+    destination = torch.empty(2, 12)
+
+    actual = impl._project_output(
+        attn,
+        local,
+        torch.empty(2, 12),
+        SimpleNamespace(swa=SimpleNamespace(cp_token_range=(0, 2, 2, 4), num_prefills=1)),
+        projected=destination,
+    )
+
+    assert actual is destination
+    assert calls[0] == "full"
+    assert calls[-1] == "local"
+    assert calls[1][1] is True
+    torch.testing.assert_close(calls[1][0][0], local[0])
+    assert torch.count_nonzero(calls[1][0][1]) == 0
+    exchange.assert_not_called()
 
 
 def test_v41_cp_consumers_reuse_local_topk_and_candidates():
@@ -1370,6 +1451,99 @@ def test_v41_cp_consumers_reuse_local_topk_and_candidates():
     assert actual.data_ptr() == indices.data_ptr()
     torch.testing.assert_close(actual, indices)
     assert shared.candidates is candidates
+
+
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_v41_cp_index_source_uses_correct_token_origin(monkeypatch, sequence_parallel):
+    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
+
+    impl = AscendDSAV41CPImpl(
+        "layer", SimpleNamespace(is_kv_source=False, has_long_context=True, is_index_source=True), None, None, None
+    )
+    # A nonzero rank owns global tokens [4:6]. In SP mode it already sees
+    # only that interval and must not apply the global offset again.
+    source = torch.arange(8 if not sequence_parallel else 2).unsqueeze(-1)
+    metadata = SimpleNamespace(swa=SimpleNamespace(cp_token_range=(4, 6, 2, 2), num_actual_tokens=2))
+    attn = SimpleNamespace(dsa_attn=SimpleNamespace(need_gather_q_kv=sequence_parallel))
+    seen = []
+
+    def select(_self, _attn, hidden_states, *_args):
+        seen.append(hidden_states.clone())
+        return hidden_states
+
+    monkeypatch.setattr(AscendDSAV41Impl, "_select_sparse_indices", select)
+    result = impl._select_sparse_indices(attn, source, None, None, None, None, metadata)
+    expected = source[:2] if sequence_parallel else source[4:6]
+    torch.testing.assert_close(result, expected)
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("gather_kv", [False, True])
+def test_v41_cp_kv_rope_uses_actual_tokens_with_padded_input(monkeypatch, gather_kv):
+    from vllm_ascend.attention.context_parallel import dsa_v41_cp
+
+    class Linear:
+        def quantize(self, value):
+            return value, None
+
+        def matmul(self, value, _scale, bias=None):
+            return value
+
+    impl = dsa_v41_cp.AscendDSAV41CPImpl("layer", SimpleNamespace(is_kv_source=False), None, None, None)
+    local_swa = SimpleNamespace(num_actual_tokens=2, cp_token_range=(0, 2, 2, 8))
+    cos = torch.ones((8, 1, 1, 2))
+    sin = torch.ones_like(cos)
+    global_metadata = SimpleNamespace(
+        swa=SimpleNamespace(num_actual_tokens=2, slot_mapping=torch.zeros((2, 2), dtype=torch.int32)),
+        rope=lambda _layer, count: (cos[:count], sin[:count]),
+    )
+    impl._global_layer_metadata = lambda _metadata: global_metadata
+    if gather_kv:
+        impl._all_gather_kv_hidden_states = lambda _hidden: (torch.ones((8, 4)), Mock())
+    monkeypatch.setattr(dsa_v41_cp, "get_forward_context", lambda: SimpleNamespace(attn_metadata={}))
+    main_stream, aux_stream = MagicMock(), MagicMock()
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: main_stream)
+    monkeypatch.setattr(dsa_v41_cp, "dsv4_dsa_overlap_stream", lambda: aux_stream)
+    monkeypatch.setattr(dsa_v41_cp, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(dsa_v41_cp, "scatter_cache_sk", Mock())
+    rotary_shapes = []
+
+    def rotary(value, cos_value, sin_value, **_kwargs):
+        rotary_shapes.append((value.shape[0], cos_value.shape[0], sin_value.shape[0]))
+
+    monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", rotary, raising=False)
+    v1_impl = SimpleNamespace(cv_wq_a=Linear(), cv_wkv=Linear(), cv_wq_b=Linear(), enable_dsa_cp_full_o_proj=False)
+    attn = SimpleNamespace(
+        dsa_attn=SimpleNamespace(
+            need_gather_q_kv=gather_kv,
+            dsa_attn=SimpleNamespace(impl=v1_impl),
+            swa_cache_layer=SimpleNamespace(kv_cache=[torch.empty(0)]),
+        ),
+        rotary_emb=SimpleNamespace(layername="layer"),
+        wq_a=SimpleNamespace(bias=None),
+        wkv=SimpleNamespace(bias=None),
+        wq_b=SimpleNamespace(bias=None),
+        q_norm=lambda value: value,
+        kv_norm=lambda value: value,
+        n_heads=1,
+        head_dim=4,
+        nope_head_dim=2,
+    )
+    hidden = torch.ones((2 if gather_kv else 8, 4))
+    q, qr = impl.multistream_preprocess(attn, hidden, cos[:2], sin[:2], local_swa)
+
+    assert q.shape == (2, 1, 4)
+    assert qr.shape == (2, 4)
+    assert rotary_shapes == [(2, 2, 2), (2, 2, 2)]
+
+
+@pytest.mark.parametrize("prefills", [0, 1])
+def test_v41_cp_full_o_proj_requires_prefill(prefills):
+    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
+
+    v1_impl = SimpleNamespace(enable_dsa_cp_full_o_proj=True)
+    metadata = SimpleNamespace(global_metadata=SimpleNamespace(num_prefills=prefills))
+    assert AscendDSAV41CPImpl._use_full_o_proj(v1_impl, metadata) is bool(prefills)
 
 
 @pytest.mark.parametrize("cp", [False, True])

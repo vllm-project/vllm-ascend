@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E402
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,6 +26,25 @@ def _layer() -> DeepseekV41DecoderLayer:
     layer.norm_eps = 1e-6
     layer.hc_eps = 1e-6
     return layer
+
+
+@pytest.mark.parametrize("a3_default", [False, True])
+@pytest.mark.parametrize("optimized,full_o_proj", [(True, True), (True, False), (False, True)])
+def test_v41_full_o_proj_gate_ignores_hardware_default(monkeypatch, a3_default, optimized, full_o_proj):
+    layer = _layer()
+    layer.enable_dsa_cp = True
+    layer.enable_dsa_v41_cp_comm_optimization = optimized
+    impl = SimpleNamespace(enable_dsa_cp_full_o_proj=not a3_default)
+    layer.self_attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=impl)))
+    monkeypatch.setattr(
+        deepseek_v41_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_dsa_v41_cp_full_o_proj=full_o_proj),
+    )
+
+    layer._configure_dsa_cp_full_o_proj()
+
+    assert impl.enable_dsa_cp_full_o_proj is (optimized and full_o_proj)
 
 
 def test_v41_hc_pre_dispatches_fused_operator_with_pre_mix():
@@ -139,6 +159,84 @@ def test_v41_forward_gathers_attention_and_keeps_moe_sharded(monkeypatch):
     reduce_scatter.assert_called_once()
     torch.testing.assert_close(reduce_scatter.call_args.args[0], collapsed)
     assert layer.mlp.call_args.kwargs["already_sequence_parallel"] is True
+
+
+def test_v41_dsa_cp_keeps_attention_sequence_sharded(monkeypatch):
+    layer = _layer()
+    layer.use_sequence_parallel = True
+    layer.enable_dsa_cp = True
+    layer.enable_dsa_v41_cp_comm_optimization = True
+    hidden_states = torch.randn(2, 4, 8, dtype=torch.bfloat16)
+    collapsed = torch.randn(2, 8, dtype=torch.bfloat16)
+    post = torch.randn(2, 4, dtype=torch.float32)
+    comb = torch.randn(2, 4, 4, dtype=torch.float32)
+    pre = torch.randn(2, 4, dtype=torch.float32)
+    for name in ("hc_attn_fn", "hc_ffn_fn"):
+        setattr(layer, name, torch.nn.Parameter(torch.empty(24, 32)))
+    for name in ("hc_attn_scale", "hc_ffn_scale"):
+        setattr(layer, name, torch.nn.Parameter(torch.empty(3)))
+    for name in ("hc_attn_base", "hc_ffn_base"):
+        setattr(layer, name, torch.nn.Parameter(torch.empty(24)))
+    layer.hc_pre = MagicMock(side_effect=[(collapsed, post, comb, pre)] * 2)
+    layer.input_layernorm = MagicMock(side_effect=lambda value: value)
+    layer.rms_norm_cast = MagicMock(return_value=(collapsed, collapsed.float()))
+    layer.self_attn = MagicMock(side_effect=lambda _positions, value, _scaling: value)
+    layer.mlp = MagicMock(side_effect=lambda value, **_kwargs: value)
+    layer.hc_post = MagicMock(side_effect=lambda _x, residual, _post, _comb: residual)
+    all_gather = MagicMock()
+    reduce_scatter = MagicMock()
+    monkeypatch.setattr(deepseek_v41_module, "sp_all_gather", all_gather)
+    monkeypatch.setattr(deepseek_v41_module, "sp_reduce_scatter", reduce_scatter)
+
+    layer.forward(torch.arange(4), hidden_states, pre, input_ids=torch.tensor([1, 2]))
+
+    layer.self_attn.assert_called_once()
+    call_positions, call_hidden_states, call_scaling = layer.self_attn.call_args.args
+    torch.testing.assert_close(call_positions, torch.arange(4))
+    assert call_hidden_states is collapsed
+    assert call_scaling is None
+    all_gather.assert_not_called()
+    reduce_scatter.assert_not_called()
+
+
+@pytest.mark.parametrize("optimized", [False, True])
+def test_v41_dsa_cp_decode_avoids_duplicate_sp_collectives(monkeypatch, optimized):
+    layer = _layer()
+    layer.use_sequence_parallel = True
+    layer.enable_dsa_cp = True
+    layer.enable_dsa_v41_cp_comm_optimization = optimized
+    hidden_states = torch.randn(2, 4, 8, dtype=torch.bfloat16)
+    collapsed = torch.randn(2, 8, dtype=torch.bfloat16)
+    post = torch.randn(2, 4, dtype=torch.float32)
+    comb = torch.randn(2, 4, 4, dtype=torch.float32)
+    pre = torch.randn(2, 4, dtype=torch.float32)
+    for name in ("hc_attn_fn", "hc_ffn_fn"):
+        setattr(layer, name, torch.nn.Parameter(torch.empty(24, 32)))
+    for name in ("hc_attn_scale", "hc_ffn_scale"):
+        setattr(layer, name, torch.nn.Parameter(torch.empty(3)))
+    for name in ("hc_attn_base", "hc_ffn_base"):
+        setattr(layer, name, torch.nn.Parameter(torch.empty(24)))
+    layer.hc_pre = MagicMock(side_effect=[(collapsed, post, comb, pre)] * 2)
+    layer.input_layernorm = MagicMock(side_effect=lambda value: value)
+    layer.rms_norm_cast = MagicMock(return_value=(collapsed, collapsed.float()))
+    layer.self_attn = MagicMock(side_effect=lambda _positions, value, _scaling: value)
+    layer.mlp = MagicMock(side_effect=lambda value, **_kwargs: value)
+    layer.hc_post = MagicMock(side_effect=lambda _x, residual, _post, _comb: residual)
+    reduce_scatter = MagicMock(return_value=collapsed)
+    all_gather = MagicMock(return_value=collapsed)
+    monkeypatch.setattr(deepseek_v41_module, "sp_all_gather", all_gather)
+    monkeypatch.setattr(deepseek_v41_module, "sp_reduce_scatter", reduce_scatter)
+
+    layer.forward(torch.arange(4), hidden_states, pre, input_ids=torch.tensor([1, 2]))
+
+    if optimized:
+        all_gather.assert_not_called()
+        reduce_scatter.assert_not_called()
+    else:
+        all_gather.assert_called_once()
+        torch.testing.assert_close(all_gather.call_args.args[0], collapsed)
+        reduce_scatter.assert_called_once()
+        torch.testing.assert_close(reduce_scatter.call_args.args[0], collapsed)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

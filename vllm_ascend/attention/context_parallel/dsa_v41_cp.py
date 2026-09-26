@@ -7,6 +7,7 @@ from dataclasses import replace
 import torch
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder, restore_tp_heads
 from vllm_ascend.attention.dsa_v1 import dsv4_dsa_overlap_stream
@@ -16,6 +17,7 @@ from vllm_ascend.attention.dsa_v41 import (
     _config_value,
     scatter_cache_sk,
 )
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.utils import enable_dsa_cp, npu_stream_switch
 
 
@@ -123,22 +125,65 @@ class AscendDSAV41CPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
 
 
 class AscendDSAV41CPImpl(AscendDSAV41Impl):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._kv_gather_buffer: torch.Tensor | None = None
+
+    def _all_gather_kv_hidden_states(self, hidden_states):
+        """Start the SP activation gather while local Q preprocessing runs."""
+        group = get_tp_group()
+        output_shape = (hidden_states.shape[0] * group.world_size, *hidden_states.shape[1:])
+        # Long prefills have many chunk sizes; retain only one buffer per layer.
+        output = self._kv_gather_buffer
+        if (
+            output is None
+            or output.shape[0] < output_shape[0]
+            or output.shape[1:] != output_shape[1:]
+            or output.dtype != hidden_states.dtype
+            or output.device != hidden_states.device
+        ):
+            output = hidden_states.new_empty(output_shape)
+            self._kv_gather_buffer = output
+        else:
+            output = output[: output_shape[0]]
+        return all_gather_async(hidden_states, group, output=output, async_op=True)
+
+    @staticmethod
+    def _use_full_o_proj(v1_impl, swa_metadata):
+        global_metadata = getattr(swa_metadata, "global_metadata", None) or swa_metadata
+        return bool(
+            getattr(v1_impl, "enable_dsa_cp_full_o_proj", False) and getattr(global_metadata, "num_prefills", 0) > 0
+        )
+
     def multistream_preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
         """Slice local Q from full inputs and overlap replicated KV preprocessing."""
         global_metadata = self._global_layer_metadata(get_forward_context().attn_metadata)
-        kv_hidden_states = hidden_states[: global_metadata.swa.num_actual_tokens]
-        start, _, _, _ = swa_metadata.cp_token_range
-        hidden_states = hidden_states[start : start + swa_metadata.num_actual_tokens]
-        kv_cos, kv_sin = global_metadata.rope(attn.rotary_emb.layername, kv_hidden_states.shape[0])
+        gather_handle = None
+        if getattr(attn.dsa_attn, "need_gather_q_kv", False):
+            kv_hidden_states, gather_handle = self._all_gather_kv_hidden_states(hidden_states)
+            hidden_states = hidden_states[: swa_metadata.num_actual_tokens]
+        else:
+            kv_hidden_states = hidden_states
+            start, _, _, _ = swa_metadata.cp_token_range
+            hidden_states = hidden_states[start : start + swa_metadata.num_actual_tokens]
+        v1_impl = attn.dsa_attn.dsa_attn.impl
+        full_o_proj = self._use_full_o_proj(v1_impl, swa_metadata)
+        if full_o_proj:
+            v1_impl._maybe_all_gather_o_proj_full_weight(True)
+        # The gathered KV buffer includes rank padding, but RoPE is applied
+        # only to actual cache tokens below.
+        kv_cos, kv_sin = global_metadata.rope(attn.rotary_emb.layername, global_metadata.swa.num_actual_tokens)
         swa_metadata = global_metadata.swa
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
-        v1_impl = attn.dsa_attn.dsa_attn.impl
         wq_a, wkv, wq_b = v1_impl.cv_wq_a, v1_impl.cv_wkv, v1_impl.cv_wq_b
 
         # Q and KV own different token ranges, even with identical quantizers.
         q_quant, q_scale = wq_a.quantize(hidden_states)
         q_quant_done = main_stream.record_event()
+        if gather_handle is not None:
+            gather_handle.wait()
+        kv_hidden_states = kv_hidden_states[: global_metadata.swa.num_actual_tokens]
         with npu_stream_switch(aux_stream, enabled=True):
             aux_stream.wait_event(q_quant_done)
             kv_quant, kv_scale = wkv.quantize(kv_hidden_states)
@@ -210,6 +255,13 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
         if metadata.swa.num_actual_tokens == 0:
             # Empty query ranks still update replicated caches before exchange.
             global_metadata = self._global_layer_metadata(metadata_by_prefix)
+            if getattr(attn.dsa_attn, "need_gather_q_kv", False):
+                hidden_states, handle = self._all_gather_kv_hidden_states(hidden_states)
+                if handle is not None:
+                    handle.wait()
+            v1_impl = attn.dsa_attn.dsa_attn.impl
+            if self._use_full_o_proj(v1_impl, metadata.swa):
+                v1_impl._maybe_all_gather_o_proj_full_weight(True)
             self._update_caches(attn, hidden_states[: global_metadata.swa.num_actual_tokens], global_metadata)
 
     def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
@@ -224,17 +276,45 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
             # while ``qr`` was projected from this rank's local query slice.
             # SparseFlashMla requires cmp_sparse_indices.T to match q.T.
             return shared.topk_indices[: qr.shape[0]]
-        start, _, _, _ = metadata.swa.cp_token_range
-        hidden_states = hidden_states[start : start + metadata.swa.num_actual_tokens]
+        if getattr(attn.dsa_attn, "need_gather_q_kv", False):
+            # SP already supplied this rank's local token interval.
+            hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
+        else:
+            start, _, _, _ = metadata.swa.cp_token_range
+            hidden_states = hidden_states[start : start + metadata.swa.num_actual_tokens]
         return super()._select_sparse_indices(attn, hidden_states, qr, positions, cos, sin, metadata)
 
     def _project_output(self, attn, output, hidden_states, metadata, *, projected):
+        v1_impl = attn.dsa_attn.dsa_attn.impl
+        full_o_proj = self._use_full_o_proj(v1_impl, metadata.swa)
+        if full_o_proj:
+            padded = output
+            if output.shape[0] != hidden_states.shape[0]:
+                padded = output.new_zeros((hidden_states.shape[0], output.shape[1], output.shape[2]))
+                padded[: output.shape[0]] = output
+            v1_impl._switch_o_proj_to_full_weight()
+            try:
+                v1_impl._forward_o_proj(padded, projected, full_gather_wo_a_enabled=True)
+            finally:
+                v1_impl._switch_o_proj_to_local_weight()
+            return projected
+
         _, _, per_rank, _ = metadata.swa.cp_token_range
         padded = output
         if output.shape[0] != per_rank:
             padded = output.new_zeros((per_rank, output.shape[1], output.shape[2]))
             padded[: output.shape[0]] = output
-        exchanged = restore_tp_heads(padded, get_tp_group())
+        tp_group = get_tp_group()
+        exchanged = restore_tp_heads(padded, tp_group)
         # The inherited V4 module owns quantized weights and TP projection logic.
-        attn.dsa_attn.dsa_attn.impl._forward_o_proj(exchanged[: hidden_states.shape[0]], projected)
+        if getattr(attn.dsa_attn, "need_gather_q_kv", False):
+            # Each rank owns a different token interval. Project all exchanged
+            # tokens with the local head weights, then sum and shard by token.
+            # Reducing local intervals directly would mix different tokens.
+            partial = v1_impl._forward_o_proj(exchanged)
+            projected.copy_(sp_reduce_scatter(partial))
+        else:
+            # The model's baseline SP reduce-scatter performs the sum and
+            # token sharding after projecting the complete exchanged tensor.
+            v1_impl._forward_o_proj(exchanged[: hidden_states.shape[0]], projected)
         return projected
