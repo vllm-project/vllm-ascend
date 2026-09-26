@@ -117,6 +117,7 @@ def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compu
         cache[0, 0].fill_(11)
 
     select = MagicMock(return_value=torch.full((10, 1, 7), -1, dtype=torch.int32))
+    output_buffer = torch.empty(10, 16, dtype=torch.int32)
     monkeypatch.setattr(kpool_module, "glm5_next_kpool_tail_compress_and_write_cache_triton", compress)
     monkeypatch.setattr(kpool_module, "glm5_next_lightning_indexer_triton", select)
     result = SparseAttnIndexerKpool(4, 2)(
@@ -133,6 +134,7 @@ def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compu
         index_kpool=4,
         max_pool_seq_len=1,
         compute_topk=compute_topk,
+        output_buffer=output_buffer,
     )
     torch.testing.assert_close(tail_cache[0, 0], torch.full_like(tail_cache[0, 0], 7))
     torch.testing.assert_close(indexer_cache[0, 0], torch.full_like(indexer_cache[0, 0], 11))
@@ -140,6 +142,8 @@ def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compu
         assert result.shape == (10, 1, 7)
         assert (result[8:] == -1).all()
         select.assert_called_once()
+        assert select.call_args.kwargs["output_buffer"] is output_buffer
+        assert select.call_args.kwargs["pack_tail"] is True
     else:
         assert result is None
         select.assert_not_called()
@@ -233,7 +237,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
         prefix="indexer.tail",
         kv_cache=torch.zeros(2, 2, 4, 2, dtype=torch.float32),
     )
-    backend.topk_indices_buffer = None
+    backend.topk_indices_buffer = torch.empty(2, 16, dtype=torch.int32)
     backend.softmax_scale = 0.5
     backend._wk_weight_f32 = None
     backend.indexer_op = _RecordingKPool()
@@ -283,3 +287,4 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     assert backend.indexer_op.args[7] is tail_metadata
     assert backend.indexer_op.kwargs is not None
     assert backend.indexer_op.kwargs["compute_topk"] is True
+    assert backend.indexer_op.kwargs["output_buffer"] is backend.topk_indices_buffer
