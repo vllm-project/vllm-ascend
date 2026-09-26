@@ -65,7 +65,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py: 440
   tests/e2e/pull_request/one_card/test_multi_instance.py: 160
   tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 360
-  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_npu_ipc_weight_transfer.py: 1800
+  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_npu_ipc_weight_transfer.py: 1050
   tests/e2e/pull_request/one_card/test_qwen3_0_6b.py: 260
   tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py: 460
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 440
@@ -106,7 +106,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py: 280
   tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 480
   tests/e2e/pull_request/two_card/test_shared_expert_dp_graph.py: 540
-  tests/e2e/pull_request/two_card/rlhf/state_transitions/test_hccl_weight_transfer.py: 1800
+  tests/e2e/pull_request/two_card/rlhf/state_transitions/test_hccl_weight_transfer.py: 670
   tests/e2e/pull_request/two_card/test_xlite.py: 840
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 500
   tests/e2e/pull_request/four_card/_310p/test_model_runner_v2_310p.py: 1220
@@ -116,7 +116,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py: 1060
   tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py: 1230
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
-  tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 2190
+  tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 1520
   tests/e2e/pull_request/four_card/model_runner_v2/test_qwen35_pp_mtp.py: 300
   tests/e2e/pull_request/four_card/model_runner_v2/test_spec_pp_accuracy.py: 900
   tests/e2e/pull_request/four_card/model_runner_v2/test_spec_decode_data_parallel.py: 540
