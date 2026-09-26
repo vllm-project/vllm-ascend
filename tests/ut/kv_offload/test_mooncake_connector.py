@@ -4247,6 +4247,62 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 {30000 + rank * (prefill_tp // 2) + offset for offset in range(prefill_tp // 2)},
                             )
 
+    def test_decode_only_dcp_empty_receive_preserves_completion(self):
+        for sparse in (False, True):
+            for remote_pcp_size in (1, 2):
+                for rank in range(8):
+                    with self.subTest(sparse=sparse, pcp=remote_pcp_size, rank=rank):
+                        worker = self._build_non_cp_worker()
+                        worker.use_mla = True
+                        worker.use_sfa_sparse = sparse
+                        worker.enable_sfa_dcp_replicated_indexer = sparse
+                        worker.dcp_size = 8
+                        worker.dcp_rank = rank
+                        worker.kv_send_thread = None
+                        worker.kv_recv_thread = MagicMock()
+                        worker._get_selected_pcp_rank = MagicMock(return_value=remote_pcp_size - 1)
+                        worker.block_size_scale = [[2], [8]]
+                        worker.kv_group2layeridx = {
+                            0: ({"kv_cache_spec_type": "MLAAttentionSpec", "kv_cache_group_id": 0}, [0]),
+                        }
+                        if sparse:
+                            worker.kv_group2layeridx[1] = (
+                                {"kv_cache_spec_type": "AscendSFAIndexerCacheSpec", "kv_cache_group_id": 0},
+                                [1],
+                            )
+                        metadata = MooncakeConnectorMetadata()
+                        metadata.add_new_req(
+                            request_id="rejected",
+                            local_block_ids=([],),
+                            local_full_block_ids=([],),
+                            num_external_tokens=0,
+                            kv_transfer_params=dict(
+                                remote_request_id="prefill-request",
+                                remote_engine_id="prefill",
+                                remote_host="localhost",
+                                remote_port=30000,
+                                remote_pcp_size=remote_pcp_size,
+                                remote_dcp_size=1,
+                                remote_ptp_size=1,
+                                remote_block_ids=([1],),
+                                remote_block_size=worker.block_size,
+                                num_prompt_blocks=1,
+                            ),
+                        )
+
+                        worker.start_load_kv(metadata)
+
+                        worker.kv_recv_thread.add_request.assert_called_once()
+                        receive = worker.kv_recv_thread.add_request.call_args.kwargs
+                        empty_ids: tuple[list[int], ...] = ([], []) if sparse else ([],)
+                        self.assertEqual(receive["local_block_ids"], empty_ids)
+                        self.assertEqual(receive["remote_block_ids"], empty_ids)
+                        self.assertEqual(receive["remote_handshake_port"], 30000 + remote_pcp_size - 1)
+                        self.assertEqual(receive["remote_request_id"], "prefill-request")
+                        self.assertTrue(receive["all_task_done"])
+                        self.assertIsNone(receive["local_block_ids_replicate_k"])
+                        self.assertIsNone(receive["remote_block_ids_replicate_k"])
+
     def test_sfa_decode_only_dcp_maps_global_blocks_to_each_rank(self):
         for rank, remote_pcp_size in ((rank, pcp) for rank in range(8) for pcp in (1, 2)):
             for prompt_blocks, prefix_blocks in ((1, 0), (17, 0), (17, 9)):
