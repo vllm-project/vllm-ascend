@@ -1,4 +1,4 @@
-"""Worker-side Lookup RPC server for the classic path."""
+"""Worker-side Lookup RPC server."""
 
 from __future__ import annotations
 
@@ -9,11 +9,13 @@ import zmq
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.serial_utils import MsgpackDecoder
 
+from .request import WorkerLookupRequest
 
-class LookupKeyServer:
+
+class LookupServer:
     """Forward decoded Lookup requests to the Worker that owns the Backend."""
 
-    def __init__(self, lookup: Callable[[int, list[str]], int], address: str) -> None:
+    def __init__(self, lookup: Callable[[WorkerLookupRequest], int], address: str) -> None:
         self.decoder = MsgpackDecoder()
         self.ctx = zmq.Context()
         self.socket = make_zmq_socket(self.ctx, address, zmq.REP, bind=True)
@@ -25,15 +27,14 @@ class LookupKeyServer:
     def _serve(self) -> None:
         while self.running:
             frames = self.socket.recv_multipart(copy=False)
-            token_len = int.from_bytes(frames[0], byteorder="big")
-            group_ids = self.decoder.decode([frames[1]])
-            # Retain the classic wire frame, but HBM hits are not used without a coordinator.
-            _hbm_hit_tokens = int.from_bytes(frames[2], byteorder="big")
+            lookup_end_token = int.from_bytes(frames[0], byteorder="big")
+            transfer_group_ids = tuple(self.decoder.decode([frames[1]]))
+            local_cached_tokens = int.from_bytes(frames[2], byteorder="big")
             hash_strings = self.decoder.decode(frames[3:])
-            if group_ids != [0]:
-                raise ValueError("AscendStore v1 classic Lookup requires one KV group")
-            result = self.lookup(token_len, hash_strings)
-            self.socket.send(result.to_bytes(4, "big"))
+            kv_pool_cached_tokens = self.lookup(
+                WorkerLookupRequest(lookup_end_token, transfer_group_ids, local_cached_tokens, tuple(hash_strings))
+            )
+            self.socket.send(kv_pool_cached_tokens.to_bytes(4, "big"))
 
     def close(self) -> None:
         self.running = False

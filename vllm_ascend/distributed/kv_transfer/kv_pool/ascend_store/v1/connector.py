@@ -1,4 +1,4 @@
-"""vLLM hooks for the extracted AscendStore classic business path."""
+"""Adapt vLLM hooks to AscendStore v1."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from .factory import build_scheduler_service, build_worker_service
 from .metadata import AscendStoreV1Metadata
 from .scheduler.lookup import SchedulerLookupRequest
 from .worker.load import LoadResult
-from .worker.lookup import LookupKeyServer
+from .worker.lookup import LookupServer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -34,22 +34,20 @@ if TYPE_CHECKING:
 
 
 class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
-    """Adapt vLLM hooks to the classic AscendStore v1 services."""
+    """Adapt vLLM hooks to AscendStore v1 services."""
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig) -> None:
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
-        if len(kv_cache_config.kv_cache_groups) != 1:
-            raise ValueError("AscendStore v1 classic path requires one KV cache group")
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         if extra_config.get("use_layerwise", False):
-            raise ValueError("AscendStore v1 classic path requires non-Layerwise Load")
+            raise ValueError("AscendStore v1 currently requires non-Layerwise Load")
         backend_name = extra_config.get("backend", "mooncake").strip().lower()
         if backend_name not in BACKEND_IMPORTS:
             raise ValueError(f"Unsupported AscendStore v1 backend: {backend_name}")
 
         self.scheduler: SchedulerService | None = None
         self.worker: WorkerService | None = None
-        self.lookup_server: LookupKeyServer | None = None
+        self.lookup_server: LookupServer | None = None
         self._pending_load_result: LoadResult | None = None
         if role == KVConnectorRole.SCHEDULER:
             lookup_address = self._resolve_lookup_address(vllm_config)
@@ -58,7 +56,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
             self.worker = build_worker_service(vllm_config, kv_cache_config)
             if vllm_config.parallel_config.rank == 0:
                 lookup_address = self._resolve_lookup_address(vllm_config)
-                self.lookup_server = LookupKeyServer(self.worker.lookup, lookup_address)
+                self.lookup_server = LookupServer(self.worker.lookup, lookup_address)
 
     @staticmethod
     def _resolve_lookup_address(vllm_config: VllmConfig) -> str:
@@ -74,11 +72,11 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
     def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
         assert self.scheduler is not None
         lookup_request = SchedulerLookupRequest(
-            req_id=request.request_id,
+            request_id=request.request_id,
             prompt_token_len=len(request.prompt_token_ids),
-            num_tokens=request.num_tokens,
+            request_token_len=request.num_tokens,
             block_hashes=request.block_hashes,
-            num_computed_tokens=num_computed_tokens,
+            local_cached_tokens=num_computed_tokens,
         )
         return self.scheduler.lookup(lookup_request)
 
@@ -134,7 +132,13 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, AscendStoreV1Metadata)
         self.worker.finish_store_step(metadata.store)
-        self._pending_load_result = self.worker.collect_load_result()
+        load_result = self.worker.collect_load_result()
+        if load_result.failed_request_ids:
+            raise RuntimeError(
+                "Hybrid KV Load failed, but this vLLM version cannot report request-level Load failures: "
+                f"{sorted(load_result.failed_request_ids)}"
+            )
+        self._pending_load_result = load_result
         return set(), set(self._pending_load_result.completed_request_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:

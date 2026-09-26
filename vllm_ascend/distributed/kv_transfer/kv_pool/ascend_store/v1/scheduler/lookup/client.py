@@ -1,4 +1,4 @@
-"""Scheduler-owned Lookup RPC client for the classic path."""
+"""Scheduler-owned Lookup RPC client."""
 
 from __future__ import annotations
 
@@ -7,20 +7,26 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.serial_utils import MsgpackEncoder
 
 
-class LookupKeyClient:
+class LookupClient:
     def __init__(self, address: str) -> None:
         self.encoder = MsgpackEncoder()
         self.ctx = zmq.Context()
         self.socket = make_zmq_socket(self.ctx, address, zmq.REQ, bind=False)
 
-    def lookup(self, token_len: int, block_hashes: list[bytes], hbm_hit_tokens: int) -> int:
+    def lookup(
+        self,
+        lookup_end_token: int,
+        transfer_group_ids: tuple[int, ...],
+        block_hashes: list[bytes],
+        local_cached_tokens: int,
+    ) -> int:
         hash_frames = self.encoder.encode([block_hash.hex() for block_hash in block_hashes])
-        group_frames = self.encoder.encode([0])
+        group_frames = self.encoder.encode(list(transfer_group_ids))
         self.socket.send_multipart(
             [
-                token_len.to_bytes(4, byteorder="big"),
+                lookup_end_token.to_bytes(4, byteorder="big"),
                 *group_frames,
-                hbm_hit_tokens.to_bytes(4, byteorder="big"),
+                local_cached_tokens.to_bytes(4, byteorder="big"),
                 *hash_frames,
             ],
             copy=False,

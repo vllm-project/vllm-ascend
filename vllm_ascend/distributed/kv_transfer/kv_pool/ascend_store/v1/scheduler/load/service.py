@@ -1,4 +1,4 @@
-"""Business entry point for classic Scheduler Load."""
+"""Business entry point for Scheduler Load."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from .scheduling import LoadScheduling
 class LoadCandidate:
     """A Lookup hit awaiting vLLM block-allocation confirmation."""
 
-    vllm_cached_tokens: int
-    kvpool_cached_tokens: int
+    local_cached_tokens: int
+    kv_pool_cached_tokens: int
 
 
 class LoadService:
@@ -31,17 +31,17 @@ class LoadService:
     def record_candidate(self, request_id: str, candidate: LoadCandidate) -> None:
         self._pending_candidates[request_id] = candidate
 
-    def confirm_allocation(self, request_id: str, num_external_tokens: int) -> LoadCandidate | None:
+    def confirm_allocation(self, request_id: str, allocated_external_tokens: int) -> LoadCandidate | None:
         candidate = self._pending_candidates.get(request_id)
         if candidate is None:
             return None
-        if num_external_tokens == 0:
+        if allocated_external_tokens == 0:
             return None
 
-        expected_tokens = candidate.kvpool_cached_tokens - candidate.vllm_cached_tokens
-        assert num_external_tokens == expected_tokens, (
-            f"Mismatch in number of tokens: {num_external_tokens} vs "
-            f"{candidate.kvpool_cached_tokens} - {candidate.vllm_cached_tokens} for request {request_id}"
+        expected_tokens = candidate.kv_pool_cached_tokens - candidate.local_cached_tokens
+        assert allocated_external_tokens == expected_tokens, (
+            f"Mismatch in number of tokens: {allocated_external_tokens} vs "
+            f"{candidate.kv_pool_cached_tokens} - {candidate.local_cached_tokens} for request {request_id}"
         )
         self._pending_candidates.pop(request_id)
         return self._scheduling.confirm(request_id, candidate)
@@ -62,10 +62,10 @@ class LoadService:
         return LoadRequest(
             request_id=tracker.request_id,
             transfer_end_token=transfer_end_token,
-            block_ids=tuple(tracker.block_ids),
+            block_ids_by_group=tuple(tuple(block_ids) for block_ids in tracker.block_ids_by_group),
             block_hashes=tuple(tracker.block_hashes),
-            vllm_cached_tokens=candidate.vllm_cached_tokens,
-            kvpool_cached_tokens=candidate.kvpool_cached_tokens,
+            local_cached_tokens=candidate.local_cached_tokens,
+            kv_pool_cached_tokens=candidate.kv_pool_cached_tokens,
         )
 
     def discard_transfer(self, request_id: str) -> None:

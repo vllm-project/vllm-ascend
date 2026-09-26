@@ -1,1 +1,1 @@
-"""Worker-owned classic KV Pool operations and resources."""
+"""Worker-owned KV pool operations and resources."""

@@ -1,4 +1,4 @@
-"""Classic Worker Store execution."""
+"""Worker Store execution."""
 
 from .service import StoreService
 

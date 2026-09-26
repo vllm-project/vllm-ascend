@@ -1,4 +1,4 @@
-"""Background execution for fully resolved classic Load tasks."""
+"""Background execution for fully resolved Load tasks."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
-from .executor import LoadExecutor, LoadTaskResult
+from .executor import LoadTaskCompletion, SynchronousLoadExecutor
 from .task import LoadTask
 
 
@@ -20,14 +20,14 @@ class AsyncLoadExecutor(threading.Thread):
     def __init__(self, backend: Backend) -> None:
         super().__init__(daemon=True, name="KVCacheLoadThread")
         self._backend = backend
-        self._load_executor = LoadExecutor(backend)
+        self._task_executor = SynchronousLoadExecutor(backend)
         self._ready = threading.Event()
         self._lifecycle_lock = threading.Lock()
         self._has_started = False
         self._closed = False
         self._completed_lock = threading.Lock()
         self._task_queue: queue.Queue[LoadTask | None] = queue.Queue()
-        self._completed: dict[str, LoadTaskResult] = {}
+        self._completed: dict[str, LoadTaskCompletion] = {}
         self._fatal_error: BaseException | None = None
 
     def start_and_wait_ready(self) -> None:
@@ -52,14 +52,14 @@ class AsyncLoadExecutor(threading.Thread):
         self.join()
         self.raise_if_failed()
 
-    def submit(self, tasks: list[LoadTask]) -> Iterable[LoadTaskResult]:
+    def submit(self, tasks: list[LoadTask]) -> Iterable[LoadTaskCompletion]:
         with self._lifecycle_lock:
             self._raise_if_not_running()
             for task in tasks:
                 self._task_queue.put(task)
         return ()
 
-    def collect(self) -> list[LoadTaskResult]:
+    def collect(self) -> list[LoadTaskCompletion]:
         self.raise_if_failed()
         with self._completed_lock:
             completed = list(self._completed.values())
@@ -93,7 +93,7 @@ class AsyncLoadExecutor(threading.Thread):
             try:
                 if task is None:
                     return
-                result = self._load_executor.execute(task)
+                result = self._task_executor.execute(task)
                 with self._completed_lock:
                     self._completed[task.request_id] = (task, result)
             except Exception as error:

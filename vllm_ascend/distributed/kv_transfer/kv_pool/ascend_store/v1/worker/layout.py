@@ -6,12 +6,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed import get_pcp_group, get_tensor_model_parallel_rank
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
-    infer_group_block_sizes,
     infer_tp_mismatch_info,
 )
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_rank
@@ -31,6 +31,16 @@ class TPPartitionSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class KVCacheGroupLayout:
+    """Worker-local layout for one vLLM KV cache group."""
+
+    group_id: int
+    block_size: int
+    layer_names: tuple[str, ...]
+    key_metadata: KeyMetadata
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerTransferLayout:
     """Static topology and cache-layout facts for one Worker."""
 
@@ -41,16 +51,16 @@ class WorkerTransferLayout:
     pcp_size: int
     dcp_size: int
     put_step: int
-    block_size: int
+    cache_transfer_granularity: int
     hash_block_size: int
     tp_partition: TPPartitionSpec
-    key_metadata: KeyMetadata
+    kv_cache_groups: tuple[KVCacheGroupLayout, ...]
+    transfer_group_ids: tuple[int, ...]
 
 
 def resolve_worker_transfer_layout(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> WorkerTransferLayout:
     parallel_config = vllm_config.parallel_config
     model_config = vllm_config.model_config
-    cache_config = vllm_config.cache_config
     tp_rank = get_tensor_model_parallel_rank()
     tp_size = parallel_config.tensor_parallel_size
     pp_size = parallel_config.pipeline_parallel_size
@@ -65,16 +75,22 @@ def resolve_worker_transfer_layout(vllm_config: VllmConfig, kv_cache_config: KVC
 
     tp_partition = resolve_tp_partition(vllm_config)
 
-    group_block_sizes = infer_group_block_sizes(cache_config.block_size, kv_cache_config.kv_cache_groups)
-    original_block_size = group_block_sizes[0]
-    block_size = original_block_size * dcp_size
-    requested_hash_block_size = cache_config.prefix_match_unit
-    if isinstance(requested_hash_block_size, int):
-        hash_block_size = requested_hash_block_size * dcp_size
-    else:
-        hash_block_size = block_size
+    cache_transfer_granularity, hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(
+        kv_cache_config, vllm_config
+    )
     model_name = model_config.model.rstrip("/").split("/")[-1]
-    key_metadata = KeyMetadata(model_name, head_or_tp_rank, dcp_rank, pp_rank)
+    kv_cache_groups = tuple(
+        KVCacheGroupLayout(
+            group_id,
+            kv_cache_utils.resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_size),
+            tuple(group.layer_names),
+            KeyMetadata(model_name, head_or_tp_rank, dcp_rank, pp_rank, group_id),
+        )
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+    )
+    transfer_group_ids = tuple(
+        getattr(kv_cache_config, "transfer_group_ids", range(len(kv_cache_config.kv_cache_groups)))
+    )
     return WorkerTransferLayout(
         tp_rank,
         tp_size,
@@ -83,10 +99,11 @@ def resolve_worker_transfer_layout(vllm_config: VllmConfig, kv_cache_config: KVC
         pcp_size,
         dcp_size,
         put_step,
-        block_size,
+        cache_transfer_granularity,
         hash_block_size,
         tp_partition,
-        key_metadata,
+        kv_cache_groups,
+        transfer_group_ids,
     )
 
 

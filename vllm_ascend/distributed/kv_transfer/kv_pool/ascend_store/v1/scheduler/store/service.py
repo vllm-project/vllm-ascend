@@ -1,4 +1,4 @@
-"""Business entry point for classic Scheduler Store."""
+"""Business entry point for Scheduler Store."""
 
 from __future__ import annotations
 
@@ -42,8 +42,8 @@ class StoreService:
 
         request = StoreRequest(
             request_id=tracker.request_id,
-            save_end_token=transfer_end_token,
-            block_ids=tuple(tracker.block_ids),
+            store_end_token=transfer_end_token,
+            block_ids_by_group=tuple(tuple(block_ids) for block_ids in tracker.block_ids_by_group),
             block_hashes=tuple(tracker.block_hashes),
             num_prompt_tokens=tracker.num_prompt_tokens,
         )

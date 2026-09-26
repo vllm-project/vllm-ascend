@@ -1,1 +1,1 @@
-"""AscendStore v1 classic-path implementation."""
+"""AscendStore v1 implementation."""

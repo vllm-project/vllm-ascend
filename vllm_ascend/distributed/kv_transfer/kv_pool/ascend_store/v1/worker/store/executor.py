@@ -1,4 +1,4 @@
-"""FIFO execution of classic Store tasks on one background thread."""
+"""FIFO execution of Store tasks on one background thread."""
 
 from __future__ import annotations
 
@@ -12,14 +12,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 
 from .task import StoreChunk, StoreTask
 
-STORE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
+STORE_BARRIER_POLL_INTERVAL_S = 1.0
 
 
-class StoreBatch:
+class StoreBatchBarrier:
     """FIFO marker following every task in one scheduled Store batch."""
 
     def __init__(self) -> None:
-        self.done = threading.Event()
+        self.completed = threading.Event()
 
 
 class StoreExecutor(threading.Thread):
@@ -32,12 +32,12 @@ class StoreExecutor(threading.Thread):
         self._lifecycle_lock = threading.Lock()
         self._has_started = False
         self._closed = False
-        self.done_task_lock = threading.Lock()
-        self.task_queue: queue.Queue[StoreTask | StoreBatch | None] = queue.Queue()
-        self.stored_requests: defaultdict[str, int] = defaultdict(int)
-        self.finished_requests: set[str] = set()
+        self._completion_lock = threading.Lock()
+        self._task_queue: queue.Queue[StoreTask | StoreBatchBarrier | None] = queue.Queue()
+        self._pending_task_counts: defaultdict[str, int] = defaultdict(int)
+        self._completed_request_ids: set[str] = set()
         self._fatal_error: BaseException | None = None
-        self._previous_store_batch: StoreBatch | None = None
+        self._previous_batch_barrier: StoreBatchBarrier | None = None
 
     def start_and_wait_ready(self) -> None:
         with self._lifecycle_lock:
@@ -57,33 +57,33 @@ class StoreExecutor(threading.Thread):
             if not self._has_started:
                 return
             if self.is_alive():
-                self.task_queue.put(None)
+                self._task_queue.put(None)
         self.join()
         self.raise_if_failed()
 
     def submit_batch(self, tasks: list[StoreTask]) -> None:
         with self._lifecycle_lock:
             self._raise_if_not_running()
-            store_batch = StoreBatch()
+            batch_barrier = StoreBatchBarrier()
             # Register every task before the thread may complete the first one.
-            with self.done_task_lock:
+            with self._completion_lock:
                 for task in tasks:
-                    self.finished_requests.discard(task.request_id)
-                    self.stored_requests[task.request_id] += 1
+                    self._completed_request_ids.discard(task.request_id)
+                    self._pending_task_counts[task.request_id] += 1
             for task in tasks:
-                self.task_queue.put(task)
-            self.task_queue.put(store_batch)
-            self._previous_store_batch = store_batch
+                self._task_queue.put(task)
+            self._task_queue.put(batch_barrier)
+            self._previous_batch_barrier = batch_barrier
 
     def wait_for_previous_store(self) -> None:
-        store_batch = self._previous_store_batch
-        if store_batch is None:
+        batch_barrier = self._previous_batch_barrier
+        if batch_barrier is None:
             return
         while True:
             self.raise_if_failed()
-            if store_batch.done.wait(timeout=STORE_BATCH_FAILURE_POLL_INTERVAL_S):
+            if batch_barrier.completed.wait(timeout=STORE_BARRIER_POLL_INTERVAL_S):
                 break
-        self._previous_store_batch = None
+        self._previous_batch_barrier = None
 
     def raise_if_failed(self) -> None:
         if self._fatal_error is not None:
@@ -97,25 +97,25 @@ class StoreExecutor(threading.Thread):
             raise RuntimeError(f"{self.name} is closed")
 
     def finish_step(self, preempted_request_ids: frozenset[str]) -> None:
-        """Forget preempted Stores and consume completions not reported by the classic path."""
+        """Forget preempted Stores and consume completion bookkeeping for this step."""
         for request_id in preempted_request_ids:
-            self.delete_finished_stored_request(request_id)
-        self.discard_finished_requests(preempted_request_ids)
-        self.get_and_clear_finished_requests()
+            self._discard_pending_request(request_id)
+        self._discard_completed_requests(preempted_request_ids)
+        self._take_completed_request_ids()
 
-    def discard_finished_requests(self, request_ids: frozenset[str]) -> None:
-        with self.done_task_lock:
-            self.finished_requests -= request_ids
+    def _discard_completed_requests(self, request_ids: frozenset[str]) -> None:
+        with self._completion_lock:
+            self._completed_request_ids -= request_ids
 
-    def get_and_clear_finished_requests(self) -> set[str]:
-        with self.done_task_lock:
-            finished_requests = self.finished_requests.copy()
-            self.finished_requests.clear()
-            return finished_requests
+    def _take_completed_request_ids(self) -> set[str]:
+        with self._completion_lock:
+            completed_request_ids = self._completed_request_ids.copy()
+            self._completed_request_ids.clear()
+            return completed_request_ids
 
-    def delete_finished_stored_request(self, request_id: str) -> None:
-        with self.done_task_lock:
-            self.stored_requests.pop(request_id, None)
+    def _discard_pending_request(self, request_id: str) -> None:
+        with self._completion_lock:
+            self._pending_task_counts.pop(request_id, None)
 
     def run(self) -> None:
         try:
@@ -129,7 +129,7 @@ class StoreExecutor(threading.Thread):
             return
 
         while True:
-            task = self.task_queue.get()
+            task = self._task_queue.get()
             try:
                 if task is None:
                     return
@@ -139,28 +139,28 @@ class StoreExecutor(threading.Thread):
                 logger.exception("Error in KVCacheSendingThread")
                 return
             finally:
-                self.task_queue.task_done()
+                self._task_queue.task_done()
 
-    def _handle_task(self, task: StoreTask | StoreBatch) -> None:
-        if isinstance(task, StoreBatch):
-            task.done.set()
+    def _handle_task(self, task: StoreTask | StoreBatchBarrier) -> None:
+        if isinstance(task, StoreBatchBarrier):
+            task.completed.set()
             return
 
         request_id = task.request_id
-        with self.done_task_lock:
-            tracked_request = request_id in self.stored_requests
+        with self._completion_lock:
+            tracked_request = request_id in self._pending_task_counts
         try:
             if tracked_request:
                 self._execute_task(task)
         except Exception:
             logger.exception("Failed to store KV cache for request %s", request_id)
         finally:
-            with self.done_task_lock:
-                if tracked_request and request_id in self.stored_requests:
-                    self.stored_requests[request_id] -= 1
-                    if self.stored_requests[request_id] == 0:
-                        del self.stored_requests[request_id]
-                        self.finished_requests.add(request_id)
+            with self._completion_lock:
+                if tracked_request and request_id in self._pending_task_counts:
+                    self._pending_task_counts[request_id] -= 1
+                    if self._pending_task_counts[request_id] == 0:
+                        del self._pending_task_counts[request_id]
+                        self._completed_request_ids.add(request_id)
 
     def _execute_task(self, task: StoreTask) -> None:
         chunks = self._select_missing_chunks(task)

@@ -19,22 +19,22 @@ class LoadExecutionResult:
     result_codes: tuple[int, ...] | None
 
 
-LoadTaskResult = tuple[LoadTask, LoadExecutionResult]
+LoadTaskCompletion = tuple[LoadTask, LoadExecutionResult]
 
 
-class LoadExecution(Protocol):
+class LoadExecutor(Protocol):
     """Execution boundary consumed by the Worker Load service."""
 
     def start_and_wait_ready(self) -> None: ...
 
     def close(self) -> None: ...
 
-    def submit(self, tasks: list[LoadTask]) -> Iterable[LoadTaskResult]: ...
+    def submit(self, tasks: list[LoadTask]) -> Iterable[LoadTaskCompletion]: ...
 
-    def collect(self) -> Iterable[LoadTaskResult]: ...
+    def collect(self) -> Iterable[LoadTaskCompletion]: ...
 
 
-class LoadExecutor:
+class SynchronousLoadExecutor:
     """Execute Load tasks synchronously without interpreting block validity."""
 
     def __init__(self, backend: Backend) -> None:
@@ -46,11 +46,11 @@ class LoadExecutor:
     def close(self) -> None:
         return
 
-    def submit(self, tasks: list[LoadTask]) -> Iterable[LoadTaskResult]:
+    def submit(self, tasks: list[LoadTask]) -> Iterable[LoadTaskCompletion]:
         for task in tasks:
             yield task, self.execute(task)
 
-    def collect(self) -> list[LoadTaskResult]:
+    def collect(self) -> list[LoadTaskCompletion]:
         return []
 
     def execute(self, task: LoadTask) -> LoadExecutionResult:

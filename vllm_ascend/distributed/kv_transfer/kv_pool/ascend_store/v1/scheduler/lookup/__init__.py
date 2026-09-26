@@ -1,4 +1,4 @@
-"""Classic Scheduler Lookup request and RPC client."""
+"""Scheduler Lookup contract and RPC client."""
 
 from .request import SchedulerLookupRequest, SchedulerLookupResult
 from .service import LookupService

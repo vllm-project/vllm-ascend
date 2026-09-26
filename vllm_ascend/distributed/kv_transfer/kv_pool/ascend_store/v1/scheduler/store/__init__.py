@@ -1,4 +1,4 @@
-"""Scheduler-side classic Store decisions."""
+"""Scheduler-side Store decisions."""
 
 from .service import StoreService
 

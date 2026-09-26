@@ -1,1 +1,1 @@
-"""Scheduler-owned classic KV Pool planning and request progress."""
+"""Scheduler-owned KV pool planning and request progress."""

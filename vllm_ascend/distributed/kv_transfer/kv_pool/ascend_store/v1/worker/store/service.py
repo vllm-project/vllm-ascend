@@ -1,4 +1,4 @@
-"""Business entry point for classic asynchronous Store."""
+"""Business entry point for asynchronous Worker Store."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import torch
 from vllm.logger import logger
 
 from ...metadata import StoreRequestBatch
+from ..coordinator import ChunkSelection, KVTransferCoordinator
 from .executor import StoreExecutor
 from .task import StoreTask, StoreTaskBuilder
 
@@ -15,9 +16,11 @@ class StoreService:
 
     def __init__(
         self,
+        coordinator: KVTransferCoordinator,
         task_builder: StoreTaskBuilder,
         executor: StoreExecutor,
     ) -> None:
+        self._coordinator = coordinator
         self._task_builder = task_builder
         self._executor = executor
 
@@ -36,11 +39,19 @@ class StoreService:
         tasks = []
         for request in request_batch.requests:
             try:
-                tasks.append(self._task_builder.build(request, source_ready_event))
+                selections = self._select_chunks(request.store_end_token, request.num_prompt_tokens)
+                tasks.append(self._task_builder.build(request, source_ready_event, selections))
             except Exception:
                 logger.exception("Failed to prepare Store task for request %s", request.request_id)
                 tasks.append(StoreTask(request.request_id, source_ready_event, ()))
         self._executor.submit_batch(tasks)
+
+    def _select_chunks(self, store_end_token: int, num_prompt_tokens: int) -> tuple[ChunkSelection, ...]:
+        try:
+            return self._coordinator.select_store(store_end_token, num_prompt_tokens)
+        except AssertionError as error:
+            logger.debug("Use unfiltered Store chunks for unaligned end token %d: %s", store_end_token, error)
+            return tuple(ChunkSelection(group_id, None) for group_id in self._coordinator.group_ids)
 
     def wait_for_previous_store(self) -> None:
         self._executor.wait_for_previous_store()
