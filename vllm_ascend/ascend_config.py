@@ -584,6 +584,9 @@ class AscendConfig:
     # count exceeds it, tokens may be truncated, causing precision
     # degradation. Do not set it too large because workspace memory scales
     # linearly with this value. Default 65536.
+    # 0 means "auto": the CANN MegaMoe op expands it to its internal safe
+    # upper bound, which avoids truncation under any expert load
+    # distribution at the cost of extra workspace memory.
     mega_moe_max_tokens: int = 65536
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
@@ -643,6 +646,12 @@ class AscendConfig:
     def _validate_user_input_ranges(self):
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
+        if self.mega_moe_max_tokens < 0:
+            raise ValueError(
+                "mega_moe_max_tokens must be >= 0; got "
+                f"{self.mega_moe_max_tokens}. Set it to 0 to let the CANN "
+                "MegaMoe op pick its internal safe upper bound."
+            )
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
         if self.enable_mc2_hierarchy_comm:
             self.mc2_comm_alg = "hierarchy"
