@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Paged, head-wise GLM KPool scoring and fused token-index expansion."""
+"""Paged GLM KPool scoring and fused token-index expansion."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 TRITON_POOL_CHUNK_SIZE = 128
-TRITON_PREFILL_POOL_CHUNK_SIZE = 256
 TRITON_SCORES_CHUNK_BYTES = 256 * 1024 * 1024
 TRITON_MAX_PROGRAMS = 256
 TRITON_INDEX_BLOCK = 256
@@ -58,9 +57,8 @@ def _gather_pool_cache(
 
 @triton.jit(do_not_specialize=["token_offset", "rows", "max_pool_seq_len", "num_reqs", "num_cache_blocks"])
 def _glm5_next_lightning_indexer_score_kernel(
-    query,
+    qbar,
     cache,
-    weights,
     query_ends,
     pool_lens,
     block_table,
@@ -71,11 +69,6 @@ def _glm5_next_lightning_indexer_score_kernel(
     max_pool_seq_len,
     num_reqs,
     num_cache_blocks,
-    query_stride_t: tl.constexpr,
-    query_stride_h: tl.constexpr,
-    query_stride_d: tl.constexpr,
-    weight_stride_t: tl.constexpr,
-    weight_stride_h: tl.constexpr,
     cache_stride_b: tl.constexpr,
     cache_stride_t: tl.constexpr,
     cache_stride_d: tl.constexpr,
@@ -83,8 +76,6 @@ def _glm5_next_lightning_indexer_score_kernel(
     table_stride_p: tl.constexpr,
     CACHE_BLOCK: tl.constexpr,
     REQ_POW2: tl.constexpr,
-    HEADS: tl.constexpr,
-    BLOCK_H: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     POOL: tl.constexpr,
     BLOCK_POOL: tl.constexpr,
@@ -103,14 +94,8 @@ def _glm5_next_lightning_indexer_score_kernel(
         position = tl.load(positions + token).to(tl.int32)
         visible = tl.minimum((position + 1) // POOL, tl.load(pool_lens + request))
         live = token < tl.load(query_ends + num_reqs - 1)
-        heads = tl.arange(0, BLOCK_H)
         dims = tl.arange(0, HEAD_DIM)
-        q = tl.load(
-            query + token * query_stride_t + heads[:, None] * query_stride_h + dims[None, :] * query_stride_d,
-            heads[:, None] < HEADS,
-            other=0,
-        )
-        w = tl.load(weights + token * weight_stride_t + heads * weight_stride_h, heads < HEADS, other=0).to(tl.float32)
+        weighted_query = tl.load(qbar + row * HEAD_DIM + dims)
         sub_tiles = tl.cdiv(tl.minimum(max_pool_seq_len - chunk * OUTER_POOL, OUTER_POOL), BLOCK_POOL)
         for sub in range(sub_tiles):
             pool_start = chunk * OUTER_POOL + sub * BLOCK_POOL
@@ -148,12 +133,7 @@ def _glm5_next_lightning_indexer_score_kernel(
                         valid[:, None],
                         other=0,
                     )
-                # ReLU is applied per head before the weighted head reduction.
-                # Summing weighted queries first is not algebraically equivalent.
-                per_head = tl.dot(k, tl.trans(q), input_precision="ieee")
-                # The comparison preserves NaN, unlike maxnum semantics.
-                per_head = tl.where(per_head < 0.0, 0.0, per_head)
-                scores = tl.sum(per_head * w[None, :], axis=1)
+                scores = tl.sum(k.to(tl.float32) * weighted_query[None, :], axis=1)
                 scores = tl.where(valid & (scores == scores), tl.minimum(tl.maximum(scores, LOWEST), -LOWEST), LOWEST)
             tl.store(output + row * max_pool_seq_len + pools, scores, pools < max_pool_seq_len)
 
@@ -232,7 +212,7 @@ def glm5_next_lightning_indexer_triton(
     pack_tail: bool = False,
 ) -> torch.Tensor:
     """Select pools, expand tokens and optionally write the final SFA buffer."""
-    num_tokens, num_heads, head_dim = query.shape
+    num_tokens, _, head_dim = query.shape
     output_width = index_topk + index_kpool - 1
     if output_buffer is None:
         output = torch.empty((num_tokens, output_width), dtype=torch.int32, device=query.device)
@@ -297,16 +277,20 @@ def glm5_next_lightning_indexer_triton(
     for start in range(0, num_tokens, token_chunk):
         rows = min(token_chunk, num_tokens - start)
         if selected:
+            # Keep the existing FP32 head reduction and score formula. A
+            # per-head ReLU changes selection and is a separate model change.
+            qbar = (
+                (query[start : start + rows].float() * weights[start : start + rows].float().unsqueeze(-1))
+                .sum(dim=1)
+                .contiguous()
+            )
             scores = torch.empty((rows, max_pool_seq_len), dtype=torch.float32, device=query.device)
             block_pool = TRITON_POOL_CHUNK_SIZE if index32 else indexer_cache.shape[1]
-            if packed_cache:
-                block_pool = TRITON_PREFILL_POOL_CHUNK_SIZE
             outer_pool = max(TRITON_PREFILL_POOL_TILE, block_pool) if rows >= TRITON_PREFILL_MIN_TOKENS else block_pool
             chunks = triton.cdiv(max_pool_seq_len, outer_pool)
             _glm5_next_lightning_indexer_score_kernel[(min(rows * chunks, TRITON_MAX_PROGRAMS),)](
-                query,
+                qbar,
                 cache,
-                weights,
                 cum_query_lens,
                 indexer_seq_lens,
                 indexer_block_table,
@@ -317,16 +301,12 @@ def glm5_next_lightning_indexer_triton(
                 max_pool_seq_len,
                 cum_query_lens.numel(),
                 indexer_cache.shape[0],
-                *query.stride(),
-                *weights.stride(),
                 0 if packed_cache else cache.stride(0),
                 cache.stride(1),
                 cache.stride(3),
                 *indexer_block_table.stride(),
                 indexer_cache.shape[1],
                 next_power_of_2(cum_query_lens.numel()),
-                num_heads,
-                max(16, next_power_of_2(num_heads)),
                 head_dim,
                 index_kpool,
                 block_pool,
