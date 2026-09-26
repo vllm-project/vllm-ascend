@@ -126,6 +126,9 @@ def _record_cos_sin_cache(cos_sin_cache):
     global _cos_sin_cache
     if _cos_sin_cache is not None:
         return
+    if cos_sin_cache.shape[-1] == 0:
+        # NoPE rope (rotary_dim == 0): keep the slot free for a later real rope.
+        return
     _cos_sin_cache = cos_sin_cache
 
 
@@ -162,6 +165,10 @@ def _record_cos_and_sin_cache_interleaved(owner: "torch.nn.Module", cos_sin_cach
     if _cos_cache is not None or _sin_cache is not None:
         return
     hidden_dim = cos_sin_cache.shape[-1] // 2
+    if hidden_dim == 0:
+        # NoPE rope (rotary_dim == 0, e.g. a text-only GLM-5.3-Flash target
+        # whose sparse indexer rope is the first one built): nothing to record.
+        return
     cos_cache, sin_cache = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2).chunk(2, dim=1)
     _cos_cache = cos_cache.squeeze(1)
     _sin_cache = sin_cache.squeeze(1)
