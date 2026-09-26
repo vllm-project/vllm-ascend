@@ -256,6 +256,12 @@ class TestQuantizeWeightMxFp8(TestBase):
         with self.assertRaisesRegex(ValueError, "multiple of the MX group size"):
             wo.quantize_weight_mx_fp8(make_weight(8, 33))
 
+    def test_npu_scale_policy_is_resolved_only_for_npu(self):
+        weight = make_weight(out_features=8, in_features=32, seed=21)
+        with unittest.mock.patch.object(wo, "_get_npu_mx_scale_alg") as get_alg:
+            wo.quantize_weight_mx_fp8(weight)
+        get_alg.assert_not_called()
+
     def test_npu_wrapper_dispatches_by_device(self):
         # The NPU branch is unreachable on CPU (device check), so assert the
         # routing guard itself rather than the operator.

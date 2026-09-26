@@ -72,6 +72,13 @@ def _is_npu_tensor(weight: torch.Tensor) -> bool:
     return weight.device.type == "npu"
 
 
+def _get_npu_mx_scale_alg() -> int:
+    """Use the same hardware/model-specific MX scale policy as production."""
+    from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+
+    return get_dynamic_mx_quant_scale_alg()
+
+
 def quantize_weight_int8_per_channel(
     weight: torch.Tensor,
     rows_per_step: int = DEFAULT_ROWS_PER_STEP,
@@ -195,8 +202,10 @@ def quantize_weight_mx_fp8(
     ``torch_npu.npu_dynamic_mx_quant`` (the same operator
     ``methods/w8a8/fp8_block.py`` uses at load time) and collapses the
     operator's ``[..., num_groups // 2, 2]`` scale split into the
-    ``[out, num_groups]`` loader layout the MXFP8 scheme consumes. On CPU the
-    pure-torch reference math runs instead.
+    ``[out, num_groups]`` loader layout the MXFP8 scheme consumes. On NPU,
+    the production hardware/model-specific ``scale_alg`` policy is reused;
+    on CPU the pure-torch reference math (the ceil-to-UE8M0 policy) runs
+    instead.
 
     Args:
         weight: Dense ``[out_features, in_features]`` float tensor. The input
@@ -230,6 +239,7 @@ def quantize_weight_mx_fp8(
     e8m0_scale = torch.empty((out_features, num_groups), dtype=torch.uint8, device=weight.device)
 
     use_npu = _is_npu_tensor(weight)
+    npu_scale_alg = _get_npu_mx_scale_alg() if use_npu else None
     for row_start in range(0, out_features, rows_per_step):
         row_end = min(row_start + rows_per_step, out_features)
         chunk = weight[row_start:row_end]
@@ -237,7 +247,7 @@ def quantize_weight_mx_fp8(
             quantized, op_scale = torch_npu.npu_dynamic_mx_quant(
                 chunk,
                 dst_type=torch.float8_e4m3fn,
-                scale_alg=0,
+                scale_alg=npu_scale_alg,
             )
             # The operator emits [..., num_groups // 2, 2]; collapse to the
             # [..., num_groups] loader layout (same normalization as
