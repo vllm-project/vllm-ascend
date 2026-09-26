@@ -2064,6 +2064,30 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     return {y, mxscale};
 }
 
+void npu_fused_quant_lightning_indexer_manage_meta(
+    const at::Tensor &index_weights,
+    const at::Tensor &query_dequant_scale,
+    const at::Tensor &query,
+    const at::Tensor &index_key_dequant_scale,
+    const at::Tensor &index_key_cache,
+    const at::Tensor &index_block_table,
+    const at::Tensor &actual_seq_lengths_query,
+    const at::Tensor &actual_seq_lengths_key,
+    const at::Tensor &offload_seq_lengths_key,
+    const at::Tensor &num_cache_tokens,
+    const at::Tensor &request_state,
+    const at::Tensor &req_pool_entries,
+    at::Tensor cache_slots_pool,
+    at::Tensor topk_src_ids,
+    at::Tensor topk_dst_slots,
+    at::Tensor topk_miss_counts,
+    at::Tensor miss_src_ids,
+    at::Tensor miss_dst_slots,
+    at::Tensor miss_counts)
+{
+    return;
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -2102,6 +2126,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("recurrent_kda", &vllm_ascend::meta::recurrent_kda_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
+    // fused_quant_lightning_indexer_manage meta implementation
+    ops.impl("npu_fused_quant_lightning_indexer_manage", &vllm_ascend::meta::npu_fused_quant_lightning_indexer_manage_meta);
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors
