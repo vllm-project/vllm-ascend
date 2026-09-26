@@ -19,6 +19,7 @@ from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups, is_kv_c
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
+    MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -4497,6 +4498,19 @@ class TestMooncakeConnectorSchedulerTransferBlockSize(unittest.TestCase):
         self.assertEqual(params["remote_block_sizes"], (512,))
         self.assertEqual(params["remote_block_size"], 128)
 
+    def test_mamba_group_does_not_inflate_transfer_block_size(self):
+        # A Mamba state group's block_size is not a physical KV page (without
+        # prefix caching it is max_model_len), and the CP path never
+        # block-expands Mamba groups, so it must not win the max that the
+        # scalar remote_block_size is taken from.
+        mamba = MambaSpec(
+            block_size=32768,
+            shapes=((1, 1, 1),),
+            dtypes=(torch.bfloat16,),
+        )
+        scheduler = self._make_scheduler(128, [self._attention_group(1024), MockKVCacheGroup(kv_cache_spec=mamba)])
+        self.assertEqual(scheduler.transfer_block_size, 1024)
+
 
 class TestMooncakeConnectorWorkerKernelBlockIds(unittest.TestCase):
     """Receiver-side kernel block expansion must respect per-group sizes.
@@ -4745,6 +4759,28 @@ class TestMooncakeConnectorWorkerKernelBlockIds(unittest.TestCase):
         self.assertEqual(remote_block_size, 1024)
         self.assertEqual(local_cp_size, 1)
         self.assertEqual(remote_cp_size, 1)
+        self.assertEqual(r_blk, 1)
+
+    def test_cp_path_allows_mamba_group_size_mismatch(self):
+        # Mamba groups pass through the CP path unexpanded, so their
+        # tokens_per_block (a state page, 128 here) must not trip the
+        # mixed-layout check while the attention groups stay uniform.
+        worker = self._make_worker(1024, [[1], [1]])
+        worker.dcp_rank = 0
+        worker.dcp_size = 1
+        worker.kv_group2layeridx = {
+            0: (self._group_spec("MambaSpec", 0, 0), [0]),
+            1: (self._group_spec("FullAttentionSpec", 1, 1), [1]),
+        }
+        meta = self._make_meta(
+            local_block_ids=([0], [0]),
+            remote_block_ids=([10], [20]),
+            remote_block_size=1024,
+            remote_block_sizes=(128, 1024),
+        )
+        remote_block_size, _, local_cp_size, remote_cp_size, r_blk = worker._get_local_remote_cp_params(meta)
+        self.assertEqual(remote_block_size, 1024)
+        self.assertEqual(local_cp_size, 1)
         self.assertEqual(r_blk, 1)
 
     def test_group_kernel_block_size_uses_group_page_not_lcm(self):

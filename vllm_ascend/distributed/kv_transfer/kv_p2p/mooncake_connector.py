@@ -1812,12 +1812,16 @@ class MooncakeConnectorScheduler:
         # 1024). Take the max physical block size across the kv_cache_config
         # group specs, only ever raising, never lowering; when the layout is
         # consistent it equals self.block_size (verified paths such as MTP
-        # are unchanged).
+        # are unchanged). Mamba state groups are excluded: their block_size
+        # is not a physical KV page (the cache_config value, or
+        # max_model_len without prefix caching) and the CP path never
+        # block-expands them, so letting it win the max would inflate the
+        # scalar the CP path expands every attention group with.
         spec_block_sizes = [
             spec.block_size
             for group in kv_cache_config.kv_cache_groups
             for spec in self._get_group_unique_specs(group)
-            if isinstance(getattr(spec, "block_size", None), int)
+            if not isinstance(spec, MambaSpec) and isinstance(getattr(spec, "block_size", None), int)
         ]
         self.transfer_block_size = max([self.block_size, *spec_block_sizes])
         if self.transfer_block_size != self.block_size:
@@ -3083,15 +3087,27 @@ class MooncakeConnectorWorker:
     def _assert_cp_layout_single_block_size(self, meta: ReqMeta) -> None:
         """Reject mixed per-group layouts on the CP path.
 
-        The CP/DCP paths expand every group's ids with the scalar
+        The CP/DCP paths expand every attention group's ids with the scalar
         ``remote_block_size``. A producer with mixed per-group physical
         sizes (e.g. a 128-token sliding-window group next to 1024-token
         full-attention groups) would have the mismatched groups silently
         misplaced there, so fail loudly; the non-CP path expands per group
-        in ``_get_kernel_block_ids`` and is unaffected.
+        in ``_get_kernel_block_ids`` and is unaffected. Mamba groups are
+        exempt: the CP path passes their ids through unexpanded, so their
+        ``tokens_per_block`` (a state page, not a KV page) must not trip the
+        check.
         """
         remote_block_sizes = getattr(meta, "remote_block_sizes", ())
-        if remote_block_sizes and len(set(remote_block_sizes)) > 1:
+        if not remote_block_sizes:
+            return
+        kv_group2layeridx = getattr(self, "kv_group2layeridx", {})
+        expanded_sizes = []
+        for group_idx, size in enumerate(remote_block_sizes):
+            entry = kv_group2layeridx.get(group_idx)
+            if entry is not None and entry[0].get("kv_cache_spec_type") == "MambaSpec":
+                continue
+            expanded_sizes.append(size)
+        if len(set(expanded_sizes)) > 1:
             raise AssertionError(
                 f"CP/DCP transfer with mixed per-group remote block sizes {remote_block_sizes} "
                 f"is not supported; the CP path expands all groups with the scalar "
