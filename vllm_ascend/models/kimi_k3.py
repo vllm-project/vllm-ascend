@@ -78,7 +78,9 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.utils import get_rotation_path
 
@@ -280,7 +282,7 @@ class AscendKimiMoE(nn.Module):
 
 
 class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
-    """Extend vLLM's generic Kimi MLA only for DSpark RoPE metadata."""
+    """Adapt Kimi MLA for A3 prolog and DSpark RoPE metadata."""
 
     def __init__(
         self,
@@ -320,6 +322,17 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         if disable_mlapo:
             attention_layer.impl.enable_mlapo = False
             mark_fused_preprocess_weights(attention_layer.impl)
+        elif (
+            not use_rope
+            and not attention_layer.impl.is_draft_model
+            and not attention_layer.impl.fa_quant_layer
+            and get_current_hardware_profile().supports(HardwareCapability.KIMI_MLAPO)
+            and get_ascend_config().enable_mlapo
+        ):
+            # Import after the backend is initialized to avoid the MLA/ops cycle.
+            from vllm_ascend.attention.kimi_mla import KimiMLAProlog
+
+            attention_layer.impl.kimi_mlapo = KimiMLAProlog(attention_layer.impl)
         if not use_rope and not non_causal_multi_token_decode:
             return
 
