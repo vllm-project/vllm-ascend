@@ -125,7 +125,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 #### 5.1.1 Single-node Deployment
 
-- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
+- For a reduced context of 32768 tokens, the `GLM-5.2-w8a8c8` model can run on 1 Atlas 800 A3 (64GB × 16) with DP1/TP16. This is not the full-context deployment: with `--max-model-len 135000`, the model required 12.15 GiB of KV cache per worker but only 5.96 GiB was available in the tested single-node configuration. Use the multi-node deployment below for longer contexts.
 
 Run the following script to execute online inference.
 
@@ -134,20 +134,19 @@ export HCCL_BUFFSIZE=200
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # Ensure the model path matches the directory recorded during download
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
 --host 0.0.0.0 \
---port 8000 \
+--port 8077 \
 --api-server-count 1 \
---data-parallel-size 2 \
---enable-expert-parallel \
---tensor-parallel-size 8 \
+--data-parallel-size 1 \
+--tensor-parallel-size 16 \
 --seed 1024 \
 --served-model-name glm-5 \
 --tool-call-parser glm47 \
 --reasoning-parser glm45 \
 --enable-auto-tool-choice \
 --max-num-seqs 12 \
---max-model-len 135000 \
+--max-model-len 32768 \
 --max-num-batched-tokens 8192 \
 --trust-remote-code \
 --gpu-memory-utilization 0.92 \
@@ -162,13 +161,13 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 **Notice:**
 The parameters are explained as follows:
 
-- For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
+- The W8A8C8 single-node configuration was verified with an HTTP chat completion request. Turning on `enable_sparse_sfa_c8` in the original DP2/TP8 configuration did not increase available KV cache memory. Replace the weight path with your local mount path if it differs.
 
 #### 5.1.2 Multi-node Deployment
 
 === "A3 series"
 
-    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
+    - `GLM-5.2-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16) with DP4/TP8 and expert parallelism. Both nodes must mount the same checkpoint path and expose all 16 logical NPUs to their containers.
 
     Run the following scripts on two nodes respectively.
 
@@ -191,7 +190,7 @@ The parameters are explained as follows:
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port 8000 \
     --api-server-count 1 \
@@ -216,7 +215,7 @@ The parameters are explained as follows:
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false, "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
+    --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "multistream_overlap_shared_expert": true, "c8_enable_reshape_optim": false, "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
@@ -239,10 +238,10 @@ The parameters are explained as follows:
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port 8000 \
-    --headless \
+    --api-server-count 1 \
     --data-parallel-size 4 \
     --data-parallel-start-rank 2 \
     --data-parallel-size-local 2 \
@@ -264,9 +263,11 @@ The parameters are explained as follows:
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false,     "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
+    --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "multistream_overlap_shared_expert": true, "c8_enable_reshape_optim": false, "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
+
+    On vLLM 0.29, keep an API server on both nodes: `--headless` on node 1 is rejected in external/hybrid DP load-balancing mode. The old `fuse_muls_add` additional-config field is also rejected by this version.
 
 === "A2 series"
 
