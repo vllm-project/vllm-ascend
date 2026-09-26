@@ -905,6 +905,88 @@ def test_preempt_offload_connector_worker_preempt_and_load_entrypoints():
     )
 
 
+@pytest.mark.parametrize("conv_first", [False, True])
+def test_preempt_offload_connector_worker_restores_aliased_conv_prefix(conv_first):
+    num_blocks = 4
+    backing = torch.full((num_blocks * 24,), -1, dtype=torch.int64)
+    sfa_cache = backing.view(num_blocks * 3, 8)
+    conv_cache = backing.as_strided((num_blocks, 6, 2), (24, 2, 1))
+    assert sfa_cache.data_ptr() == conv_cache.data_ptr()
+    assert sfa_cache.stride(0) * 3 == conv_cache.stride(0)
+
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((6, 2),),
+        dtypes=(torch.int64,),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+    worker = PreemptOffloadWorker.__new__(PreemptOffloadWorker)
+    worker.kv_cache_config = SimpleNamespace(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[SimpleNamespace(size=backing.numel() * backing.element_size(), layers=["sfa", "mamba"])],
+        kv_cache_groups=[SimpleNamespace(layer_names=["mamba"], kv_cache_spec=mamba_spec)],
+    )
+    worker.cpu_capacity_bytes = None
+    worker.offload_host_memory_ratio = 1
+    worker.mamba_conv_cache_bindings = {}
+    worker.num_spec_tokens = 3
+    kv_caches = {"mamba": (conv_cache,), "sfa": sfa_cache} if conv_first else {"sfa": sfa_cache, "mamba": (conv_cache,)}
+
+    original_zeros = torch.zeros
+
+    def unpinned_zeros(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return original_zeros(*args, **kwargs)
+
+    with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker.torch.zeros",
+            side_effect=unpinned_zeros,
+        ) as zeros,
+        patch("vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker.torch.npu.Stream"),
+    ):
+        worker.register_kv_caches(kv_caches)
+
+    assert zeros.call_count == 1
+    assert len(worker.gpu_kv_caches) == len(worker.cpu_kv_caches) == 1
+    cache_name = next(iter(worker.gpu_kv_caches))
+    assert next(iter(worker.cpu_kv_caches)) == cache_name
+    assert worker.block_size_scale[cache_name] == 3
+    assert worker.mamba_conv_cache_bindings[cache_name] == MambaConvCacheBinding((6, 2), torch.int64)
+    assert worker.gpu_kv_caches[cache_name].data_ptr() == backing.data_ptr()
+
+    cpu_cache = worker.cpu_kv_caches[cache_name]
+    cpu_cache.copy_(torch.arange(cpu_cache.numel(), dtype=torch.int64).view_as(cpu_cache))
+    worker._copy_mamba_conv_loads([MambaConvLoadMeta(gpu_block_id=2, cpu_block_id=1, source_offset=2)])
+
+    expected = torch.full_like(backing, -1)
+    expected[2 * 24 : 2 * 24 + 6] = cpu_cache[1 * 3 : 2 * 3].reshape(-1)[4:10]
+    torch.testing.assert_close(backing, expected)
+
+
+@pytest.mark.parametrize("alias_width", [8, 4])
+def test_preempt_offload_connector_worker_rejects_alias_with_different_block_stride(alias_width):
+    num_blocks = 2
+    backing = torch.empty(32, dtype=torch.int64)
+    kv_caches = {
+        "first": backing.as_strided((num_blocks, 8), (16, 1)),
+        "alias": backing.as_strided((num_blocks, alias_width), (8, 1)),
+    }
+    worker = PreemptOffloadWorker.__new__(PreemptOffloadWorker)
+    worker.kv_cache_config = SimpleNamespace(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[SimpleNamespace(size=backing.numel() * backing.element_size(), layers=list(kv_caches))],
+        kv_cache_groups=[],
+    )
+    worker.cpu_capacity_bytes = None
+    worker.offload_host_memory_ratio = 1
+
+    # Both views start at the same address, but logical block 1 does not.
+    # Neither an equal nor a smaller payload makes pointer-only dedupe safe.
+    with pytest.raises(RuntimeError, match="Aliased KV caches have incompatible block layouts"):
+        worker.register_kv_caches(kv_caches)
+
+
 @pytest.mark.parametrize("accept_offset", [0, 1, 2, 3])
 def test_preempt_offload_connector_worker_restores_only_conv_history(accept_offset):
     worker = PreemptOffloadWorker.__new__(PreemptOffloadWorker)
@@ -915,6 +997,7 @@ def test_preempt_offload_connector_worker_restores_only_conv_history(accept_offs
     worker.cpu_kv_caches = {"conv": conv_cpu, "ssm": ssm_cpu}
     worker.gpu_kv_caches = {"conv": conv_gpu, "ssm": ssm_gpu}
     worker.mamba_conv_cache_bindings = {"conv": MambaConvCacheBinding((6, 2), torch.int64)}
+    worker.block_size_scale = {"conv": 1, "ssm": 1}
     worker.num_spec_tokens = 3
 
     worker._copy_mamba_conv_loads(

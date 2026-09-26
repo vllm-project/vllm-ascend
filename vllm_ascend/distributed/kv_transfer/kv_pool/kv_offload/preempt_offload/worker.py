@@ -29,6 +29,12 @@ class MambaConvCacheBinding:
     state_shape: tuple[int, int]
     state_dtype: torch.dtype
 
+    def get_state_view(self, cache: torch.Tensor, block_id: int, block_scale: int) -> torch.Tensor:
+        """View the Conv prefix of one logical block in a registered cache."""
+        block = cache[block_id * block_scale : (block_id + 1) * block_scale].view(-1)
+        state_elements = self.state_shape[0] * self.state_shape[1]
+        return block.view(self.state_dtype)[:state_elements].view(self.state_shape)
+
 
 class PreemptOffloadWorker:
     """Worker-side handler for recompute CPU/NPU KV cache transfers."""
@@ -116,13 +122,31 @@ class PreemptOffloadWorker:
             states = list(enumerate(layer_tensor)) if isinstance(layer_tensor, (tuple, list)) else [(0, layer_tensor)]
             for state_idx, single_tensor in states:
                 logical_name = f"{layer_name}.{state_idx}" if isinstance(layer_tensor, (tuple, list)) else layer_name
+                if single_tensor.numel() == 0:
+                    continue
                 ptr = single_tensor.data_ptr()
                 cache_name = cache_name_by_ptr.get(ptr)
+                flat_tensor = single_tensor.view(single_tensor.shape[0], -1)
+                block_scale, block_bytes, block_stride = self._get_block_layout(flat_tensor, self.num_gpu_blocks)
                 if cache_name is None:
                     cache_name = logical_name
                     cache_name_by_ptr[ptr] = cache_name
-                    unique_gpu_caches[cache_name] = single_tensor.view(single_tensor.shape[0], -1)
-                    self.block_size_scale[cache_name] = single_tensor.shape[0] // self.num_gpu_blocks
+                    unique_gpu_caches[cache_name] = flat_tensor
+                    self.block_size_scale[cache_name] = block_scale
+                else:
+                    registered_cache = unique_gpu_caches[cache_name]
+                    _, registered_bytes, registered_stride = self._get_block_layout(
+                        registered_cache, self.num_gpu_blocks
+                    )
+                    # Same-pointer views are nested prefixes only when every
+                    # logical block starts at the same address in both views.
+                    if block_stride != registered_stride:
+                        raise RuntimeError(f"Aliased KV caches have incompatible block layouts: tensor={cache_name}.")
+                    if block_bytes > registered_bytes:
+                        # Retain the widest compatible view regardless of
+                        # registration order or the layer's state type.
+                        unique_gpu_caches[cache_name] = flat_tensor
+                        self.block_size_scale[cache_name] = block_scale
 
                 spec = mamba_layers.get(layer_name)
                 if spec is None or not self._is_conv_state(spec, state_idx):
@@ -136,12 +160,14 @@ class PreemptOffloadWorker:
                         f"layer={layer_name}, actual={state_shape}, "
                         f"expected={expected_shape}."
                     )
-                if self.block_size_scale[cache_name] != 1:
+                if single_tensor.shape[0] != self.num_gpu_blocks:
                     raise RuntimeError(
                         "Mamba Conv cache must have one physical row per cache block: "
-                        f"tensor={cache_name}, scale={self.block_size_scale[cache_name]}."
+                        f"tensor={logical_name}, rows={single_tensor.shape[0]}, blocks={self.num_gpu_blocks}."
                     )
 
+                # Registration above preserves each state's block starts and
+                # full payload even when another view owns the physical copy.
                 binding = MambaConvCacheBinding(
                     state_shape=(state_shape[0], state_shape[1]),
                     state_dtype=single_tensor.dtype,
@@ -193,6 +219,20 @@ class PreemptOffloadWorker:
             self.num_cpu_blocks,
             (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
         )
+
+    @staticmethod
+    def _get_block_layout(cache: torch.Tensor, num_blocks: int) -> tuple[int, int, int]:
+        """Return rows per logical block, payload bytes and block stride bytes."""
+        block_scale, remainder = divmod(cache.shape[0], num_blocks)
+        if block_scale == 0 or remainder:
+            raise RuntimeError("KV cache rows must be a positive multiple of the logical block count.")
+        if (cache.shape[1] > 1 and cache.stride(1) != 1) or (block_scale > 1 and cache.stride(0) != cache.shape[1]):
+            raise RuntimeError("KV cache payload must be contiguous within each logical block.")
+        block_bytes = cache.shape[1] * cache.element_size() * block_scale
+        block_stride = cache.stride(0) * cache.element_size() * block_scale
+        if block_stride < block_bytes:
+            raise RuntimeError("KV cache logical blocks must not overlap.")
+        return block_scale, block_bytes, block_stride
 
     @staticmethod
     def _is_conv_state(spec: MambaSpec, state_idx: int) -> bool:
@@ -395,12 +435,9 @@ class PreemptOffloadWorker:
 
         for load in loads:
             for name, binding in self.mamba_conv_cache_bindings.items():
-                gpu_state = (
-                    self.gpu_kv_caches[name][load.gpu_block_id].view(binding.state_dtype).view(binding.state_shape)
-                )
-                cpu_state = (
-                    self.cpu_kv_caches[name][load.cpu_block_id].view(binding.state_dtype).view(binding.state_shape)
-                )
+                block_scale = self.block_size_scale[name]
+                gpu_state = binding.get_state_view(self.gpu_kv_caches[name], load.gpu_block_id, block_scale)
+                cpu_state = binding.get_state_view(self.cpu_kv_caches[name], load.cpu_block_id, block_scale)
 
                 conv_width = binding.state_shape[0]
                 # The first ``conv_width - num_spec_tokens`` rows are the
