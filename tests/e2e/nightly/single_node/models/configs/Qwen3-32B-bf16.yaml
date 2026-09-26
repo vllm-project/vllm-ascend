@@ -1,0 +1,81 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  TASK_QUEUE_ENABLE: "1"
+  SERVER_PORT: "DEFAULT_PORT"
+
+_server_cmd: &server_cmd
+  - "--tensor-parallel-size"
+  - "2"
+  - "--data-parallel-size"
+  - "2"
+  - "--data-parallel-start-rank"
+  - "0"
+  - "--no-enable-prefix-caching"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "36864"
+  - "--max-num-batched-tokens"
+  - "40960"
+  - "--trust-remote-code"
+  - "--distributed-executor-backend"
+  - "mp"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--async-scheduling"
+  - "--compilation-config"
+  - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
+  - "--speculative-config"
+  - '{"method": "eagle3", "model": "RedHatAI/Qwen3-32B-speculator.eagle3", "num_speculative_tokens": 3}'
+
+_benchmarks_gpqa: &benchmarks_gpqa
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_str
+    max_out_len: 32768
+    batch_size: 64
+    temperature: 0.6
+    top_k: 20
+    top_p: 0.95
+    # baseline: 100
+    # threshold: 0
+
+_benchmarks_perf: &benchmarks_perf
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs400
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    max_out_len: 1500
+    batch_size: 64
+    request_rate: 0
+    # baseline: 100
+    # threshold: 0
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen3-32B-bf16-gpqa-accuracy"
+    model: "Qwen/Qwen3-32B"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    benchmarks:
+      <<: *benchmarks_gpqa
+  - name: "Qwen3-32B-bf16-performance"
+    model: "Qwen/Qwen3-32B"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    benchmarks:
+      <<: *benchmarks_perf

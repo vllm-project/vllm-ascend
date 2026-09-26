@@ -239,6 +239,9 @@ a3-560t:
       - name: Qwen3_32b_W8A8_wl_A3
         os: linux-aarch64-a3-800i-16
         config_file_path: Qwen3_32b_W8A8_wl_A3.yaml
+      - name: Qwen3-32B-bf16
+        os: linux-aarch64-a3-800i-4
+        config_file_path: Qwen3-32B-bf16.yaml
       - name: qwen3-235b-a22b-w8a8
         os: linux-aarch64-a3-800i-16
         config_file_path: Qwen3-235B-A22B-W8A8.yaml
