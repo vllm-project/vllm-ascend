@@ -9,7 +9,6 @@ test_cases:
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
-      - "--enforce-eager"
       - "--no-enable-prefix-caching"
       - "--tensor-parallel-size"
       - "2"
