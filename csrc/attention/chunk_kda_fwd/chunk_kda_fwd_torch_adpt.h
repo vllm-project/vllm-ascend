@@ -37,7 +37,8 @@ chunk_kda_fwd(
     const c10::optional<at::Tensor> &dt_bias,
     c10::optional<bool> disable_recompute,
     c10::optional<bool> return_intermediate_states,
-    c10::optional<bool> state_v_first)
+    c10::optional<bool> state_v_first,
+    bool use_qk_l2norm_in_kernel)
 {
     std::string layout_str(layout.data(), layout.size());
     TORCH_CHECK(layout_str == "BSND" || layout_str == "BNSD" || layout_str == "TND" || layout_str == "NTD",
@@ -172,12 +173,32 @@ chunk_kda_fwd(
     const at::Tensor &A_log_ = c10::value_or_else(A_log, [] { return at::Tensor(); });
     const at::Tensor &dt_bias_ = c10::value_or_else(dt_bias, [] { return at::Tensor(); });
     const char *layout_cstr = layout_str.c_str();
-    EXEC_NPU_CMD(
-        aclnnChunkKdaFwd,
-        q, k, v, g, beta, A_log_, dt_bias_, initial_state_, cu_seqlens, chunk_indices_for_call,
-        layout_cstr, scale, chunk_size, safe_gate_, lower_bound_, use_gate_in_kernel_, state_v_first_,
-        attn_out, final_state, gk_out, aqk, akk, w, u, qg, kg, v_new, h
-    );
+    if (use_qk_l2norm_in_kernel) {
+        TORCH_CHECK(q.scalar_type() == at::kBFloat16 && K == 128 && V == 128 && chunk_size == 64 &&
+                        g.scalar_type() == at::kBFloat16 && beta.scalar_type() == at::kFloat &&
+                        use_gate_in_kernel_ && safe_gate_ && !disable_recompute_ &&
+                        !return_intermediate_states_,
+                    "chunk_kda_fwd: fused Q/K norm requires the BF16 K128/V128, chunk64 "
+                    "safe-gate inference path with FP32 beta and no saved intermediates.");
+        double l2norm_eps = 1.0e-6;
+        bool use_exp2 = true;
+        bool use_beta_sigmoid = false;
+        bool allow_neg_eigval = false;
+        EXEC_NPU_CMD(
+            aclnnChunkKdaFwdV2,
+            q, k, v, g, beta, A_log_, dt_bias_, initial_state_, cu_seqlens, chunk_indices_for_call,
+            layout_cstr, scale, chunk_size, safe_gate_, lower_bound_, use_gate_in_kernel_, state_v_first_,
+            l2norm_eps, use_qk_l2norm_in_kernel, use_beta_sigmoid, allow_neg_eigval, use_exp2,
+            attn_out, final_state, gk_out, aqk, akk, w, u, qg, kg, v_new, h
+        );
+    } else {
+        EXEC_NPU_CMD(
+            aclnnChunkKdaFwd,
+            q, k, v, g, beta, A_log_, dt_bias_, initial_state_, cu_seqlens, chunk_indices_for_call,
+            layout_cstr, scale, chunk_size, safe_gate_, lower_bound_, use_gate_in_kernel_, state_v_first_,
+            attn_out, final_state, gk_out, aqk, akk, w, u, qg, kg, v_new, h
+        );
+    }
 
     c10::optional<at::Tensor> final_state_out =
         final_state.defined() ? c10::optional<at::Tensor>(final_state) : c10::nullopt;

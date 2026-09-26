@@ -7,6 +7,8 @@ from collections.abc import Sequence
 import torch
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
+from vllm_ascend.utils import is_950
+
 KDA_CHUNK_SIZE = 64
 
 
@@ -57,16 +59,33 @@ def run_chunk_kda(
     beta: torch.Tensor,
     initial_state: torch.Tensor,
     cu_seqlens: torch.Tensor | Sequence[int],
-    chunk_indices: torch.Tensor | Sequence[int],
+    chunk_indices: torch.Tensor | Sequence[int] | None,
     a_log: torch.Tensor,
     dt_bias: torch.Tensor,
     *,
     lower_bound: float | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Consume preprocessed beta and return output plus the final VK state."""
+    # The A5 Prepare/FwdH/Finalize chain accepts raw Q/K and consumes VK state
+    # directly. Keep the legacy path for the other dtype/gate/empty-sequence
+    # contracts; deciding from host metadata introduces no device sync.
+    use_fused_norm = (
+        q.dtype == torch.bfloat16
+        and q.shape[-1] == v.shape[-1] == 128
+        and q.shape[-2] == v.shape[-2]
+        and raw_gate.dtype == torch.bfloat16
+        and beta.dtype == torch.float32
+        and lower_bound is not None
+        and not isinstance(cu_seqlens, torch.Tensor)
+        and all(end > begin for begin, end in zip(cu_seqlens, cu_seqlens[1:]))
+        and is_950()
+    )
+    q, k = q.contiguous(), k.contiguous()
+    if not use_fused_norm:
+        q, k = l2norm_fwd(q), l2norm_fwd(k)
     output, final_state, *_ = torch.ops._C_ascend.chunk_kda_fwd(
-        l2norm_fwd(q.contiguous()),
-        l2norm_fwd(k.contiguous()),
+        q,
+        k,
         v.contiguous(),
         raw_gate.contiguous(),
         beta.contiguous(),
@@ -85,5 +104,6 @@ def run_chunk_kda(
         disable_recompute=False,
         return_intermediate_states=False,
         state_v_first=True,
+        use_qk_l2norm_in_kernel=use_fused_norm,
     )
     return output, final_state
