@@ -780,7 +780,7 @@ class KVCacheRecvingThread(threading.Thread):
                         self._reformat_pending_kv_caches(request_id)
                     except Exception as e:
                         transfer_failed = True
-                        self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                        self._mark_failed_recv_request(request_id, req_meta["local_block_ids"], remote_block_sizes)
                         with self.pending_reformat_lock:
                             self.pending_reformat.pop(request_id, None)
                         logger.exception(

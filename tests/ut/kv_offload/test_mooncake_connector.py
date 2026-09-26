@@ -1192,6 +1192,29 @@ class TestCoreFunctionality(unittest.TestCase):
                 expected_errors = {1, 2} if transfer_error else set()
                 self.assertEqual(self.thread.get_and_clear_invalid_block_ids(), expected_errors)
 
+    @patch.object(KVCacheRecvingThread, "_reformat_pending_kv_caches")
+    @patch.object(KVCacheRecvingThread, "_transfer_kv_cache_all_groups")
+    @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
+    def test_handle_request_reformat_failure_maps_packed_ids_to_kernel_blocks(
+        self, mock_send, mock_transfer, mock_reformat
+    ):
+        # 8:1 packing (kernel 1024, remote 128): the reformat-failure path
+        # must invalidate the packed slice ids mapped back to their kernel
+        # block, like the transfer-failure paths do.
+        self.thread.block_size = 1024
+        self.thread.block_size_scale = [[1]]
+        mock_reformat.side_effect = RuntimeError("reformat failed")
+        req = dict(self.test_req)
+        req["local_block_ids"] = ([8, 9],)
+        req["remote_block_ids"] = ([3, 4],)
+        req["remote_block_sizes"] = (128,)
+
+        self.thread._handle_request(req)
+
+        mock_transfer.assert_called_once_with(req)
+        mock_reformat.assert_called_once_with("req1")
+        self.assertEqual(self.thread.get_and_clear_invalid_block_ids(), {1})
+
     @patch.object(KVCacheRecvingThread, "_send_done_signal_to_free_remote_port")
     @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
     def test_handle_empty_transfer_sends_done(self, mock_send_done, mock_free_remote_port):
