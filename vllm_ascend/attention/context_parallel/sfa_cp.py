@@ -193,6 +193,11 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         group = get_pcp_group()
         rank_slots = slot_mapping[: group.world_size * num_tokens].view(group.world_size, num_tokens)
         local_slots = rank_slots[group.rank_in_group].contiguous()
+        if num_decode_tokens and group.rank_in_group != 0:
+            # Gathered slots mask replicated decode copies outside rank 0.
+            # Each rank still writes its local decode KV; only prefills are
+            # gathered below, so reuse rank 0's valid decode slot prefix.
+            local_slots = torch.cat((rank_slots[0, :num_decode_tokens], local_slots[num_decode_tokens:]))
         result = super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, local_slots)
         # Same stream orders the fused cache write, pack, collective and scatter.
         # C8 packs quantized K, BF16 RoPE and scales into the first cache.

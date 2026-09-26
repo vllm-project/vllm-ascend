@@ -2109,3 +2109,31 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+
+@pytest.mark.parametrize("pcp_size,actual_tokens,expected_valid", [(8, 12, 12), (8, 0, 0), (8, 13, 13), (1, 12, 13)])
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_mrv2_pcp_mc2_mask_excludes_rank_local_padding(pcp_size, actual_tokens, expected_valid, mode):
+    config = TestNPUPlatform.mock_vllm_config()
+    config.use_v2_model_runner = True
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    mask = torch.empty(32, dtype=torch.bool)
+    with (
+        patch("vllm_ascend.platform.is_moe_model", return_value=True),
+        patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=1),
+        patch("vllm.distributed.get_dp_group", return_value=SimpleNamespace(world_size=2)),
+        patch("vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.MC2) as select,
+        patch("vllm_ascend.ascend_forward_context.get_mc2_mask", return_value=mask),
+        patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_moe_comm_method", return_value=object()),
+    ):
+        context = NPUPlatform.set_additional_forward_context(
+            attn_metadata={"layer": SimpleNamespace(num_actual_tokens=actual_tokens)},
+            vllm_config=config,
+            dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=torch.tensor([32, 13])),
+            num_tokens=13,
+            cudagraph_runtime_mode=mode,
+        )
+    assert context["num_tokens"] == 13
+    assert context["padded_num_tokens"] == 32
+    select.assert_called_once_with(32, config)
+    assert context["mc2_mask"].tolist() == [True] * expected_valid + [False] * (32 - expected_valid)

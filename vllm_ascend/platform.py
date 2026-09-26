@@ -614,6 +614,11 @@ class NPUPlatform(Platform):
         padded_num_tokens = None
         if num_tokens is not None:
             num_actual_tokens = num_tokens
+            if pcp_size > 1 and attn_metadata:
+                # MRV2 passes the padded PCP input length as num_tokens. Ranks
+                # with fewer local query tokens must exclude their padding from
+                # dispatch, even though all ranks use the same communication size.
+                num_actual_tokens = next(iter(attn_metadata.values())).num_actual_tokens
             # NOTE: token num which need to pad to when mc2
             padded_num_tokens = math.ceil(max_tokens_across_dp / tp_world_size) * tp_world_size
             reserved_mc2_mask = get_mc2_mask()
