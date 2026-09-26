@@ -725,12 +725,47 @@ def test_kimi_k3_dspark_group_count_is_derived_from_layer_ratio() -> None:
     assert [len(group.layer_names) for group in groups] == [24, 24, 23, 23]
 
 
-def test_kimi_k3_dspark_mixed_grouping_falls_back_on_unaligned_pages() -> None:
+def test_kimi_k3_dspark_mixed_grouping_reports_unaligned_pages() -> None:
     specs = _make_kimi_k3_dspark_kv_cache_specs()
-    draft_layer = "model.layers.93.self_attn.attn"
-    specs[draft_layer] = replace(specs[draft_layer], page_size_padded=976896)
+    target_layer = "language_model.model.layers.3.self_attn.attn"
+    specs[target_layer] = replace(specs[target_layer], page_size_padded=488450)
+    error = NotImplementedError("page size is not divisible by the maximum page size")
+    with (
+        patch.object(kv_cache_utils_patch, "_orig_get_kv_cache_groups", side_effect=error),
+        patch.object(kv_cache_utils_patch.logger, "error") as log_error,
+        pytest.raises(NotImplementedError) as caught,
+    ):
+        kv_cache_utils_patch._get_glm5_next_kv_cache_groups(None, specs)
 
-    assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
+    assert caught.value is error
+    messages = [call.args[0] % call.args[1:] for call in log_error.call_args_list]
+    assert "max_page_size_bytes=488450" in messages[0]
+    assert any(
+        "role=target_attention" in message
+        and target_layer in message
+        and "page_size_bytes=488450" in message
+        and "indexes_kv_by_block_stride=False" in message
+        for message in messages[1:]
+    )
+    assert any("role=draft_attention" in message for message in messages[1:])
+    assert any("role=mamba" in message for message in messages[1:])
+
+    non_kimi_specs = {"attn": FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)}
+    with (
+        patch.object(kv_cache_utils_patch, "_orig_get_kv_cache_groups", side_effect=error),
+        patch.object(kv_cache_utils_patch.logger, "error") as log_error,
+        pytest.raises(NotImplementedError),
+    ):
+        kv_cache_utils_patch._get_glm5_next_kv_cache_groups(None, non_kimi_specs)
+    log_error.assert_not_called()
+
+    expected_groups = []
+    with (
+        patch.object(kv_cache_utils_patch, "_orig_get_kv_cache_groups", return_value=expected_groups),
+        patch.object(kv_cache_utils_patch.logger, "error") as log_error,
+    ):
+        assert kv_cache_utils_patch._get_glm5_next_kv_cache_groups(None, specs) is expected_groups
+    log_error.assert_not_called()
 
 
 def test_deepseek_v4_scheduler_lcm_uses_logical_group_sizes() -> None:
