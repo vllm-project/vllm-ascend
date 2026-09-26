@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import os
+from unittest.mock import patch
 
 import pytest
 import torch_npu
@@ -364,6 +365,16 @@ def test_hang():
     ],
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
+@patch.dict(
+    os.environ,
+    {
+        "HCCL_BUFFSIZE": "1024",
+        "LCCL_DETERMINISTIC": "1",
+        "HCCL_DETERMINISTIC": "true",
+        "ATB_MATMUL_SHUFFLE_K_ENABLE": "0",
+        "CLOSE_MATMUL_K_SHIFT": "1",
+    },
+)
 def test_qwen36_35b_dspark_spec_decoding(
     model: str,
     draft_model: str,
