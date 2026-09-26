@@ -8,6 +8,15 @@ from vllm_ascend.ops.triton.rope import (
     rope_forward_triton_siso,
 )
 
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+# Before running all the test cases in this file, the hardware attributes of NPU
+# are automatically initialized to prevent errors reported by the underlying operators.
+@pytest.fixture(autouse=True)
+def setup_device_properties_for_ut():
+    init_device_properties_triton()
+
+
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.bfloat16, torch.float16]
 MAX_POSITION_EMBEDDINGS = [262144]
@@ -155,11 +164,19 @@ def _rope_fp8_pytorch_native(
     positions: torch.Tensor,
     rope_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """PyTorch reference for NeoX RoPE with a direct E4M3 store."""
-    half = rope_dim // 2
-    cos_sin = cos_sin_cache.index_select(0, positions).to(torch.float32)
-    cos = cos_sin[:, :half].unsqueeze(-2)
-    sin = cos_sin[:, half:rope_dim].unsqueeze(-2)
+    """PyTorch reference for NeoX RoPE with a direct E4M3 store (evaluated on CPU)."""
+    orig_device = query.device
+
+    with torch.device("cpu"):
+        query_cpu = query.to("cpu")
+        key_cpu = key.to("cpu")
+        cos_sin_cache_cpu = cos_sin_cache.to("cpu")
+        positions_cpu = positions.to("cpu")
+
+        half = rope_dim // 2
+        cos_sin = cos_sin_cache_cpu.index_select(0, positions).to(torch.float32)
+        cos = cos_sin[:, :half].unsqueeze(-2)
+        sin = cos_sin[:, half:rope_dim].unsqueeze(-2)
 
     def apply_rope(tensor: torch.Tensor) -> torch.Tensor:
         tensor = tensor.to(torch.float32)
@@ -173,7 +190,10 @@ def _rope_fp8_pytorch_native(
             rotated = torch.cat((rotated, tensor[..., rope_dim:]), dim=-1)
         return rotated.clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(torch.float8_e4m3fn)
 
-    return apply_rope(query), apply_rope(key)
+    out_q = apply_rope(query_cpu).to(orig_device)
+    out_k = apply_rope(key_cpu).to(orig_device)
+
+    return out_q, out_k
 
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
@@ -273,6 +293,14 @@ def test_rotary_embedding_triton_kernel_fp8(
     rotary_dim: int,
     device: str,
 ) -> None:
+    # Ascend BiShengIR LLVM backend currently does not support FP8 conversion
+    pytest.skip(
+        "Ascend Triton compiler does not support FP8 compilation"
+    )
+    if rotary_dim & (rotary_dim - 1) != 0:
+        pytest.skip(
+            f"rotary_dim {rotary_dim} is not a power of 2, unsupported by Ascend Triton"
+        )
     torch.manual_seed(0)
     torch.set_default_device(device)
 
@@ -355,6 +383,25 @@ def test_rotary_embedding_triton_kernel_siso(
 
     if rotary_dim == -1:
         rotary_dim = head_size
+    # Physical validity check
+    if rotary_dim > head_size:
+        pytest.skip(f"rotary_dim {rotary_dim} > head_size {head_size}")
+    # Skip non-2 powers of 2 to avoid underlying aclnn Cast issues and Triton
+    # compiler limitations.
+    if rotary_dim & (rotary_dim - 1) != 0:
+        pytest.skip(
+            f"rotary_dim {rotary_dim} is not a power of 2, unsupported on"
+            " current Ascend environment."
+        )
+    # Workaround for the 192 KB UB physical capacity limitation
+    # In SISO mode , when is_neox_style is set to False, the internal vinterleave
+    # temporary buffer reaches 144 KB. The double-buffered I/O will definitely exceed the
+    # upper limit of the 192 KB UB physical capacity.
+    if not is_neox_style:
+        pytest.skip(
+            "is_neox_style=False 192KB UB physical limit."
+        )
+
     # Skip invalid combinations where rotary_dim > head_size (RoPE cannot
     # rotate more dimensions than the head has).
     if rotary_dim > head_size:
