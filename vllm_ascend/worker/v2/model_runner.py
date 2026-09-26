@@ -310,6 +310,29 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.model_state.kvpp_runtime = self.kvpp
 
+    def load_model(self, *args, **kwargs) -> None:
+        super().load_model(*args, **kwargs)
+        self._clear_draft_mm_inputs_flag_for_pp_releases()
+
+    def _clear_draft_mm_inputs_flag_for_pp_releases(self) -> None:
+        """Keep release vLLM from gathering draft MM embeddings on the last PP stage.
+
+        v0.28.0/v0.29.0 gate ``sample_tokens``' multimodal gather on the
+        speculator flag alone, but the encoder cache (and encoder_runner)
+        exists only on the first PP stage while the draft speculator runs on
+        the last one, so a raised flag crashes the last-stage worker with
+        ``AttributeError: ... has no attribute 'encoder_runner'``. Clearing
+        the flag after load keeps the gather from being called at all; the
+        drafter falls back to ordinary token embeddings. Newer vLLM guards
+        the call on ``model_state.supports_mm_inputs`` and needs no help.
+        """
+        if (
+            self.speculator is not None
+            and self.vllm_config.parallel_config.pipeline_parallel_size > 1
+            and (vllm_version_is("0.28.0") or vllm_version_is("0.29.0"))
+        ):
+            self.speculator.supports_mm_inputs = False
+
     @torch.inference_mode()
     def execute_model(
         self,
