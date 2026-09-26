@@ -119,11 +119,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
 
-        # Internal-router: precast weight_fp32 at load to avoid hot-path Cast.
-        # Use ctor `gate` (not self.is_internal_router): Module.__getattr__ shadows during init.
-        if gate is not None and not hasattr(gate, "weight_fp32"):
-            gate.precast_fp32_weight = True
-
         self.ascend_shared_experts = None
         if shared_experts is not None:
             routed_experts.return_with_event = True
@@ -384,13 +379,19 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        # Gate linears are unquantized. Their weight is normally pre-cast by
-        # AscendUnquantizedLinearMethod to avoid a Cast in this hot path.
+        # Gate linears are unquantized. Models that require a forced fp32
+        # router set precast_fp32_weight on the gate themselves (e.g. DSV4),
+        # which makes AscendUnquantizedLinearMethod materialise
+        # gate.weight_fp32 at load; they keep this direct fp32 F.linear.
         gate = self.gate
         assert gate is not None
-        hidden_states_fp32 = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
         if hasattr(gate, "weight_fp32"):
+            hidden_states_fp32 = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
             return F.linear(hidden_states_fp32, gate.weight_fp32)
+        # Without a forced weight conversion, route through the gate's own
+        # forward, which self-manages router precision: the bf16 GEMM with
+        # fp32 accumulation when the checkpoint weight is bf16-origin
+        # (AscendGateLinear), or the fp32 fallback otherwise.
         gate_out = gate(hidden_states)
         return gate_out[0] if isinstance(gate_out, tuple) else gate_out
 

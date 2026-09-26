@@ -22,6 +22,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     RoutedMoEMilestones,
 )
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
 from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
@@ -2484,13 +2485,14 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
     )
 
 
-def test_runner_sets_precast_fp32_weight(monkeypatch):
-    """Init sets precast so load materializes weight_fp32."""
+def test_runner_does_not_force_precast_fp32_weight(monkeypatch):
+    """Init must not force precast: without a model-side forced fp32 weight,
+    the gate routes through its own forward (AscendGateLinear)."""
     gate = SimpleNamespace(weight=torch.randn(8, 4, dtype=torch.float16))
     runner = _stub_moe_runner_init(monkeypatch, gate=gate)
 
     assert runner._gate is gate
-    assert gate.precast_fp32_weight is True
+    assert not hasattr(gate, "precast_fp32_weight")
     assert not hasattr(gate, "weight_fp32")
 
 
@@ -2508,7 +2510,8 @@ def test_runner_skips_precast_without_internal_router(monkeypatch):
 
 
 def test_forward_impl_uses_gate_weight_fp32(monkeypatch):
-    """Hot path only reads gate.weight_fp32; judgment lives in __init__."""
+    """Hot path only reads gate.weight_fp32; the forced-fp32 judgment lives
+    in the model (precast_fp32_weight), not in the runner."""
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
     hidden_states = torch.randn(2, 4, dtype=torch.float16)
@@ -2545,6 +2548,53 @@ def test_forward_impl_uses_gate_weight_fp32(monkeypatch):
     runner.routed_experts.forward_impl.assert_called_once_with(
         hidden_states=hidden_states,
         router_logits=recomputed_logits,
+        input_ids=None,
+    )
+
+
+def test_forward_impl_routes_gate_without_weight_fp32(monkeypatch):
+    """Gates without weight_fp32 (no forced fp32 conversion) route through
+    the gate's own forward, letting AscendGateLinear self-manage precision."""
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    # vllm#51838 wiring: internal-router models pass hidden_states as the
+    # router_logits placeholder.
+    router_logits = hidden_states
+    gate_logits = torch.randn(2, 3, dtype=torch.float32)
+    routed_out = torch.randn(2, 4)
+    # spec restricts attribute access to the real class surface: a bare
+    # MagicMock auto-creates weight_fp32, which would flip the runner into
+    # the forced-fp32 branch.
+    gate = MagicMock(spec=AscendGateLinear, return_value=(gate_logits, None))
+
+    runner._gate = gate
+    runner.gate = gate
+    runner.ascend_shared_experts = None
+    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=routed_out))
+    runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
+    monkeypatch.setattr(
+        fused_moe_module.F,
+        "linear",
+        MagicMock(side_effect=AssertionError("fp32 F.linear path must not run")),
+    )
+
+    result = runner._forward_impl(
+        hidden_states,
+        router_logits,
+        shared_experts_input=None,
+        input_ids=None,
+    )
+
+    assert result is routed_out
+    gate.assert_called_once()
+    # mock's argument equality is unreliable for torch tensors on some
+    # Python versions (tensor.__eq__ returns a Tensor, not a bool);
+    # compare by identity instead.
+    assert gate.call_args[0][0] is hidden_states
+    runner.routed_experts.forward_impl.assert_called_once_with(
+        hidden_states=hidden_states,
+        router_logits=gate_logits,
         input_ids=None,
     )
 
