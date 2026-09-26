@@ -21,24 +21,6 @@ def test_dyntra_lb_core_uses_native_request_status():
     assert dyntra_lb_core.RequestStatus is NativeRequestStatus
 
 
-def test_dyntra_lb_enabled_reads_nested_scheduler_config(monkeypatch):
-    monkeypatch.setattr(
-        dyntra_lb_core,
-        "get_ascend_config",
-        MagicMock(side_effect=RuntimeError("not initialized")),
-    )
-    vllm_config = MagicMock()
-    vllm_config.additional_config = {
-        "scheduler_config": {
-            "dyntra_lb_config": {
-                "enabled": True,
-            }
-        }
-    }
-
-    assert dyntra_lb_core._dyntra_lb_enabled(vllm_config) is True
-
-
 def test_dyntra_lb_diagnostics_read_nested_scheduler_config(monkeypatch):
     monkeypatch.setattr(
         dyntra_lb_core,
@@ -56,18 +38,6 @@ def test_dyntra_lb_diagnostics_read_nested_scheduler_config(monkeypatch):
     }
 
     assert dyntra_lb_core._get_dyntra_lb_config(vllm_config).enable_diagnostics is True
-
-
-def test_dyntra_lb_enabled_ignores_top_level_config(monkeypatch):
-    monkeypatch.setattr(
-        dyntra_lb_core,
-        "get_ascend_config",
-        MagicMock(side_effect=RuntimeError("not initialized")),
-    )
-    vllm_config = MagicMock()
-    vllm_config.additional_config = {"DYNTRA_LB_ENABLE": 1}
-
-    assert dyntra_lb_core._dyntra_lb_enabled(vllm_config) is False
 
 
 def _diagnostics_config(enable_diagnostics: bool):

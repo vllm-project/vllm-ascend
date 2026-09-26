@@ -6,7 +6,7 @@
 - symbol: vllm_ascend.core.recompute_scheduler:RecomputeScheduler.schedule
   handler: ms_service_metric.provider_handlers:scheduler_scheduler_hooker
 
-- symbol: vllm_ascend.patch.platform.patch_balance_schedule:BalanceScheduler.schedule
+- symbol: vllm_ascend.core.balance_scheduler:BalanceScheduler.schedule
   handler: ms_service_metric.provider_handlers:scheduler_scheduler_hooker
 
 # Model runner metrics.
