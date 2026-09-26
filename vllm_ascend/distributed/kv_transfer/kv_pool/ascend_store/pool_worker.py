@@ -926,7 +926,7 @@ class KVPoolWorker:
         n_local = int(self.group_num_layers.get(group_id, 0))
         if n_local <= 0:
             return sum(gbl)
-        per_layer = sum(gbl) // n_local
+        per_layer = (sum(gbl) + n_local - 1) // n_local
         n_global = max(total_layers, int(self.num_layers), n_local)
         # DCP shard-major layout: ranks sharing head_or_tp_rank (put_step>1,
         # e.g. MLA) hold different context shards of the same logical block
