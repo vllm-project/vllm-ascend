@@ -547,6 +547,9 @@ class KVCacheRecvingThread(threading.Thread):
                 self.num_kv_heads = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
         self.proc_not_transfer_request_lock = threading.Lock()
+        self.failed_recv_requests: set[str] = set()
+        self.invalid_block_ids: set[int] = set()
+        self.failed_recv_requests_lock = threading.Lock()
 
     def add_request(
         self,
@@ -589,6 +592,27 @@ class KVCacheRecvingThread(threading.Thread):
             A set of request IDs that have been completed.
         """
         return self.task_tracker.get_and_clear_finished_requests()
+
+    def get_and_clear_invalid_block_ids(self) -> set[int]:
+        """Get and clear block ids that failed to load."""
+        with self.failed_recv_requests_lock:
+            invalid_block_ids = self.invalid_block_ids
+            self.invalid_block_ids = set()
+        return invalid_block_ids
+
+    def _is_failed_recv_request(self, request_id: str) -> bool:
+        with self.failed_recv_requests_lock:
+            return request_id in self.failed_recv_requests
+
+    def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds) -> None:
+        with self.failed_recv_requests_lock:
+            self.failed_recv_requests.add(request_id)
+            for group_block_ids in local_block_ids:
+                self.invalid_block_ids.update(group_block_ids)
+
+    def _clear_failed_recv_request(self, request_id: str) -> None:
+        with self.failed_recv_requests_lock:
+            self.failed_recv_requests.discard(request_id)
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
@@ -682,14 +706,20 @@ class KVCacheRecvingThread(threading.Thread):
         all_task_done = req_meta["all_task_done"]
 
         try:
-            logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
-            if not self.use_hybrid:
-                self._transfer_kv_cache(req_meta)
+            if self._is_failed_recv_request(request_id):
+                self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                logger.warning("Skipping KV cache transfer for request. remote_request_id=%s. ", remote_request_id)
             else:
-                self._transfer_kv_cache_all_groups(req_meta)
-            logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
-        except Exception:
-            logger.exception("Failed to transfer KV cache for request %s.", remote_request_id)
+                try:
+                    logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
+                    if not self.use_hybrid:
+                        self._transfer_kv_cache(req_meta)
+                    else:
+                        self._transfer_kv_cache_all_groups(req_meta)
+                    logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
+                except Exception as e:
+                    self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                    logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             if self._mark_request_task_done(request_id, all_task_done):
@@ -697,6 +727,7 @@ class KVCacheRecvingThread(threading.Thread):
                     self.task_tracker.update_done_task_count(request_id)
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
+                self._clear_failed_recv_request(request_id)
             self.request_queue.task_done()
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
@@ -1259,6 +1290,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Get the block ids whose KV load failed."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -1939,6 +1975,11 @@ class MooncakeConnectorWorker:
                 len(done_recving),
             )
         return done_sending, done_recving
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        if self.kv_role == "kv_consumer" and self.kv_recv_thread is not None:
+            return self.kv_recv_thread.get_and_clear_invalid_block_ids()
+        return set()
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
