@@ -371,3 +371,6 @@ a5:
       - name: DeepSeek_V31_Terminus_w4a8_w8a8_A5
         os: linux-aarch64-a5-8
         config_file_path: DeepSeek_V31_Terminus_w4a8_w8a8_A5.yaml
+      - name: Qwen3_6_27B_W8A8_tp1_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3_6_27B_W8A8_tp1_A5.yaml
