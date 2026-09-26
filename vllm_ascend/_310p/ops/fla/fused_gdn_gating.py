@@ -1,4 +1,58 @@
+import importlib
+
 import torch
+from vllm.logger import logger
+
+_SUPPORTED_INPUT_DTYPES = {torch.float16, torch.bfloat16, torch.float32}
+
+
+def _load_gdn_ops_ext() -> bool:
+    """Load the ops-transformer extension that registers the GDN ops."""
+    try:
+        importlib.import_module("gdn_ops_ext")
+    except (ImportError, OSError, RuntimeError) as exc:
+        logger.warning_once(
+            "[wxc][310P] Failed to load the ops-transformer gdn_ops_ext extension: %s",
+            exc,
+        )
+        return False
+    return True
+
+
+def _get_fused_gdn_gating_op():
+    """Return the ops-transformer fused GDN gating Torch op when available."""
+    gdn_namespace = getattr(torch.ops, "gdn_ops_ext", None)
+    op = (
+        None
+        if gdn_namespace is None
+        else getattr(gdn_namespace, "fused_gdn_gating", None)
+    )
+    if op is not None:
+        return op
+
+    if not _load_gdn_ops_ext():
+        return None
+    gdn_namespace = getattr(torch.ops, "gdn_ops_ext", None)
+    return (
+        None
+        if gdn_namespace is None
+        else getattr(gdn_namespace, "fused_gdn_gating", None)
+    )
+
+
+def _can_use_fused_gdn_gating_op(
+    A_log: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    dt_bias: torch.Tensor,
+) -> bool:
+    if A_log.device.type != "npu" or any(tensor.device != A_log.device for tensor in (a, b, dt_bias)):
+        return False
+    if not all(tensor.dtype in _SUPPORTED_INPUT_DTYPES for tensor in (A_log, a, b, dt_bias)):
+        return False
+    if A_log.ndim != 1 or dt_bias.shape != A_log.shape:
+        return False
+    return a.ndim == 2 and b.shape == a.shape and a.shape[1] == A_log.shape[0]
 
 
 def fused_gdn_gating_pytorch(
@@ -60,3 +114,45 @@ def fused_gdn_gating_pytorch(
     beta_output = beta_output.unsqueeze(0)
 
     return g, beta_output
+
+
+def fused_gdn_gating(
+    A_log: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    dt_bias: torch.Tensor,
+    beta: float = 1.0,
+    threshold: float = 20.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Use the ops-transformer GDN op when possible, otherwise use PyTorch."""
+    op = _get_fused_gdn_gating_op()
+    if op is not None and _can_use_fused_gdn_gating_op(A_log, a, b, dt_bias):
+        logger.info_once(
+            "[wxc][310P] Using torch.ops.gdn_ops_ext.fused_gdn_gating with FP16 inputs "
+            "(source dtypes: A_log=%s, a=%s, b=%s, dt_bias=%s).",
+            A_log.dtype,
+            a.dtype,
+            b.dtype,
+            dt_bias.dtype,
+        )
+        return op(
+            A_log.to(torch.float16).contiguous(),
+            a.to(torch.float16).contiguous(),
+            b.to(torch.float16).contiguous(),
+            dt_bias.to(torch.float16).contiguous(),
+            beta,
+            threshold,
+        )
+
+    logger.info_once(
+        "[wxc][310P] Falling back to the PyTorch fused_gdn_gating implementation because "
+        "torch.ops.gdn_ops_ext.fused_gdn_gating is unavailable or the inputs are unsupported."
+    )
+    return fused_gdn_gating_pytorch(
+        A_log,
+        a,
+        b,
+        dt_bias,
+        beta,
+        threshold,
+    )
