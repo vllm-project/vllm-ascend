@@ -4,13 +4,11 @@
 
 from collections.abc import Mapping
 from functools import cached_property, partial
-from typing import Any
 
 import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers.video_utils import VideoMetadata
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     parallel_state,
@@ -609,20 +607,6 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
         return self._glm5_next_hf_processor
-
-    def _get_video_second_idx_glm46v(self, metadata: dict[str, Any], total_frames: int) -> list[int]:
-        # The inherited placeholder builder must use the same sampled frames
-        # as the Flash vision processor, rather than GLM-4.6's dynamic FPS.
-        if metadata.get("do_sample_frames", True):
-            video_processor = self.get_hf_processor().video_processor
-            frame_metadata = VideoMetadata(
-                total_num_frames=metadata.get("total_num_frames", total_frames),
-                fps=metadata["fps"],
-                duration=metadata.get("duration"),
-            )
-            indices = video_processor.sample_frames(frame_metadata, **self.ctx.get_merged_mm_kwargs({}))
-            metadata = {**metadata, "do_sample_frames": False, "frames_indices": indices.tolist()}
-        return super()._get_video_second_idx_glm46v(metadata, total_frames)
 
     def _processor_pixel_budget(self, proc) -> tuple[int, int]:
         from vllm_ascend.models.glm5next.processor import _pixel_budget

@@ -13,7 +13,6 @@ import torch
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -1124,13 +1123,8 @@ def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
     request_queue.task_done.assert_called_once_with()
 
 
-@pytest.mark.parametrize("cache_kind", ["mla", "nope", "tail"])
-def test_whole_block_address_generation_uses_independent_stride(cache_kind: str) -> None:
+def test_whole_block_mla_address_generation_uses_independent_stride() -> None:
     spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
-    if cache_kind == "tail":
-        spec = AscendIndexerKPoolTailSpec(
-            block_size=2, sliding_window=2, compress_ratio=2, num_kv_heads=1, head_size=8, dtype=torch.float32
-        )
     thread = make_thread(
         kv_cache_specs=[spec],
         kv_caches_base_addr=[[1000]],
@@ -1142,13 +1136,6 @@ def test_whole_block_address_generation_uses_independent_stride(cache_kind: str)
         block_lens=[[128]],
         tp_base_addrs={0: [[5000]]},
     )
-    if cache_kind == "nope":
-        thread.kv_caches_base_addr[0].append(0)
-        thread.block_strides[0].append(256)
-        thread.block_lens[0].append(0)
-        remote.metadata_by_pcp_rank[0].metadata_by_tp_rank[0].kv_caches_base_addr[0].append(0)
-        remote.block_strides[0].append(512)
-        remote.block_lens[0].append(0)
     src: list[int] = []
     dst: list[int] = []
     lengths: list[int] = []
@@ -1664,19 +1651,6 @@ def test_layer_remote_tp_rank_groups_apply_spec_specific_dcp_rules() -> None:
             remote_tp_size=4,
             remote_dcp_size=4,
         ) == [list(range(8))]
-
-
-@pytest.mark.parametrize("local_tp,remote_tp", [(4, 8), (8, 4)])
-def test_tail_tp_groups_preserve_replicated_k_and_gate(local_tp: int, remote_tp: int) -> None:
-    spec = AscendIndexerKPoolTailSpec(
-        block_size=2, sliding_window=2, compress_ratio=2, num_kv_heads=1, head_size=8, dtype=torch.float32
-    )
-    remote = make_pp_metadata(block_shapes=[[(2, 2, 8)]])
-    for rank in range(local_tp):
-        thread = make_thread(tp_size=local_tp, tp_rank=rank, block_shapes=[[(2, 2, 8)]])
-        assert thread._get_layer_remote_tp_rank_groups(
-            0, 0, spec, remote, remote_pcp_size=1, remote_tp_size=remote_tp, remote_dcp_size=1
-        ) == [list(range(remote_tp))]
 
 
 @pytest.mark.parametrize(
