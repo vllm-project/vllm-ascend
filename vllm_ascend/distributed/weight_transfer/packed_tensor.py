@@ -4,6 +4,7 @@
 
 import math
 from collections.abc import Callable, Iterator
+from functools import cache
 from typing import Any
 
 import torch
@@ -13,6 +14,13 @@ from torch.multiprocessing.reductions import reduce_tensor
 # These are imported by HCCLWeightTransferUpdateInfo and trainer_send_weights.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
+
+
+@cache
+def _get_npu_streams(device_idx: int, num_buffers: int) -> tuple[Any, ...]:
+    """Reuse packing/communication streams across weight-transfer calls."""
+    with torch.npu.device(device_idx):
+        return tuple(torch.npu.Stream() for _ in range(num_buffers))
 
 
 def packed_broadcast_producer(
@@ -38,7 +46,7 @@ def packed_broadcast_producer(
     """
     target_packed_tensor_size = buffer_size_bytes
 
-    streams = [torch.npu.Stream() for _ in range(num_buffers)]
+    streams = _get_npu_streams(torch.npu.current_device(), num_buffers)
     buffer_idx = 0
 
     packing_tensor_list: list[list[torch.Tensor]] = [[] for _ in range(num_buffers)]
@@ -48,7 +56,7 @@ def packed_broadcast_producer(
     done = False
     while not done:
         # Synchronize the current stream (waits for previous
-        # iteration's work on this buffer to finish)
+        # iteration's packing and broadcast work on this buffer to finish)
         streams[buffer_idx].synchronize()
         # Start tasks for the new buffer in a new stream
         with torch.npu.stream(streams[buffer_idx]):
@@ -76,17 +84,20 @@ def packed_broadcast_producer(
             # No more tensors — nothing left to broadcast
             break
 
-        # torch.cat runs on the custom stream.  Synchronize before
-        # broadcasting on the default stream so the packed data is ready.
-        streams[buffer_idx].synchronize()
-        group.broadcast(packed_tensors[buffer_idx], src=src)
+        # Keep packing and HCCL broadcast on the same buffer stream. The
+        # explicit stream argument makes the HCCL enqueue target unambiguous.
+        group.broadcast(
+            packed_tensors[buffer_idx],
+            src=src,
+            stream=streams[buffer_idx],
+        )
 
         # Move to the next buffer
         buffer_idx = (buffer_idx + 1) % num_buffers
 
-    # Ensure the last broadcast on the default stream has completed
-    # before returning, so NPU tensor cleanup at exit doesn't hang.
-    torch.npu.current_stream().synchronize()
+    # Drain every cached buffer stream before returning.
+    for stream in streams:
+        stream.synchronize()
 
 
 def packed_broadcast_consumer(
