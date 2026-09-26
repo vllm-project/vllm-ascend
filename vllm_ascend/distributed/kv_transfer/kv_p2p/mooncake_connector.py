@@ -4006,7 +4006,15 @@ class MooncakeConnectorWorker:
         return {rank for remote_ranks in remote_ranks_by_decode_rank for rank in remote_ranks}
 
     def _get_remote_rank(self, req_id: str, prefill_tp_size: int | None = None) -> list[int]:
-        return self._get_remote_ranks_for_req(req_id, prefill_tp_size)[self.tp_rank]
+        # `_get_remote_ranks_for_req` is indexed by decode TP rank (length ≈ D-TP).
+        # Decode consumers and symmetric P/D TP can index with `self.tp_rank`.
+        # A prefill producer doing a DPLB cross-P load has P-side `tp_rank`
+        # (0..P-TP-1), which is out of range when P-TP > D-TP (e.g. P-TP8 /
+        # D-TP1). Use decode-group 0 rather than a new shuffle / modulo.
+        remote_ranks = self._get_remote_ranks_for_req(req_id, prefill_tp_size)
+        if self.kv_role == "kv_producer" and self.tp_rank >= len(remote_ranks):
+            return remote_ranks[0]
+        return remote_ranks[self.tp_rank]
 
     def _get_remote_tp_ranks(
         self,
