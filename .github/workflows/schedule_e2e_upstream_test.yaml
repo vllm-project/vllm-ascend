@@ -20,6 +20,11 @@ name: E2E-upstream
 on:
   schedule:
     - cron: '0 8 * * 0' # every Sunday at 8:00
+  pull_request:
+    branches:
+      - 'main'
+      - '*_dev'
+      - 'releases/v*'
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
@@ -73,7 +78,7 @@ jobs:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
-            HF_HUB_OFFLINE: 1
+            HF_HUB_OFFLINE: 0
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v7
@@ -180,11 +185,17 @@ jobs:
                 echo "csrc cache miss: compile kernels on the NPU runner"
                 uv pip install -e . --no-build-isolation
               fi
-              uv pip install tblib 
+              uv pip install tblib
               uv pip install cohere_melody peft "vllm[helion]"  "vllm[grpc]" "vllm[audio]"
               uv pip install pqdm timm imagehash num2words schemathesis==3.39.15
               uv pip install "mteb[bm25s]" "lm-eval[api]" "runai-model-streamer[s3,gcs]"
               uv pip install open_clip_torch terratorch==1.2.2 torchgeo==0.9.0
+              uv pip install pytest-asyncio 
+              uv pip install pytest-timeout multiprocess 
+              uv pip install "accelerate>=1.1.0" 
+              uv pip install datasets 
+              uv pip install vllm_bnb_plugin
+              uv pip install msguard openpyxl
 
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
@@ -200,6 +211,7 @@ jobs:
 
     e2e-upstream_multicard:
         runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
+        # runs-on: linux-aarch64-a2b3-0
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false
@@ -330,6 +342,7 @@ jobs:
               
     e2e-upstream_online:
         runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
+        #runs-on: linux-aarch64-a2b3-0
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false
