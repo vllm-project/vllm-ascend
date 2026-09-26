@@ -110,9 +110,6 @@ def refresh_model_routing_tables(
 class AscendEplbState(_eplb_state.EplbState):
     """Keep Ascend routing and load-recording state around upstream EPLB."""
 
-    device_index: int | None
-    cuda_device_index: int | None
-
     def __init__(self, parallel_config, device: torch.device) -> None:
         super().__init__(parallel_config, device)
         self._has_fresh_recorded_load = False
@@ -122,7 +119,6 @@ class AscendEplbState(_eplb_state.EplbState):
         if device_index is None:
             device_index = torch.accelerator.current_device_index()
         self.device_index = device_index
-        self.cuda_device_index = device_index
 
     @property
     def uses_custom_load_stats(self) -> bool:
