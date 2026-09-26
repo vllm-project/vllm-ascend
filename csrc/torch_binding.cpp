@@ -62,7 +62,8 @@
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
-#include "attention/mla_prolog_v3_k3/mla_prolog_v3_k3_torch_adpt.h"
+#include "attention/mla_prolog_v3/mla_prolog_v3_torch_adpt.h"
+#include "attention/mla_prolog_dcp_c8/mla_prolog_dcp_c8_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2905,9 +2906,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 #endif
 
-    // K3 MLA prolog uses a distinct ACLNN/operator name to keep CANN's MlaPrologV3 available.
+    // npu_mla_prolog_v3 is aligned with torch_npu's public operator name.
     ops.def(
-        "npu_mla_prolog_v3_k3(Tensor token_x, Tensor weight_dq, Tensor weight_uq_qr, Tensor weight_uk,"
+        "npu_mla_prolog_v3(Tensor token_x, Tensor weight_dq, Tensor weight_uq_qr, Tensor weight_uk,"
         "           Tensor weight_dkv_kr, Tensor rmsnorm_gamma_cq, Tensor rmsnorm_gamma_ckv,"
         "           Tensor rope_sin, Tensor rope_cos, Tensor(a!) kv_cache, Tensor(b!) kr_cache, *,"
         "           Tensor? cache_index=None, Tensor? dequant_scale_x=None,"
@@ -2921,7 +2922,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "           int ckvkr_repo_mode=0, int quant_scale_repo_mode=0, int tile_size=128,"
         "           float qc_qr_scale=1.0, float kc_scale=1.0)"
         " -> (Tensor, Tensor, Tensor, Tensor, Tensor)");
-    ops.impl("npu_mla_prolog_v3_k3", torch::kPrivateUse1, &vllm_ascend::npu_mla_prolog_v3_k3);
+    ops.impl("npu_mla_prolog_v3", torch::kPrivateUse1, &vllm_ascend::npu_mla_prolog_v3);
+
+    ops.def(
+        "npu_mla_prolog_dcp_c8(Tensor token_x, Tensor weight_dq, Tensor weight_uq_qr, Tensor weight_uk,"
+        "           Tensor weight_dkv_kr, Tensor rmsnorm_gamma_cq, Tensor rmsnorm_gamma_ckv,"
+        "           Tensor rope_sin, Tensor rope_cos, Tensor(a!) kv_cache, Tensor(b!) kr_cache, Tensor kv_descale, *"
+        "           Tensor? cache_index=None, Tensor? dequant_scale_x=None,"
+        "           Tensor? dequant_scale_w_dq=None, Tensor? dequant_scale_w_uq_qr=None,"
+        "           Tensor? dequant_scale_w_dkv_kr=None, Tensor? quant_scale_ckv=None,"
+        "           Tensor? quant_scale_ckr=None, Tensor? smooth_scales_cq=None,"
+        "           Tensor? actual_seq_len=None, Tensor? k_nope_clip_alpha=None,"
+        "           float rmsnorm_epsilon_cq=1e-05, float rmsnorm_epsilon_ckv=1e-05,"
+        "           str cache_mode=\"PA_BSND\", bool query_norm_flag=False,"
+        "           int weight_quant_mode=0, int kv_cache_quant_mode=0, int query_quant_mode=0,"
+        "           int ckvkr_repo_mode=0, int quant_scale_repo_mode=0, int tile_size=128,"
+        "           float qc_qr_scale=1.0, float kc_scale=1.0)"
+        " -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)");
+    ops.impl("npu_mla_prolog_dcp_c8", torch::kPrivateUse1, &vllm_ascend::npu_mla_prolog_dcp_c8);
 
     // swap_blocks_batch takes CPU tensors (int64 pointer/size arrays), not NPU
     // tensors, so dispatch must be registered on the CPU backend. The function

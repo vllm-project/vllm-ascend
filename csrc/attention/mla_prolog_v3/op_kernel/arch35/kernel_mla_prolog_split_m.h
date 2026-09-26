@@ -1374,7 +1374,8 @@ __aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::ScatterCkv(LocalTensor<kvCach
         ScatterCache<kvCacheType, (MLAPT::cacheMode == CACHE_MODE::PA_NZ)>(
             kvCacheGm_, outputLocal,
             ScatterCacheParams{baseParams_->blockSize, paTokenIndex, vectorRow_, baseParams_->headSizeCkv,
-                               baseParams_->dtileSize, static_cast<int64_t>(baseParams_->kvCacheStride0)});
+                               static_cast<int64_t>(baseParams_->kvCacheTokenStride),
+                               static_cast<int64_t>(baseParams_->kvCacheStride0)});
         // 刷新量化scale
         if (isPertile && baseParams_->quantScaleRepoMode == 1U) {
             // BSND:
@@ -1498,12 +1499,14 @@ __aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::ScatterKr(LocalTensor<krCache
                 kvCacheGm_[startOffset], outputKrInt8Tensor,
                 ScatterCacheParams{baseParams_->blockSize, paTokenIndex, vectorRow_,
                                    static_cast<int64_t>(baseParams_->dimHeadRope * sizeof(krCacheType)),
-                                   baseParams_->dtileSize, static_cast<int64_t>(baseParams_->kvCacheStride0)});
+                                   static_cast<int64_t>(baseParams_->kvCacheTokenStride),
+                                   static_cast<int64_t>(baseParams_->kvCacheStride0)});
         } else {
             ScatterCache<krCacheType, (MLAPT::cacheMode == CACHE_MODE::PA_NZ)>(
                 krCacheGm_, outputKrLocal,
                 ScatterCacheParams{baseParams_->blockSize, paTokenIndex, vectorRow_, baseParams_->dimHeadRope,
-                                   baseParams_->dimHeadRope, static_cast<int64_t>(baseParams_->krCacheStride0)});
+                                   static_cast<int64_t>(baseParams_->krCacheTokenStride),
+                                   static_cast<int64_t>(baseParams_->krCacheStride0)});
         }
     } else if constexpr ((MLAPT::cacheMode == CACHE_MODE::PA_BLK_BSND) || (MLAPT::cacheMode == CACHE_MODE::PA_BLK_NZ)) {
         // 使用  已计算好的偏移参数

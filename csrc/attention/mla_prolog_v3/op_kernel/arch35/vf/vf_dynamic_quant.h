@@ -101,6 +101,17 @@ __simd_vf__ void ComputeVFImpl(__ubuf__ T *xAddr, __ubuf__ O *yAddr, __ubuf__ fl
         AscendC::MicroAPI::Max(xReduceMax, xReduceMax, epsilonReg, fullMask1); // regtensor类型
     }
     AscendC::MicroAPI::Muls(xScale, xReduceMax, alphaValue, fullMask1);
+    if constexpr (std::is_same<O, fp8_e4m3fn_t>::value) {
+        // A zero latent Q can still have a nonzero BF16 64-D component. Its
+        // scale also divides QR below, so use the neutral scale for zero rows.
+        AscendC::MicroAPI::RegTensor<float> zeroScaleValue;
+        AscendC::MicroAPI::RegTensor<float> neutralScaleValue;
+        AscendC::MicroAPI::MaskReg zeroScaleMask;
+        AscendC::MicroAPI::Duplicate(zeroScaleValue, 0.0f);
+        AscendC::MicroAPI::Duplicate(neutralScaleValue, 1.0f);
+        AscendC::MicroAPI::Compare<float, CMPMODE::EQ>(zeroScaleMask, xScale, zeroScaleValue, fullMask1);
+        AscendC::MicroAPI::Select<float>(xScale, neutralScaleValue, xScale, zeroScaleMask);
+    }
     AscendC::MicroAPI::Duplicate(xScaleDup, xScale, fullMask1);
     AscendC::MicroAPI::StoreUnAlign<float, AscendC::MicroAPI::PostLiteral::POST_MODE_UPDATE>(scaleAddr, xScale, ureg0,
                                                                                              1);

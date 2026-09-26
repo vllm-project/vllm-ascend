@@ -17,7 +17,7 @@
 #define VF_MUL_QR_H
 
 namespace MlaProlog {
-template <typename T>
+template <typename T, bool DcpC8 = false>
 __simd_vf__ void MulQrVFImpl(__ubuf__ T *inputBuf, __ubuf__ T *outputBuf, __ubuf__ T *dequantScaleBrcbBuf,
                              const uint16_t floatRepSize, uint16_t repeatTimes, float quantScaleCkvRope,
                              uint64_t computeBlockAlign)
@@ -39,9 +39,14 @@ __simd_vf__ void MulQrVFImpl(__ubuf__ T *inputBuf, __ubuf__ T *outputBuf, __ubuf
                                                                  dequantScaleBrcbBuf + dequantLoopOffset);
         MicroAPI::Duplicate(vregQuantScale, quantScaleCkvRope);
 
-        MicroAPI::Div(vregMulScale, vregQuantScale, vregDequantScaleVrcb, pregAll);
-
-        MicroAPI::Mul<T, MicroAPI::MaskMergeMode::ZEROING>(vregRes, vregSrc, vregMulScale, pregAll);
+        if constexpr (DcpC8) {
+            // Match the BF16-Q quantizer's (rope / q_scale) / kv_descale order.
+            MicroAPI::Div(vregMulScale, vregSrc, vregDequantScaleVrcb, pregAll);
+            MicroAPI::Div(vregRes, vregMulScale, vregQuantScale, pregAll);
+        } else {
+            MicroAPI::Div(vregMulScale, vregQuantScale, vregDequantScaleVrcb, pregAll);
+            MicroAPI::Mul<T, MicroAPI::MaskMergeMode::ZEROING>(vregRes, vregSrc, vregMulScale, pregAll);
+        }
 
         MicroAPI::StoreAlign<T, MicroAPI::StoreDist::DIST_NORM>(outputBuf + loopOffset, vregRes, pregAll);
     }
@@ -56,7 +61,7 @@ __simd_vf__ void MulQrVFImpl(__ubuf__ T *inputBuf, __ubuf__ T *outputBuf, __ubuf
  * @param computeSizeRope 输入参数的大小 subRow * colRope
  * @param computeBlockAlign 输入动态量化参数的单个数据块存放多少个动态量化参数
  */
-template <typename T>
+template <typename T, bool DcpC8 = false>
 __aicore__ inline void MulQrVF(const LocalTensor<T> &outputLocal, const LocalTensor<T> &inputLocal,
                                const LocalTensor<T> &dequantScaleBrcbLocal, float quantScaleCkvRope,
                                uint64_t computeSizeRope, uint64_t computeBlockAlign)
@@ -67,7 +72,7 @@ __aicore__ inline void MulQrVF(const LocalTensor<T> &outputLocal, const LocalTen
     __ubuf__ T *inputBuf = (__ubuf__ T *)inputLocal.GetPhyAddr();
     __ubuf__ T *outputBuf = (__ubuf__ T *)outputLocal.GetPhyAddr();
     __ubuf__ T *dequantScaleBrcbBuf = (__ubuf__ T *)dequantScaleBrcbLocal.GetPhyAddr();
-    MulQrVFImpl<T>(inputBuf, outputBuf, dequantScaleBrcbBuf, floatRepSize, repeatTimes, quantScaleCkvRope,
+    MulQrVFImpl<T, DcpC8>(inputBuf, outputBuf, dequantScaleBrcbBuf, floatRepSize, repeatTimes, quantScaleCkvRope,
                    computeBlockAlign);
 }
 } // namespace MlaProlog

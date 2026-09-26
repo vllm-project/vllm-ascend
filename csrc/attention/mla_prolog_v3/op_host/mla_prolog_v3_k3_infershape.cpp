@@ -242,7 +242,7 @@ ge::graphStatus InferDataTypeMlaPrologV3K3(gert::InferDataTypeContext *context)
 
     // mxfp8 quant
     if (weightQuantMode == WEIGHT_QUANT_MODE_MXFP8_FULL_QUANT) {
-        bool isMxfp8FullQuant = (context->GetRequiredInputDataType(TOKEN_X_INDEX) == ge::DT_FLOAT8_E4M3FN &&
+        bool isMxfp8FullQuant = (context->GetRequiredInputDataType(WEIGHT_DQ_INDEX) == ge::DT_FLOAT8_E4M3FN &&
                                  context->GetOptionalInputDataType(QUANT_SCALE_CKV_INDEX) != ge::DT_UNDEFINED);
 
         context->SetOutputDataType(QUERY_INDEX, (isMxfp8FullQuant) ?

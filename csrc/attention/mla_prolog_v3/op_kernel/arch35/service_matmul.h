@@ -20,6 +20,13 @@
 
 namespace MlaProlog {
 
+// Whole-head MM3 tiles need 96 KiB for their 512 x 192 MXFP8 weights.
+// Keep scales beyond that live range; legacy tiles retain their old layout.
+__aicore__ inline uint64_t MxScaleL1ByteOffset(const MMParams &para)
+{
+    return para.baseN == 192 && para.k == 1536 && para.m <= 64 ? 96 * 1024 : L1_B_SIZE / 2;
+}
+
 constexpr uint8_t UNIT_FLAG_DISABLE = 0;  // 0: disable: 不配置unitFlag
 constexpr uint8_t UNIT_FLAG_CHECK = 0b10; // 2: enable: 将mmadParams.unitFlag设置为 0b10
 constexpr uint8_t UNIT_FLAG_SET = 0b11;   // 3: enable: 在k的最后一轮循环，会将mmadParams.unitFlag设置为 0b11
@@ -471,17 +478,19 @@ template <typename T, typename S, bool hasL1ALoaded, bool scaleSrcPadFlag = fals
 __aicore__ inline void LoadL1ABAndScale(const GlobalTensor<T> &tensorAGm, const GlobalTensor<T> &tensorBGm,
                                         const GlobalTensor<S> &tensorAScaleGm, const GlobalTensor<S> &tensorBScaleGm,
                                         uint32_t kL1, uint32_t kL1Loops, const MMParams &para, uint32_t nL1Offset,
-                                        uint32_t nL1Size, uint32_t kOffesetUnit, MMBufParams &bufParam)
+                                        uint32_t nL1Size, uint32_t kOffesetUnit, MMBufParams &bufParam, bool firstBReady = false)
 {
-    uint64_t offsetL1B = L1_B_SIZE / 2 / sizeof(T); // // 2表示scale起始地址固定从L1B上ping的64k开始
+    uint64_t offsetL1B = MxScaleL1ByteOffset(para) / sizeof(T); // Scales follow the current tile weights in L1B ping.
     if (kL1 == 0) {
         if constexpr (!hasL1ALoaded) {
             LoadL1AAndScale<T, S, hasL1ALoaded, scaleSrcPadFlag>(tensorAGm, tensorAScaleGm, para.m, para.kL1StepSize,
                                                                  para.k, para.kScale, offsetL1B, bufParam);
         }
         uint64_t scaleOffsetL1B = offsetL1B + para.kScale * Align(para.m, BLOCK_CUBE_SIZE);
-        LoadL1BAndScale(tensorBGm[para.k * nL1Offset], tensorBScaleGm[para.kScale * nL1Offset], nL1Size,
-                        para.kL1StepSize, para.k, para.kScale, scaleOffsetL1B, bufParam);
+        if (!firstBReady) {
+            LoadL1BAndScale(tensorBGm[para.k * nL1Offset], tensorBScaleGm[para.kScale * nL1Offset], nL1Size,
+                            para.kL1StepSize, para.k, para.kScale, scaleOffsetL1B, bufParam);
+        }
     }
 
     if (kL1 + 1 < kL1Loops) {
@@ -551,7 +560,7 @@ __aicore__ inline void MatmulL1(const LocalTensor<O_L0C> &cL0, const LocalTensor
                                 int64_t &aOffset)
 {
     uint32_t mSize = Align(para.m, BLOCK_CUBE_SIZE);
-    uint64_t weightSizeL1B = L1_B_SIZE / 2 / sizeof(T); // 2表示scale起始地址固定从L1B上ping的64k开始
+    uint64_t weightSizeL1B = MxScaleL1ByteOffset(para) / sizeof(T); // Scales follow the current tile weights in L1B ping.
     uint64_t scaleASize = mSize * para.kScale;          // BS*224
     uint32_t bOffset = 0;
     uint32_t aOffsetUnit = mSize * para.baseK;
@@ -595,11 +604,13 @@ __aicore__ inline void MatmulL1(const LocalTensor<O_L0C> &cL0, const LocalTensor
  * @param tensorBScaleGm BScale矩阵在GM的位置
  */
 template <typename T, typename O, typename S, bool hasL1ALoaded = false, bool scaleSrcPadFlag = false,
-          bool enUnitFlag = false, DataFormat bLoadFormat = DataFormat::NZ>
+          bool enUnitFlag = false, DataFormat bLoadFormat = DataFormat::NZ, bool directBf16QcQr = false>
 __aicore__ inline void
 MatmulSplitK(const GlobalTensor<O> &tensorCGm, const GlobalTensor<T> &tensorAGm, const GlobalTensor<T> &tensorBGm,
              const MMParams &para, MMBufParams &bufParam, const uint32_t nL1Offset, const uint32_t nL1Size,
-             const GlobalTensor<S> &tensorAScaleGm = {}, const GlobalTensor<S> &tensorBScaleGm = {})
+             const GlobalTensor<S> &tensorAScaleGm = {}, const GlobalTensor<S> &tensorBScaleGm = {},
+             const GlobalTensor<bfloat16_t> &qcGm = {}, const GlobalTensor<bfloat16_t> &qrGm = {},
+             bool firstBReady = false)
 {
     using O_L0C = typename std::conditional<std::is_same<T, int8_t>::value, int32_t, float>::type;
 
@@ -632,7 +643,7 @@ MatmulSplitK(const GlobalTensor<O> &tensorCGm, const GlobalTensor<T> &tensorAGm,
         if constexpr (std::is_same<T, FP8E4M3>::value && std::is_same<S, fp8_e8m0_t>::value) {
             LoadL1ABAndScale<T, S, hasL1ALoaded, scaleSrcPadFlag>(tensorAGm, tensorBGm, tensorAScaleGm, tensorBScaleGm,
                                                                   kL1, kL1Loops, para, nL1Offset, nL1Size, kOffesetUnit,
-                                                                  bufParam);
+                                                                  bufParam, firstBReady);
         } else {
             LoadL1AB<T, hasL1ALoaded, bLoadFormat>(tensorAGm, tensorBGm, kL1, kL1Loops, para, nL1Offset, nL1Size,
                                                    kOffesetUnit, bufParam);
@@ -660,7 +671,28 @@ MatmulSplitK(const GlobalTensor<O> &tensorCGm, const GlobalTensor<T> &tensorAGm,
     if constexpr (std::is_same<T, FP8E4M3>::value && std::is_same<S, fp8_e8m0_t>::value) {
         SetFlag<HardEvent::MTE1_MTE2>(SCALE_EVENT);
     }
-    GetTensorC<T, O, O_L0C, enUnitFlag>(tensorCGm[nL1Offset], cL0, para.m, nL1Size, mSize, para.orgKc, bufParam);
+    if constexpr (directBf16QcQr) {
+        // One N192 tile is one complete QC128/QR64 head. NZ stores N in
+        // 16-column groups, so the QR slice begins at 128 * aligned-M.
+        const uint32_t head = nL1Offset / 192;
+        const uint32_t heads = para.orgKc / 192;
+        SetFlag<HardEvent::M_FIX>(L0C_EVENT0 + (bufParam.cL0BufIter & 1u));
+        WaitFlag<HardEvent::M_FIX>(L0C_EVENT0 + (bufParam.cL0BufIter & 1u));
+        FixpipeParamsV220 fixParams;
+        fixParams.nSize = 128;
+        fixParams.mSize = para.m;
+        fixParams.srcStride = mSize;
+        fixParams.dstStride = heads * 128;
+        fixParams.ndNum = 1;
+        fixParams.unitFlag = UNIT_FLAG_DISABLE;
+        fixParams.quantPre = QuantMode_t::F322BF16;
+        Fixpipe(qcGm[head * 128], cL0, fixParams);
+        fixParams.nSize = 64;
+        fixParams.dstStride = heads * 64;
+        Fixpipe(qrGm[head * 64], cL0[128 * mSize], fixParams);
+    } else {
+        GetTensorC<T, O, O_L0C, enUnitFlag>(tensorCGm[nL1Offset], cL0, para.m, nL1Size, mSize, para.orgKc, bufParam);
+    }
     SetFlag<HardEvent::FIX_M>(L0C_EVENT0 + (bufParam.cL0BufIter & 1u));
     bufParam.cL0BufIter++;
 }
@@ -862,7 +894,7 @@ __aicore__ inline void MatmulSplitMKOuter(const GlobalTensor<O> &tensorCGm, cons
     uint32_t bScaleBf16Off = 0;
     uint32_t bScaleL1BaseOff = 0;
     if constexpr (std::is_same<T, FP8E4M3>::value && std::is_same<S, fp8_e8m0_t>::value) {
-        uint64_t scaleAOff = L1_B_SIZE / 2 / sizeof(T);
+        uint64_t scaleAOff = MxScaleL1ByteOffset(para) / sizeof(T);
         LocalTensor<bfloat16_t> bL1Bf16;
         bL1Bf16.SetAddr(bufParam.bL1BufAddr);
         GlobalTensor<bfloat16_t> scaleGmCast;

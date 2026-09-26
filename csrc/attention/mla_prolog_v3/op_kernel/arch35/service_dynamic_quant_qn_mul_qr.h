@@ -73,7 +73,7 @@ __aicore__ inline void DynamicQuantMultiRow(const GlobalTensor<O> &outputGm, con
     }
 }
 
-template <typename T, typename C>
+template <typename T, typename C, bool DcpC8 = false>
 __aicore__ inline void
 MulQr(const GlobalTensor<T> &outputGmRope, const GlobalTensor<T> &inputGmRope, LocalTensor<T> outputLocalRope,
       const LocalTensor<T> &qrInputLocal, const LocalTensor<C> &qrFp32Local, const LocalTensor<C> &reciprocalLocal,
@@ -114,7 +114,7 @@ MulQr(const GlobalTensor<T> &outputGmRope, const GlobalTensor<T> &inputGmRope, L
 
         Cast(qrFp32Local, qrInputLocal[inputLocalRopeOffset], RoundMode::CAST_NONE, computeSizeRope);
         PipeBarrier<PIPE_V>();
-        MulQrVF(qrFp32Local, qrFp32Local, dequantScaleBrcbLocal, quantScaleCkvRope, computeSizeRope, computeBlockAlign);
+        MulQrVF<C, DcpC8>(qrFp32Local, qrFp32Local, dequantScaleBrcbLocal, quantScaleCkvRope, computeSizeRope, computeBlockAlign);
         Cast(outputLocalRope, qrFp32Local, RoundMode::CAST_RINT, computeSizeRope);
         PipeBarrier<PIPE_V>();
 
@@ -148,7 +148,7 @@ MulQr(const GlobalTensor<T> &outputGmRope, const GlobalTensor<T> &inputGmRope, L
  * @param colRope
  * @param qrOutputStrideRope 描述rope处理后的输出位置
  */
-template <typename T, typename C, typename O>
+template <typename T, typename C, typename O, bool DcpC8 = false>
 __aicore__ inline void DynamicQuantQnWithMulQr(
     // Dynamic Quant With MulQr 输出
     const GlobalTensor<C> &scaleOutputGm, const GlobalTensor<O> &outputGm, const GlobalTensor<T> &outputGmRope,
@@ -224,7 +224,7 @@ __aicore__ inline void DynamicQuantQnWithMulQr(
     DataCopyPad(scaleOutputGm, scaleBrcb, scaleOutCopyParams);
 
     // qr rope 后的乘法
-    MulQr(outputGmRope, inputGmRope, outputLocalRope, qrInputLocal, qrFp32Local, reciprocalLocal, scaleBrcb, row,
+    MulQr<T, C, DcpC8>(outputGmRope, inputGmRope, outputLocalRope, qrInputLocal, qrFp32Local, reciprocalLocal, scaleBrcb, row,
           colRope, subRowRope, qrOutputStrideRope, quantScaleCkvRope, MUL_QR_INPUT_COPY_READY, MUL_QR);
 
     SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);

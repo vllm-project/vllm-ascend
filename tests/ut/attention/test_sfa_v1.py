@@ -526,7 +526,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
         with (
             patch(
-                "torch.ops._C_ascend.npu_mla_prolog_v3_k3",
+                "torch.ops._C_ascend.npu_mla_prolog_v3",
                 create=True,
                 side_effect=AssertionError("C8 per-tile must use CANN's MLAPO v3"),
             ),
