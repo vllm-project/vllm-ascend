@@ -220,10 +220,14 @@ public:
         uint64_t ubOffset = 0;
         uint64_t idx = batchBegin;
         for (uint64_t k = 0; k < batchRows; ++k) {
-            uint64_t linearIndex = static_cast<uint64_t>(indicesLocal_.GetValue(idx));
-            uint64_t gmOut = ResolveOutOffset<isViewStride0>(linearIndex, scatterLength_, firstDimStrideRows_,
-                                                             varStride0Elements_, 0);
-            DataCopyPad(outputGm_[gmOut], buf[ubOffset], pout);
+            int64_t linearIndex = static_cast<int64_t>(indicesLocal_.GetValue(idx));
+            // Compressor metadata pads unused rows with a negative linear
+            // index. Match the no-sort path and leave the cache untouched.
+            if (linearIndex >= 0) {
+                uint64_t gmOut = ResolveOutOffset<isViewStride0>(static_cast<uint64_t>(linearIndex), scatterLength_,
+                                                                 firstDimStrideRows_, varStride0Elements_, 0);
+                DataCopyPad(outputGm_[gmOut], buf[ubOffset], pout);
+            }
             ubOffset += slotElements_;
             ++idx;
         }
@@ -235,6 +239,9 @@ public:
         uint64_t srcBase = process * indexTileLength_;
         for (uint64_t i = 0; i < rows; ++i) {
             int64_t linearIndex = static_cast<int64_t>(indicesLocal_.GetValue(i));
+            if (linearIndex < 0) {
+                continue;
+            }
             uint64_t srcRow = srcBase + i;
             DataCopyPadExtParams<T> pad{true, 0, 0, 0};
             for (uint64_t s = 0; s < scatterTileNum_; ++s) {
