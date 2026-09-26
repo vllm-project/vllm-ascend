@@ -29,6 +29,9 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import (
+    pool_worker as pool_worker_module,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LayerTransferTask,
@@ -2384,6 +2387,51 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         keys = worker.m_store.batch_alloc.call_args.args[0]
         self.assertEqual(len(keys), 4)
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [101, 102, 103, 104])
+
+    def test_alloc_gvas_for_save_converts_each_hash_once(self):
+        worker = self._make_worker()
+        worker.m_store.batch_alloc.return_value = [101, 102, 103, 104]
+        request = self._make_request()
+
+        original = pool_worker_module.block_hash_to_str
+        calls = []
+
+        def counting(block_hash):
+            calls.append(block_hash)
+            return original(block_hash)
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.block_hash_to_str",
+            side_effect=counting,
+        ):
+            worker._alloc_gvas_for_save([request])
+
+        self.assertEqual(calls, ["h0", "h1", "h2", "h3"])
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [101, 102, 103, 104])
+
+    def test_alloc_gvas_for_save_converts_each_hash_once_with_cached_prefix(self):
+        worker = self._make_worker()
+        for hash_str, gva in (("h0", 201), ("h1", 202)):
+            worker._allocated_gvas[worker._make_layerwise_full_key(0, hash_str)] = gva
+        worker.m_store.batch_is_exist.return_value = [1, 1]
+        worker.m_store.batch_alloc.return_value = [203, 204]
+        request = self._make_request()
+
+        original = pool_worker_module.block_hash_to_str
+        calls = []
+
+        def counting(block_hash):
+            calls.append(block_hash)
+            return original(block_hash)
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.block_hash_to_str",
+            side_effect=counting,
+        ):
+            worker._alloc_gvas_for_save([request])
+
+        self.assertEqual(calls, ["h0", "h1", "h2", "h3"])
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [0, 0, 203, 204])
 
     def test_process_save_for_layer_batch_splits_masked_runs(self):
         worker = self._make_worker()

@@ -1621,19 +1621,18 @@ class KVPoolWorker:
                 # Only a leading run of already-allocated blocks is skipped so
                 # the readable-blob write failure semantics stay unchanged.
                 allocated_prefix = 0
-                for block_idx in candidate_blocks:
-                    key = self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[block_idx]))
+                for key in candidate_keys:
                     if key in self._allocated_gvas:
                         allocated_prefix += 1
                     else:
                         break
                 transfer_blocks = candidate_blocks[allocated_prefix:]
+                transfer_keys = candidate_keys[allocated_prefix:]
 
                 block_gvas: list[int] = []
                 new_keys: list[str] = []
                 new_positions: list[int] = []
-                for blk_idx in transfer_blocks:
-                    key = self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[blk_idx]))
+                for key in transfer_keys:
                     cached = self._allocated_gvas.get(key)
                     if cached is not None:
                         block_gvas.append(cached)
