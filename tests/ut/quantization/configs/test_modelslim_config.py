@@ -563,6 +563,66 @@ class TestGetCacheScaleMapper(TestBase):
             "model.layers.0.attn.v_cache_offset",
         )
 
+    @staticmethod
+    def _mxfp8_dtype():
+        # C8-MXFP is enabled with --kv-cache-dtype mxfp8; the config property
+        # reads the current vllm config, which tests must provide.
+        return patch(
+            "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config_or_none",
+            return_value=SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="mxfp8")),
+        )
+
+    def test_mxfp_c8_recipe_detected_from_per_layer_quant_type(self):
+        # Newer ModelSlim checkpoints drop the model-wide kv_cache_type and
+        # state the recipe per layer instead; only full-attention layers of a
+        # hybrid model carry one. The recipe is detected, but the switch is
+        # the dtype: without it the config stays off.
+        config = AscendModelSlimConfig(
+            {
+                "model.layers.3.self_attn.quant_type": "QK_MXFP8_DYNAMIC_V_MXFP8_PER_CHANNEL",
+                "model.layers.0.linear_attn.quant_type": "W8A8_DYNAMIC",
+            }
+        )
+        self.assertTrue(config._has_mxfp_c8_recipe)
+        self.assertFalse(config.enable_mxfp_c8_quant)
+
+        with self._mxfp8_dtype():
+            self.assertTrue(config.enable_mxfp_c8_quant)
+            mapper = config.get_cache_scale_mapper()
+        self.assertEqual(
+            mapper._map_name("model.layers.3.self_attn.fa_v.scale"),
+            "model.layers.3.self_attn.attn.v_cache_scale",
+        )
+
+    def test_mxfp_c8_stands_fa_quant_down(self):
+        # Both recipes declared for the same layer: MXFP8 has to win, or the
+        # FAKQuant regex renames fa_v.scale into an MLA submodule a dense model
+        # does not have and the scale is silently dropped.
+        config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "K_DYNAMIC_V_STATIC_MXFP8_PER_CHANNEL",
+                "fa_quant_type": "FAKQuant",
+                "model.layers.3.self_attn.fa_k.scale": "FAKQuant",
+            }
+        )
+        self.assertTrue(config._has_mxfp_c8_recipe)
+
+        with self._mxfp8_dtype():
+            mapper = config.get_cache_scale_mapper()
+            self.assertFalse(config.enable_fa_quant)
+            self.assertEqual(
+                mapper._map_name("model.layers.3.self_attn.fa_v.scale"),
+                "model.layers.3.self_attn.attn.v_cache_scale",
+            )
+            # K is quantized dynamically here, so its checkpoint scale has no
+            # parameter to land on and must be declared ignorable instead.
+            self.assertEqual(
+                mapper._map_name("model.layers.3.self_attn.fa_k.scale"),
+                "model.layers.3.self_attn.fa_k.scale",
+            )
+            for suffix in (".fa_k.scale", ".fa_q.scale", ".fa_k.offset"):
+                self.assertIn(suffix, config._ignore_unexpected_suffixes)
+
     def test_fa_quant_returns_mapper(self):
         config = AscendModelSlimConfig(
             {

@@ -26,6 +26,10 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+from vllm_ascend.attention.attention_c8_mxfp import (
+    AscendC8MXFPAttentionBackendImpl,
+    mxfp_v_scale_cache_shape,
+)
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import (
@@ -2835,6 +2839,137 @@ class TestKVPPExecute(unittest.TestCase):
                 self.assertEqual(
                     events, ([("prepare", expected)] if computed is not None else []) + ["forward", "complete"]
                 )
+
+
+class TestC8MXFPVScaleCacheFill(unittest.TestCase):
+    """The static V scale is written at KV cache setup, not in forward.
+
+    Filling it lazily during attention meant the write could be recorded into
+    an ACL graph instead of executed, which left the draft model's V scale at
+    zero and collapsed MTP acceptance. Doing it here happens before any
+    capture, replay or request, so no execution order can skip it.
+    """
+
+    NUM_BLOCKS = 2
+    NUM_KV_HEADS = 2
+    BLOCK_SIZE = 128
+    HEAD_DIM = 64
+
+    def _runner(self, layers):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.compilation_config = SimpleNamespace(static_forward_context=layers)
+        return runner
+
+    def _c8_layer(self):
+        layer = SimpleNamespace(
+            v_cache_scale=torch.arange(self.NUM_KV_HEADS * self.HEAD_DIM, dtype=torch.int32)
+            .remainder(251)
+            .to(torch.uint8),
+            impl=object.__new__(AscendC8MXFPAttentionBackendImpl),
+        )
+        return layer
+
+    def _c8_cache(self):
+        v_scale = torch.zeros(
+            mxfp_v_scale_cache_shape(self.NUM_BLOCKS, self.BLOCK_SIZE, self.NUM_KV_HEADS, self.HEAD_DIM),
+            dtype=torch.uint8,
+        )
+        return (MagicMock(), MagicMock(), MagicMock(), v_scale)
+
+    def test_every_c8_mxfp_layer_is_filled(self):
+        layers = {f"layer.{i}": self._c8_layer() for i in range(3)}
+        kv_caches = {name: self._c8_cache() for name in layers}
+        self._runner(layers)._fill_c8_mxfp_v_scale_caches(kv_caches)
+        for name, layer in layers.items():
+            self.assertEqual(
+                kv_caches[name][3][0, :, :, 0, :, 0].reshape(-1).tolist(),
+                layer.v_cache_scale.tolist(),
+            )
+
+    def test_other_backends_are_left_alone(self):
+        # Non-C8 layers hand out plain (k, v) pairs; indexing them as a
+        # four-tuple would be the bug, so they must not be touched at all.
+        layers = {"plain": SimpleNamespace(impl=object())}
+        kv_caches = {"plain": (MagicMock(), MagicMock())}
+        self._runner(layers)._fill_c8_mxfp_v_scale_caches(kv_caches)
+
+    def test_a_layer_without_a_forward_context_entry_is_skipped(self):
+        self._runner({})._fill_c8_mxfp_v_scale_caches({"stray": (MagicMock(), MagicMock())})
+
+    def test_cache_setup_hands_back_a_filled_cache(self):
+        # The wiring, not just the helper: nothing downstream of
+        # initialize_kv_cache_tensors fills this cache, so if the call site
+        # ever goes away the scales are zero for the life of the process.
+        layers = {"layer.0": self._c8_layer()}
+        kv_caches = {"layer.0": self._c8_cache()}
+        runner = self._runner(layers)
+        runner.shared_kv_cache_layers = {}
+        runner.kv_caches = []
+        runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
+        with (
+            patch.object(NPUModelRunner, "_allocate_kv_cache_tensors", return_value={}),
+            patch.object(NPUModelRunner, "_reshape_kv_cache_tensors", return_value=kv_caches),
+            patch("vllm.v1.worker.utils.bind_kv_cache"),
+        ):
+            returned = runner.initialize_kv_cache_tensors(MagicMock())
+        self.assertEqual(
+            returned["layer.0"][3][0, :, :, 0, :, 0].reshape(-1).tolist(),
+            layers["layer.0"].v_cache_scale.tolist(),
+        )
+
+
+class TestCopyKVCacheBlocksByLayerViews(unittest.TestCase):
+    """CoW copies take scheduler block ids; hybrid attention views do not.
+
+    A hybrid attention cache is reshaped into kernel blocks, so scheduler
+    block ``b`` owns rows ``[b * scale, (b + 1) * scale)`` of the view. Using
+    the scheduler id as a row index copies the wrong rows and, worse, lands
+    the write inside a block that some other request may own.
+    """
+
+    NUM_BLOCKS = 4
+    SCALE = 2  # kernel blocks per scheduler block
+
+    def _runner(self, kv_caches):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.device = torch.device("cpu")
+        runner.kv_cache_config = SimpleNamespace(num_blocks=self.NUM_BLOCKS)
+        runner.kv_caches = kv_caches
+        return runner
+
+    @staticmethod
+    def _rows(num_rows, width, dtype=torch.uint8):
+        # Row r is filled with r + 1, so every row is recognisable and nonzero.
+        rows = torch.arange(1, num_rows + 1, dtype=torch.uint8).repeat_interleave(width).view(num_rows, width)
+        return rows.view(dtype) if dtype != torch.uint8 else rows
+
+    def test_kernel_block_views_copy_the_whole_scheduler_block(self):
+        num_rows = self.NUM_BLOCKS * self.SCALE
+        key = self._rows(num_rows, 8, torch.float8_e4m3fn)
+        k_scale = self._rows(num_rows, 4)
+        before = k_scale.clone()
+        self._runner([(key, k_scale)])._copy_kv_cache_blocks_by_layer_views([(1, 3)])
+        for tensor in (key.view(torch.uint8), k_scale):
+            # Scheduler block 3 -> rows 6, 7 now mirror block 1 -> rows 2, 3.
+            self.assertEqual(tensor[6:8, 0].tolist(), [3, 4])
+        # Nothing outside the destination block moved; row 3 in particular
+        # belongs to block 1, which a row-indexed copy would have overwritten.
+        self.assertTrue(torch.equal(k_scale[:6], before[:6]))
+
+    def test_block_indexed_views_are_copied_by_scheduler_id(self):
+        # Recurrent-state caches keep one row per scheduler block.
+        conv = self._rows(self.NUM_BLOCKS, 4)
+        ssm = self._rows(self.NUM_BLOCKS, 6)
+        self._runner([[conv, ssm]])._copy_kv_cache_blocks_by_layer_views([(1, 3)])
+        for tensor in (conv, ssm):
+            self.assertEqual(tensor[:, 0].tolist(), [1, 2, 3, 2])
+
+    def test_mixed_layers_each_use_their_own_scale(self):
+        key = self._rows(self.NUM_BLOCKS * self.SCALE, 8)
+        ssm = self._rows(self.NUM_BLOCKS, 6)
+        self._runner([(key,), [ssm]])._copy_kv_cache_blocks_by_layer_views([(0, 2), (1, 3)])
+        self.assertEqual(key[:, 0].tolist(), [1, 2, 3, 4, 1, 2, 3, 4])
+        self.assertEqual(ssm[:, 0].tolist(), [1, 2, 1, 2])
 
 
 if __name__ == "__main__":

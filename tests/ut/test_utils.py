@@ -825,6 +825,111 @@ class TestIsRlWeightUpdateEnabled(TestBase):
             self.assertTrue(utils.is_rl_weight_update_enabled(self._vllm_config(SimpleNamespace(backend="npu_ipc"))))
 
 
+class TestRefreshBlockSizeC8MXFP(TestBase):
+    """C8-MXFP block sizing, dense vs. hybrid (recurrent state + full attention).
+
+    Hybrid pools share one page size across the attention and recurrent-state
+    groups. Pinning the C8 attention block to the 512-token QFA kernel block
+    left it padded up to a page sized for BF16 K/V, so a page that holds 2048
+    BF16 tokens held 512 FP8 tokens: a quarter of the BF16 capacity from a
+    cache that should roughly double it.
+    """
+
+    # Qwen3.8-2.4T at TP8: GDN conv (4, 2560) bf16 + ssm (16, 128, 128) fp32,
+    # one 256-dim KV head per rank.
+    CONV_SHAPE, SSM_SHAPE = (4, 2560), (16, 128, 128)
+    CONV_BYTES, SSM_BYTES = 4 * 2560 * 2, 16 * 128 * 128 * 4
+    NUM_KV_HEADS, HEAD_SIZE = 1, 256
+
+    def _config(self, *, is_hybrid, ssm_shape=None, block_size=2048, **cache_overrides):
+        ssm_shape = ssm_shape or self.SSM_SHAPE
+        model_cls = SimpleNamespace(
+            get_mamba_state_shape_from_config=lambda _cfg: (self.CONV_SHAPE, ssm_shape),
+            get_mamba_state_dtype_from_config=lambda _cfg: (torch.bfloat16, torch.float32),
+        )
+        cache_config = SimpleNamespace(
+            block_size=block_size,
+            cache_dtype="mxfp8",
+            # What the hybrid config hook leaves behind: it runs before the
+            # quant config exists, so it sizes everything for BF16 K/V.
+            mamba_page_size_padded=2048 * 2 * self.HEAD_SIZE * 2 + self.CONV_BYTES,
+            mamba_block_size=32768,
+            mamba_cache_mode="none",
+            enable_prefix_caching=False,
+        )
+        for name, value in cache_overrides.items():
+            setattr(cache_config, name, value)
+        model_config = SimpleNamespace(
+            is_hybrid=is_hybrid,
+            use_mla=False,
+            architecture="FakeHybridForCausalLM",
+            get_num_kv_heads=lambda _parallel: self.NUM_KV_HEADS,
+            get_head_size=lambda: self.HEAD_SIZE,
+        )
+        vllm_config = SimpleNamespace(
+            cache_config=cache_config,
+            scheduler_config=SimpleNamespace(),
+            model_config=model_config,
+            parallel_config=SimpleNamespace(),
+            speculative_config=None,
+        )
+        return vllm_config, model_cls
+
+    def _refresh(self, vllm_config, model_cls):
+        with mock.patch(
+            "vllm.model_executor.models.ModelRegistry.resolve_model_cls",
+            return_value=(model_cls, "FakeHybridForCausalLM"),
+        ):
+            utils.refresh_block_size(vllm_config)
+        return vllm_config.cache_config
+
+    def test_dense_model_keeps_the_kernel_block_size(self):
+        cache_config = self._refresh(*self._config(is_hybrid=False, block_size=128))
+        self.assertEqual(cache_config.block_size, utils.A5_C8_MXFP_KV_CACHE_BLOCK_SIZE)
+
+    def test_hybrid_block_is_sized_from_fp8_bytes(self):
+        cache_config = self._refresh(*self._config(is_hybrid=True))
+        # FP8 K is one byte per element, so the block whose K payload equals
+        # one SSM state is twice the 2048 tokens BF16 gets from the same state.
+        self.assertEqual(cache_config.block_size, 4096)
+        self.assertEqual(cache_config.block_size * self.NUM_KV_HEADS * self.HEAD_SIZE, self.SSM_BYTES)
+        self.assertEqual(cache_config.block_size % utils.A5_C8_MXFP_KV_CACHE_BLOCK_SIZE, 0)
+
+    def test_hybrid_page_is_the_c8_page_plus_conv(self):
+        cache_config = self._refresh(*self._config(is_hybrid=True))
+        # K + V payloads plus their E8M0 scales (one byte per 32 elements).
+        c8_page = 2 * 4096 * self.NUM_KV_HEADS * (self.HEAD_SIZE + self.HEAD_SIZE // 32)
+        self.assertEqual(cache_config.mamba_page_size_padded, c8_page + self.CONV_BYTES)
+        # The point of the change: padding is the conv state, not 87% of the page.
+        self.assertLess(self.CONV_BYTES / cache_config.mamba_page_size_padded, 0.02)
+
+    def test_hybrid_overrides_a_user_block_size(self):
+        cache_config = self._refresh(*self._config(is_hybrid=True, block_size=512))
+        self.assertEqual(cache_config.block_size, 4096)
+
+    def test_hybrid_align_mode_keeps_mamba_block_in_step(self):
+        cache_config = self._refresh(
+            *self._config(
+                is_hybrid=True,
+                enable_prefix_caching=True,
+                mamba_cache_mode="align",
+                mamba_block_size=2048,
+            )
+        )
+        self.assertEqual(cache_config.mamba_block_size, cache_config.block_size)
+
+    def test_hybrid_without_align_leaves_mamba_block_alone(self):
+        cache_config = self._refresh(*self._config(is_hybrid=True))
+        self.assertEqual(cache_config.mamba_block_size, 32768)
+
+    def test_hybrid_state_that_does_not_fill_whole_kernel_blocks_raises(self):
+        # Qwen3.8-27B at TP16: 3 value heads -> 768 FP8 tokens, 1.5 kernel
+        # blocks. The K section could not line up with the SSM section, so
+        # block ids would alias across the two groups; refuse to start.
+        with self.assertRaises(ValueError):
+            self._refresh(*self._config(is_hybrid=True, ssm_shape=(3, 128, 128)))
+
+
 @pytest.fixture
 def physical_device_lookup():
     with mock.patch("vllm.platforms.current_platform") as platform:

@@ -1288,6 +1288,83 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     return hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
 
 
+# C8_MXFP (FP8 KV + E8M0 scales) on Ascend A5 uses 512-token kernel blocks for
+# the QFA path (the QFA D=256 requirement doc allows block sizes 512/1024).
+A5_C8_MXFP_KV_CACHE_BLOCK_SIZE = 512
+
+# Enabled with ``--kv-cache-dtype mxfp8``, like the other Ascend C8 KV cache
+# flavors. The ModelSlim checkpoint recipe (fa_v.scale weights) is loaded when
+# present; it is not the switch.
+C8_MXFP_KV_CACHE_DTYPE = "mxfp8"
+
+
+def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
+    return vllm_config.cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+
+
+def _refresh_hybrid_c8_mxfp_block_size(vllm_config: VllmConfig) -> None:
+    """Size a hybrid C8-MXFP cache (recurrent state + full attention) from FP8 bytes.
+
+    Hybrid pools share one page size between the attention and recurrent-state
+    groups, and the shared buffer is sectioned so one attention block's K
+    payload equals one SSM state. The hybrid config hook runs before the
+    quant config exists and sizes both for BF16 K/V; redo its sizing with
+    C8 bytes. The block grows to the FP8 token count of one SSM state, the
+    page becomes that block's K/V + scale payloads plus the conv state, and
+    the backend still reads 512-token kernel blocks (the runner splits
+    scheduler blocks into them).
+    """
+    from vllm.model_executor.models import ModelRegistry
+    from vllm.utils.torch_utils import get_dtype_size
+
+    cache_config = vllm_config.cache_config
+    model_config = vllm_config.model_config
+
+    model_cls, _ = ModelRegistry.resolve_model_cls(model_config.architecture, model_config=model_config)
+    state_sizes = [
+        math.prod(shape) * get_dtype_size(dtype)
+        for shape, dtype in zip(
+            model_cls.get_mamba_state_shape_from_config(vllm_config),
+            model_cls.get_mamba_state_dtype_from_config(vllm_config),
+        )
+    ]
+    ssm_page_size = max(state_sizes)
+    conv_page_size = sum(state_sizes) - ssm_page_size
+
+    num_kv_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+    head_size = model_config.get_head_size()
+    kv_dtype_size = get_dtype_size(torch.float8_e4m3fn)
+    block_size, remainder = divmod(ssm_page_size, num_kv_heads * head_size * kv_dtype_size)
+    if remainder or block_size % A5_C8_MXFP_KV_CACHE_BLOCK_SIZE:
+        # A partial kernel block would alias block ids across the two groups.
+        raise ValueError(
+            "C8_MXFP cannot align the hybrid KV cache: one SSM state "
+            f"({ssm_page_size} bytes) must hold a whole number of "
+            f"{A5_C8_MXFP_KV_CACHE_BLOCK_SIZE}-token FP8 K blocks "
+            f"(num_kv_heads={num_kv_heads}, head_size={head_size}). "
+            "Use a tensor parallel size that keeps it aligned."
+        )
+
+    if cache_config.block_size != block_size:
+        logger.info(
+            "Hybrid C8_MXFP KV cache requires block_size=%s (%s QFA kernel blocks of %s tokens); "
+            "overriding block_size from %s.",
+            block_size,
+            block_size // A5_C8_MXFP_KV_CACHE_BLOCK_SIZE,
+            A5_C8_MXFP_KV_CACHE_BLOCK_SIZE,
+            cache_config.block_size,
+        )
+        cache_config.block_size = block_size
+    # One C8 page = FP8 K/V payloads plus both E8M0 scale caches (one scale
+    # byte per 32 data bytes). Inlined here because the shared layout module
+    # lives with the attention backend, which utils cannot import.
+    kv_payload_bytes = block_size * num_kv_heads * 2 * head_size * kv_dtype_size
+    scale_bytes = num_kv_heads * block_size * 2 * head_size // 32
+    cache_config.mamba_page_size_padded = kv_payload_bytes + scale_bytes + conv_page_size
+    if cache_config.enable_prefix_caching and cache_config.mamba_cache_mode == "align":
+        cache_config.mamba_block_size = block_size
+
+
 def refresh_block_size(vllm_config):
     """
     Refresh the block size in cache config.
@@ -1312,6 +1389,21 @@ def refresh_block_size(vllm_config):
 
     if cache_config.block_size is None:
         cache_config.block_size = 128
+
+    # Must run before the hybrid early-return below: the hybrid config hook
+    # cannot see the quant config, so C8-MXFP models (dense and hybrid) are
+    # sized here.
+    if is_c8_mxfp_kv_quant(vllm_config):
+        if model_config is not None and model_config.is_hybrid and not model_config.use_mla:
+            _refresh_hybrid_c8_mxfp_block_size(vllm_config)
+        elif cache_config.block_size != A5_C8_MXFP_KV_CACHE_BLOCK_SIZE:
+            logger.info(
+                "Ascend A5 with C8_MXFP KV cache requires block_size=%s; overriding block_size from %s.",
+                A5_C8_MXFP_KV_CACHE_BLOCK_SIZE,
+                cache_config.block_size,
+            )
+            cache_config.block_size = A5_C8_MXFP_KV_CACHE_BLOCK_SIZE
+        return
 
     if not scheduler_config or not model_config:
         return
