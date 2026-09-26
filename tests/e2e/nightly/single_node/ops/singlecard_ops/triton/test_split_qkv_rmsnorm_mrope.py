@@ -3,6 +3,14 @@ import gc
 import pytest
 import torch
 
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+# Before running all the test cases in this file, the hardware attributes of NPU
+# are automatically initialized to prevent errors reported by the underlying operators.
+@pytest.fixture(autouse=True)
+def setup_device_properties_for_ut():
+    init_device_properties_triton()
+
 NUM_TOKENS = [1, 4096]
 NUM_QKV_HEADS = [(2, 1), (16, 2)]
 HEAD_SIZES = [128, 256]
