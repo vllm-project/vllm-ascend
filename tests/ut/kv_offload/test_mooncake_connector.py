@@ -83,6 +83,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
+    group_kernel_block_size,
+    group_packing_factor,
     resolve_remote_layer_idx,
     split_if_not_byte_contiguous,
     string_to_int64_hash,
@@ -4490,13 +4492,17 @@ class TestMooncakeConnectorWorkerKernelBlockIds(unittest.TestCase):
         return worker
 
     @staticmethod
-    def _group_spec(spec_type: str, layer_idx: int, group_id: int | None = None) -> dict:
+    def _group_spec(
+        spec_type: str, layer_idx: int, group_id: int | None = None, spec_block_size: int | None = None
+    ) -> dict:
         spec: dict[str, Any] = {
             "kv_cache_spec_type": spec_type,
             "layer_names": [f"layer{layer_idx}"],
         }
         if group_id is not None:
             spec["kv_cache_group_id"] = group_id
+        if spec_block_size is not None:
+            spec["kv_cache_spec_block_size"] = spec_block_size
         return spec
 
     def _make_meta(
@@ -4717,6 +4723,73 @@ class TestMooncakeConnectorWorkerKernelBlockIds(unittest.TestCase):
         self.assertEqual(local_cp_size, 1)
         self.assertEqual(remote_cp_size, 1)
         self.assertEqual(r_blk, 1)
+
+    def test_group_kernel_block_size_uses_group_page_not_lcm(self):
+        # The worker's block_size is the hybrid LCM (1536), but a sliding-window
+        # draft group is its own 128-token page. The group page must win.
+        spec = self._group_spec("SlidingWindowSpec", 0, 0, spec_block_size=128)
+        self.assertEqual(group_kernel_block_size(spec, [0], 1536, [[1]]), 128)
+        # Tensor subdivision applies on top of the group's own page (dspark:
+        # a 1024-token group page subdivided 8x into 128-token kernels).
+        dspark = self._group_spec("SlidingWindowSpec", 0, 0, spec_block_size=1024)
+        self.assertEqual(group_kernel_block_size(dspark, [0], 1024, [[8]]), 128)
+        # Legacy metadata without the field keeps the historical LCM fallback.
+        legacy = self._group_spec("SlidingWindowSpec", 0, 0)
+        self.assertEqual(group_kernel_block_size(legacy, [0], 1536, [[1]]), 1536)
+
+    def test_group_packing_factor_one_to_one_when_local_page_matches_remote(self):
+        # Local 128-token page == remote 128-token block: no packing, even
+        # though the worker's LCM is 1536 (DFlash2 draft group).
+        spec = self._group_spec("SlidingWindowSpec", 0, 0, spec_block_size=128)
+        self.assertEqual(group_packing_factor(0, spec, [0], 1536, [[1]], (128,)), 1)
+        # A genuinely larger local page still packs the smaller remote blocks.
+        big = self._group_spec("SlidingWindowSpec", 0, 0, spec_block_size=1024)
+        self.assertEqual(group_packing_factor(0, big, [0], 1024, [[1]], (128,)), 8)
+
+    def test_group_page_smaller_than_lcm_stays_one_to_one(self):
+        # DFlash2: a 128-token sliding-window draft group next to 1536-token
+        # full-attention groups. The worker's global block_size is the LCM
+        # (1536), so the old code "packed" 12 remote 128-token blocks into one
+        # 1536-token kernel and expanded the local id 12x. The group's own page
+        # keeps the mapping one-to-one.
+        worker = self._make_worker(1536, [[1]])
+        spec = self._group_spec("SlidingWindowSpec", 1, 1, spec_block_size=128)
+        meta = self._make_meta(
+            local_block_ids=([0], [100]),
+            remote_block_ids=([0], [5]),
+            remote_block_size=1536,
+            remote_block_sizes=(1536, 128),
+        )
+        local, remote = worker._get_kernel_block_ids([1], meta, 1, spec)
+        self.assertEqual(local, [100])
+        self.assertEqual(remote, [5])
+
+    def test_group_page_smaller_than_lcm_skips_prefix_at_page_granularity(self):
+        # The prefix skip must use the group's 128-token page: 256 computed
+        # tokens skip 2 remote pages, not 0 (256 // 1536). Two local logical
+        # blocks stay two kernel blocks instead of 12x-expanding to fill the
+        # 1536-token packing slots.
+        worker = self._make_worker(1536, [[1]])
+        spec = self._group_spec("SlidingWindowSpec", 1, 1, spec_block_size=128)
+        meta = self._make_meta(
+            local_block_ids=([0], [0, 1]),
+            remote_block_ids=([0], [10, 11, 12, 13, 14, 15]),
+            num_computed_tokens=256,
+            remote_block_size=1536,
+            remote_block_sizes=(1536, 128),
+        )
+        local, remote = worker._get_kernel_block_ids([1], meta, 1, spec)
+        self.assertEqual(local, [0, 1])
+        self.assertEqual(remote, [12, 13])
+
+    def test_serialize_kv_group_spec_records_group_page_size(self):
+        spec = FullAttentionSpec(block_size=1536, num_kv_heads=2, head_size=128, dtype=torch.float16)
+        serialized = MooncakeConnectorWorker._serialize_kv_group_spec(
+            group_spec=MagicMock(),
+            layer_names=["layer0"],
+            kv_cache_spec=spec,
+        )
+        self.assertEqual(serialized["kv_cache_spec_block_size"], 1536)
 
 
 if __name__ == "__main__":

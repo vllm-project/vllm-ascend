@@ -2373,6 +2373,14 @@ class MooncakeConnectorWorker:
         }
         if kv_cache_group_id is not None:
             serialized["kv_cache_group_id"] = kv_cache_group_id
+        # This group's own page size in tokens. ``cache_config.block_size`` is
+        # the hybrid LCM across groups (e.g. 1536 for Mamba-aligned layouts),
+        # not this group's page, so kernel-size and packing resolution must use
+        # the spec (e.g. a 128-token sliding-window draft group next to
+        # 1536-token full-attention groups). Unset/0 falls back to the LCM.
+        spec_block_size = getattr(kv_cache_spec, "block_size", None)
+        if isinstance(spec_block_size, int) and spec_block_size > 0:
+            serialized["kv_cache_spec_block_size"] = spec_block_size
         if isinstance(kv_cache_spec, MambaSpec):
             serialized["shapes"] = [list(shape) for shape in kv_cache_spec.shapes]
             serialized["dtype_sizes"] = [
@@ -2988,7 +2996,7 @@ class MooncakeConnectorWorker:
 
         # kernel_size is the shared (P==D) granularity; remote_scale is derived from it.
         local_scale = self._get_kernel_block_scale(layer_indices)
-        kernel_size = self.block_size // local_scale
+        kernel_size = group_kernel_block_size(group_spec, layer_indices, self.block_size, self.block_size_scale)
         # Hybrid layouts mix physical block sizes across groups (e.g. a 128-token
         # sliding-window group next to 1024-token full-attention groups), so the
         # scalar remote_block_size is only a fallback for legacy metadata.
@@ -3064,7 +3072,7 @@ class MooncakeConnectorWorker:
             if group_spec["kv_cache_spec_type"] == "MambaSpec":
                 continue
             local_scale = self._get_kernel_block_scale(layer_indices)
-            kernel_size = self.block_size // local_scale
+            kernel_size = group_kernel_block_size(group_spec, layer_indices, self.block_size, self.block_size_scale)
             assert remote_block_size % kernel_size == 0, (
                 f"remote_block_size({remote_block_size}) not divisible by kernel_size({kernel_size})"
             )
@@ -4377,6 +4385,30 @@ def ensure_zmq_recv(
                 raise RuntimeError(f"Failed to receive data after {max_retries} retries: {e}")
 
 
+def group_kernel_block_size(
+    group_spec: dict[str, Any],
+    layer_indices: list[int],
+    block_size: int,
+    block_size_scale: list[list[int]],
+) -> int:
+    """Token size of one local kernel block for a KV cache group.
+
+    ``block_size`` is the connector's global block size. Under a hybrid
+    (Mamba) layout it is the LCM across groups (e.g. 1536), so it is only a
+    fallback: each group carries its own page (a 128-token sliding-window
+    draft group next to 1536-token full-attention groups) in
+    ``kv_cache_spec_block_size``. ``block_size_scale`` then subdivides that
+    page into the tensor's kernel blocks (logical -> tensor expansion).
+    """
+    local_scale = 1
+    if layer_indices and layer_indices[0] < len(block_size_scale) and block_size_scale[layer_indices[0]]:
+        local_scale = block_size_scale[layer_indices[0]][0]
+    group_block_size = group_spec.get("kv_cache_spec_block_size")
+    if not isinstance(group_block_size, int) or group_block_size <= 0:
+        group_block_size = block_size
+    return group_block_size // local_scale
+
+
 def group_packing_factor(
     group_idx: int,
     group_spec: dict[str, Any],
@@ -4402,10 +4434,7 @@ def group_packing_factor(
     if not remote_block_sizes or kv_cache_group_id >= len(remote_block_sizes):
         return 1
     group_remote_size = remote_block_sizes[kv_cache_group_id]
-    local_scale = 1
-    if layer_indices and layer_indices[0] < len(block_size_scale) and block_size_scale[layer_indices[0]]:
-        local_scale = block_size_scale[layer_indices[0]][0]
-    kernel_size = block_size // local_scale
+    kernel_size = group_kernel_block_size(group_spec, layer_indices, block_size, block_size_scale)
     if group_remote_size < kernel_size and kernel_size % group_remote_size == 0:
         return kernel_size // group_remote_size
     return 1
