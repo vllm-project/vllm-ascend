@@ -1,5 +1,6 @@
 import importlib
 import math
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -249,6 +250,24 @@ class KVPoolScheduler:
         self.model_name = model_config.model.split("/")[-1]
 
         self.client: LookupKeyClient | None = None
+        # PERF-TUNE(3): cross-request block hit cache for the scheduler-side
+        # layerwise lookup. A block's all-rank presence only changes on save
+        # or eviction; cache it briefly so concurrent requests sharing a
+        # prefix skip the repeated batch_get_key_info RPCs. A cached False
+        # (miss) short-circuits the whole group.
+        #
+        # Asymmetry is deliberate: a stale miss only costs one extra RPC
+        # (the block was saved after we cached its absence), so miss
+        # entries may live for the full TTL. A stale hit is dangerous: an
+        # eviction after the entry was cached makes the scheduler report a
+        # prefix hit the worker can no longer load, and the forward pass
+        # already skipped recomputation. Hit entries therefore use a much
+        # shorter TTL so they only cover the same-step concurrent requests
+        # and cannot outlive an eviction by a meaningful margin.
+        self._lw_block_hit_cache: dict[tuple[int, str], tuple[bool, float]] = {}
+        self._lw_hit_cache_ttl = 30.0
+        self._lw_hit_cache_hit_ttl = 0.5
+        self._lw_hit_cache_max = 200_000
 
     def _get_or_create_request_tracker(self, req_id: str) -> RequestTracker:
         tracker = self._request_trackers.get(req_id)
@@ -461,21 +480,64 @@ class KVPoolScheduler:
                 0 if self.use_layerwise else min(num_computed_tokens // effective_block_size, len(group_block_hashes))
             )
             group_block_hashes = group_block_hashes[query_start_block:]
-            # Generate all-rank keys for each block hash
+            if not group_block_hashes:
+                continue
+
+            # PERF-TUNE(3): consume the cached prefix first. The hit check is
+            # a sequential prefix scan (stop at first miss), so blocks whose
+            # (group, hash) state is cached are resolved without any RPC.
+            hit_cache = self._lw_block_hit_cache
+            now = time.monotonic()
+            if len(hit_cache) > self._lw_hit_cache_max:
+                hit_cache.clear()
+            cached_hits = 0
+            first_uncached = len(group_block_hashes)
+            cached_miss = False
+            for i, bh in enumerate(group_block_hashes):
+                entry = hit_cache.get((group_id, block_hash_to_str(bh)))
+                if entry is None or entry[1] < now:
+                    first_uncached = i
+                    break
+                if entry[0]:
+                    cached_hits += 1
+                else:
+                    first_uncached = i
+                    cached_miss = True
+                    break
+
+            if cached_miss:
+                # Known-miss prefix block: the whole group resolves to the
+                # cached hit count with zero RPC.
+                hits_per_group.append((query_start_block + cached_hits) * effective_block_size)
+                continue
+
+            uncached_hashes = group_block_hashes[first_uncached:]
+            if not uncached_hashes:
+                hits_per_group.append((query_start_block + cached_hits) * effective_block_size)
+                continue
+
             keys_by_block = [
-                self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(bh)) for bh in group_block_hashes
+                self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(bh)) for bh in uncached_hashes
             ]
             if not keys_by_block:
                 continue
             block_hits = self._query_layerwise_block_hits(keys_by_block)
-            num_hit_blocks = 0
+            # PERF-TUNE(3): record every resolved block in the cache (True on
+            # hit, False on the first miss) so later requests skip these RPCs
+            # entirely. Misses keep the long TTL (stale miss == wasted RPC
+            # only); hits get the short TTL so an eviction cannot serve a
+            # stale hit beyond the same-step window.
+            for bh, hit in zip(uncached_hashes, block_hits):
+                ttl = self._lw_hit_cache_ttl if not hit else self._lw_hit_cache_hit_ttl
+                hit_cache[(group_id, block_hash_to_str(bh))] = (hit, now + ttl)
+            uncached_hit_blocks = 0
             for hit in block_hits:
                 if hit:
-                    num_hit_blocks += 1
+                    uncached_hit_blocks += 1
                 else:
                     break
 
-            hits_per_group.append((query_start_block + num_hit_blocks) * effective_block_size)
+            hits_per_group.append((query_start_block + cached_hits + uncached_hit_blocks) * effective_block_size)
 
         if not hits_per_group:
             logger.debug(
