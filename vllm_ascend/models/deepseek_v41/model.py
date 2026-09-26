@@ -85,7 +85,7 @@ from .engram.embedding import (
     preflight_engram_checkpoint,
 )
 from .engram.layer import AscendEngram
-from .engram.parallel import gather_engram_hashes, get_engram_dp_size
+from .engram.parallel import gather_engram_hashes, get_engram_dp_size, resolve_dp_shared_memory
 from .indexer import DeepseekV41Indexer
 
 
@@ -992,7 +992,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         # The table is INT8 with group-32 scales; whether it lives in host
         # memory is vLLM's EngramConfig choice.
         cpu_offload = engram_cpu_offload(vllm_config)
-        self.engram_dp_shared_memory = bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
+        # A node that holds one DP replica has nothing to share, so an explicit
+        # request resolves there to the plain TP-sharded table, before any table
+        # exists: the model and the embedding then read the same mode.
+        self.engram_dp_shared_memory = resolve_dp_shared_memory(
+            bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
+        )
         self.engram_layout = EngramLayout.from_config(config) if engram_enabled(config) else None
         if self.engram_layout is not None:
             # Complete head buckets per rank, laid out over TP and the

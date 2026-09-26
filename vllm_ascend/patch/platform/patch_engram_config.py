@@ -24,11 +24,8 @@ import importlib.util
 
 # Older vLLM builds have no Engram config or CLI entry to patch.
 if importlib.util.find_spec("vllm.config.engram") is not None:
-    import argparse
-    import json
     from dataclasses import asdict
 
-    import vllm.engine.arg_utils as arg_utils
     from pydantic import model_validator
     from vllm.config.engram import EngramConfig
     from vllm.config.utils import config
@@ -36,12 +33,9 @@ if importlib.util.find_spec("vllm.config.engram") is not None:
 
     @config
     class AscendEngramConfig(EngramConfig):
-        dp_shared_memory: bool = False
-
         @model_validator(mode="after")
         def _validate_shared_memory(self):
-            if self.dp_shared_memory and not self.cpu_offload:
-                raise ValueError("dp_shared_memory requires cpu_offload=True")
+            super()._validate_shared_memory()
             if self.dp_shared_memory and self.embedding_across_dp:
                 raise ValueError("dp_shared_memory cannot be combined with embedding_across_dp")
             return self
@@ -58,53 +52,28 @@ if importlib.util.find_spec("vllm.config.engram") is not None:
             super().verify_parallel_config(parallel_config)
             if self.embedding_across_dp:
                 raise ValueError("Ascend Engram does not support embedding_across_dp")
-            if self.dp_shared_memory and parallel_config.data_parallel_size <= 1:
-                raise ValueError("dp_shared_memory requires data_parallel_size > 1")
             tp = parallel_config.tensor_parallel_size
-            dp = parallel_config.data_parallel_size
+            # The DP dimension may span nodes: Engram shards and exchanges only
+            # inside the node-local EDP group that the distributed init derives
+            # from the physical placement, and it falls back to plain TP shards
+            # where a node holds a single replica. Whether those groups really
+            # are node-local is checked against the initialized groups when the
+            # table is built.
             if (
                 parallel_config.enable_elastic_ep
                 or tp not in (1, 2, 4, 8)
-                or dp < 1
-                or tp * dp > 16
+                or parallel_config.data_parallel_size < 1
                 or parallel_config.pipeline_parallel_size != 1
                 or parallel_config.prefill_context_parallel_size != 1
                 or parallel_config.decode_context_parallel_size != 1
-                or parallel_config.nnodes != 1
-                # External DP launches one engine per process, even on one node.
-                # Check physical co-location after the DP group is initialized.
-                or (not parallel_config.data_parallel_external_lb and parallel_config.data_parallel_size_local != dp)
             ):
-                raise ValueError(
-                    "Ascend Engram requires single-node TP=1/2/4/8 with at most 16 ranks, "
-                    "with all DP replicas local and PP=PCP=DCP=1."
-                )
+                raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=PCP=DCP=1.")
 
         def verify_load_config(self, load_config) -> None:
             if self.dp_shared_memory and load_config.load_format not in ("auto", "safetensors"):
                 raise ValueError("dp_shared_memory requires load_format auto or safetensors")
             if load_config.load_format not in ("auto", "safetensors", "dummy"):
                 raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors), or dummy weights.")
-
-    # 84030bbe's CLI TypeAdapter is built from the upstream config annotation.
-    # Select the Ascend subtype here so its backported field survives parsing.
-    arg_utils.EngramConfig = AscendEngramConfig
-    _get_kwargs = arg_utils.get_kwargs
-
-    def _get_ascend_kwargs(cls):
-        kwargs = _get_kwargs(cls)
-        if cls is VllmConfig:
-
-            def parse_engram(value):
-                try:
-                    return AscendEngramConfig(**json.loads(value))
-                except (TypeError, ValueError) as exc:
-                    raise argparse.ArgumentTypeError(str(exc)) from exc
-
-            kwargs["engram_config"]["type"] = arg_utils.optional_type(parse_engram)
-        return kwargs
-
-    arg_utils.get_kwargs = _get_ascend_kwargs
 
     _resolve_engram_config = VllmConfig._resolve_and_verify_engram_config
 
@@ -120,9 +89,5 @@ if importlib.util.find_spec("vllm.config.engram") is not None:
             elif getattr(model_config.hf_text_config, "engram_layer_ids", None):
                 self.engram_config = AscendEngramConfig()
         _resolve_engram_config(self)
-        if isinstance(self.engram_config, AscendEngramConfig):
-            if self.parallel_config.use_ubatching:
-                raise ValueError("Ascend Engram does not support DBO or microbatching")
-            self.engram_config.verify_load_config(self.load_config)
 
     VllmConfig._resolve_and_verify_engram_config = _resolve_and_verify_engram_config
