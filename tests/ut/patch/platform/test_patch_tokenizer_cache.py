@@ -344,7 +344,7 @@ def test_renderer_init_patch_attaches_the_cache_to_the_renderer_tokenizer(monkey
         assert _cache_for(renderer.tokenizer) is not None
         assert _cache_for(passed_in) is None
     finally:
-        _CopyingRenderer.__init__ = original_init
+        _CopyingRenderer.__init__ = original_init  # type: ignore[method-assign]
 
 
 def test_renderer_init_patch_is_inert_when_the_option_is_off(monkeypatch):
@@ -359,7 +359,7 @@ def test_renderer_init_patch_is_inert_when_the_option_is_off(monkeypatch):
         renderer = _CopyingRenderer(None, _FakeTokenizer())
         assert _cache_for(renderer.tokenizer) is None
     finally:
-        _CopyingRenderer.__init__ = original_init
+        _CopyingRenderer.__init__ = original_init  # type: ignore[method-assign]
 
 
 def test_chat_ids_returns_none_for_requests_that_opt_out_of_tokenizing():
@@ -423,7 +423,7 @@ def test_renderer_chat_patch_forwards_the_callers_keyword_arguments():
         assert second == first
         assert len(tokenizer.calls) == tokenized, "the repeat call must not re-tokenize"
     finally:
-        _KeywordOnlyRenderer._apply_chat_template = original
+        _KeywordOnlyRenderer._apply_chat_template = original  # type: ignore[method-assign]
 
 
 def test_hf_chat_patch_forwards_the_callers_template_kwargs():
