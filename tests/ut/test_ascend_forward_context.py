@@ -16,6 +16,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 @pytest.fixture(autouse=True)
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
+    monkeypatch.setattr(afc, "_reserved_mc2_mask", None)
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
@@ -243,6 +244,80 @@ def test_is_decode_only_node_false_without_recompute_scheduler(monkeypatch):
     )
 
     assert afc._is_decode_only_node(vllm_config) is False
+
+
+@pytest.mark.parametrize(
+    ("max_num_batched_tokens", "expected_mask_tokens"),
+    [(80, 80), (90, 96)],
+)
+def test_set_mc2_mask_aligns_capacity_to_tp(
+    monkeypatch,
+    max_num_batched_tokens,
+    expected_mask_tokens,
+):
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
+    vllm_config = _make_vllm_config(
+        tensor_parallel_size=8,
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
+
+    afc.set_mc2_mask(vllm_config, device="cpu")
+
+    assert afc.get_mc2_mask().shape == (expected_mask_tokens,)
+
+
+def test_forward_context_exposes_tp_aligned_mc2_mask(monkeypatch):
+    vllm_config = _make_vllm_config(
+        tensor_parallel_size=8,
+        max_num_batched_tokens=90,
+    )
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
+    afc.set_mc2_mask(vllm_config, device="cpu")
+
+    @contextmanager
+    def passthrough_context(*_args, **_kwargs):
+        yield
+
+    forward_context = SimpleNamespace(dp_metadata=None)
+    monkeypatch.setattr(afc, "set_current_vllm_config", passthrough_context)
+    monkeypatch.setattr(afc, "set_forward_context", passthrough_context)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+    monkeypatch.setattr(afc, "get_tensor_model_parallel_world_size", lambda: 8)
+    monkeypatch.setattr(afc, "get_dp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(afc, "has_layer_idx", lambda _model: False)
+    monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(afc, "_is_decode_only_node", lambda _config: False)
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _config: False)
+
+    moe_mod_name = "vllm_ascend.ops.fused_moe.moe_comm_method"
+    if moe_mod_name in sys.modules:
+        monkeypatch.setattr(sys.modules[moe_mod_name], "get_moe_comm_method", lambda _t: None)
+    else:
+        monkeypatch.setitem(
+            sys.modules,
+            moe_mod_name,
+            SimpleNamespace(get_moe_comm_method=lambda _t: None),
+        )
+
+    with afc.set_ascend_forward_context(
+        None,
+        vllm_config,
+        num_tokens=90,
+    ):
+        mc2_mask = forward_context.mc2_mask
+        assert forward_context.padded_num_tokens == 96
+        assert mc2_mask.shape == (96,)
+        assert mc2_mask[:90].all()
+        assert not mc2_mask[90:].any()
+
+
+def test_set_mc2_mask_clears_cached_mask_for_non_moe(monkeypatch):
+    monkeypatch.setattr(afc, "_reserved_mc2_mask", torch.ones(8, dtype=torch.bool))
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: False)
+
+    afc.set_mc2_mask(_make_vllm_config(), device="cpu")
+
+    assert afc.get_mc2_mask() is None
 
 
 def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):
