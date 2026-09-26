@@ -642,8 +642,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         global_input_tokens_local_experts_indices = None
         if self.num_local_experts > 1:
-            if num_global_tokens_per_local_expert is None:
-                raise ValueError("num_global_tokens_per_local_expert must be set before operations.")
             global_input_tokens_local_experts_indices = torch.repeat_interleave(
                 self.expert_ids_per_ep_rank, num_global_tokens_per_local_expert.ravel()
             )
