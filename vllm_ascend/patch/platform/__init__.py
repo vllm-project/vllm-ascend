@@ -20,6 +20,7 @@ import vllm_ascend.patch.platform.patch_deepseek_v4_vision  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
+import vllm_ascend.patch.platform.patch_mha_fastpath  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 import vllm_ascend.patch.platform.patch_parallel_config  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
@@ -106,3 +107,25 @@ import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa
 #    Future Plan:
 #       Remove this patch when upstream supports per-group or backend-defined
 #       prefill boundaries.
+#
+# ** File: platform/patch_mha_fastpath.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `torch.backends.mha.set_fastpath_enabled`
+#    Why:
+#       `torch.nn.MultiheadAttention` / `TransformerEncoderLayer` take a fused
+#       fast path (`_native_multi_head_attention` /
+#       `_transformer_encoder_layer_fwd`) when the global flag is set. Neither
+#       op has an Ascend kernel, so torch_npu silently falls back to
+#       `VariableFallbackKernel` and runs them on the host CPU.
+#    How:
+#       Flip the global flag off at import time, before any model is built, so
+#       both modules use their decomposed (NPU-native) implementation. This is
+#       numerically equivalent to the fused path and purely a latency fix
+#       (measured 711.2 ms -> 2.1 ms on a 2-layer decision head, 910B4).
+#    Related PR (if no, explain why):
+#       No upstream PR: PyTorch exposes no Ascend kernel for the fused MHA ops,
+#       and the fast path is not gated on operator availability.
+#    Future Plan:
+#       Remove this patch once torch_npu provides native
+#       `_native_multi_head_attention` / `_transformer_encoder_layer_fwd`
+#       kernels.
