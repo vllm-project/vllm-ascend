@@ -15,6 +15,7 @@ from safetensors.torch import save_file
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
+from vllm_ascend.models.deepseek_v41.engram.common import engram_gate
 from vllm_ascend.patch.platform.patch_engram_config import AscendEngramConfig
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -69,27 +70,42 @@ def test_dp_shared_memory_survives_cli_parsing():
     assert isinstance(parsed, AscendEngramConfig) and parsed.dp_shared_memory
 
 
-def test_loader_prefers_quantized_checkpoint(tmp_path):
+@pytest.mark.parametrize("quantized", [False, True])
+def test_loader_preserves_checkpoint_storage(tmp_path, quantized):
     key = "layers.1.engram.embed.weight"
     scale_key = "layers.1.engram.embed.scale"
     source = torch.linspace(-12, 12, 19 * 64).reshape(19, 64).bfloat16()
     codes, scales = npu.quantize_engram_rows(source)
     save_file({key: source}, tmp_path / "model.safetensors")
-    save_file({key: codes, scale_key: scales}, tmp_path / "quant.safetensors")
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {key: "model.safetensors"}}))
-    (tmp_path / "quant_model_weights.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {key: "quant.safetensors", scale_key: "quant.safetensors"}})
-    )
+    if quantized:
+        save_file({key: codes, scale_key: scales}, tmp_path / "quant.safetensors")
+        (tmp_path / "quant_model_weights.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {key: "quant.safetensors", scale_key: "quant.safetensors"}})
+        )
     table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
     torch.nn.Module.__init__(table)
     table._shared_group = None
     table.vocab_start_idx = 0
     table.vocab_end_idx = 19
-    table.weight = torch.nn.Parameter(torch.empty_like(codes), requires_grad=False)
-    table.weight_scale_inv = torch.nn.Parameter(torch.empty_like(scales), requires_grad=False)
-    table.load_checkpoint(tmp_path, key)
-    assert torch.equal(table.weight, codes)
-    assert torch.equal(table.weight_scale_inv, scales)
+    expected = codes if quantized else source
+    table.weight = torch.nn.Parameter(torch.empty_like(expected), requires_grad=False)
+    table.weight_scale_inv = torch.nn.Parameter(torch.empty_like(scales), requires_grad=False) if quantized else None
+    table.load_checkpoint(tmp_path, key, chunk_rows=7)
+    assert torch.equal(table.weight, expected)
+    if quantized:
+        assert torch.equal(table.weight_scale_inv, scales)
+
+
+def test_bf16_gate_without_rotation():
+    hidden = torch.ones(2, 4, 64, dtype=torch.bfloat16)
+    value = torch.full((2, 64), 0.25, dtype=torch.bfloat16)
+    mask = torch.tensor([True, False])
+    result = engram_gate(hidden, hidden * 2, value, torch.ones(4, 64), None, mask, 1e-20)
+    # Normalized dot is sqrt(64) = 8; the gate applies signed sqrt, then sigmoid.
+    expected = (1 + 0.25 * torch.sigmoid(torch.tensor(8.0).sqrt())).bfloat16()
+    assert torch.all(result[0] == expected)
+    assert torch.equal(result[1], hidden[1])
 
 
 def _fake_host_library(device_offset):

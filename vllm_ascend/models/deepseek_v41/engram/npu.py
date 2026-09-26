@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NPU-side Engram storage, routing and lookup.
 
-Every layer is INT8 with group-32 FP32 scales, sharded into contiguous hash
+Tables are BF16 or INT8 with group-32 FP32 scales, sharded into contiguous hash
 head buckets.  With ``EngramConfig.cpu_offload`` the shard stays in host memory:
 ``aclrtHostRegisterV2`` pins it and ``aclrtHostGetDevicePointer`` publishes the
 address the NPU gather kernel reads, so an offloaded table needs neither an H2D
@@ -75,6 +75,7 @@ def _engram_int8_gather_dequant_kernel(
     HEAD_START: tl.constexpr,
     LOCAL_HEADS: tl.constexpr,
     PAD_HEADS: tl.constexpr,
+    QUANTIZED: tl.constexpr,
 ):
     row = tl.program_id(0)
     if row >= rows:
@@ -93,8 +94,10 @@ def _engram_int8_gather_dequant_kernel(
     owned = (source_row >= vocab_start) & (source_row < vocab_end)
     local_row = tl.where(owned, source_row - vocab_start, 0)
     codes = tl.load(weight_ptr + local_row * WIDTH + offsets).to(tl.float32)
-    scales = tl.load(scale_ptr + local_row * (WIDTH // GROUP) + offsets // GROUP)
-    result = (codes * scales).to(tl.bfloat16)
+    if QUANTIZED:
+        scales = tl.load(scale_ptr + local_row * (WIDTH // GROUP) + offsets // GROUP)
+        codes = codes * scales
+    result = codes.to(tl.bfloat16)
     tl.store(
         output_ptr + (token * PAD_HEADS + local) * WIDTH + offsets,
         tl.where(owned, result, tl.zeros_like(result)),
@@ -103,7 +106,7 @@ def _engram_int8_gather_dequant_kernel(
 
 def gather_dequantize_engram_int8(
     weight: torch.Tensor,
-    scales: torch.Tensor,
+    scales: torch.Tensor | None,
     ids: torch.Tensor,
     width: int,
     *,
@@ -114,7 +117,7 @@ def gather_dequantize_engram_int8(
     vocab_start: int = 0,
     vocab_end: int | None = None,
 ) -> torch.Tensor:
-    """Gather this shard's head rows from a device table, dequantize in one kernel.
+    """Gather device rows, dequantizing INT8 when scales are supplied.
 
     Returns ``[tokens * pad_heads, width]``; the head path views it as
     ``[tokens, pad_heads, width]``.
@@ -147,6 +150,7 @@ def gather_dequantize_engram_int8(
         HEAD_START=head_start,
         LOCAL_HEADS=local_heads,
         PAD_HEADS=pad_heads,
+        QUANTIZED=scales is not None,
         num_warps=4,
     )
     return output
@@ -247,6 +251,7 @@ def _engram_host_uva_gather_dequant_kernel(
     HEAD_START: tl.constexpr,
     LOCAL_HEADS: tl.constexpr,
     PAD_HEADS: tl.constexpr,
+    QUANTIZED: tl.constexpr,
 ):
     row = tl.program_id(0)
     if row < rows:
@@ -260,12 +265,17 @@ def _engram_host_uva_gather_dequant_kernel(
         local_row = tl.where(owned, index - vocab_start, 0)
         chunk = local_row // CHUNK
         local = local_row % CHUNK
-        codes = tl.load(codes_ptrs + chunk).to(tl.pointer_type(tl.int8))
-        scales = tl.load(scales_ptrs + chunk).to(tl.pointer_type(tl.float32))
+        if QUANTIZED:
+            codes = tl.load(codes_ptrs + chunk).to(tl.pointer_type(tl.int8))
+        else:
+            codes = tl.load(codes_ptrs + chunk).to(tl.pointer_type(tl.bfloat16))
         col = tl.arange(0, WIDTH)
         value = tl.load(codes + local * WIDTH + col).to(tl.float32)
-        scale = tl.load(scales + local * (WIDTH // GROUP) + col // GROUP)
-        result = (value * scale).to(tl.bfloat16)
+        if QUANTIZED:
+            scales = tl.load(scales_ptrs + chunk).to(tl.pointer_type(tl.float32))
+            scale = tl.load(scales + local * (WIDTH // GROUP) + col // GROUP)
+            value = value * scale
+        result = value.to(tl.bfloat16)
         tl.store(
             output + (token * PAD_HEADS + head_local) * WIDTH + col,
             tl.where(owned, result, tl.zeros_like(result)),
@@ -274,7 +284,7 @@ def _engram_host_uva_gather_dequant_kernel(
 
 def gather_dequantize_host_uva(
     codes: HostUvaBuffer,
-    scales: HostUvaBuffer,
+    scales: HostUvaBuffer | None,
     ids: torch.Tensor,
     *,
     head_start: int = 0,
@@ -284,7 +294,7 @@ def gather_dequantize_host_uva(
     vocab_start: int = 0,
     vocab_end: int | None = None,
 ) -> torch.Tensor:
-    """Gather this shard's head rows from a registered host table on device.
+    """Gather registered host rows, preserving BF16 when scales are absent.
 
     Returns ``[tokens * pad_heads, width]``; the head path views it as
     ``[tokens, pad_heads, width]``.
@@ -304,7 +314,7 @@ def gather_dequantize_host_uva(
     init_device_properties_triton()
     _engram_host_uva_gather_dequant_kernel[(rows,)](
         codes.ptrs,
-        scales.ptrs,
+        scales.ptrs if scales is not None else None,
         ids.to(torch.int64),
         output,
         rows,
@@ -317,6 +327,7 @@ def gather_dequantize_host_uva(
         HEAD_START=head_start,
         LOCAL_HEADS=local_heads,
         PAD_HEADS=pad_heads,
+        QUANTIZED=scales is not None,
         num_warps=4,
     )
     return output
