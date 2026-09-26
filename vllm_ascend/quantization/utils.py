@@ -188,6 +188,30 @@ def detect_quantization_method(model: str, revision: str | None = None) -> str |
     return None
 
 
+def _sync_quantization_to_same_checkpoint_mtp(vllm_config, detected: str) -> None:
+    """Propagate auto-detected quantization to an in-checkpoint MTP draft.
+
+    ``SpeculativeConfig`` is initialized before the platform hook that performs
+    quantization auto-detection. Therefore an MTP draft created from the target
+    checkpoint may retain ``quantization=None`` even after the target config is
+    updated. Keep independent draft models and explicitly configured drafts
+    unchanged.
+    """
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if speculative_config is None or getattr(speculative_config, "method", None) != "mtp":
+        return
+
+    draft_model_config = getattr(speculative_config, "draft_model_config", None)
+    if draft_model_config is None:
+        return
+
+    target_model_config = vllm_config.model_config
+    if draft_model_config.model != target_model_config.model or draft_model_config.quantization is not None:
+        return
+
+    draft_model_config.quantization = detected
+
+
 def maybe_auto_detect_quantization(vllm_config) -> None:
     """Auto-detect and apply the quantization method on *vllm_config*.
 
@@ -204,6 +228,9 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
     2. Recreate ``vllm_config.quant_config`` so that the quantization
        pipeline (``get_quant_config`` → ``QuantizationConfig`` →
        ``get_quant_method`` for every layer) is properly initialised.
+    3. Propagate the detected method to an MTP draft that shares the target
+       checkpoint. ``SpeculativeConfig`` was initialized before this hook, so
+       the draft cannot inherit a method that was only detected here.
 
     Rules:
         * If the user explicitly set ``--quantization``, that value is
@@ -262,6 +289,7 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
     from vllm.config import VllmConfig as _VllmConfig
 
     vllm_config.quant_config = _VllmConfig._get_quantization_config(model_config, vllm_config.load_config)
+    _sync_quantization_to_same_checkpoint_mtp(vllm_config, detected)
 
 
 def enable_fa_quant(vllm_config, layer_name=None) -> bool:
