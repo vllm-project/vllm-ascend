@@ -128,13 +128,13 @@ partition:
     count: 1
   a2-1:
     runner_label: linux-aarch64-a2b3-1
-    count: 5
+    count: 6
   a3-2:
     runner_label: linux-aarch64-a3-2
-    count: 4
+    count: 5
   a3-4:
     runner_label: linux-aarch64-a3-4
-    count: 4
+    count: 5
   cpu-0:
     runner_label: linux-amd64-cpu-8-hk
     count: 1
