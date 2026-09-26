@@ -1184,8 +1184,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             and self.enable_mlapo
             # DCP causal decode needs the unfused projections for current KV.
             and not enable_dcp()
-            and self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.is_kv_consumer
+            and is_pd_decode_recompute_scheduler_enabled(vllm_config=self.vllm_config)
             and self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
             and not ascend_config.mlapo_keep_prefill_weights
         ):
