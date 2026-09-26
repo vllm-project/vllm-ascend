@@ -37,6 +37,7 @@ from vllm_ascend.utils import FP8_METHOD, dispose_tensor, maybe_trans_nz, maybe_
 from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
+    PreparedLinearInput,
     QuantType,
     WeightSwitchGatherSpec,
 )
@@ -81,14 +82,49 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         params_dict["weight_scale"] = torch.empty(output_size, cdiv(input_size, self.group_size), dtype=torch.uint8)
         return params_dict
 
+    def _quantize_input(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        prefix_padding, suffix_padding = vars(layer).get("mxfp8_tp_padding", (0, 0))
+        if prefix_padding or suffix_padding:
+            x = F.pad(x, (prefix_padding, suffix_padding), mode="constant", value=0)
+        return torch_npu.npu_dynamic_mx_quant(
+            x,
+            dst_type=torch.float8_e4m3fn,
+            scale_alg=self.dynamic_mx_quant_scale_alg,
+        )
+
+    def prepare_input_for_overlap(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        """Move MX quant before the router wait while keeping QMM after it.
+
+        Shared-expert inputs are two-dimensional. Higher-dimensional inputs
+        keep the original wrapper so its output reshape remains unchanged.
+        """
+        if x.dim() != 2:
+            return None
+        quantized_x, pertoken_scale = self._quantize_input(layer, x)
+        return PreparedLinearInput(quantized_x, pertoken_scale, x.dtype)
+
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        if isinstance(x, tuple):
+        if isinstance(x, PreparedLinearInput):
+            quantized_x = x.quantized
+            assert x.scale is not None
+            pertoken_scale = x.scale
+            original_shape = quantized_x.shape
+            output_dtype = x.output_dtype
+        elif isinstance(x, tuple):
             quantized_x, pertoken_scale = x
             original_shape = quantized_x.shape
             output_dtype = torch.bfloat16
@@ -97,14 +133,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             original_shape = x.shape
             if x.dim() > 2:
                 x = x.view(-1, x.shape[-1])
-            prefix_padding, suffix_padding = vars(layer).get("mxfp8_tp_padding", (0, 0))
-            if prefix_padding or suffix_padding:
-                x = F.pad(x, (prefix_padding, suffix_padding), mode="constant", value=0)
-            quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
-                x,
-                dst_type=torch.float8_e4m3fn,
-                scale_alg=self.dynamic_mx_quant_scale_alg,
-            )
+            quantized_x, pertoken_scale = self._quantize_input(layer, x)
             output_dtype = x.dtype
 
         if bias is not None and bias.dtype != torch.float32:

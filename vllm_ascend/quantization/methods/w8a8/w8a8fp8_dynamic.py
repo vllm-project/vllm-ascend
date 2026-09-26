@@ -25,7 +25,7 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list
 from vllm_ascend.utils import dispose_tensor
 
-from ..base import QuantType
+from ..base import PreparedLinearInput, QuantType
 from ..registry import register_scheme
 from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
 
@@ -61,15 +61,16 @@ class AscendW8A8FP8DynamicLinearMethod(AscendW8A8DynamicLinearMethod):
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | PreparedLinearInput,
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+        output_dtype = x.output_dtype if isinstance(x, PreparedLinearInput) else x.dtype
         output = super().apply(layer, x, bias, tp_rank)
         # TODO: there is a bug in npu_quant_matmul for fp8 with bias
         # after the bug is fixed, the whole apply method can be removed.
         if bias is not None:
-            output = (output + bias).to(x.dtype)
+            output = (output + bias).to(output_dtype)
         return output
 
 
