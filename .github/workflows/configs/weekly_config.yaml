@@ -361,7 +361,17 @@ a3-560t:
         os: linux-aarch64-a3-800i-4
         tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
 
-  a5:
+a5:
+  multi_node:
+    test_config:
+      - name: DeepSeek_V4_Flash_A5_PD
+        config_file_path: DeepSeek_V4_Flash_A5_PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        size: 2
+      - name: DeepSeek_V4_Flash_A5_PD_Accuracy
+        config_file_path: DeepSeek_V4_Flash_A5_PD_Accuracy.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        size: 2
     #   multi_node:
     #     test_config:
     #       - name: Qwen3-235B-W8A8-EPLB

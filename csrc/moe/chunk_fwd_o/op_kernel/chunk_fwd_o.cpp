@@ -13,6 +13,7 @@
  */
 
 // #include "chunk_fwd_o.h"
+// #include "../op_host/chunk_fwd_o_tiling.h"
 #if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
 #include "arch20/compat_310p.h"
 #include "arch20/gemm/kernel/gdn_fwd_o_kernel.hpp"
