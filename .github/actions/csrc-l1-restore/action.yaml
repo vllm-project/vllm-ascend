@@ -1,0 +1,86 @@
+name: Restore csrc incremental cache
+description: Restore a persistent snapshot for the content-addressed local csrc cache.
+
+inputs:
+  cache-dir:
+    required: true
+    description: Directory exported as VLLM_ASCEND_BUILD_CACHE_DIR.
+  architecture:
+    required: true
+    description: Build architecture (x64 or arm64; common runner aliases are accepted).
+  soc-version:
+    required: true
+    description: Target SOC or device family, normalized by this action.
+  toolchain-image:
+    required: false
+    default: ''
+    description: Exact compiler image for nested builds; overrides the outer runtime environment.
+  source-root:
+    required: false
+    default: '.'
+  csrc-hash:
+    required: false
+    default: ''
+
+outputs:
+  supported:
+    value: ${{ steps.key.outputs.supported }}
+  primary-key:
+    value: ${{ steps.key.outputs.primary_key }}
+  csrc-hash:
+    value: ${{ steps.key.outputs.csrc_hash }}
+  cache-hit:
+    value: ${{ steps.restore.outputs.cache-hit }}
+  cache-matched-key:
+    value: ${{ steps.restore.outputs.cache-matched-key }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare L1 key
+      id: key
+      shell: bash
+      env:
+        CACHE_DIR: ${{ inputs.cache-dir }}
+        CACHE_ARCHITECTURE: ${{ inputs.architecture }}
+        CACHE_SOC_VERSION: ${{ inputs.soc-version }}
+        CACHE_TOOLCHAIN_IMAGE: ${{ inputs.toolchain-image }}
+        SOURCE_ROOT: ${{ inputs.source-root }}
+        CALLER_CSRC_HASH: ${{ inputs.csrc-hash }}
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/../../workflows/scripts/prepare_csrc_l1_restore.py" \
+          --cache-dir "$CACHE_DIR" \
+          --architecture "$CACHE_ARCHITECTURE" \
+          --soc-version "$CACHE_SOC_VERSION" \
+          --toolchain-image "$CACHE_TOOLCHAIN_IMAGE" \
+          --source-root "$SOURCE_ROOT" \
+          --csrc-hash "$CALLER_CSRC_HASH"
+
+    - name: Restore L1 snapshot
+      id: restore
+      if: steps.key.outputs.supported == 'true'
+      continue-on-error: true
+      uses: runs-on/cache/restore@v5
+      env:
+        RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+        RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+        RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+        AWS_S3_FORCE_PATH_STYLE: "false"
+        AWS_REGION: ap-southeast-1
+        RUNS_ON_RUNNER_NAME: ""
+      with:
+        path: ${{ inputs.cache-dir }}
+        key: ${{ steps.key.outputs.primary_key }}
+        restore-keys: |
+          ${{ steps.key.outputs.same_csrc_prefix }}
+          ${{ steps.key.outputs.compat_prefix }}
+
+    - name: Reset L1 update marker
+      if: steps.key.outputs.supported == 'true'
+      shell: bash
+      env:
+        CACHE_DIR: ${{ inputs.cache-dir }}
+      run: |
+        set -euo pipefail
+        rm -f "$CACHE_DIR/.updated"

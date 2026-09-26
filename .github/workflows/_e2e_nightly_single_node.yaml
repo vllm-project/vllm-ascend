@@ -189,6 +189,15 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
+      - name: Restore incremental cache for source checkout
+        id: source-l1
+        if: ${{ inputs.request_id != '' }}
+        uses: $/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          architecture: ${{ runner.arch }}
+          soc-version: ${{ inputs.soc_version }}
+          source-root: ./temp-vllm-ascend
       - name: Move code to /vllm-workspace
         if: ${{ inputs.request_id != '' }}
         run: |

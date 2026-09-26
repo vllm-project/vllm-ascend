@@ -1,0 +1,1964 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+import regex as re
+
+from .build_cache_test_utils import ENGINE, REPO_ROOT, build_cache_command, run_command
+
+_KEY_RE = re.compile(r"\bkey=([0-9a-f]{64})\b")
+
+
+def _load_engine(name: str):
+    spec = importlib.util.spec_from_file_location(name, ENGINE)
+    assert spec is not None and spec.loader is not None
+    engine = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(engine)
+    return engine
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_builder(tmp_path: Path) -> Path:
+    builder = tmp_path / "fake_builder.py"
+    builder.write_text(
+        """from pathlib import Path
+import sys
+import time
+
+output_dir = Path(sys.argv[1])
+counter = Path(sys.argv[2])
+mode = sys.argv[3]
+artifact_name = sys.argv[4]
+
+count = int(counter.read_text()) if counter.exists() else 0
+count += 1
+counter.write_text(str(count))
+
+output_dir.mkdir(parents=True, exist_ok=True)
+
+if mode == "sleep":
+    time.sleep(0.35)
+
+if mode == "symlink":
+    target = output_dir / "ascend_protoc"
+    target.write_text("#!/bin/sh\\necho fake-protoc\\n", encoding="utf-8")
+    target.chmod(0o755)
+
+    link = output_dir / "protoc"
+    if link.exists() or link.is_symlink():
+        link.unlink()
+    link.symlink_to("ascend_protoc")
+else:
+    artifact = output_dir / artifact_name
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    content = "fixed-artifact" if mode == "fixed" else f"artifact-{count}"
+    artifact.write_text(content, encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
+    return builder
+
+
+def _run_cache(
+    *,
+    cache_root: Path,
+    prepared_inputs: list[Path],
+    output_dir: Path,
+    builder: Path,
+    counter: Path,
+    recipe_values: list[str] | None = None,
+    environment_values: list[str] | None = None,
+    domain: str = "custom_operator",
+    operator_source: Path | None = None,
+    artifact_includes: list[str] | None = None,
+    builder_mode: str = "counted",
+    artifact_name: str = "kernel.o",
+    action: str = "TestOperator-0",
+    stage_dir: Path | None = None,
+    publish_state_dir: Path | None = None,
+    normalize_paths: list[Path] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    actual_output = output_dir
+    if domain == "custom_operator":
+        safe_action = re.sub(r"[^A-Za-z0-9_.-]", "_", action)
+        stage_dir = stage_dir or (output_dir.parent / "private-stages" / safe_action)
+        publish_state_dir = publish_state_dir or (output_dir.parent / "publish-state")
+        actual_output = stage_dir
+
+    custom_soc: str | None = None
+    custom_operator: str | None = None
+    custom_action: str | None = None
+    custom_operator_source: Path | None = None
+    custom_publish_dir: Path | None = None
+    custom_publish_state_dir: Path | None = None
+    if domain == "custom_operator":
+        if operator_source is None:
+            operator_source = prepared_inputs[0]
+        assert stage_dir is not None
+        assert publish_state_dir is not None
+        custom_soc = "ascend910b"
+        custom_operator = "test_operator"
+        custom_action = action
+        custom_operator_source = operator_source
+        custom_publish_dir = output_dir
+        custom_publish_state_dir = publish_state_dir
+
+    command = build_cache_command(
+        cache_root=cache_root,
+        domain=domain,
+        unit="test_unit",
+        output_dir=actual_output,
+        environment_profile="ascendc" if domain == "custom_operator" else "host-cxx",
+        prepared_inputs=prepared_inputs,
+        recipe_values=recipe_values or ["recipe=stable"],
+        environment_values=environment_values or ["abi=test"],
+        environment_tools=[sys.executable],
+        normalize_paths=normalize_paths or [],
+        artifact_includes=artifact_includes or [],
+        build_command=[
+            sys.executable,
+            str(builder),
+            str(actual_output),
+            str(counter),
+            builder_mode,
+            artifact_name,
+        ],
+        soc=custom_soc,
+        operator=custom_operator,
+        action=custom_action,
+        operator_source=custom_operator_source,
+        publish_dir=custom_publish_dir,
+        publish_state_dir=custom_publish_state_dir,
+    )
+    return run_command(command)
+
+
+def _assert_success(proc: subprocess.CompletedProcess[str]) -> None:
+    assert proc.returncode == 0, f"returncode={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+
+
+def _extract_key(proc: subprocess.CompletedProcess[str]) -> str:
+    matches = _KEY_RE.findall(proc.stdout)
+    assert matches, f"no cache key in stdout:\n{proc.stdout}"
+    assert len(set(matches)) == 1, f"multiple cache keys in stdout: {matches}"
+    return matches[-1]
+
+
+def _find_entries(cache_root: Path, domain: str, final_key: str) -> list[Path]:
+    # Locate entries from manifest contents rather than assuming the cache
+    # directory layout.
+    domain_root = cache_root / domain
+    entries: list[Path] = []
+    if not domain_root.exists():
+        return entries
+
+    for manifest_path in domain_root.rglob("manifest.json"):
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if payload.get("domain") == domain and payload.get("final_key") == final_key:
+            entries.append(manifest_path.parent)
+
+    return sorted(entries)
+
+
+def _only_entry(cache_root: Path, domain: str, final_key: str) -> Path:
+    entries = _find_entries(cache_root, domain, final_key)
+    assert len(entries) == 1, (
+        f"expected exactly one entry for domain={domain} key={final_key}, got {len(entries)}: {entries}"
+    )
+    return entries[0]
+
+
+def _manifest(entry: Path) -> dict:
+    return json.loads((entry / "manifest.json").read_text(encoding="utf-8"))
+
+
+def _artifact_kind(artifact: dict) -> str:
+    return artifact.get("kind", "file")
+
+
+def _first_file_artifact(entry: Path) -> tuple[dict, Path]:
+    manifest = _manifest(entry)
+    files = [artifact for artifact in manifest.get("artifacts", []) if _artifact_kind(artifact) == "file"]
+    assert files, f"entry has no regular-file artifacts: {entry}"
+    artifact = files[0]
+    return artifact, entry / "artifacts" / artifact["path"]
+
+
+def _fresh_dir(path: Path) -> None:
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _make_operator_inputs(tmp_path: Path) -> tuple[Path, Path]:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "kernel.cpp").write_text("int source = 1;\n", encoding="utf-8")
+
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    (prepared / "kernel.cpp").write_text("int prepared = 1;\n", encoding="utf-8")
+    return source, prepared
+
+
+def test_custom_operator_miss_then_hit_and_restore(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(first)
+    assert "[build-cache] MISS" in first.stdout
+    assert "[build-cache] SAVED" in first.stdout
+    assert counter.read_text() == "1"
+
+    _fresh_dir(output)
+
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(second)
+    assert "[build-cache] HIT" in second.stdout
+    assert counter.read_text() == "1"
+    assert (output / "kernel.o").read_text(encoding="utf-8") == "artifact-1"
+
+
+def test_prepared_input_change_invalidates_and_revert_reuses_prior_entry(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    original = (prepared / "kernel.cpp").read_text(encoding="utf-8")
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(first)
+    key_original = _extract_key(first)
+
+    (prepared / "kernel.cpp").write_text("int prepared = 2;\n", encoding="utf-8")
+    _fresh_dir(output)
+
+    changed = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(changed)
+    key_changed = _extract_key(changed)
+    assert "[build-cache] MISS" in changed.stdout
+    assert key_changed != key_original
+    assert counter.read_text() == "2"
+
+    (prepared / "kernel.cpp").write_text(original, encoding="utf-8")
+    _fresh_dir(output)
+
+    reverted = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(reverted)
+    assert "[build-cache] HIT" in reverted.stdout
+    assert _extract_key(reverted) == key_original
+    assert counter.read_text() == "2"
+
+
+def _prepared_path_key(
+    tmp_path: Path,
+    *,
+    root_name: str,
+    prepared_payload: bytes,
+    normalize_root: bool = True,
+    semantic_input_payload: bytes | None = None,
+) -> str:
+    root = tmp_path / root_name
+    source = root / "source"
+    source.mkdir(parents=True)
+    (source / "kernel.cpp").write_text("int source = 1;\n", encoding="utf-8")
+
+    prepared = root / "prepared"
+    prepared.mkdir()
+    (prepared / "generated.py").write_bytes(prepared_payload)
+    prepared_inputs = [prepared]
+    if semantic_input_payload is not None:
+        semantic_input = root / "cann_compat.h"
+        semantic_input.write_bytes(semantic_input_payload)
+        prepared_inputs.append(semantic_input)
+
+    output = root / "output"
+    output.mkdir()
+    proc = _run_cache(
+        cache_root=tmp_path / "cache",
+        prepared_inputs=prepared_inputs,
+        operator_source=source,
+        output_dir=output,
+        builder=_write_builder(tmp_path),
+        counter=tmp_path / "counter",
+        stage_dir=root / "stage",
+        publish_state_dir=root / "publish-state",
+        normalize_paths=[root] if normalize_root else [],
+    )
+    _assert_success(proc)
+    return _extract_key(proc)
+
+
+def test_prepared_text_normalizes_explicit_root(tmp_path: Path):
+    root_a = tmp_path / "pep517-a"
+    root_b = tmp_path / "pep517-b"
+
+    key_a = _prepared_path_key(
+        tmp_path,
+        root_name=root_a.name,
+        prepared_payload=f'SOURCE_ROOT = "{root_a}"\nVALUE = 1\n'.encode(),
+    )
+    key_b = _prepared_path_key(
+        tmp_path,
+        root_name=root_b.name,
+        prepared_payload=f'SOURCE_ROOT = "{root_b}"\nVALUE = 1\n'.encode(),
+    )
+    assert key_a == key_b
+
+
+def test_prepared_text_semantic_change_remains_identity_sensitive(tmp_path: Path):
+    root_a = tmp_path / "semantic-a"
+    root_b = tmp_path / "semantic-b"
+    key_a = _prepared_path_key(
+        tmp_path,
+        root_name=root_a.name,
+        prepared_payload=f'SOURCE_ROOT = "{root_a}"\nVALUE = 1\n'.encode(),
+    )
+    key_semantic_change = _prepared_path_key(
+        tmp_path,
+        root_name=root_b.name,
+        prepared_payload=f'SOURCE_ROOT = "{root_b}"\nVALUE = 2\n'.encode(),
+    )
+    assert key_semantic_change != key_a
+
+
+def test_binary_prepared_input_remains_raw_byte_sensitive(tmp_path: Path):
+    root_a = tmp_path / "binary-a"
+    root_b = tmp_path / "binary-b"
+    key_a = _prepared_path_key(
+        tmp_path,
+        root_name=root_a.name,
+        prepared_payload=b"\x00prefix:" + str(root_a).encode() + b":suffix",
+    )
+    key_b = _prepared_path_key(
+        tmp_path,
+        root_name=root_b.name,
+        prepared_payload=b"\x00prefix:" + str(root_b).encode() + b":suffix",
+    )
+    assert key_a != key_b
+
+
+def test_prepared_path_outside_explicit_normalize_root_remains_sensitive(
+    tmp_path: Path,
+):
+    root_a = tmp_path / "outside-a"
+    root_b = tmp_path / "outside-b"
+    external_a = tmp_path / "external-a"
+    external_b = tmp_path / "external-b"
+    key_a = _prepared_path_key(
+        tmp_path,
+        root_name=root_a.name,
+        prepared_payload=f'EXTERNAL_ROOT = "{external_a}"\n'.encode(),
+    )
+    key_b = _prepared_path_key(
+        tmp_path,
+        root_name=root_b.name,
+        prepared_payload=f'EXTERNAL_ROOT = "{external_b}"\n'.encode(),
+    )
+    assert key_a != key_b
+
+
+def test_normalize_text_preserves_non_path_backslashes():
+    engine = _load_engine("build_cache_engine_non_path_backslash_test")
+
+    escaped_newline = 'const char *value = "\\n";\n'
+    slash_n = 'const char *value = "/n";\n'
+
+    assert engine._normalize_text(escaped_newline, []) == escaped_newline
+    assert engine._normalize_text(slash_n, []) == slash_n
+    assert engine._normalize_text(escaped_newline, []) != engine._normalize_text(slash_n, [])
+
+
+def test_normalize_text_requires_a_path_component_boundary(tmp_path: Path):
+    engine = _load_engine("build_cache_engine_path_boundary_test")
+    root_a = tmp_path / "repo-a"
+    root_b = tmp_path / "repo-b"
+
+    normalized_a = engine._normalize_text(
+        f'HEADER = "{root_a}-backup/header.h"\n',
+        [root_a],
+    )
+    normalized_b = engine._normalize_text(
+        f'HEADER = "{root_b}-backup/header.h"\n',
+        [root_b],
+    )
+
+    assert str(root_a) in normalized_a
+    assert str(root_b) in normalized_b
+    assert normalized_a != normalized_b
+
+
+def test_normalize_text_keeps_descendant_paths_reusable_in_embedded_flags(
+    tmp_path: Path,
+):
+    engine = _load_engine("build_cache_engine_embedded_path_test")
+    root_a = tmp_path / "work-a" / "repo"
+    root_b = tmp_path / "work-b" / "repo"
+
+    text_a = (
+        f"-I{root_a}/include "
+        f"--some-path={root_a}/generated "
+        f'"{root_a}/quoted/file.h" '
+        f"['-include{root_a}/shared/header.h']"
+    )
+    text_b = (
+        f"-I{root_b}/include "
+        f"--some-path={root_b}/generated "
+        f'"{root_b}/quoted/file.h" '
+        f"['-include{root_b}/shared/header.h']"
+    )
+
+    assert engine._normalize_text(text_a, [root_a]) == engine._normalize_text(text_b, [root_b])
+
+
+def test_normalize_text_handles_windows_style_known_path_without_touching_escapes(
+    tmp_path: Path,
+):
+    engine = _load_engine("build_cache_engine_windows_path_test")
+    root_a = tmp_path / "windows-a" / "repo"
+    root_b = tmp_path / "windows-b" / "repo"
+    windows_a = str(root_a).replace("/", "\\")
+    windows_b = str(root_b).replace("/", "\\")
+
+    text_a = f'-I{windows_a}\\include VALUE="\\n"'
+    text_b = f'-I{windows_b}\\include VALUE="\\n"'
+    normalized_a = engine._normalize_text(text_a, [root_a])
+    normalized_b = engine._normalize_text(text_b, [root_b])
+
+    assert normalized_a == normalized_b
+    assert 'VALUE="\\n"' in normalized_a
+
+
+def test_third_party_backslash_semantic_change_is_a_cache_miss(tmp_path: Path):
+    compiler = shutil.which("g++")
+    if compiler is None:
+        pytest.skip("g++ is required for the run-level normalization regression")
+    assert compiler is not None
+
+    cache_root = tmp_path / "cache"
+    output = tmp_path / "output"
+    output.mkdir()
+    header = tmp_path / "value.h"
+    source = tmp_path / "main.cpp"
+    source.write_text(
+        '#include "value.h"\n#include <cstdio>\nint main() { std::printf("%d\\n", VALUE[0]); }\n',
+        encoding="utf-8",
+    )
+
+    def build() -> subprocess.CompletedProcess[str]:
+        command = build_cache_command(
+            cache_root=cache_root,
+            domain="third_party",
+            unit="normalization-regression",
+            output_dir=output,
+            environment_profile="host-cxx",
+            prepared_inputs=[header],
+            recipe_values=["g++-normalization-regression"],
+            environment_values=[],
+            environment_tools=[compiler],
+            artifact_includes=["result"],
+            build_command=[
+                compiler,
+                str(source),
+                "-I",
+                str(tmp_path),
+                "-o",
+                str(output / "result"),
+            ],
+        )
+        return run_command(command)
+
+    header.write_text('#define VALUE "\\n"\n', encoding="utf-8")
+    first = build()
+    _assert_success(first)
+    first_key = _extract_key(first)
+    assert "[build-cache] MISS" in first.stdout
+    assert subprocess.check_output([output / "result"], text=True).strip() == "10"
+
+    _fresh_dir(output)
+    header.write_text('#define VALUE "/n"\n', encoding="utf-8")
+    second = build()
+    _assert_success(second)
+    assert "[build-cache] MISS" in second.stdout
+    assert _extract_key(second) != first_key
+    assert subprocess.check_output([output / "result"], text=True).strip() == "47"
+
+
+def test_custom_operator_shared_backslash_input_invalidates_without_operator_change(
+    tmp_path: Path,
+):
+    operator_source = tmp_path / "operator-source"
+    operator_source.mkdir()
+    (operator_source / "kernel.cpp").write_text("int stable_operator = 1;\n", encoding="utf-8")
+    shared_input = tmp_path / "shared" / "value.h"
+    shared_input.parent.mkdir()
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    shared_input.write_text('#define VALUE "\\n"\n', encoding="utf-8")
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[shared_input],
+        operator_source=operator_source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(first)
+    first_key = _extract_key(first)
+    first_manifest = _manifest(_only_entry(cache_root, "custom_operator", first_key))
+
+    _fresh_dir(output)
+    shared_input.write_text('#define VALUE "/n"\n', encoding="utf-8")
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[shared_input],
+        operator_source=operator_source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(second)
+    second_key = _extract_key(second)
+    second_manifest = _manifest(_only_entry(cache_root, "custom_operator", second_key))
+
+    assert "[build-cache] MISS" in second.stdout
+    assert second_key != first_key
+    assert second_manifest["operator_text_hash"] == first_manifest["operator_text_hash"]
+    assert second_manifest["prepared_input_hash"] != first_manifest["prepared_input_hash"]
+    assert counter.read_text() == "2"
+
+
+def test_recipe_normalizes_ephemeral_cmake_path_without_hiding_semantic_changes(
+    tmp_path: Path,
+):
+    engine = _load_engine("build_cache_engine_recipe_path_test")
+
+    source = tmp_path / "source"
+    source.mkdir()
+    binary_a = tmp_path / "build-a"
+    binary_b = tmp_path / "build-b"
+    binary_a.mkdir()
+    binary_b.mkdir()
+
+    tool_a = tmp_path / "pep517-a" / "bin" / "cmake"
+    tool_b = tmp_path / "pep517-b" / "bin" / "cmake"
+
+    def write_fake_cmake(path: Path, version: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f'#!/bin/sh\necho "cmake version {version}"\n',
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+
+    write_fake_cmake(tool_a, "4.4.3")
+    write_fake_cmake(tool_b, "4.4.3")
+
+    env_hash_a, _ = engine._hash_compiler_environment(
+        "host-cxx",
+        [],
+        [],
+        [str(tool_a)],
+    )
+    env_hash_b, _ = engine._hash_compiler_environment(
+        "host-cxx",
+        [],
+        [],
+        [str(tool_b)],
+    )
+    assert env_hash_a == env_hash_b
+
+    recipe_values = ["protobuf_BUILD_TESTS=OFF"]
+    command_a = [str(tool_a), "--build", "."]
+    command_b = [str(tool_b), "--build", "."]
+
+    raw_hash_a, _ = engine._hash_recipe(
+        [],
+        recipe_values,
+        command_a,
+        [source, binary_a],
+    )
+    raw_hash_b, _ = engine._hash_recipe(
+        [],
+        recipe_values,
+        command_b,
+        [source, binary_b],
+    )
+    assert raw_hash_a != raw_hash_b
+
+    stable_hash_a, manifest_a = engine._hash_recipe(
+        [],
+        recipe_values,
+        command_a,
+        [source, binary_a, tool_a],
+    )
+    stable_hash_b, manifest_b = engine._hash_recipe(
+        [],
+        recipe_values,
+        command_b,
+        [source, binary_b, tool_b],
+    )
+    assert stable_hash_a == stable_hash_b
+    assert manifest_a[-1]["argv"] == ["<PATH_2>", "--build", "."]
+    assert manifest_b[-1]["argv"] == ["<PATH_2>", "--build", "."]
+
+    write_fake_cmake(tool_b, "4.4.4")
+    changed_env_hash, _ = engine._hash_compiler_environment(
+        "host-cxx",
+        [],
+        [],
+        [str(tool_b)],
+    )
+    assert changed_env_hash != env_hash_a
+
+    changed_recipe_hash, _ = engine._hash_recipe(
+        [],
+        ["protobuf_BUILD_TESTS=ON"],
+        command_b,
+        [source, binary_b, tool_b],
+    )
+    assert changed_recipe_hash != stable_hash_a
+
+
+def test_recipe_change_invalidates_cache(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        recipe_values=["optimization=-O2"],
+    )
+    _assert_success(first)
+    key_a = _extract_key(first)
+
+    _fresh_dir(output)
+
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        recipe_values=["optimization=-O0"],
+    )
+    _assert_success(second)
+    assert "[build-cache] MISS" in second.stdout
+    assert _extract_key(second) != key_a
+    assert counter.read_text() == "2"
+
+
+def test_compiler_environment_change_invalidates_cache(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        environment_values=["toolkit=9.1.0"],
+    )
+    _assert_success(first)
+    key_a = _extract_key(first)
+
+    _fresh_dir(output)
+
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        environment_values=["toolkit=9.2.0"],
+    )
+    _assert_success(second)
+    assert "[build-cache] MISS" in second.stdout
+    assert _extract_key(second) != key_a
+    assert counter.read_text() == "2"
+
+
+def test_operator_text_hash_is_identity_namespace_not_action_key(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(first)
+    key = _extract_key(first)
+    assert len(_find_entries(cache_root, "custom_operator", key)) == 1
+
+    (source / "kernel.cpp").write_text("int source = 2;\n", encoding="utf-8")
+    _fresh_dir(output)
+
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(second)
+    assert "[build-cache] MISS" in second.stdout
+    assert _extract_key(second) == key
+    assert counter.read_text() == "2"
+    assert len(_find_entries(cache_root, "custom_operator", key)) == 2
+
+
+def test_active_corrupted_artifact_rebuilds_repairs_then_hits(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(first)
+    key = _extract_key(first)
+    entry = _only_entry(cache_root, "custom_operator", key)
+
+    artifact_meta, cached_artifact = _first_file_artifact(entry)
+    expected_sha = artifact_meta["sha256"]
+    assert _sha256_file(cached_artifact) == expected_sha
+
+    cached_artifact.write_bytes(cached_artifact.read_bytes() + b"\nCORRUPTED\n")
+    assert _sha256_file(cached_artifact) != expected_sha
+
+    _fresh_dir(output)
+
+    rebuilt = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(rebuilt)
+    assert _extract_key(rebuilt) == key
+    assert "[build-cache] MISS" in rebuilt.stdout
+    assert "[build-cache] SAVED" in rebuilt.stdout
+    assert counter.read_text() == "2"
+
+    repaired_entry = _only_entry(cache_root, "custom_operator", key)
+    repaired_meta, repaired_artifact = _first_file_artifact(repaired_entry)
+    assert _sha256_file(repaired_artifact) == repaired_meta["sha256"]
+
+    _fresh_dir(output)
+
+    warm = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(warm)
+    assert "[build-cache] HIT" in warm.stdout
+    assert _extract_key(warm) == key
+    assert counter.read_text() == "2"
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    ["parent", "absolute", "missing-path", "wrong-shape"],
+)
+def test_untrusted_artifact_manifest_is_a_cache_miss(tmp_path: Path, malformation: str):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    cold = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(cold)
+    entry = _only_entry(cache_root, "custom_operator", _extract_key(cold))
+    manifest_path = entry / "manifest.json"
+    manifest = _manifest(entry)
+    outside = tmp_path / "outside-artifact"
+    outside.write_text("outside", encoding="utf-8")
+
+    if malformation == "parent":
+        manifest["artifacts"][0]["path"] = "../../outside-artifact"
+    elif malformation == "absolute":
+        manifest["artifacts"] = [
+            {
+                "path": str(outside),
+                "kind": "file",
+                "sha256": _sha256_file(outside),
+            }
+        ]
+    elif malformation == "missing-path":
+        manifest["artifacts"] = [{"kind": "file", "sha256": "0" * 64}]
+    else:
+        manifest["artifacts"] = {"path": "kernel.o"}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    _fresh_dir(output)
+    rebuilt = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(rebuilt)
+    assert "[build-cache] MISS" in rebuilt.stdout
+    assert "[build-cache] SAVED" in rebuilt.stdout
+    assert counter.read_text() == "2"
+    assert outside.read_text(encoding="utf-8") == "outside"
+
+
+def test_identical_rebuild_output_is_still_cacheable(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        recipe_values=["recipe=a"],
+        builder_mode="fixed",
+    )
+    _assert_success(first)
+
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        recipe_values=["recipe=b"],
+        builder_mode="fixed",
+    )
+    _assert_success(second)
+    assert "[build-cache] MISS" in second.stdout
+    assert "[build-cache] SAVED" in second.stdout
+    assert counter.read_text() == "2"
+
+
+def test_third_party_whole_unit_restores_regular_product(tmp_path: Path):
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    (prepared / "third_party.cc").write_text("source\n", encoding="utf-8")
+
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        domain="third_party",
+        artifact_includes=["*.a"],
+        artifact_name="libtest.a",
+    )
+    _assert_success(first)
+    assert "[build-cache] MISS" in first.stdout
+    assert counter.read_text() == "1"
+
+    _fresh_dir(output)
+
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        domain="third_party",
+        artifact_includes=["*.a"],
+        artifact_name="libtest.a",
+    )
+    _assert_success(second)
+    assert "[build-cache] HIT" in second.stdout
+    assert counter.read_text() == "1"
+    assert (output / "libtest.a").read_text(encoding="utf-8") == "artifact-1"
+
+
+def test_third_party_symlink_restores_link_and_internal_target(tmp_path: Path):
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    (prepared / "protobuf.cc").write_text("source\n", encoding="utf-8")
+
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        domain="third_party",
+        artifact_includes=["protoc"],
+        builder_mode="symlink",
+    )
+    _assert_success(first)
+    assert "[build-cache] MISS" in first.stdout
+
+    key = _extract_key(first)
+    entry = _only_entry(cache_root, "third_party", key)
+    manifest = _manifest(entry)
+    artifacts = {artifact["path"]: artifact for artifact in manifest["artifacts"]}
+
+    assert artifacts["protoc"]["kind"] == "symlink"
+    assert artifacts["protoc"]["target"] == "ascend_protoc"
+    assert artifacts["ascend_protoc"]["kind"] == "file"
+
+    _fresh_dir(output)
+
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        domain="third_party",
+        artifact_includes=["protoc"],
+        builder_mode="symlink",
+    )
+    _assert_success(second)
+    assert "[build-cache] HIT" in second.stdout
+    assert counter.read_text() == "1"
+
+    protoc = output / "protoc"
+    target = output / "ascend_protoc"
+    assert protoc.is_symlink()
+    assert os.readlink(protoc) == "ascend_protoc"
+    assert target.is_file()
+    assert os.access(protoc, os.X_OK)
+
+
+def test_corrupted_cached_symlink_rebuilds(tmp_path: Path):
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    (prepared / "protobuf.cc").write_text("source\n", encoding="utf-8")
+
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        domain="third_party",
+        artifact_includes=["protoc"],
+        builder_mode="symlink",
+    )
+    _assert_success(first)
+
+    key = _extract_key(first)
+    entry = _only_entry(cache_root, "third_party", key)
+    cached_link = entry / "artifacts" / "protoc"
+    assert cached_link.is_symlink()
+    cached_link.unlink()
+    cached_link.symlink_to("wrong_target")
+
+    _fresh_dir(output)
+
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        domain="third_party",
+        artifact_includes=["protoc"],
+        builder_mode="symlink",
+    )
+    _assert_success(second)
+    assert "[build-cache] MISS" in second.stdout
+    assert "[build-cache] SAVED" in second.stdout
+    assert _extract_key(second) == key
+    assert counter.read_text() == "2"
+
+
+def _spawn_cache(**kwargs) -> subprocess.Popen[str]:
+    cache_root = kwargs["cache_root"]
+    prepared_inputs = kwargs["prepared_inputs"]
+    output_dir = kwargs["output_dir"]
+    builder = kwargs["builder"]
+    counter = kwargs["counter"]
+    operator_source = kwargs.get("operator_source") or prepared_inputs[0]
+    action = kwargs.get("action", "TestOperator-0")
+    artifact_name = kwargs.get("artifact_name", "kernel.o")
+    builder_mode = kwargs.get("builder_mode", "sleep")
+    recipe_values = kwargs.get("recipe_values") or ["recipe=stable"]
+    publish_state_dir = kwargs.get("publish_state_dir") or (output_dir.parent / "publish-state")
+    safe_action = re.sub(r"[^A-Za-z0-9_.-]", "_", action)
+    stage_dir = kwargs.get("stage_dir") or (output_dir.parent / "private-stages" / safe_action)
+
+    command = build_cache_command(
+        cache_root=cache_root,
+        domain="custom_operator",
+        unit="test_unit",
+        output_dir=stage_dir,
+        environment_profile="ascendc",
+        prepared_inputs=prepared_inputs,
+        recipe_values=recipe_values,
+        environment_values=["abi=test"],
+        environment_tools=[sys.executable],
+        soc="ascend910b",
+        operator="test_operator",
+        action=action,
+        operator_source=operator_source,
+        publish_dir=output_dir,
+        publish_state_dir=publish_state_dir,
+        build_command=[
+            sys.executable,
+            str(builder),
+            str(stage_dir),
+            str(counter),
+            builder_mode,
+            artifact_name,
+        ],
+    )
+    return subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _finish_process(proc: subprocess.Popen[str]) -> tuple[str, str]:
+    stdout, stderr = proc.communicate(timeout=10)
+    assert proc.returncode == 0, f"returncode={proc.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    return stdout, stderr
+
+
+def test_parallel_actions_have_exact_artifact_ownership(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "shared-output"
+    output.mkdir()
+    state = tmp_path / "publish-state"
+    cache_root = tmp_path / "cache"
+    builder = _write_builder(tmp_path)
+
+    first = _spawn_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        publish_state_dir=state,
+        builder=builder,
+        counter=tmp_path / "counter-a",
+        action="TestOperator-0",
+        artifact_name="A.o",
+        recipe_values=["recipe=A"],
+    )
+    second = _spawn_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        publish_state_dir=state,
+        builder=builder,
+        counter=tmp_path / "counter-b",
+        action="TestOperator-1",
+        artifact_name="B.o",
+        recipe_values=["recipe=B"],
+    )
+    out_a, _ = _finish_process(first)
+    out_b, _ = _finish_process(second)
+    assert "[build-cache] SAVED" in out_a
+    assert "[build-cache] SAVED" in out_b
+    assert (output / "A.o").is_file()
+    assert (output / "B.o").is_file()
+
+    manifests = []
+    for manifest_path in (cache_root / "custom_operator").rglob("manifest.json"):
+        manifests.append(json.loads(manifest_path.read_text(encoding="utf-8")))
+    assert len(manifests) == 2
+    by_action = {manifest["action"]: manifest for manifest in manifests}
+    assert {item["path"] for item in by_action["TestOperator-0"]["artifacts"]} == {"A.o"}
+    assert {item["path"] for item in by_action["TestOperator-1"]["artifacts"]} == {"B.o"}
+    assert all(manifest["artifact_model"] == 2 for manifest in manifests)
+
+
+def test_parallel_cache_hits_publish_without_shared_output_race(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "shared-output"
+    output.mkdir()
+    state = tmp_path / "publish-state"
+    cache_root = tmp_path / "cache"
+    builder = _write_builder(tmp_path)
+
+    for action, artifact, recipe, counter_name in [
+        ("TestOperator-0", "A.o", "recipe=A", "counter-a"),
+        ("TestOperator-1", "B.o", "recipe=B", "counter-b"),
+    ]:
+        proc = _run_cache(
+            cache_root=cache_root,
+            prepared_inputs=[prepared],
+            operator_source=source,
+            output_dir=output,
+            publish_state_dir=state,
+            builder=builder,
+            counter=tmp_path / counter_name,
+            action=action,
+            artifact_name=artifact,
+            recipe_values=[recipe],
+        )
+        _assert_success(proc)
+
+    _fresh_dir(output)
+    shutil.rmtree(tmp_path / "private-stages", ignore_errors=True)
+
+    first = _spawn_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        publish_state_dir=state,
+        builder=builder,
+        counter=tmp_path / "counter-a",
+        action="TestOperator-0",
+        artifact_name="A.o",
+        recipe_values=["recipe=A"],
+        builder_mode="counted",
+    )
+    second = _spawn_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        publish_state_dir=state,
+        builder=builder,
+        counter=tmp_path / "counter-b",
+        action="TestOperator-1",
+        artifact_name="B.o",
+        recipe_values=["recipe=B"],
+        builder_mode="counted",
+    )
+    out_a, _ = _finish_process(first)
+    out_b, _ = _finish_process(second)
+    assert "[build-cache] HIT" in out_a
+    assert "[build-cache] HIT" in out_b
+    assert (output / "A.o").is_file()
+    assert (output / "B.o").is_file()
+    assert (tmp_path / "counter-a").read_text() == "1"
+    assert (tmp_path / "counter-b").read_text() == "1"
+
+
+def test_same_key_parallel_requests_compile_once(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "shared-output"
+    output.mkdir()
+    state = tmp_path / "publish-state"
+    cache_root = tmp_path / "cache"
+    builder = _write_builder(tmp_path)
+    counter = tmp_path / "counter"
+
+    first = _spawn_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        publish_state_dir=state,
+        builder=builder,
+        counter=counter,
+        action="TestOperator-0",
+        artifact_name="A.o",
+        recipe_values=["recipe=A"],
+    )
+    time.sleep(0.05)
+    second = _spawn_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        publish_state_dir=state,
+        builder=builder,
+        counter=counter,
+        action="TestOperator-0",
+        artifact_name="A.o",
+        recipe_values=["recipe=A"],
+    )
+    out_a, _ = _finish_process(first)
+    out_b, _ = _finish_process(second)
+    combined = out_a + out_b
+    assert combined.count("[build-cache] MISS") == 1
+    assert combined.count("[build-cache] HIT") == 1
+    assert counter.read_text() == "1"
+
+
+def test_same_action_removes_stale_published_artifact(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "shared-output"
+    output.mkdir()
+    state = tmp_path / "publish-state"
+    cache_root = tmp_path / "cache"
+    builder = _write_builder(tmp_path)
+    counter = tmp_path / "counter"
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        publish_state_dir=state,
+        builder=builder,
+        counter=counter,
+        action="TestOperator-0",
+        artifact_name="old.o",
+        recipe_values=["recipe=old"],
+    )
+    _assert_success(first)
+    assert (output / "old.o").is_file()
+
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        publish_state_dir=state,
+        builder=builder,
+        counter=counter,
+        action="TestOperator-0",
+        artifact_name="new.o",
+        recipe_values=["recipe=new"],
+    )
+    _assert_success(second)
+    assert not (output / "old.o").exists()
+    assert (output / "new.o").is_file()
+
+
+def test_legacy_custom_operator_model_is_rebuilt(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(first)
+    key = _extract_key(first)
+    entry = _only_entry(cache_root, "custom_operator", key)
+    manifest_path = entry / "manifest.json"
+    manifest = _manifest(entry)
+    manifest.pop("artifact_model")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    _fresh_dir(output)
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(second)
+    assert "[build-cache] MISS" in second.stdout
+    assert counter.read_text() == "2"
+
+
+def test_third_party_entry_without_artifact_model_uses_legacy_model(tmp_path: Path):
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    (prepared / "third_party.cc").write_text("source\n", encoding="utf-8")
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        domain="third_party",
+        artifact_includes=["*.a"],
+        artifact_name="libtest.a",
+    )
+    _assert_success(first)
+    key = _extract_key(first)
+    entry = _only_entry(cache_root, "third_party", key)
+    manifest_path = entry / "manifest.json"
+    manifest = _manifest(entry)
+    manifest.pop("artifact_model")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    _fresh_dir(output)
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        domain="third_party",
+        artifact_includes=["*.a"],
+        artifact_name="libtest.a",
+    )
+    _assert_success(second)
+    assert "[build-cache] HIT" in second.stdout
+    assert counter.read_text() == "1"
+
+
+def test_cache_lock_failure_is_fail_open_for_custom_operator(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    builder = _write_builder(tmp_path)
+    counter = tmp_path / "counter"
+
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("block cache mkdir", encoding="utf-8")
+    unusable_cache = blocker / "cache"
+
+    proc = _run_cache(
+        cache_root=unusable_cache,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(proc)
+    assert "[build-cache] BYPASS" in proc.stdout
+    assert (output / "kernel.o").is_file()
+    assert counter.read_text() == "1"
+
+
+def test_different_actions_cannot_publish_same_relative_path(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "shared-output"
+    output.mkdir()
+    state = tmp_path / "publish-state"
+    cache_root = tmp_path / "cache"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        publish_state_dir=state,
+        builder=builder,
+        counter=tmp_path / "counter-a",
+        action="TestOperator-0",
+        artifact_name="same.o",
+        recipe_values=["recipe=A"],
+    )
+    _assert_success(first)
+
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        publish_state_dir=state,
+        builder=builder,
+        counter=tmp_path / "counter-b",
+        action="TestOperator-1",
+        artifact_name="same.o",
+        recipe_values=["recipe=B"],
+    )
+    assert second.returncode != 0
+    assert "artifact ownership collision" in second.stderr
+
+
+def test_first_isolated_publish_cleans_legacy_shared_output(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "shared-output"
+    output.mkdir()
+    (output / "legacy-stale.o").write_text("stale", encoding="utf-8")
+    cache_root = tmp_path / "cache"
+    builder = _write_builder(tmp_path)
+
+    proc = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        publish_state_dir=tmp_path / "publish-state",
+        builder=builder,
+        counter=tmp_path / "counter",
+        artifact_name="current.o",
+    )
+    _assert_success(proc)
+    assert not (output / "legacy-stale.o").exists()
+    assert (output / "current.o").is_file()
+
+
+def test_top_level_prepared_input_symlink_tracks_link_and_target_content(
+    tmp_path: Path,
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "kernel.cpp").write_text("int source = 1;\n", encoding="utf-8")
+
+    target_a = tmp_path / "prepared-a"
+    target_b = tmp_path / "prepared-b"
+    target_a.mkdir()
+    target_b.mkdir()
+    for target in (target_a, target_b):
+        (target / "kernel.cpp").write_text("int prepared = 1;\n", encoding="utf-8")
+
+    prepared = tmp_path / "prepared"
+    prepared.symlink_to(target_a.name, target_is_directory=True)
+
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(first)
+    key_a = _extract_key(first)
+    assert "[build-cache] MISS" in first.stdout
+    assert counter.read_text() == "1"
+
+    _fresh_dir(output)
+    warm = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(warm)
+    assert "[build-cache] HIT" in warm.stdout
+    assert _extract_key(warm) == key_a
+    assert counter.read_text() == "1"
+
+    prepared.unlink()
+    prepared.symlink_to(target_b.name, target_is_directory=True)
+    _fresh_dir(output)
+    retargeted = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(retargeted)
+    key_b = _extract_key(retargeted)
+    assert "[build-cache] MISS" in retargeted.stdout
+    assert key_b != key_a
+    assert counter.read_text() == "2"
+
+    (target_b / "kernel.cpp").write_text("int prepared = 2;\n", encoding="utf-8")
+    _fresh_dir(output)
+    changed = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(changed)
+    assert "[build-cache] MISS" in changed.stdout
+    assert _extract_key(changed) != key_b
+    assert counter.read_text() == "3"
+
+
+def test_normalized_prepared_path_keeps_referenced_semantic_input_sensitive(
+    tmp_path: Path,
+):
+    root_a = tmp_path / "covered-a"
+    root_b = tmp_path / "covered-b"
+    root_changed = tmp_path / "covered-changed"
+    key_a = _prepared_path_key(
+        tmp_path,
+        root_name=root_a.name,
+        prepared_payload=f'HEADER = "{root_a}/cann_compat.h"\n'.encode(),
+        semantic_input_payload=b"#define COMPAT 1\n",
+    )
+    key_b = _prepared_path_key(
+        tmp_path,
+        root_name=root_b.name,
+        prepared_payload=f'HEADER = "{root_b}/cann_compat.h"\n'.encode(),
+        semantic_input_payload=b"#define COMPAT 1\n",
+    )
+    key_changed = _prepared_path_key(
+        tmp_path,
+        root_name=root_changed.name,
+        prepared_payload=(f'HEADER = "{root_changed}/cann_compat.h"\n'.encode()),
+        semantic_input_payload=b"#define COMPAT 2\n",
+    )
+    assert key_b == key_a
+    assert key_changed != key_a
+
+
+def test_save_entry_rolls_back_old_entry_if_publish_replace_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    engine = _load_engine("build_cache_engine_atomic_save_test")
+
+    output = tmp_path / "output"
+    output.mkdir()
+    artifact = output / "kernel.o"
+    artifact.write_text("new artifact", encoding="utf-8")
+
+    entry = tmp_path / "entry"
+    entry.mkdir()
+    marker = entry / "old-marker"
+    marker.write_text("old entry survives", encoding="utf-8")
+
+    artifacts = [
+        {
+            "path": "kernel.o",
+            "kind": "file",
+            "sha256": _sha256_file(artifact),
+        }
+    ]
+
+    real_replace = engine.os.replace
+
+    def fail_new_entry_publish(source, destination):
+        source = Path(source)
+        destination = Path(destination)
+        if destination == entry and source.name.startswith(f".{entry.name}.tmp-"):
+            raise OSError("injected cache-entry publish failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(engine.os, "replace", fail_new_entry_publish)
+
+    with pytest.raises(OSError, match="injected cache-entry publish failure"):
+        engine._save_entry(
+            entry,
+            output,
+            artifacts,
+            {"domain": "custom_operator", "final_key": "test"},
+        )
+
+    assert marker.read_text(encoding="utf-8") == "old entry survives"
+    assert not list(entry.parent.glob(f".{entry.name}.old-*"))
+
+
+def test_nested_prepared_symlink_tracks_target_content(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    nested_target = tmp_path / "generated.py"
+    nested_target.write_text("VALUE = 1\n", encoding="utf-8")
+    (prepared / "nested.py").symlink_to(nested_target)
+
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(first)
+    first_key = _extract_key(first)
+
+    _fresh_dir(output)
+    warm = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(warm)
+    assert "[build-cache] HIT" in warm.stdout
+
+    nested_target.write_text("VALUE = 2\n", encoding="utf-8")
+    _fresh_dir(output)
+    changed = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(changed)
+    assert "[build-cache] MISS" in changed.stdout
+    assert _extract_key(changed) != first_key
+
+
+def test_cache_path_components_reject_dot_segments():
+    engine = _load_engine("build_cache_engine_safe_component_test")
+    with pytest.raises(ValueError, match="invalid cache path component"):
+        engine._safe_component(".")
+    with pytest.raises(ValueError, match="invalid cache path component"):
+        engine._safe_component("..")
+
+
+def test_explicit_environment_metadata_cannot_be_silently_dropped(tmp_path: Path):
+    engine = _load_engine("build_cache_engine_environment_metadata_test")
+    missing = tmp_path / "missing-toolchain.info"
+    with pytest.raises(FileNotFoundError, match="compiler environment metadata"):
+        engine._hash_compiler_environment(
+            "host-cxx",
+            [missing],
+            [],
+            [sys.executable],
+        )
+
+
+def test_snapshot_compatibility_aliases_share_identity(monkeypatch):
+    engine = _load_engine("build_cache_engine_snapshot_key_test")
+    image = "quay.io/ascend/manylinux:9.1.0-910b"
+    canonical = engine._snapshot_compatibility("arm64", "ascend910b1", image)
+    aliases = engine._snapshot_compatibility("aarch64", "a2", image)
+    different_image = engine._snapshot_compatibility("arm64", "ascend910b1", f"{image}-new")
+    assert canonical == aliases
+    assert different_image != canonical
+
+
+def test_snapshot_compatibility_explicit_image_overrides_outer_runtime(monkeypatch):
+    engine = _load_engine("build_cache_engine_snapshot_image_test")
+    ubuntu_image = "quay.io/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12"
+    openeuler_image = "quay.io/ascend/cann:9.1.0-910b-openeuler24.03-py3.12"
+
+    monkeypatch.setattr(engine.platform, "system", lambda: "outer-system-a")
+    outer_a = engine._snapshot_compatibility("arm64", "a2", openeuler_image)
+    monkeypatch.setattr(engine.platform, "system", lambda: "outer-system-b")
+    outer_b = engine._snapshot_compatibility("arm64", "a2", openeuler_image)
+
+    assert outer_a == outer_b
+    assert outer_a != engine._snapshot_compatibility("arm64", "a2", ubuntu_image)
+
+
+def test_snapshot_compatibility_separates_runtime_operating_systems(monkeypatch):
+    engine = _load_engine("build_cache_engine_snapshot_runtime_test")
+    metadata = Path("/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info")
+    original_is_file = engine.Path.is_file
+
+    def expose_runtime_files(path):
+        if path == metadata or path == Path("/etc/os-release"):
+            return True
+        return original_is_file(path)
+
+    monkeypatch.setattr(engine.Path, "is_file", expose_runtime_files)
+    os_release_hash = {"value": "ubuntu-22.04"}
+
+    def hash_runtime_file(path):
+        if path == Path("/etc/os-release"):
+            return os_release_hash["value"]
+        return "cann-metadata"
+
+    monkeypatch.setattr(engine, "_sha256_file", hash_runtime_file)
+    monkeypatch.setattr(engine.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(engine.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(engine.platform, "libc_ver", lambda: ("glibc", "2.35"))
+    ubuntu = engine._snapshot_compatibility("arm64", "a2", "")
+
+    os_release_hash["value"] = "openeuler-24.03"
+    openeuler = engine._snapshot_compatibility("arm64", "a2", "")
+
+    assert ubuntu != openeuler
+
+
+def test_snapshot_key_reports_unavailable_toolchain_without_weaker_identity(monkeypatch, capsys):
+    engine = _load_engine("build_cache_engine_snapshot_unavailable_test")
+    args = engine.argparse.Namespace(
+        architecture="arm64",
+        soc_version="a2",
+        toolchain_image="",
+        csrc_hash="csrc",
+        unique_suffix="unique",
+    )
+    monkeypatch.setattr(
+        engine,
+        "_snapshot_compatibility",
+        lambda *_args: (_ for _ in ()).throw(OSError("metadata unreadable")),
+    )
+
+    assert engine.snapshot_key(args) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "snapshot key unavailable: metadata unreadable" in captured.err
+
+
+def test_restore_action_skips_l1_when_snapshot_key_fails():
+    action = (REPO_ROOT / ".github" / "actions" / "csrc-l1-restore" / "action.yaml").read_text()
+
+    assert "prepare_csrc_l1_restore.py" in action
+    assert "snapshot-key" not in action
+
+
+def test_update_marker_only_records_successful_entry_save(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    cold = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(cold)
+    marker = cache_root / ".updated"
+    assert marker.is_file()
+
+    marker.unlink()
+    _fresh_dir(output)
+    warm = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(warm)
+    assert "[build-cache] HIT" in warm.stdout
+    assert not marker.exists()
+
+
+def test_cmake_adapter_preserves_arguments_with_spaces(tmp_path: Path):
+    cmake = shutil.which("cmake")
+    if cmake is None:
+        pytest.skip("cmake is unavailable")
+    assert cmake is not None
+
+    cache_root = tmp_path / "cache root"
+    output_dir = tmp_path / "output dir"
+    prepared = tmp_path / "prepared input"
+    result = tmp_path / "command.txt"
+    script = tmp_path / "verify.cmake"
+    adapter = REPO_ROOT / "csrc" / "cmake" / "build_cache.cmake"
+    script.write_text(
+        f'''set(HI_PYTHON "/python with space")
+set(VLLM_ASCEND_BUILD_CACHE_DIR "{cache_root}")
+set(VLLM_ASCEND_BUILD_CACHE_SCRIPT "{ENGINE}" CACHE FILEPATH "" FORCE)
+include("{adapter}")
+vllm_ascend_build_cache_command(
+    CACHE_COMMAND
+    DOMAIN third_party
+    UNIT "unit with space"
+    OUTPUT_DIR "{output_dir}"
+    ENVIRONMENT_PROFILE host-cxx
+    PREPARED_INPUT "{prepared}"
+    COMMAND "/builder with space" "--value=argument with space"
+)
+list(JOIN CACHE_COMMAND "\n" RENDERED)
+file(WRITE "{result}" "${{RENDERED}}\n")
+''',
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [cmake, "-P", str(script)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    _assert_success(proc)
+    arguments = result.read_text(encoding="utf-8").splitlines()
+    assert str(cache_root) in arguments
+    assert "unit with space" in arguments
+    assert str(output_dir) in arguments
+    assert str(prepared) in arguments
+    assert "/builder with space" in arguments
+    assert "--value=argument with space" in arguments
+
+
+def test_cmake_adapter_defaults_cache_under_csrc(tmp_path: Path):
+    cmake = shutil.which("cmake")
+    if cmake is None:
+        pytest.skip("cmake is unavailable")
+    assert cmake is not None
+
+    source_dir = tmp_path / "csrc"
+    build_dir = tmp_path / "build"
+    source_dir.mkdir()
+    result = build_dir / "cache-dir.txt"
+    adapter = REPO_ROOT / "csrc" / "cmake" / "build_cache.cmake"
+    (source_dir / "CMakeLists.txt").write_text(
+        f'''cmake_minimum_required(VERSION 3.16)
+project(build_cache_default NONE)
+include("{adapter}")
+file(WRITE "{result}" "${{VLLM_ASCEND_BUILD_CACHE_DIR}}")
+''',
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [cmake, "-S", str(source_dir), "-B", str(build_dir)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    _assert_success(proc)
+    assert result.read_text(encoding="utf-8") == str(source_dir / "build_cache")
+
+    build_script = (REPO_ROOT / "csrc" / "build.sh").read_text(encoding="utf-8")
+    assert "VLLM_ASCEND_BUILD_CACHE_DIR:-${CURRENT_DIR}/build_cache" in build_script
+    assert "VLLM_ASCEND_BUILD_CACHE_DIR:-${CURRENT_DIR}/../build_cache" not in build_script
+
+
+@pytest.mark.parametrize(
+    ("workflow", "container_source_root", "build_count"),
+    [
+        ("_schedule_image_build.yaml", "/vllm-workspace/vllm-ascend", 1),
+        ("schedule_release_code_and_wheel.yml", "/workspace/vllm-ascend", 4),
+    ],
+)
+def test_docker_l1_paths_match_csrc_default(workflow: str, container_source_root: str, build_count: int):
+    text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
+
+    # COPY . places the restored host directory under the image source root.
+    assert text.count("cache-dir: ${{ github.workspace }}/csrc/build_cache") == 2 * build_count
+    assert text.count('"$GITHUB_WORKSPACE/csrc/build_cache"') == build_count
+    assert text.count(f'"{container_source_root}/csrc/build_cache"') == build_count

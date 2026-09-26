@@ -5,6 +5,8 @@ BISECT_SOC="${1:-}"
 MAX_GOOD_AGE_DAYS="${2:-3}"
 BISECT_SCENE="${3:-multi_node}"
 
+export VLLM_ASCEND_BUILD_CACHE_DIR="/root/.cache/vllm-ascend/csrc-build-cache/${BISECT_SOC:-unknown}/node-${LWS_WORKER_INDEX:-0}"
+
 # Color definitions
 GREEN="\033[0;32m"
 BLUE="\033[0;34m"

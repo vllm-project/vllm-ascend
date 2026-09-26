@@ -177,6 +177,8 @@ jobs:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
 
   image_build_by_commit:
     name: ${{ matrix.build_meta.name }} (commit mode)
@@ -225,3 +227,5 @@ jobs:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}

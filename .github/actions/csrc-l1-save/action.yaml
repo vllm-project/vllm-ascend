@@ -1,0 +1,57 @@
+name: Save csrc incremental cache
+description: Persist the updated content-addressed local csrc cache.
+
+inputs:
+  cache-dir:
+    required: true
+  primary-key:
+    required: true
+  access-key-id:
+    required: false
+    default: ''
+  secret-access-key:
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Inspect L1 directory
+      id: inspect
+      shell: bash
+      env:
+        CACHE_DIR: ${{ inputs.cache-dir }}
+        PRIMARY_KEY: ${{ inputs.primary-key }}
+      run: |
+        set -euo pipefail
+        if [ -n "$PRIMARY_KEY" ] \
+          && [ -d "$CACHE_DIR" ] \
+          && [ -f "$CACHE_DIR/.updated" ]; then
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          du -sh "$CACHE_DIR" || true
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::The local L1 cache did not gain an entry; shared save is skipped."
+        fi
+
+    # Possession of both write-capable OBS secrets is the authorization
+    # boundary. Read-only consumers may restore but must not publish shared L1.
+    - name: Save L1 snapshot
+      if: >-
+        steps.inspect.outputs.present == 'true' &&
+        inputs.access-key-id != '' &&
+        inputs.secret-access-key != ''
+      continue-on-error: true
+      uses: runs-on/cache/save@v5
+      env:
+        RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+        RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+        RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+        AWS_S3_FORCE_PATH_STYLE: "false"
+        AWS_REGION: ap-southeast-1
+        RUNS_ON_RUNNER_NAME: ""
+        AWS_ACCESS_KEY_ID: ${{ inputs.access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.secret-access-key }}
+      with:
+        path: ${{ inputs.cache-dir }}
+        key: ${{ inputs.primary-key }}

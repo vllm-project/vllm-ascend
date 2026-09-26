@@ -8,6 +8,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+include(${CMAKE_CURRENT_LIST_DIR}/build_cache.cmake)
+
 function(filter_copy_files SELECTED_FILES SELECTED_DIRS)
     set(_selected_files "")
     set(_selected_dirs "")
@@ -360,9 +362,15 @@ function(add_ops_src_copy)
         if (NOT TARGET ${OPS_UTILS_INC_KERNEL_TARGET})
             get_filename_component(_ROOT_OPS_SRC_DIR    "${SRC_COPY_DST}" DIRECTORY)
             set(OPS_UTILS_INC_KERNEL_DIR ${_ROOT_OPS_SRC_DIR}/ascendc/common)
+            file(
+                GLOB_RECURSE OPS_UTILS_INC_KERNEL_FILES
+                CONFIGURE_DEPENDS
+                ${OPS_ADV_UTILS_KERNEL_INC}/*
+            )
             add_custom_command(OUTPUT ${OPS_UTILS_INC_KERNEL_DIR}
                     COMMAND mkdir -p ${OPS_UTILS_INC_KERNEL_DIR}/regbase
                     COMMAND cp -rf ${OPS_ADV_UTILS_KERNEL_INC}/*.* ${OPS_UTILS_INC_KERNEL_DIR}
+                    DEPENDS ${OPS_UTILS_INC_KERNEL_FILES}
             )
 
             add_custom_target(${OPS_UTILS_INC_KERNEL_TARGET}
@@ -401,11 +409,14 @@ function(add_ops_src_copy)
     endif()
 
     if(NOT BUILD_OPS_RTY_KERNEL AND BELONG_MC2_OPS)
-        file(GLOB SRC_FILES ${SRC_COPY_SRC}/* ${SRC_COPY_SRC}/op_kernel/*)
+        file(GLOB SRC_FILES CONFIGURE_DEPENDS ${SRC_COPY_SRC}/* ${SRC_COPY_SRC}/op_kernel/*)
     else()
-        file(GLOB SRC_FILES ${SRC_COPY_SRC}/*)
+        file(GLOB SRC_FILES CONFIGURE_DEPENDS ${SRC_COPY_SRC}/*)
     endif()
     list(FILTER SRC_FILES EXCLUDE REGEX "op_host")
+
+    file(GLOB_RECURSE SRC_COPY_DEPENDS CONFIGURE_DEPENDS ${SRC_COPY_SRC}/*)
+    list(FILTER SRC_COPY_DEPENDS EXCLUDE REGEX "/op_host(/|$)")
 
     get_filename_component(PARENT_PTH "${SRC_COPY_SRC}" DIRECTORY)
     get_filename_component(CUR_NAME "${SRC_COPY_SRC}" NAME)
@@ -424,12 +435,14 @@ function(add_ops_src_copy)
                     COMMAND cp -rf ${SRC_FILES} ${SRC_COPY_DST}
                     COMMAND rm -rf ${SRC_COPY_DST}/op_kernel/
                     COMMAND touch ${_BUILD_FLAG}
+                    DEPENDS ${SRC_COPY_DEPENDS}
             )
         else()
             add_custom_command(OUTPUT ${_BUILD_FLAG}
                     COMMAND mkdir -p ${SRC_COPY_DST}
                     COMMAND cp -rf ${SRC_FILES} ${SRC_COPY_DST}
                     COMMAND touch ${_BUILD_FLAG}
+                    DEPENDS ${SRC_COPY_DEPENDS}
             )
         endif()
 
@@ -534,6 +547,7 @@ function(add_bin_compile_target)
             set(DYNAMIC_PY_FILE ${OP_SRC_OUT_DIR}/${op_type}.py)
             add_custom_command(OUTPUT ${DYNAMIC_PY_FILE}
                     COMMAND cp -rf ${ASCEND_IMPL_OUT_DIR}/dynamic/${op_file}.py ${DYNAMIC_PY_FILE}
+                    DEPENDS ${ASCEND_IMPL_OUT_DIR}/dynamic/${op_file}.py
                     # COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/update_get_kernel_source.sh ${DYNAMIC_PY_FILE}
             )
 
@@ -606,27 +620,106 @@ function(add_bin_compile_target)
         endif ()
 
         if (_compile_flag)
-            set(_BUILD_COMMAND)
-            set(_BUILD_FLAG ${GEN_OUT_DIR}/${OP_TARGET_NAME}_${op_index}.done)
+            # Cache-correctness boundary: every file that can affect the
+            # generated action must remain in one of the prepared-input groups
+            # below. Do not normalize an embedded path unless the referenced
+            # semantic content is covered here or by environment identity.
+            # prepared_input_hash: what is compiled?
+            set(_CACHE_OPERATOR_GENERATED_INPUTS ${OP_SRC_OUT_DIR})
+            set(_CACHE_DEPENDENT_GENERATED_INPUTS)
+            if (DEFINED ${op_file}_depends)
+                foreach(depend_info ${${op_file}_depends})
+                    get_filename_component(_depend_op_name "${depend_info}" NAME)
+                    list(APPEND _CACHE_DEPENDENT_GENERATED_INPUTS ${SRC_OUT_DIR}/${_depend_op_name})
+                endforeach()
+            endif()
+
+            set(_CACHE_SHARED_COMPILER_INPUTS)
+            if (EXISTS ${OPS_ADV_UTILS_KERNEL_INC})
+                list(APPEND _CACHE_SHARED_COMPILER_INPUTS ${SRC_OUT_DIR}/ascendc/common)
+            endif()
+            # The generated adapter embeds this absolute -include path. Its
+            # location is normalized by the cache wrapper, but its contents
+            # are a semantic compiler input and must remain identity-sensitive.
+            if (EXISTS ${VLLM_ASCEND_CANN_COMPAT_HEADER})
+                list(APPEND _CACHE_SHARED_COMPILER_INPUTS ${VLLM_ASCEND_CANN_COMPAT_HEADER})
+            endif()
+
+            set(
+                _CACHE_PREPARED_INPUTS
+                ${_CACHE_OPERATOR_GENERATED_INPUTS}
+                ${_CACHE_DEPENDENT_GENERATED_INPUTS}
+                ${_CACHE_SHARED_COMPILER_INPUTS}
+            )
+
+            # compiler_environment_hash: what compiler/toolkit produces it?
+            set(_CACHE_ENVIRONMENT_FILES)
+            foreach(_cache_metadata_file
+                    ${ASCEND_CANN_PACKAGE_PATH}/version.info
+                    ${ASCEND_CANN_PACKAGE_PATH}/ascend_toolkit_install.info)
+                if(EXISTS "${_cache_metadata_file}")
+                    list(APPEND _CACHE_ENVIRONMENT_FILES ${_cache_metadata_file})
+                endif()
+            endforeach()
+
+            set(
+                _CACHE_SET_ENV
+                HI_PYTHON=python3
+                TILINGKEY_PAR_COMPILE=1
+                BIN_FILENAME_HASHED=1
+            )
             if (ENABLE_OPS_HOST OR ENABLE_HOST_TILING)
-                list(APPEND _BUILD_COMMAND export ASCEND_CUSTOM_OPP_PATH=${CUSTOM_DIR} &&)
-            endif ()
-            list(APPEND _BUILD_COMMAND export HI_PYTHON="python3" &&)
-            list(APPEND _BUILD_COMMAND export TILINGKEY_PAR_COMPILE=1 &&)
-            list(APPEND _BUILD_COMMAND export BIN_FILENAME_HASHED=1 &&)
-            list(APPEND _BUILD_COMMAND bash ${bin_script} ${OP_SRC_OUT_DIR}/${op_type}.py ${OP_BIN_OUT_DIR})
+                list(APPEND _CACHE_SET_ENV ASCEND_CUSTOM_OPP_PATH=${CUSTOM_DIR})
+            endif()
+
+            # Compile every action into a private directory. Multiple
+            # op_index actions may run in parallel, but must never infer artifact
+            # ownership from changes in their shared OP_BIN_OUT_DIR.
+            set(_CACHE_ACTION_ROOT ${_OUT_DIR}/cache_actions/${op_file})
+            set(_CACHE_ACTION_STAGE_DIR
+                ${_CACHE_ACTION_ROOT}/stages/${op_type}-${op_index}
+            )
+            set(_CACHE_PUBLISH_STATE_DIR
+                ${_CACHE_ACTION_ROOT}/publish_state
+            )
+
+            # recipe_hash: how is it compiled? The upstream generated
+            # op_type/op_file/op_index script remains authoritative. The stage
+            # path is under CMAKE_BINARY_DIR and is normalized by the cache
+            # wrapper, so workspace location does not enter the semantic key.
+            # These identity and publication arguments form one contract. Keep
+            # the design document and invalidation regressions aligned with it.
+            vllm_ascend_build_cache_command(
+                _BUILD_COMMAND
+                DOMAIN custom_operator
+                UNIT ${op_file}
+                SOC ${BINARY_COMPUTE_UNIT}
+                OPERATOR ${op_file}
+                ACTION ${op_type}-${op_index}
+                OPERATOR_SOURCE ${${op_file}_dir}
+                REPO_ROOT ${CMAKE_SOURCE_DIR}
+                OUTPUT_DIR ${_CACHE_ACTION_STAGE_DIR}
+                PUBLISH_DIR ${OP_BIN_OUT_DIR}
+                PUBLISH_STATE_DIR ${_CACHE_PUBLISH_STATE_DIR}
+                PREPARED_INPUT ${_CACHE_PREPARED_INPUTS}
+                RECIPE_FILE ${bin_script}
+                ENVIRONMENT_PROFILE ascendc
+                ENVIRONMENT_FILE ${_CACHE_ENVIRONMENT_FILES}
+                NORMALIZE_PATH ${ASCEND_CANN_PACKAGE_PATH}
+                SET_ENV ${_CACHE_SET_ENV}
+                COMMAND bash ${bin_script} ${OP_SRC_OUT_DIR}/${op_type}.py ${_CACHE_ACTION_STAGE_DIR}
+            )
+
             if(CMAKE_GENERATOR MATCHES "Unix Makefiles")
+                # Preserve GNU Make jobserver inheritance.
                 list(APPEND _BUILD_COMMAND && echo $(MAKE))
             endif()
 
-            add_custom_command(OUTPUT ${_BUILD_FLAG}
-                    COMMAND ${_BUILD_COMMAND}
-                    COMMAND touch ${_BUILD_FLAG}
-                    WORKING_DIRECTORY ${GEN_OUT_DIR}
-            )
-
+            # Always enter the cache wrapper. The wrapper, not a stale .done
+            # file, is the source of truth for whether this action can be reused.
             add_custom_target(${OP_TARGET_NAME}_${op_index}
-                DEPENDS ${_BUILD_FLAG}
+                COMMAND ${_BUILD_COMMAND}
+                WORKING_DIRECTORY ${GEN_OUT_DIR}
             )
 
             if (ENABLE_OPS_HOST OR ENABLE_HOST_TILING)

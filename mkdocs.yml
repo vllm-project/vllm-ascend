@@ -327,6 +327,7 @@ nav:
         - developer_guide/contribution/e2e_ci_test.md
     - Design Documents:
         - developer_guide/Design_Documents/index.md
+        - developer_guide/Design_Documents/persistent_csrc_build_cache.md
         - developer_guide/Design_Documents/patch.md
         - developer_guide/Design_Documents/cpu_binding.md
         - developer_guide/Design_Documents/ModelRunner_prepare_inputs.md
