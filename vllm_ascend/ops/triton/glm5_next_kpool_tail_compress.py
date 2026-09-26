@@ -69,100 +69,101 @@ def _glm5_next_kpool_tail_compress_kernel(
     dim_offsets = tl.program_id(1) * BLOCK_D + tl.arange(0, BLOCK_D)
     dim_mask = dim_offsets < HEAD_DIM
 
-    # Request bucketize: requests are packed contiguously in the batch.
-    req_offsets = tl.arange(0, REQ_POW2)
-    query_ends = tl.load(
-        cum_query_lens_ptr + req_offsets,
-        mask=req_offsets < num_reqs,
-        other=2147483647,
-    )
-    req_id = tl.sum(tl.where(token_idx >= query_ends, 1, 0))
-    # Full ACL graphs keep padded rows beyond the last request; keep their
-    # pointer arithmetic in bounds even though their stores are masked.
-    req_id = tl.minimum(req_id, num_reqs - 1)
-
-    # 2) Pool window gather for pool-completing tokens.
+    # Check completion before request lookup and the softmax. Most tokens
+    # only update the tail; they cannot produce a compressed cache row.
     indexer_slot = tl.load(indexer_slot_mapping_ptr + token_idx).to(tl.int64)
     last_query_end = tl.load(cum_query_lens_ptr + num_reqs - 1)
-    indexer_valid = (indexer_slot >= 0) & (indexer_slot < indexer_num_slots) & (token_idx < last_query_end)
-
     pos = tl.load(positions_ptr + token_idx).to(tl.int32)
-    indexer_valid = indexer_valid & (pos >= 0) & ((pos + 1) % POOL_SIZE == 0)
-    query_end = tl.load(cum_query_lens_ptr + req_id)
-    prev_query_end = tl.load(cum_query_lens_ptr + req_id - 1, mask=req_id > 0, other=0)
-    seq_len = tl.load(seq_lens_ptr + req_id)
-    request_query_start = seq_len - (query_end - prev_query_end)
-
-    pool_offsets = tl.arange(0, BLOCK_P)
-    pool_mask = pool_offsets < POOL_SIZE
-    # Column j holds the raw K/gate at position pos - (POOL_SIZE - 1 - j).
-    pool_pos = pos - (POOL_SIZE - 1 - pool_offsets)
-    eff_pos = tl.maximum(pool_pos, 0)
-    in_window = pool_mask & (pool_pos >= request_query_start) & (pool_pos < seq_len)
-
-    # In-window rows live in this launch's k/gate_score inputs; the matching
-    # input row is the batch row of the token at that position.
-    src_row = prev_query_end + eff_pos - request_query_start
-    src_row = tl.minimum(tl.maximum(src_row, 0), num_tokens - 1)
-    window_mask = indexer_valid & in_window[:, None] & dim_mask[None, :]
-    pool_k_in = tl.load(
-        k_ptr + src_row[:, None] * k_stride_t + dim_offsets[None, :],
-        mask=window_mask,
-        other=0.0,
-    ).to(tl.float32)
-    pool_g_in = tl.load(
-        gate_score_ptr + src_row[:, None] * gate_score_stride_t + dim_offsets[None, :],
-        mask=window_mask,
-        other=0.0,
-    ).to(tl.float32)
-
-    # Older rows belong to this request's fixed block, addressed modulo C.
-    history_valid = indexer_valid & pool_mask & (pool_pos >= 0) & (~in_window)
-    page_offset = eff_pos % tail_block_size
-    physical = tl.load(
-        tail_block_table_ptr + req_id * tail_block_table_stride_req,
-    ).to(tl.int64)
-    history_valid = history_valid & (physical >= 0) & (physical < tail_num_blocks)
-    physical = tl.where(history_valid, physical, 0)
-    hist_addr = physical[:, None] * tail_cache_stride_block + page_offset[:, None] * tail_cache_stride_offset
-    hist_mask = history_valid[:, None] & dim_mask[None, :]
-    pool_k_hist = tl.load(
-        tail_cache_ptr + hist_addr + dim_offsets[None, :] * tail_cache_stride_d,
-        mask=hist_mask,
-        other=0.0,
-    ).to(tl.float32)
-    pool_g_hist = tl.load(
-        tail_cache_ptr + hist_addr + tail_cache_stride_plane + dim_offsets[None, :] * tail_cache_stride_d,
-        mask=hist_mask,
-        other=0.0,
-    ).to(tl.float32)
-
-    pool_k = tl.where(in_window[:, None], pool_k_in, pool_k_hist)
-    pool_g = tl.where(in_window[:, None], pool_g_in, pool_g_hist)
-
-    # 3) softmax(gate + ape) over the pool axis, weighted sum of K.
-    ape = tl.load(
-        ape_ptr + pool_offsets[:, None] * ape_stride_p + dim_offsets[None, :],
-        mask=pool_mask[:, None] & dim_mask[None, :],
-        other=0.0,
-    ).to(tl.float32)
-    scores = tl.where(pool_mask[:, None], pool_g + ape, float("-inf"))
-    score_max = tl.max(scores, axis=0)
-    weights = tl.exp(scores - score_max[None, :])
-    weights = weights / tl.sum(weights, axis=0)[None, :]
-    compressed = tl.sum(weights * pool_k, axis=0)
-
-    safe_indexer_slot = tl.where(indexer_valid, indexer_slot, 0)
-    indexer_block = safe_indexer_slot // indexer_block_size
-    indexer_offset = safe_indexer_slot % indexer_block_size
-    tl.store(
-        indexer_cache_ptr
-        + indexer_block * indexer_cache_stride_block
-        + indexer_offset * indexer_cache_stride_offset
-        + dim_offsets * indexer_cache_stride_d,
-        compressed,
-        mask=dim_mask & indexer_valid,
+    indexer_valid = (
+        (indexer_slot >= 0)
+        & (indexer_slot < indexer_num_slots)
+        & (token_idx < last_query_end)
+        & (pos >= 0)
+        & ((pos + 1) % POOL_SIZE == 0)
     )
+    if indexer_valid:
+        req_offsets = tl.arange(0, REQ_POW2)
+        query_ends = tl.load(
+            cum_query_lens_ptr + req_offsets,
+            mask=req_offsets < num_reqs,
+            other=2147483647,
+        )
+        req_id = tl.sum(tl.where(token_idx >= query_ends, 1, 0))
+        query_end = tl.load(cum_query_lens_ptr + req_id)
+        prev_query_end = tl.load(cum_query_lens_ptr + req_id - 1, mask=req_id > 0, other=0)
+        seq_len = tl.load(seq_lens_ptr + req_id)
+        request_query_start = seq_len - (query_end - prev_query_end)
+
+        pool_offsets = tl.arange(0, BLOCK_P)
+        pool_mask = pool_offsets < POOL_SIZE
+        # Column j holds the raw K/gate at position pos - (POOL_SIZE - 1 - j).
+        pool_pos = pos - (POOL_SIZE - 1 - pool_offsets)
+        eff_pos = tl.maximum(pool_pos, 0)
+        in_window = pool_mask & (pool_pos >= request_query_start) & (pool_pos < seq_len)
+
+        # In-window rows live in this launch's k/gate_score inputs; the matching
+        # input row is the batch row of the token at that position.
+        src_row = prev_query_end + eff_pos - request_query_start
+        src_row = tl.minimum(tl.maximum(src_row, 0), num_tokens - 1)
+        window_mask = indexer_valid & in_window[:, None] & dim_mask[None, :]
+        pool_k_in = tl.load(
+            k_ptr + src_row[:, None] * k_stride_t + dim_offsets[None, :],
+            mask=window_mask,
+            other=0.0,
+        ).to(tl.float32)
+        pool_g_in = tl.load(
+            gate_score_ptr + src_row[:, None] * gate_score_stride_t + dim_offsets[None, :],
+            mask=window_mask,
+            other=0.0,
+        ).to(tl.float32)
+
+        # Older rows belong to this request's fixed block, addressed modulo C.
+        history_valid = indexer_valid & pool_mask & (pool_pos >= 0) & (~in_window)
+        page_offset = eff_pos % tail_block_size
+        physical = tl.load(
+            tail_block_table_ptr + req_id * tail_block_table_stride_req,
+        ).to(tl.int64)
+        history_valid = history_valid & (physical >= 0) & (physical < tail_num_blocks)
+        physical = tl.where(history_valid, physical, 0)
+        hist_addr = physical[:, None] * tail_cache_stride_block + page_offset[:, None] * tail_cache_stride_offset
+        hist_mask = history_valid[:, None] & dim_mask[None, :]
+        pool_k_hist = tl.load(
+            tail_cache_ptr + hist_addr + dim_offsets[None, :] * tail_cache_stride_d,
+            mask=hist_mask,
+            other=0.0,
+        ).to(tl.float32)
+        pool_g_hist = tl.load(
+            tail_cache_ptr + hist_addr + tail_cache_stride_plane + dim_offsets[None, :] * tail_cache_stride_d,
+            mask=hist_mask,
+            other=0.0,
+        ).to(tl.float32)
+
+        pool_k = tl.where(in_window[:, None], pool_k_in, pool_k_hist)
+        pool_g = tl.where(in_window[:, None], pool_g_in, pool_g_hist)
+
+        # 3) softmax(gate + ape) over the pool axis, weighted sum of K.
+        ape = tl.load(
+            ape_ptr + pool_offsets[:, None] * ape_stride_p + dim_offsets[None, :],
+            mask=pool_mask[:, None] & dim_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        scores = tl.where(pool_mask[:, None], pool_g + ape, float("-inf"))
+        score_max = tl.max(scores, axis=0)
+        weights = tl.exp(scores - score_max[None, :])
+        weights = weights / tl.sum(weights, axis=0)[None, :]
+        compressed = tl.sum(weights * pool_k, axis=0)
+
+        safe_indexer_slot = tl.where(indexer_valid, indexer_slot, 0)
+        indexer_block = safe_indexer_slot // indexer_block_size
+        indexer_offset = safe_indexer_slot % indexer_block_size
+        tl.store(
+            indexer_cache_ptr
+            + indexer_block * indexer_cache_stride_block
+            + indexer_offset * indexer_cache_stride_offset
+            + dim_offsets * indexer_cache_stride_d,
+            compressed,
+            mask=dim_mask & indexer_valid,
+        )
 
 
 @triton.jit(do_not_specialize=["num_tokens"])
