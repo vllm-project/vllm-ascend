@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+from vllm.logger import logger
 
 from vllm_ascend._310p.ops.fla.l2norm import l2norm_310p
 
@@ -365,6 +366,78 @@ def _compute_kernel_inputs_from_torch_wy(
     return q_kernel, k_kernel, w_kernel, u_kernel, g_kernel
 
 
+def _get_chunk_gated_delta_rule_compute_wy_op():
+    """Return the vLLM Ascend WY preparation op when available."""
+    ascend_ops = getattr(torch.ops, "_C_ascend", None)
+    if ascend_ops is None:
+        return None
+    op = getattr(ascend_ops, "chunk_gated_delta_rule_compute_wy", None)
+    is_available = getattr(ascend_ops, "is_chunk_gated_delta_rule_compute_wy_available", None)
+    if op is None or is_available is None or not is_available():
+        return None
+    return op
+
+
+def _can_use_chunk_gated_delta_rule_compute_wy_op(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int,
+) -> bool:
+    if q.device.type != "npu" or any(tensor.device != q.device for tensor in (k, v, g, beta)):
+        return False
+    if chunk_size != CHUNK_SIZE:
+        return False
+    if q.dtype != torch.float16 or k.dtype != torch.float16 or v.dtype != torch.float16:
+        return False
+    if beta.dtype != torch.float16 or g.dtype != torch.float32:
+        return False
+    if q.ndim != 4 or k.shape != q.shape or v.ndim != 4:
+        return False
+    if g.ndim != 3 or beta.shape != g.shape:
+        return False
+
+    batch_size, sequence_length, num_key_heads, key_dim = q.shape
+    num_value_heads = v.shape[2]
+    value_dim = v.shape[3]
+    if v.shape[:2] != q.shape[:2] or g.shape != (batch_size, sequence_length, num_value_heads):
+        return False
+    if sequence_length % chunk_size != 0 or num_key_heads == 0 or num_value_heads % num_key_heads != 0:
+        return False
+    if key_dim % 16 != 0 or value_dim % 16 != 0 or key_dim > 128 or value_dim > 128:
+        return False
+    return batch_size <= 32 and num_value_heads <= 64
+
+
+def _compute_kernel_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    op = _get_chunk_gated_delta_rule_compute_wy_op()
+    if op is None or not _can_use_chunk_gated_delta_rule_compute_wy_op(q, k, v, g, beta, chunk_size):
+        logger.info_once(
+            "[wxc][310P] Falling back to the PyTorch chunk_gated_delta_rule_compute_wy implementation because "
+            "torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy is unavailable or the inputs are unsupported."
+        )
+        return _compute_kernel_inputs_from_torch_wy(q, k, v, g, beta, chunk_size)
+
+    logger.info_once("[wxc][310P] Using torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy.")
+    return op(
+        q.contiguous(),
+        k.contiguous(),
+        v.contiguous(),
+        g.contiguous(),
+        beta.contiguous(),
+        chunk_size,
+    )
+
+
 def _unpad_chunk_output(
     out: torch.Tensor,
     seq_ranges: list[tuple[int, int, int]],
@@ -532,7 +605,7 @@ def chunk_gated_delta_rule_310(
         return empty_out, final_state
 
     scale = k.shape[-1] ** -0.5 if scale is None else scale
-    q_kernel, k_kernel, w_kernel, u_kernel, g_kernel = _compute_kernel_inputs_from_torch_wy(
+    q_kernel, k_kernel, w_kernel, u_kernel, g_kernel = _compute_kernel_inputs(
         q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE
     )
 

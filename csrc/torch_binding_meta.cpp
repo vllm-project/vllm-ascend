@@ -1809,6 +1809,57 @@ at::Tensor chunk_fwd_o_meta(
     return o;
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_compute_wy_meta(
+    const at::Tensor & q,
+    const at::Tensor & k,
+    const at::Tensor & v,
+    const at::Tensor & g,
+    const at::Tensor & beta,
+    c10::optional<int64_t> chunk_size)
+{
+    (void)k;
+    (void)beta;
+    (void)chunk_size;
+    const c10::SymInt batch_size = q.sym_size(0);
+    const c10::SymInt sequence_length = q.sym_size(1);
+    const c10::SymInt num_key_heads = q.sym_size(2);
+    const c10::SymInt key_dim = q.sym_size(3);
+    const c10::SymInt num_value_heads = v.sym_size(2);
+    const c10::SymInt value_dim = v.sym_size(3);
+
+    at::Tensor q_kernel = at::empty_symint(
+        c10::SymDimVector{batch_size, num_key_heads, sequence_length, key_dim}, q.options());
+    at::Tensor k_kernel = at::empty_symint(
+        c10::SymDimVector{batch_size, num_key_heads, sequence_length, key_dim}, q.options());
+    at::Tensor w_kernel = at::empty_symint(
+        c10::SymDimVector{batch_size, num_value_heads, sequence_length, key_dim}, q.options());
+    at::Tensor u_kernel = at::empty_symint(
+        c10::SymDimVector{batch_size, num_value_heads, sequence_length, value_dim}, v.options());
+    at::Tensor g_kernel = at::empty_symint(
+        c10::SymDimVector{batch_size, num_value_heads, sequence_length}, g.options().dtype(at::kFloat));
+    return std::make_tuple(q_kernel, k_kernel, w_kernel, u_kernel, g_kernel);
+}
+
+std::tuple<at::Tensor, at::Tensor> fused_gdn_gating_meta(
+    const at::Tensor & A_log,
+    const at::Tensor & a,
+    const at::Tensor & b,
+    const at::Tensor & dt_bias,
+    double beta,
+    double threshold)
+{
+    (void)A_log;
+    (void)dt_bias;
+    (void)beta;
+    (void)threshold;
+    const c10::SymInt batch_size = a.sym_size(0);
+    const c10::SymInt num_heads = a.sym_size(1);
+    const c10::SymDimVector output_shape{c10::SymInt(1), batch_size, num_heads};
+    at::Tensor g = at::empty_symint(output_shape, a.options().dtype(at::kFloat));
+    at::Tensor beta_output = at::empty_symint(output_shape, b.options());
+    return std::make_tuple(g, beta_output);
+}
+
 std::tuple<at::Tensor, c10::optional<at::Tensor>, c10::optional<at::Tensor>, at::Tensor, at::Tensor,
            c10::optional<at::Tensor>, c10::optional<at::Tensor>, c10::optional<at::Tensor>,
            c10::optional<at::Tensor>, c10::optional<at::Tensor>, c10::optional<at::Tensor>,
@@ -2082,6 +2133,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o
     ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // chunk_gated_delta_rule_compute_wy
+    ops.impl("chunk_gated_delta_rule_compute_wy", &vllm_ascend::meta::chunk_gated_delta_rule_compute_wy_meta);
+    // fused_gdn_gating
+    ops.impl("fused_gdn_gating", &vllm_ascend::meta::fused_gdn_gating_meta);
     // chunk_kda_fwd
     ops.impl("chunk_kda_fwd", &vllm_ascend::meta::chunk_kda_fwd_meta);
     // kda_gate_cumsum
