@@ -18,6 +18,57 @@ def test_collect_warmup_rejection_block_sizes():
     assert len(block_sizes) == len(sizes)
 
 
+def test_warm_greedy_passes_fly_arguments():
+    tensors = {
+        "output_token_ids": object(),
+        "cu_num_draft_tokens": object(),
+        "draft_token_ids": object(),
+        "target_argmax": object(),
+        "bonus_token_ids": object(),
+        "fly_entropy": object(),
+        "fly_draft_allowed": object(),
+    }
+    rejection_config = SimpleNamespace(
+        enable_fly_verify=True,
+        fly_entropy_threshold=0.7,
+        fly_window_size=2,
+    )
+
+    with (
+        patch.object(
+            rw,
+            "_make_rejection_tensors",
+            return_value=tensors,
+        ),
+        patch.object(
+            rw,
+            "get_ascend_config",
+            return_value=SimpleNamespace(
+                rejection_sampler_config=rejection_config,
+            ),
+        ),
+        patch.object(
+            rw,
+            "rejection_greedy_sample_with_triton",
+        ) as mock_greedy,
+    ):
+        rw._warm_greedy(
+            batch_size=2,
+            max_spec_len=4,
+            block_size=8,
+            grid=1,
+            device=MagicMock(),
+            is_greedy=None,
+        )
+
+    mock_greedy.assert_called_once()
+    kwargs = mock_greedy.call_args.kwargs
+    assert kwargs["fly_entropy"] is tensors["fly_entropy"]
+    assert kwargs["fly_draft_allowed"] is tensors["fly_draft_allowed"]
+    assert kwargs["fly_entropy_threshold"] == 0.7
+    assert kwargs["fly_window_size"] == 2
+
+
 @patch.object(rw, "_warm_rejection_random")
 @patch.object(rw, "_warm_greedy")
 @patch.object(rw, "_warm_expand")

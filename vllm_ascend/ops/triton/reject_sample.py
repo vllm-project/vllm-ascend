@@ -95,7 +95,12 @@ def rejection_greedy_sample_triton(
     max_spec_len,
     uniform_probs_ptr,  # [num_tokens] or None (synthetic only)
     synthetic_conditional_rates_ptr,  # [num_speculative_tokens] or None
+    fly_entropy_ptr,  # [num_tokens] or None
+    fly_draft_allowed_ptr,  # [num_tokens] or None
+    fly_entropy_threshold,
     SYNTHETIC_MODE: tl.constexpr,
+    FLY_VERIFY: tl.constexpr,
+    FLY_WINDOW_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
@@ -123,40 +128,107 @@ def rejection_greedy_sample_triton(
         start_idx1 = get_element(start_idx, (pos,))
         is_greedy_mask1 = get_element(is_greedy_mask, (pos,))
         position = block_idx * BLOCK_SIZE + pos
+        # Inclusive end position of a lookahead window that has already been
+        # verified by a previous successful FLy decision.
+        fly_verified_until = tl.full((), -1, tl.int32)
+
         for i in range(num_tokens1):
             if not rejected:
-                draft_token_id = tl.load(draft_token_ids_ptr + start_idx1 + i)
-                target_argmax_id = tl.load(target_argmax_ptr + start_idx1 + i)
-                if SYNTHETIC_MODE:
-                    # Synthetic: accept draft token i with prob
-                    # conditional_rates[i], independent of target match. Store
-                    # each arm separately (draft on accept, target_argmax on
-                    # reject) so the int32 (draft) / int64 (target_argmax)
-                    # dtype mismatch is handled by the store's implicit cast --
-                    # no ternary, no explicit cast (matches the random kernel's
-                    # synthetic branch).
-                    uniform_prob = tl.load(uniform_probs_ptr + start_idx1 + i)
-                    rate = tl.load(synthetic_conditional_rates_ptr + i)
-                    accepted = (uniform_prob < rate) & (draft_token_id >= 0)
-                    if accepted:
-                        tl.store(
-                            output_token_ids_ptr + position * (max_spec_len + 1) + i,
-                            draft_token_id,
-                        )
-                    else:
-                        tl.store(
-                            output_token_ids_ptr + position * (max_spec_len + 1) + i,
-                            target_argmax_id,
-                        )
-                        rejected = True
+                token_idx = start_idx1 + i
+                output_idx = position * (max_spec_len + 1) + i
+                draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
+
+                already_verified = False
+                if FLY_VERIFY:
+                    already_verified = i <= fly_verified_until
+                if already_verified:
+                    # When this position was checked as part of a previous FLy
+                    # lookahead window, it is already known to be an original native match.
+                    tl.store(output_token_ids_ptr + output_idx, draft_token_id)
                 else:
-                    tl.store(
-                        output_token_ids_ptr + position * (max_spec_len + 1) + i,
-                        target_argmax_id,
-                    )
-                    if draft_token_id != target_argmax_id:
-                        # Reject.
-                        rejected = True
+                    target_argmax_id = tl.load(target_argmax_ptr + token_idx)
+
+                    if SYNTHETIC_MODE:
+                        # Synthetic: accept draft token i with prob
+                        # conditional_rates[i], independent of target match. Store
+                        # each arm separately (draft on accept, target_argmax on
+                        # reject) so the int32 (draft) / int64 (target_argmax)
+                        # dtype mismatch is handled by the store's implicit cast --
+                        # no ternary, no explicit cast (matches the random kernel's
+                        # synthetic branch).
+                        uniform_prob = tl.load(uniform_probs_ptr + token_idx)
+                        rate = tl.load(synthetic_conditional_rates_ptr + i)
+                        accepted = (uniform_prob < rate) & (draft_token_id >= 0)
+                        if accepted:
+                            tl.store(
+                                output_token_ids_ptr + output_idx,
+                                draft_token_id,
+                            )
+                        else:
+                            tl.store(
+                                output_token_ids_ptr + output_idx,
+                                target_argmax_id,
+                            )
+                            rejected = True
+                    else:
+                        native_accepted = draft_token_id == target_argmax_id
+
+                        if native_accepted:
+                            tl.store(
+                                output_token_ids_ptr + output_idx,
+                                draft_token_id,
+                            )
+                        else:
+                            can_defer = False
+
+                            if FLY_VERIFY:
+                                has_full_window = i + FLY_WINDOW_SIZE < num_tokens1
+
+                                draft_allowed = (
+                                    tl.load(
+                                        fly_draft_allowed_ptr + token_idx,
+                                        mask=has_full_window,
+                                        other=0,
+                                    )
+                                    != 0
+                                )
+                                entropy = tl.load(
+                                    fly_entropy_ptr + token_idx,
+                                    mask=has_full_window & draft_allowed,
+                                    other=float("-inf"),
+                                )
+                                can_defer = has_full_window & draft_allowed & (entropy >= fly_entropy_threshold)
+
+                                # Always compare against the original immutable target
+                                # argmax tensor. A prior FLy rescue must not become
+                                # evidence for a later rescue.
+                                for fly_offset in range(1, FLY_WINDOW_SIZE + 1):
+                                    future_draft_id = tl.load(
+                                        draft_token_ids_ptr + token_idx + fly_offset,
+                                        mask=can_defer,
+                                        other=-1,
+                                    )
+                                    future_target_id = tl.load(
+                                        target_argmax_ptr + token_idx + fly_offset,
+                                        mask=can_defer,
+                                        other=-2,
+                                    )
+                                    can_defer = can_defer & (future_draft_id == future_target_id)
+
+                            if can_defer:
+                                tl.store(
+                                    output_token_ids_ptr + output_idx,
+                                    draft_token_id,
+                                )
+                                if FLY_VERIFY:
+                                    fly_verified_until = FLY_WINDOW_SIZE + i
+                            else:
+                                tl.store(
+                                    output_token_ids_ptr + output_idx,
+                                    target_argmax_id,
+                                )
+                                # Reject.
+                                rejected = True
 
         if not rejected and is_greedy_mask1:
             bonus_renew(
@@ -543,8 +615,13 @@ def rejection_greedy_sample_with_triton(
     uniform_probs=None,
     synthetic_conditional_rates=None,
     synthetic_mode=False,
+    fly_entropy=None,
+    fly_draft_allowed=None,
+    fly_entropy_threshold=0.3,
+    fly_window_size=0,
 ):
     vec_len = output_token_ids.shape[0]
+    fly_verify = fly_entropy is not None
 
     if min(num_draft_tokens) == 1 and max(num_draft_tokens) == 1 and is_greedy is None:
         rejection_greedy_sample_spec_len_1_triton[(grid,)](
@@ -570,7 +647,12 @@ def rejection_greedy_sample_with_triton(
             max_spec_len,
             uniform_probs,
             synthetic_conditional_rates,
+            fly_entropy,
+            fly_draft_allowed,
+            fly_entropy_threshold,
             SYNTHETIC_MODE=synthetic_mode,
+            FLY_VERIFY=fly_verify,
+            FLY_WINDOW_SIZE=fly_window_size if fly_verify else 0,
             BLOCK_SIZE=block_size,
         )
 
