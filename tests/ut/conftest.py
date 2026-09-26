@@ -279,25 +279,26 @@ def _clear_enable_sp_before_test():
 @pytest.fixture(autouse=True)
 def _reset_stream_globals_before_test():
     """Avoid cross-test leakage from utils.current_stream() caching."""
+    import vllm_ascend.attention.dsa_v1 as dsa_v1_mod
     import vllm_ascend.ops.fused_moe.moe_utils as moe_utils_mod
     import vllm_ascend.utils as utils_mod
     from vllm_ascend.overlap.streams import reset_stream_registry
 
-    # utils accessors cache into module globals; the stream registry caches
-    # underneath them, so both layers must be dropped for a clean slate.
-    reset_stream_registry()
-    utils_mod._CURRENT_STREAM = None
-    utils_mod._GLOBAL_STREAM = None
-    if hasattr(utils_mod, "_SHARED_EXPERTS_CALCULATION_STREAM"):
-        utils_mod._SHARED_EXPERTS_CALCULATION_STREAM = None
-    moe_utils_mod.COMM_STREAM = None
+    def reset() -> None:
+        # Accessors cache into module globals; the registry caches underneath
+        # them, so all compatibility layers must be reset together.
+        reset_stream_registry()
+        utils_mod._CURRENT_STREAM = None
+        utils_mod._GLOBAL_STREAM = None
+        if hasattr(utils_mod, "_SHARED_EXPERTS_CALCULATION_STREAM"):
+            utils_mod._SHARED_EXPERTS_CALCULATION_STREAM = None
+        utils_mod._CP_CHUNKEDPREFILL_COMM_STREAM = None
+        dsa_v1_mod._DSV4_DSA_OVERLAP_STREAM = None
+        moe_utils_mod.COMM_STREAM = None
+
+    reset()
     yield
-    reset_stream_registry()
-    utils_mod._CURRENT_STREAM = None
-    utils_mod._GLOBAL_STREAM = None
-    if hasattr(utils_mod, "_SHARED_EXPERTS_CALCULATION_STREAM"):
-        utils_mod._SHARED_EXPERTS_CALCULATION_STREAM = None
-    moe_utils_mod.COMM_STREAM = None
+    reset()
 
 
 @pytest.fixture(autouse=True)
