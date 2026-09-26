@@ -587,10 +587,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     def ascend_expert_map(self) -> torch.Tensor | None:
         """Return the global-to-local map used by Ascend MoE execution.
 
-        MRv1: CPU tensor of length ``num_experts`` (logical + redundant
-        physical experts). Entry ``p`` is the local slot of global physical
-        expert ``p`` on this rank, or -1 when it is not owned here. MRv2:
-        upstream ``expert_map``, which is already physical-length.
+        MRv1: execution-device tensor of length ``num_experts`` (logical +
+        redundant physical experts). Entry ``p`` is the local slot of global
+        physical expert ``p`` on this rank, or -1 when it is not owned here.
+        MRv2: upstream ``expert_map``, which is already physical-length.
         """
         if getattr(self, "_use_v2_model_runner", False):
             return self.expert_map
@@ -605,10 +605,13 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # The EPLB worker ships CPU tensors; keep the runtime map on the
         # execution device and dtype of the current map (NPU after checkpoint
         # loading) - the AllGather dispatcher indexes it with device topk_ids.
-        assert self.local_phys_expert_ids is not None
-        self.ascend_expert_map = new_ascend_expert_map.to(
-            device=self._ascend_expert_map.device, dtype=self._ascend_expert_map.dtype
-        )
+        assert self.local_phys_expert_ids is not None, "local_phys_expert_ids must be initialised before a rebalance"
+        # Update the map in place to preserve tensor identity. A captured ACL
+        # graph may reference the map's storage (the mask kernel indexes it);
+        # rebinding the attribute would leave the graph reading the stale map
+        # after a rebalance. Same pattern as the log2phy update path.
+        current_map = self._ascend_expert_map
+        current_map.copy_(new_ascend_expert_map.to(device=current_map.device, dtype=current_map.dtype))
         self.global_expert_map[self.ep_rank].copy_(new_ascend_expert_map.to(self.global_expert_map.device))
         self.local_phys_expert_ids.copy_(
             compute_local_phys_expert_ids(new_ascend_expert_map).to(self.local_phys_expert_ids.device)
