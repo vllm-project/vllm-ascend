@@ -94,6 +94,7 @@ class ModelAclGraphManager310(ModelAclGraphManager):
             batch = orig_make_dummy(num_reqs, num_tokens, input_buffers_arg, **kwargs)
             # Uniform MTP verify: q_len = 1+K (>1). Decode-only graphs stay PA.
             if num_reqs > 0 and (num_tokens // num_reqs) > 1:
+                # TODO: Remove this override when 310P MTP capture uses DecodeOnly safely.
                 batch.attn_state = AscendAttentionState.SpecDecoding
             return batch
 
