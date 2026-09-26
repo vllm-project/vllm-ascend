@@ -95,7 +95,7 @@ templates:
       - --max-model-len
       - "204800"
       - --max-num-batched-tokens
-      - "4096"
+      - "8192"
       - --max-num-seqs
       - "16"
       - --no-disable-hybrid-kv-cache-manager
@@ -149,7 +149,7 @@ templates:
       - --max-model-len
       - "204800"
       - --max-num-batched-tokens
-      - "4096"
+      - "8192"
       - --max-num-seqs
       - "16"
       - --no-disable-hybrid-kv-cache-manager
