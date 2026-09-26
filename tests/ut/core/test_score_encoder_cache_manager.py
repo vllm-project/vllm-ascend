@@ -349,3 +349,42 @@ def test_clock_tracks_npu_residency_lifecycle():
     manager.evict_from_npu(entry)
     manager._check_invariant()
     assert entry.clock == 0
+
+
+def test_free_encoder_input_holds_reference_until_last_repeated_occurrence():
+    """Regression test for upstream vllm-project/vllm#54284.
+
+    A request that repeats the same mm item holds a single reference for
+    all of its occurrences. The entry must stay referenced until the last
+    occurrence is freed; dropping it at the first makes the entry
+    evictable while another occurrence is still pending and forces the
+    encoder to recompute an item it already had.
+    """
+    manager = _build_manager(npu_cache_size=4, cpu_cache_size=4)
+    request = MagicMock()
+    request.request_id = "request"
+    request.mm_features = [
+        SimpleNamespace(identifier="image"),
+        SimpleNamespace(identifier="image"),
+    ]
+    request.get_num_encoder_embeds.return_value = 1
+
+    assert manager.can_allocate(request, 0, 1, 0)
+    manager.allocate(request, 0)
+    # second occurrence scheduled later: cache hit registers input_id 1
+    assert manager.check_and_update_cache(request, 1)
+    manager._check_invariant()
+    assert manager.request_cached_ids["request"] == {0, 1}
+
+    # first occurrence consumed: the reference must be held
+    manager.free_encoder_input(request, 0)
+    manager._check_invariant()
+    assert manager.cached["image"] == {"request"}
+    assert "image" not in manager.cpu_freeable
+    assert "image" not in manager.npu_freeable
+
+    # last occurrence freed: only now does the entry become reclaimable
+    manager.free_encoder_input(request, 1)
+    manager._check_invariant()
+    assert manager.cached["image"] == set()
+    assert "image" in manager.cpu_freeable
