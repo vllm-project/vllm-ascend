@@ -21,7 +21,7 @@ import numpy as np
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -63,8 +63,11 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         del params_dtype
         pack_factor = 2
-        if output_size % pack_factor != 0:
-            raise ValueError(f"W4A8 dynamic linear output size {output_size} must be divisible by {pack_factor}.")
+        required_divisibility = pack_factor * 4
+        if output_size % required_divisibility != 0:
+            raise ValueError(
+                f"W4A8 dynamic linear output size {output_size} must be divisible by {required_divisibility}."
+            )
         return {
             "weight": torch.empty(output_size // pack_factor, input_size, dtype=torch.int8),
             "_packed_dim": 0,
@@ -92,7 +95,9 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
             return scale_bias.flatten()
 
         tp_size = getattr(layer, "tp_size", self.tp_size)
-        rank = getattr(layer, "tp_rank", tp_rank if tp_rank is not None else 0)
+        rank = getattr(layer, "tp_rank", None)
+        if rank is None:
+            rank = tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
         num_offline_shards = scale_bias.shape[1]
         if tp_size <= 0 or num_offline_shards % tp_size != 0:
             raise ValueError(
@@ -147,16 +152,12 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         layer.weight_offset.data = layer.weight_offset.data.flatten()
 
         # Grouped matmul expects each FP32 bit pattern stored in an int64 element.
-        scale_np = layer.weight_scale.data.to(torch.float32).contiguous().cpu().numpy()
-        scale_uint32 = scale_np.view(np.uint32)
-        layer.weight_scale.data = torch.from_numpy(scale_uint32.astype(np.int64)).to(layer.weight_scale.device)
+        # Keep the conversion on device to avoid a synchronous host-device copy.
+        layer.weight_scale.data = (
+            layer.weight_scale.data.to(torch.float32).view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+        )
 
         layer.scale_bias.data = self._local_scale_bias(layer).contiguous()
-        if layer.weight.data.shape[-1] % 4 != 0:
-            raise ValueError(
-                "the last dim of W4A8 dynamic linear weight must be divisible by 4, "
-                f"but got shape {layer.weight.data.shape}"
-            )
         # Model the projection as one grouped-matmul group. Preserve the packed
         # INT4 bytes while converting to WeightNZ, then expose groups of four
         # bytes as the int32 storage required by grouped matmul.
