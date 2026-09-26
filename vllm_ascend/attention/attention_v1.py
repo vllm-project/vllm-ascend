@@ -67,6 +67,15 @@ _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
 
 
+def _get_fia_sparse_config(sliding_window: int | None, causal: bool) -> tuple[int, int, int]:
+    """Return sparse mode and token limits for FIAS graph execution."""
+    if not causal:
+        return 0, SWA_INT_MAX, SWA_INT_MAX
+    if sliding_window is not None:
+        return 4, sliding_window, 0
+    return 3, SWA_INT_MAX, SWA_INT_MAX
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -602,9 +611,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
         attn_mask = attn_metadata.attn_mask
-        sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
-        pre_tokens = self.sliding_window or SWA_INT_MAX
-        next_tokens = 0 if self.sliding_window else SWA_INT_MAX
+        sparse_mode, pre_tokens, next_tokens = _get_fia_sparse_config(self.sliding_window, attn_metadata.causal)
         output_view = output[: attn_metadata.num_actual_tokens]
 
         extra_args = {}
