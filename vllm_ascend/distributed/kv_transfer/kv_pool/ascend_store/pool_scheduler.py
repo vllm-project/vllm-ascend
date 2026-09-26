@@ -613,6 +613,12 @@ class KVPoolScheduler:
                     hbm_hit_tokens=num_computed_tokens,
                 )
 
+        if len(self.cacheable_group_ids) != len(self.grouped_block_size):
+            # Private indexer tails are empty on a pool hit. Resume at a
+            # complete page/state boundary and recompute the final token.
+            num_external_hit_tokens = min(
+                num_external_hit_tokens, self._floor_to_cache_transfer_granularity(request.num_tokens - 1)
+            )
         if num_external_hit_tokens == 0:
             return 0, False
 

@@ -879,8 +879,9 @@ class KVPoolWorker:
     @staticmethod
     def _as_cache_tuple(cache_or_caches) -> tuple[torch.Tensor, ...]:
         if isinstance(cache_or_caches, torch.Tensor):
-            return (cache_or_caches,)
-        return tuple(cache_or_caches)
+            cache_or_caches = (cache_or_caches,)
+        # NoPE MLA exposes an empty RoPE view whose data_ptr() is zero.
+        return tuple(cache for cache in cache_or_caches if cache.numel())
 
     def _get_cache_block_metadata(self, cache: torch.Tensor) -> tuple[int, int, int, int]:
         tensor_num_blocks = cache.shape[0]
