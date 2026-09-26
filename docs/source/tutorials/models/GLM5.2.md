@@ -214,7 +214,6 @@ The parameters are explained as follows:
     --gpu-memory-utilization 0.90 \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
     --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false, "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
@@ -262,7 +261,6 @@ The parameters are explained as follows:
     --gpu-memory-utilization 0.90 \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
     --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false,     "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'

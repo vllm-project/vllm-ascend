@@ -107,8 +107,6 @@ templates:
       - --cp-kv-cache-interleave-size
       - "128"
       - --enforce-eager
-      - --kv-cache-dtype
-      - "int8"
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
@@ -167,8 +165,6 @@ templates:
       - --cp-kv-cache-interleave-size
       - "128"
       - --enforce-eager
-      - --kv-cache-dtype
-      - "int8"
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
@@ -228,8 +224,6 @@ templates:
       - "128"
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      - --kv-cache-dtype
-      - "int8"
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
@@ -289,8 +283,6 @@ templates:
       - "128"
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      - --kv-cache-dtype
-      - "int8"
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
