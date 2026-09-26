@@ -10,7 +10,6 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from heapq import heapify, heappop, heappush
-from pathlib import Path
 from typing import BinaryIO, cast
 
 import numpy as np

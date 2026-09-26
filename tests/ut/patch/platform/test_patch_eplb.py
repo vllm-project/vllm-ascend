@@ -173,18 +173,12 @@ def test_async_rebalance_wrapper_stashes_explicit_target_on_communicator():
     assert getattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) is target
 
 
-def test_async_rebalance_passes_current_prepared_stats_to_policy(monkeypatch):
-    worker_stream = object()
+def test_async_rebalance_passes_current_prepared_stats_to_policy():
+    worker_stream = MagicMock()
     cpu_values = torch.tensor([[[1, 2]], [[3, 4]]])
     device_values = MagicMock()
     device_values.cpu.return_value = cpu_values
 
-    @contextmanager
-    def device_stream(stream):
-        assert stream is worker_stream
-        yield
-
-    monkeypatch.setattr(patch_eplb._async_worker, "device_stream", device_stream)
     stats = SimpleNamespace(
         global_expert_load_window=device_values,
         num_replicas=2,
@@ -207,7 +201,12 @@ def test_async_rebalance_passes_current_prepared_stats_to_policy(monkeypatch):
         get_rank_node_ids=MagicMock(return_value=rank_node_ids),
     )
 
-    def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, stream):
+    def original_rebalance(
+        model_state,
+        eplb_state,
+        physical_to_logical_map_cpu,
+        cuda_stream,
+    ):
         raise AssertionError("prepared statistics must bypass the legacy runner")
 
     physical_map = torch.tensor([[0, 1]])
@@ -219,6 +218,8 @@ def test_async_rebalance_passes_current_prepared_stats_to_policy(monkeypatch):
     )
 
     assert result is target
+    worker_stream.__enter__.assert_called_once_with()
+    worker_stream.__exit__.assert_called_once()
     np.testing.assert_array_equal(result.rank_node_ids, rank_node_ids)
     planned_stats = policy.rebalance_experts.call_args.args[0]
     assert isinstance(planned_stats, patch_eplb.PreparedLoadStats)
