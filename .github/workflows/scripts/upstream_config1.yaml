@@ -1,0 +1,9 @@
+e2e-upstream_singlecard:
+  - name: tests/model_executor/test_routed_experts_capture.py
+    estimated_time: 20
+  - name: tests/evals/mrcr/test_mrcr_correctness.py
+    estimated_time: 20
+  - name: tests/evals/mrcr/test_mrcr_correctness.py
+    estimated_time: 20
+  - name: tests/evals/mrcr/test_mrcr_correctness.py
+    estimated_time: 20
