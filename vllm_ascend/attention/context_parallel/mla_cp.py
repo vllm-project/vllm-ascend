@@ -222,10 +222,7 @@ class AscendMlaDCPMetadataBuilder(
 
 
 class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Ascend MLA implementation for decode context parallelism."""
 
     can_return_lse_for_decode: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
