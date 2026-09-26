@@ -52,12 +52,8 @@ _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 def _get_fla_gdn_prefill_op():
     try:
         from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd  # type: ignore[import-not-found]
-    except ImportError as exc:
-        raise RuntimeError(
-            "FLA NPU GDN prefill requires a current "
-            "flash-linear-attention-npu wheel providing "
-            "fla_npu.ops.ascendc.chunk_gated_delta_rule_fwd."
-        ) from exc
+    except ImportError:
+        return None
     return chunk_gated_delta_rule_fwd
 
 
@@ -615,9 +611,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            if get_pcp_group().world_size == 1 and get_current_hardware_profile().supports(
+            use_fla_gdn_prefill = get_pcp_group().world_size == 1 and get_current_hardware_profile().supports(
                 HardwareCapability.FLA_GDN_PREFILL
-            ):
+            )
+            fla_gdn_prefill_op = _get_fla_gdn_prefill_op() if use_fla_gdn_prefill else None
+            if fla_gdn_prefill_op is not None:
                 initial_state = ssm_state[prefill_state_indices]
                 clear_ssm_states(initial_state, prefill_has_initial_state)
                 (core_attn_out_non_spec, last_recurrent_state) = DeviceOperator.fla_gdn_prefill(
@@ -629,7 +627,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     initial_state=initial_state,
                     scale=key_non_spec.shape[-1] ** -0.5,
                     prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
-                    fused_fwd=_get_fla_gdn_prefill_op(),
+                    fused_fwd=fla_gdn_prefill_op,
                 )
                 ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
             # Use the fused CANN operator when available (probed once, cached on
