@@ -550,18 +550,19 @@ __aicore__ inline void GMMSwigluSplitWorkSpaceCompute<mmType, sync, CHANNELDTYPE
         _inMMLocal[loopIdx * gmmSwigluTensorList->tokenLen],
         gmmSwigluTensorList->tokenLen / BISECT);
     LocalTensor<float> workspaceLocal= reduceWorkspace.Get<float>();
-    PipeBarrier<PIPE_ALL>();
+    PipeBarrier<PIPE_V>();
     ReduceMaxTemplate(workspaceLocal,
         _inMMLocal, loopIdx * gmmSwigluTensorList->tokenLen + gmmSwigluTensorList->tokenLen / BISECT, gmmSwigluTensorList->tokenLen / BISECT);
-    PipeBarrier<PIPE_ALL>();
+    int32_t eventIdVToS = static_cast<int32_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+    SetFlag<HardEvent::V_S>(eventIdVToS);
+    WaitFlag<HardEvent::V_S>(eventIdVToS);
     float quantScale = workspaceLocal.GetValue(0) / QUANT_SCALE_INT8;
-    PipeBarrier<PIPE_ALL>();
     LocalTensor<float> quantScaleLocal = quantScaleOutQueue.DeQue<float>();
-    PipeBarrier<PIPE_ALL>();
     quantScaleLocal.SetValue(loopIdx, quantScale);
-    PipeBarrier<PIPE_ALL>();
     quantScale = 1 / quantScale;
-    PipeBarrier<PIPE_ALL>();
+    int32_t eventIdSToV = static_cast<int32_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+    SetFlag<HardEvent::S_V>(eventIdSToV);
+    WaitFlag<HardEvent::S_V>(eventIdSToV);
     Muls(_inMMLocal[loopIdx * gmmSwigluTensorList->tokenLen], _inMMLocal[loopIdx * gmmSwigluTensorList->tokenLen],
          quantScale, gmmSwigluTensorList->tokenLen / BISECT);
     PipeBarrier<PIPE_V>();
