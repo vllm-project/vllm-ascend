@@ -553,7 +553,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         # Level-2 sleep discards NPU tensors that are not parameters/buffers.
         # Register Ascend runtime EPLB NPU state as named buffers for wake restore.
-        # ascend_expert_map stays a plain CPU attribute and does not need promotion.
+        # ascend_expert_map is re-derived from the worker on every rebalance
+        # (update_ascend_eplb_maps), so it is not promoted to a Level-2 buffer.
         self._promote_attr_to_buffer("log2phy")
         self._promote_attr_to_buffer("local_phys_expert_ids")
         if self.dynamic_eplb:

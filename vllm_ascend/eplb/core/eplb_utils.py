@@ -29,6 +29,21 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_ex
 _LINEAR_EXPERT_MAP_CACHE: dict[tuple[int, int, int], torch.Tensor] = {}
 
 
+def _to_execution_device(t: torch.Tensor) -> torch.Tensor:
+    """Move a runtime tensor to the execution device (NPU when available).
+
+    The AllGather dispatcher indexes the local expert map with device topk_ids,
+    so the map must share the execution device. The guard keeps CPU-only test
+    runners (and the no-NPU fallback) on CPU.
+    """
+    try:
+        if torch.npu.is_available():
+            return t.to(device=f"npu:{torch.npu.current_device()}")
+    except Exception:
+        pass
+    return t
+
+
 def expert_file_to_tensor(expert_map_path, layer_id):
     with open(expert_map_path) as f:
         data = json.load(f)
@@ -100,13 +115,7 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
             _LINEAR_EXPERT_MAP_CACHE[cache_key] = expert_map
         if expert_map is None:
             return None, None, None, 0, None
-        expert_map = expert_map.clone()
-        try:
-            if torch.npu.is_available():
-                expert_map = expert_map.to(device=f"npu:{torch.npu.current_device()}")
-        except Exception:
-            pass
-        return None, expert_map, None, 0, None
+        return None, _to_execution_device(expert_map.clone()), None, 0, None
 
     if global_placement is None:
         global_placement = generate_global_placement(n_experts, ep_size, n_redundant, num_shared_experts)
@@ -141,7 +150,9 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         else None
     )
 
-    return torch.stack(global_expert_map), local_expert_map, log2phy, n_redundant, phys_to_logical
+    # Keep the local map on the execution device so the AllGather dispatcher
+    # can index it with device topk_ids (consistent with the non-EPLB path).
+    return torch.stack(global_expert_map), _to_execution_device(local_expert_map), log2phy, n_redundant, phys_to_logical
 
 
 def generate_log2phy_map(
