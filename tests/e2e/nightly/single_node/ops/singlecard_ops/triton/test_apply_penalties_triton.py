@@ -11,6 +11,29 @@ from vllm.v1.sample.ops.penalties import apply_all_penalties as v1_apply_all_pen
 
 from vllm_ascend.sample.penalties import apply_all_penalties as ascend_apply_all_penalties
 
+from unittest.mock import MagicMock
+import vllm_ascend.ascend_config as ascend_config_module
+
+# This fixture will be automatically executed before running the test, forcibly tampering
+# with the underlying global variables, to trick the system's config initialization check
+# and avoid throwing a RuntimeError.
+@pytest.fixture(autouse=True)
+def bypass_ascend_config_check():
+    mock_config = MagicMock()
+    mock_config.enable_reduce_sample = False
+
+    original_config = ascend_config_module._ASCEND_CONFIG
+    original_check = getattr(ascend_config_module, "_is_ascend_config_initialized", None)
+
+    ascend_config_module._ASCEND_CONFIG = mock_config
+    ascend_config_module._is_ascend_config_initialized = lambda x: True
+
+    yield
+
+    ascend_config_module._ASCEND_CONFIG = original_config
+    ascend_config_module._is_ascend_config_initialized = original_check
+
+
 # Same scenario grid as test_apply_penalties_model_executor (equivalence + boundaries).
 APPLY_PENALTY_CASES = [
     pytest.param(0, 0, "mixed", id="empty-both"),
