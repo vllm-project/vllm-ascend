@@ -141,6 +141,11 @@ class NPUModelRunner(GPUModelRunner):
             parallel_config,
             device,
             load_collection_phase=(load_collection_phase if parallel_config.enable_eplb else "all"),
+            global_pool_slots=(
+                self.ascend_config.eplb_config.num_redundant_experts
+                if parallel_config.enable_eplb and self.ascend_config.eplb_config.eplb_policy_type == 4
+                else 0
+            ),
         )
 
         self.update_stream = None

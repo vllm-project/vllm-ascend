@@ -878,12 +878,28 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
         raise TypeError("additional_config.eplb_config must be a dictionary.")
 
     use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
-    if use_v2_model_runner:
-        legacy_eplb_fields = sorted(set(eplb_config) - {"load_collection_phase"})
+    global_pool = eplb_config.get("eplb_policy_type") == 4
+    if global_pool:
+        if not vllm_config.parallel_config.enable_eplb:
+            raise ValueError("Global Policy4 requires --enable-eplb")
+        if vllm_config.parallel_config.eplb_config.num_redundant_experts:
+            raise ValueError(
+                "Global Policy4 requires zero native per-layer redundancy; configure the pool in additional_config"
+            )
+        if not vllm_config.model_config.enforce_eager or vllm_config.speculative_config is not None:
+            raise ValueError("Mainline global Policy4 currently requires eager mode without speculative decoding")
+        if vllm_config.parallel_config.pipeline_parallel_size != 1:
+            raise ValueError("Mainline global Policy4 currently requires pipeline_parallel_size=1")
+    if use_v2_model_runner or global_pool:
+        supported_fields = {"load_collection_phase"}
+        if global_pool:
+            supported_fields.update({"eplb_policy_type", "num_redundant_experts"})
+        legacy_eplb_fields = sorted(set(eplb_config) - supported_fields)
         if legacy_eplb_fields:
             raise ValueError(
-                "Model Runner V2 only accepts 'load_collection_phase' in "
-                "additional_config.eplb_config; legacy fields are not supported: "
+                "Native EPLB accepts only "
+                f"{', '.join(sorted(supported_fields))} in additional_config.eplb_config; "
+                "legacy fields are not supported: "
                 f"{', '.join(legacy_eplb_fields)}."
             )
         if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(

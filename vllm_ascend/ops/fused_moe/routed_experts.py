@@ -401,6 +401,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
         self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
+        self._use_global_pool = getattr(getattr(ascend_config, "eplb_config", None), "eplb_policy_type", None) == 4
         self.dynamic_eplb = False
         self.multi_stage = False
         self.load_counter = None
@@ -411,7 +412,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.global_redundant_expert_num: int = 0
         self.ascend_pertoken_scale: torch.Tensor | None = None
         self.ascend_mc2_mask: torch.Tensor | None = None
-        if not self._use_v2_model_runner:
+        if not self._use_v2_model_runner and not self._use_global_pool:
             self.init_eplb(n_shared_experts)
         self.return_with_event = False
 
@@ -565,7 +566,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     @property
     def ascend_expert_map(self) -> torch.Tensor | None:
         """Return the global-to-local map used by Ascend MoE execution."""
-        if getattr(self, "_use_v2_model_runner", False):
+        if getattr(self, "_use_v2_model_runner", False) or getattr(self, "_use_global_pool", False):
             return self.expert_map
         return getattr(self, "_ascend_expert_map", None)
 

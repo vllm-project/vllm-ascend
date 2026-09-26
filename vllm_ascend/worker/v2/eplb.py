@@ -39,16 +39,23 @@ class AscendEPLBController(EPLBController):
         parallel_config: Any,
         device: torch.device,
         load_collection_phase: str = "all",
+        global_pool_slots: int = 0,
     ) -> None:
         super().__init__(parallel_config, device)
         self.load_collection_phase = load_collection_phase
+        self.global_pool_slots = global_pool_slots
         self._load_collection_phase_matched = True
 
     def prepare_load(self) -> None:
         self.state = None
         self._has_registered_models = False
         if self.parallel_config.enable_eplb:
-            self.state = AscendEplbState(self.parallel_config, self.device)
+            if self.global_pool_slots:
+                from vllm_ascend.distributed.eplb.global_state import GlobalPoolState
+
+                self.state = GlobalPoolState(self.parallel_config, self.device, self.global_pool_slots)
+            else:
+                self.state = AscendEplbState(self.parallel_config, self.device)
 
     def set_batch_phase(self, batch_has_prefill: bool) -> None:
         self._load_collection_phase_matched = is_eplb_load_collection_phase_matched(
@@ -71,6 +78,8 @@ class AscendEPLBController(EPLBController):
                 state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
                 and self._load_collection_phase_matched
             )
+            if self.global_pool_slots:
+                should_record = should_record and bool(state.collecting)
             state.should_record_tensor.fill_(should_record)
             if should_record:
                 state._has_fresh_recorded_load = True
