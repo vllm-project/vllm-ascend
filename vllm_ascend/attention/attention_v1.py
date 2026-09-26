@@ -62,6 +62,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
+# `npu_fusion_attention` with `sparse_mode=0` treats `atten_mask` as a full
+# pairwise mask, which is what the encoder-only windowed path needs.
+FIA_FULL_MASK_SPARSE_MODE = 0
 _FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
@@ -526,6 +529,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.hidden_size = self.num_heads * self.head_size
         self.sliding_window = sliding_window
+        # Memo for the windowed encoder-only band mask: every layer of a
+        # windowed encoder rebuilds the same mask for the same step, and the
+        # token count is fixed for a step, so remembering the last
+        # `(num_tokens, sliding_window)` turns 28 builds into one. Kept on the
+        # instance: it is mutable state.
+        self._encoder_band_mask_key: tuple[int, int] | None = None
+        self._encoder_band_mask_value: torch.Tensor | None = None
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32, device="npu")
         self.alibi_slopes = alibi_slopes
@@ -1075,6 +1085,68 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         return output
 
+    def _encoder_band_mask(
+        self,
+        num_tokens: int,
+        sliding_window: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Boolean ``[num_tokens, num_tokens]`` mask, ``True`` where blocked.
+
+        ``sliding_window`` is inclusive: position ``i`` attends to ``j`` when
+        ``abs(i - j) <= sliding_window - 1``, which is the visibility the causal
+        path gets from ``sparse_mode=4`` + ``pre_tokens``.
+        """
+        key = (num_tokens, sliding_window)
+        mask = self._encoder_band_mask_value
+        if mask is None or self._encoder_band_mask_key != key or mask.device != device:
+            index = torch.arange(num_tokens, device=device)
+            mask = (index[:, None] - index[None, :]).abs() >= sliding_window
+            self._encoder_band_mask_key = key
+            self._encoder_band_mask_value = mask
+        return mask
+
+    def _write_encoder_attention_output(
+        self,
+        output: torch.Tensor,
+        attn_output: torch.Tensor,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        """Copy the fused encoder attention result into the caller's buffer.
+
+        The fused operator allocates its own result, so the pooling path has to
+        move it into ``output``; ``output[:num_tokens] = attn_output[:num_tokens]``
+        expresses that as a copy of two host slices, and on A2 the slices cost
+        more than the copy: measured in isolation at 40 us per layer against
+        21 us for a plain ``copy_``, i.e. ~0.5 ms of a 28-layer step.
+        ``Attention.forward`` sizes this buffer to the token count it passes
+        down, so the slices cover the whole tensor and the guarded ``copy_`` is
+        exactly equivalent.
+
+        ``num_tokens`` is the *padded* token count: the model runner rounds it
+        up to the next cudagraph capture size, while the fused operator only
+        sees the tokens the attention metadata describes (``query``/``key``/
+        ``value`` are trimmed to ``actual_seq_qlen[-1]`` above). The two sizes
+        therefore disagree whenever the step is padded -- 83 real tokens in a
+        96-row buffer, for instance -- and writing ``num_tokens`` rows would
+        read past the end of the operator's result. Copy the overlap instead:
+        GPU backends leave the padding rows untouched for the same reason, and
+        the pooler indexes real tokens only, so those rows are never read.
+
+        Adopting the operator's buffer instead (``output.set_``) is *not* an
+        option: it rebinds the storage of a buffer that the piecewise cudagraph
+        boundary copies read from, which silently corrupts the next graph
+        segment (measured: worst_d_logit 0.0003 -> 11.45).
+        """
+        if attn_output is output:
+            return output
+        if attn_output.shape == output.shape and attn_output.dtype == output.dtype:
+            output.copy_(attn_output)
+            return output
+        num_tokens = min(num_tokens, attn_output.shape[0], output.shape[0])
+        output[:num_tokens] = attn_output[:num_tokens]
+        return output
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -1083,9 +1155,44 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         _: torch.Tensor,
     ) -> torch.Tensor:
+        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
+        if self.sliding_window is not None:
+            # A windowed encoder (ModernBERT and friends) has to hand the window
+            # to the operator: with the default ``sparse_mode=0`` an absent
+            # ``atten_mask`` means "the mask is a full pairwise mask", i.e. no
+            # mask at all, so every sliding_attention layer would silently
+            # degenerate into full attention and disagree with the reference.
+            #
+            # Two operator constraints, both verified on 910B4 / CANN 9.1.0:
+            # the mask must be no larger than the number of query tokens, hence
+            # the trim to ``actual_seq_qlen[-1]``, and ``actual_seq_qlen`` must
+            # be a plain python list of cumulative lengths, so the trailing
+            # ``+ [0]`` pad row is both unnecessary and harmful here (it would
+            # shift the mask indexing).
+            seq_lens = list(actual_seq_qlen)
+            num_tokens = seq_lens[-1]
+            max_seq_len = max(seq_lens[i] - (seq_lens[i - 1] if i else 0) for i in range(len(seq_lens)))
+            fia_kwargs = dict(
+                query=query[:num_tokens],
+                key=key[:num_tokens],
+                value=value[:num_tokens],
+                head_num=self.num_heads,
+                input_layout="TND",
+                scale=self.scale,
+                actual_seq_qlen=seq_lens,
+                actual_seq_kvlen=seq_lens,
+            )
+            # When every sequence fits inside one window nothing is masked, so
+            # keep the cheaper maskless call. The boundary is inclusive, so all
+            # pairs of a sequence are visible as soon as
+            # ``max_seq_len <= sliding_window``.
+            if max_seq_len > self.sliding_window:
+                fia_kwargs["atten_mask"] = self._encoder_band_mask(num_tokens, self.sliding_window, query.device)
+                fia_kwargs["sparse_mode"] = FIA_FULL_MASK_SPARSE_MODE
+            return torch_npu.npu_fusion_attention(**fia_kwargs)[0]
+
         # use default sparse_mode 0 in normal scenario, which means no mask works on it
         # Pad actual_seq_len with 0 when num_tokens > actual_seq_len in TND layout
-        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
         if query.shape[0] > actual_seq_qlen[-1]:
             actual_seq_qlen = actual_seq_qlen + [0]
         return torch_npu.npu_fusion_attention(
@@ -1284,8 +1391,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # pooling model branch
         if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-            output[:num_tokens] = attn_output[:num_tokens]
-            return output
+            return self._write_encoder_attention_output(output, attn_output, num_tokens)
         if output_padded is not None:
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
         else:
@@ -1336,8 +1442,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             # pooling model branch
             if attn_metadata.model_runner_type == "pooling":
                 attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                output[:num_tokens] = attn_output[:num_tokens]
-                return output
+                return self._write_encoder_attention_output(output, attn_output, num_tokens)
 
             # When `modelrunnerv2` compiles the graph, the value of `attn_metadata.attn_state` is `None`;
             # therefore, the graph-mode condition needs to be evaluated earlier.
@@ -1369,8 +1474,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 # pooling model branch
                 if attn_metadata.model_runner_type == "pooling":
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
+                    return self._write_encoder_attention_output(output, attn_output, num_tokens)
                 if output_padded is not None:
                     attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
                 else:
@@ -1384,8 +1488,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 # pooling model branch
                 if attn_metadata.model_runner_type == "pooling":
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
+                    return self._write_encoder_attention_output(output, attn_output, num_tokens)
                 if _EXTRA_CTX.capturing:
                     attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                     output[:num_tokens] = attn_output[:num_tokens]
