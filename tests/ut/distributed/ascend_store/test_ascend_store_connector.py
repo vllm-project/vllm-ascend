@@ -65,6 +65,39 @@ class TestAscendStoreKVEvents(unittest.TestCase):
 
 
 class TestAscendStoreConnector(unittest.TestCase):
+    def test_bind_metadata_prepares_only_layerwise_workers(self):
+        for use_layerwise in (False, True):
+            with self.subTest(use_layerwise=use_layerwise):
+                connector = AscendStoreConnector.__new__(AscendStoreConnector)
+                connector.use_layerwise = use_layerwise
+                connector.connector_worker = MagicMock()
+                old_bufs = object()
+                connector._mamba_copy_bufs = old_bufs
+                metadata = types.SimpleNamespace(requests=[])
+
+                connector.bind_connector_metadata(metadata)
+
+                self.assertIs(connector._get_connector_metadata(), metadata)
+                if use_layerwise:
+                    connector.connector_worker.prepare_layerwise_step.assert_called_once_with(metadata)
+                    self.assertIsNone(connector._mamba_copy_bufs)
+                else:
+                    connector.connector_worker.prepare_layerwise_step.assert_not_called()
+                    self.assertIs(connector._mamba_copy_bufs, old_bufs)
+
+                # The runner may prepare Mamba copies between binding and the
+                # deferred load start. Only the non-layerwise path resets here.
+                current_bufs = object()
+                connector._mamba_copy_bufs = current_bufs
+                connector.start_load_kv(types.SimpleNamespace())
+                self.assertTrue(connector._current_step_has_real_forward)
+                connector.connector_worker.start_load_kv.assert_called_once_with(metadata)
+                self.assertIs(connector._mamba_copy_bufs, current_bufs if use_layerwise else None)
+
+                connector.bind_connector_metadata(metadata)
+                connector.start_load_kv(None)
+                self.assertFalse(connector._current_step_has_real_forward)
+
     def _make_vllm_config(self, kv_role="kv_producer", extra_config=None):
         config = MagicMock()
         config.kv_transfer_config.kv_role = kv_role

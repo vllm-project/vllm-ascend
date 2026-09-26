@@ -131,6 +131,7 @@ class TestMooncakePipeline(unittest.TestCase):
     def run_step(worker, request):
         meta = AscendConnectorMetadata(set())
         meta.add_request(request)
+        worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
         for _ in range(worker.num_layers):
             worker.wait_for_layer_load()

@@ -1112,23 +1112,28 @@ class KVPoolWorker:
             self.m_store.validate_layerwise_support()
         self._start_kv_transfer_threads()
 
-    def start_load_kv(self, metadata: AscendConnectorMetadata):
+    def prepare_layerwise_step(self, metadata: AscendConnectorMetadata) -> None:
+        """Prepare per-step hook state when the runner binds metadata."""
+        assert self.use_layerwise
         self.current_layer = 0
         self.layerwise_retrievers: list[Any] = []
+        self.next_layer_to_submit = 0
+        # Transfer threads may still own the previous step's task lists.
+        self.layer_save_tasks = [[] for _ in range(self.num_layers)]
+        self.layer_load_tasks = [[] for _ in range(self.num_layers)]
+        reset_attention_compute_start_gate()
+        self._attention_saved_layers = set()
+        self.process_layer_data(metadata.requests)
+
+    def start_load_kv(self, metadata: AscendConnectorMetadata):
         if self.use_layerwise:
-            self.next_layer_to_submit = 0
-            # Transfer threads receive these lists by reference. Give every
-            # step fresh lists so a late clear of a previous step cannot drop
-            # newly prepared loads/saves and leave a reused buffer stale.
-            self.layer_save_tasks = [[] for _ in range(self.num_layers)]
-            self.layer_load_tasks = [[] for _ in range(self.num_layers)]
-            reset_attention_compute_start_gate()
-            self._attention_saved_layers = set()
+            # wait_for_layer_load submits loads from tasks prepared at bind.
+            # A deferred call must not reset state between target and MTP.
+            return
+        self.current_layer = 0
+        self.layerwise_retrievers: list[Any] = []
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
-            return
-        if self.use_layerwise:
-            self.process_layer_data(metadata.requests)
             return
         for request in metadata.requests:
             load_spec = request.load_spec
@@ -2405,7 +2410,7 @@ class KVPoolWorker:
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         if not requests:
             return
-        # Keep this method safe for direct callers as well as start_load_kv().
+        # Keep this method safe for direct callers as well as metadata binding.
         # Worker threads may still own the lists from the preceding step.
         # Mooncake uses the projected stage-local cache layout, including any
         # draft layers. The GVA/key planes retain their existing PP key count.

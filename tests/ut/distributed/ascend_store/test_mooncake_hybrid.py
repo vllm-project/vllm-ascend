@@ -190,6 +190,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         )
         meta = AscendConnectorMetadata(set())
         meta.add_request(request)
+        worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
         self.assertEqual(len(store.objects), 7)
         self.assertEqual(sorted(len(value) for value in store.objects.values()), [16] * 4 + [32] + [36] * 2)
@@ -222,6 +223,7 @@ class TestMooncakeHybrid(unittest.TestCase):
                 is_last_chunk=True,
             )
         )
+        worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
         for _ in range(4):
             worker.wait_for_layer_load()
@@ -351,6 +353,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         )
         meta = AscendConnectorMetadata(set())
         meta.add_request(request)
+        worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
         for _ in range(4):
             worker.wait_for_layer_load()
@@ -371,6 +374,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         request.can_save = False
         meta = AscendConnectorMetadata(set())
         meta.add_request(request)
+        worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
         for _ in range(4):
             worker.wait_for_layer_load()
@@ -398,6 +402,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         worker.kv_role = "kv_consumer"
         meta = AscendConnectorMetadata(set())
         meta.add_request(request)
+        worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
         for _ in range(4):
             worker.wait_for_layer_load()
@@ -437,6 +442,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         store.batch_copy_get = lambda keys, *args: [-1] * len(keys)
         meta = AscendConnectorMetadata(set())
         meta.add_request(request)
+        worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
         with self.assertRaisesRegex(RuntimeError, "refusing incomplete"):
             worker.wait_for_layer_load()
