@@ -716,8 +716,23 @@ at::Tensor npu_causal_conv1d_custom(
     const c10::optional<at::Tensor>& num_accepted_tokens_opt,
     int64_t  activation_mode,
     int64_t  pad_slot_id,
-    int64_t  run_mode)
+    int64_t  run_mode,
+    int64_t  max_query_len)
 {
+    if (max_query_len >= 0) {
+        // CausalConv1dV2 fast path (ported from PR #16468, A5 Kimi K3 stack):
+        // dim-last layout, host-metadata friendly, spec-decode aware.
+        const c10::optional<at::IntArrayRef> no_cpu_metadata = c10::nullopt;
+        const char* activation = activation_mode == 1 ? "silu" : "none";
+        const int64_t null_block_id = -1;
+        const int64_t head_num = 0;
+        const int64_t update_bound = run_mode == 1 ? max_query_len : -1;
+        EXEC_NPU_CMD(aclnnCausalConv1dV2, x, weight, bias_opt, conv_state,
+            query_start_loc_opt, cache_indices_opt, initial_state_mode_opt, num_accepted_tokens_opt,
+            no_cpu_metadata, no_cpu_metadata, no_cpu_metadata, no_cpu_metadata,
+            activation, pad_slot_id, null_block_id, run_mode, head_num, update_bound, output);
+        return output;
+    }
     EXEC_NPU_CMD(aclnnCausalConv1d,
                     x,
                     weight,
@@ -3238,7 +3253,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         Tensor? num_accepted_tokens_opt, "
         "                         int activation_mode, "
         "                         int pad_slot_id, "
-        "                         int run_mode"
+        "                         int run_mode, int max_query_len=-1"
         ") -> (Tensor output)");
     ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
 

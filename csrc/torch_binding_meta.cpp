@@ -715,7 +715,8 @@ at::Tensor npu_causal_conv1d_custom_meta(
     const c10::optional<at::Tensor>& num_accepted_tokens_opt,
     int64_t  activation_mode,
     int64_t  pad_slot_id,
-    int64_t  run_mode)
+    int64_t  run_mode,
+    int64_t  max_query_len)
 {
     return output;
 }
