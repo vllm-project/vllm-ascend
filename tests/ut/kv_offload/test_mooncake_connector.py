@@ -4760,6 +4760,14 @@ class TestMooncakeConnectorWorkerKernelBlockIds(unittest.TestCase):
         legacy = self._group_spec("SlidingWindowSpec", 0, 0)
         self.assertEqual(group_kernel_block_size(legacy, [0], 1536, [[1]]), 1536)
 
+    def test_group_kernel_block_size_asserts_when_page_not_divisible_by_scale(self):
+        # A page that does not tile the tensor subdivision is an invalid
+        # layout; fail loudly instead of truncating the kernel size
+        # (100 // 8 would silently yield 12).
+        spec = self._group_spec("SlidingWindowSpec", 0, 0, spec_block_size=100)
+        with self.assertRaisesRegex(AssertionError, "not divisible"):
+            group_kernel_block_size(spec, [0], 100, [[8]])
+
     def test_group_packing_factor_one_to_one_when_local_page_matches_remote(self):
         # Local 128-token page == remote 128-token block: no packing, even
         # though the worker's LCM is 1536 (DFlash2 draft group).

@@ -4406,6 +4406,9 @@ def group_kernel_block_size(
     group_block_size = group_spec.get("kv_cache_spec_block_size")
     if not isinstance(group_block_size, int) or group_block_size <= 0:
         group_block_size = block_size
+    assert group_block_size % local_scale == 0, (
+        f"kernel block size {group_block_size} not divisible by block size scale {local_scale}"
+    )
     return group_block_size // local_scale
 
 
