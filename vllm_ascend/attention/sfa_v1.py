@@ -7,7 +7,7 @@ import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.utils.math_utils import cdiv
@@ -170,14 +170,22 @@ def sparse_mla(query, cache, indices, metadata, scale):
         topk_length = metadata.smla_topk_length
         cu_seqlens_q = metadata.query_start_loc
         plan = metadata.smla_metadata
-        if query.shape[0] != topk_length.shape[0]:
+        # The plan has to be generated from the very tensors the operator call
+        # receives: a plan built over different ones makes the kernel index past
+        # what it was handed. The shape check below catches the eager case, where
+        # the query is trimmed to the unpadded row count, but a replayed FULL
+        # draft graph passes the padded count the plan was built for. The MTP
+        # draft replays one captured graph per step, so its pre-built plan can
+        # describe a different step's rows; rebuild from the indices actually
+        # passed whenever the draft model is running.
+        draft_model = is_forward_context_available() and getattr(get_forward_context(), "is_draft_model", False)
+        if query.shape[0] != topk_length.shape[0] or draft_model:
             # Eager and piecewise steps trim the query to the unpadded token
             # count, while the plan built during metadata construction still
             # describes the padded one (graph capacity, and under data
             # parallelism the group-wide token count, which can be hundreds of
             # rows larger). cu_seqlens_q is padded for the same reason. Rebuild
-            # for the rows actually being passed; a replayed full graph never
-            # reaches this branch, so the captured plan is left intact.
+            # for the rows actually being passed.
             #
             # Since this branch regenerates the plan anyway, take the top-k
             # lengths from the indices being passed rather than from the
