@@ -89,6 +89,8 @@ def _check_device_kv_cache_exist() -> None:
 class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
     """Fills the offload-specific SFA metadata (decode split + request ids)."""
 
+    supports_sfa_fia_shared_prefill_plan = False
+
     def __init__(
         self,
         kv_cache_spec,

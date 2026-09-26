@@ -73,6 +73,7 @@ def test_sfa_metadata_uses_reallocated_adaptive_token_shape(
         slot_mapping=torch.arange(8),
         block_table_tensor=torch.zeros((2, 1), dtype=torch.int32),
         query_start_loc=torch.tensor([0, 3, 6], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 3, 6], dtype=torch.int32).cpu(),
         seq_lens=torch.tensor([8, 9], dtype=torch.int32),
         _seq_lens_cpu=torch.tensor([8, 9], dtype=torch.int32),
         seq_lens_cpu=None,
