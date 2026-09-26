@@ -57,6 +57,15 @@ on:
         required: false
         default: false
         description: 'Allow callers in rollout mode to continue when this cache build fails.'
+      snapshot-cache:
+        type: boolean
+        required: false
+        default: false
+        description: >-
+          Restore the csrc build-tree snapshot cache before the compile and
+          save a fresh snapshot afterwards, enabling per-op incremental
+          rebuilds. The snapshot is stored in the GitHub cache under
+          csrc-snapshot-v1-<target>-.
 
 defaults:
   run:
@@ -153,7 +162,7 @@ jobs:
         if: fromJSON(inputs.target).os == 'ubuntu'
         run: |
           xargs apt-get -y install < packages.txt
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15 ccache
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           pip install uv
@@ -161,13 +170,53 @@ jobs:
       - name: Install system dependencies (openeuler)
         if: fromJSON(inputs.target).os == 'openeuler'
         run: |
-          yum install -y python3-pip net-tools jemalloc numactl patch clang
+          yum install -y python3-pip net-tools jemalloc numactl patch clang ccache
           pip install uv
+
+      - name: Restore csrc snapshot cache
+        # Per-op incremental layer: the artifact cache above only helps when
+        # csrc is unchanged; on a miss this snapshot lets the build recompile
+        # only the ops whose sources changed (~4 min instead of ~19 min).
+        # restore-keys picks the most recent snapshot for the target when the
+        # exact csrc hash has never been snapshotted; the manifest
+        # invalidation in build_aclnn.sh handles any staleness.
+        if: ${{ inputs.snapshot-cache }}
+        uses: runs-on/cache/restore@v5
+        with:
+          path: /tmp/csrc-snapshot-store
+          key: csrc-snapshot-v1-${{ fromJSON(inputs.target).id }}-${{ inputs.csrc_hash }}
+          restore-keys: |
+            csrc-snapshot-v1-${{ fromJSON(inputs.target).id }}-
+
+      - name: Restore ccache directory
+        # The CANN build framework auto-detects ccache in PATH (build.sh adds
+        # -DENABLE_CCACHE=ON -DCUSTOM_CCACHE=...) and routes the host-side C++
+        # compiles (op_host, protobuf, torch adapter) through it. The ccec /
+        # AscendC kernels are NOT cacheable by ccache (verified live: those
+        # invocations show up as uncacheable pass-throughs) - they are covered
+        # by the snapshot cache above instead. Cross-container snapshot
+        # restores still mark every CXX rule dirty by mtime; with ccache each
+        # such "recompile" becomes a millisecond-level content hit. The cache
+        # is shared by every target using the same arch + image (ccache keys
+        # include the full command line, so per-SOC flags coexist safely).
+        uses: runs-on/cache/restore@v5
+        with:
+          path: /tmp/ccache-dir
+          key: ccache-dir-v1-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ inputs.csrc_hash }}
+          restore-keys: |
+            ccache-dir-v1-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-
 
       - name: Install vllm-ascend
         env:
           SOC_VERSION: ${{ fromJSON(inputs.target).soc_version }}
           MAX_JOBS: '16'
+          CCACHE_DIR: /tmp/ccache-dir
+          CCACHE_MAXSIZE: 2G
+          # Snapshot cache is opt-in: an empty dir disables the hooks in
+          # build_aclnn.sh entirely (cache_enabled checks the env var).
+          VLLM_ASCEND_SNAPSHOT_CACHE_DIR: ${{ inputs.snapshot-cache && '/tmp/csrc-snapshot-store' || '' }}
+          VLLM_ASCEND_CACHE_TARGET: ${{ fromJSON(inputs.target).id }}
+          VLLM_ASCEND_CACHE_IMAGE_TAG: ${{ fromJSON(inputs.target).image_tag }}
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source /usr/local/Ascend/nnal/atb/set_env.sh
@@ -183,7 +232,39 @@ jobs:
           # UV_EXTRA_INDEX_URL. Passing --extra-index-url here would replace it.
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
-          uv pip install -e .
+          # --no-deps: requirements-dev.txt already provides every runtime
+          # dependency. Resolving them again here re-walks the whole index tree
+          # and costs 10-30 minutes against the remote mirrors for zero
+          # effect on the compiled artifacts.
+          #
+          # uv hides PEP 517 build output on success, which makes build-time
+          # analysis impossible (per-op compile times, parallel efficiency).
+          # Stream it with -v into a timestamped log on disk instead of the
+          # job console, and sample /proc/stat alongside it so CPU
+          # utilization of the two serial compile chains can be measured
+          # offline. Both files are uploaded as an artifact below.
+          set -o pipefail
+          (
+            while :; do
+              date +%s
+              grep '^cpu ' /proc/stat
+              sleep 5
+            done
+          ) > "$RUNNER_TEMP/vllm-ascend-cpu-samples.log" 2>/dev/null &
+          sampler_pid=$!
+
+          if uv pip install -e . --no-deps -v 2>&1 \
+            | while IFS= read -r line; do printf '%s %s\n' "$(date +%T)" "$line"; done \
+            > "$RUNNER_TEMP/vllm-ascend-build.log"; then
+            echo "vllm-ascend build finished; full log uploaded as an artifact"
+          else
+            build_status=$?
+            echo "::error::uv build failed (exit ${build_status}); tail of the build log:"
+            tail -n 200 "$RUNNER_TEMP/vllm-ascend-build.log"
+            kill "$sampler_pid" 2>/dev/null || true
+            exit 1
+          fi
+          kill "$sampler_pid" 2>/dev/null || true
 
       - name: Verify csrc artifacts
         run: |
@@ -201,3 +282,64 @@ jobs:
             vllm_ascend/lib
             vllm_ascend/include
           key: vllm-ascend-build-v2-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ inputs.csrc_hash }}
+
+      - name: Prune snapshot store to newest entry
+        # GitHub cache entries are immutable, so every build saves the store
+        # under a new key. Keep only the snapshot produced by THIS build in
+        # the store before saving; otherwise restored snapshots accumulate
+        # and each saved entry grows generation by generation. Cross-entry
+        # eviction is delegated to the GitHub cache LRU.
+        if: ${{ inputs.snapshot-cache }}
+        id: prune-snapshots
+        run: |
+          set -euo pipefail
+          store=/tmp/csrc-snapshot-store
+          if [ ! -d "$store" ]; then
+            echo "saved=false" >> "$GITHUB_OUTPUT"
+            echo "no snapshot store; nothing to save"
+            exit 0
+          fi
+          newest=$(find "$store" -maxdepth 1 -type f -name 'snapshot-*.tar.*' \
+            -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
+          if [ -z "$newest" ]; then
+            echo "saved=false" >> "$GITHUB_OUTPUT"
+            echo "no snapshot produced; nothing to save"
+            exit 0
+          fi
+          find "$store" -maxdepth 1 -type f -name 'snapshot-*.tar.*' \
+            ! -path "$newest" -delete
+          echo "pruned snapshot store to newest entry: $(basename "$newest")"
+          echo "saved=true" >> "$GITHUB_OUTPUT"
+
+      - name: Save csrc snapshot cache
+        if: ${{ inputs.snapshot-cache && steps.prune-snapshots.outputs.saved == 'true' }}
+        uses: runs-on/cache/save@v5
+        with:
+          path: /tmp/csrc-snapshot-store
+          key: csrc-snapshot-v1-${{ fromJSON(inputs.target).id }}-${{ inputs.csrc_hash }}
+
+      - name: Show ccache statistics
+        # Observability for the host-side cache: expect misses on a cold
+        # target and hits once the directory has been restored once.
+        env:
+          CCACHE_DIR: /tmp/ccache-dir
+        run: ccache --show-stats || ccache -s
+
+      - name: Save ccache directory
+        uses: runs-on/cache/save@v5
+        with:
+          path: /tmp/ccache-dir
+          key: ccache-dir-v1-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ inputs.csrc_hash }}
+
+      - name: Upload build log
+        # Full uv/setuptools/cmake/ccec output plus 5s CPU samples, for
+        # build-time analysis (per-op compile times, parallel efficiency,
+        # utilization of the serial AscendC and C++ chains).
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: vllm-ascend-build-log-${{ fromJSON(inputs.target).id }}
+          path: ${{ runner.temp }}/vllm-ascend-*.log
+          if-no-files-found: ignore
+          retention-days: 7

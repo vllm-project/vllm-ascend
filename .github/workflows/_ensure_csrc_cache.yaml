@@ -48,6 +48,11 @@ on:
         required: false
         default: ''
         description: 'Fixed base commit to rebase onto.'
+      snapshot-cache:
+        type: boolean
+        required: false
+        default: false
+        description: 'Pass through to _build_csrc_cache.yaml: enable the csrc build-tree snapshot cache.'
 
 defaults:
   run:
@@ -195,12 +200,26 @@ jobs:
           key: vllm-ascend-build-v2-ARM64-9.1.0-310p-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
           lookup-only: 'true'
 
+      - name: Look up csrc cache (a5-arm64-ubuntu)
+        id: lookup-a5
+        if: contains(fromJSON(inputs.target_ids), 'a5-arm64-ubuntu')
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v2-ARM64-9.1.0-950-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
+          lookup-only: 'true'
+
       - name: Summarize csrc cache results
         id: misses
         env:
           A2_CACHE_HIT: ${{ steps.lookup-a2.outputs.cache-hit }}
           A3_CACHE_HIT: ${{ steps.lookup-a3.outputs.cache-hit }}
           P310_CACHE_HIT: ${{ steps.lookup-310p.outputs.cache-hit }}
+          A5_CACHE_HIT: ${{ steps.lookup-a5.outputs.cache-hit }}
           TARGETS: ${{ steps.targets.outputs.targets }}
         run: |
           python3 - <<'PY'
@@ -211,6 +230,7 @@ jobs:
               "a2-arm64-ubuntu": os.environ["A2_CACHE_HIT"] == "true",
               "a3-arm64-ubuntu": os.environ["A3_CACHE_HIT"] == "true",
               "310p-arm64-ubuntu": os.environ["P310_CACHE_HIT"] == "true",
+              "a5-arm64-ubuntu": os.environ["A5_CACHE_HIT"] == "true",
           }
           targets = json.loads(os.environ["TARGETS"])
           # Lookup steps are intentionally explicit. Fail when configuration
@@ -268,3 +288,4 @@ jobs:
       # Preserve CI during rollout if a missing cache cannot yet be built on CPU.
       # The standalone push workflow keeps the build workflow's default false.
       continue_on_error: true
+      snapshot-cache: ${{ inputs.snapshot-cache }}
