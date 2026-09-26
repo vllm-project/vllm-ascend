@@ -199,6 +199,20 @@ class AscendPCPManager(PCPManager):
         if cudagraph_mode.has_full_cudagraphs() and cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
             raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
 
+    def replicated_requests(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> np.ndarray:
+        replicated = super().replicated_requests(num_scheduled_tokens, is_prefilling)
+        # With fewer query tokens than PCP ranks, partitioning leaves some
+        # ranks without a prefill row. Ascend's prefill cache and O-proj
+        # collectives must follow the same path on every PCP rank.
+        replicated |= num_scheduled_tokens < self.pcp_world_size
+        speculative_config = getattr(getattr(self, "vllm_config", None), "speculative_config", None)
+        if speculative_config is not None:
+            # The scheduler may pad a final one-token prefill with K draft
+            # placeholders. Keep that complete verification query on each rank,
+            # including when estimating the rank-local size for DP dispatch.
+            replicated |= num_scheduled_tokens <= speculative_config.num_speculative_tokens + 1
+        return replicated
+
     # TODO To bypass the upstream verification, a pseudo-batch method is used to perform reconstruction after bypassing,
     # and the changes will be deleted after the upstream is merged.
     def _partition_speculative_batch_compat(
@@ -209,8 +223,13 @@ class AscendPCPManager(PCPManager):
         global_draft_counts = global_batch.num_draft_tokens_per_req
         if global_draft_counts is None:
             raise RuntimeError("PCP speculative decoding requires per-request draft token counts.")
-        if np.any(global_draft_counts[global_batch.is_prefilling_np] != 0):
-            raise NotImplementedError("PCP speculative decoding does not support draft tokens on prefill requests.")
+        prefill_with_drafts = global_batch.is_prefilling_np & (global_draft_counts != 0)
+        if np.any(prefill_with_drafts):
+            replicated = self.replicated_requests(global_batch.num_scheduled_tokens, global_batch.is_prefilling_np)
+            if np.any(prefill_with_drafts & ~replicated):
+                raise NotImplementedError(
+                    "PCP speculative decoding requires prefills with draft tokens to be replicated."
+                )
 
         # Upstream currently rejects speculative batches before building the
         # ordinary PCP rank-local layout. Temporarily clear only its spec

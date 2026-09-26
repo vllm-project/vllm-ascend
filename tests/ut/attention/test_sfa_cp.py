@@ -970,32 +970,39 @@ def test_sfa_pcp_keeps_prolog_v3_enabled(is_kv_consumer, sfa_c8):
 
 
 @pytest.mark.parametrize(
-    "cache_dtype,pcp_size,rank,num_decode_tokens",
+    "cache_dtype,pcp_size,rank,num_decode_tokens,num_tokens",
     [
-        (torch.bfloat16, 2, 0, 0),
-        (torch.bfloat16, 4, 3, 2),
-        (torch.bfloat16, 2, 1, 4),
-        (torch.int8, 2, 0, 0),
-        (torch.int8, 2, 1, 2),
-        (torch.float8_e4m3fn, 2, 1, 2),
-        (torch.int8, 2, 0, 4),
+        (torch.bfloat16, 2, 0, 0, 4),
+        (torch.bfloat16, 4, 3, 2, 4),
+        (torch.bfloat16, 2, 1, 4, 4),
+        (torch.int8, 2, 0, 0, 4),
+        (torch.int8, 2, 1, 2, 4),
+        (torch.float8_e4m3fn, 2, 1, 2, 4),
+        (torch.int8, 2, 0, 4, 4),
+        (torch.bfloat16, 8, 7, 1, 4),
+        (torch.int8, 8, 7, 4, 7),
+        (torch.float8_e4m3fn, 8, 7, 4, 7),
+        (torch.int8, 8, 0, 4, 7),
     ],
 )
-def test_sfa_pcp_prolog_gathers_only_prefill_kv(cache_dtype, pcp_size, rank, num_decode_tokens):
+def test_sfa_pcp_prolog_gathers_only_prefill_kv(cache_dtype, pcp_size, rank, num_decode_tokens, num_tokens):
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
     c8 = impl.enable_sparse_sfa_c8 = cache_dtype != torch.bfloat16
-    num_tokens, width = 4, 656 if c8 else 5
+    width = 656 if c8 else 5
+    cache_blocks = (pcp_size * num_tokens + 7) // 8
     cache = (
-        (torch.empty((2, 8, 1, width), dtype=cache_dtype), torch.empty((2, 8, 1, 128)))
+        (torch.empty((cache_blocks, 8, 1, width), dtype=cache_dtype), torch.empty((cache_blocks, 8, 1, 128)))
         if c8
-        else (torch.empty((2, 8, 1, 3)), torch.empty((2, 8, 1, 2)))
+        else (torch.empty((cache_blocks, 8, 1, 3)), torch.empty((cache_blocks, 8, 1, 2)))
     )
     hidden = torch.zeros((num_tokens, 1))
     slots = torch.stack([torch.arange(num_tokens) + i * num_tokens for i in range(pcp_size)])
     slots[:, :num_decode_tokens] = torch.arange(num_decode_tokens)
+    slots[1:, :num_decode_tokens] = -1
     rows = num_tokens - num_decode_tokens
     if rows:
         slots[:, -1] = -1
+    original_slots = slots.clone()
     dtype = torch.int8 if c8 else cache[0].dtype
     gathered = (torch.arange(pcp_size * rows * width) % 256 - 128).to(dtype).view(-1, width)
     packed = gathered[rank * rows : (rank + 1) * rows]
@@ -1018,7 +1025,12 @@ def test_sfa_pcp_prolog_gathers_only_prefill_kv(cache_dtype, pcp_size, rank, num
         )
     assert result is output
     assert prolog.call_args.args[0] is hidden
-    torch.testing.assert_close(prolog.call_args.args[4], slots[rank])
+    # Upstream masks replicated decode copies outside rank 0, but each
+    # rank must still write its locally computed decode KV to its own cache.
+    expected_local_slots = slots[rank].clone()
+    expected_local_slots[:num_decode_tokens] = slots[0, :num_decode_tokens]
+    torch.testing.assert_close(prolog.call_args.args[4], expected_local_slots)
+    torch.testing.assert_close(slots, original_slots)
     if not rows:
         read.assert_not_called()
         group.all_gather.assert_not_called()

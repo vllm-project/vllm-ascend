@@ -1095,3 +1095,63 @@ def test_pcp_slot_buffers_match_block_tables(slot_dtype):
     assert dummy.tolist() == [[-1, -1, -1, -1]]
     assert dummy.dtype == slot_dtype
     assert dummy.data_ptr() == buffer_ptr
+
+
+@pytest.mark.parametrize("pcp_rank", range(8))
+@pytest.mark.parametrize("computed", [0, 127])
+def test_padded_final_prefill_keeps_all_draft_tokens_on_every_pcp_rank(pcp_rank, computed):
+    batch = _make_global_pcp_batch()
+    batch.num_tokens = batch.num_tokens_after_padding = 4
+    batch.num_scheduled_tokens = np.array([4], dtype=np.int32)
+    batch.query_start_loc_np = np.array([0, 4], dtype=np.int32)
+    batch.query_start_loc.copy_(torch.tensor([0, 4], dtype=torch.int32))
+    batch.num_computed_tokens_np = np.array([computed], dtype=np.int32)
+    batch.prefill_len_np = np.array([computed + 1], dtype=np.int32)
+    batch.num_computed_prefill_tokens_np = np.array([computed], dtype=np.int32)
+    batch.input_ids = torch.tensor([101, 0, 0, 0], dtype=torch.int32)
+    batch.positions = torch.arange(computed, computed + 4, dtype=torch.int64)
+    batch.is_padding = torch.zeros(4, dtype=torch.bool)
+    batch.num_draft_tokens = 3
+    batch.num_draft_tokens_per_req = np.array([3], dtype=np.int32)
+    manager = AscendPCPManager(8, pcp_rank, torch.device("cpu"), max_num_reqs=1, max_num_tokens=32)
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager.vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    with (
+        patch("vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d", side_effect=_mock_async_copy_to_cpu),
+        patch("vllm_ascend.worker.v2.pcp_manager.build_attn_state"),
+    ):
+        local = manager.partition_batch(batch)
+    assert manager.get_num_tokens_for_dispatch(batch.num_scheduled_tokens, batch.is_prefilling_np) == 4
+    assert local.num_tokens == 4
+    assert local.req_ids == batch.req_ids
+    assert local.num_draft_tokens_per_req.tolist() == [3]
+    assert local.input_ids.tolist() == batch.input_ids.tolist()
+    assert local.positions.tolist() == batch.positions.tolist()
+    assert local.is_prefilling_np.tolist() == [True]
+    assert manager._hidden_restore_idx[:4].tolist() == [0, 1, 2, 3]
+
+
+def test_partitioned_prefill_with_drafts_remains_rejected():
+    batch = _make_global_pcp_batch()
+    batch.num_draft_tokens = 3
+    batch.num_draft_tokens_per_req = np.array([3], dtype=np.int32)
+    manager = AscendPCPManager(8, 0, torch.device("cpu"), max_num_reqs=1, max_num_tokens=32)
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+    manager.vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    with pytest.raises(NotImplementedError, match="requires prefills with draft tokens to be replicated"):
+        manager.partition_batch(batch)
+
+
+@pytest.mark.parametrize("num_prefill_tokens", range(1, 8))
+@pytest.mark.parametrize("speculative", [False, True])
+def test_short_prefill_is_present_on_every_rank_in_mixed_pcp8_batch(num_prefill_tokens, speculative):
+    manager = AscendPCPManager(8, 0, torch.device("cpu"))
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+    if speculative:
+        manager.vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    counts = np.array([4, 4, 4, num_prefill_tokens], dtype=np.int32)
+    prefilling = np.array([False, False, False, True])
+    for rank in range(8):
+        chunks = list(manager._iter_rank_chunks(rank, counts, prefilling))
+        assert chunks == [(0, 0, 4), (1, 0, 4), (2, 0, 4), (3, 0, num_prefill_tokens)]
+    assert manager.get_num_tokens_for_dispatch(counts, prefilling) == 12 + num_prefill_tokens
