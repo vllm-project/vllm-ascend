@@ -94,6 +94,17 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             self._enable_o_proj_full_weight_switch()
         return result
 
+    def _get_fused_type_unsupported_reasons(self, pp_type):
+        # PCP feeds rank-local tokens to the attention impl while the slot
+        # mapping is in the global gathered layout (padded local tokens x PCP
+        # world size). Fused preprocessing writes the KV cache inline with one
+        # cache index per input token, so the layouts mismatch; only the
+        # NATIVE chain, which gathers prefill cache inputs before the write,
+        # is layout compatible.
+        reasons = super()._get_fused_type_unsupported_reasons(pp_type)
+        reasons.insert(0, "Fused preprocessing does not support SFA-PCP.")
+        return reasons
+
     def _get_parallel_forward_context(
         self,
         attn_metadata: M,
