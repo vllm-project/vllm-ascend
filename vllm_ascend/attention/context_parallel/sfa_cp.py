@@ -296,6 +296,20 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             seq_lens,
             draft_index,
         )
+        if cos is None or sin is None:
+            # DSA context parallel relies on rotary cos/sin to pad and shard the
+            # position embedding across TP ranks. When the model's SFA layer uses
+            # NoPE (qk_rope_head_dim == 0) cos/sin are None, so DSA-CP is not
+            # supported. Fail fast with a clear message instead of crashing on
+            # ``cos.shape`` with an AttributeError. This only converts the crash
+            # into a readable error; it does not make DSA-CP usable on NoPE
+            # models — set ``enable_dsa_cp=false`` for those models.
+            raise ValueError(
+                "enable_dsa_cp requires rotary cos/sin, but the SFA layer has "
+                "qk_rope_head_dim == 0 (NoPE) so cos/sin are None. DSA context "
+                "parallel is not supported for this model. Disable it with "
+                "enable_dsa_cp=false."
+            )
         global_tp_size = get_tp_group().world_size
         num_tokens = common_attn_metadata.num_input_tokens
         num_tokens_pad = _round_up(num_tokens, global_tp_size)
