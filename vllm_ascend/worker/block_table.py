@@ -446,6 +446,7 @@ class MultiGroupBlockTable:
                 dtype=torch.int32,
                 device=device,
             )
+            self._fused_any_circular = any(block_table.is_circular for block_table in active_block_tables)
             self._fused_min_block_size = min(block_table.block_size for block_table in active_block_tables)
 
     def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
@@ -491,7 +492,7 @@ class MultiGroupBlockTable:
                 self._fused_block_sizes,
                 self._fused_min_block_size,
                 pad_id=PAD_SLOT_ID,
-                is_circular_ptr=self._fused_is_circular,
+                is_circular_ptr=self._fused_is_circular if self._fused_any_circular else None,
             )
             return
 

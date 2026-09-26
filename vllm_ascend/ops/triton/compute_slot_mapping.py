@@ -106,6 +106,7 @@ def _compute_slot_mapping_request(
     TOTAL_CP_WORLD_SIZE: tl.constexpr,
     TOTAL_CP_RANK: tl.constexpr,
     CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
+    HAS_CIRCULAR: tl.constexpr,
     PAD_ID: tl.constexpr,
     TILE_BLOCK_SIZE: tl.constexpr,
     BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
@@ -132,8 +133,17 @@ def _compute_slot_mapping_request(
             slot_offsets = local_block_offsets % block_size
 
         INT32_MAX = 2147483647
-        valid_block_indices = tl.where(mask, block_indices, INT32_MAX)
-        block_idx_base = tl.min(valid_block_indices, axis=0)
+        if HAS_CIRCULAR:
+            # Negative positions have no valid block in any group: keep them
+            # out of the window base and clamp the base so the window load
+            # and the gather below stay in range even for all-negative tiles.
+            pos_valid = mask & (pos >= 0)
+            valid_block_indices = tl.where(pos_valid, block_indices, INT32_MAX)
+            block_idx_base = tl.min(valid_block_indices, axis=0)
+            block_idx_base = tl.minimum(block_idx_base, block_table_stride - 1)
+        else:
+            valid_block_indices = tl.where(mask, block_indices, INT32_MAX)
+            block_idx_base = tl.min(valid_block_indices, axis=0)
         block_table_window_offsets = block_idx_base + block_table_offsets
         block_table_window = tl.load(
             block_table_ptr + row_offset + block_table_window_offsets,
@@ -141,12 +151,16 @@ def _compute_slot_mapping_request(
             other=0,
         ).to(tl.float32)
         if TOTAL_CP_WORLD_SIZE == 1:
-            relative_block_indices = tl.where(mask, block_indices - block_idx_base, 0)
+            if HAS_CIRCULAR:
+                relative_block_indices = tl.where(pos_valid, block_indices - block_idx_base, 0)
+            else:
+                relative_block_indices = tl.where(mask, block_indices - block_idx_base, 0)
         else:
             relative_block_indices = tl.where(mask & is_local, block_indices - block_idx_base, 0)
         block_numbers = tl.gather(block_table_window, relative_block_indices, 0).to(tl.int32)
         slot_ids = block_numbers * block_size + slot_offsets
-        slot_ids = tl.where(is_circular & (pos < 0), PAD_ID, slot_ids)
+        if HAS_CIRCULAR:
+            slot_ids = tl.where(pos < 0, PAD_ID, slot_ids)
         if TOTAL_CP_WORLD_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
@@ -211,18 +225,28 @@ def _compute_slot_mapping_fused_groups_kernel(
         slot_offsets = pos % block_size
 
         INT32_MAX = 2147483647
-        valid_block_indices = tl.where(mask, block_indices, INT32_MAX)
-        block_idx_base = tl.min(valid_block_indices, axis=0)
+        if HAS_CIRCULAR:
+            pos_valid = mask & (pos >= 0)
+            valid_block_indices = tl.where(pos_valid, block_indices, INT32_MAX)
+            block_idx_base = tl.min(valid_block_indices, axis=0)
+            block_idx_base = tl.minimum(block_idx_base, block_table_stride - 1)
+        else:
+            valid_block_indices = tl.where(mask, block_indices, INT32_MAX)
+            block_idx_base = tl.min(valid_block_indices, axis=0)
         block_table_window_offsets = block_idx_base + block_table_offsets
         block_table_window = tl.load(
             block_table_ptr + row_offset + block_table_window_offsets,
             mask=block_table_window_offsets < block_table_stride,
             other=0,
         ).to(tl.float32)
-        relative_block_indices = tl.where(mask, block_indices - block_idx_base, 0)
+        if HAS_CIRCULAR:
+            relative_block_indices = tl.where(pos_valid, block_indices - block_idx_base, 0)
+        else:
+            relative_block_indices = tl.where(mask, block_indices - block_idx_base, 0)
         block_numbers = tl.gather(block_table_window, relative_block_indices, 0).to(tl.int32)
         slot_ids = block_numbers * block_size + slot_offsets
-        slot_ids = tl.where(is_circular & (pos < 0), PAD_ID, slot_ids)
+        if HAS_CIRCULAR:
+            slot_ids = tl.where(pos < 0, PAD_ID, slot_ids)
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
 
 
@@ -287,6 +311,7 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
             1,
             0,
             1,
+            HAS_CIRCULAR,
             PAD_ID,
             SMALL_TILE_BLOCK_SIZE,
             SMALL_BLOCK_TABLE_WINDOW_SIZE,
@@ -307,6 +332,7 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
             1,
             0,
             1,
+            HAS_CIRCULAR,
             PAD_ID,
             1024,
             LARGE_BLOCK_TABLE_WINDOW_SIZE,
