@@ -7,15 +7,18 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
+    _is_glm_model,
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
 )
@@ -555,3 +558,40 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
     return bool(config_val and is_decode_instance)
+
+
+def _select_seq_lens(
+    common_attn_metadata: AscendCommonAttentionMetadata,
+    kv_cache_spec: AttentionSpec | None,
+    speculative_config: SpeculativeConfig | None,
+    vllm_config: VllmConfig,
+) -> torch.Tensor:
+    """Choose the seq_lens tensor carried by the built attention metadata.
+
+    Defaults to the CPU mirror: ``_seq_lens_cpu`` is always available and
+    updated during draft iterations, while ``seq_lens_cpu`` is None in async
+    spec decode mode. Cross-attention and generic parallel drafting override
+    this with the NPU ``seq_lens``; the one exception is DSpark on the GLM5.2
+    family, whose CPU mirror carries the same post-rejection-sampling lengths
+    across draft iterations, so building from it skips the NPU->CPU sync at
+    ``seq_lens.tolist()`` in the metadata build.
+    """
+    # Prefer _seq_lens_cpu (always available, updated during draft
+    # iterations) over seq_lens_cpu (None in async spec decode mode).
+    model_config = vllm_config.model_config
+    num_reqs = common_attn_metadata.num_reqs
+    if common_attn_metadata._seq_lens_cpu is not None:
+        seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
+    elif common_attn_metadata.seq_lens_cpu is not None:
+        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+    else:
+        seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+
+    if isinstance(kv_cache_spec, CrossAttentionSpec):
+        seq_lens = common_attn_metadata.seq_lens
+    if speculative_config is not None and speculative_config.parallel_drafting:
+        # PARD / DFlash (and DSpark on other models) keep the NPU seq_lens;
+        # only DSpark on the GLM5.2 family keeps the CPU mirror above.
+        if not (speculative_config.use_dspark() and _is_glm_model(model_config)):
+            seq_lens = common_attn_metadata.seq_lens
+    return seq_lens
