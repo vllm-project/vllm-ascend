@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
 
+from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
     EplbExpertTensorList,
@@ -186,3 +188,77 @@ def test_update_ascend_eplb_maps_preserves_execution_device():
     assert routed_experts.ascend_expert_map.dtype == torch.int32
     assert torch.equal(routed_experts.global_expert_map[1], new_map.to(torch.int32))
     assert torch.equal(routed_experts.local_phys_expert_ids, torch.tensor([5, 6, 7, 8, 9], dtype=torch.int64))
+
+
+def _heat_collection_fixture(expert_tokens, local_phys_expert_ids, moe_load):
+    """Build a layer whose forward_impl collects EPLB heat into moe_load."""
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed_experts.moe_config = SimpleNamespace(is_sequence_parallel=False)
+    routed_experts.router = SimpleNamespace()
+    routed_experts.dynamic_eplb = True
+    routed_experts.multi_stage = False
+    routed_experts.return_with_event = False
+    routed_experts._use_v2_model_runner = False
+    routed_experts.enable_npugraph_ex_static_kernel = False
+    routed_experts.moe_load = moe_load
+    routed_experts.local_phys_expert_ids = local_phys_expert_ids
+    routed_experts._select_experts = lambda **kwargs: (torch.ones(2, 2), torch.zeros(2, 2, dtype=torch.int32))
+    routed_experts.quant_method = SimpleNamespace(
+        apply=lambda **kwargs: FusedExpertsResult(
+            routed_out=torch.randn(2, 4),
+            group_list_type=1,
+            expert_tokens=expert_tokens,
+        )
+    )
+    comm_method = SimpleNamespace(
+        prepare=lambda **kwargs: SimpleNamespace(
+            hidden_states=torch.randn(2, 4),
+            router_logits=torch.randn(2, 4),
+            mc2_mask=None,
+            padded_hidden_states_shape=None,
+            pertoken_scale=None,
+        ),
+        finalize=lambda **kwargs: torch.randn(2, 4),
+    )
+    return routed_experts, comm_method
+
+
+def _run_forward_impl(routed_experts, comm_method):
+    ctx = SimpleNamespace(
+        all_moe_layers=None,
+        in_profile_run=False,
+        eplb_heat_collection_status=True,
+        moe_comm_method=comm_method,
+    )
+    with (
+        patch("vllm_ascend.ops.fused_moe.routed_experts.get_forward_context", return_value=ctx),
+        patch("vllm_ascend.ascend_forward_context.get_forward_context", return_value=ctx),
+    ):
+        routed_experts.forward_impl(hidden_states=torch.randn(2, 4), router_logits=torch.randn(2, 4))
+
+
+def test_forward_impl_heat_collection_gathers_local_slots():
+    # The AllGather dispatcher reports token counts per global physical expert;
+    # the collector must gather this rank's local slots out of the global
+    # histogram, not take the first len(moe_load) entries.
+    expert_tokens = torch.tensor([11, 12, 13, 14, 15, 21, 22, 23, 24, 25], dtype=torch.int64)
+    local_phys_expert_ids = torch.tensor([5, 6, 7, 8, 9], dtype=torch.int64)
+    moe_load = torch.zeros(5, dtype=torch.int64)
+    routed_experts, comm_method = _heat_collection_fixture(expert_tokens, local_phys_expert_ids, moe_load)
+
+    _run_forward_impl(routed_experts, comm_method)
+
+    assert torch.equal(moe_load, torch.tensor([21, 22, 23, 24, 25], dtype=torch.int64))
+
+
+def test_forward_impl_heat_collection_passthrough_for_per_local_counts():
+    # MC2/FusedMC2 report per-local-expert counts; the size guard must pass
+    # them through untouched (no gather).
+    expert_tokens = torch.tensor([3, 1, 4, 1, 5], dtype=torch.int64)
+    local_phys_expert_ids = torch.tensor([5, 6, 7, 8, 9], dtype=torch.int64)
+    moe_load = torch.zeros(5, dtype=torch.int64)
+    routed_experts, comm_method = _heat_collection_fixture(expert_tokens, local_phys_expert_ids, moe_load)
+
+    _run_forward_impl(routed_experts, comm_method)
+
+    assert torch.equal(moe_load, torch.tensor([3, 1, 4, 1, 5], dtype=torch.int64))
