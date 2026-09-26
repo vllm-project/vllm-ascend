@@ -1078,7 +1078,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             block_hashes=["h0"],
             load_spec=load_spec,
         )
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         meta.add_request(req)
         worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
@@ -1185,7 +1185,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             block_hashes=["h0"],
             can_save=True,
         )
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         meta.add_request(req)
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
         with patch(f"{module}.torch.npu", create=True):
@@ -1205,7 +1205,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             block_hashes=["h0"],
             can_save=False,
         )
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         meta.add_request(req)
         worker.wait_for_save(meta)
         worker.kv_send_thread.add_stored_request.assert_not_called()
@@ -1218,7 +1218,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         send_thread.get_and_clear_finished_requests.return_value = {"r1"}
         worker.kv_send_thread = send_thread
 
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         done_s, done_r = worker.get_finished({"r1"}, meta)
         self.assertEqual(done_s, set())
         self.assertEqual(done_r, set())
@@ -1226,7 +1226,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
     def test_get_finished_consumer(self):
         worker = self._make_worker(kv_role="kv_consumer")
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         done_s, done_r = worker.get_finished(set(), meta)
         self.assertEqual(done_s, set())
 
@@ -1353,16 +1353,15 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         worker.kv_recv_thread = recv_thread
         worker.kv_send_thread = None
 
-        loading_req_ids = {"r1"}
-        meta = AscendConnectorMetadata(set(), loading_req_ids=loading_req_ids)
+        meta = AscendConnectorMetadata(set())
         done_s, done_r = worker.get_finished(set(), meta)
         self.assertEqual(done_s, set())
         self.assertEqual(done_r, {"r1"})
-        recv_thread.get_and_clear_finished_requests.assert_called_once_with(loading_req_ids)
+        recv_thread.get_and_clear_finished_requests.assert_called_once_with()
 
         recv_thread.reset_mock()
         recv_thread.get_and_clear_finished_requests.return_value = set()
-        meta = AscendConnectorMetadata({"r_preempted"}, loading_req_ids=set())
+        meta = AscendConnectorMetadata({"r_preempted"})
         worker.get_finished(set(), meta)
         recv_thread.discard_finished_requests.assert_called_once_with({"r_preempted"})
 
@@ -1494,7 +1493,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         old_save_tasks = worker.layer_save_tasks
         old_load_tasks = worker.layer_load_tasks
 
-        worker.start_load_kv(AscendConnectorMetadata(set(), set()))
+        worker.start_load_kv(AscendConnectorMetadata(set()))
 
         for layer_id in range(worker.num_layers):
             self.assertIsNot(worker.layer_save_tasks[layer_id], old_save_tasks[layer_id])
