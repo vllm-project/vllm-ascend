@@ -917,6 +917,9 @@ class XliteWrapper:
         # tensor (device) here instead of syncing to CPU every step; the ids
         # are materialized into the dirty set once at the next import.
         self._pending_native_ids: list[torch.Tensor] = []
+        # A1 decode-only: key ids (device) of the LAST xlite decode batch —
+        # bounds the pre-native-step export to one batch worth of requests.
+        self._last_decode_keys: torch.Tensor | None = None
         if self._hybrid_decode_only:
             logger.warning(
                 "xlite EXPERIMENTAL decode-only hybrid mode enabled "
@@ -1276,22 +1279,26 @@ class XliteWrapper:
             )
             self._xlite_import_log_done = True
 
-    def _hybrid_export_to_native(self) -> None:
+    def _hybrid_export_to_native(self, key_ids: list[int] | None) -> None:
         """A1 decode-only: lazily write the xlite persistent states back to
         the native mamba pools right before a native step runs.
 
-        PERF: driven by the xlite-residency dict (``_xlite_req_pages``, per
-        -request page ids cached at import time) — the export therefore needs
-        NEITHER the native batch composition NOR any per-step D2H sync."""
-        if not self._xlite_native_gdn_groups:
-            return
+        BOUNDED: ``key_ids`` are the requests of the LAST xlite decode batch
+        (cached as a device tensor by the decode path, materialized once per
+        native<->decode transition — no per-step D2H). Export size never
+        exceeds one batch regardless of how many requests the server has
+        served; requests absent from the batch either have native-fresh
+        states (new prefills) or no longer run (finished)."""
         if self._xlite_hybrid_dirty and self._xlite_hybrid_last_idx is not None:
             self._hybrid_copy(self._xlite_hybrid_last_idx, to_batch=False)
             self._xlite_hybrid_dirty = False
-        if not self._xlite_req_pages:
+        if not key_ids or not self._xlite_native_gdn_groups:
             return
-        for key, pages in list(self._xlite_req_pages.items()):
+        for key in key_ids:
+            if not key:
+                continue
             slot = self._xlite_hybrid_block_to_slot.get(key)
+            pages = self._xlite_req_pages.get(key)
             if not slot or not pages:
                 continue
             for li, ((conv_p, ssm_p), group) in enumerate(
@@ -1565,12 +1572,19 @@ class XliteWrapper:
                         logger.warning("xlite DO-DEBUG: mamba_cache_params fields=%s", _attrs)
                     self._dbg_mark_logged = True
                 # A1: flush xlite states into the native pools so the native
-                # GDN (mixed step) reads current states. Driven by the
-                # xlite-residency dict — no batch ids, no D2H (exporting
-                # states of requests absent from this batch is redundant
-                # but harmless: the native forward only touches its own
-                # batch's slots).
-                self._hybrid_export_to_native()
+                # GDN (mixed step) reads current states. BOUNDED: export only
+                # the LAST xlite decode batch's requests (one .cpu() per
+                # native<->decode transition, zero per-step syncs, export size
+                # <= one batch). New prefills have native-fresh states and
+                # need no export; decode tokens computed inside mixed steps
+                # are native and get re-imported via pending_native_ids.
+                _exp_keys = None
+                if self._last_decode_keys is not None:
+                    _exp_keys = [
+                        int(x) for x in self._last_decode_keys.detach().cpu().tolist()
+                    ]
+                    self._last_decode_keys = None
+                self._hybrid_export_to_native(_exp_keys)
             # A1 decode-only: call the UNWRAPPED native model. Going through
             # the ACLGraphWrapper here triggers a runtime lazy capture for
             # mixed-batch shapes ("CUDA graph capturing detected at an
@@ -1660,6 +1674,12 @@ class XliteWrapper:
                         self._dbg_dec_steps, num_reqs,
                         None if _dbg_ids is None else _dbg_ids[:6],
                     )
+                # Remember this decode batch's key ids (device, no sync): the
+                # export before the next native step covers exactly these —
+                # every running decode-phase request appears in every decode
+                # step, so the last batch covers all of them.
+                if _gdn_idx is not None:
+                    self._last_decode_keys = _gdn_idx[:num_reqs]
             if os.environ.get("XLITE_DO_DEBUG", "0") == "1" and _gdn_idx is not None:
                 _ids_l = [int(x) for x in _gdn_idx[:num_reqs].detach().cpu().tolist()]
                 for _i, _b in enumerate(_ids_l):
