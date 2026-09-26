@@ -3,16 +3,33 @@
 
 """CPU building blocks for the STAIR EPLB policy."""
 
-from collections.abc import Callable
-from dataclasses import dataclass
+import os
+import socket
+import subprocess
+import sys
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass
 from heapq import heapify, heappop, heappush
+from typing import BinaryIO, cast
 
 import numpy as np
+import torch
+from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
+from vllm_ascend.distributed.eplb.layer_sharding import all_gather_layer_shards, assigned_layer_ids
+from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
+from vllm_ascend.distributed.eplb.policy._stair_process import receive_planner_response, send_planner_request
 
 _MEAN_RATIO_TIE_TOLERANCE = 1e-9
+_PLANNER_THREAD_ENV = {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
+_PLANNER_SHUTDOWN_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -82,17 +99,247 @@ _VARIANCE_ROUNDOFF_SAFETY_FACTOR = 8
 class StairEplbPolicy(AbstractEplbPolicy):
     """STAIR load statistics and placement planning."""
 
+    def __init__(self, config: StairConfig) -> None:
+        self.config = config
+        self._planner_process: subprocess.Popen[bytes] | None = None
+        self._planner_socket: socket.socket | None = None
+        self._planner_stream: BinaryIO | None = None
+
+    def _start_planner_process(self) -> None:
+        process = self._planner_process
+        if process is not None and process.poll() is None:
+            return
+        self._stop_planner_process()
+
+        parent_socket, child_socket = socket.socketpair()
+        environment = os.environ.copy()
+        environment.update(_PLANNER_THREAD_ENV)
+        try:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "vllm_ascend.distributed.eplb.policy._stair_process",
+                    str(child_socket.fileno()),
+                ],
+                pass_fds=(child_socket.fileno(),),
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=environment,
+            )
+        except Exception:
+            parent_socket.close()
+            child_socket.close()
+            raise
+        child_socket.close()
+        self._planner_process = process
+        self._planner_socket = parent_socket
+        self._planner_stream = cast(BinaryIO, parent_socket.makefile("rwb"))
+
+    def _stop_planner_process(self) -> None:
+        stream = getattr(self, "_planner_stream", None)
+        planner_socket = getattr(self, "_planner_socket", None)
+        process = getattr(self, "_planner_process", None)
+        self._planner_stream = None
+        self._planner_socket = None
+        self._planner_process = None
+
+        if stream is not None:
+            stream.close()
+        if planner_socket is not None:
+            planner_socket.close()
+        if process is None:
+            return
+        try:
+            process.wait(timeout=_PLANNER_SHUTDOWN_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=_PLANNER_SHUTDOWN_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        if process.stderr is not None:
+            process.stderr.close()
+
+    def _planner_exit_details(self) -> str:
+        process = self._planner_process
+        if process is None or process.poll() is None or process.stderr is None:
+            return ""
+        return process.stderr.read().decode(errors="replace").strip()
+
+    def _plan_in_subprocess(
+        self,
+        logical_load_values: np.ndarray,
+        current_rank_expert_ids: np.ndarray,
+        last_committed_mean_ratios: np.ndarray,
+        rank_node_ids: np.ndarray,
+        config: StairConfig,
+        layer_ids: Sequence[int] | None = None,
+        sample_counts: np.ndarray | None = None,
+    ) -> StairPlan:
+        """Run one CPU plan in STAIR's persistent subprocess."""
+        self._start_planner_process()
+        stream = self._planner_stream
+        if stream is None:
+            raise RuntimeError("STAIR planner subprocess did not provide a socket")
+        try:
+            send_planner_request(
+                stream,
+                (
+                    logical_load_values,
+                    current_rank_expert_ids,
+                    last_committed_mean_ratios,
+                    rank_node_ids,
+                    asdict(config),
+                    layer_ids,
+                    sample_counts,
+                ),
+            )
+            remote_error_type, remote_error, plan_fields = receive_planner_response(stream)
+        except (EOFError, OSError, TypeError, ValueError) as error:
+            details = self._planner_exit_details()
+            self._stop_planner_process()
+            message = "STAIR planner subprocess terminated unexpectedly"
+            if details:
+                message += f": {details}"
+            raise RuntimeError(message) from error
+        if remote_error is not None:
+            error_class = ValueError if remote_error_type == "ValueError" else RuntimeError
+            raise error_class(f"STAIR planner subprocess failed:\n{remote_error.rstrip()}")
+        if plan_fields is None:
+            raise RuntimeError("STAIR planner subprocess returned no plan")
+        return StairPlan(*plan_fields)
+
+    def rebalance_experts(
+        self,
+        weight: torch.Tensor | PreparedLoadStats,
+        num_replicas: int,
+        num_groups: int,
+        num_nodes: int,
+        num_ranks: int,
+        old_global_expert_indices: torch.Tensor | None = None,
+        *,
+        last_committed_mean_ratios: np.ndarray | None = None,
+        rank_node_ids: np.ndarray | None = None,
+    ) -> torch.Tensor:
+        """Plan a placement through the upstream policy entry point."""
+        controls = num_replicas, num_groups, num_nodes, num_ranks
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in controls) or min(controls) < 1:
+            raise ValueError("STAIR topology values must be positive integers")
+        if num_replicas % num_ranks:
+            raise ValueError("STAIR requires equal rank capacity")
+        if old_global_expert_indices is None:
+            raise ValueError("STAIR requires the current expert placement")
+
+        current_map = old_global_expert_indices.cpu()
+        if current_map.ndim != 2 or current_map.shape[1] != num_replicas:
+            raise ValueError("current expert placement must be [layers, num_replicas]")
+        if isinstance(weight, PreparedLoadStats):
+            if weight.values.device.type != "cpu" or weight.sample_counts is None:
+                raise ValueError("prepared STAIR statistics require CPU values and sample counts")
+            logical_load_values = weight.values.to(dtype=torch.float64).numpy()
+            sample_counts = weight.sample_counts
+        else:
+            logical_load_values = weight.to(device="cpu", dtype=torch.float64).numpy()
+            if logical_load_values.ndim == 2:
+                logical_load_values = logical_load_values[None, ...]
+            sample_counts = None
+        if logical_load_values.ndim != 3 or logical_load_values.shape[1] != current_map.shape[0]:
+            raise ValueError("weight must be [samples, layers, logical_experts] and match the placement")
+
+        current_placement = current_map.numpy().reshape(current_map.shape[0], num_ranks, num_replicas // num_ranks)
+        if last_committed_mean_ratios is None:
+            last_committed_mean_ratios = np.full(current_placement.shape[0], np.nan)
+        if rank_node_ids is None:
+            if num_ranks % num_nodes:
+                raise ValueError("STAIR cannot infer topology with unequal ranks per node")
+            node_ids = np.arange(num_ranks, dtype=np.int64) // (num_ranks // num_nodes)
+        else:
+            node_ids = np.asarray(rank_node_ids)
+            if node_ids.shape != (num_ranks,) or not np.issubdtype(node_ids.dtype, np.integer) or np.any(node_ids < 0):
+                raise ValueError("rank_node_ids must contain one non-negative integer per rank")
+            if len(np.unique(node_ids)) != num_nodes:
+                raise ValueError("num_nodes must match the distinct rank_node_ids")
+        cpu_group = get_eplb_group().cpu_group
+        if cpu_group.size() != num_ranks:
+            raise RuntimeError("STAIR topology does not match the stage-local EPLB group")
+
+        planning_args = dict(
+            logical_load_values=logical_load_values,
+            current_rank_expert_ids=current_placement,
+            last_committed_mean_ratios=last_committed_mean_ratios,
+            rank_node_ids=node_ids,
+            config=self.config,
+            sample_counts=sample_counts,
+        )
+        if num_ranks == 1:
+            plan = self._plan_in_subprocess(**planning_args)
+        else:
+            plan = self.plan_sharded_rebalance(
+                **planning_args,
+                cpu_group=cpu_group,
+                planner=self._plan_in_subprocess,
+            )
+        self.validate_plan(
+            current_placement,
+            plan,
+            logical_load_values.shape[2],
+            node_ids,
+            self.config.rank_transfer_limit,
+            self.config.cross_node_transfer_limit,
+        )
+        target = torch.from_numpy(plan.rank_expert_ids.reshape(current_map.shape)).to(dtype=current_map.dtype)
+        target.source_rank_ids = plan.source_rank_ids
+        target.source_slot_ids = plan.source_slot_ids
+        target.predicted_mean_ratios = plan.predicted_mean_ratios
+
+        if sample_counts is None:
+            load_bins, bin_counts = self.compress_load_window(logical_load_values, self.config.load_window_bins)
+        else:
+            bin_counts = np.asarray(sample_counts)
+            load_bins = logical_load_values / bin_counts[:, None, None]
+        before = [
+            self.placement_imbalance(load_bins[:, layer], bin_counts, current_placement[layer])
+            for layer in range(current_placement.shape[0])
+        ]
+        after = [
+            self.placement_imbalance(load_bins[:, layer], bin_counts, plan.rank_expert_ids[layer])
+            for layer in range(current_placement.shape[0])
+        ]
+        target.predicted_imbalance_summary = (
+            float(np.mean([score.mean_ratio for score in before])),
+            float(np.mean([score.p95_ratio for score in before])),
+            float(np.mean([score.mean_ratio for score in after])),
+            float(np.mean([score.p95_ratio for score in after])),
+        )
+        return target
+
+    @staticmethod
+    def _load_bin_boundaries(num_samples: int, max_bins: int) -> tuple[np.ndarray, np.ndarray]:
+        if num_samples < 1 or max_bins < 1:
+            raise ValueError("load binning requires samples and a positive bin limit")
+        num_bins = min(num_samples, max_bins)
+        boundaries = np.arange(num_bins + 1) * num_samples // num_bins
+        return boundaries, np.diff(boundaries).astype(np.int64)
+
+    def prepare_local_load_stats(self, load_samples: torch.Tensor) -> PreparedLoadStats:
+        """Compress local temporal samples into weighted STAIR bins."""
+        boundaries, samples_per_bin = self._load_bin_boundaries(load_samples.shape[0], self.config.load_window_bins)
+        load_sums_per_bin = torch.stack(
+            [load_samples[start:end].sum(dim=0) for start, end in zip(boundaries[:-1], boundaries[1:])]
+        )
+        return PreparedLoadStats(load_sums_per_bin, samples_per_bin)
+
     @staticmethod
     def compress_load_window(load_samples: np.ndarray, max_bins: int) -> tuple[np.ndarray, np.ndarray]:
         """Compress [steps, layers, experts] into bin means and sample counts."""
-        if max_bins < 1:
-            raise ValueError("max_bins must be positive")
         values = np.asarray(load_samples, dtype=np.float64)
         if values.ndim != 3 or values.shape[0] == 0 or not np.all(np.isfinite(values)) or np.any(values < 0):
             raise ValueError("load_samples must be finite non-negative [steps, layers, experts]")
-        num_bins = min(values.shape[0], max_bins)
-        boundaries = np.arange(num_bins + 1) * values.shape[0] // num_bins
-        sample_counts = np.diff(boundaries).astype(np.int64)
+        boundaries, sample_counts = StairEplbPolicy._load_bin_boundaries(values.shape[0], max_bins)
         compressed = np.stack(
             [values[start:end].mean(axis=0, dtype=np.float64) for start, end in zip(boundaries[:-1], boundaries[1:])]
         )
@@ -986,21 +1233,44 @@ class StairEplbPolicy(AbstractEplbPolicy):
     @classmethod
     def plan_rebalance(
         cls,
-        logical_load_samples: np.ndarray,
+        logical_load_values: np.ndarray,
         current_rank_expert_ids: np.ndarray,
         last_committed_mean_ratios: np.ndarray,
         rank_node_ids: np.ndarray,
         config: StairConfig,
+        layer_ids: Sequence[int] | None = None,
+        sample_counts: np.ndarray | None = None,
     ) -> StairPlan:
-        """Plan every eligible layer from a ``[steps, layers, experts]`` window.
+        """Plan every eligible layer from raw samples or pre-binned sums.
 
-        Current placement is ``[layers, ranks, slots]``, committed ratios are
-        ``[layers]``, and node IDs are ``[ranks]``. A NaN committed ratio means
-        that the layer has no commit anchor; its relative deterioration is 0
-        for sorting. Eligible layers are planned by descending current mean
-        ratio, relative deterioration, then layer ID.
+        ``logical_load_values`` contains raw ``[steps, layers, experts]``
+        samples when ``sample_counts`` is absent, otherwise ``[bins, layers,
+        experts]`` pre-binned sums. Current placement is ``[layers, ranks,
+        slots]``. ``layer_ids`` contains
+        stage-local indices on the input layer axis. The returned plan keeps its
+        full shape, but only those indices are authoritative; omitted layers are
+        identity/NaN placeholders that must not be committed before the shards
+        are gathered.
         """
-        load_bins, sample_counts = cls.compress_load_window(logical_load_samples, config.load_window_bins)
+        if sample_counts is None:
+            load_bins, bin_sample_counts = cls.compress_load_window(logical_load_values, config.load_window_bins)
+        else:
+            load_sums = np.asarray(logical_load_values, dtype=np.float64)
+            bin_sample_counts = np.asarray(sample_counts)
+            if (
+                load_sums.ndim != 3
+                or load_sums.shape[0] == 0
+                or not np.all(np.isfinite(load_sums))
+                or np.any(load_sums < 0)
+            ):
+                raise ValueError("prepared loads must be finite non-negative [bins, layers, experts]")
+            if (
+                bin_sample_counts.shape != (load_sums.shape[0],)
+                or not np.issubdtype(bin_sample_counts.dtype, np.integer)
+                or np.any(bin_sample_counts <= 0)
+            ):
+                raise ValueError("sample_counts must contain one positive integer per bin")
+            load_bins = load_sums / bin_sample_counts[:, None, None]
         current = np.asarray(current_rank_expert_ids)
         if current.ndim != 3 or 0 in current.shape or not np.issubdtype(current.dtype, np.integer):
             raise ValueError("current_rank_expert_ids must be a non-empty integer [layers, ranks, slots] array")
@@ -1020,15 +1290,22 @@ class StairEplbPolicy(AbstractEplbPolicy):
             or np.any(node_ids < 0)
         ):
             raise ValueError("rank_node_ids must contain one non-negative integer per rank")
+        selected_layers = range(current.shape[0]) if layer_ids is None else tuple(layer_ids)
+        if (
+            any(type(layer_id) is not int for layer_id in selected_layers)
+            or len(set(selected_layers)) != len(selected_layers)
+            or any(not 0 <= layer_id < current.shape[0] for layer_id in selected_layers)
+        ):
+            raise ValueError("layer_ids must contain unique valid stage-local layer IDs")
 
         rank_expert_ids = current.copy()
         source_rank_ids = np.broadcast_to(np.arange(current.shape[1])[None, :, None], current.shape).copy()
         source_slot_ids = np.broadcast_to(np.arange(current.shape[2])[None, None, :], current.shape).copy()
         predicted_mean_ratios = np.full(current.shape[0], np.nan, dtype=np.float64)
         layer_priority_keys = []
-        for layer_id in range(current.shape[0]):
+        for layer_id in selected_layers:
             current_imbalance = cls.gated_layer_imbalance(
-                load_bins[:, layer_id], sample_counts, current[layer_id], anchors[layer_id], config
+                load_bins[:, layer_id], bin_sample_counts, current[layer_id], anchors[layer_id], config
             )
             if current_imbalance is None:
                 continue
@@ -1038,7 +1315,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
             layer_priority_keys.append((-current_imbalance.mean_ratio, -relative_deterioration, layer_id))
 
         for _, _, layer_id in sorted(layer_priority_keys):
-            layer_plan = cls.plan_layer(load_bins[:, layer_id], sample_counts, current[layer_id], node_ids, config)
+            layer_plan = cls.plan_layer(load_bins[:, layer_id], bin_sample_counts, current[layer_id], node_ids, config)
             if layer_plan is None:
                 continue
             rank_expert_ids[layer_id] = layer_plan.placement.rank_expert_ids
@@ -1052,6 +1329,94 @@ class StairEplbPolicy(AbstractEplbPolicy):
             source_slot_ids=source_slot_ids,
             predicted_mean_ratios=predicted_mean_ratios,
         )
+
+    @classmethod
+    def plan_sharded_rebalance(
+        cls,
+        logical_load_values: np.ndarray,
+        current_rank_expert_ids: np.ndarray,
+        last_committed_mean_ratios: np.ndarray,
+        rank_node_ids: np.ndarray,
+        config: StairConfig,
+        cpu_group: torch.distributed.ProcessGroup,
+        sample_counts: np.ndarray | None = None,
+        planner: Callable[..., StairPlan] | None = None,
+    ) -> StairPlan:
+        """Plan round-robin layer shards and gather one stage-local plan.
+
+        Every rank in ``cpu_group`` must call this method with identical model
+        inputs and configuration. The group must contain only the current PP
+        stage's EPLB ranks. All ranks receive and validate the same complete
+        plan; no coordinator rank assembles the result. Input and result shapes
+        follow :meth:`plan_rebalance` and :class:`StairPlan`.
+        """
+        group_size = cpu_group.size()
+        local_error: Exception | None = None
+        local_plan_fields: tuple[torch.Tensor, ...] | None = None
+        current: np.ndarray | None = None
+        try:
+            current_array = np.asarray(current_rank_expert_ids)
+            if current_array.ndim != 3:
+                raise ValueError("current_rank_expert_ids must be a [layers, ranks, slots] array")
+            current = current_array
+            num_layers = current_array.shape[0]
+            owned_layer_ids = assigned_layer_ids(num_layers, cpu_group.rank(), group_size)
+            plan_local_layers = cast(Callable[..., StairPlan], cls.plan_rebalance) if planner is None else planner
+            local_plan = plan_local_layers(
+                logical_load_values,
+                current_array,
+                last_committed_mean_ratios,
+                rank_node_ids,
+                config,
+                layer_ids=owned_layer_ids,
+                sample_counts=sample_counts,
+            )
+            owned_indices = np.fromiter(owned_layer_ids, dtype=np.int64, count=len(owned_layer_ids))
+            local_plan_fields = tuple(
+                torch.from_numpy(plan_field[owned_indices])
+                for plan_field in (
+                    local_plan.rank_expert_ids,
+                    local_plan.source_rank_ids,
+                    local_plan.source_slot_ids,
+                    local_plan.predicted_mean_ratios,
+                )
+            )
+            num_experts = np.asarray(logical_load_values).shape[2]
+        except Exception as error:
+            local_error = error
+
+        planning_succeeded = torch.tensor(local_error is None, dtype=torch.int32)
+        if group_size > 1:
+            torch.distributed.all_reduce(
+                planning_succeeded,
+                op=torch.distributed.ReduceOp.MIN,
+                group=cpu_group,
+            )
+        if not planning_succeeded.item():
+            if local_error is not None:
+                raise local_error
+            raise RuntimeError("STAIR layer shard planning failed on another EPLB rank")
+        if current is None or local_plan_fields is None:
+            raise RuntimeError("STAIR layer shard planning produced no local plan")
+
+        def gather_owned_field(local_values: torch.Tensor) -> np.ndarray:
+            return all_gather_layer_shards(local_values, num_layers, cpu_group).numpy()
+
+        plan = StairPlan(
+            rank_expert_ids=gather_owned_field(local_plan_fields[0]),
+            source_rank_ids=gather_owned_field(local_plan_fields[1]),
+            source_slot_ids=gather_owned_field(local_plan_fields[2]),
+            predicted_mean_ratios=gather_owned_field(local_plan_fields[3]),
+        )
+        cls.validate_plan(
+            current,
+            plan,
+            num_experts,
+            rank_node_ids,
+            config.rank_transfer_limit,
+            config.cross_node_transfer_limit,
+        )
+        return plan
 
     @classmethod
     def validate_plan(

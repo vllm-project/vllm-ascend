@@ -8,7 +8,9 @@ import pytest
 import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
+from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb import state as eplb_state
+from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 from vllm_ascend.distributed.eplb.state import (
     AscendEplbLayerState,
     AscendEplbState,
@@ -17,6 +19,62 @@ from vllm_ascend.distributed.eplb.state import (
 
 def test_uses_upstream_policy_and_async_worker_lifecycle():
     assert AscendEplbState.start_async_loop is upstream_eplb_state.EplbState.start_async_loop
+
+
+def test_result_readiness_waits_for_next_rearrangement_boundary():
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.expert_rearrangement_step_interval = 10
+    model_state = SimpleNamespace(pending_result=object(), rebalanced=True)
+
+    state.expert_rearrangement_step = 9
+    assert not state._all_ranks_result_ready(model_state)
+
+    state.expert_rearrangement_step = 10
+    assert state._all_ranks_result_ready(model_state)
+
+
+def test_configured_upstream_policy_registration_is_scoped():
+    policy = StairEplbPolicy(StairConfig())
+    assert "stair" not in upstream_eplb_state.EPLB_POLICIES
+
+    with eplb_state._configured_upstream_policy("stair", policy):
+        assert upstream_eplb_state.EPLB_POLICIES["stair"] is policy
+
+    assert "stair" not in upstream_eplb_state.EPLB_POLICIES
+
+
+def test_drain_async_accepts_last_changed_layer_before_model_end():
+    consumed_event = MagicMock()
+    model_state = SimpleNamespace(
+        rebalanced=True,
+        model=SimpleNamespace(num_moe_layers=3),
+        pending_result=SimpleNamespace(
+            layer_idx=0,
+            is_last_result=True,
+            consumed_event=consumed_event,
+        ),
+    )
+    state = SimpleNamespace(
+        is_async=True,
+        model_states={"model": model_state},
+    )
+
+    AscendEplbState.drain_async(state)
+
+    assert not model_state.rebalanced
+    assert model_state.pending_result is None
+    consumed_event.record.assert_called_once_with()
+
+
+def test_drain_async_fails_when_worker_stops():
+    state = SimpleNamespace(
+        is_async=True,
+        async_worker=SimpleNamespace(is_alive=lambda: False),
+        model_states={"model": SimpleNamespace(rebalanced=True, pending_result=None)},
+    )
+
+    with pytest.raises(RuntimeError, match="background worker terminated"):
+        AscendEplbState.drain_async(state)
 
 
 def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
@@ -114,7 +172,9 @@ def test_from_mapping_refreshes_final_mapping(monkeypatch):
         model=object(),
         model_config=object(),
         device=torch.device("cpu"),
-        parallel_config=object(),
+        parallel_config=SimpleNamespace(
+            eplb_config=SimpleNamespace(policy="default"),
+        ),
         expanded_physical_to_logical=torch.zeros(1),
     )
 
@@ -152,7 +212,9 @@ def test_from_mapping_forwards_release_valid_expert_count(monkeypatch):
         model=object(),
         model_config=object(),
         device=torch.device("cpu"),
-        parallel_config=object(),
+        parallel_config=SimpleNamespace(
+            eplb_config=SimpleNamespace(policy="default"),
+        ),
         expanded_physical_to_logical=torch.zeros((1, 2)),
         num_valid_physical_experts=1,
     )

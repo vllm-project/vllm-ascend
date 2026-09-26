@@ -4,21 +4,40 @@
 """Ascend-owned extensions for the upstream EPLB state."""
 
 import inspect
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import fields
 from typing import Any
 
+import numpy as np
 import torch
 from torch.distributed import all_reduce
 from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
-from vllm.distributed.parallel_state import get_node_count
+from vllm.distributed.eplb.policy import AbstractEplbPolicy
+from vllm.distributed.parallel_state import in_the_same_node_as
 
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
+
+
+@contextmanager
+def _configured_upstream_policy(name: str, policy: AbstractEplbPolicy | None) -> Iterator[None]:
+    """Expose an Ascend policy only while upstream initializes its state."""
+    policies: dict[str, Any] = _eplb_state.EPLB_POLICIES
+    if policy is None or name in policies:
+        yield
+        return
+    policies[name] = policy
+    try:
+        yield
+    finally:
+        policies.pop(name)
 
 
 def _upstream_from_mapping_accepts_valid_expert_count() -> bool:
@@ -107,13 +126,28 @@ def refresh_model_routing_tables(
             layer_state.refresh_expert_replica_routing_table()
 
 
+def _raise_if_async_worker_stopped(state: Any) -> None:
+    worker = getattr(state, "async_worker", None)
+    if worker is not None and not worker.is_alive():
+        raise RuntimeError("EPLB background worker terminated unexpectedly")
+
+
 class AscendEplbState(_eplb_state.EplbState):
     """Keep Ascend routing and load-recording state around upstream EPLB."""
 
     cuda_device_index: int | None
 
-    def __init__(self, parallel_config, device: torch.device) -> None:
-        super().__init__(parallel_config, device)
+    def __init__(
+        self,
+        parallel_config,
+        device: torch.device,
+        policy: AbstractEplbPolicy | None = None,
+    ) -> None:
+        with _configured_upstream_policy(parallel_config.eplb_config.policy, policy):
+            super().__init__(parallel_config, device)
+        self._configured_policy = policy
+        if policy is not None:
+            self.policy = policy
         self._has_fresh_recorded_load = False
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
@@ -129,13 +163,21 @@ class AscendEplbState(_eplb_state.EplbState):
         """Build the EP-aware layout and initialize custom load statistics."""
         token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
         try:
-            super().add_model(model, model_config)
+            with _configured_upstream_policy(
+                self.parallel_config.eplb_config.policy,
+                self._configured_policy,
+            ):
+                super().add_model(model, model_config)
         finally:
             EXPERT_MAPPING_EP_SIZE.reset(token)
         if self.uses_custom_load_stats:
             self._initialize_load_stats_state(self.model_states[model_config.compute_hash()])
 
     def _initialize_load_stats_state(self, model_state: Any) -> None:
+        model_state._last_committed_mean_ratios = np.full(
+            model_state.model.num_moe_layers,
+            np.nan,
+        )
         model_state._load_mapping_generation = 0
         model_state._observed_load_mapping_generation = 0
         if hasattr(self, "_local_load_collection_mask"):
@@ -154,6 +196,30 @@ class AscendEplbState(_eplb_state.EplbState):
         self._num_recorded_load_steps = 0
         self._load_stats_window_start_index = 0
         self._load_stats_window_write_index = 0
+
+    def get_rank_node_ids(self) -> np.ndarray:
+        """Return cached node ordinals in stage-local EPLB rank order."""
+        rank_node_ids = getattr(self, "_rank_node_ids", None)
+        if rank_node_ids is not None:
+            return rank_node_ids
+
+        cpu_group = get_eplb_group().cpu_group
+        num_ranks = cpu_group.size()
+        rank_node_ids = np.full(num_ranks, -1, dtype=np.int64)
+        next_node_id = 0
+        for source_rank in range(num_ranks):
+            if rank_node_ids[source_rank] >= 0:
+                continue
+            same_node = np.asarray(
+                in_the_same_node_as(cpu_group, source_rank),
+                dtype=bool,
+            )
+            if same_node.shape != (num_ranks,) or not same_node[source_rank]:
+                raise RuntimeError("EPLB node discovery returned an invalid rank mask")
+            rank_node_ids[same_node] = next_node_id
+            next_node_id += 1
+        self._rank_node_ids = rank_node_ids
+        return rank_node_ids
 
     def _discard_samples_from_old_mapping(self) -> None:
         mapping_changed = any(
@@ -282,9 +348,7 @@ class AscendEplbState(_eplb_state.EplbState):
         if global_load_stats.keys() != self.model_states.keys():
             raise ValueError("Load statistics must contain exactly one entry per EPLB model")
         num_gpus = get_eplb_group().device_group.size()
-        num_nodes = get_node_count()
-        if num_gpus % num_nodes:
-            num_nodes = 1
+        num_nodes = len(np.unique(self.get_rank_node_ids()))
         for model_key, model_state in self.model_states.items():
             load_stats = global_load_stats[model_key]
             model_state._policy_load_stats = load_stats
@@ -360,6 +424,37 @@ class AscendEplbState(_eplb_state.EplbState):
             self._has_fresh_recorded_load = False
         return result
 
+    def drain_async(self) -> None:
+        """Acknowledge changed-layer and no-op results through one lifecycle."""
+        if not self.is_async:
+            return
+        for model_state in self.model_states.values():
+            while model_state.rebalanced:
+                _raise_if_async_worker_stopped(self)
+                result = model_state.pending_result
+                if result is not None:
+                    if getattr(
+                        result,
+                        "is_last_result",
+                        result.layer_idx == model_state.model.num_moe_layers - 1,
+                    ):
+                        model_state.rebalanced = False
+                    model_state.pending_result = None
+                    result.consumed_event.record()
+                else:
+                    time.sleep(0.001)
+
+    def _all_ranks_result_ready(self, model_state: Any) -> bool:
+        """Consume results at the next shared rearrangement boundary."""
+        if self.expert_rearrangement_step < self.expert_rearrangement_step_interval:
+            return False
+        while model_state.pending_result is None:
+            _raise_if_async_worker_stopped(self)
+            if not model_state.rebalanced:
+                return False
+            time.sleep(0.001)
+        return True
+
     @classmethod
     def from_mapping(
         cls,
@@ -369,6 +464,7 @@ class AscendEplbState(_eplb_state.EplbState):
         parallel_config,
         expanded_physical_to_logical: torch.Tensor,
         num_valid_physical_experts: int | None = None,
+        policy: AbstractEplbPolicy | None = None,
     ) -> "AscendEplbState":
         from_mapping_kwargs: dict[str, Any] = {
             "model": model,
@@ -381,7 +477,11 @@ class AscendEplbState(_eplb_state.EplbState):
             if num_valid_physical_experts is None:
                 raise TypeError("num_valid_physical_experts is required by the selected vLLM release mapping contract")
             from_mapping_kwargs["num_valid_physical_experts"] = num_valid_physical_experts
-        state = super().from_mapping(**from_mapping_kwargs)
+        with _configured_upstream_policy(parallel_config.eplb_config.policy, policy):
+            state = super().from_mapping(**from_mapping_kwargs)
+        state._configured_policy = policy
+        if policy is not None:
+            state.policy = policy
         if state.uses_custom_load_stats:
             for model_state in state.model_states.values():
                 state._initialize_load_stats_state(model_state)

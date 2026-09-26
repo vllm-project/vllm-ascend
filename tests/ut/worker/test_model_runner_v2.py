@@ -542,7 +542,7 @@ def test_init_spec_pp_full_graph_and_speculator():
     ):
         runner = NPUModelRunner(vllm_config, torch.device("cpu"))
     restore_pp.assert_called_once()
-    assert eplb_cls.call_args.kwargs["load_collection_phase"] == "decode"
+    assert eplb_cls.call_args.args[2] is ascend_config.eplb_config
     assert runner.use_aclgraph is True
     assert runner.use_aux_hidden_state_outputs is True
     assert runner.speculator is speculator

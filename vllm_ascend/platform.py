@@ -879,12 +879,13 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
 
     use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
     if use_v2_model_runner:
-        legacy_eplb_fields = sorted(set(eplb_config) - {"load_collection_phase"})
-        if legacy_eplb_fields:
+        supported_eplb_fields = {"load_collection_phase", "stair_config"}
+        unsupported_eplb_fields = sorted(set(eplb_config) - supported_eplb_fields)
+        if unsupported_eplb_fields:
             raise ValueError(
-                "Model Runner V2 only accepts 'load_collection_phase' in "
-                "additional_config.eplb_config; legacy fields are not supported: "
-                f"{', '.join(legacy_eplb_fields)}."
+                "Model Runner V2 only accepts 'load_collection_phase' and 'stair_config' in "
+                "additional_config.eplb_config; unsupported fields: "
+                f"{', '.join(unsupported_eplb_fields)}."
             )
         if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
             "EXPERT_MAP_RECORD", "false"
@@ -914,10 +915,10 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                 upstream_eplb_config.communicator = "torch_gloo"
             if vllm_config.parallel_config.enable_elastic_ep:
                 raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
-    elif "load_collection_phase" in eplb_config:
+    elif {"load_collection_phase", "stair_config"} & eplb_config.keys():
         raise ValueError(
-            "additional_config.eplb_config.load_collection_phase is only supported by "
-            "Model Runner V2; use eplb_heat_collection_stage with Model Runner V1."
+            "stair_config and load_collection_phase are only supported by Model Runner V2; "
+            "use eplb_heat_collection_stage with Model Runner V1."
         )
     elif vllm_config.parallel_config.enable_eplb:
         raise ValueError("Upstream EPLB is only supported by Model Runner V2 on Ascend.")
