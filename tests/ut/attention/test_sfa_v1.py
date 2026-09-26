@@ -1370,7 +1370,7 @@ class TestAscendSFAImpl(TestBase):
     ):
         """exec_kv with enable_sparse_sfa_c8 delegates to custom_kv_rmsnorm_rope."""
         self.impl.enable_sparse_sfa_c8 = True
-        self.impl.c8_k_cache_dtype = torch.int8
+        self.impl.c8_cache_dtype = torch.int8
         self.impl.kv_a_layernorm = MagicMock()
         self.impl.kv_a_layernorm.weight = torch.ones(self.impl.kv_lora_rank)
         self.impl.kv_a_layernorm.variance_epsilon = 1e-5

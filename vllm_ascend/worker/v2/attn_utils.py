@@ -127,6 +127,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     elif c8_k_cache_dtype == torch.int8:
         c8_k_scale_cache_dtype = torch.float16
 
+    c8_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+
     for layer_name, attn_module in attn_layers.items():
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
             continue
@@ -152,7 +154,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                     vllm_config.model_config.hf_text_config.kv_lora_rank,
                     vllm_config.model_config.hf_text_config.qk_rope_head_dim,
                 )
-                dtype = c8_k_cache_dtype
+                dtype = c8_cache_dtype
                 cache_dtype_str = vllm_config.cache_config.cache_dtype
             else:
                 head_size = spec.head_size
@@ -384,11 +386,14 @@ def build_attn_state(
     num_reqs,
     num_scheduled_tokens,
     num_valid_tokens,
+    kv_cache_config: KVCacheConfig | None = None,
 ):
     """Build attention state for npu's attention backend."""
     if vllm_config.model_config.runner_type == "pooling":
+        if kv_cache_config is None:
+            raise RuntimeError("Pooling attention state requires KVCacheConfig.")
         if isinstance(
-            vllm_config.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+            kv_cache_config.kv_cache_groups[0].kv_cache_spec,
             EncoderOnlyAttentionSpec,
         ):
             attn_state = AscendAttentionState.PrefillNoCache

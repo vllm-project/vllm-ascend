@@ -846,15 +846,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
         if self.qk_rope_head_dim == 0 and self.enable_sparse_sfa_c8:
             raise NotImplementedError("NoPE SFA currently requires an unquantized latent KV cache.")
-        self.enable_sparse_li_c8 = self.has_indexer and self.indexer.enable_sparse_li_c8
-        if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
-            self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
-                self.vllm_config.attention_config.indexer_kv_dtype, self.vllm_config.model_config
+        if self.enable_sparse_sfa_c8:
+            self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
+                self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
             )
-            if self.c8_k_cache_dtype == torch.float8_e4m3fn:
-                self.c8_k_scale_cache_dtype = torch.float32
-            elif self.c8_k_cache_dtype == torch.int8:
-                self.c8_k_scale_cache_dtype = torch.float16
 
         if self.enable_sparse_sfa_c8:
             self.sfa_qsfa_packed_kv_head_dim = get_sfa_qsfa_packed_head_dim(
@@ -1232,7 +1227,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self.kv_lora_rank,
                 self.qk_rope_head_dim,
                 epsilon=self.kv_a_layernorm.variance_epsilon,
-                dst_type=self.c8_k_cache_dtype,
+                dst_type=self.c8_cache_dtype,
                 tile_size=self.sfa_qsfa_tile_size,
             )
 
@@ -1492,6 +1487,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             inner_out=q_c,
         )
         return hidden_states, ql_nope, q_pe, q_c
+
+    def _prepare_indexer_metadata(self, indexer_metadata, attn_metadata) -> None:
+        """Allow an attention backend to supply indexer selection metadata."""
+        return
 
     def _get_indexcache_topk_indices(self, num_tokens: int) -> torch.Tensor:
         if self.topk_indices_buffer is None:
@@ -1905,6 +1904,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # independently built metadata.
             assert k_hidden_states is not None
             assert indexer_attn_metadata is not None
+            self._prepare_indexer_metadata(indexer_attn_metadata, attn_metadata)
             topk_indices = self.indexer(
                 hidden_states,
                 q_c,

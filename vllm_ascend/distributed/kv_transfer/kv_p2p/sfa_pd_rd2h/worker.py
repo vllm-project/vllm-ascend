@@ -30,6 +30,7 @@ from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
+    CopySfaTailDest,
     LayerMetadata,
     SendTask,
     get_external_request_id,
@@ -147,6 +148,15 @@ class SFAPDRD2HConsumerWorker:
         self.request_map: dict[str, str] = {}
         # external_req_id -> (main CPU block ids, indexer HBM block ids).
         self._dest_blocks_by_req: dict[str, tuple[list[int], list[int]]] = {}
+        # Internal req_id -> early-bound fused_copy_sfa top-k row used by the runner.
+        self.copy_sfa_slots_by_req: dict[str, int] = {}
+        # external_req_id -> circular-tail destination. Shared with the read thread.
+        self._copy_sfa_tail_by_req: dict[str, CopySfaTailDest] = {}
+        self._topk_k_bases: list[int] = []
+        self._topk_v_bases: list[int] = []
+        self._topk_row_tokens = 0
+        self._topk_hot_tokens = 0
+        self._copy_sfa_block_size = 128
         # External req ids whose DONE signal arrived before request_map
         # was seeded (see get_finished). Retried every step until mapped.
         self._pending_done: set[str] = set()
@@ -200,6 +210,22 @@ class SFAPDRD2HConsumerWorker:
                 indexer_ids = list(getattr(req, "indexer_block_ids", []) or [])
                 self._dest_blocks_by_req[ext_id] = (main_ids, indexer_ids)
                 self._cpu_blocks_by_req[req_id] = len(main_ids)
+                pool_slot = getattr(req, "pool_slot", None)
+                if pool_slot is not None:
+                    self.copy_sfa_slots_by_req[req_id] = int(pool_slot)
+                    dense = bool(getattr(req, "dense", False))
+                    tail_tokens = int(getattr(req, "tail_tokens", 0) or 0)
+                    # dense: the pull thread copies the whole prompt into the
+                    # row's hot region (short requests decode as -3); tail: the
+                    # circular slots only receive the incomplete last block.
+                    if dense or tail_tokens > 0:
+                        self._copy_sfa_tail_by_req[ext_id] = CopySfaTailDest(
+                            pool_slot=int(pool_slot),
+                            tail_tokens=tail_tokens,
+                            tail_block_index=int(getattr(req, "tail_block_index", 0) or 0),
+                            dense=dense,
+                            kv_tokens=int(getattr(req, "kv_tokens", 0) or 0),
+                        )
 
     def save_kv_layer(
         self,
@@ -221,6 +247,8 @@ class SFAPDRD2HConsumerWorker:
             self._cpu_blocks_by_req.pop(req_id, None)
             self.request_map.pop(ext_id, None)
             self._dest_blocks_by_req.pop(ext_id, None)
+            getattr(self, "copy_sfa_slots_by_req", {}).pop(req_id, None)
+            getattr(self, "_copy_sfa_tail_by_req", {}).pop(ext_id, None)
             self._pending_done.discard(ext_id)
             self._terminal_ext_ids.discard(ext_id)
         # Drop any partial contributor-completion state so a dead contributor or a
@@ -324,6 +352,12 @@ class SFAPDRD2HConsumerWorker:
             indexer_scale_tensors=self._indexer_scale_tensors,
             dest_blocks_by_req=self._dest_blocks_by_req,
             get_offload_layer_id=self.offload_manager._get_offload_layer_id,
+            copy_sfa_tail_by_req=self._copy_sfa_tail_by_req,
+            topk_k_bases=self._topk_k_bases,
+            topk_v_bases=self._topk_v_bases,
+            topk_row_tokens=self._topk_row_tokens,
+            topk_hot_tokens=self._topk_hot_tokens,
+            block_size=self._copy_sfa_block_size,
         )
 
     def _register_memfabric_pull(
@@ -407,6 +441,7 @@ class SFAPDRD2HConsumerWorker:
 
         # Create memfabric engine (no registration)
         self._ensure_engine()
+        self._bind_copy_sfa_tail_destinations()
         read_state = self._build_consumer_read_state()
         # Start MembPullReadThread (ZMQ ROUTER + memfabric read)
         self._mf_read_thread = MembPullReadThread(
@@ -428,6 +463,30 @@ class SFAPDRD2HConsumerWorker:
             sum(t is not None for t in self._indexer_tensors),
             len(main_names),
         )
+
+    def _bind_copy_sfa_tail_destinations(self) -> None:
+        """Publish rank-local topk buffer bases for circular-tail D2D."""
+        manager = self.offload_manager
+        if manager is None or not getattr(manager, "use_fused_copy_sfa", False):
+            self._topk_k_bases = []
+            self._topk_v_bases = []
+            self._topk_row_tokens = 0
+            self._topk_hot_tokens = 0
+            return
+        topk_k = manager.topk_buffers_k
+        topk_v = manager.topk_buffers_v
+        if not topk_k or not topk_v:
+            raise RuntimeError("fused_copy_sfa PD tail D2D requires registered topk buffers")
+        self._topk_k_bases = [int(tensor.data_ptr()) for tensor in topk_k]
+        self._topk_v_bases = [int(tensor.data_ptr()) for tensor in topk_v]
+        self._copy_sfa_block_size = int(manager.block_size)
+        self._topk_row_tokens = int(topk_k[0].shape[1])
+        self._topk_hot_tokens = self._topk_row_tokens - 2 * self._copy_sfa_block_size
+        if self._topk_hot_tokens <= 0:
+            raise RuntimeError(
+                "fused_copy_sfa topk row is missing circular tail slots: "
+                f"row_tokens={self._topk_row_tokens}, block_size={self._copy_sfa_block_size}"
+            )
 
     def shutdown(self) -> None:
         read_thread = getattr(self, "_mf_read_thread", None)
@@ -507,15 +566,15 @@ class SFAPDRD2HProducerWorker:
             return req_meta
         raise RuntimeError("SfaRemoteD2HConnector P side supports memfabric pull only.")
 
-    def start_load_kv(self, metadata: KVConnectorMetadata) -> None:
-        """Prepare P-side request metadata for memfabric pull mode.
+    def bind_connector_metadata(self, metadata: KVConnectorMetadata) -> None:
+        """Prepare P-side dispatch metadata before this step's layer hooks.
 
-        * reset ``self.current_layer`` — the per-step layer counter that
-          ``save_kv_layer`` increments; without the reset it drifts to
-          ``>= total_layers`` and every request after the first is skipped.
-        * adjust ``remote_port`` by ``tp_rank`` — D's ROUTER binds
-          ``side_channel_port + tp_rank`` (one per rank) but D advertises the
-          base port, so each P rank must send to ``base + tp_rank``.
+        * reset ``self.current_layer`` — the stage-local fallback position for
+          hooks without an explicit layer name.
+        * clear ``_pd_dispatched_layers`` so the new step can send each layer
+          once, through either the scatter-time or layer-end hook.
+        * adjust ``remote_port`` by the mapped D TP rank. D advertises its base
+          port, while each D rank listens on ``base + decode_tp_rank``.
 
         ``remote_host`` / ``local_block_ids`` are already correct from
         ``build_connector_meta``; main and indexer group ids remain separate."""
@@ -543,7 +602,7 @@ class SFAPDRD2HProducerWorker:
                     description="SFAPD remote D-side TP control-plane port",
                 )
                 logger.debug(
-                    "MembPull P start_load_kv req %s: remote_host=%s, "
+                    "MembPull P bind_connector_metadata req %s: remote_host=%s, "
                     "remote_port=%s->%s, tp_rank=%s, tp_ratio=%s, local_block_ids=%s, "
                     "chunk_finish=%s, local_computed_tokens=%s, local_transed_tokens=%s",
                     req_id,

@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch import nn
 
-from vllm_ascend.spec_decode.mtp import compact_mtp_topk_indices
+from vllm_ascend.spec_decode.utils import compact_mtp_topk_indices
 
 
 @pytest.mark.parametrize(
@@ -48,9 +48,11 @@ def test_dsa_cp_compaction_moves_rows_to_next_step_owner(num_input_tokens, sampl
 def test_compaction_without_dsa_cp_uses_predictor_hook():
     model = nn.Module()
     model.compact_topk_indices = Mock()
+    copy_sfa_attention = Mock()
     indices = torch.tensor([1, 5], dtype=torch.int32)
-    compact_mtp_topk_indices(model, indices, 6)
+    compact_mtp_topk_indices(model, indices, 6, lim_topk_compactors=[copy_sfa_attention])
     model.compact_topk_indices.assert_called_once_with(indices)
+    copy_sfa_attention.compact_lim_topk_metadata.assert_called_once_with(indices)
 
 
 def test_dsa_cp_compaction_empty_batch_skips_collective():

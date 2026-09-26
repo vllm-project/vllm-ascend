@@ -36,20 +36,40 @@ fi
 # ---- memfabric_hybrid ----
 echo "Install memfabric_hybrid based on architecture..."
 if [ "$ARCH" = "x86_64" ]; then
-    MEMFABRIC_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/mf/v1.2.0/${MEMFABRIC_DATE}/memfabric_hybrid-${MEMFABRIC_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+    MEMFABRIC_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/mf/master/${MEMFABRIC_DATE}/memfabric_hybrid-${MEMFABRIC_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
 else
-    MEMFABRIC_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/mf/v1.2.0/${MEMFABRIC_DATE}/memfabric_hybrid-${MEMFABRIC_VERSION}-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl"
+    MEMFABRIC_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/mf/master/${MEMFABRIC_DATE}/memfabric_hybrid-${MEMFABRIC_VERSION}-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl"
 fi
 python3 -m pip install "$MEMFABRIC_URL" --force-reinstall --no-deps
 
 # ---- memcache_hybrid ----
 echo "Install memcache_hybrid based on architecture..."
 if [ "$ARCH" = "x86_64" ]; then
-    MEMCACHE_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/memcache/v1.2.0/${MEMCACHE_DATE}/memcache_hybrid-${MEMCACHE_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+    MEMCACHE_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/memcache/master/${MEMCACHE_DATE}/memcache_hybrid-${MEMCACHE_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
 else
-    MEMCACHE_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/memcache/v1.2.0/${MEMCACHE_DATE}/memcache_hybrid-${MEMCACHE_VERSION}-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl"
+    MEMCACHE_URL="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/memcache/master/${MEMCACHE_DATE}/memcache_hybrid-${MEMCACHE_VERSION}-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl"
 fi
 python3 -m pip install "$MEMCACHE_URL" --force-reinstall --no-deps
+
+# ---- mfcli kernel install ----
+# Install the memfabric kernel for the target SoC. Only A5 and A3 require it;
+# Disable torch device backend autoload so `import torch` does not pull in
+# torch_npu (unusable on the CPU build host), which breaks mfcli's torch ABI
+# check on A3/A5.
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+case "${SOC_VERSION:-}" in
+    ascend950dt_9582)
+        echo "Install memfabric kernel for A5..."
+        mfcli kernel install --soc-version A5
+        ;;
+    ascend910_9391)
+        echo "Install memfabric kernel for A3..."
+        mfcli kernel install --soc-version A3
+        ;;
+    *)
+        echo "Skip memfabric kernel install (SOC_VERSION=${SOC_VERSION:-})."
+        ;;
+esac
 
 # ---- triton-ascend ----
 # Controlled by INSTALL_TRITON_ASCEND env var (default: false).

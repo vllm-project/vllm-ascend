@@ -21,7 +21,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
@@ -38,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
+    MmcDirect,
     _inject_device_ub_qos,
     _validate_device_ub_qos,
     extract_layout_config,
@@ -1295,6 +1296,32 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.register_buffer([100], [200])
         b.store.register_buffer.assert_called_once()
 
+    def test_unregister_buffer(self):
+        b = self._make_backend()
+
+        b.unregister_buffer([100, 200], [300, 400])
+
+        self.assertEqual(
+            b.store.unregister_buffer.call_args_list,
+            [call(100, 300), call(200, 400)],
+        )
+
+    def test_unregister_buffer_rejects_mismatched_ptrs_and_sizes(self):
+        b = self._make_backend()
+
+        with self.assertRaisesRegex(ValueError, "same length"):
+            b.unregister_buffer([100, 200], [300])
+
+        b.store.unregister_buffer.assert_not_called()
+
+    def test_unregister_buffer_before_store_initialization_is_noop(self):
+        b = self._make_backend()
+        b._store_initialized = False
+
+        b.unregister_buffer([100], [200])
+
+        b.store.unregister_buffer.assert_not_called()
+
     def test_batch_write_finish(self):
         b = self._make_backend()
         b.store.batch_write_finish.return_value = [0]
@@ -1313,6 +1340,32 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.store.batch_get_into_layers.return_value = [0]
         b.get(["k1"], [[100]], [[10]])
         b.store.batch_get_into_layers.assert_called_once()
+
+    def test_batch_get_into_buffers(self):
+        b = self._make_backend()
+        b.store.batch_get_into.return_value = [0]
+
+        result = b.batch_get_into_buffers(["k1"], [100], [10])
+
+        self.assertEqual(result, [0])
+        b.store.batch_get_into.assert_called_once_with(["k1"], [100], [10], MmcDirect.COPY_G2L.value)
+
+    def test_batch_get_into_buffers_error(self):
+        b = self._make_backend()
+        b.store.batch_get_into.return_value = [1]
+
+        self.assertEqual(b.batch_get_into_buffers(["k1"], [100], [10]), [1])
+
+    def test_batch_get_into_buffers_exception(self):
+        b = self._make_backend()
+        b.store.batch_get_into.side_effect = RuntimeError("backend fail")
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
+        ) as mock_logger:
+            self.assertIsNone(b.batch_get_into_buffers(["k1"], [100], [10]))
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("RuntimeError", error_log)
+        self.assertIn("backend fail", error_log)
 
     def test_get_error(self):
         b = self._make_backend()
@@ -1348,6 +1401,39 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
         ) as mock_logger:
             b.put(["k1"], [[100]], [[10]])
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("RuntimeError", error_log)
+        self.assertIn("backend fail", error_log)
+
+    def test_put_from(self):
+        b = self._make_backend()
+        b.store.put_from.return_value = 0
+
+        self.assertEqual(b.put_from("k1", 100, 10), 0)
+        b.store.put_from.assert_called_once_with("k1", 100, 10, MmcDirect.COPY_L2G.value)
+
+    def test_put_from_error(self):
+        b = self._make_backend()
+        b.store.put_from.return_value = -1
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
+        ) as mock_logger:
+            self.assertEqual(b.put_from("k1", 100, 10), -1)
+
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("k1", error_log)
+        self.assertIn("-1", error_log)
+
+    def test_put_from_exception(self):
+        b = self._make_backend()
+        b.store.put_from.side_effect = RuntimeError("backend fail")
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
+        ) as mock_logger:
+            self.assertIsNone(b.put_from("k1", 100, 10))
+
         error_log = _format_log_call(mock_logger.error.call_args)
         self.assertIn("RuntimeError", error_log)
         self.assertIn("backend fail", error_log)

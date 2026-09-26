@@ -276,6 +276,15 @@ class MemcacheBackend(Backend):
         self._pending_buffers = (list(ptrs), list(sizes))
         self._register_buffers_if_needed()
 
+    def unregister_buffer(self, ptrs: list[int], sizes: list[int]):
+        if len(ptrs) != len(sizes):
+            raise ValueError(f"ptrs and sizes must have the same length: {len(ptrs)} != {len(sizes)}")
+        if not self._store_initialized:
+            return
+        assert self.store is not None
+        for ptr, size in zip(ptrs, sizes):
+            self.store.unregister_buffer(ptr, size)
+
     def _register_buffers_if_needed(self):
         if self._pending_buffers is None or not self._store_initialized:
             return
@@ -305,6 +314,48 @@ class MemcacheBackend(Backend):
             return []
         assert self.store is not None
         return self.store.batch_get_key_info(keys)
+
+    def batch_get_into_buffers(
+        self,
+        keys: list[str],
+        addrs: list[int],
+        sizes: list[int],
+        direction: int = MmcDirect.COPY_G2L.value,
+    ) -> list[int] | None:
+        if self._lazy_init and not self._store_initialized:
+            logger.error(
+                "Failed to get %d keys out of %d. Store is not initialized; "
+                "call put() first to trigger initialization.",
+                len(keys),
+                len(keys),
+            )
+            logger.debug("Failed to get key details. keys=%s", keys)
+            return None
+        assert self.store is not None
+        try:
+            res = self.store.batch_get_into(keys, addrs, sizes, direction)
+            failed_codes = [int(value) for value in res if value != 0]
+            failed_count = len(failed_codes)
+            if failed_count:
+                error_codes = sorted(set(failed_codes))
+                logger.error(
+                    "Failed to get %d keys out of %d. error_codes=%s. Check key existence and memory state.",
+                    failed_count,
+                    len(keys),
+                    error_codes,
+                )
+                logger.debug("Failed to get key details. keys=%s, result=%s", keys, res)
+            return res
+        except Exception as e:
+            logger.error(
+                "Failed to get %d keys out of %d. type=%s, error=%s. Check store state and network.",
+                len(keys),
+                len(keys),
+                type(e).__name__,
+                e,
+            )
+            logger.debug("Failed to get key details. keys=%s", keys)
+            return None
 
     def batch_is_readable(self, keys: list[str]) -> list[bool]:
         """Map valid MemCache GVA metadata to the common readability contract."""
@@ -344,7 +395,12 @@ class MemcacheBackend(Backend):
             return [0] * len(keys)
         return finish(keys, results)
 
-    def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
+    def get(
+        self,
+        key: list[str],
+        addr: list[list[int]],
+        size: list[list[int]],
+    ):
         if self._lazy_init and not self._store_initialized:
             logger.error(
                 "Failed to get %d keys out of %d. Store is not initialized; "
@@ -380,7 +436,12 @@ class MemcacheBackend(Backend):
             logger.debug("Failed to get key details. keys=%s", key)
             return None
 
-    def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
+    def put(
+        self,
+        key: list[str],
+        addr: list[list[int]],
+        size: list[list[int]],
+    ):
         self.ensure_initialized()
         assert self.store is not None
         try:
@@ -409,3 +470,30 @@ class MemcacheBackend(Backend):
             logger.debug("Failed to put key details. keys=%s", key)
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+
+    def put_from(
+        self,
+        key: str,
+        addr: int,
+        size: int,
+        direction: int = MmcDirect.COPY_L2G.value,
+    ) -> int | None:
+        self.ensure_initialized()
+        assert self.store is not None
+        try:
+            res = self.store.put_from(key, addr, size, direction)
+            if res != 0:
+                logger.error(
+                    "Failed to put key %s. error_code=%s. Check memory and store capacity.",
+                    key,
+                    res,
+                )
+            return res
+        except Exception as e:
+            logger.error(
+                "Failed to put key %s. type=%s, error=%s. Check store state and memory.",
+                key,
+                type(e).__name__,
+                e,
+            )
+            return None
