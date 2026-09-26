@@ -26,7 +26,7 @@ FROM ${BASE_IMAGE}:nightly-${VLLM_ASCEND_BRANCH}${OS_MARK}${TAG_SUFFIX}
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG PIP_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi"
 ARG PIP_TRUSTED_HOST=""
-ARG AIS_BENCH_TAG="v3.1-20260609-master"
+ARG AIS_BENCH_TAG="v3.1-20260912-master"
 ARG AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 ARG GIT_PROXY=""
 
@@ -55,7 +55,7 @@ RUN if [ -n "$GIT_PROXY" ]; then \
 # Install benchmark tools
 RUN git clone -b ${AIS_BENCH_TAG} --depth 1 "${AIS_BENCH_URL}" /vllm-workspace/vllm-ascend/benchmark && \
     cd /vllm-workspace/vllm-ascend/benchmark && \
-    pip install -e . -r requirements/api.txt -r requirements/extra.txt && \
+    pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt && \
     python3 -m pip cache purge
 
 CMD ["/bin/bash"]
