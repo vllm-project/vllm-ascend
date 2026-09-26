@@ -169,8 +169,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "lightning_indexer_quant"
         "compressor"
         "compressor_metadata"
-        "quant_lightning_indexer_v2"
-        "quant_lightning_indexer_v2_metadata"
         "sparse_flash_mla"
         "sparse_flash_mla_metadata"
         "sparse_attn_sharedkv"
