@@ -243,6 +243,32 @@ std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_meta(
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
 }
 
+std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_v2_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights, int64_t topk,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_k,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &seqused_k,
+    const c10::optional<at::Tensor> &cmp_residual_k,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &output_idx_offset,
+    const c10::optional<at::Tensor> &metadata,
+    int64_t max_seqlen_q, c10::string_view layout_q, c10::string_view layout_k,
+    int64_t mask_mode, int64_t cmp_ratio, int64_t return_value)
+{
+    (void)cu_seqlens_k;
+    (void)seqused_q;
+    (void)cmp_residual_k;
+    (void)output_idx_offset;
+    (void)metadata;
+    (void)max_seqlen_q;
+    (void)cmp_ratio;
+    auto output = npu_lightning_indexer_meta(query, key, weights, cu_seqlens_q, seqused_k,
+        block_table, layout_q, layout_k, topk, mask_mode, 0, 0, return_value != 0);
+    at::Tensor sparse_values_out = at::empty_like(std::get<1>(output), weights.options());
+    return std::tuple<at::Tensor, at::Tensor>(std::get<0>(output), sparse_values_out);
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const at::Tensor &sparse_indices, double scale_value,
@@ -1149,6 +1175,20 @@ at::Tensor npu_quant_lightning_indexer_v2_metadata_meta(
     }
 
     return output;
+}
+
+at::Tensor npu_lightning_indexer_v2_metadata_meta(
+    int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t topk,
+    const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
+    const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_k,
+    const c10::optional<at::Tensor> &cmp_residual_k, int64_t batch_size, int64_t max_seqlen_q,
+    int64_t max_seqlen_k, c10::string_view layout_q, c10::string_view layout_k,
+    int64_t mask_mode, int64_t cmp_ratio, c10::string_view device)
+{
+    return npu_quant_lightning_indexer_v2_metadata_meta(
+        num_heads_q, num_heads_k, head_dim, topk, 0, cu_seqlens_q, cu_seqlens_k,
+        seqused_q, seqused_k, cmp_residual_k, batch_size, max_seqlen_q, max_seqlen_k,
+        layout_q, layout_k, mask_mode, cmp_ratio, device);
 }
 
 at::Tensor construct_hc_post_output_tensor(const at::Tensor& residual)
@@ -2125,6 +2165,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_swiglu_quant_v2", &vllm_ascend::meta::grouped_matmul_swiglu_quant_v2_meta);
     // Lightning indexer
     ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
+    ops.impl("npu_pivot_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     ops.impl("npu_sparse_flash_mla_metadata", &vllm_ascend::meta::npu_sparse_flash_mla_metadata_meta);
@@ -2164,6 +2205,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
     ops.impl("npu_quant_lightning_indexer_v2", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_meta);
     ops.impl("npu_quant_lightning_indexer_v2_metadata", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_metadata_meta);
+    ops.impl("npu_lightning_indexer_v2", &vllm_ascend::meta::npu_lightning_indexer_v2_meta);
+    ops.impl("npu_lightning_indexer_v2_metadata", &vllm_ascend::meta::npu_lightning_indexer_v2_metadata_meta);
     ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);
     ops.impl("npu_sparse_attn_sharedkv_metadata", &vllm_ascend::meta::npu_sparse_attn_sharedkv_metadata_meta);
     ops.impl("npu_hc_post", &vllm_ascend::meta::npu_hc_post_meta);

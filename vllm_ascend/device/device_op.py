@@ -396,6 +396,8 @@ class BaseDeviceAdaptor:
         actual_seq_lengths_key: torch.Tensor,
         enable_sparse_li_c8: bool,
         use_torch_npu_lightning_indexer: bool,
+        enable_pivot_lightning_indexer: bool,
+        pivot_lightning_indexer_backend: str,
     ) -> torch.Tensor:
         # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
         # So two branches are maintained temporarily.
@@ -425,6 +427,57 @@ class BaseDeviceAdaptor:
                 sparse_count=2048,
                 sparse_mode=3,
             )
+        elif enable_pivot_lightning_indexer:
+            if pivot_lightning_indexer_backend == "v1":
+                topk_indices, _ = torch.ops._C_ascend.npu_pivot_lightning_indexer(
+                    query=q_li,
+                    key=kv_cache[indexer_cache_idx],
+                    weights=weights,
+                    actual_seq_lengths_query=actual_seq_lengths_query,
+                    actual_seq_lengths_key=actual_seq_lengths_key,
+                    block_table=attn_metadata.block_table,
+                    layout_query="TND",
+                    layout_key="PA_BSND",
+                    sparse_count=2048,
+                    sparse_mode=3,
+                )
+            else:
+                weights = weights.to(torch.float32)
+                batch_size = actual_seq_lengths_key.shape[0]
+                cu_seqlens_query = torch.cat((torch.zeros_like(actual_seq_lengths_query[:1]), actual_seq_lengths_query))
+                max_seqlen_query = (q_li.shape[0] + batch_size - 1) // batch_size
+                max_seqlen_key = attn_metadata.block_table.shape[-1] * kv_cache[indexer_cache_idx].shape[1]
+                metadata = torch.ops._C_ascend.npu_lightning_indexer_v2_metadata(
+                    q_li.shape[1],
+                    kv_cache[indexer_cache_idx].shape[2],
+                    q_li.shape[2],
+                    2048,
+                    cu_seqlens_q=cu_seqlens_query,
+                    seqused_k=actual_seq_lengths_key,
+                    batch_size=batch_size,
+                    max_seqlen_q=max_seqlen_query,
+                    max_seqlen_k=max_seqlen_key,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    mask_mode=3,
+                    cmp_ratio=1,
+                )
+                topk_indices, _ = torch.ops._C_ascend.npu_lightning_indexer_v2(
+                    q_li,
+                    kv_cache[indexer_cache_idx],
+                    weights,
+                    2048,
+                    cu_seqlens_q=cu_seqlens_query,
+                    seqused_k=actual_seq_lengths_key,
+                    block_table=attn_metadata.block_table,
+                    metadata=metadata,
+                    max_seqlen_q=max_seqlen_query,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    mask_mode=3,
+                    cmp_ratio=1,
+                    return_value=0,
+                )
         elif use_torch_npu_lightning_indexer:
             topk_indices, _ = torch_npu.npu_lightning_indexer(
                 query=q_li,
@@ -1380,6 +1433,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         actual_seq_lengths_key: torch.Tensor,
         enable_sparse_li_c8: bool,
         use_torch_npu_lightning_indexer: bool,
+        enable_pivot_lightning_indexer: bool,
+        pivot_lightning_indexer_backend: str,
     ) -> torch.Tensor:
         indexer_cache_idx = indexer_k_cache_idx
         indexer_scale_cache_idx = indexer_scale_cache_idx
@@ -1422,6 +1477,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     sparse_count=2048,
                     sparse_mode=3,
                 )
+        elif enable_pivot_lightning_indexer:
+            raise RuntimeError("enable_pivot_lightning_indexer is supported only on Ascend 910B/910_93 devices")
         else:
             topk_indices, _ = torch_npu.npu_lightning_indexer(
                 query=q_li,
