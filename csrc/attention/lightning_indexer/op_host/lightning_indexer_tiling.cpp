@@ -95,6 +95,8 @@ ge::graphStatus LIInfoParser::GetNpuInfo()
     OP_CHECK_IF(aicNum == 0 || aivNum == 0, OP_LOGE(opName_, "num of core obtained is 0."), return GRAPH_FAILED);
 
     socVersion_ = ascendcPlatform.GetSocVersion();
+    OP_CHECK_IF(fp32Scores_ && socVersion_ != platform_ascendc::SocVersion::ASCEND910B,
+                OP_LOGE(opName_, "FP32 scores support Ascend 910B only."), return GRAPH_FAILED);
     if ((socVersion_ != platform_ascendc::SocVersion::ASCEND910B) &&
         (socVersion_ != platform_ascendc::SocVersion::ASCEND910_93) &&
         (socVersion_ != platform_ascendc::SocVersion::ASCEND950)) {
@@ -242,8 +244,8 @@ ge::graphStatus LIInfoParser::GetAndCheckInOutDataType()
     OP_CHECK_IF(outputType_ != ge::DT_INT32,
                OP_LOGE(opName_, "The data types of the output sparse_indices must be int32."),
                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(valuesOutType_ != inputQType_,
-               OP_LOGE(opName_, "The data types of the output sparse_values must be same as inputQType."),
+    OP_CHECK_IF(valuesOutType_ != (fp32Scores_ ? ge::DT_FLOAT : inputQType_),
+               OP_LOGE(opName_, "The output sparse_values dtype does not match the operator score contract."),
                return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;

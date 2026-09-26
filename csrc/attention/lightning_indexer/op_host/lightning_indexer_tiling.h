@@ -156,7 +156,8 @@ public:
 // -----------算子Tiling入参信息解析及Check类---------------
 class LIInfoParser {
 public:
-    explicit LIInfoParser(gert::TilingContext *context) : context_(context)
+    explicit LIInfoParser(gert::TilingContext *context, bool fp32Scores = false)
+        : context_(context), fp32Scores_(fp32Scores)
     {
     }
     ~LIInfoParser() = default;
@@ -223,6 +224,7 @@ public:
     ge::DataType inputKRopeType_ = ge::DT_FLOAT16;
     ge::DataType outputType_ = ge::DT_FLOAT16;
     ge::DataType valuesOutType_ = ge::DT_FLOAT16;
+    bool fp32Scores_ = false;
 };
 
 // ---------------算子Tiling类---------------

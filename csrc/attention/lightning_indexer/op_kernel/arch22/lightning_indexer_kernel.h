@@ -64,6 +64,8 @@ public:
     static constexpr bool DT_W_FLAG = LIT::weightsTypeFlag;
     using Q_T = typename LIT::queryType;
     using K_T = typename LIT::keyType;
+    using SCORE_T = typename LIT::scoreType;
+    using SCORE_BITS_T = typename std::conditional<std::is_same<SCORE_T, float>::value, uint32_t, uint16_t>::type;
     using OUT_T = typename LIT::outputType;
     static constexpr bool PAGE_ATTENTION = LIT::pageAttention;
     static constexpr LI_LAYOUT LAYOUT_T = LIT::layout;
@@ -109,7 +111,7 @@ protected:
     GlobalTensor<W_T> weightsGm;
 
     GlobalTensor<int32_t> indiceOutGm;
-    GlobalTensor<K_T> valueOutGm;
+    GlobalTensor<SCORE_T> valueOutGm;
     GlobalTensor<int32_t> blockTableGm;
 
     GlobalTensor<uint32_t> actualSeqLengthsGmQ;
@@ -441,7 +443,7 @@ __aicore__ inline void LightningIndexerKernel<LIT>::Init(__gm__ uint8_t *query,
     if ASCEND_IS_AIV {
         vectorService.InitParams(constInfo, tiling);
         indiceOutGm.SetGlobalBuffer((__gm__ int32_t *)sparseIndices);
-        valueOutGm.SetGlobalBuffer((__gm__ K_T *)sparseValues);
+        valueOutGm.SetGlobalBuffer((__gm__ SCORE_T *)sparseValues);
         weightsGm.SetGlobalBuffer((__gm__ W_T *)weights);
         vectorService.InitVec1GlobalTensor(mm1ResGm, vec1ResGm, vec1ParamGm, weightsGm, indiceOutGm, valueOutGm);
     } else {
@@ -597,12 +599,14 @@ __aicore__ inline void LightningIndexerKernel<LIT>::ProcessInvalid()
                 SetFlag<HardEvent::MTE3_V>(eventIDMTE3ToV);
                 WaitFlag<HardEvent::MTE3_V>(eventIDMTE3ToV);
 
-                GlobalTensor<uint16_t> valueOutGmTmp;
-                valueOutGmTmp.SetGlobalBuffer((__gm__ uint16_t *)valueOutGm.GetPhyAddr());
-                GlobalTensor<uint16_t> valueOut = valueOutGmTmp[baseSize];
+                GlobalTensor<SCORE_BITS_T> valueOutGmTmp;
+                valueOutGmTmp.SetGlobalBuffer((__gm__ SCORE_BITS_T *)valueOutGm.GetPhyAddr());
+                GlobalTensor<SCORE_BITS_T> valueOut = valueOutGmTmp[baseSize];
 
-                uint16_t negInf = 0;
-                if constexpr(std::is_same<K_T, float16_t>::value) {
+                SCORE_BITS_T negInf = 0;
+                if constexpr (std::is_same<SCORE_T, float>::value) {
+                    negInf = 0xFF800000U;
+                } else if constexpr(std::is_same<K_T, float16_t>::value) {
                     negInf = 0xFC00;
                 } else {
                     negInf = 0xFF80;

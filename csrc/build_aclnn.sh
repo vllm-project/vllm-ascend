@@ -99,6 +99,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "scatter_nd_update_sk"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer"
+        "lightning_indexer_fp32"
         "sparse_flash_attention"
         "kv_quant_sparse_flash_attention"
         "moe_gating_top_k"
