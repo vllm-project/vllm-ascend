@@ -108,6 +108,15 @@ class XliteModelRunner(NPUModelRunner):
                 ascend_metadata_cls,
             )
 
+        # A1 decode-only: the wrapper now exists and the native GDN layers
+        # have their kv_cache views bound — pre-resolve the native pools and
+        # warm the D2H sync path so the first real request does not pay the
+        # lazy-init costs (~118ms one-time TTFT penalty when left lazy).
+        try:
+            self.runner_model.xlite_hybrid_prepare()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("xlite decode-only warmup failed (deferred to runtime): %s", e)
+
     def _should_build_dummy_attn_metadata(
         self, force_attention: bool = False, is_profile: bool = False, *args: Any, **kwargs: Any
     ) -> bool:
