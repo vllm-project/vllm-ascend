@@ -6,6 +6,79 @@ import torch_npu
 from vllm.distributed import get_dcp_group
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
+
+
+def exchange_flash_attention_output(
+    output: torch.Tensor,
+    lse: torch.Tensor,
+    dcp_group=None,
+    *,
+    fp32_output: bool = False,
+    raw_row_words: int = 257,
+) -> torch.Tensor:
+    """Exchange history shards without waiting for the local current chunk."""
+    size = dcp_group.world_size if dcp_group is not None else 1
+    return torch.ops.vllm.sfa_dcp_a2a_fused(
+        # The existing SFA pack encodes FP32 LSE alongside BF16 values,
+        # and its fused combine accumulates in FP32. Avoid a full-size FP32
+        # output copy unless the expanded-prefill projection needs it below.
+        output.float() if fp32_output else output,
+        lse.transpose(0, 1).unsqueeze(-1).float(),
+        size,
+        1,
+        dcp_group.unique_name if size > 1 else "",
+        defer_combine=True,
+        raw_row_words=raw_row_words,
+    )
+
+
+def combine_flash_attention_output(
+    recv: torch.Tensor,
+    head_dim: int,
+    *,
+    current_output: torch.Tensor | None = None,
+    current_lse: torch.Tensor | None = None,
+    value_projection: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Merge received history and count the replicated current chunk once."""
+    if value_projection is not None:
+        ranks, heads, tokens, _ = recv.shape
+        latent = recv[..., :head_dim].permute(1, 0, 2, 3).reshape(heads, ranks * tokens, head_dim)
+        projected = torch.bmm(latent, value_projection.float())
+        projected = projected.view(heads, ranks, tokens, -1).permute(1, 0, 2, 3)
+        recv = torch.cat((projected, recv[..., head_dim:]), dim=-1).contiguous()
+        head_dim = value_projection.shape[-1]
+    return fused_sfa_dcp_lse_combine(
+        recv,
+        head_dim,
+        scatter_dim=1,
+        local_output=current_output,
+        local_lse=current_lse.transpose(0, 1).unsqueeze(-1) if current_lse is not None else None,
+    )
+
+
+def merge_flash_attention_output(
+    output: torch.Tensor,
+    lse: torch.Tensor,
+    dcp_group=None,
+    *,
+    current_output: torch.Tensor | None = None,
+    current_lse: torch.Tensor | None = None,
+    value_projection: torch.Tensor | None = None,
+    raw_row_words: int = 257,
+) -> torch.Tensor:
+    """Reuse DCP exchange/combine, including Flash's empty-rank LSE sentinel."""
+    recv = exchange_flash_attention_output(
+        output, lse, dcp_group, fp32_output=value_projection is not None, raw_row_words=raw_row_words
+    )
+    return combine_flash_attention_output(
+        recv,
+        output.shape[-1],
+        current_output=current_output,
+        current_lse=current_lse,
+        value_projection=value_projection,
+    )
 
 
 def get_cp_local_query_key_lens(
