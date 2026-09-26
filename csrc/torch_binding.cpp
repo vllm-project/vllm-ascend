@@ -3423,19 +3423,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_rms_norm_dynamic_quant", torch::kPrivateUse1, &vllm_ascend::npu_rms_norm_dynamic_quant_npu);
 
     ops.def(
-        "kv_compress_epilog("
-            "Tensor(a!) kv_compress_cache, "
-            "Tensor x, "
-            "Tensor slot_mapping, "
-            "int quant_group_size, "
-            "int quant_mode, "
-            "bool round_scale_flag, "
-            "int layout"
-        ") -> ()"
-    );
-    ops.impl("kv_compress_epilog", torch::kPrivateUse1, &vllm_ascend::kv_compress_epilog_npu);
-
-    ops.def(
         "npu_kv_quant_sparse_attn_sharedkv("
             "Tensor q, "
             "int kv_quant_mode, "
