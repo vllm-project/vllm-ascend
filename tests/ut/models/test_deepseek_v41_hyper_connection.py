@@ -269,6 +269,11 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
     model = DeepseekV41Model.__new__(DeepseekV41Model)
     torch.nn.Module.__init__(model)
     model.hc_mult = 2
+    model.start_layer = 0
+    model.end_layer = 3
+    model.decoder_replay_start = 3
+    model.decoder_replay_layers = None
+    model.use_sequence_parallel = False
     model.needs_moe_input_ids = False
     model.embed_tokens = torch.nn.Embedding(4, 3)
     model.norm = torch.nn.Identity()

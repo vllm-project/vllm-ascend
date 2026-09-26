@@ -22,7 +22,7 @@ import math
 import sys
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
@@ -77,6 +77,7 @@ from vllm.v1.attention.selector import get_attn_backend  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    CircularBufferSpec,
     EncoderOnlyAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
@@ -93,8 +94,6 @@ from vllm.v1.outputs import (
     LogprobsLists,
     LogprobsTensors,
     ModelRunnerOutput,
-    RoutedExpertsLists,
-    RoutedExpertsTensors,
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
@@ -106,6 +105,7 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
+from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu_model_runner import (
     AsyncGPUModelRunnerOutput,
     GPUModelRunner,
@@ -162,7 +162,9 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
+from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
@@ -241,6 +243,8 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+
+    from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -248,6 +252,7 @@ else:
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 from vllm_ascend.attention.dsa_v41 import (
+    AscendDSAV41Metadata,
     AscendDSAV41MetadataBuilder,
     DeepseekV41CacheLayer,
 )
@@ -349,6 +354,8 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        self.decoder_replay: AscendDecoderReplayLayers | None = None
+        self._decoder_replay_common_metadata = None
         # Must be set before super().__init__() because parent init may call
         # _allocate_kv_cache_tensors which accesses self.use_compress.
         model_config = getattr(vllm_config, "model_config", None)
@@ -2794,7 +2801,6 @@ class NPUModelRunner(GPUModelRunner):
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
-        output_spec_token_ids = None
         use_padded_batch = False
         early_pp_padded_drafter = False
         if self.speculative_config:
@@ -2853,27 +2859,10 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
-            draft_token_ids = self._draft_token_ids if use_pp_spec_decode else None
-            if draft_token_ids is not None:
-                if isinstance(draft_token_ids, torch.Tensor):
-                    num_reqs = draft_token_ids.shape[0]
-                    draft_ids_list = draft_token_ids[:num_reqs].cpu().tolist()
-                    draft_req_ids = self._draft_token_req_ids
-                else:
-                    draft_ids_list = draft_token_ids
-                    draft_req_ids = self.input_batch.req_ids
-                if draft_ids_list and draft_req_ids:
-                    draft_by_req_id = dict(zip(draft_req_ids, draft_ids_list))
-                    output_spec_token_ids = [
-                        draft_by_req_id.get(req_id, [])
-                        for req_id in req_ids_output_copy
-                    ]
-
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
-            spec_token_ids=output_spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             kv_connector_output=kv_connector_output,
@@ -2881,7 +2870,6 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             num_nans_in_logits=num_nans_in_logits,
             cudagraph_stats=cudagraph_stats,
-            routed_experts=None,
         )
         if self.dynamic_eplb:
             self.eplb_updator.forward_end(self.eplb_heat_collection_status)
@@ -2898,39 +2886,8 @@ class NPUModelRunner(GPUModelRunner):
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         if not self.use_async_scheduling:
-            if self.routed_experts_initialized:
-                # Sync path: D2H was issued in ``_bookkeeping_sync`` and
-                # synchronized by ``_to_list``'s event.synchronize(), so
-                # the pinned buffers are ready to be wrapped as numpy.
-                total = scheduler_output.total_num_scheduled_tokens
-                model_runner_output.routed_experts = RoutedExpertsLists(
-                    routing_data=self.routed_experts_cpu[:total].numpy(),
-                    slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
-                )
             return model_runner_output
 
-        # Async path: produce a device-side snapshot that the async
-        # copy stream can D2H later. Both tensors must be private
-        # clones because:
-        #   - ``routing_data`` source is the shared capturer buffer,
-        #     which is ``clear_buffer()``-ed at the start of the
-        #     next step on the default stream.
-        #   - ``slot_mapping`` source is our own
-        #     ``routed_experts_slot_mapping_device``, which the
-        #     next ``_prepare_inputs`` overwrites on the default
-        #     stream while the D2H is still pending on the copy
-        #     stream.
-        # Without clones, the copy stream would read torn data.
-        routed_experts_snapshot = None
-        if self.routed_experts_initialized:
-            buf = self.routed_experts_capturer.get_device_buffer()
-            total = scheduler_output.total_num_scheduled_tokens
-            routed_experts_snapshot = RoutedExpertsTensors(
-                routing_data=buf[:total].clone(),
-                slot_mapping=self.routed_experts_slot_mapping_device[
-                    :total
-                ].clone(),
-            )
         async_output = AsyncGPUModelRunnerOutput(
             model_runner_output=model_runner_output,
             sampled_token_ids=sampler_output.sampled_token_ids,
@@ -2938,7 +2895,6 @@ class NPUModelRunner(GPUModelRunner):
             invalid_req_indices=invalid_req_indices,
             async_output_copy_stream=self.async_output_copy_stream,
             vocab_size=self.input_batch.vocab_size,
-            routed_experts=routed_experts_snapshot,
             num_nans=num_nans_device,
         )
         self.input_batch.set_async_sampled_token_ids(
@@ -3037,21 +2993,6 @@ class NPUModelRunner(GPUModelRunner):
         invalid_req_indices = []
         logprobs_lists = None
         if not self.use_async_scheduling:
-            # Sync scheduling: issue routed experts D2H into the pinned
-            # CPU buffer BEFORE ``_to_list`` below. ``_to_list`` does
-            # ``event.synchronize()`` on the async copy stream which
-            # waits for every D2H queued on the default stream since
-            # the last sync, so this enqueue is naturally covered
-            # without requiring its own synchronize.
-            if self.routed_experts_initialized:
-                buf = self.routed_experts_capturer.get_device_buffer()
-                total = scheduler_output.total_num_scheduled_tokens
-                self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
-                self.routed_experts_slot_mapping_cpu[:total].copy_(
-                    self.routed_experts_slot_mapping_device[:total],
-                    non_blocking=True,
-                )
-
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
             if max_gen_len == 1:
@@ -3217,6 +3158,191 @@ class NPUModelRunner(GPUModelRunner):
             "block_table": block_table.get_device_tensor(num_reqs),
         }
 
+    def _initialize_decoder_replay(self) -> None:
+        self.decoder_replay = getattr(self.model, "decoder_replay_layers", None)
+        if self.decoder_replay is None:
+            return
+        capacity = round_up(self.max_num_tokens, self.parallel_config.tensor_parallel_size)
+        self._decoder_replay_rows = torch.empty(capacity, dtype=torch.int64, device=self.device)
+        self._decoder_replay_positions = torch.empty_like(self._decoder_replay_rows)
+        self._decoder_replay_offsets = self._make_buffer(self.max_num_reqs + 1, dtype=torch.int32)
+        self._decoder_replay_dropped_before = self._make_buffer(self.max_num_reqs + 1, dtype=torch.int32)
+        self._decoder_replay_start = torch.empty(self.max_num_reqs, dtype=torch.int32, device=self.device)
+        self._decoder_replay_slot_mappings: torch.Tensor | None = None
+        self._decoder_replay_builders: list[tuple[int, list[str], AscendDSAV41MetadataBuilder]] = []
+        self._decoder_replay_num_tokens = 0
+        self._decoder_replay_num_actual_tokens = 0
+        self._decoder_replay_counts: torch.Tensor | None = None
+        self._decoder_replay_metadata: dict[str, AscendDSAV41Metadata] | None = None
+
+    def _prepare_decoder_replay(self, num_tokens: int, is_dummy: bool) -> None:
+        layers = self.decoder_replay
+        assert layers is not None
+        layers.rows = layers.forward_context = layers.context_factory = None
+        if self.parallel_config.data_parallel_size > 1 and should_skip_allreduce_across_dp_group(self.vllm_config):
+            logger.warning_once(
+                "Decoder bounded replay requires synchronized Ascend DP execution modes; skipping replay."
+            )
+            return
+        context = get_forward_context()
+        if (
+            context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+            or context.in_profile_run
+            or context.capturing
+            or torch.npu.is_current_stream_capturing()
+        ):
+            return
+        common = self._decoder_replay_common_metadata
+        real_batch = (
+            not is_dummy
+            and common is not None
+            and context.attn_metadata is not None
+            and self.input_batch.num_reqs > 0
+        )
+        trims = False
+        kept_lens = np.empty(0, dtype=np.int32)
+        self._decoder_replay_num_actual_tokens = num_tokens
+        if real_batch:
+            num_reqs = self.input_batch.num_reqs
+            offsets = common.query_start_loc_cpu[: num_reqs + 1].numpy()
+            query_lens = np.diff(offsets)
+            keeps_rows = np.array([req in self.num_prompt_logprobs for req in self.input_batch.req_ids])
+            prefills = common.is_prefilling[:num_reqs].numpy()
+            kept_lens = np.where(prefills & ~keeps_rows, np.minimum(query_lens, layers.window), query_lens)
+            trims = bool((kept_lens < query_lens).any())
+            self._decoder_replay_num_actual_tokens = int(kept_lens.sum())
+            kept_offsets = self._decoder_replay_offsets.np[: num_reqs + 1]
+            kept_offsets[0] = 0
+            np.cumsum(kept_lens, out=kept_offsets[1:])
+            self._decoder_replay_dropped_before.np[: num_reqs + 1] = offsets - kept_offsets
+        self._decoder_replay_num_tokens = self._decoder_replay_num_actual_tokens
+        if enable_dsa_cp():
+            self._decoder_replay_num_tokens = round_up(
+                self._decoder_replay_num_tokens, self.parallel_config.tensor_parallel_size
+            )
+        self._decoder_replay_counts = None
+        if self.parallel_config.data_parallel_size > 1:
+            agreed = torch.zeros((2, self.parallel_config.data_parallel_size), dtype=torch.int32)
+            agreed[:, self.parallel_config.data_parallel_rank] = torch.tensor([trims, self._decoder_replay_num_tokens])
+            if not should_skip_dp_coordination():
+                dist.all_reduce(agreed, group=get_dp_group().cpu_group)
+            trims = bool(agreed[0].any())
+            self._decoder_replay_counts = agreed[1]
+        if not trims:
+            return
+        if real_batch:
+            self._decoder_replay_metadata = self._build_decoder_replay_metadata(kept_lens)
+        else:
+            torch.arange(num_tokens, out=self._decoder_replay_rows[:num_tokens])
+            self._decoder_replay_rows[num_tokens : self._decoder_replay_num_tokens].zero_()
+            self._decoder_replay_metadata = context.attn_metadata
+        layers.rows = self._decoder_replay_rows[: self._decoder_replay_num_tokens]
+        layers.num_actual_rows = self._decoder_replay_num_actual_tokens
+        layers.context_factory = self._decoder_replay_context
+        logger.debug(
+            "Decoder bounded replay DP%d: %d -> %d tokens (%d padded).",
+            self.parallel_config.data_parallel_rank,
+            num_tokens,
+            self._decoder_replay_num_actual_tokens,
+            self._decoder_replay_num_tokens,
+        )
+
+    def _build_decoder_replay_metadata(self, kept_lens: np.ndarray) -> dict[str, AscendDSAV41Metadata]:
+        layers = self.decoder_replay
+        original = self._decoder_replay_common_metadata
+        assert layers is not None and original is not None
+        num_reqs = len(kept_lens)
+        num_tokens = self._decoder_replay_num_tokens
+        if self._decoder_replay_slot_mappings is None:
+            self._decoder_replay_slot_mappings = torch.empty(
+                (len(self.attn_groups), self._decoder_replay_rows.numel()), dtype=torch.int64, device=self.device
+            )
+            for group_id, groups in enumerate(self.attn_groups):
+                for group in groups:
+                    if isinstance(group.kv_cache_spec, CircularBufferSpec):
+                        continue
+                    builder_cls = group.backend.get_builder_cls()
+                    if not issubclass(builder_cls, AscendDSAV41MetadataBuilder):
+                        continue
+                    builder = builder_cls(group.kv_cache_spec, group.layer_names, self.vllm_config, self.device)
+                    self._decoder_replay_builders.append((group_id, group.layer_names, builder))
+        self._decoder_replay_dropped_before.copy_to_gpu(num_reqs + 1)
+        slots = self._decoder_replay_slot_mappings[:, :num_tokens]
+        gather_replay_batch(
+            original.query_start_loc[: num_reqs + 1],
+            self._decoder_replay_dropped_before.gpu[: num_reqs + 1],
+            original.seq_lens[:num_reqs],
+            original.positions,
+            tuple(self.input_batch.block_table[i].slot_mapping.gpu for i in range(len(self.attn_groups))),
+            self._decoder_replay_rows,
+            self._decoder_replay_offsets.gpu,
+            self._decoder_replay_positions,
+            slots,
+            self._decoder_replay_start,
+            num_tokens,
+            layers.window,
+        )
+        common = original.replace(
+            query_start_loc=self._decoder_replay_offsets.gpu[: num_reqs + 1],
+            query_start_loc_cpu=self._decoder_replay_offsets.cpu[: num_reqs + 1],
+            seq_lens=original.seq_lens[:num_reqs],
+            num_reqs=num_reqs,
+            num_actual_tokens=self._decoder_replay_num_actual_tokens,
+            num_input_tokens=num_tokens,
+            positions=self._decoder_replay_positions[:num_tokens],
+            positions_cpu=None,
+            max_query_len=int(kept_lens.max()),
+            is_prefilling=original.is_prefilling[:num_reqs],
+            actual_seq_lengths_q=self._decoder_replay_offsets.np[1 : num_reqs + 1].tolist(),
+        )
+        # Decoder metadata is prepared before forward, so its RoPE must not
+        # overwrite the runtime buffers referenced by the encoder metadata.
+        rope = get_cos_and_sin_dsa(common.positions, use_cache=False)
+        metadata: dict[str, AscendDSAV41Metadata] = {}
+        batch_shared = {}
+        group_shared = {}
+        for group_id, layer_names, builder in self._decoder_replay_builders:
+            cm = common.replace(
+                block_table_tensor=self.input_batch.block_table[group_id].get_device_tensor(num_reqs),
+                slot_mapping=slots[group_id],
+            )
+            value = builder.build(
+                0,
+                cm,
+                num_actual_reqs=num_reqs,
+                common_v41_batch_metadata=batch_shared,
+                common_v41_metadata=group_shared.setdefault(group_id, {}),
+                rope_views=rope,
+                replay_start=self._decoder_replay_start[:num_reqs],
+                replay_seq_lens=original.seq_lens[:num_reqs],
+                replay_max_seq_len=int(kept_lens.max()) + layers.window - 1,
+            )
+            for name in layer_names:
+                metadata[name] = value
+        return metadata
+
+    @contextmanager
+    def _decoder_replay_context(self) -> Iterator[None]:
+        outer = get_forward_context()
+        mask = getattr(outer, "mc2_mask", None)
+        saved_mask = mask.clone() if mask is not None else None
+        try:
+            with set_ascend_forward_context(
+                self._decoder_replay_metadata,
+                self.vllm_config,
+                num_tokens=self._decoder_replay_num_tokens,
+                num_tokens_across_dp=self._decoder_replay_counts,
+                num_actual_tokens=self._decoder_replay_num_actual_tokens,
+                aclgraph_runtime_mode=CUDAGraphMode.NONE,
+                model_instance=self.model,
+                has_sinks=self._has_sinks,
+                eplb_heat_collection_status=outer.eplb_heat_collection_status,
+            ):
+                yield
+        finally:
+            if saved_mask is not None:
+                mask.copy_(saved_mask)
+
     def _model_forward(
         self,
         num_tokens_padded: int,
@@ -3224,6 +3350,7 @@ class NPUModelRunner(GPUModelRunner):
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        decoder_replay_dummy: bool = False,
         **model_kwargs: dict[str, Any],
     ):
         assert self.model is not None
@@ -3270,6 +3397,8 @@ class NPUModelRunner(GPUModelRunner):
         run_model = partial(self.model, **model_inputs)
 
         try:
+            if self.decoder_replay is not None:
+                self._prepare_decoder_replay(num_tokens_padded, decoder_replay_dummy)
             if self.enable_enpu:
                 # The soft segmentation scenario requires event.record first, then event.wait
                 self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
@@ -3558,15 +3687,6 @@ class NPUModelRunner(GPUModelRunner):
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
                 slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                 blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
-            if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
-                if self.routed_experts_initialized:
-                    # snapshot slot_mapping into a private device
-                    # buffer so the next ``_prepare_inputs`` does not
-                    # overwrite it while D2H is still pending.
-                    n = slot_mapping.shape[0]
-                    self.routed_experts_slot_mapping_device[:n].copy_(
-                        slot_mapping
-                    )
             return blk_table_tensor, slot_mapping
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
@@ -3882,6 +4002,7 @@ class NPUModelRunner(GPUModelRunner):
                 device_metadata_tasks,
                 batch_descriptor if cudagraph_runtime_mode == CUDAGraphMode.FULL else None,
             )
+        self._decoder_replay_common_metadata = cm_base
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _should_build_dummy_attn_metadata(
@@ -4253,7 +4374,12 @@ class NPUModelRunner(GPUModelRunner):
                     and self.vllm_config.model_config.is_moe:
                     build_force_eplb_topk(self.device, self.max_num_tokens)
                 outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                    num_tokens_padded,
+                    input_ids,
+                    positions,
+                    intermediate_tensors,
+                    inputs_embeds,
+                    decoder_replay_dummy=True,
                 )
             if active_device_metadata_executor is not None and active_device_metadata_executor.submission_in_flight:
                 active_device_metadata_executor.release()
@@ -4455,6 +4581,8 @@ class NPUModelRunner(GPUModelRunner):
 
         get_offloader().post_init()
 
+        self._initialize_decoder_replay()
+
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
             supports_multimodal_pruning(self.get_model())
@@ -4627,9 +4755,6 @@ class NPUModelRunner(GPUModelRunner):
             self.sparse_kv_offload_manager.register_kv_caches(kv_caches)
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
-
-        if self.model_config.enable_return_routed_experts:
-            self.init_routed_experts_capturer()
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(
             vllm_config=self.vllm_config,

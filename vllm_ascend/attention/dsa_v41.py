@@ -129,6 +129,10 @@ class AscendDSAV41Metadata(AttentionMetadata):
     ori_mask_mode: int = 4
     ori_win_left: int = 0
     ori_win_right: int = 0
+    replay_seq_lens: torch.Tensor | None = None
+    replay_block_table: torch.Tensor | None = None
+    replay_cache_blocks: torch.Tensor | None = None
+    replay_cache_offsets: torch.Tensor | None = None
     smla_metadata: torch.Tensor | None = None
     qli_metadata: torch.Tensor | None = None
     cmp_residual: torch.Tensor | None = None
@@ -497,9 +501,17 @@ class AscendDSAV41Impl:
             DeviceMetadataStage.ATTENTION,
             id(op_metadata),
         )
+        swa_cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+        if metadata.swa.replay_block_table is not None:
+            # Rebase only SWA: A3 CSA cannot mask its missing prefix with
+            # sparse ori indices. Compressed KV retains its causal coordinates.
+            swa_cache = swa_cache[metadata.swa.replay_cache_blocks, metadata.swa.replay_cache_offsets]
+            swa_cache = swa_cache.reshape(-1, metadata.swa.storage_block_size, 1, swa_cache.shape[-1])
+            ori_block_table = metadata.swa.replay_block_table
+            seq_lens = metadata.swa.replay_seq_lens
         output, _ = torch.ops._C_ascend.npu_sparse_flash_mla(
             q,
-            ori_kv=attn.dsa_attn.swa_cache_layer.kv_cache[0],
+            ori_kv=swa_cache,
             cmp_kv=source_cache,
             ori_sparse_indices=metadata.swa.ori_sparse_indices,
             ori_topk_length=metadata.swa.ori_topk_length,
@@ -830,6 +842,26 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         head_dim = int(_config_value(text_config, "head_dim"))
         index_topk = int(_config_value(text_config, "index_topk"))
         ori_sparse_indices = kwargs.get("ori_sparse_indices")
+        replay_start = kwargs.get("replay_start")
+        replay_seq_lens = replay_block_table = replay_cache_blocks = replay_cache_offsets = None
+        max_ori_seq_len = int(getattr(common, "max_seq_len", 0))
+        if replay_start is not None:
+            replay_seq_lens = (seq_lens - replay_start).clamp_min(0)
+            max_ori_seq_len = kwargs["replay_max_seq_len"]
+            if cache_kind == "swa":
+                blocks_per_req = (max_ori_seq_len + storage_block_size - 1) // storage_block_size
+                capacity = blocks_per_req * storage_block_size
+                cache_positions = replay_start[:, None] + torch.arange(capacity, device=seq_lens.device)
+                cache_positions = torch.minimum(cache_positions, kwargs["replay_seq_lens"][:, None] - 1).clamp_min(0)
+                replay_cache_blocks = (
+                    common.block_table_tensor[:num_reqs]
+                    .gather(1, cache_positions.div(storage_block_size, rounding_mode="floor").long())
+                    .long()
+                )
+                replay_cache_offsets = cache_positions.remainder(storage_block_size).long()
+                replay_block_table = torch.arange(
+                    num_reqs * blocks_per_req, dtype=torch.int32, device=seq_lens.device
+                ).view(num_reqs, blocks_per_req)
         noncausal = not bool(getattr(common, "causal", True))
         if noncausal and ori_sparse_indices is None:
             ori_sparse_indices, _ = build_dspark_swa_indices(
@@ -869,12 +901,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     1,
                     head_dim,
                     cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int(),
-                    seqused_ori_kv=seq_lens,
+                    seqused_ori_kv=replay_seq_lens if replay_seq_lens is not None else seq_lens,
                     seqused_cmp_kv=cmp_seq_lens,
                     cmp_residual_kv=cmp_residual,
                     batch_size=num_reqs,
                     max_seqlen_q=int(getattr(common, "max_query_len", 0)),
-                    max_seqlen_ori_kv=int(getattr(common, "max_seq_len", 0)),
+                    max_seqlen_ori_kv=max_ori_seq_len,
                     max_seqlen_cmp_kv=(coordinates["max_cache_seq_len"] if has_compressed else 0),
                     ori_topk=ori_sparse_indices.shape[-1] if ori_sparse_indices is not None else 0,
                     ori_topk_length=ori_topk_length,
@@ -1036,6 +1068,10 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             ori_mask_mode=ori_mask_mode,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
+            replay_seq_lens=replay_seq_lens,
+            replay_block_table=replay_block_table,
+            replay_cache_blocks=replay_cache_blocks,
+            replay_cache_offsets=replay_cache_offsets,
             smla_metadata=smla_metadata,
             qli_metadata=qli_metadata,
             cmp_residual=cmp_residual_buffer,

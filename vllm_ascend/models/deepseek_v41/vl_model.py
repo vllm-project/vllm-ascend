@@ -231,6 +231,10 @@ class AscendDeepseekV41ForCausalLM(
         )
 
     @property
+    def decoder_replay_layers(self):
+        return self.language_model.decoder_replay_layers
+
+    @property
     def token_lookback_depth(self) -> int:
         """What the runner sizes the prompt lookback buffer from."""
         return self.language_model.token_lookback_depth

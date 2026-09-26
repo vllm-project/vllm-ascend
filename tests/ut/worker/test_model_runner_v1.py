@@ -469,7 +469,8 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         runner.use_compress = False
         runner._finalize_dump_data = MagicMock()
 
-        def model_forward(*args):
+        def model_forward(*args, decoder_replay_dummy=False):
+            assert decoder_replay_dummy
             events.append("forward")
             return torch.zeros((4, 1))
 
