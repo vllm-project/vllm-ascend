@@ -349,6 +349,11 @@ def test_mrv2_copy_on_write_preserves_pooled_pages_and_layer_bindings(
     def initialize(_runner, cache_config, kv_cache_allocation_context=None):
         _runner.kv_cache_config = cache_config
         _runner.block_tables = AscendBlockTables.__new__(AscendBlockTables)
+        _runner.block_tables.num_kv_cache_groups = len(cache_config.kv_cache_groups)
+        _runner.block_tables.device = _runner.device
+        _runner.block_tables._slot_mapping_enabled = [
+            group.kv_cache_spec.uses_slot_mapping for group in cache_config.kv_cache_groups
+        ]
         _runner.block_tables.cp_size = 1
         _runner.block_tables.block_sizes = [group.kv_cache_spec.block_size for group in cache_config.kv_cache_groups]
         _runner.block_tables.kernel_block_sizes = _runner.block_tables.block_sizes
