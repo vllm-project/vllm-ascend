@@ -190,9 +190,10 @@ jobs:
               uv pip install pqdm timm imagehash num2words schemathesis==3.39.15
               uv pip install "mteb[bm25s]" "lm-eval[api]" "runai-model-streamer[s3,gcs]"
               uv pip install open_clip_torch terratorch==1.2.2 torchgeo==0.9.0
-              uv pip install cohere pytest-asyncio 
-              import pytest_asyncio
-              uv pip install pytest-timeout multiprocess "accelerate>=1.1.0" datasets 
+              uv pip install pytest-asyncio 
+              uv pip install pytest-timeout multiprocess 
+              uv pip install "accelerate>=1.1.0" 
+              uv pip install datasets 
               uv pip install vllm_bnb_plugin
               uv pip install msguard openpyxl
 
@@ -210,7 +211,7 @@ jobs:
 
     e2e-upstream_multicard:
         runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
-#        runs-on: linux-aarch64-a2b3-0
+        # runs-on: linux-aarch64-a2b3-0
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false
@@ -341,7 +342,7 @@ jobs:
               
     e2e-upstream_online:
         runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
-#        runs-on: linux-aarch64-a2b3-0
+        #runs-on: linux-aarch64-a2b3-0
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false
