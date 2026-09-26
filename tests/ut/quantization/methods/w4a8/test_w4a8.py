@@ -14,9 +14,10 @@ from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_MET
 
 
 class TestAscendW4A8DynamicLinearMethod(TestBase):
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_tensor_model_parallel_rank", return_value=0)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config")
-    def setUp(self, mock_get_current_vllm_config, _mock_get_tp_world_size):
+    def setUp(self, mock_get_current_vllm_config, _mock_get_tp_world_size, _mock_get_tp_rank):
         mock_vllm_config = Mock()
         mock_vllm_config.quant_config = Mock(quant_description={"group_size": 0, "version": "1.0.0"})
         mock_get_current_vllm_config.return_value = mock_vllm_config
@@ -38,6 +39,9 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.assertEqual(column_params["scale_bias"].shape, (32, 1))
         self.assertEqual(row_params["scale_bias"].shape, (32, 16))
 
+        with self.assertRaisesRegex(ValueError, "divisible by 8"):
+            self.method.get_weight(8, 30, torch.bfloat16)
+
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config")
     def test_rejects_unsupported_checkpoint_layouts(self, mock_get_current_vllm_config):
         mock_vllm_config = Mock()
@@ -55,7 +59,10 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
     def test_processes_linear_weight_for_grouped_matmul(self, _mock_maybe_trans_nz):
         layer = torch.nn.Module()
         layer.weight = torch.nn.Parameter(torch.zeros((4, 8), dtype=torch.int8), requires_grad=False)
-        layer.weight_scale = torch.nn.Parameter(torch.ones((8, 1), dtype=torch.float32), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(
+            torch.tensor([[1.0], [0.5], [0.25], [0.125], [2.0], [4.0], [8.0], [16.0]]),
+            requires_grad=False,
+        )
         layer.weight_offset = torch.nn.Parameter(torch.zeros((8, 1), dtype=torch.float32), requires_grad=False)
         layer.scale_bias = torch.nn.Parameter(torch.ones((8, 1), dtype=torch.float32), requires_grad=False)
 
@@ -65,7 +72,19 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.assertEqual(layer.weight.dtype, torch.int32)
         self.assertEqual(layer.weight_scale.shape, (8,))
         self.assertEqual(layer.weight_scale.dtype, torch.int64)
+        expected_scale = (
+            torch.tensor([1.0, 0.5, 0.25, 0.125, 2.0, 4.0, 8.0, 16.0]).view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+        )
+        torch.testing.assert_close(layer.weight_scale, expected_scale)
         self.assertEqual(layer.scale_bias.shape, (8,))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_tensor_model_parallel_rank", return_value=1)
+    def test_scale_bias_uses_current_tp_rank_when_layer_has_no_rank(self, _mock_get_tp_rank):
+        self.method.tp_size = 2
+        layer = torch.nn.Module()
+        layer.scale_bias = torch.nn.Parameter(torch.tensor([[1.0, 2.0], [3.0, 4.0]]), requires_grad=False)
+
+        torch.testing.assert_close(self.method._local_scale_bias(layer), torch.tensor([2.0, 4.0]))
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_grouped_matmul")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_dynamic_quant")
