@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 """Focused tests for the Ascend Engram configuration and storage path."""
 
 import json
@@ -12,6 +13,11 @@ import numpy as np
 import pytest
 import torch
 from safetensors.torch import save_file
+
+pytest.importorskip(
+    "vllm.models.deepseek_v4_1",
+    reason="DeepSeek V4.1 is unavailable on this vLLM release",
+)
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
