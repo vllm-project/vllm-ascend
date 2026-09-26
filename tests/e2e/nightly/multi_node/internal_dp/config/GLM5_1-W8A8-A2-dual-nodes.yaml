@@ -12,6 +12,7 @@ env_common: &env_common
   VLLM_ENGINE_READY_TIMEOUT_S: 3000
   VLLM_RPC_TIMEOUT: 600
   SERVER_PORT: 8078
+  VLLM_USE_V2_MODEL_RUNNER: 1
 
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
 
@@ -67,6 +68,17 @@ deployment:
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,48,60,72]}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 benchmarks:
+  perf_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1500
+    batch_size: 4
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
   perf:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs2800
