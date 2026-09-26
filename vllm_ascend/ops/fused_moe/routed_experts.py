@@ -553,10 +553,13 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         # Level-2 sleep discards NPU tensors that are not parameters/buffers.
         # Register Ascend runtime EPLB NPU state as named buffers for wake restore.
-        # ascend_expert_map is re-derived from the worker on every rebalance
-        # (update_ascend_eplb_maps), so it is not promoted to a Level-2 buffer.
+        # The runtime maps are included: a sleep/wake cycle can land between two
+        # rebalances, so they cannot rely on update_ascend_eplb_maps re-deriving
+        # them after wake.
         self._promote_attr_to_buffer("log2phy")
         self._promote_attr_to_buffer("local_phys_expert_ids")
+        self._promote_attr_to_buffer("_ascend_expert_map")
+        self._promote_attr_to_buffer("global_expert_map")
         if self.dynamic_eplb:
             self._promote_attr_to_buffer("moe_load")
             if self.multi_stage:
