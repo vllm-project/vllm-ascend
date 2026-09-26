@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ...metadata import LoadRequest
+from ...protocol.transfer import LoadRequest
 from ..request_tracker import RequestTracker
 from .scheduling import LoadScheduling
 

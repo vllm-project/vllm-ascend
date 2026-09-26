@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..metadata import AscendStoreV1Metadata, LoadRequest, LoadRequestBatch, StoreRequest, StoreRequestBatch
+from ..protocol.transfer import AscendStoreV1Metadata, LoadRequest, LoadRequestBatch, StoreRequest, StoreRequestBatch
 from .layout import SchedulerTransferLayout
 from .load import LoadCandidate, LoadService
-from .lookup import LookupService, SchedulerLookupRequest
+from .lookup import LookupService, SchedulerLookupRequest, SchedulerLookupResult
 from .request_tracker import RequestTracker
 from .store import StoreService
 
@@ -34,16 +34,17 @@ class SchedulerService:
         self.unfinished_requests: dict[str, Request] = {}
         self.preempted_request_ids: set[str] = set()
 
-    def lookup(self, request: SchedulerLookupRequest) -> tuple[int, bool]:
-        result = self._lookup_service.lookup(request)
-        if result.kv_pool_cached_tokens is not None:
-            load_candidate = LoadCandidate(
-                local_cached_tokens=request.local_cached_tokens,
-                kv_pool_cached_tokens=result.kv_pool_cached_tokens,
-            )
-            self._load_service.record_candidate(request.request_id, load_candidate)
-        load_is_deferred = result.num_new_matched_tokens > 0 and self._load_service.is_deferred
-        return result.num_new_matched_tokens, load_is_deferred
+    def lookup(self, request: SchedulerLookupRequest) -> SchedulerLookupResult:
+        kv_pool_cached_tokens = self._lookup_service.lookup(request)
+        if kv_pool_cached_tokens is None:
+            return SchedulerLookupResult(0, False)
+
+        self._load_service.record_candidate(
+            request.request_id,
+            LoadCandidate(request.local_cached_tokens, kv_pool_cached_tokens),
+        )
+        num_new_matched_tokens = kv_pool_cached_tokens - request.local_cached_tokens
+        return SchedulerLookupResult(num_new_matched_tokens, self._load_service.is_deferred)
 
     def update_state_after_alloc(
         self, request: Request, blocks: tuple[list[int], ...], allocated_external_tokens: int
@@ -73,7 +74,7 @@ class SchedulerService:
 
         return AscendStoreV1Metadata(
             LoadRequestBatch(tuple(load_requests)),
-            StoreRequestBatch(tuple(store_requests), frozenset(scheduler_output.preempted_req_ids)),
+            StoreRequestBatch(tuple(store_requests)),
         )
 
     def _handle_finished_and_preempted_requests(self, scheduler_output: SchedulerOutput) -> None:

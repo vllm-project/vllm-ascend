@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from ...protocol.lookup import LookupRequest
 from .client import LookupClient
-from .request import SchedulerLookupRequest, SchedulerLookupResult
+from .messages import SchedulerLookupRequest
 
 
 class LookupService:
@@ -25,34 +26,36 @@ class LookupService:
         self.enabled = enabled
         self.client: LookupClient | None = None
 
-    def lookup(self, request: SchedulerLookupRequest) -> SchedulerLookupResult:
+    def lookup(self, request: SchedulerLookupRequest) -> int | None:
         if not self.enabled:
-            return SchedulerLookupResult(0, None)
+            return None
 
         lookup_end_token = request.prompt_token_len
         if self.discard_partial_chunks:
             lookup_end_token -= lookup_end_token % self.cache_transfer_granularity
         if lookup_end_token < self.cache_transfer_granularity or request.local_cached_tokens >= lookup_end_token:
-            return SchedulerLookupResult(0, None)
+            return None
 
         if self.client is None:
             self.client = LookupClient(self.lookup_address)
-        kv_pool_cached_tokens = self.client.lookup(
-            lookup_end_token,
-            self.transfer_group_ids,
-            request.block_hashes,
-            request.local_cached_tokens,
+        lookup_result = self.client.lookup(
+            LookupRequest(
+                lookup_end_token,
+                self.transfer_group_ids,
+                request.local_cached_tokens,
+                tuple(request.block_hashes),
+            )
         )
+        kv_pool_cached_tokens = lookup_result.kv_pool_cached_tokens
         if kv_pool_cached_tokens == 0:
-            return SchedulerLookupResult(0, None)
+            return None
 
         if kv_pool_cached_tokens == request.request_token_len:
             kv_pool_cached_tokens -= 1
-        need_to_allocate = max(kv_pool_cached_tokens - request.local_cached_tokens, 0)
-        if need_to_allocate == 0:
-            return SchedulerLookupResult(0, None)
+        if kv_pool_cached_tokens <= request.local_cached_tokens:
+            return None
 
-        return SchedulerLookupResult(need_to_allocate, kv_pool_cached_tokens)
+        return kv_pool_cached_tokens
 
     def close(self) -> None:
         if self.client is not None:

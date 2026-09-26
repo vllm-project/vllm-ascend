@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from vllm.logger import logger
 
+from ...protocol.lookup import LookupRequest, LookupResult
 from ..coordinator import KVTransferCoordinator, LookupChunkSelection, LookupObservation
 from .executor import LookupExecutionResult, LookupExecutor
-from .request import WorkerLookupRequest
 from .task import LookupTask, LookupTaskBuilder
 
 
@@ -23,7 +23,7 @@ class LookupService:
         self._task_builder = task_builder
         self._executor = executor
 
-    def lookup(self, request: WorkerLookupRequest) -> int:
+    def lookup(self, request: LookupRequest) -> LookupResult:
         try:
             if request.transfer_group_ids != self._coordinator.group_ids:
                 raise ValueError(
@@ -34,17 +34,19 @@ class LookupService:
                 self._execute_selection(request, selection)
                 for selection in self._coordinator.select_lookup(request.lookup_end_token, request.local_cached_tokens)
             )
-            return self._coordinator.resolve_lookup(
-                request.block_hashes,
-                request.lookup_end_token,
-                request.local_cached_tokens,
-                observations,
+            return LookupResult(
+                self._coordinator.resolve_lookup(
+                    request.block_hashes,
+                    request.lookup_end_token,
+                    request.local_cached_tokens,
+                    observations,
+                )
             )
         except Exception as error:
             logger.error("Remote connection failed in lookup. type=%s, error=%s", type(error).__name__, error)
-            return 0
+            return LookupResult(0)
 
-    def _execute_selection(self, request: WorkerLookupRequest, selection: LookupChunkSelection) -> LookupObservation:
+    def _execute_selection(self, request: LookupRequest, selection: LookupChunkSelection) -> LookupObservation:
         task = self._task_builder.build(request, selection)
         if not task.backend_keys:
             return LookupObservation(task.group_id, task.chunk_ends, task.chunk_hashes, ())

@@ -15,7 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 
 from .backend import BACKEND_IMPORTS
 from .factory import build_scheduler_service, build_worker_service
-from .metadata import AscendStoreV1Metadata
+from .protocol.transfer import AscendStoreV1Metadata
 from .scheduler.lookup import SchedulerLookupRequest
 from .worker.load import LoadResult
 from .worker.lookup import LookupServer
@@ -78,7 +78,8 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
             block_hashes=request.block_hashes,
             local_cached_tokens=num_computed_tokens,
         )
-        return self.scheduler.lookup(lookup_request)
+        lookup_result = self.scheduler.lookup(lookup_request)
+        return lookup_result.num_new_matched_tokens, lookup_result.load_is_deferred
 
     def update_state_after_alloc(self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int) -> None:
         assert self.scheduler is not None
@@ -129,9 +130,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         assert self.worker is not None
         if self._pending_load_result is not None:
             raise RuntimeError("Previous Load result has not been fully consumed")
-        metadata = self._get_connector_metadata()
-        assert isinstance(metadata, AscendStoreV1Metadata)
-        self.worker.finish_store_step(metadata.store)
+        # A finished request can still own blocks held for an in-flight async Load; its late completion releases them.
         load_result = self.worker.collect_load_result()
         if load_result.failed_request_ids:
             raise RuntimeError(

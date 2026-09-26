@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from ...metadata import LoadRequestBatch
+from ...protocol.transfer import LoadRequestBatch
 from ..coordinator import KVTransferCoordinator
 from .executor import LoadExecutionResult, LoadExecutor, LoadTaskCompletion
 from .task import LoadTask, LoadTaskBuilder, resolve_load_end_token
@@ -13,7 +13,7 @@ from .task import LoadTask, LoadTaskBuilder, resolve_load_end_token
 
 @dataclass(frozen=True, slots=True)
 class LoadResult:
-    """Terminal asynchronous requests and failures ready for the Connector."""
+    """Terminal Worker Load facts consumed through the Connector's split hooks."""
 
     completed_request_ids: frozenset[str]
     failed_request_ids: frozenset[str]

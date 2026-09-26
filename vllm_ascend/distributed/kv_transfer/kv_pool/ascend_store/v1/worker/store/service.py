@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from vllm.logger import logger
 
-from ...metadata import StoreRequestBatch
+from ...protocol.transfer import StoreRequestBatch
 from ..coordinator import ChunkSelection, KVTransferCoordinator
 from .executor import StoreExecutor
 from .task import StoreTask, StoreTaskBuilder
@@ -55,6 +55,3 @@ class StoreService:
 
     def wait_for_previous_store(self) -> None:
         self._executor.wait_for_previous_store()
-
-    def finish_step(self, request_batch: StoreRequestBatch) -> None:
-        self._executor.finish_step(request_batch.preempted_request_ids)

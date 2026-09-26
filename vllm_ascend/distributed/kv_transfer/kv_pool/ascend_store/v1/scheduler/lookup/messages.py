@@ -1,4 +1,4 @@
-"""Input and output values for Scheduler Lookup."""
+"""Messages crossing Scheduler-side Lookup boundaries."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 
 @dataclass(frozen=True, slots=True)
 class SchedulerLookupRequest:
-    """The request facts needed to plan a Scheduler Lookup."""
+    """Request facts needed to plan a Scheduler Lookup."""
 
     request_id: str
     prompt_token_len: int
@@ -20,7 +20,7 @@ class SchedulerLookupRequest:
 
 @dataclass(frozen=True, slots=True)
 class SchedulerLookupResult:
-    """Allocation and KV-pool hit facts produced by Scheduler Lookup."""
+    """Lookup allocation returned to the Connector."""
 
     num_new_matched_tokens: int
-    kv_pool_cached_tokens: int | None
+    load_is_deferred: bool

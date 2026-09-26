@@ -11,7 +11,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase
 
-from ...metadata import StoreRequest
+from ...protocol.transfer import StoreRequest
 from ..coordinator import ChunkSelection
 from ..layout import StridedKVPartitioner
 

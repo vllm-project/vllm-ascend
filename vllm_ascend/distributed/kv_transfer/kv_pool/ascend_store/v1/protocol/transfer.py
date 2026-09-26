@@ -1,4 +1,4 @@
-"""Operation-owned requests carried across the Scheduler/Worker boundary."""
+"""Scheduler-to-Worker KV transfer commands and their vLLM envelope."""
 
 from __future__ import annotations
 
@@ -40,13 +40,14 @@ class LoadRequestBatch:
 
 @dataclass(frozen=True, slots=True)
 class StoreRequestBatch:
-    """Store requests and preempted work to discard in one Worker step."""
+    """Store requests approved for one Worker step."""
 
     requests: tuple[StoreRequest, ...] = ()
-    preempted_request_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
 class AscendStoreV1Metadata(KVConnectorMetadata):
+    """vLLM step envelope carrying approved Load and Store commands."""
+
     load: LoadRequestBatch = LoadRequestBatch()
     store: StoreRequestBatch = StoreRequestBatch()
