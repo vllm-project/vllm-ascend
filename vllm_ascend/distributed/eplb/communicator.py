@@ -36,41 +36,6 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
         buffer_indices[key] = buffer_index + 1
         return buffers[buffer_index]
 
-    def _to_global_peer_rank(self, peer_group_rank: int) -> int:
-        """Translate an EPLB group-local peer rank to a global rank.
-
-        The EPLB transfer planner addresses peers relative to the EPLB process
-        group. The upstream Gloo communicator, however, passes that value as
-        the positional ``peer`` argument of ``torch.distributed.P2POp``, which
-        is interpreted as a global rank. The two rank spaces differ when a
-        non-zero pipeline stage owns an EPLB group, for example group ranks
-        ``[0, 1]`` may correspond to global ranks ``[2, 3]``.
-        """
-        group_size = self._cpu_group.size()
-        if not 0 <= peer_group_rank < group_size:
-            raise ValueError(f"EPLB peer group rank {peer_group_rank} is outside the valid range [0, {group_size}).")
-        return dist.get_global_rank(self._cpu_group, peer_group_rank)
-
-    def add_send(
-        self,
-        tensors: list[torch.Tensor],
-        dst_rank: int,
-        expert_id: int,
-    ) -> None:
-        # ``dst_rank`` is local to the EPLB group, while the parent class
-        # ultimately supplies it as P2POp.peer, which requires a global rank.
-        super().add_send(tensors, self._to_global_peer_rank(dst_rank), expert_id)
-
-    def add_recv(
-        self,
-        tensors: list[torch.Tensor],
-        src_rank: int,
-        expert_id: int,
-    ) -> None:
-        # Keep receive peers in the same global-rank space expected by the
-        # parent's positional P2POp.peer argument.
-        super().add_recv(tensors, self._to_global_peer_rank(src_rank), expert_id)
-
     def execute(self) -> None:
         if not self._ops:
             return
@@ -85,9 +50,23 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
                     cpu_tensor = self._acquire_staging_buffer(tensor, buffer_indices)
                     if operation == "send":
                         cpu_tensor.copy_(tensor, non_blocking=True)
-                        p2p_ops.append(P2POp(dist.isend, cpu_tensor, peer_rank, self._cpu_group))
+                        p2p_ops.append(
+                            P2POp(
+                                dist.isend,
+                                cpu_tensor,
+                                group=self._cpu_group,
+                                group_peer=peer_rank,
+                            )
+                        )
                     else:
-                        p2p_ops.append(P2POp(dist.irecv, cpu_tensor, peer_rank, self._cpu_group))
+                        p2p_ops.append(
+                            P2POp(
+                                dist.irecv,
+                                cpu_tensor,
+                                group=self._cpu_group,
+                                group_peer=peer_rank,
+                            )
+                        )
                         recv_staging.append((tensor, cpu_tensor))
         finally:
             self._ops.clear()

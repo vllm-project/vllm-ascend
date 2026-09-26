@@ -25,34 +25,36 @@ def test_communicator_reuses_upstream_gloo_staging(communicator):
     assert communicator.needs_profile_buffer_reservation is False
 
 
-def test_send_and_recv_translate_group_local_peer_ranks(communicator, monkeypatch):
-    communicator._cpu_group.size.return_value = 2
-    get_global_rank = MagicMock(side_effect=[3, 2])
-    monkeypatch.setattr(
-        "vllm_ascend.distributed.eplb.communicator.dist.get_global_rank",
-        get_global_rank,
-    )
+def test_execute_uses_group_local_peer_ranks(communicator, monkeypatch):
     send_tensor = torch.arange(2)
     recv_tensor = torch.zeros(2)
-
     communicator.add_send([send_tensor], dst_rank=1, expert_id=3)
     communicator.add_recv([recv_tensor], src_rank=0, expert_id=3)
+    staging_tensors = [torch.empty_like(send_tensor), torch.empty_like(recv_tensor)]
+    monkeypatch.setattr(
+        communicator,
+        "_acquire_staging_buffer",
+        MagicMock(side_effect=staging_tensors),
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.eplb.communicator.device_stream",
+        lambda _stream: nullcontext(),
+    )
+    p2p_op = MagicMock(side_effect=lambda *args, **kwargs: (args, kwargs))
+    monkeypatch.setattr("vllm_ascend.distributed.eplb.communicator.P2POp", p2p_op)
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.eplb.communicator.batch_isend_irecv",
+        lambda _ops: [],
+    )
+    current_stream = MagicMock()
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: current_stream)
 
-    assert communicator._ops == [
-        ("send", send_tensor, 3),
-        ("recv", recv_tensor, 2),
+    communicator.execute()
+
+    assert p2p_op.call_args_list == [
+        call(torch.distributed.isend, staging_tensors[0], group=communicator._cpu_group, group_peer=1),
+        call(torch.distributed.irecv, staging_tensors[1], group=communicator._cpu_group, group_peer=0),
     ]
-    assert get_global_rank.call_args_list == [
-        call(communicator._cpu_group, 1),
-        call(communicator._cpu_group, 0),
-    ]
-
-
-def test_peer_group_rank_must_be_in_range(communicator):
-    communicator._cpu_group.size.return_value = 2
-
-    with pytest.raises(ValueError, match=r"group rank 2.*\[0, 2\)"):
-        communicator.add_send([torch.zeros(1)], dst_rank=2, expert_id=3)
 
 
 def test_pinned_staging_buffers_are_reused_between_transfers(communicator, monkeypatch):
@@ -81,7 +83,7 @@ def test_execute_uses_current_device_stream_when_stream_is_unset(communicator, m
     )
     monkeypatch.setattr(
         "vllm_ascend.distributed.eplb.communicator.P2POp",
-        lambda *_args: object(),
+        lambda *_args, **_kwargs: object(),
     )
     monkeypatch.setattr(
         "vllm_ascend.distributed.eplb.communicator.batch_isend_irecv",

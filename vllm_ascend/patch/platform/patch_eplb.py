@@ -403,9 +403,10 @@ def _wrap_move_to_workspace(original_move):
             consumed_event = pending_result.consumed_event
             deferred_event = _DeferredConsumedEvent(consumed_event)
             pending_result.consumed_event = deferred_event
+        result = None
         try:
             if isinstance(pending_result, _AscendAsyncLayerResult):
-                result = _move_changed_layer_to_workspace(
+                _move_changed_layer_to_workspace(
                     model_state,
                     bound.arguments["ep_rank"],
                 )
