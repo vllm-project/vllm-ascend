@@ -141,6 +141,28 @@ def test_update_ascend_eplb_maps_refreshes_runtime_maps():
     assert torch.equal(routed_experts.local_phys_expert_ids, torch.tensor([5, 6, 7, 8, 9], dtype=torch.int64))
 
 
+def test_update_ascend_eplb_maps_preserves_tensor_identity():
+    # Regression: the refresh must update the maps in place (copy_). A
+    # captured ACL graph holds references to the original tensor objects;
+    # rebinding the attributes would leave the graph reading the stale map
+    # after a rebalance.
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed_experts.moe_config = SimpleNamespace(ep_rank=1)
+    old_map = torch.tensor([-1, -1, -1, -1, -1, 0, 1, 2, -1, -1], dtype=torch.int32)
+    new_map = torch.tensor([-1, -1, -1, -1, -1, 0, 1, 2, 3, 4], dtype=torch.int64)
+    global_expert_map = torch.stack([torch.full((10,), -1, dtype=torch.int32), old_map])
+    local_phys_ids = torch.zeros(5, dtype=torch.int64)
+    routed_experts.ascend_expert_map = old_map
+    routed_experts.global_expert_map = global_expert_map
+    routed_experts.local_phys_expert_ids = local_phys_ids
+
+    routed_experts.update_ascend_eplb_maps(new_map)
+
+    assert routed_experts.ascend_expert_map is old_map
+    assert routed_experts.global_expert_map is global_expert_map
+    assert routed_experts.local_phys_expert_ids is local_phys_ids
+
+
 def test_update_ascend_eplb_maps_preserves_execution_device():
     # Regression: the EPLB worker ships CPU maps. After checkpoint loading the
     # runtime map lives on the execution device (NPU), and the refresh must keep
