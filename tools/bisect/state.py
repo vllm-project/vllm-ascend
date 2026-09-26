@@ -14,8 +14,10 @@
 # This file is a part of the vllm-ascend project.
 """Persist bisect progress so a preempted/timed-out run can resume."""
 
+import contextlib
 import json
 import logging
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -42,8 +44,33 @@ class BisectState:
     verdicts: dict[str, str] = field(default_factory=dict)
 
     def save(self, path: Path) -> None:
+        """Publish the state through a same-directory temp file and rename.
+
+        A direct write_text() truncates the previous checkpoint before the
+        new content lands, so an interrupted save (disk error, preemption)
+        can leave invalid JSON that the next run cannot load. The temporary
+        file keeps the previous checkpoint intact until the new one is
+        fully written and renamed into place.
+        """
+        payload = json.dumps(asdict(self), indent=2)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=path.name + ".",
+                suffix=".tmp",
+                delete=False,
+            ) as output:
+                temporary_path = Path(output.name)
+                output.write(payload)
+            temporary_path.replace(path)
+        finally:
+            if temporary_path is not None:
+                with contextlib.suppress(OSError):
+                    temporary_path.unlink(missing_ok=True)
 
     @classmethod
     def load(cls, path: Path, *, good: str, bad: str) -> "BisectState | None":
