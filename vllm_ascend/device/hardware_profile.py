@@ -81,6 +81,10 @@ class HardwareCapability(Enum):
     DYNAMIC_MX_QUANT_FUSION = auto()
     # Select DynamicMxQuantV3 ``scale_alg=1`` for model paths that require it.
     DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
+    # Enable the A5 non-absorbed MLA prefill operator ABI: expanded QK192/V128
+    # FlashAttn plus its device-side (AICPU) metadata producer. Profiles without
+    # this contract keep the absorbed FIA prefill, which takes host-side lengths.
+    FLASH_MLA_PREFILL = auto()
     # Enable the FP8/C8 attention KV-cache ABI and matching attention preprocess paths.
     # This is not a general statement that every FP8 operation is supported.
     FP8_ATTENTION = auto()
@@ -329,6 +333,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DSV4_COMPRESSED_CACHE,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
+                    HardwareCapability.FLASH_MLA_PREFILL,
                     HardwareCapability.FP8_ATTENTION,
                     HardwareCapability.GRAPH_MULS_ADD_FUSION,
                     HardwareCapability.GRAPH_NORM_QUANT_FUSION,

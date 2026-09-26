@@ -276,9 +276,14 @@ log_selected_ops
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
 
+  # CANN OPC invokes nested make processes outside Ninja's jobserver.
+  # Propagate the requested concurrency so tiling keys do not build serially.
+  build_jobs="${MAX_JOBS:-$(nproc)}"
+  export MAKEFLAGS="${MAKEFLAGS:+${MAKEFLAGS} }-j${build_jobs}"
+  log "build parallelism: jobs=${build_jobs} MAKEFLAGS=${MAKEFLAGS}"
   log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
-  bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
+  bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}" -j"${build_jobs}"
   log "build.sh finished"
 
   custom_ops_install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"

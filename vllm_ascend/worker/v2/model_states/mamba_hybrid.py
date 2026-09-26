@@ -302,6 +302,9 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
+        # A5 Flash MLA prefill sizes its history gather from this exact
+        # prefill-only count; other backends ignore it.
+        num_computed_prefill_tokens_np = getattr(input_batch, "num_computed_prefill_tokens_np", None)
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -319,6 +322,9 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             parallel_config=self.vllm_config.parallel_config,
             seq_lens_np=input_batch.seq_lens_np,
+            num_computed_prefill_tokens_cpu=(
+                torch.from_numpy(num_computed_prefill_tokens_np) if num_computed_prefill_tokens_np is not None else None
+            ),
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,
             model_specific_attn_metadata=model_specific_metadata,

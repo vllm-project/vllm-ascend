@@ -39,6 +39,10 @@ set(ASCEND_ALL_COMPUTE_UNIT       "ascend310p;ascend910b;ascend910_93;ascend950;
 set(SOC_VERSION_LIST ascend310p ascend910b ascend910_93 ascend950 kirinx90)
 set(ARCH_DIRECTORY_LIST arch22 arch32 arch32 arch35 arch32)
 
+# Rebuild the selected AICPU target inventory for every configure. Targets from
+# a previous --ops selection do not exist when an incremental gate is narrower.
+unset(AICPU_CUST_OBJ_TARGETS CACHE)
+
 if ("ascend950" IN_LIST ASCEND_COMPUTE_UNIT)
 message(STATUS "build with 3~8 packages........")
 set(BUILD_WITH_3_8_PACKAGE  ON CACHE BOOL "build with 3~8 package and opsbase")

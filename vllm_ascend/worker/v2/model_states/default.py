@@ -94,6 +94,9 @@ class AscendModelState(DefaultModelState):
         )
         # attn_metadata is needed when update_full_graph_params, but no way can get it now.
         # Temporarily store it in model_state.
+        # A5 Flash MLA prefill sizes its history gather from this exact
+        # prefill-only count; other backends ignore it.
+        num_computed_prefill_tokens_np = getattr(input_batch, "num_computed_prefill_tokens_np", None)
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -114,6 +117,9 @@ class AscendModelState(DefaultModelState):
             parallel_config=self.vllm_config.parallel_config,
             # extra attributes for ascend npus.
             seq_lens_np=input_batch.seq_lens_np,
+            num_computed_prefill_tokens_cpu=(
+                torch.from_numpy(num_computed_prefill_tokens_np) if num_computed_prefill_tokens_np is not None else None
+            ),
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,
             pcp_context=pcp_context,
