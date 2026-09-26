@@ -62,7 +62,7 @@ class TestAscendConfig(unittest.TestCase):
         gt_expert_map = torch.tensor([-1, -1, -1, -1, -1, 0, 1, 2, 3, 4])
         gt_log2phy = torch.tensor([8, 9, 2, 3, 4, 5, 6, 7])
         gt_phys_to_logical = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 0, 1])
-        self.assertTrue(torch.equal(expert_map, gt_expert_map))
+        self.assertTrue(torch.equal(expert_map.cpu(), gt_expert_map))
         self.assertTrue(torch.equal(log2phy, gt_log2phy))
         self.assertTrue(torch.equal(phys_to_logical, gt_phys_to_logical))
         self.assertEqual(redundant_experts, 2)
@@ -74,14 +74,16 @@ class TestAscendConfig(unittest.TestCase):
         eplb_config = init_ascend_config(self.vllm_config).eplb_config
         _, expert_map, log2phy, redundant_experts, _ = init_eplb_config(eplb_config, 0, self.moe_config)
         logical_topk_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int64)
-        physical_topk_ids = log2phy[logical_topk_ids]
+        # Index on the map's own device: the map is on the execution device
+        # while log2phy may be CPU under the npu no-op patch.
+        physical_topk_ids = log2phy[logical_topk_ids].to(expert_map.device)
 
         self.assertTrue(torch.all(physical_topk_ids < expert_map.numel()))
         self.assertEqual(int(log2phy.max()), expert_map.numel() - 1)
         mask = expert_map[physical_topk_ids] != -1
         self.assertEqual(mask.shape, (2, 2))
         # rank 1 owns physical experts 5..9; logical 0,1 replicate there.
-        self.assertTrue(torch.equal(mask, torch.tensor([[True, True], [False, False]])))
+        self.assertTrue(torch.equal(mask.cpu(), torch.tensor([[True, True], [False, False]])))
         self.assertEqual(redundant_experts, 2)
 
     def test_generate_global_placement_matches_vllm_physical_layout(self):
@@ -106,7 +108,7 @@ class TestAscendConfig(unittest.TestCase):
         gt_expert_map = torch.tensor([-1, -1, -1, -1, -1, 0, 1, 2, 3, 4])
         gt_log2phy = torch.tensor([2, 6, 9, 3, 7, 4, 5, 8])
         gt_phys_to_logical = torch.tensor([7, 2, 0, 3, 5, 6, 1, 4, 7, 2])
-        self.assertTrue(torch.equal(expert_map, gt_expert_map))
+        self.assertTrue(torch.equal(expert_map.cpu(), gt_expert_map))
         self.assertTrue(torch.equal(log2phy, gt_log2phy))
         self.assertTrue(torch.equal(phys_to_logical, gt_phys_to_logical))
         self.assertEqual(redundant_experts, 2)
@@ -181,7 +183,7 @@ class TestAscendConfig(unittest.TestCase):
         gt_expert_map = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3])
         self.assertIsNone(log2phy)
         self.assertIsNone(phys_to_logical)
-        self.assertTrue(torch.equal(expert_map, gt_expert_map))
+        self.assertTrue(torch.equal(expert_map.cpu(), gt_expert_map))
         self.assertEqual(redundant_experts, 0)
 
 
@@ -204,8 +206,8 @@ class TestLinearExpertMapCache(unittest.TestCase):
             _, second, _, _, _ = init_eplb_config(self.eplb_config, 1, self.moe_config)
 
         mock_determine.assert_called_once()
-        self.assertTrue(torch.equal(first, base_map))
-        self.assertTrue(torch.equal(second, base_map))
+        self.assertTrue(torch.equal(first.cpu(), base_map))
+        self.assertTrue(torch.equal(second.cpu(), base_map))
 
     def test_each_layer_gets_its_own_copy(self):
         base_map = torch.tensor([0, 1, 2, 3, -1, -1, -1, -1], dtype=torch.int32)
@@ -228,8 +230,8 @@ class TestLinearExpertMapCache(unittest.TestCase):
             self.moe_config.ep_rank = 1
             _, second, _, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
 
-        self.assertTrue(torch.equal(first, rank0))
-        self.assertTrue(torch.equal(second, rank1))
+        self.assertTrue(torch.equal(first.cpu(), rank0))
+        self.assertTrue(torch.equal(second.cpu(), rank1))
         self.assertEqual(len(eplb_utils._LINEAR_EXPERT_MAP_CACHE), 2)
 
     def test_none_map_is_not_cloned(self):
