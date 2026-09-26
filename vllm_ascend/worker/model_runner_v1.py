@@ -245,6 +245,7 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 
+from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 from vllm_ascend.attention.dsa_v41 import (
@@ -264,6 +265,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.embedding_offload.ec_mmcache_mstore import EMoonCakeStoreConnector
 
 v41_metadata_builder_type: type[AscendDSAV41MetadataBuilder] = AscendDSAV41MetadataBuilder
 v41_cache_layer_type: type[DeepseekV41CacheLayer] = DeepseekV41CacheLayer
@@ -673,6 +675,11 @@ class NPUModelRunner(GPUModelRunner):
         if self.sparse_kv_offload_enabled:
             self._offload_req_ids_tensor = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
             self._offload_token_to_req = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
+			
+		# add new feature: encoder cache pop to cpu
+        offload_cfg = self.ascend_config.encoder_caches_offload_config
+        if offload_cfg.enabled_offload:
+            self.mm_embed_offload = EMoonCakeStoreConnector(self.vllm_config, ECConnectorRole.WORKER)
 
     @property
     def use_dcp(self) -> bool:

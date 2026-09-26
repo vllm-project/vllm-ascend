@@ -390,6 +390,24 @@ class RlConfig:
 
 
 @config
+class EncoderCachesOffloadConfig:
+    """Configuration for encoder cache offload behavior.
+
+    Used via:
+      --additional-config '{"encoder_caches_offload_config": {...}}'
+    """
+
+    """Whether to enable LFU eviction for encoder cache."""
+    enabled_lfu_evict: bool = False
+    """Whether to enable encoder cache offload to cpu."""
+    enabled_offload: bool = False
+    """Whether to enable swapping encoder cache to HBM."""
+    enabled_swap: bool = False
+    """set mooncake store register memory size."""
+    aligned_tensor_size: int = 200
+
+
+@config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
 
@@ -611,6 +629,9 @@ class AscendConfig:
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
+    encoder_caches_offload_config: EncoderCachesOffloadConfig = dataclasses.field(
+        default_factory=EncoderCachesOffloadConfig
+    )
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.
