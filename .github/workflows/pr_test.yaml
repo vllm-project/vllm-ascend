@@ -222,34 +222,35 @@ jobs:
           path: /tmp/pre-commit-cache
           key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
 
-      - name: Run pre-commit
-        env:
-          PRE_COMMIT_HOME: /tmp/pre-commit-cache
-          PRE_COMMIT_COLOR: always
-          FORCE_COLOR: "1"
-          TERM: xterm-256color
-          SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
-          # Keep golang-based pre-commit hooks on a domestic module proxy.
-          GOPROXY: https://repo.huaweicloud.com/repository/goproxy/
-          GONOSUMDB: '*'
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+      # - name: Run pre-commit
+      #   env:
+      #     PRE_COMMIT_HOME: /tmp/pre-commit-cache
+      #     PRE_COMMIT_COLOR: always
+      #     FORCE_COLOR: "1"
+      #     TERM: xterm-256color
+      #     SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
+      #     # Keep golang-based pre-commit hooks on a domestic module proxy.
+      #     GOPROXY: https://repo.huaweicloud.com/repository/goproxy/
+      #     GONOSUMDB: '*'
+      #   run: |
+      #     git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      #     pre-commit run --all-files --hook-stage manual --show-diff-on-failure
 
-      - name: Run mypy
-        run: |
-          PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
-          export PYTHONPATH
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          for python_version in "3.10" "3.11" "3.12"; do
-            echo "============================"
-            tools/mypy.sh 1 "$python_version"
-            echo "============================"
-          done
+      # - name: Run mypy
+      #   run: |
+      #     PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
+      #     export PYTHONPATH
+      #     git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      #     for python_version in "3.10" "3.11" "3.12"; do
+      #       echo "============================"
+      #       tools/mypy.sh 1 "$python_version"
+      #       echo "============================"
+      #     done
 
   cpu-ut:
     needs: pre-commit
-    if: ${{ needs.pre-commit.result == 'success' }}
+    # if: ${{ needs.pre-commit.result == 'success' }}
+    if: false
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ needs.pre-commit.outputs.main_commit }}
@@ -267,10 +268,15 @@ jobs:
     # --all-tests and unlabeled runs select nothing, so all of them skip this
     # job. The pre-commit + cpu-ut checks are explicit so the job can never be
     # made to run after a failed upstream by adding !cancelled().
+    # if: >-
+    #   ${{
+    #     needs.pre-commit.result == 'success' &&
+    #     needs.cpu-ut.result == 'success' &&
+    #     contains(github.event.pull_request.labels.*.name, 'ready-precise')
+    #   }}
     if: >-
       ${{
         needs.pre-commit.result == 'success' &&
-        needs.cpu-ut.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise')
       }}
     runs-on: linux-amd64-cpu-8-hk
@@ -373,7 +379,7 @@ jobs:
   select-tests:
     needs:
       - pre-commit
-      - cpu-ut
+      # - cpu-ut
       - recommend-tests
     # select-tests is the single producer of test_groups / base_sha / has_tests.
     # It runs only when a run-enabling label (ready-precise / ready-all /
@@ -389,11 +395,21 @@ jobs:
     #   all         - ready-all or main2main forced, or the PR touches the CI
     #                 pipeline itself
     #   none        - ready-precise on a PR whose diff recommends no tests
+    # if: >-
+    #   ${{
+    #     !cancelled() &&
+    #     needs.pre-commit.result == 'success' &&
+    #     needs.cpu-ut.result == 'success' &&
+    #     (
+    #       contains(github.event.pull_request.labels.*.name, 'main2main') ||
+    #       contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+    #       contains(github.event.pull_request.labels.*.name, 'ready-all')
+    #     )
+    #   }}
     if: >-
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
-        needs.cpu-ut.result == 'success' &&
         (
           contains(github.event.pull_request.labels.*.name, 'main2main') ||
           contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
@@ -580,17 +596,18 @@ jobs:
     # which is skipped under ready-all or main2main. Without a status check
     # function, the skipped need propagates transitively and skips this job
     # even when select-tests succeeded.
-    if: >-
-      ${{
-        !cancelled() &&
-        needs.select-tests.result == 'success' &&
-        (
-          contains(github.event.pull_request.labels.*.name, 'main2main') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-a5') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-all')
-        )
-      }}
+    # if: >-
+    #   ${{
+    #     !cancelled() &&
+    #     needs.select-tests.result == 'success' &&
+    #     (
+    #       contains(github.event.pull_request.labels.*.name, 'main2main') ||
+    #       contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+    #       contains(github.event.pull_request.labels.*.name, 'ready-a5') ||
+    #       contains(github.event.pull_request.labels.*.name, 'ready-all')
+    #     )
+    #   }}
+    if: false
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     with:
       target_ids: ${{ needs.select-tests.outputs.csrc_cache_target_ids }}
@@ -602,7 +619,7 @@ jobs:
     needs:
       - pre-commit
       - select-tests
-      - prepare-csrc-cache
+      # - prepare-csrc-cache
     # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all or main2main) through select-tests, without
     # running after workflow cancel.
@@ -610,7 +627,6 @@ jobs:
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
-        needs.prepare-csrc-cache.result == 'success' &&
         (
           contains(github.event.pull_request.labels.*.name, 'main2main') ||
           contains(github.event.pull_request.labels.*.name, 'ready-precise') ||

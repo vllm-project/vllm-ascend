@@ -1685,7 +1685,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # TND for the draft (its metadata uses cumulative lengths). Use the
             # forward-context flag, not self.is_draft_model: the draft MLA impl
             # shares the target's vllm_config, so runner_type is "generate".
-            or _EXTRA_CTX.is_draft_model
+            # or _EXTRA_CTX.is_draft_model
         ):
             # The right part layout indicates the layout of the attention
             # output. It is set to NTD to avoid the need for a transpose
