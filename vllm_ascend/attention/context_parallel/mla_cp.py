@@ -36,6 +36,7 @@ from vllm_ascend.compilation.acl_graph import (
     get_graph_params,
     update_graph_params_workspaces,
 )
+from vllm_ascend.ops.triton.mla_dcp_exchange import can_exchange, exchange
 from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
 from vllm_ascend.utils import weak_ref_tensors
 
@@ -800,11 +801,15 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
         # Update out&lse
-        attn_output = self._merge_dcp_attention_output(
-            attn_output,
-            softmax_lse,
-            self.kv_lora_rank,
-        )
+        # Restrict the fast path to the qualified single-row DCP16 geometry.
+        if self.dcp_size == 16 and attn_output.shape[0] == 1 and can_exchange(attn_output, softmax_lse, self.dcp_size):
+            attn_output = exchange(attn_output, softmax_lse, self.dcp_device_group)
+        else:
+            attn_output = self._merge_dcp_attention_output(
+                attn_output,
+                softmax_lse,
+                self.kv_lora_rank,
+            )
         return self._v_up_proj_batch_major(attn_output)
 
     def _reorg_kvcache(
