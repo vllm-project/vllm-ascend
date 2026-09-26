@@ -21,6 +21,7 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceDPEngineCoreProc, _balance_scheduling_enabled
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import DyntraLBDPEngineCoreProc, _get_dyntra_lb_config
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import _print_rank_0 as dyntra_print_rank_0
+from vllm_ascend.patch.platform.patch_engine_watchdog import patch_watchdog_for_engine_core
 from vllm_ascend.patch.platform.patch_pp_mtp import _patch_engine_core as pp_mtp_patch_post_step
 from vllm_ascend.patch.platform.patch_profiling_chunk import _apply_profiling_patches
 
@@ -52,7 +53,7 @@ def _run_engine_core_patch_func(*args, dp_rank: int = 0, local_dp_rank: int = 0,
         _apply_profiling_patches()
 
     _patch_dp_engine_core_proc(vllm_config, dp_rank)
-
+    patch_watchdog_for_engine_core()
     return _OriginalRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
 
 
@@ -68,6 +69,7 @@ def _apply_patch() -> None:
     # And in _run_engine_core_patch_func:
     # 1. Patch EngineCore.__init__ by _apply_profiling_patches
     # 2. Patch class DPEngineCoreProc by _patch_dp_engine_core_proc
+    # 3. Patch _process_engine_step & _process_input_queue by patch_watchdog_for_engine_core
     EngineCoreProc.run_engine_core = staticmethod(_run_engine_core_patch_func)
 
 
