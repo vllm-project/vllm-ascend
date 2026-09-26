@@ -497,12 +497,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         metadata_cls: type[AscendSFAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
-        layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
-        if getattr(kv_cache_spec, "indexes_kv_by_block_stride", False):
-            # AttentionGroup passes a kernel/storage-sized spec. Keep the
-            # layer's logical block size without discarding grouped padding.
-            kv_cache_spec = kv_cache_spec.copy_with_new_block_size(layer.get_kv_cache_spec(vllm_config).block_size)
-        self.nope = layer.qk_rope_head_dim == 0
         super().__init__(
             kv_cache_spec,
             layer_names,
@@ -512,8 +506,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             supports_dcp_with_varlen,
         )
 
+        # Match the logical block size selected for BlockTable.
         self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFABackend])
 
+        layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
+        self.nope = layer.qk_rope_head_dim == 0
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
         self.nope_indexer = None
         if self.nope:

@@ -808,7 +808,8 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
     @patch_distributed_groups(dcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_default(self):
-        kv_cache_spec = SimpleNamespace(block_size=128)
+        kv_cache_spec = MagicMock()
+        kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
@@ -843,7 +844,8 @@ class TestAscendSFAMetadataBuilder(TestBase):
         cfg.model_config.hf_text_config = MagicMock()
 
         mock_get_current_vllm_config.return_value = cfg
-        kv_cache_spec = SimpleNamespace(block_size=128)
+        kv_cache_spec = MagicMock()
+        kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
@@ -903,7 +905,8 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         mock_get_current_vllm_config.return_value = cfg
 
-        kv_cache_spec = SimpleNamespace(block_size=128)
+        kv_cache_spec = MagicMock()
+        kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16
@@ -963,7 +966,8 @@ class TestAscendSFAMetadataBuilder(TestBase):
         cfg.model_config.hf_text_config = MagicMock()
 
         mock_get_current_vllm_config.return_value = cfg
-        kv_cache_spec = SimpleNamespace(block_size=128)
+        kv_cache_spec = MagicMock()
+        kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
         vllm_config.cache_config.block_size = 16

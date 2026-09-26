@@ -9,15 +9,13 @@ from unittest.mock import patch
 import pytest
 import torch
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
-from vllm.v1.worker.utils import AttentionGroup
 
 import vllm_ascend.attention.sfa_v1 as sfa
 import vllm_ascend.attention.sfa_v1 as sparse_mla
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 
 
-def _builder(block_size, a5, monkeypatch, rope_dim=0, kernel_spec=False):
+def _builder(block_size, a5, monkeypatch, rope_dim=0):
     indexer = SimpleNamespace(
         topk_output_width=17,
         get_topk_lengths=lambda positions: torch.where(positions == 0, 1, 7),
@@ -57,24 +55,9 @@ def _builder(block_size, a5, monkeypatch, rope_dim=0, kernel_spec=False):
         self.model_config, self.metadata_cls = cfg.model_config, metadata_cls
 
     with patch.object(MLACommonMetadataBuilder, "__init__", base_init):
-        spec = (
-            AscendMLAAttentionSpec(
-                block_size=block_size,
-                num_kv_heads=1,
-                head_size=512,
-                dtype=torch.bfloat16,
-                indexes_kv_by_block_stride=True,
-            )
-            if kernel_spec
-            else SimpleNamespace(block_size=block_size)
+        return sfa.AscendSFAMetadataBuilder(
+            SimpleNamespace(block_size=block_size), ["layer"], config, torch.device("cpu")
         )
-        if kernel_spec:
-            config.compilation_config.static_forward_context["layer"].get_kv_cache_spec = lambda _: spec
-            monkeypatch.setattr(sfa.AscendSFABackend, "get_builder_cls", lambda: sfa.AscendSFAMetadataBuilder)
-            group = AttentionGroup(sfa.AscendSFABackend, ["layer"], spec, 0)
-            group.create_metadata_builders(config, torch.device("cpu"), kernel_block_size=128)
-            return group.get_metadata_builder()
-        return sfa.AscendSFAMetadataBuilder(spec, ["layer"], config, torch.device("cpu"))
 
 
 def _common(block_size):
@@ -106,9 +89,8 @@ def _common(block_size):
 
 @pytest.mark.parametrize("block_size", [128, 384, 640, 2304, 4352])
 @pytest.mark.parametrize("a5", [False, True])
-@pytest.mark.parametrize("kernel_spec", [False, True])
-def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, block_size, a5, kernel_spec):
-    builder = _builder(block_size, a5, monkeypatch, kernel_spec=kernel_spec)
+def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, block_size, a5):
+    builder = _builder(block_size, a5, monkeypatch)
     seen = []
 
     def plan(**kwargs):

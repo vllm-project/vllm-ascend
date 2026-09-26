@@ -180,7 +180,7 @@ def test_invalid_pool_geometry_is_rejected(ratio):
 
 @pytest.mark.parametrize(
     "storage_block_size,kernel_block_size",
-    [(8, None), (24, None), (144, None), (1536, None), (2048, None), (1536, 128), (24, 64)],
+    [(8, None), (24, None), (144, None), (1536, None), (2048, None), (1536, 128)],
 )
 def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size, kernel_block_size):
     pool_size = 16
@@ -188,7 +188,7 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size, k
     kernel_size = kernel_block_size or 128
     split = logical_size // kernel_size
     config = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=logical_size + 128),
+        cache_config=SimpleNamespace(block_size=logical_size),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=1),
         model_config=SimpleNamespace(max_model_len=logical_size * 3),
     )
@@ -199,11 +199,6 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size, k
         dtype=torch.bfloat16,
         tokens_per_state=pool_size,
         model_version="glm5_next",
-    )
-    layer_spec = replace(spec, indexes_kv_by_block_stride=True)
-    spec = replace(layer_spec, page_size_padded=layer_spec.page_size_bytes + 256)
-    config.compilation_config = SimpleNamespace(
-        static_forward_context={"layer.indexer.k_cache": SimpleNamespace(get_kv_cache_spec=lambda _: layer_spec)}
     )
     if kernel_block_size is not None:
         group = AttentionGroup(AscendIndexerKPoolBackend, ["layer.indexer.k_cache"], spec, 0)
@@ -216,8 +211,6 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size, k
             AscendIndexerKPoolMetadataBuilder(spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
             for _ in range(2)
         ]
-    for builder in builders:
-        assert builder.kv_cache_spec == spec
     pages = torch.tensor([[7, 2, -1]], dtype=torch.int32)
     expanded = (pages.unsqueeze(-1) * split + torch.arange(split)).reshape(1, -1).int()
     expanded[:, -split:] = -1
