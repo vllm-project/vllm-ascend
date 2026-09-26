@@ -80,13 +80,13 @@ def _indexer_metadata(num_tokens: int = 8) -> AscendIndexerKPoolMetadata:
             dtype=torch.int64,
         )[:num_tokens],
         seq_lens=torch.tensor([1, 1], dtype=torch.int32),
-        seq_lens_cpu=torch.tensor([1, 1], dtype=torch.int32),
         positions=torch.tensor([0, 1, 2, 3, 0, 1, 2, 3, 0, 0])[:num_tokens],
         block_size=2,
         compress_ratio=4,
         cum_query_lens=torch.tensor([4, 8], dtype=torch.int32),
         raw_seq_lens=torch.tensor([4, 4], dtype=torch.int32),
-        num_actual_tokens=8,
+        num_tokens=num_tokens,
+        max_pool_seq_len=1,
     )
 
 
@@ -211,8 +211,14 @@ class _RecordingKPool(nn.Module):
         return None
 
 
+@pytest.mark.parametrize(
+    "num_tokens,max_pool_seq_len",
+    [(1, 1), (2, 2)],
+)
 def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     monkeypatch,
+    num_tokens,
+    max_pool_seq_len,
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
@@ -243,7 +249,6 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
         "get_forward_context",
         lambda: SimpleNamespace(
             attn_metadata={"indexer.tail": tail_metadata},
-            cudagraph_runtime_mode=None,
             virtual_engine=0,
         ),
     )
@@ -251,7 +256,8 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     normalized_q_c = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
     hidden = torch.ones(2, 3)
     metadata = _indexer_metadata(num_tokens=2)
-    metadata.num_actual_tokens = 2
+    metadata.num_tokens = num_tokens
+    metadata.max_pool_seq_len = max_pool_seq_len
     metadata.cum_query_lens = torch.tensor([1, 2], dtype=torch.int32)
     metadata.raw_seq_lens = torch.tensor([1, 1], dtype=torch.int32)
     metadata.seq_lens = torch.tensor([0, 0], dtype=torch.int32)
@@ -267,8 +273,12 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     )
 
     assert result is not None
+    assert result.shape == (num_tokens, 1, 5)
     assert backend.indexer_op.args is not None
-    torch.testing.assert_close(backend.indexer_op.args[1], normalized_q_c.repeat(1, 2).view(2, 2, 2))
+    torch.testing.assert_close(
+        backend.indexer_op.args[1], normalized_q_c[:num_tokens].repeat(1, 2).view(num_tokens, 2, 2)
+    )
+    hidden = hidden[:num_tokens]
     expected_k = torch.nn.functional.layer_norm(
         torch.nn.functional.linear(hidden + 3, backend.wk_weights_proj.weight)[:, :2],
         (2,),
@@ -283,3 +293,4 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     assert backend.indexer_op.args[7] is tail_metadata
     assert backend.indexer_op.kwargs is not None
     assert backend.indexer_op.kwargs["compute_topk"] is True
+    assert backend.indexer_op.kwargs["max_pool_seq_len"] == max_pool_seq_len

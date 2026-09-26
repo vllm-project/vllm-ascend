@@ -18,7 +18,7 @@
 #
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -57,10 +57,12 @@ from vllm_ascend.ascend_forward_context import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.models.glm5next.cache_views import build_kv_cache_copy_views
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
@@ -85,6 +87,9 @@ from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpecul
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.block_table import AscendBlockTables
+
 
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
@@ -95,6 +100,7 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    kv_caches: list[torch.Tensor]
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -289,6 +295,15 @@ class NPUModelRunner(GPUModelRunner):
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
+
+        cast("AscendBlockTables", self.block_tables).configure_circular(
+            [is_circular_kv_cache_spec(group.kv_cache_spec) for group in self.kv_cache_config.kv_cache_groups]
+        )
+        self.kv_caches = build_kv_cache_copy_views(
+            self.kv_cache_config,
+            lambda name: self.compilation_config.static_forward_context[name].kv_cache,
+            self.kv_caches,
+        )
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.

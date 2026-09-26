@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pooled-cache physical views for GLM-Next on Model Runner V1."""
+"""Pooled-cache physical views and copy-on-write layout for GLM-Next."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 
 import torch
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -137,6 +137,46 @@ def view_glm5_next_cache(
         if get_kv_cache_compression_ratio(kv_cache_spec) > 1:
             return _view_compressed_indexer_cache(layer_name, kv_cache_spec, raw_cache, attn_backend, kernel_block_size)
         _k_dim, v_dim = get_kv_cache_dims(layer_name, kv_cache_spec)
-        if v_dim == 0:
+        if v_dim == 0 and kv_cache_spec.page_size_bytes == kv_cache_spec.unpadded_page_size_bytes:
             return _view_nope_main_mla_cache(kv_cache_spec, raw_cache, attn_backend, kernel_block_size)
     return None
+
+
+def build_kv_cache_copy_views(
+    kv_cache_config: KVCacheConfig,
+    get_layer_cache: Callable[[str], torch.Tensor | Sequence[torch.Tensor]],
+    runner_caches: Iterable[torch.Tensor | Sequence[torch.Tensor]],
+) -> list[torch.Tensor]:
+    """Expose logical pages to upstream COW without changing layer bindings.
+
+    Main MLA/Mamba components alias complete pages, so copy their shared
+    page only once. Indexer/tail components occupy separate packed regions
+    and must retain their individual strides in the copy inventory.
+    """
+    shared_cache_views: dict[int, torch.Tensor] = {}
+    for descriptor in kv_cache_config.kv_cache_tensors:
+        if len(descriptor.layers) < 2 or descriptor.layer_stride != 0:
+            continue
+        caches = [get_layer_cache(name) for name in descriptor.layers]
+        first_components = [cache if isinstance(cache, torch.Tensor) else cache[0] for cache in caches]
+        first = first_components[0]
+        # Packed regions start at different addresses and retain their own
+        # block strides. Only views with the same page origin alias pages.
+        if any(tensor.data_ptr() != first.data_ptr() for tensor in first_components[1:]):
+            continue
+        storage = first.untyped_storage()
+        base = first.storage_offset() * first.element_size()
+        assert base + descriptor.size <= storage.nbytes()
+        pages = torch.empty(0, dtype=torch.uint8, device=first.device).set_(
+            storage, base, (kv_cache_config.num_blocks, descriptor.block_stride)
+        )
+        for cache in caches:
+            shared_cache_views[id(cache)] = pages
+
+    copy_caches = (shared_cache_views.get(id(cache), cache) for cache in runner_caches)
+    return [
+        tensor
+        for cache in copy_caches
+        for tensor in ((cache,) if isinstance(cache, torch.Tensor) else cache)
+        if tensor.numel() > 0
+    ]
