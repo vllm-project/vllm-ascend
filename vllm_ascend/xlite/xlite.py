@@ -902,6 +902,25 @@ class XliteWrapper:
         self.device = device
         # `full_mode` only sizes the token budget (see the comment in `StandardXliteModel._build_config`).
         self.full_mode: bool = get_ascend_config().xlite_graph_config.full_mode
+        # EXPERIMENTAL (A1 prototype): decode-only mode for hybrid (GDN+MHA)
+        # models. Prefill runs the native runnable (piecewise ACLGraph kept);
+        # decode steps run the xlite graph; GDN states produced by native
+        # prefill are imported into the xlite persistent pool at handoff.
+        self._hybrid_decode_only: bool = (
+            os.environ.get("XLITE_DECODE_ONLY_HYBRID", "0") == "1"
+        )
+        self._xlite_native_dirty: set[int] = set()
+        self._xlite_req_pages: dict[int, list[int]] = {}
+        self._xlite_native_gdn_groups: list[list[torch.Tensor]] = []
+        self._xlite_import_log_done = False
+        if self._hybrid_decode_only:
+            logger.warning(
+                "xlite EXPERIMENTAL decode-only hybrid mode enabled "
+                "(XLITE_DECODE_ONLY_HYBRID=1): prefill runs the native "
+                "runnable, decode runs the xlite graph; GDN states are "
+                "imported from the vllm mamba pools. Use full_mode=false."
+            )
+
         self.data_parallel_size = vllm_config.parallel_config.data_parallel_size
 
         set_dummy_tensor(torch.empty(1, device=device, dtype=vllm_config.model_config.dtype))
@@ -1011,13 +1030,18 @@ class XliteWrapper:
             if ((i + 1) % interval) == 0:
                 adapted.append(list(as_kv(caches[i])))
             else:
+                # A1 decode-only: native per-layer mamba pools are resolved
+                # lazily from the model's bound GDN modules
+                # (_resolve_native_gdn_groups) — the runner's kv_caches
+                # entries here are GROUP buffers shared by 3 GDN layers.
                 conv_p, ssm_p = z(num_slots, conv_dim, kernel), z(num_slots, n_v, k_dim, v_dim)
                 conv_b, ssm_b = z(max_batch, conv_dim, kernel), z(max_batch, n_v, k_dim, v_dim)
                 self._xlite_hybrid_persistent.append((conv_p, ssm_p))
                 self._xlite_hybrid_batch.append((conv_b, ssm_b))
                 self._xlite_hybrid_state_refs.extend([conv_p, ssm_p, conv_b, ssm_b])
                 adapted.append([conv_b, ssm_b])
-        logger.info("xlite hybrid KV adapted: layers=%s max_batch=%s gdn_slots=%s", n_layers, max_batch, num_slots)
+        logger.info("xlite hybrid KV adapted: layers=%s max_batch=%s gdn_slots=%s native_gdn_groups=%s caches_len=%s",
+                    n_layers, max_batch, num_slots, len(self._xlite_native_gdn_groups), len(caches))
         return adapted
 
     @staticmethod
@@ -1061,6 +1085,227 @@ class XliteWrapper:
             if idx is not None and idx.numel() >= num_reqs:
                 return idx[:num_reqs]
         return None
+
+    def _resolve_native_gdn_groups(self) -> None:
+        """A1 decode-only: locate the native per-layer mamba state pools.
+
+        The runner's kv_caches entries for GDN layers are GROUP buffers packed
+        per 4-layer block (3 GDN layers share one buffer; data_ptr-verified),
+        so they cannot be sliced per layer here. Instead read the bound
+        per-layer views from the native model's GDN modules
+        (``layer.linear_attn.kv_cache``), which the native path itself uses.
+        """
+        inner = self.npu_runnable
+        if hasattr(inner, "unwrap"):
+            inner = inner.unwrap()
+        # candidate decoder containers: text decoder may sit at .model,
+        # .language_model, or .model.language_model (VL-style wrappers)
+        cands = []
+        obj = inner
+        for _ in range(4):
+            if obj is None:
+                break
+            cands.append(obj)
+            for attr in ("model", "language_model"):
+                nxt = getattr(obj, attr, None)
+                if nxt is not None:
+                    cands.append(nxt)
+            obj = getattr(obj, "language_model", None) or getattr(obj, "model", None)
+        layers = None
+        for c in cands:
+            layers = getattr(c, "layers", None)
+            if layers is not None:
+                break
+        if layers is None:
+            raise RuntimeError(
+                "xlite decode-only: cannot locate native model layers "
+                f"(inner type={type(inner).__name__}, "
+                f"candidates={[type(c).__name__ for c in cands]})"
+            )
+        groups = []
+        prefixes = []
+        for layer in layers:
+            gdn = getattr(layer, "linear_attn", None)
+            if gdn is not None and hasattr(gdn, "kv_cache"):
+                groups.append([t for t in gdn.kv_cache if isinstance(t, torch.Tensor)])
+                prefixes.append(getattr(gdn, "prefix", None))
+        if not groups:
+            raise RuntimeError("xlite decode-only: no native GDN layers found")
+        self._xlite_native_gdn_groups = groups
+        self._xlite_gdn_meta_keys = prefixes
+        if os.environ.get("XLITE_DO_DEBUG", "0") == "1":
+            logger.warning(
+                "xlite DO-DEBUG: resolved ptrs=%s shapes=%s types=%s",
+                [g[0].data_ptr() for g in groups[:6]],
+                [tuple(g[0].shape) for g in groups[:6]],
+                [type(g[0]).__name__ for g in groups[:2]],
+            )
+        logger.info("xlite decode-only: resolved %s native GDN layer pools", len(groups))
+
+    @staticmethod
+    def _gdn_layer_indices(attn_metadata_raw: Any, key: str | None, num_reqs: int) -> list[int] | None:
+        """Per-request state page ids of ONE GDN layer (its own metadata)."""
+        if key is None or num_reqs <= 0:
+            return None
+        try:
+            meta = attn_metadata_raw[key]
+        except (KeyError, TypeError, IndexError):
+            return None
+        idx = getattr(meta, "non_spec_state_indices_tensor", None)
+        if idx is None or idx.numel() < num_reqs:
+            return None
+        return [int(x) for x in idx[:num_reqs].detach().cpu().tolist()]
+
+    def _hybrid_import_native_states(
+        self, attn_metadata_raw: Any, layer0_idx: list[int] | None, num_reqs: int
+    ) -> None:
+        """A1 decode-only: import native mamba-pool GDN states into the xlite
+        persistent pool.
+
+        The pool backing is SHARED across GDN layers; each layer addresses it
+        with its OWN layer-scoped state indices (from its per-layer metadata),
+        so the import resolves per-layer indices instead of reusing layer 0's.
+        Conversion per GDN layer:
+          conv: native [K-1, C] (SD) or [C, K-1] (DS)  -> xlite [C, K] cols 1..K-1
+                (xlite window = [state[1:], input]; col 0 is oldest/scratch)
+          ssm:  native [n_v, V, K] ("vllm convention") -> xlite [n_v, K, V]
+        """
+        if num_reqs <= 0:
+            return
+        if not self._xlite_native_gdn_groups:
+            self._resolve_native_gdn_groups()
+        if len(self._xlite_native_gdn_groups) != len(self._xlite_hybrid_persistent):
+            raise RuntimeError(
+                f"xlite decode-only: native GDN group count "
+                f"{len(self._xlite_native_gdn_groups)} != persistent pool count "
+                f"{len(self._xlite_hybrid_persistent)}"
+            )
+        if not self._xlite_native_dirty:
+            return
+        key_ids = layer0_idx
+        if key_ids is None:
+            key_ids = self._gdn_layer_indices(
+                attn_metadata_raw,
+                self._xlite_gdn_meta_keys[0] if self._xlite_gdn_meta_keys else None,
+                num_reqs,
+            )
+        if key_ids is None:
+            return
+        dirty_keys = [b for b in key_ids if b and b in self._xlite_native_dirty]
+        if not dirty_keys:
+            return
+        slots = self._hybrid_slots(tuple(b for b in key_ids if b))
+        first_log = not self._xlite_import_log_done
+        imported = 0
+        for li, ((conv_p, ssm_p), group) in enumerate(
+            zip(self._xlite_hybrid_persistent, self._xlite_native_gdn_groups)
+        ):
+            key = self._xlite_gdn_meta_keys[li] if li < len(self._xlite_gdn_meta_keys) else None
+            layer_ids = self._gdn_layer_indices(attn_metadata_raw, key, num_reqs)
+            if layer_ids is None:
+                continue
+            nconv, nssm = self._pick_native_conv_ssm(
+                group, int(conv_p.shape[1]), int(ssm_p.shape[1])
+            )
+            conv_w = conv_p.shape[2] - 1
+            for r, slot in enumerate(slots):
+                if not slot or r >= len(layer_ids) or key_ids[r] not in self._xlite_native_dirty:
+                    continue
+                page = layer_ids[r]
+                nc = nconv[page] if nconv.ndim == 3 else nconv      # [K-1, C] or [C, K-1]
+                ns = nssm[page] if nssm.ndim == 4 else nssm         # [n_v, V, K]
+                if nc.shape[0] == conv_w:
+                    src = nc.t()                                    # [K-1, C] -> [C, K-1]
+                elif nc.shape[1] == conv_w:
+                    src = nc                                        # [C, K-1]
+                else:
+                    raise RuntimeError(
+                        f"native conv state shape {tuple(nc.shape)} does not "
+                        f"match xlite conv width {conv_w}"
+                    )
+                src = src.to(dtype=conv_p.dtype)
+                conv_p[slot, :, 1:] = src
+                conv_p[slot, :, 0] = src[:, 0]
+                # native temporal state is [n_v, head_v_dim, head_k_dim]
+                # ("vllm convention"); xlite pool is [n_v, k_dim, v_dim].
+                ssm_p[slot] = ns.transpose(1, 2).to(dtype=ssm_p.dtype)
+                imported += 1
+                self._xlite_req_pages.setdefault(key_ids[r], [None] * len(self._xlite_native_gdn_groups))[li] = page
+        self._xlite_native_dirty.difference_update(
+            b for b in key_ids if b in self._xlite_native_dirty
+        )
+        # note: dirty keys are request-level (layer-0 scoped ids); clearing the
+        # key clears ALL layers of that request at once
+        if first_log:
+            g0 = self._xlite_native_gdn_groups[0]
+            logger.info(
+                "xlite decode-only: imported states for %s requests x %s layers "
+                "(native group[0] tensors: %s)",
+                len(key_ids), imported // max(1, len(key_ids)),
+                [(tuple(t.shape), str(t.dtype)) for t in g0],
+            )
+            self._xlite_import_log_done = True
+
+    def _hybrid_export_to_native(self, key_ids: list[int], slots: tuple[int, ...]) -> None:
+        """A1 decode-only: lazily write the xlite persistent states back to the
+        native mamba pools (using cached per-request page ids — NO per-step
+        D2H syncs) right before a native step runs."""
+        if not key_ids or not self._xlite_native_gdn_groups:
+            return
+        if self._xlite_hybrid_dirty and self._xlite_hybrid_last_idx is not None:
+            self._hybrid_copy(self._xlite_hybrid_last_idx, to_batch=False)
+            self._xlite_hybrid_dirty = False
+        for r, key in enumerate(key_ids):
+            if not key:
+                continue
+            slot = self._xlite_hybrid_block_to_slot.get(key)
+            pages = self._xlite_req_pages.get(key)
+            if not slot or not pages or r >= len(slots) or slots[r] != slot:
+                continue
+            for li, ((conv_p, ssm_p), group) in enumerate(
+                zip(self._xlite_hybrid_persistent, self._xlite_native_gdn_groups)
+            ):
+                page = pages[li] if li < len(pages) else None
+                if not page:
+                    continue
+                nconv, nssm = self._pick_native_conv_ssm(
+                    group, int(conv_p.shape[1]), int(ssm_p.shape[1])
+                )
+                if nconv.ndim == 3:
+                    nconv[page] = conv_p[slot][:, 1:].t().to(nconv.dtype)
+                else:
+                    nconv[page] = conv_p[slot][:, 1:].to(nconv.dtype)
+                if nssm.ndim == 4:
+                    nssm[page] = ssm_p[slot].transpose(1, 2).to(nssm.dtype)
+                else:
+                    nssm[page] = ssm_p[slot].to(nssm.dtype)
+
+    @staticmethod
+    def _pick_native_conv_ssm(
+        group: list[torch.Tensor],
+        conv_dim: int,
+        n_v: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Identify conv / temporal state tensors inside a native mamba group.
+
+        conv carries the conv_dim axis (2560/TP layout); temporal carries the
+        n_v axis and no conv_dim.
+        """
+        ts = [t for t in group if isinstance(t, torch.Tensor)]
+        conv = ssm = None
+        for t in ts:
+            last = t.shape[-2:] if t.ndim >= 2 else t.shape
+            if conv is None and conv_dim in last:
+                conv = t
+            elif ssm is None and t.ndim >= 3 and t.shape[-3] == n_v and conv_dim not in t.shape[-2:]:
+                ssm = t
+        if conv is None or ssm is None:
+            raise RuntimeError(
+                "cannot identify conv/ssm in native mamba group: "
+                f"{[(tuple(t.shape), str(t.dtype)) for t in ts]} "
+                f"(conv_dim={conv_dim}, n_v={n_v})"
+            )
+        return conv, ssm
 
     def _hybrid_slots(self, bids: tuple[int, ...]) -> tuple[int, ...]:
         """Remap sparse mamba block IDs into dense slots; 0 is NULL."""
@@ -1223,7 +1468,11 @@ class XliteWrapper:
         # Decode-Only: runnable for prefill, graph for decode
         # Hybrid: always graph (Ascend-GDN state is not sync-compatible with xlite).
         if is_hybrid:
-            use_xlite_graph = True
+            if self._hybrid_decode_only:
+                # A1: hybrid decode-only — native prefill, xlite decode.
+                use_xlite_graph = not with_prefill
+            else:
+                use_xlite_graph = True
         elif not self.full_mode and self.data_parallel_size > 1:
             num_tokens = forward_context.batch_descriptor.num_tokens
             num_reqs = forward_context.batch_descriptor.num_reqs
@@ -1234,7 +1483,70 @@ class XliteWrapper:
         if not use_xlite_graph:
             # fall back to runnable for prefill in decode-only mode
             # or when the number of tokens exceeds the graph capacity in non-full mode
-            return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
+            if self._hybrid_decode_only and is_hybrid:
+                # Native steps update GDN states in the vllm mamba pools:
+                # mark every request in this batch so its state is re-imported
+                # into the xlite pool before the next xlite decode step.
+                # NOTE: batch_descriptor.num_reqs can be None here; read the
+                # state indices straight from the GDN metadata instead.
+                _marked = 0
+                _metas = (
+                    attn_metadata_raw.values()
+                    if isinstance(attn_metadata_raw, dict)
+                    else attn_metadata_raw
+                    if isinstance(attn_metadata_raw, list)
+                    else (attn_metadata_raw,)
+                )
+                _first_gdn_ids: list[int] | None = None
+                for _meta in _metas:
+                    _idx = getattr(_meta, "non_spec_state_indices_tensor", None)
+                    if _idx is None or not _idx.numel():
+                        continue
+                    if _first_gdn_ids is None:
+                        # request-level dirty keys: the layer-0 scoped ids
+                        _first_gdn_ids = [int(x) for x in _idx.detach().cpu().tolist()]
+                        self._xlite_native_dirty.update(x for x in _first_gdn_ids if x)
+                        _marked = len(_first_gdn_ids)
+                    break
+                if os.environ.get("XLITE_DO_DEBUG", "0") == "1" and not getattr(self, "_dbg_mark_logged", False):
+                    logger.warning("xlite DO-DEBUG: native step marked %s ids, values(first 12)=%s",
+                                   _marked, sorted(self._xlite_native_dirty)[:12])
+                    logger.warning("xlite DO-DEBUG: native model_kwargs keys=%s", list(model_kwargs.keys()))
+                    _mcp = model_kwargs.get("mamba_cache_params")
+                    if _mcp is not None:
+                        _attrs = {}
+                        for _a in dir(_mcp):
+                            if _a.startswith("_"):
+                                continue
+                            _v = getattr(_mcp, _a, None)
+                            if isinstance(_v, torch.Tensor):
+                                _attrs[_a] = (tuple(_v.shape), str(_v.dtype))
+                            elif isinstance(_v, (list, tuple)) and _v and isinstance(_v[0], torch.Tensor):
+                                _attrs[_a] = f"{len(_v)} tensors, first {tuple(_v[0].shape)}"
+                        logger.warning("xlite DO-DEBUG: mamba_cache_params fields=%s", _attrs)
+                    self._dbg_mark_logged = True
+                # A1: flush xlite states into the native pools so the native
+                # GDN (mixed step) reads current states (lazy, cached pages).
+                _key_ids = _first_gdn_ids or []
+                _slots = self._hybrid_slots(tuple(b for b in _key_ids if b)) if _key_ids else ()
+                self._hybrid_export_to_native(_key_ids, _slots)
+            # A1 decode-only: call the UNWRAPPED native model. Going through
+            # the ACLGraphWrapper here triggers a runtime lazy capture for
+            # mixed-batch shapes ("CUDA graph capturing detected at an
+            # inappropriate time") — eager native prefill is correct-first;
+            # piecewise graph acceleration can be revisited later.
+            if self._hybrid_decode_only and is_hybrid:
+                _run = self.npu_runnable
+                if hasattr(_run, "unwrap"):
+                    _run = _run.unwrap()
+                return _ensure_output(
+                    _run(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
+                    "runnable(not use_xlite_graph)",
+                )
+            return _ensure_output(
+                self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
+                "runnable(not use_xlite_graph)",
+            )
 
         if is_hybrid:
             num_reqs = int(getattr(attn_metadata, "num_decodes", 0) or 0) + int(
@@ -1281,7 +1593,77 @@ class XliteWrapper:
                     self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs),
                     "runnable(hybrid query_lens sum mismatch)",
                 )
-            self._hybrid_gather(self._gdn_state_ids(attn_metadata_raw, num_reqs), cached_lens_list, num_reqs)
+            _gdn_idx = self._gdn_state_ids(attn_metadata_raw, num_reqs)
+            _layer0_ids = None
+            if _gdn_idx is not None:
+                _layer0_ids = [int(x) for x in _gdn_idx[:num_reqs].detach().cpu().tolist()]
+            if self._hybrid_decode_only:
+                if self._xlite_native_dirty:
+                    self._hybrid_import_native_states(attn_metadata_raw, _layer0_ids, num_reqs)
+                if os.environ.get("XLITE_DO_DEBUG", "0") == "1":
+                    self._dbg_dec_steps = getattr(self, "_dbg_dec_steps", 0) + 1
+                    logger.warning("xlite DO-STEP: decode step #%s (num_reqs=%s, ids=%s)",
+                                   self._dbg_dec_steps, num_reqs, _layer0_ids[:6])
+            if os.environ.get("XLITE_DO_DEBUG", "0") == "1" and _gdn_idx is not None:
+                _ids_l = [int(x) for x in _gdn_idx[:num_reqs].detach().cpu().tolist()]
+                for _i, _b in enumerate(_ids_l):
+                    if not _b:
+                        continue
+                    _slot = self._xlite_hybrid_block_to_slot.get(_b, 0)
+                    if not _slot:
+                        continue
+                    _cs = float(self._xlite_hybrid_persistent[0][0][_slot].float().sum())
+                    _ss = float(self._xlite_hybrid_persistent[0][1][_slot].float().sum())
+                    _cols = [float(self._xlite_hybrid_persistent[0][0][_slot, :, c].float().sum())
+                             for c in range(self._xlite_hybrid_persistent[0][0].shape[2])]
+                    logger.warning("xlite DO-STATE: bid=%s slot=%s L0 conv_sum=%.6f ssm_sum=%.6f conv_cols=%s",
+                                   _b, _slot, _cs, _ss, [round(v, 4) for v in _cols])
+                    if not getattr(self, "_dbg_alllayer_logged", False):
+                        _ss_all = [round(float(p[1][_slot].float().sum()), 4)
+                                   for p in self._xlite_hybrid_persistent]
+                        _cv_all = [round(float(p[0][_slot].float().sum()), 4)
+                                   for p in self._xlite_hybrid_persistent]
+                        logger.warning("xlite DO-STATE-ALL: ssm=%s", _ss_all)
+                        logger.warning("xlite DO-STATE-ALL: conv=%s", _cv_all)
+                        self._dbg_alllayer_logged = True
+                    break
+            elif os.environ.get("XLITE_DO_DEBUG", "0") == "1" and not getattr(self, "_dbg_imp_logged", False):
+                logger.warning("xlite DO-DEBUG: decode step skip import (dirty=%s, ids=%s)",
+                               len(self._xlite_native_dirty),
+                               None if _gdn_idx is None else _gdn_idx[:6].tolist())
+                if getattr(self, "_dbg_imp_logged_n", 0) >= 2:
+                    self._dbg_imp_logged = True
+                self._dbg_imp_logged_n = getattr(self, "_dbg_imp_logged_n", 0) + 1
+            self._hybrid_gather(_gdn_idx, cached_lens_list, num_reqs)
+            _adp_mark("gdn_gather")
+            stream = torch.npu.current_stream().npu_stream
+            if (os.environ.get("XLITE_DECODE_GRAPH", "0") == "1"
+                    and inputs_embeds is not None and num_reqs == num_actual_tokens
+                    and all(q == 1 for q in query_lens_list)):
+                _dg_out = self._decode_graph_step(
+                    inputs_embeds, positions, attn_metadata, num_reqs, cached_lens_list, stream)
+                if _dg_out is not None:
+                    _adp_mark("decode_graph")
+                    self._hybrid_scatter()
+                    _adp_mark("scatter")
+                    if _adp_prof:
+                        try:
+                            with open(os.environ.get("XLITE_ADAPTER_PROF_OUT", "/tmp/opencode/adapter_prof.jsonl"), "a") as _f:
+                                _f.write(json.dumps({
+                                    "num_reqs": num_reqs, "num_tokens": num_actual_tokens,
+                                    "with_prefill": bool(with_prefill), "decode_graph": True,
+                                    "total_ms": (_adp_last[0] - _adp_t0) * 1000,
+                                    "marks": dict(_adp_marks),
+                                }) + "\n")
+                        except Exception:
+                            pass
+                    return _ensure_output(_dg_out, "xlite hybrid decode graph")
+            elif not getattr(self, "_dg_cond_logged", False):
+                self._dg_cond_logged = True
+                logger.warning(
+                    "xlite decode graph: condition false (env=%s embeds_none=%s num_reqs=%s num_tokens=%s qlens=%s)",
+                    os.environ.get("XLITE_DECODE_GRAPH"), inputs_embeds is None,
+                    num_reqs, num_actual_tokens, query_lens_list[:4])
             xlite_attn_metadata = AttnMeta()
             xlite_attn_metadata.lens = query_lens_list
             xlite_attn_metadata.cached_lens = cached_lens_list
