@@ -242,6 +242,27 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertIn("expert_ids", kwargs)
         self.assertEqual(kwargs["moe_expert_num"], 8)
 
+    def test_get_dispatch_mc2_kwargs_moe_expert_num_counts_physical_map(self):
+        # expert_map is a full-length physical map (logical + redundant), so
+        # its length already is the global physical expert count and the
+        # redundant count must not be added again (the old code computed
+        # len(expert_map) + global_redundant_expert_num = 12 here).
+        hidden_states = torch.randn(10, 128)
+        topk_ids = torch.randint(0, 10, (10, 1))
+        topk_weights = torch.randn(10, 1)
+        expert_map = torch.arange(10)
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            global_redundant_expert_num=2,
+        )
+
+        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+
+        self.assertEqual(kwargs["moe_expert_num"], 10)
+
     def test_token_permutation_dispatch(self):
         hidden_states = torch.randn(10, 128)
         topk_weights = torch.randn(10, 1)
@@ -673,6 +694,48 @@ def test_allgather_bf16_lora_skips_quant_backend_validation():
 
     mock_validate.assert_not_called()
     assert output.dynamic_scale is None
+
+
+def test_allgather_dispatch_masks_physical_topk_ids_in_full_physical_map():
+    # topk_ids are global physical IDs (log2phy-mapped) and expert_map is a
+    # full-length physical map, so the mask stays in range and the histogram
+    # is sized by the global physical count (issue #14080).
+    dispatcher = TokenDispatcherWithAllGather(top_k=2, num_experts=10, num_local_experts=5)
+    hidden_states = torch.randn(2, 128)
+    topk_weights = torch.ones(2, 2)
+    # Physical 8/9 are the redundant tail; rank 0 owns physical 0..4 only.
+    topk_ids = torch.tensor([[8, 9], [0, 1]], dtype=torch.int32)
+    expert_map = torch.tensor([0, 1, 2, 3, 4, -1, -1, -1, -1, -1], dtype=torch.int32)
+    token_dispatch_input = build_token_dispatch_input_fixture(
+        hidden_states=hidden_states,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        expert_map=expert_map,
+        global_redundant_expert_num=2,
+    )
+    init_routing_output = (
+        hidden_states,
+        torch.arange(4, dtype=torch.int32),
+        torch.tensor([1, 1, 1, 1], dtype=torch.int32),
+        None,
+    )
+
+    with (
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+            return_value=init_routing_output,
+        ) as mock_init_routing,
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group",
+            return_value=SimpleNamespace(rank_in_group=0),
+        ),
+    ):
+        output = dispatcher.token_dispatch(token_dispatch_input)
+
+    # The histogram is sized by the global physical count, not map len + redundant.
+    assert mock_init_routing.call_args.kwargs["expert_num"] == 10
+    # The non-owned physical IDs 8/9 are masked out of the router weights.
+    assert torch.equal(output.combine_metadata.topk_weights, torch.tensor([[0.0, 0.0], [1.0, 1.0]]))
 
 
 class TestTokenDispatcherWithAllGather(TestBase):
