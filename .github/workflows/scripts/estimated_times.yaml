@@ -9,6 +9,8 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  # Initial scheduling budget; replace with measured A3 warm-cache duration at acceptance.
+  tests/e2e/pull_request/two_card/test_glm53_flash_logprobs.py: 600
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
   tests/e2e/pull_request/four_card/test_kvpp_pd.py: 230
   tests/e2e/pull_request/two_card/test_kvpp.py: 290
