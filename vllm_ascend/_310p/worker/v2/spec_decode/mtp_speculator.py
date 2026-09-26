@@ -12,6 +12,7 @@ K>1 draft-decode FULL uses per-step graphs: host slot_mapping between steps.
 
 from __future__ import annotations
 
+import copy
 import os
 from contextlib import contextmanager
 from typing import Any
@@ -39,8 +40,15 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         draft_model_config = self.speculative_config.draft_model_config
-        if draft_model_config.hf_overrides is None:
-            draft_model_config.hf_overrides = {}
+        # Draft MTP ModelConfig often carries a *callable* hf_overrides composed by
+        # SpeculativeConfig.compose_draft_hf_overrides (e.g. Qwen3 legacy normalizer).
+        # Ascend W8A8 has no HF quantization_config; platform auto-detect re-runs
+        # get_quant_config during VllmConfig.replace(), which requires dict overrides.
+        # Copy so we do not mutate the shared SpeculativeConfig.draft_model_config.
+        model_config_for_vllm = draft_model_config
+        if not isinstance(getattr(draft_model_config, "hf_overrides", None), dict):
+            model_config_for_vllm = copy.copy(draft_model_config)
+            model_config_for_vllm.hf_overrides = {}
 
         parallel_config = replace(
             self.vllm_config.parallel_config,
@@ -48,8 +56,9 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         )
         draft_vllm_config = replace(
             self.vllm_config,
-            model_config=draft_model_config,
+            model_config=model_config_for_vllm,
             parallel_config=parallel_config,
+            quant_config=self.vllm_config.quant_config,
         )
 
         target_path = os.path.realpath(self.vllm_config.model_config.model)
@@ -158,8 +167,13 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         num_rejected = kwargs.get("num_rejected")
         if num_rejected is None and len(args) >= 7:
             num_rejected = args[6]
-        if isinstance(num_rejected, torch.Tensor):
-            self._last_num_rejected_cpu = num_rejected.detach().to("cpu")
+        # Prefer host mirror published by postprocess_sampled (already synced).
+        # Avoid an extra device→host copy on every MTP propose.
+        if getattr(self, "_last_num_rejected_cpu", None) is None and isinstance(num_rejected, torch.Tensor):
+            if num_rejected.device.type == "cpu":
+                self._last_num_rejected_cpu = num_rejected
+            else:
+                self._last_num_rejected_cpu = num_rejected.detach().to("cpu")
         return super().propose(*args, **kwargs)
 
     def _generate_draft(
