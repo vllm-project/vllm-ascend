@@ -242,6 +242,7 @@ def glm5_next_lightning_indexer_triton(
     selected = min(index_topk // index_kpool, max_pool_seq_len)
     packed_cache = (
         num_tokens >= TRITON_PREFILL_MIN_TOKENS
+        and num_tokens > cum_query_lens.numel()
         and selected > 0
         and index32
         and cum_query_lens.numel() * max_pool_seq_len * head_dim * indexer_cache.element_size()
