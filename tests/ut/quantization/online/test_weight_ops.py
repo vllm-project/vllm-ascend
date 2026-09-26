@@ -378,6 +378,15 @@ class TestCompareLayersCosine(TestBase):
         self.assertEqual(set(result), {"shared"})
         self.assertLessEqual(abs(result["shared"]), 1.0)
 
+    def test_one_sided_zero_outputs_report_cosine_zero(self):
+        zero_model = nn.Linear(8, 8)
+        with torch.no_grad():
+            zero_model.weight.zero_()
+            zero_model.bias.zero_()
+        nonzero_model = nn.Linear(8, 8)
+        result = accuracy.compare_layers_cosine(zero_model, nonzero_model, torch.randn(4, 8))
+        self.assertEqual(result[""], 0.0)
+
     def test_zero_outputs_report_cosine_one(self):
         zero_model = nn.Linear(8, 8)
         with torch.no_grad():

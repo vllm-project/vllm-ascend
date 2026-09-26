@@ -52,11 +52,18 @@ def _cosine_similarity(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-12) -> 
             "the two models are not running the same modules on the same inputs."
         )
     dot = torch.dot(a_flat, b_flat)
-    norm = a_flat.norm() * b_flat.norm()
-    if norm.item() < eps:
+    a_norm = a_flat.norm()
+    b_norm = b_flat.norm()
+    a_is_zero = a_norm.item() < eps
+    b_is_zero = b_norm.item() < eps
+    if a_is_zero and b_is_zero:
         # Both outputs are numerically zero: directionally identical.
         return 1.0
-    return (dot / norm).item()
+    if a_is_zero or b_is_zero:
+        # A one-sided zero means the compared layer collapsed; do not hide it
+        # behind the convention used for two zero vectors.
+        return 0.0
+    return (dot / (a_norm * b_norm)).item()
 
 
 class _OutputCaptor:
