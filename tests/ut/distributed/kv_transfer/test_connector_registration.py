@@ -107,3 +107,18 @@ def test_alias_helper_registers_alias_when_names_differ(
 
     assert ("BarConnector", "some.module", "BarConnectorV1") in registrations
     assert ("BarConnectorV1", "some.module", "BarConnectorV1") in registrations
+
+
+def test_d2rh_connector_class_name_matches_its_config_name() -> None:
+    """MultiConnector keys transfer stats by ``__class__.__name__`` and resolves
+    that key through KVConnectorFactory, which is indexed by the registered
+    config name. The D2RH connector's class must therefore carry the config
+    name; the historical ``MooncakeConnector`` name resolves to the upstream
+    registry entry and reconstructs an incompatible stats schema (KeyError on
+    every stats interval under MultiConnector).
+    """
+    from vllm_ascend.distributed.kv_transfer.kv_p2p import mooncake_d2rh_connector as d2rh
+
+    assert d2rh.MooncakeD2RHConnectorV1.__name__ == "MooncakeD2RHConnectorV1"
+    assert d2rh.MooncakeConnector is d2rh.MooncakeD2RHConnectorV1
+    assert d2rh.MooncakeD2RHConnector is d2rh.MooncakeD2RHConnectorV1
