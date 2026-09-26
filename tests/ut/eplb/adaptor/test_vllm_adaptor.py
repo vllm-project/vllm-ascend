@@ -1,10 +1,15 @@
+import json
+import os
+import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import torch
 from transformers import DeepseekV2Config
 
 from vllm_ascend.eplb.adaptor.vllm_adaptor import EPLB_EXPERT_WEIGHT_NAMES, VllmEplbAdaptor
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.quant_type import QuantType
 
 
@@ -198,6 +203,63 @@ class TestVllmAdaptor(unittest.TestCase):
 
         with self.assertRaisesRegex(AssertionError, "EPLB expert weight shapes mismatch"):
             VllmEplbAdaptor(model)
+
+    def test_do_update_expert_map_refreshes_layer_runtime_maps(self):
+        # Regression test for issue #14080: the layer-facing maps must track
+        # the worker's authoritative map, not just the CPU bookkeeping copy.
+        layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
+        old_map = torch.tensor([-1, -1, -1, -1, -1, 0, 1, 2, -1, -1], dtype=torch.int32)
+        # Worker payload (int64): rank 1 owns physical experts 5..9 in slots 0..4.
+        new_map = torch.tensor([-1, -1, -1, -1, -1, 0, 1, 2, 3, 4], dtype=torch.int64)
+        layer.moe_config = SimpleNamespace(ep_rank=1)
+        global_expert_map = torch.stack([torch.full((10,), -1, dtype=torch.int32), old_map])
+        local_phys_ids = torch.zeros(5, dtype=torch.int64)
+        layer.ascend_expert_map = old_map
+        layer.global_expert_map = global_expert_map
+        layer.local_phys_expert_ids = local_phys_ids
+
+        adaptor = VllmEplbAdaptor.__new__(VllmEplbAdaptor)
+        adaptor.moe_layers = [layer]
+        adaptor.expert_map_per_layer_cpu = [old_map.clone()]
+
+        VllmEplbAdaptor.do_update_expert_map(adaptor, 0, new_map)
+
+        self.assertTrue(torch.equal(adaptor.expert_map_per_layer_cpu[0], new_map.to(torch.int32)))
+        self.assertTrue(torch.equal(layer.ascend_expert_map, new_map.to(torch.int32)))
+        self.assertTrue(torch.equal(layer.global_expert_map[1], new_map.to(torch.int32)))
+        self.assertTrue(torch.equal(layer.local_phys_expert_ids, torch.tensor([5, 6, 7, 8, 9], dtype=torch.int64)))
+        # The refresh must update the maps in place (copy_): a captured ACL
+        # graph holds references to the original tensor objects, and
+        # rebinding the attributes would leave it reading the stale map.
+        self.assertIs(layer.ascend_expert_map, old_map)
+        self.assertIs(layer.global_expert_map, global_expert_map)
+        self.assertIs(layer.local_phys_expert_ids, local_phys_ids)
+
+    def test_export_tensor_to_file_writes_logical_expert_ids(self):
+        # expert_maps is [num_layers, ep, physical]; entries index physical
+        # expert IDs. The record file format stores logical IDs per device.
+        expert_maps = torch.tensor(
+            [
+                [
+                    [0, 1, 2, 3, 4, -1, -1, -1, -1, -1],
+                    [-1, -1, -1, -1, -1, 0, 1, 2, 3, 4],
+                ]
+            ],
+            dtype=torch.int32,
+        )
+        adaptor = VllmEplbAdaptor.__new__(VllmEplbAdaptor)
+        adaptor.rank_id = 0
+        adaptor.phys_to_logical = torch.tensor([7, 2, 0, 3, 5, 6, 1, 4, 7, 2], dtype=torch.int32)
+
+        with tempfile.NamedTemporaryFile(mode="r", suffix=".json", delete=False) as f:
+            path = f.name
+        VllmEplbAdaptor._export_tensor_to_file(adaptor, expert_maps, path)
+        with open(path) as f:
+            record = json.load(f)
+        os.unlink(path)
+
+        device_experts = [device["device_expert"] for device in record["layer_list"][0]["device_list"]]
+        self.assertEqual(device_experts, [[7, 2, 0, 3, 5], [6, 1, 4, 7, 2]])
 
     def tearDown(self):
         self.mock_rank.stop()
