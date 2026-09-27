@@ -46,8 +46,8 @@ def test_temporal_copy_preserves_bytes_and_guards(size, offsets, tiles):
     ],
 )
 @pytest.mark.parametrize("tiles", [1, 4])
-def test_temporal_copy_model_state_sizes(state_shape, dtype, tiles):
-    # Sizes are per-layer, per-physical-block temporal states after TP sharding.
+def test_temporal_copy_config_derived_sizes(state_shape, dtype, tiles):
+    # These are config-derived state sizes; no model class or weights are loaded.
     size = torch.Size(state_shape).numel() * torch.empty((), dtype=dtype).element_size()
     source = torch.randint(0, 256, (size + 64,), dtype=torch.uint8, device="npu")
     destination = torch.full_like(source, 123)
