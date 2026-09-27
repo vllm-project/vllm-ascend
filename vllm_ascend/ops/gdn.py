@@ -648,10 +648,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             # Use the fused CANN operator when available (probed once, cached on
             # the class) and applicable. It only supports the non-PCP case; fall
             # back to the Triton pipeline under PCP or if the op is unavailable.
-
-            elif (
-                AscendGatedDeltaNetAttention._can_use_fused_chunk(query_non_spec) and get_pcp_group().world_size == 1
-            ):
+            elif AscendGatedDeltaNetAttention._can_use_fused_chunk(query_non_spec) and get_pcp_group().world_size == 1:
                 # Gather only the selected rows. Generic advanced indexing first
                 # materializes the complete cache when ssm_state has a padded
                 # batch stride under the hybrid KV-cache manager.
