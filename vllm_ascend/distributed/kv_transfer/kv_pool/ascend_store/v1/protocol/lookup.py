@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TypeAlias
 
-import zmq
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
-from .coordinates import TokenRange
+from ..graph.coordinates import TokenRange
 
-WireFrame = bytes | bytearray | memoryview | zmq.Frame
+WireFrame: TypeAlias = bytes | bytearray | memoryview
 _TOKEN_COUNT_BYTES = 4
 _REQUEST_FRAME_COUNT = 4
 
@@ -33,7 +33,7 @@ class LookupResult:
 
 
 class LookupCodec:
-    """Keep Lookup wire frames out of Scheduler and Worker business services."""
+    """Keep Lookup wire frames out of the Scheduler planner and Worker graph."""
 
     def __init__(self) -> None:
         self._encoder = MsgpackEncoder()

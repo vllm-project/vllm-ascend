@@ -1,1 +1,1 @@
-"""Scheduler-to-Worker protocols used by AscendStore v1."""
+"""Immutable messages and RPC transport between process boundaries."""
