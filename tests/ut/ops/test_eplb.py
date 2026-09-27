@@ -7,8 +7,7 @@ from vllm_ascend.ops.fused_moe.eplb import (
     EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
     build_expert_replica_routing_table,
     map_to_physical,
-    map_to_physical_for_ascend,
-    record_expert_tokens,
+    map_to_physical_and_record,
 )
 
 
@@ -69,7 +68,7 @@ def test_map_to_physical_uses_periodic_rows():
     assert physical_ids[EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS, 1] == physical_ids[0, 1]
 
 
-def test_map_and_record_operator_counts():
+def test_map_to_physical_and_record_gates_load_collection():
     routing_table = torch.tensor(
         [[0, 3], [2, 1], [0, 3], [2, 1]],
         dtype=torch.int32,
@@ -80,16 +79,31 @@ def test_map_and_record_operator_counts():
     )
     expert_load = torch.zeros(4, dtype=torch.int32)
 
-    physical_ids = map_to_physical_for_ascend(topk_ids, routing_table)
+    physical_ids = map_to_physical_and_record(
+        topk_ids,
+        routing_table,
+        expert_load,
+        record_enabled=torch.tensor(True),
+        num_unpadded_tokens=torch.tensor(3, dtype=torch.int32),
+    )
 
     torch.testing.assert_close(
         physical_ids,
         torch.tensor([[0, 3], [2, 1], [0, 3], [2, 1]], dtype=torch.int32),
     )
-    counts = torch.tensor([2, 1, 1, 2], dtype=torch.int32)
-    record_expert_tokens(counts, expert_load, torch.tensor(True), 1, 0)
-    torch.testing.assert_close(expert_load, counts)
-    record_expert_tokens(counts.cumsum(0), expert_load, torch.tensor(True), 0, 0)
-    torch.testing.assert_close(expert_load, counts * 2)
-    record_expert_tokens(counts, expert_load, torch.tensor(False), 1, 0)
-    torch.testing.assert_close(expert_load, counts * 2)
+    torch.testing.assert_close(
+        expert_load,
+        torch.tensor([2, 1, 1, 2], dtype=torch.int32),
+    )
+
+    map_to_physical_and_record(
+        topk_ids,
+        routing_table,
+        expert_load,
+        record_enabled=torch.tensor(False),
+        num_unpadded_tokens=torch.tensor(4, dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        expert_load,
+        torch.tensor([2, 1, 1, 2], dtype=torch.int32),
+    )

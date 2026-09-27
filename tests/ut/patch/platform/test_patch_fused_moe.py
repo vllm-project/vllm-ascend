@@ -110,17 +110,23 @@ def test_adapted_router_uses_ascend_mapping_operation():
     topk_ids = torch.tensor([[1]], dtype=torch.int32)
     physical_ids = torch.tensor([[0]], dtype=torch.int32)
 
-    with patch.object(
-        patch_fused_moe.torch.ops.vllm,
-        "ascend_eplb_map_to_physical",
-        return_value=physical_ids,
-    ) as mapping_op:
+    with (
+        patch.object(patch_fused_moe, "dbo_current_ubatch_id", return_value=0),
+        patch.object(
+            patch_fused_moe.torch.ops.vllm,
+            "ascend_eplb_map_to_physical_and_record",
+            return_value=physical_ids,
+        ) as mapping_op,
+    ):
         result = router._apply_eplb_mapping(topk_ids)
 
     assert result is physical_ids
     mapping_op.assert_called_once_with(
         topk_ids,
         router.eplb_state.expert_replica_routing_table,
+        router.eplb_state.expert_load_view,
+        router.eplb_state.should_record_tensor,
+        router.eplb_state.num_unpadded_tokens_tensors[0],
     )
 
 

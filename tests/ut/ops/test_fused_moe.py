@@ -944,16 +944,7 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int64)
     routed_experts.router = SimpleNamespace(
         _select_experts=MagicMock(return_value=(topk_weights, topk_ids)),
-        eplb_state=(
-            SimpleNamespace(
-                expert_load_view=expert_load,
-                should_record_tensor=torch.tensor(False),
-                local_expert_count=2,
-                local_expert_start=2,
-            )
-            if v2_eplb
-            else None
-        ),
+        eplb_state=SimpleNamespace(expert_load_view=expert_load) if v2_eplb else None,
     )
     routed_experts.top_k = 2
     routed_experts.renormalize = True
@@ -1002,8 +993,6 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     monkeypatch.setattr(routed_experts_module, "get_current_vllm_config", lambda: None)
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 3)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
-    record_expert_tokens = MagicMock()
-    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
 
     result = routed_experts.forward_impl(
         hidden_states=hidden_states,
@@ -1045,7 +1034,6 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     )
     expected_load = torch.zeros_like(expert_load)
     torch.testing.assert_close(expert_load, expected_load)
-    assert record_expert_tokens.call_count == int(v2_eplb)
     moe_comm_method.finalize.assert_called_once_with(
         hidden_states=routed_out,
         reduce_results=False,
