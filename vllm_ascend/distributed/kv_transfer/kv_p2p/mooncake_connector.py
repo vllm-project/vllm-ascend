@@ -657,7 +657,8 @@ class KVCacheRecvingThread(threading.Thread):
                 packing = group_packing_factor(
                     0, group_spec, layer_indices, self.block_size, self.block_size_scale, remote_block_sizes
                 )
-            self.invalid_block_ids.update(bid // packing for bid in local_block_ids[0])
+            if local_block_ids:
+                self.invalid_block_ids.update(bid // packing for bid in local_block_ids[0])
 
     def _clear_failed_recv_request(self, request_id: str) -> None:
         with self.failed_recv_requests_lock:
@@ -1660,7 +1661,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
             remote_block_size=kv_transfer_params.get("remote_block_size", 0),
-            remote_block_sizes=tuple(kv_transfer_params.get("remote_block_sizes", ())),
+            remote_block_sizes=tuple(kv_transfer_params.get("remote_block_sizes") or ()),
             local_full_block_ids=local_full_block_ids or tuple(),
             do_virtual=kv_transfer_params.get("do_virtual", False),
         )
@@ -3004,7 +3005,7 @@ class MooncakeConnectorWorker:
         # Hybrid layouts mix physical block sizes across groups (e.g. a 128-token
         # sliding-window group next to 1024-token full-attention groups), so the
         # scalar remote_block_size is only a fallback for legacy metadata.
-        remote_sizes = meta.remote_block_sizes
+        remote_sizes = getattr(meta, "remote_block_sizes", ())
         group_remote_size = (
             remote_sizes[kv_cache_group_id] if remote_sizes and kv_cache_group_id < len(remote_sizes) else None
         )
@@ -4433,6 +4434,10 @@ def group_kernel_block_size(
     group_block_size = group_spec.get("kv_cache_spec_block_size")
     if not isinstance(group_block_size, int) or group_block_size <= 0:
         group_block_size = block_size
+    assert isinstance(group_block_size, int) and group_block_size > 0, (
+        f"invalid group block size {group_block_size!r}; the connector block size "
+        f"must be a positive int (got {block_size!r})"
+    )
     assert group_block_size % local_scale == 0, (
         f"kernel block size {group_block_size} not divisible by block size scale {local_scale}"
     )
