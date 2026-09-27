@@ -96,6 +96,12 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         self.query_cudagraph_manager.speculator = self
         self.query_cudagraph_manager.update_stream = self.update_stream
 
+    def capture(self) -> None:
+        # DFlash builds draft capture metadata outside its forward context.
+        # Ascend needs the draft's physical DCP layout for CPU local lengths.
+        with set_current_vllm_config(self.attn_vllm_config):
+            super().capture()
+
     def set_attn(
         self,
         model_state: Any,
@@ -286,12 +292,21 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             # TODO: Remove this guard once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
+        seq_lens_cpu = None
+        is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
+        if self.use_dcp and self.attn_architecture in ("GQA", "MLA") and not (dummy_run and skip_attn_for_dummy_run):
+            # DSpark drafts one block with a fixed step; zero unused request slots
+            # before upstream selects the padded batch size and slices this view.
+            seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
+                input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
+            )
         with (
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,
                 self.max_num_tokens,
-                torch.from_numpy(self.input_batch.is_prefilling_np),
+                is_prefilling,
+                seq_lens_cpu=seq_lens_cpu,
                 parallel_config=self.attn_vllm_config.parallel_config,
             ),
         ):

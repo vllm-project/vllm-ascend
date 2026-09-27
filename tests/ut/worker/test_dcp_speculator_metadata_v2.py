@@ -282,3 +282,106 @@ def test_sfa_consumer_uses_device_local_lengths_and_ignores_cpu(monkeypatch):
     result = builder._build_with_metadata_view(common, lambda: metadata)
     assert result.dcp_context.seq_lens.tolist() == [4, 16, 0, 0]
     assert common.dcp_local_seq_lens_cpu.tolist() == [999] * 4
+
+
+def test_draft_decode_hooks_forward_parallel_config(monkeypatch):
+    """DCP draft decode calls these hooks directly and needs parallel_config."""
+    spec, _, _ = _speculator(monkeypatch, "mtp", "SFA", 1, 2, 1)
+    seen: list[object] = []
+
+    @contextmanager
+    def factory(*_args, **kwargs):
+        seen.append(kwargs["parallel_config"])
+        yield
+
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_factory",
+        factory,
+    )
+    monkeypatch.setattr(AutoRegressiveSpeculator, "_build_attn_metadata", lambda *a, **k: None)
+    batch = SimpleNamespace(num_tokens=2, num_reqs=2)
+    seq_lens = spec.input_batch.seq_lens_cpu_upper_bound
+    dcp_local = spec.input_buffers.dcp_local_seq_lens
+    spec._build_uniform_attn_metadata(batch, 2, 1, seq_lens, 1, dcp_local_seq_lens=dcp_local)
+    spec._build_attn_metadata(2, batch, np.array([0, 1, 2]), seq_lens, 1, dcp_local_seq_lens=dcp_local)
+
+    assert seen == [spec.draft_vllm_config.parallel_config, spec.draft_vllm_config.parallel_config]
+
+
+@pytest.mark.parametrize("mode", ["NONE", "PIECEWISE", "FULL"])
+@pytest.mark.parametrize("use_dcp", [False, True])
+@pytest.mark.parametrize("architecture", ["MLA", "GQA", "SFA"])
+def test_dspark_propose_passes_cpu_lengths_through_existing_factory(monkeypatch, mode, use_dcp, architecture):
+    from vllm.config import CUDAGraphMode
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    width = 3
+    padded = 4 if mode == "FULL" else 2
+    spec, target, device_lengths = _speculator(
+        monkeypatch, "dspark", architecture, width, padded, width, use_dcp=use_dcp
+    )
+    spec.max_num_reqs = 4
+    spec.max_num_tokens = 12
+    desc = BatchExecutionDescriptor(
+        cg_mode=getattr(CUDAGraphMode, mode), num_tokens=12, num_reqs=4 if mode == "FULL" else None
+    )
+    module = attn_utils._BUILD_ATTN_METADATA_MODULE
+    original_builder = module.build_attn_metadata
+
+    def propose(self, input_batch, *args, **kwargs):
+        return self._build_uniform_attn_metadata(
+            batch_desc=desc,
+            num_reqs=input_batch.num_reqs,
+            num_query_per_req=width,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            step=width,
+            causal=self._group_causal,
+        )
+
+    monkeypatch.setattr(DSparkSpeculator, "propose", propose)
+    result = spec.propose(spec.input_batch, {}, {}, None, None, None, None, None, None, None, None)
+    common = result["draft.layer"].common
+    if use_dcp and architecture in ("GQA", "MLA"):
+        expected = [34, 128] + [0] * (padded - 2)
+    else:
+        expected = [128] * padded
+    assert common.seq_lens_cpu.tolist() == expected
+    if use_dcp:
+        torch.testing.assert_close(common.dcp_local_seq_lens_cpu, _local(expected))
+        torch.testing.assert_close(common.dcp_local_seq_lens, _local(device_lengths[:padded].tolist()))
+    if use_dcp and architecture in ("GQA", "MLA"):
+        # The draft hook allocates one decode flag per uniform query group.
+        assert common.is_prefilling.tolist() == [False] * (desc.num_tokens // width)
+    else:
+        assert common.is_prefilling.tolist() == [True, False]
+    assert common.attn_state is None
+    torch.testing.assert_close(common.positions, spec.input_buffers.positions)
+    torch.testing.assert_close(spec.target_input_buffers.seq_lens_cpu, target)
+    assert module.build_attn_metadata is original_builder
+
+
+def test_dspark_profile_without_attention_skips_cpu_lengths(monkeypatch):
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    spec, _, _ = _speculator(monkeypatch, "dspark", "MLA", 3, 2, 3)
+    spec.max_num_tokens = 12
+    del spec.target_input_buffers
+    sentinel = object()
+    monkeypatch.setattr(DSparkSpeculator, "propose", lambda *args, **kwargs: sentinel)
+    result = spec.propose(
+        spec.input_batch,
+        {},
+        {},
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        dummy_run=True,
+        skip_attn_for_dummy_run=True,
+    )
+    assert result is sentinel

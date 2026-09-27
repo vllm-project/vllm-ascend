@@ -27,7 +27,13 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 import vllm
-from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.config import (
+    ParallelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
+)
 from vllm.distributed import get_dcp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
@@ -335,7 +341,11 @@ def build_attn_metadata(
     # once per batch, without introducing a device-to-host synchronization.
     dcp_local_seq_lens_cpu = None
     if dcp_local_seq_lens is not None:
-        assert parallel_config is not None
+        if parallel_config is None:
+            vllm_config = get_current_vllm_config_or_none()
+            if vllm_config is not None:
+                parallel_config = vllm_config.parallel_config
+        assert parallel_config is not None, "DCP metadata requires a parallel config argument or current vLLM config."
         dcp_local_seq_lens_cpu = get_dcp_local_seq_lens(
             seq_lens_cpu,
             dcp_size=parallel_config.decode_context_parallel_size,
