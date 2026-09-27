@@ -56,7 +56,6 @@ rejection_sampler.rejection_sample = npu_rejection_sample
 # Upstream still passes BLOCK_SIZE, derived per step from the query length.
 # The Ascend kernel never reads it, so drop the kwarg and keep one cache entry.
 class _NoBlockSizeDFlashKernel:
-
     def __getitem__(self, grid):
         def launch(*args, **kwargs):
             kwargs.pop("BLOCK_SIZE", None)
