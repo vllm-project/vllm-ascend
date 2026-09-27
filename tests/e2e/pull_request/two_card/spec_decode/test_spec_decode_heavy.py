@@ -390,8 +390,8 @@ def test_qwen36_35b_dspark_spec_decoding(
 ) -> None:
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     num_speculative_tokens = 7
-    # The old four-prompt baseline cannot calibrate this 40-prompt run.
-    acceptance_length = _run_speculative_decoding(
+    # Provisional baseline; recalibrate it from this 40-prompt CI run.
+    _run_speculative_decoding(
         model_name=model,
         speculative_config={
             "method": "dspark",
@@ -399,7 +399,7 @@ def test_qwen36_35b_dspark_spec_decoding(
             "num_speculative_tokens": num_speculative_tokens,
         },
         example_prompts=SPEC_DECODE_PROMPTS,
-        expected_acceptance_length=None,
+        expected_acceptance_length=3.5,
         runner_kwargs={
             "max_model_len": 4096,
             "tensor_parallel_size": 2,
@@ -410,4 +410,3 @@ def test_qwen36_35b_dspark_spec_decoding(
         max_tokens=max_tokens,
         log_acceptance_per_pos=True,
     )
-    assert acceptance_length > 1, "DSpark must accept at least one draft token"

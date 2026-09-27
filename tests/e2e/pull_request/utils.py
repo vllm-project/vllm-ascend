@@ -240,7 +240,7 @@ SPEC_DECODE_PROMPTS = (
 def _run_speculative_decoding(
     model_name: str,
     speculative_config: dict[str, object],
-    expected_acceptance_length: float | None,
+    expected_acceptance_length: float,
     runner_kwargs: dict[str, Any],
     example_prompts: Sequence[str] = SPEC_DECODE_PROMPTS,
     max_tokens: int = 1024,
@@ -294,19 +294,20 @@ def _run_speculative_decoding(
     acceptance_length = 1 + num_accepted_tokens / num_drafts if num_drafts > 0 else 1
     print(f"Model: {model_name}, Acceptance length: {acceptance_length:.3f}", flush=True)
     if log_acceptance_per_pos:
+        acceptance_per_pos = (
+            [count / num_drafts for count in accepted_per_pos] if num_drafts else [0.0] * len(accepted_per_pos)
+        )
+        print(f"Model: {model_name}, Acceptance rates per draft position: {acceptance_per_pos}", flush=True)
         assert num_drafts > 0
         assert sum(accepted_per_pos) == num_accepted_tokens
-        acceptance_per_pos = [count / num_drafts for count in accepted_per_pos]
-        print(f"Model: {model_name}, Acceptance rates per draft position: {acceptance_per_pos}", flush=True)
-    if expected_acceptance_length is not None:
-        relative_error = abs(acceptance_length - expected_acceptance_length) / expected_acceptance_length
-        assert relative_error <= acceptance_length_rtol, (
-            f"Acceptance length regression detected for {model_name}!\n"
-            f" Expected: {expected_acceptance_length:.3f}\n"
-            f" Actual: {acceptance_length:.3f}\n"
-            f" Relative error: {relative_error:.2%} (tolerance: {acceptance_length_rtol:.2%})\n"
-            f" Drafts: {num_drafts}, Accepted tokens: {num_accepted_tokens}"
-        )
+    relative_error = abs(acceptance_length - expected_acceptance_length) / expected_acceptance_length
+    assert relative_error <= acceptance_length_rtol, (
+        f"Acceptance length regression detected for {model_name}!\n"
+        f" Expected: {expected_acceptance_length:.3f}\n"
+        f" Actual: {acceptance_length:.3f}\n"
+        f" Relative error: {relative_error:.2%} (tolerance: {acceptance_length_rtol:.2%})\n"
+        f" Drafts: {num_drafts}, Accepted tokens: {num_accepted_tokens}"
+    )
 
     cleanup_dist_env_and_memory()
     return acceptance_length
