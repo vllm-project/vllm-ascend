@@ -26,7 +26,13 @@ from .worker.load.task import ContiguousLoadTaskBuilder, StridedLoadTaskBuilder
 from .worker.lookup import LookupService as WorkerLookupService
 from .worker.lookup.executor import LookupExecutor
 from .worker.lookup.task import LookupTaskBuilder
-from .worker.projection import EffectiveTPKeyProjector, KVObjectProjector, StridedKVMemoryProjector
+from .worker.projection import (
+    ContiguousKVBindingProjector,
+    EffectiveTPKeyProjector,
+    KVObjectProjector,
+    StridedKVBindingProjector,
+    StridedKVMemoryProjector,
+)
 from .worker.region import HybridKVRegionOperator, KVRegionOperator, UnitaryKVRegionOperator
 from .worker.resources import WorkerCacheResources
 from .worker.service import WorkerService
@@ -87,42 +93,45 @@ def build_worker_service(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
         kv_cache_config.num_blocks,
     )
     kv_cache_group = layout.kv_cache_groups[layout.transfer_group_ids[0]]
-    tp_mismatch_projectors = _build_tp_mismatch_projectors(cache_resources, layout, kv_cache_group)
+    tp_mismatch_projector = _build_tp_mismatch_binding_projector(cache_resources, layout, kv_cache_group)
     region_operator = _build_kv_region_operator(vllm_config, kv_cache_config, layout)
     object_projector = KVObjectProjector(cache_resources.token_database)
+    binding_projector = ContiguousKVBindingProjector(cache_resources.token_database)
     lookup_service = _build_worker_lookup_service(cache_resources, layout, region_operator, object_projector)
     load_service = _build_worker_load_service(
         cache_resources,
         layout,
-        tp_mismatch_projectors,
+        tp_mismatch_projector,
         _resolve_load_execution_mode(vllm_config),
         region_operator,
         object_projector,
+        binding_projector,
         align_state_group_ids,
     )
     store_service = _build_worker_store_service(
         cache_resources,
         layout,
-        tp_mismatch_projectors,
+        tp_mismatch_projector,
         transfer_config.kv_role,
         _is_store_enabled(vllm_config),
         region_operator,
         object_projector,
+        binding_projector,
         align_state_group_ids,
     )
     return WorkerService(cache_resources, lookup_service, load_service, store_service)
 
 
-def _build_tp_mismatch_projectors(
+def _build_tp_mismatch_binding_projector(
     cache_resources: WorkerCacheResources,
     layout: WorkerTransferLayout,
     kv_cache_group: KVCacheGroupLayout,
-) -> tuple[EffectiveTPKeyProjector, StridedKVMemoryProjector] | None:
+) -> StridedKVBindingProjector | None:
     if not layout.tp_partition.tp_mismatch:
         return None
     if len(layout.transfer_group_ids) != 1:
         raise ValueError("AscendStore v1 TP mismatch requires one transferable KV cache group")
-    return (
+    return StridedKVBindingProjector(
         EffectiveTPKeyProjector(layout.tp_rank, layout.tp_partition.key_slices_per_rank),
         StridedKVMemoryProjector(
             cache_resources.token_database,
@@ -185,20 +194,21 @@ def _uses_eagle_block_drop(vllm_config: VllmConfig) -> bool:
 def _build_worker_load_service(
     cache_resources: WorkerCacheResources,
     layout: WorkerTransferLayout,
-    tp_mismatch_projectors: tuple[EffectiveTPKeyProjector, StridedKVMemoryProjector] | None,
+    tp_mismatch_projector: StridedKVBindingProjector | None,
     execution_mode: LoadExecutionMode,
     region_operator: KVRegionOperator,
     object_projector: KVObjectProjector,
+    binding_projector: ContiguousKVBindingProjector,
     align_state_group_ids: frozenset[int],
 ) -> WorkerLoadService:
-    if tp_mismatch_projectors is None:
+    if tp_mismatch_projector is None:
         task_builder = ContiguousLoadTaskBuilder(
-            cache_resources.token_database,
+            binding_projector,
             layout.tp_rank,
             align_state_group_ids,
         )
     else:
-        task_builder = StridedLoadTaskBuilder(*tp_mismatch_projectors)
+        task_builder = StridedLoadTaskBuilder(tp_mismatch_projector, layout.tp_rank)
     executor_type = AsyncLoadExecutor if execution_mode is LoadExecutionMode.ASYNCHRONOUS else SynchronousLoadExecutor
     return WorkerLoadService(
         region_operator,
@@ -212,18 +222,20 @@ def _build_worker_load_service(
 def _build_worker_store_service(
     cache_resources: WorkerCacheResources,
     layout: WorkerTransferLayout,
-    tp_mismatch_projectors: tuple[EffectiveTPKeyProjector, StridedKVMemoryProjector] | None,
+    tp_mismatch_projector: StridedKVBindingProjector | None,
     kv_role: str,
     enabled: bool,
     region_operator: KVRegionOperator,
     object_projector: KVObjectProjector,
+    binding_projector: ContiguousKVBindingProjector,
     align_state_group_ids: frozenset[int],
 ) -> WorkerStoreService | None:
     if not enabled:
         return None
-    if tp_mismatch_projectors is None:
+    if tp_mismatch_projector is None:
         task_builder = ContiguousStoreTaskBuilder(
             cache_resources.token_database,
+            binding_projector,
             layout.tp_rank,
             layout.pcp_rank,
             layout.pcp_size,
@@ -236,7 +248,7 @@ def _build_worker_store_service(
         task_builder = StridedStoreTaskBuilder(
             layout.pcp_rank,
             layout.pcp_size,
-            *tp_mismatch_projectors,
+            tp_mismatch_projector,
         )
     return WorkerStoreService(region_operator, object_projector, task_builder, StoreExecutor(cache_resources.backend))
 
