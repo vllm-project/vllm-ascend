@@ -934,6 +934,12 @@ class NPUWorker(WorkerBase):
         # may cause performance degradation at runtime.
         if get_current_hardware_profile().supports(HardwareCapability.ATB_WARMUP):
             self._warm_up_atb()
+        if self.use_v2_model_runner:
+            if self.vllm_config.kernel_config.enable_jit_warmup:
+                from vllm.v1.worker.gpu.warmup import warmup_kernels
+
+                logger.info("Warming up V2 prefill/decode Triton kernels.")
+                warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
         # Keep thread affinity after warmup and capture. Engram HOST_UVA tables
         # are already registered here; process-wide migration must not revisit
         # their pinned backing, which may also be shared across NUMA nodes.
