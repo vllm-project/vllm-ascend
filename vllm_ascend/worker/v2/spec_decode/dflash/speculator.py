@@ -206,7 +206,6 @@ def _prepare_dflash_inputs_kernel_ascend(
     PAD_SLOT_ID: tl.constexpr,
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
