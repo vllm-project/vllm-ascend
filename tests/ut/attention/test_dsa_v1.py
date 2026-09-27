@@ -2048,7 +2048,7 @@ def test_pcp_graph_decode_builds_only_local_metadata(is_dummy: bool):
     local_slot_mapping = (
         torch.arange(20, 20 + 2 * graph_size, dtype=torch.int64)
         if is_dummy
-        else torch.tensor([20, 21, -1, -1, 30, 31, -1, -1], dtype=torch.int64)
+        else torch.tensor([20, 21, -1, -1, -1, -1, -1, -1], dtype=torch.int64)
     )
     local_common = AscendCommonAttentionMetadata(
         query_start_loc=query_start_loc.clone(),
@@ -2103,7 +2103,7 @@ def test_pcp_graph_decode_builds_only_local_metadata(is_dummy: bool):
     expected_local_slots = (
         torch.full((graph_size,), -1, dtype=torch.int64)
         if is_dummy
-        else torch.tensor([30, 31, -1, -1], dtype=torch.int64)
+        else torch.tensor([10, 11, -1, -1], dtype=torch.int64)
     )
 
     assert actual is local_metadata

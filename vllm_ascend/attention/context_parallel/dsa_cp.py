@@ -2391,15 +2391,25 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         self,
         pcp_context: "AscendPCPAttentionContext",
         common_attn_metadata: AscendCommonAttentionMetadata,
+        cache_group_idx: int,
+        has_prefill: bool,
     ) -> AscendCommonAttentionMetadata:
         num_local_padded_tokens = common_attn_metadata.num_input_tokens
-        gathered_slot_mapping = common_attn_metadata.slot_mapping
-        if pcp_context.global_batch.is_dummy:
-            gathered_slot_mapping.fill_(-1)
-        local_slot_mapping = gathered_slot_mapping.view(
-            self._pcp_world_size,
-            num_local_padded_tokens,
-        )[self._pcp_rank]
+        if has_prefill:
+            gathered_slot_mapping = common_attn_metadata.slot_mapping
+            if pcp_context.global_batch.is_dummy:
+                gathered_slot_mapping.fill_(-1)
+            local_slot_mapping = gathered_slot_mapping.view(
+                self._pcp_world_size,
+                num_local_padded_tokens,
+            )[self._pcp_rank]
+        else:
+            # Decode tokens are replicated, so every rank must write its own
+            # SWA cache. The gathered mapping masks these writes off rank 0.
+            local_slot_mapping = pcp_context.global_slot_mappings[cache_group_idx]
+            if pcp_context.global_batch.is_dummy:
+                local_slot_mapping.fill_(-1)
+            assert local_slot_mapping.shape[0] == num_local_padded_tokens
         return common_attn_metadata.replace(
             slot_mapping=local_slot_mapping,
         )
@@ -2474,6 +2484,8 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,
             common_attn_metadata,
+            pcp_cache_group_idx,
+            has_prefill,
         )
         local_common_attn_metadata = self._build_graph_common_attn_metadata(
             local_common_attn_metadata,
@@ -2524,6 +2536,7 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         self.multistream_dsv4_dsa_overlap = False
         self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding()
         self._pcp_o_proj_weight_switches = None
+        self._pcp_o_proj_use_full_weight = False
         if not self.enable_pcp_o_proj_weight_sharding:
             return
         pcp_size = get_pcp_group().world_size
@@ -2603,7 +2616,7 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         return self._pcp_o_proj_weight_switches
 
     def _maybe_all_gather_pcp_o_proj_weights(self) -> None:
-        if not self.enable_pcp_o_proj_weight_sharding:
+        if not self._pcp_o_proj_use_full_weight:
             return
 
         for _, method, state in self._get_pcp_o_proj_weight_switches():
@@ -2629,9 +2642,50 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
             cache_is_prepared,
         )
 
+    def _forward_o_proj_with_local_weights(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        # Decode tokens and their KV cache updates are replicated across PCP
+        # ranks, so each rank projects the same attention output locally.
+        pcp_group = get_pcp_group()
+        num_tokens = o_proj_input.shape[0]
+        groups_per_rank = self.n_local_groups // pcp_group.world_size
+        group_input = o_proj_input.reshape(num_tokens, self.n_local_groups, -1)
+        group_input = group_input.narrow(1, pcp_group.rank_in_group * groups_per_rank, groups_per_rank).contiguous()
+
+        use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
+        if use_a5_quant_o_proj:
+            quant_input, input_scale = torch_npu.npu_dynamic_mx_quant(group_input, dst_type=torch.float8_e4m3fn)
+            projected = torch_npu.npu_transpose_quant_batchmatmul(
+                quant_input,
+                self.wo_a.weight,
+                dtype=torch.bfloat16,
+                bias=None,
+                group_sizes=(0, 0, 32),
+                x1_scale=input_scale.view(torch.float8_e8m0fnu),
+                x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+            )
+        else:
+            projected = torch_npu.npu_transpose_batchmatmul(
+                group_input,
+                self.wo_a.weight,
+                bias=None,
+                scale=None,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+                batch_split_factor=1,
+            )
+        partial_output = self.wo_b(projected.reshape(num_tokens, -1))
+        output[...] = pcp_group.all_reduce(partial_output)
+        return output
+
     def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         if not self.enable_pcp_o_proj_weight_sharding:
             return super()._forward_o_proj(o_proj_input, output)
+        if not self._pcp_o_proj_use_full_weight:
+            return self._forward_o_proj_with_local_weights(o_proj_input, output)
 
         weight_switches = self._get_pcp_o_proj_weight_switches()
         for layer, method, state in weight_switches:
@@ -2792,11 +2846,15 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         self,
         attn_metadata: dsa_v1.DSAMetadataDict | None,
     ) -> tuple[int, int, int]:
+        # Called before every O projection, including profiling. Reset the
+        # weight view for decode-only batches and absent metadata.
+        self._pcp_o_proj_use_full_weight = False
         if attn_metadata is None:
             return super()._get_o_proj_input_shape(attn_metadata)
         pcp_metadata = next(iter(attn_metadata.values()))
         if not isinstance(pcp_metadata, AscendDSAPCPMetadata):
             return super()._get_o_proj_input_shape(attn_metadata)
+        self._pcp_o_proj_use_full_weight = self.enable_pcp_o_proj_weight_sharding
         return (
             pcp_metadata.local_num_tokens_after_padding,
             self.n_local_heads,
