@@ -134,3 +134,14 @@ At T/E/K=65536/16/8, main 2612.04 µs versus fused 2749.08 µs (0.95×).
 These runs preserve the small-T win and large-T fallback decision; the
 absolute eager timings vary between runs and should not be read as device
 kernel durations.
+
+## Round 2 — preserve fallback for non-contiguous router inputs
+
+The eligibility guard now sends non-contiguous logits or correction bias to
+the existing operator path. The fused kernel and its contiguous-input launch
+arguments are unchanged, so the Round-1 timing matrix still applies to the
+eligible cases. The new fallback cases are checked independently in the NPU
+test suite (14/14 passed); no throughput claim is made for those inputs.
+The unchanged contiguous T/E/K=64/16/8 path was remeasured with ten
+post-warmup stream-event samples: main 543.76 µs, fused 372.19 µs (1.46×),
+consistent with Round 1.
