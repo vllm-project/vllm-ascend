@@ -646,30 +646,22 @@
 # ** 18. File: platform/patch_profiling_chunk.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCore.__init__`
-#   2. `Scheduler.update_from_output` (scheduler class, wrapped when profiling chunk is enabled)
 #    Why:
 #       Profiling-based dynamic chunk sizing needs to run a one-shot profiling pass
-#       after `model_executor` is ready, and to feed per-step execution latency back
-#       into `ProfilingChunkManager` so the history-aware chunk predictor can refine
-#       online. In multiprocessing `spawn` mode the child process starts a fresh
-#       interpreter, so monkey-patches applied in the parent are lost unless the
-#       subprocess entry point re-applies them before any `EngineCore` is created.
+#       after `model_executor` is ready. The scheduler itself does not own the
+#       executor, so this initialization still requires an EngineCore hook. Per-step
+#       execution timing is handled directly by `ProfilingChunkScheduler`.
 #    How：
 #       Replace `EngineCore.__init__` to call `scheduler.run_profiling_chunk_init`
-#       when present, then wrap `scheduler.update_from_output` once per process to
-#       read `model_output.execution_time_ms` and `scheduler_output` token/chunk
-#       metadata and call `ProfilingChunkManager.record_batch_execution_time` (and
-#       bootstrap target latency for the first chunk when needed). In `spawn`
-#       children, the module-level `_apply_profiling_patches()` re-runs the
-#       idempotent patch helper when this module is imported; `patch_engine_core.py`
-#       imports this module and additionally invokes the helper when profiling
-#       chunk sizing is enabled.
+#       when present. In `spawn` children, the module-level
+#       `_apply_profiling_patches()` re-runs the idempotent patch helper when this
+#       module is imported; `patch_engine_core.py` imports this module and
+#       additionally invokes the helper when profiling chunk sizing is enabled.
 #    Related PR (if no, explain why):
 #       No, vllm-ascend-specific profiling / scheduling integration.
 #    Future Plan:
-#       Remove or narrow this patch if upstream exposes stable hooks for backend
-#       profiling startup and per-step timing callbacks without monkey-patching
-#       `EngineCore` and the multiprocess entry point.
+#       Remove this patch if upstream exposes a stable hook for backend profiling
+#       startup after the model executor is ready.
 #
 # ** 19. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -116,6 +116,7 @@ class ProfilingChunkScheduler(Scheduler):
         # DP prefill balancing state for the throttle_prefills path; updated
         # at the end of every schedule() step that admits prefills.
         self.prefill_capacity_bound: bool = False
+        self._profiling_timing_done = False
 
         logger.info(
             "[ProfilingChunk] Scheduler initialized. base_chunk=%d, page_size=%d, smooth_factor=%.2f, min_chunk=%d",
@@ -251,6 +252,85 @@ class ProfilingChunkScheduler(Scheduler):
         if isinstance(result, list) and len(result) > 0:
             return float(result[0])
         return None
+
+    def _record_execution_timing(self, scheduler_output, model_output) -> None:
+        """Record execution timing for online model refinement."""
+        profiling_mgr = self.profiling_chunk_manager
+        set_time_count = 3
+        if not profiling_mgr.is_ready:
+            return
+
+        # Once both the target latency and history model are calibrated,
+        # stop collecting timing data and disable the synchronize-and-time
+        # calls in the model runner to avoid unnecessary pipeline stalls.
+        if profiling_mgr._set_time_done and profiling_mgr.predictor.history_fitted:
+            try:
+                from vllm_ascend.ascend_config import get_ascend_config
+
+                get_ascend_config().scheduler_config.profiling_chunk_config.need_timing = False
+            except RuntimeError:
+                pass
+            # Propagate this state through the next SchedulerOutput so the
+            # worker process disables its process-local timing as well.
+            self._profiling_timing_done = True
+            return
+
+        elapsed_time_ms = getattr(model_output, "execution_time_ms", 0.0)
+        if elapsed_time_ms <= 0:
+            return
+        elapsed_time = elapsed_time_ms / 1000.0
+
+        try:
+            total_tokens = getattr(scheduler_output, "total_num_scheduled_tokens", 0)
+            if total_tokens <= 0:
+                return
+
+            num_scheduled_tokens = getattr(scheduler_output, "num_scheduled_tokens", {})
+            request_chunks = []
+
+            total_hist_tokens = 0
+            new_reqs = getattr(scheduler_output, "scheduled_new_reqs", [])
+            for req in new_reqs:
+                req_id = getattr(req, "request_id", None) or getattr(req, "req_id", None)
+                if req_id and req_id in num_scheduled_tokens:
+                    chunk_size = num_scheduled_tokens[req_id]
+                    hist_seq_len = getattr(req, "num_computed_tokens", 0)
+                    total_hist_tokens += hist_seq_len
+                    if chunk_size > 0:
+                        request_chunks.append((chunk_size, hist_seq_len))
+
+            cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
+            if cached_reqs is not None:
+                req_ids = getattr(cached_reqs, "req_ids", [])
+                computed_tokens_list = getattr(cached_reqs, "num_computed_tokens", [])
+                for i, req_id in enumerate(req_ids):
+                    if req_id in num_scheduled_tokens:
+                        chunk_size = num_scheduled_tokens[req_id]
+                        hist_seq_len = computed_tokens_list[i] if i < len(computed_tokens_list) else 0
+                        total_hist_tokens += hist_seq_len
+                        if chunk_size > 0:
+                            request_chunks.append((chunk_size, hist_seq_len))
+
+            # Collect three first-chunk samples before marking calibration done.
+            if total_hist_tokens == 0 and not profiling_mgr._set_time_done:
+                profiling_mgr.predictor.set_target_latency(0, elapsed_time * 1000)
+                profiling_mgr._set_time_count += 1
+                if profiling_mgr._set_time_count >= set_time_count:
+                    profiling_mgr._set_time_done = True
+
+            if not request_chunks:
+                logger.debug("[ProfilingChunk] Skipping timing sample: unable to extract per-request chunk info")
+                return
+
+            if not profiling_mgr.predictor.history_fitted:
+                profiling_mgr.record_batch_execution_time(request_chunks, elapsed_time)
+
+        except (AttributeError, TypeError) as e:
+            logger.debug("Failed to record execution timing: %s", e)
+
+    def update_from_output(self, scheduler_output, model_output):
+        self._record_execution_timing(scheduler_output, model_output)
+        return super().update_from_output(scheduler_output, model_output)
 
     # ------------------------------------------------------------------
     # schedule() override
@@ -1262,6 +1342,8 @@ class ProfilingChunkScheduler(Scheduler):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        if self._profiling_timing_done:
+            scheduler_output.disable_profiling_timing = True
         return scheduler_output
 
 
