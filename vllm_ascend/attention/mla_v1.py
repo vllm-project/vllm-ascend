@@ -490,6 +490,13 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 ),
             )
         )
+        logger.info(
+            "cls probe: sched=%s max_q=%s thr=%s nd=%s np=%s state=%s",
+            common_attn_metadata.num_scheduled_tokens,
+            common_attn_metadata.max_query_len,
+            self.decode_threshold,
+            self.num_decodes, self.num_prefills, common_attn_metadata.attn_state,
+        )
         self.set_num_actual_tokens(common_attn_metadata)
         assert self.num_decodes + self.num_prefills == num_reqs
         assert self.num_decode_tokens + self.num_prefill_tokens == common_attn_metadata.num_actual_tokens
