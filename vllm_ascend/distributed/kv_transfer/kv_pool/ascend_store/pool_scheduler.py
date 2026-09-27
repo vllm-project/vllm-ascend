@@ -964,9 +964,7 @@ class KVPoolScheduler:
         # Immediate block free: requests finished in the previous output
         # processing and requests preempted by this schedule released their
         # blocks; the worker fences their queued saves before reuse.
-        meta.released_req_ids = set(scheduler_output.preempted_req_ids) | set(
-            scheduler_output.finished_req_ids
-        )
+        meta.released_req_ids = set(scheduler_output.preempted_req_ids) | set(scheduler_output.finished_req_ids)
 
         for request in scheduler_output.scheduled_new_reqs:
             req_meta = self._process_new_request(request, scheduler_output, force_skip_save)
