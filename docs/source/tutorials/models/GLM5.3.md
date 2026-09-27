@@ -26,7 +26,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version          | Hardware Requirements                                         | Download Links |
 |--------------------------|---------------------------------------------------------------|----------------|
-|  `GLM-5.3-w8a8c8`        | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 32) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8) |
+|  `GLM-5.3-W8A8C8`        | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 32) | [ModelScope](https://modelscope.cn/models/Eco-Tech/GLM-5.3-W8A8C8) |
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
@@ -149,7 +149,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
 #### 5.1.1 Context Below 1M
 
 === "A3 series"
-    -  `GLM-5.3-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
+    -  `GLM-5.3-W8A8C8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
 
     Run the following scripts on two nodes respectively.
 
@@ -179,7 +179,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
     export VLLM_ASCEND_ENABLE_MLAPO=1
 
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8 \
         --host 0.0.0.0 \
         --port 8077 \
         --safetensors-load-strategy prefetch \
@@ -235,7 +235,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
     export VLLM_ASCEND_ENABLE_MLAPO=1
 
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8 \
         --host 0.0.0.0 \
         --port 8077 \
         --headless \
@@ -269,7 +269,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
 
 === "A2 series"
 
-    - `GLM-5.3-w8a8c8`: can be deployed on 4 Atlas 800 A2 (64GB × 32).
+    - `GLM-5.3-W8A8C8`: can be deployed on 4 Atlas 800 A2 (64GB × 32).
 
     Run the following scripts on four nodes respectively.
 
@@ -302,7 +302,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
     export VLLM_ENGINE_READY_TIMEOUT_S=1200
 
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8 \
         --host 0.0.0.0 \
         --port 8077 \
         --max-model-len 135000 \
@@ -363,7 +363,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
     export VLLM_ENGINE_READY_TIMEOUT_S=1200
 
     # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8 \
         --host 0.0.0.0 \
         --port 8077 \
         --headless \
