@@ -262,6 +262,11 @@ class TestQuantizeWeightMxFp8(TestBase):
             wo.quantize_weight_mx_fp8(weight)
         get_alg.assert_not_called()
 
+    def test_npu_scale_policy_delegates_to_production_selector(self):
+        with unittest.mock.patch.object(wo, "get_dynamic_mx_quant_scale_alg", return_value=1) as get_alg:
+            self.assertEqual(wo._get_npu_mx_scale_alg(), 1)
+        get_alg.assert_called_once_with()
+
     def test_npu_wrapper_dispatches_by_device(self):
         # The NPU branch is unreachable on CPU (device check), so assert the
         # routing guard itself rather than the operator.
