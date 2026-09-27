@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
 from vllm_ascend.ops.triton.moe_gating_topk_map_record import moe_gating_topk_map_record
 from vllm_ascend.utils import enable_custom_op
 
@@ -80,3 +81,16 @@ def test_gating_topk_map_record_uses_updated_routing_table_on_replay():
         torch.testing.assert_close(ids, table[0, logical_ids.long()], rtol=0, atol=0)
         torch.testing.assert_close(weights, expected_weights, rtol=1e-4, atol=1e-5)
         torch.testing.assert_close(load, torch.zeros_like(load), rtol=0, atol=0)
+
+
+def test_fused_router_falls_back_for_noncontiguous_inputs():
+    class RecordingState:
+        fused_record_allowed = True
+
+    router = AscendFusedTopKRouter(top_k=8, global_num_experts=32, eplb_state=RecordingState())
+    noncontiguous_logits = torch.randn(64, 64)[:, ::2]
+    assert router._try_small_expert_fused_routing(noncontiguous_logits, None, 1, 1, 1) is None
+
+    router.e_score_correction_bias = torch.randn(64)[::2]
+    contiguous_logits = torch.randn(64, 32)
+    assert router._try_small_expert_fused_routing(contiguous_logits, None, 1, 1, 1) is None

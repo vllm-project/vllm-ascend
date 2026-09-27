@@ -155,6 +155,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             state is None
             or not getattr(state, "fused_record_allowed", False)
             or self.capture_fn is not None
+            or not router_logits.is_contiguous()
             or router_logits.shape[0] > MAX_FUSED_ROUTING_TOKENS
             or router_logits.shape[1] > MAX_FUSED_ROUTING_EXPERTS
             or self.top_k > MAX_FUSED_ROUTING_TOP_K
@@ -165,7 +166,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         ):
             return None
         bias = self.e_score_correction_bias
-        if bias is not None and bias.dtype != router_logits.dtype:
+        if bias is not None and (bias.dtype != router_logits.dtype or not bias.is_contiguous()):
             return None
         table = state.expert_replica_routing_table
         load = state.expert_load_view
