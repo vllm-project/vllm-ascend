@@ -14,10 +14,11 @@ from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_MET
 
 
 class TestAscendW4A8DynamicLinearMethod(TestBase):
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.mlp_tp_enable", return_value=False)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_tensor_model_parallel_rank", return_value=0)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config")
-    def setUp(self, mock_get_current_vllm_config, _mock_get_tp_world_size, _mock_get_tp_rank):
+    def setUp(self, mock_get_current_vllm_config, _mock_get_tp_world_size, _mock_get_tp_rank, _mock_mlp_tp_enable):
         mock_vllm_config = Mock()
         mock_vllm_config.quant_config = Mock(quant_description={"group_size": 0, "version": "1.0.0"})
         mock_get_current_vllm_config.return_value = mock_vllm_config
@@ -53,6 +54,16 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
         mock_vllm_config.quant_config = Mock(quant_description={"group_size": 0, "version": "0"})
         with self.assertRaisesRegex(ValueError, "version 1.0.0"):
+            AscendW4A8DynamicLinearMethod()
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.mlp_tp_enable", return_value=True)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config")
+    def test_rejects_finegrained_mlp_tp(self, mock_get_current_vllm_config, _mock_mlp_tp_enable):
+        mock_vllm_config = Mock()
+        mock_vllm_config.quant_config = Mock(quant_description={"group_size": 0, "version": "1.0.0"})
+        mock_get_current_vllm_config.return_value = mock_vllm_config
+
+        with self.assertRaisesRegex(ValueError, "does not support fine-grained MLP TP"):
             AscendW4A8DynamicLinearMethod()
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz", side_effect=identity)

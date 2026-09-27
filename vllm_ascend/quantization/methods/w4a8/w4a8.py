@@ -35,6 +35,7 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     dispose_tensor,
     maybe_trans_nz,
+    mlp_tp_enable,
 )
 
 from ..base import AscendLinearScheme, AscendMoEScheme, QuantType
@@ -58,6 +59,8 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         quant_version = quant_description.get("version", "0")
         if quant_version != "1.0.0":
             raise ValueError("W4A8 dynamic linear requires quantization version 1.0.0.")
+        if mlp_tp_enable():
+            raise ValueError("W4A8 dynamic linear does not support fine-grained MLP TP.")
         self.tp_size = get_tensor_model_parallel_world_size()
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
