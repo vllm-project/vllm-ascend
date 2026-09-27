@@ -46,11 +46,11 @@ def _copy_pcp_kv_cache_kernel(
             valid = (t < N) & (s >= 0)
             ko = (s[:, None] // BS) * KS0 + (s[:, None] % BS) * KS1 + d * KS3
             k = tl.load(K + ko, mask=valid[:, None] & (d < KD), other=0)
-            tl.store(P + t[:, None] * (KD + RD) + d, k, mask=(t[:, None] < N) & (d < KD))
+            tl.store(P + t[:, None] * (KD + RD) + d, k, mask=(t[:, None] < N) & (d < KD))  # type: ignore[index]
             if RD > 0:
                 ro = (s[:, None] // BS) * RS0 + (s[:, None] % BS) * RS1 + d * RS3
                 r = tl.load(R + ro, mask=valid[:, None] & (d < RD), other=0)
-                tl.store(P + t[:, None] * (KD + RD) + KD + d, r, mask=(t[:, None] < N) & (d < RD))
+                tl.store(P + t[:, None] * (KD + RD) + KD + d, r, mask=(t[:, None] < N) & (d < RD))  # type: ignore[index]
 
 
 def _get_pcp_kv_cache_rows(num_tokens: int, num_cores: int, block_cols: int, element_size: int, num_caches: int) -> int:
