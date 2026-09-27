@@ -50,16 +50,44 @@ from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 
+from vllm_ascend.ascend_forward_context import in_profile_run
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
     get_otp_group,
 )
 from vllm_ascend.utils import (
     enable_dsa_cp,
+    get_potential_max_tokens,
     mlp_tp_enable,
     oproj_tp_enable,
     shared_expert_dp_enabled,
 )
+
+
+def _in_profile_run() -> bool:
+    # Profile dummy batches may exceed the capacity; read the module mirror
+    # (a ContextVar read would crash torch.compile tracing; it bakes at trace time).
+    return in_profile_run()
+
+
+def _exchange_capacity(num_tokens: int, label: str) -> int:
+    """Static exchange capacity for decode-shaped steps only; covering mnbt
+    like embedding TP does would scale every per-layer buffer ~16x."""
+    capacity = get_potential_max_tokens()
+    if num_tokens > capacity and not _in_profile_run():
+        # Only decode-shaped steps fit; a prefill-shaped step (e.g. a request
+        # scheduled directly on the decode node) cannot.
+        raise ValueError(f"{label} static exchange capacity {capacity} < num_tokens {num_tokens}.")
+    return capacity
+
+
+# gate_up records the local token count per MLP block; down trims with it
+# (gate_up -> act -> down run sequentially, so the pairing never races).
+_mlp_tp_local_tokens: dict[str, int] = {}
+
+
+def _mlp_block_key(prefix: str) -> str:
+    return prefix.rsplit(".gate_up_proj", 1)[0].rsplit(".down_proj", 1)[0]
 
 
 class CustomLinearOp:
@@ -272,13 +300,33 @@ class MLPColumnParallelOp(CustomColumnParallelOp):
         self,
         input_: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        num_tokens = input_.shape[0]
+        capacity = _exchange_capacity(num_tokens, "MLP TP")
+        _mlp_tp_local_tokens[_mlp_block_key(self.prefix)] = num_tokens
+
+        # Address-stable exchange buffers keep HCCL ops replayable in ACL graphs
+        # (per-call allocations desync the captured collective).
+        if not hasattr(self, "_ag_in_buf"):
+            self._ag_in_buf = torch.zeros((capacity, input_.shape[1]), dtype=input_.dtype, device=input_.device)
+            self._ag_out_buf = torch.empty(
+                (self.tp_size * capacity, input_.shape[1]), dtype=input_.dtype, device=input_.device
+            )
+
+        # Self-pad to the static capacity so per-rank token counts may differ.
+        self._ag_in_buf.zero_()
+        if num_tokens <= capacity:
+            self._ag_in_buf[:num_tokens].copy_(input_)
+        dist.all_gather_into_tensor(self._ag_out_buf, self._ag_in_buf, group=self.comm_group.device_group)
+
         bias = self.bias if not self.skip_bias_add else None
-        # Matrix multiply.
         assert self.quant_method is not None
-        input_parallel = self.comm_group.all_gather(input_, 0)
-        output = self.quant_method.apply(self.layer, input_parallel, bias)
+        output = self.quant_method.apply(self.layer, self._ag_out_buf, bias)
 
         output_bias = self.bias if self.skip_bias_add else None
+        if num_tokens > capacity:
+            # Profiling run with an oversized dummy batch: exchange shapes stay
+            # capacity-sized; restore the caller-visible shape (values unused).
+            return output.new_zeros((num_tokens, output.shape[1])), output_bias
         return output, output_bias
 
 
@@ -295,11 +343,32 @@ class MLPRowParallelOp(CustomRowParallelOp):
 
         assert self.quant_method is not None
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.layer.bias
+        capacity = get_potential_max_tokens()
+        local_tokens = _mlp_tp_local_tokens.get(_mlp_block_key(self.prefix))
+        if local_tokens is None:
+            # Only a fused gate_up_proj records the count; separate up/down_proj
+            # naming is not sharded consistently — fail instead of trimming blindly.
+            raise ValueError(
+                f"MLP TP down op for {self.prefix} has no gate_up-recorded token count: "
+                "the dense MLP must use a fused gate_up_proj linear."
+            )
+        if not hasattr(self, "_rs_out_buf"):
+            self._rs_out_buf = torch.empty(
+                (capacity, self.layer.output_size), dtype=input_parallel.dtype, device=input_parallel.device
+            )
+        if local_tokens > capacity:
+            # Profiling run beyond capacity: gate_up already returned
+            # [num_tokens]-shaped zeros, so skip the capacity-shaped exchange.
+            output = self._rs_out_buf.new_zeros((input_parallel.shape[0], self.layer.output_size))
+            output_bias = self.bias if self.skip_bias_add else None
+            return output, output_bias
+
         output_parallel = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
-        output = self.comm_group.reduce_scatter(output_parallel, 0)
+        dist.reduce_scatter_tensor(self._rs_out_buf, output_parallel, group=self.comm_group.device_group)
 
         output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
+        # Trim the padding tail with the gate_up-recorded local token count.
+        return self._rs_out_buf[:local_tokens], output_bias
 
 
 class DSV4OProjColumnParallelOp(CustomColumnParallelOp):
@@ -348,35 +417,46 @@ class OProjRowParallelOp(CustomRowParallelOp):
         input_: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         input_parallel = self.get_input_parallel(input_)
-
-        # Prepare tensors for all-to-all communication
-        local_batch_size = input_parallel.size(0)
+        num_tokens = input_parallel.shape[0]
         chunk_size = self.input_size_per_partition
-        total_batch_size = local_batch_size * self.tp_size
+        capacity = _exchange_capacity(num_tokens, "o_proj TP")
 
-        # Reshape tensor for efficient cross-device transfer:
-        # [batch, dim] -> [tp_size, batch, chunk] -> flattened
-        send_buf = input_parallel.reshape(-1, self.tp_size, chunk_size).transpose(0, 1).contiguous().view(-1)
+        # Address-stable buffers keep HCCL replayable in ACL graphs; allocated
+        # on the first (profiling) call, which always precedes capture.
+        if not hasattr(self, "_send_buf"):
+            buf_shape = (self.tp_size, capacity, chunk_size)
+            self._send_buf = torch.zeros(buf_shape, dtype=input_parallel.dtype, device=input_parallel.device)
+            self._recv_buf = torch.empty_like(self._send_buf)
 
-        # Create receive buffer
-        recv_buf = torch.empty(total_batch_size * chunk_size, dtype=input_parallel.dtype, device=input_parallel.device)
-
-        # Perform all-to-all communication
-        dist.all_to_all_single(recv_buf, send_buf, group=self.comm_group.device_group)
-        input_parallel = recv_buf.view(total_batch_size, chunk_size)
+        # Pad to the capacity and copy the whole static block: a dynamic-endpoint
+        # slice copy would specialize num_tokens under torch.compile (NPU crash).
+        self._send_buf.zero_()
+        if num_tokens <= capacity:
+            padded = torch.nn.functional.pad(input_parallel, (0, 0, 0, capacity - num_tokens))
+            self._send_buf.copy_(padded.reshape(capacity, self.tp_size, chunk_size).transpose(0, 1))
+        dist.all_to_all_single(self._recv_buf.view(-1), self._send_buf.view(-1), group=self.comm_group.device_group)
+        input_parallel = self._recv_buf.view(self.tp_size * capacity, chunk_size)
 
         # Only fuse bias add for rank 0 to avoid duplicate bias addition in TP>1
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         assert self.quant_method is not None
         output_parallel = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
 
-        # otp-specific: Combine partial results across devices
-        output = self.comm_group.reduce_scatter(output_parallel, dim=0)
-        output = output.view(input_.shape[0], self.layer.output_size)
+        # reduce_scatter via a raw dist collective into an address-stable buffer
+        # (the group helper allocates per call, which desyncs HCCL under graphs).
+        if not hasattr(self, "_rs_out_buf"):
+            self._rs_out_buf = torch.empty(
+                (capacity, output_parallel.shape[1]), dtype=output_parallel.dtype, device=output_parallel.device
+            )
+        dist.reduce_scatter_tensor(self._rs_out_buf, output_parallel, group=self.comm_group.device_group)
 
-        # Handle bias return based on configuration
         output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
+        if num_tokens > capacity:
+            # Profiling run with an oversized dummy batch: exchange shapes stay
+            # capacity-sized; restore the caller-visible shape (values unused).
+            return self._rs_out_buf.new_zeros((num_tokens, self._rs_out_buf.shape[1])), output_bias
+        # Each rank's own tokens land in its reduce_scatter chunk: trim the tail.
+        return self._rs_out_buf[:num_tokens], output_bias
 
     def update_attrs(self):
         super().update_attrs()

@@ -1,11 +1,10 @@
 """Unit tests for fine-grained TP support in the Ascend V2 model runner.
 
 Pure-mock tests (CPU tensors, no NPU): they lock the runner-side pad/trim
-contract of sample()/_dummy_run (lmhead TP), guard the copied dispatch tail
+contract of sample()/_dummy_run (lmhead TP) and guard the copied dispatch tail
 with a canary that compares it call-by-call against upstream
-GPUModelRunner.sample, and pin the o_proj TP graph-mode guard that turns an
-eagerly dispatched step into an explicit error. Collective behavior itself
-is validated on real hardware.
+GPUModelRunner.sample. Collective behavior itself is validated on real
+hardware.
 """
 
 from types import SimpleNamespace
@@ -13,7 +12,6 @@ from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 import torch
-from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.eplb_utils import step_eplb_after
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -241,14 +239,3 @@ def test_dummy_lmhead_collective_precedes_eplb(lmhead_enabled, is_profile, has_h
         torch.testing.assert_close(dummy_input, hidden_states[torch.zeros(16, dtype=torch.long)])
     else:
         runner.model.compute_logits.assert_not_called()
-
-
-def test_finegrained_tp_guard_contract():
-    runner = object.__new__(NPUModelRunner)
-    runner._finegrained_tp_requires_graph = False
-    NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.NONE)
-    runner._finegrained_tp_requires_graph = True
-    with pytest.raises(RuntimeError, match="captured graph"):
-        NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.NONE)
-    NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.FULL_DECODE_ONLY)
-    NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.FULL)

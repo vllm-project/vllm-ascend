@@ -33,8 +33,6 @@ def _make_runner(need_timing: bool = True):
     runner.adaptive_verification = None
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
-    # Set by NPUModelRunner.__init__ on real instances.
-    runner._finegrained_tp_requires_graph = False
     # Empty groups keep prepare_dummy_attn's V4.1 ring-state prep a no-op;
     # these tests focus on buffer refresh / upstream passthrough only.
     runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
