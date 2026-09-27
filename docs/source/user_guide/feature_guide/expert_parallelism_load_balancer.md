@@ -115,7 +115,7 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | `policy` | `stair` on Ascend | Select `stair` for the Ascend policy or `default` for upstream-policy comparison experiments. |
 | `log_balancedness` | `false` | Log expert balancedness metrics. |
 | `log_balancedness_interval` | `1` | Interval between balancedness log entries. |
-| `communicator` | `None` | Leave unset for automatic Gloo selection, or set `torch_gloo`. |
+| `communicator` | `None` | Leave unset for automatic Gloo selection, set `torch_gloo` for CPU staging, or set `hixl` for registered NPU-to-NPU transfers. |
 
 These fields may also be passed together as JSON through `--eplb-config`.
 They must not be placed in `--additional-config` for MRv2.
@@ -156,8 +156,13 @@ vllm serve Qwen/Qwen3-30B-A3B \
 
 !!! IMPORTANT
 
-    MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to asynchronous Gloo movement. It rejects legacy `dynamic_eplb`, recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as
-    well as communicators other than Gloo. Validate the target model, topology, graph mode, and traffic independently before production use.
+    MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to
+    asynchronous movement. It rejects elastic EP, legacy `dynamic_eplb`,
+    recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as
+    well as communicators other than Gloo and HIXL. HIXL requires the CANN HIXL
+    runtime and working device connectivity on every EPLB rank. Validate the
+    target model, topology, graph mode, and traffic independently before
+    production use.
 
 ### Model Runner V1: Legacy EPLB
 

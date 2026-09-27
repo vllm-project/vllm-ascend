@@ -278,6 +278,22 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(vllm_config.parallel_config.eplb_config.communicator, "torch_gloo")
         warning.assert_called_once()
 
+    def test_validate_eplb_config_keeps_explicit_hixl_when_forcing_async(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=False,
+            communicator="hixl",
+        )
+
+        with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning") as warning:
+            _validate_eplb_config(vllm_config)
+
+        self.assertTrue(vllm_config.parallel_config.eplb_config.use_async)
+        self.assertEqual(vllm_config.parallel_config.eplb_config.communicator, "hixl")
+        warning.assert_called_once()
+
     def test_validate_eplb_config_rejects_nccl_before_sync_normalization(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
@@ -356,6 +372,19 @@ class TestNPUPlatform(TestBase):
             patch.dict("os.environ", {}, clear=True),
             self.assertRaisesRegex(ValueError, "got 'nixl'"),
         ):
+            _validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_async_allows_hixl_communicator(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.enable_elastic_ep = False
+        vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=True,
+            communicator="hixl",
+        )
+
+        with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_allows_load_collection_phase_with_dbo_and_spec_decode(
