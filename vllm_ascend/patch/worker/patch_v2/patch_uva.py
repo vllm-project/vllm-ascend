@@ -25,8 +25,6 @@ import torch
 import vllm.v1.worker.gpu.buffer_utils
 from vllm.logger import logger
 
-from vllm_ascend.device.uva import can_get_npu_view_from_cpu_tensor, get_npu_view_from_cpu_tensor
-
 
 def check_triton_ascend_version_valid() -> bool:
     """
@@ -135,11 +133,16 @@ class UvaBufferWrapper:
         self._np: np.ndarray = self._cpu.numpy()
         self._modified_indices: set[int] = set()
         requested_real_uva = is_uva_available()
-        self._use_real_uva = requested_real_uva and can_get_npu_view_from_cpu_tensor(self._cpu)
+        if requested_real_uva:
+            import vllm_ascend.vllm_ascend_C  # noqa: F401
+
+        self._use_real_uva = requested_real_uva and torch.ops._C_ascend.can_get_npu_view_from_cpu_tensor(self._cpu)
         if requested_real_uva and not self._use_real_uva:
             logger.warning_once("Pinned CPU memory is not mapped for NPU UVA; using the async H2D fallback")
         self._uva: torch.Tensor = (
-            get_npu_view_from_cpu_tensor(self._cpu) if self._use_real_uva else torch.zeros_like(self._cpu, device="npu")
+            torch.ops._C_ascend.get_npu_view_from_cpu_tensor(self._cpu)
+            if self._use_real_uva
+            else torch.zeros_like(self._cpu, device="npu")
         )
 
     def _mark_cpu_modified(self, key: int):

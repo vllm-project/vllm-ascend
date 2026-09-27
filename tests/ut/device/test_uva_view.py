@@ -1,6 +1,7 @@
 """Runtime contract for an NPU view of registered pinned CPU memory."""
 
 import gc
+import importlib
 import os
 import weakref
 from importlib.metadata import PackageNotFoundError, version
@@ -8,9 +9,8 @@ from importlib.metadata import PackageNotFoundError, version
 import pytest
 import torch
 
-from vllm_ascend.device.uva import can_get_npu_view_from_cpu_tensor, get_npu_view_from_cpu_tensor
-
 pytest.importorskip("torch_npu")
+importlib.import_module("vllm_ascend.vllm_ascend_C")
 triton = pytest.importorskip("triton")
 tl = pytest.importorskip("triton.language")
 
@@ -49,8 +49,8 @@ def _read_on_npu(view: torch.Tensor) -> torch.Tensor:
 def test_npu_view_preserves_metadata(dtype: torch.dtype):
     base = torch.arange(64, dtype=dtype).pin_memory()
     cpu = base[3:58:2]
-    assert can_get_npu_view_from_cpu_tensor(cpu)
-    view = get_npu_view_from_cpu_tensor(cpu)
+    assert torch.ops._C_ascend.can_get_npu_view_from_cpu_tensor(cpu)
+    view = torch.ops._C_ascend.get_npu_view_from_cpu_tensor(cpu)
 
     assert view.device.type == "npu"
     assert view.shape == cpu.shape
@@ -62,7 +62,11 @@ def test_npu_views_keep_cpu_storage_alive():
     def make_views():
         base = torch.arange(32, dtype=torch.int32).pin_memory()
         cpu = base[1::2]
-        return weakref.ref(cpu), get_npu_view_from_cpu_tensor(cpu), get_npu_view_from_cpu_tensor(cpu)
+        return (
+            weakref.ref(cpu),
+            torch.ops._C_ascend.get_npu_view_from_cpu_tensor(cpu),
+            torch.ops._C_ascend.get_npu_view_from_cpu_tensor(cpu),
+        )
 
     cpu_ref, first, second = make_views()
     gc.collect()
@@ -82,7 +86,7 @@ def test_npu_views_keep_cpu_storage_alive():
 def test_npu_view_reads_cpu_updates_without_copy(dtype: torch.dtype):
     base = torch.arange(64, dtype=dtype).pin_memory()
     cpu = base[3:58:2]
-    view = get_npu_view_from_cpu_tensor(cpu)
+    view = torch.ops._C_ascend.get_npu_view_from_cpu_tensor(cpu)
     torch.testing.assert_close(_read_on_npu(view), cpu)
 
     cpu.add_(100)
@@ -94,7 +98,7 @@ def test_npu_view_keeps_cpu_storage_alive():
     def make_view():
         base = torch.arange(32, dtype=torch.int32).pin_memory()
         cpu = base[1::2]
-        return weakref.ref(cpu), get_npu_view_from_cpu_tensor(cpu)
+        return weakref.ref(cpu), torch.ops._C_ascend.get_npu_view_from_cpu_tensor(cpu)
 
     cpu_ref, view = make_view()
     gc.collect()
@@ -108,7 +112,7 @@ def test_npu_view_keeps_cpu_storage_alive():
 
 def test_empty_npu_view():
     cpu = torch.empty((0, 4), dtype=torch.int32, pin_memory=True)
-    view = get_npu_view_from_cpu_tensor(cpu)
+    view = torch.ops._C_ascend.get_npu_view_from_cpu_tensor(cpu)
     assert view.device.type == "npu"
     assert view.shape == cpu.shape
     assert view.stride() == cpu.stride()
@@ -116,8 +120,8 @@ def test_empty_npu_view():
 
 
 def test_npu_view_rejects_unpinned_or_device_input():
-    assert not can_get_npu_view_from_cpu_tensor(torch.ones(4))
+    assert not torch.ops._C_ascend.can_get_npu_view_from_cpu_tensor(torch.ones(4))
     with pytest.raises(RuntimeError, match="pinned CPU memory"):
-        get_npu_view_from_cpu_tensor(torch.ones(4))
+        torch.ops._C_ascend.get_npu_view_from_cpu_tensor(torch.ones(4))
     with pytest.raises(RuntimeError, match="CPU tensor"):
-        get_npu_view_from_cpu_tensor(torch.ones(4, device="npu"))
+        torch.ops._C_ascend.get_npu_view_from_cpu_tensor(torch.ones(4, device="npu"))

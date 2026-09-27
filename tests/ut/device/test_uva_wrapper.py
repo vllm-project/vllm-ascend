@@ -10,6 +10,7 @@ import torch
 from vllm.v1.worker.gpu import buffer_utils
 
 pytest.importorskip("torch_npu")
+importlib.import_module("vllm_ascend.vllm_ascend_C")
 patch_uva = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_uva")
 
 pytestmark = pytest.mark.skipif(not torch.npu.is_available(), reason="requires an Ascend NPU")
@@ -28,7 +29,7 @@ def test_fallback_copies_modified_prefix_and_sparse_rows(monkeypatch):
 
 def test_unmapped_storage_uses_fallback(monkeypatch):
     monkeypatch.setattr(patch_uva, "is_uva_available", lambda: True)
-    monkeypatch.setattr(patch_uva, "can_get_npu_view_from_cpu_tensor", lambda _: False)
+    monkeypatch.setattr(torch.ops._C_ascend, "can_get_npu_view_from_cpu_tensor", lambda _: False)
     buffer = patch_uva.UvaBufferWrapper((2, 2), torch.int32)
 
     assert not buffer._use_real_uva

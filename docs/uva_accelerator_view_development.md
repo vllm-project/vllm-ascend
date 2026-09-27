@@ -11,8 +11,7 @@
 | 层 | 实现 | 职责 |
 | --- | --- | --- |
 | Host runtime | `csrc/torch_binding.cpp` | 校验输入、查询 mapping、创建非 owning view、注册 `_C_ascend` op |
-| Python API | `vllm_ascend/device/uva.py` | 加载扩展并调用两个 `_C_ascend` op |
-| MRV2 wrapper | `vllm_ascend/patch/worker/patch_v2/patch_uva.py` | 仅在 real UVA 已请求且当前 allocation 可映射时选用 view；否则保持异步 H2D fallback |
+| MRV2 wrapper | `vllm_ascend/patch/worker/patch_v2/patch_uva.py` | 请求 real UVA 时加载 `vllm_ascend_C`，直接调用 `_C_ascend` op；仅在当前 allocation 可映射时选用 view，否则保持异步 H2D fallback |
 
 这是 `vllm_ascend_C` 的 Host runtime utility，不是 AscendC/ACLNN compute op；不要放入 `CUSTOM_OPS`、`op_host` 或 `op_kernel`。当前源码的 CANN 基线为 9.1.0，不需要 `aclrtHostGetDevicePointer` 的 CMake API existence probe。API 可编译不等于任意 pinned allocation 均可映射；以每次 runtime 查询的返回值为准。
 
@@ -70,7 +69,7 @@ PY
 
 ## Component UT 方法与执行边界
 
-先让 vLLM 源码/安装版本与 vLLM-Ascend 对齐，再在有 Ascend NPU 的环境中运行：
+先让 vLLM 源码/安装版本与 vLLM-Ascend 对齐，再在有 Ascend NPU 的环境中运行。组件测试加载 `vllm_ascend_C` 并直接调用 `torch.ops._C_ascend.*`：
 
 ```bash
 PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True \
