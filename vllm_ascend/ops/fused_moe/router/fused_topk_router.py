@@ -204,6 +204,10 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             raise RuntimeError("EPLB replica routing table is not initialized.")
         if state.num_valid_tokens_tensor is None:
             raise RuntimeError("EPLB num-valid-token plumbing is not initialized.")
+        if tid2eid is None:
+            # No lookup table: fall through to the CANN op, which raises its
+            # own (pre-existing) error for a missing tid2eid.
+            return None
         weights, ids = torch.ops.vllm.hash_gating_top_k_map_and_record(
             router_logits,
             input_ids,

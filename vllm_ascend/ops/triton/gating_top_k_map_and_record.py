@@ -322,8 +322,11 @@ def hash_gating_top_k_map_and_record_kernel(
         s_j = tl.sum(tl.where(offs[None, :] == e_j[:, None], score, 0.0), axis=1)
         phys = tl.load(table_ptr + (trows % TABLE_ROWS) * num_experts + e_j, mask=tmask, other=-1)
         tl.store(ids_ptr + trows * K + j, phys, mask=tmask)
-        local = phys - local_expert_start
-        hit = active & (local >= 0) & (local < LOCAL_COUNT)
+        raw_local = phys - local_expert_start
+        hit = active & (raw_local >= 0) & (raw_local < LOCAL_COUNT)
+        # Clamp so masked lanes (phys = -1 on padding rows) keep the address
+        # in bounds even though the atomic itself is masked off.
+        local = tl.maximum(raw_local, 0)
         tl.atomic_add(load_ptr + local_expert_start + local, 1, mask=hit)
         sc = tl.where(karange[None, :] == j, s_j[:, None], sc)
 
