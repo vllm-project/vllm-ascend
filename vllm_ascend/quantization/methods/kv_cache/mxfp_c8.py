@@ -75,12 +75,10 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
             # initialize the state the impl relies on here.
             layer.impl.enable_hamming_sparse = False
 
-        # Load v_cache static quantization scale. E8M0 bias is 127, so 127 is
-        # the neutral scale of 1.0 -- a deterministic fallback for checkpoints
-        # missing a layer's V-cache scale.
+        # The checkpoint supplies the static V-cache scale.
         hidden_size = layer.num_kv_heads * layer.head_size_v
         weight_param = torch.nn.Parameter(
-            torch.full((hidden_size,), 127, dtype=torch.uint8),
+            torch.empty((hidden_size,), dtype=torch.uint8),
             requires_grad=False,
         )
         layer.register_parameter("v_cache_scale", weight_param)

@@ -84,6 +84,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
@@ -960,39 +961,6 @@ class NPUModelRunner(GPUModelRunner):
             device=self.device,
         ).unsqueeze(1)
 
-    def _copy_kv_cache_blocks_by_layer_views(self, block_copies: list) -> None:
-        """Apply prefix-cache CoW block copies through the per-layer views.
-
-        The generic runner views each cache tensor's whole storage as
-        (num_blocks, page_bytes), which breaks on Ascend: PD deployments
-        over-allocate 2 MiB-aligned buffers (the divisibility assert fires),
-        and hybrid buffers are sectioned rather than block-major. Every
-        per-layer cache view is block-indexed on dim 0, so copying through
-        the views is correct for every layout.
-
-        Dim 0 counts scheduler blocks only for recurrent-state views; hybrid
-        attention views are split into kernel blocks, so scheduler block
-        ``b`` owns rows ``[b * scale, (b + 1) * scale)``.
-        """
-        ids = torch.tensor(block_copies, dtype=torch.long, device=self.device)
-        num_blocks = self.kv_cache_config.num_blocks
-        row_ids_by_scale: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
-        for layer_cache in self.kv_caches:
-            tensors = layer_cache if isinstance(layer_cache, (list, tuple)) else (layer_cache,)
-            for cache_tensor in tensors:
-                if cache_tensor is None or cache_tensor.dim() == 0:
-                    continue
-                scale = max(cache_tensor.shape[0] // num_blocks, 1)
-                if scale not in row_ids_by_scale:
-                    rows = ids.unsqueeze(-1) * scale + torch.arange(scale, device=self.device)
-                    src_rows, dst_rows = rows.unbind(dim=1)
-                    row_ids_by_scale[scale] = (src_rows.reshape(-1), dst_rows.reshape(-1))
-                src_rows, dst_rows = row_ids_by_scale[scale]
-                # aclnnIndex rejects FP8 dtypes; copy through a uint8 view.
-                if cache_tensor.dtype == torch.float8_e4m3fn:
-                    cache_tensor = cache_tensor.view(torch.uint8)
-                cache_tensor[dst_rows] = cache_tensor[src_rows]
-
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
@@ -1007,21 +975,6 @@ class NPUModelRunner(GPUModelRunner):
                 num_computed_tokens = req_data.num_computed_tokens[i]
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
-
-        block_copies = scheduler_output.kv_cache_block_copies
-        if block_copies and is_c8_mxfp_kv_quant(self.vllm_config):
-            # C8 scale caches live in the NZ 6-D layout where a scheduler
-            # block spans non-contiguous kernel rows; the generic segmented
-            # copy below would slice them. C8 takes the per-layer kernel-row
-            # views, every other layout keeps the generic path.
-            if scheduler_output.new_block_ids_to_zero:
-                self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
-            scheduler_output = replace(
-                scheduler_output,
-                new_block_ids_to_zero=[],
-                kv_cache_block_copies=[],
-            )
-            self._copy_kv_cache_blocks_by_layer_views(block_copies)
 
         self._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
         if scheduler_output.kv_cache_block_copies:
@@ -4827,7 +4780,12 @@ class NPUModelRunner(GPUModelRunner):
         return tensor[int(offset) :]
 
     def _is_c8_mxfp_kv_cache(self, kv_cache_spec: AttentionSpec) -> bool:
-        return isinstance(kv_cache_spec, FullAttentionSpec) and is_c8_mxfp_kv_quant(self.vllm_config)
+        """Select ordinary K/V groups; MLA has a different compressed layout."""
+        return (
+            isinstance(kv_cache_spec, FullAttentionSpec)
+            and not isinstance(kv_cache_spec, MLAAttentionSpec)
+            and is_c8_mxfp_kv_quant(self.vllm_config)
+        )
 
     def _fill_c8_mxfp_v_scale_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """Broadcast every C8 MXFP layer's static V scale into its scale cache.
