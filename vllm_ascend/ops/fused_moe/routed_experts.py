@@ -612,6 +612,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
+        state = getattr(self.router, "eplb_state", None)
+        if state is not None:
+            # The fused kernel records the pre-transform routing decisions;
+            # force EPLB and shared-expert placement rewrite topk_ids after
+            # mapping, so those cases keep the unfused recording route.
+            state.fused_record_allowed = not getattr(self, "mix_placement", False) and not enable_force_load_balance
         topk_weights, topk_ids = self.router._select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -693,6 +699,15 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         pertoken_scale = prepare_output.pertoken_scale
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
+        state = getattr(self.router, "eplb_state", None)
+        if state is not None and getattr(state, "expert_replica_routing_table", None) is not None:
+            # The fused kernel filters padding rows itself; keep the
+            # unpadded count in a stable 0-D device tensor.
+            num_valid = state.ensure_num_valid_tokens_tensor(hidden_states.device)
+            if mc2_mask is not None:
+                num_valid.copy_(mc2_mask.sum())
+            else:
+                num_valid.fill_(hidden_states.shape[0])
         topk_weights, topk_ids = self._select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -714,8 +729,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
 
-        if self._use_v2_model_runner:
+        router_state = getattr(self.router, "eplb_state", None)
+        fused_active = bool(getattr(router_state, "fused_map_record_active", False))
+        if self._use_v2_model_runner and not fused_active:
             _record_v2_eplb_load(self.router, fused_experts_results)
+        if router_state is not None:
+            router_state.fused_map_record_active = False
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens

@@ -35,6 +35,17 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         self.expert_replica_routing_table: torch.Tensor | None = None
         self.local_expert_start = 0
         self.local_expert_count = 0
+        # Fused gating/mapping/recording route (see
+        # ops/triton/gating_top_k_map_and_record).
+        self.fused_map_record_active = False
+        self.fused_record_allowed = True
+        self.num_valid_tokens_tensor: torch.Tensor | None = None
+
+    def ensure_num_valid_tokens_tensor(self, device: torch.device) -> torch.Tensor:
+        """0-D device tensor holding the unpadded token count of the step."""
+        if self.num_valid_tokens_tensor is None or self.num_valid_tokens_tensor.device != device:
+            self.num_valid_tokens_tensor = torch.zeros((), dtype=torch.int32, device=device)
+        return self.num_valid_tokens_tensor
 
     @classmethod
     def from_upstream(
