@@ -359,7 +359,7 @@ def test_hang():
     "compilation_config",
     [
         pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [8, 16]},
             id="full_decode_only",
         )
     ],
@@ -406,6 +406,17 @@ def test_qwen36_35b_dspark_spec_decoding(
         },
         compilation_config=compilation_config,
     ) as runner:
+        tokenizer = runner.model.get_tokenizer()
+        prompts = [
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for prompt in prompts
+        ]
+        # Two requests use the 16-token graph; four require 32 tokens and run eager.
+        runner.model.generate(prompts[:2], sampling_params)
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
 
