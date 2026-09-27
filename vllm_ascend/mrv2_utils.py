@@ -167,9 +167,7 @@ def _uses_eplb(vllm_config: VllmConfig) -> bool:
     parallel_config = getattr(vllm_config, "parallel_config", None)
     if _is_configured(parallel_config) and bool(getattr(parallel_config, "enable_eplb", False)):
         return True
-    if _env_flag_enabled(envs_ascend.DYNAMIC_EPLB) or _env_flag_enabled(
-        os.getenv("EXPERT_MAP_RECORD"), true_only=True
-    ):
+    if _env_flag_enabled(envs_ascend.DYNAMIC_EPLB) or _env_flag_enabled(os.getenv("EXPERT_MAP_RECORD"), true_only=True):
         return True
 
     eplb_config = _eplb_config(vllm_config)
