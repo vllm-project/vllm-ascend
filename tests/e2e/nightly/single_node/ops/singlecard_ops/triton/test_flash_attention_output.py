@@ -36,3 +36,40 @@ def test_output_masks_nan_and_graph_padding():
     expected[0], expected[2] = result[0], result[2]
     assert flash_attention_output(result, live, output) is output
     torch.testing.assert_close(output, expected)
+
+
+@pytest.mark.parametrize("tp", [1, 4, 8, 16])
+@pytest.mark.parametrize("tokens,active_tokens", [(1, 1), (8, 8), (32, 20), (128, 111)])
+@torch.inference_mode()
+def test_kimi_k3_gate_tp_and_token_shapes(tp, tokens, active_tokens):
+    # Kimi-K3 has 96 MLA heads with v_head_dim=128; g_proj is column-sharded.
+    hidden = 96 // tp * 128
+    projected = torch.randn(tokens, hidden, device="npu", dtype=torch.bfloat16)
+    projected[active_tokens:] = 0
+    gate = torch.randn_like(projected)
+    expected = projected * torch.sigmoid(gate)
+
+    assert flash_attention_gate(projected, gate) is projected
+    torch.testing.assert_close(projected, expected)
+    assert torch.count_nonzero(projected[active_tokens:]) == 0
+
+
+@torch.inference_mode()
+def test_kimi_k3_gate_graph_replay_updates_values():
+    projected = torch.empty(32, 1536, device="npu", dtype=torch.bfloat16)
+    gate = torch.empty_like(projected)
+    projected.fill_(1)
+    gate.fill_(0)
+    flash_attention_gate(projected, gate)
+    torch.npu.synchronize()
+
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        flash_attention_gate(projected, gate)
+
+    for value, gate_value in [(1.0, -1.0), (-2.0, 2.0)]:
+        projected.fill_(value)
+        gate.fill_(gate_value)
+        graph.replay()
+        expected = torch.full_like(projected, value) * torch.sigmoid(torch.full_like(gate, gate_value))
+        torch.testing.assert_close(projected, expected)
