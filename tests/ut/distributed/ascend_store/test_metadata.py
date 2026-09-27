@@ -608,7 +608,9 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, discard_partial_chunks=True)
+        meta = ReqMeta.from_request_tracker(
+            tracker, cache_transfer_granularity=16, discard_partial_chunks=True, block_hashes=[b"h0"]
+        )
         self.assertIsNotNone(meta)
         self.assertEqual(meta.token_len_chunk, 16)
 
@@ -694,7 +696,9 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, discard_partial_chunks=False)
+        meta = ReqMeta.from_request_tracker(
+            tracker, cache_transfer_granularity=16, discard_partial_chunks=False, block_hashes=[b"h0"]
+        )
         self.assertIsNotNone(meta)
         self.assertEqual(meta.token_len_chunk, 20)
 

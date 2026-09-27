@@ -23,7 +23,6 @@ from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
     _mamba_block_aligned_split,
     _original_mamba_block_aligned_split,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def _scheduler(
@@ -36,12 +35,10 @@ def _scheduler(
     if kv_transfer_config is not None and is_kv_producer is not None:
         kv_transfer_config.is_kv_producer = is_kv_producer
     # vLLM main added `mamba_has_prefill_checkpoint_blocks` (gated by
-    # MambaSpec.num_prefill_checkpoint_blocks) to the boundary split; v0.28.0
-    # does not define it.
+    # MambaSpec.num_prefill_checkpoint_blocks) to the boundary split.
     scheduler_kwargs: dict = {}
     scheduler_kwargs["mamba_has_prefill_checkpoint_blocks"] = False
-    if not vllm_version_is("0.29.0"):
-        scheduler_kwargs["mamba_fine_grained_prefix_cache"] = False
+    scheduler_kwargs["mamba_fine_grained_prefix_cache"] = False
     indexer_config = {"index_topk": 2048, "index_kpool": 4} if uses_sparse_index_kpool else {}
     return SimpleNamespace(
         vllm_config=SimpleNamespace(

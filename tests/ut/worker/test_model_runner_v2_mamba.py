@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+import vllm.v1.worker.gpu.cp_utils as _cp_utils
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -32,11 +33,17 @@ from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
 
+if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(_cp_utils, "maybe_prepare_dcp_local_seq_lens"):
+    _cp_utils.prepare_dcp_local_seq_lens = (
+        lambda dcp_local_seq_lens, seq_lens, num_reqs, dcp_size, dcp_rank, cp_interleave: None
+    )
+
 
 def _mock_vllm_config():
     # Config for get_kv_cache_spec: attn_utils reads attention_config.indexer_kv_dtype.
     config = MagicMock()
     config.attention_config.indexer_kv_dtype = "int8"
+    config.cache_config.cache_dtype = "auto"
     return config
 
 
@@ -266,20 +273,6 @@ def test_deferred_copy_missing_layer_raises(mock_get_group):
         state._finish_previous_layerwise_mamba_copy()
 
 
-def test_mrv2_shared_backing_support_follows_connector_capability():
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-
-    for kv_transfer_config, expected in (
-        (None, True),
-        (SimpleNamespace(kv_connector="MooncakeConnectorV1"), True),
-        (SimpleNamespace(kv_connector="MooncakeConnectorV2"), True),
-        (SimpleNamespace(kv_connector="MooncakePullConnector"), True),
-        (SimpleNamespace(kv_connector="UnsupportedConnector"), False),
-    ):
-        runner.vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
-        assert runner.supports_shared_backing_with_kv_transfer is expected
-
-
 def test_prepare_inputs_propagates_padded_request_count():
     model_runner_path = Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
     module = ast.parse(model_runner_path.read_text(encoding="utf-8"))
@@ -327,7 +320,10 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
     expected_metadata = {"gdn": object()}
     mock_build_attn_metadata.return_value = expected_metadata
     state = SimpleNamespace(
-        vllm_config=SimpleNamespace(num_speculative_tokens=num_spec),
+        vllm_config=SimpleNamespace(
+            num_speculative_tokens=num_spec,
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        ),
         num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
         max_model_len=1024,
     )

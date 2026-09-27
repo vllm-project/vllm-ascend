@@ -21,7 +21,7 @@ For each accuracy/performance benchmark entry:
   1. Read a preset JSON template
   2. Patch nested testcase_info fields (and base_info.test_version)
   3. Write a new JSON file
-  4. Upload via tools/upload_to_openlibing.py
+  4. Upload via ``python -m tools.upload_to_openlibing``
 
 Missing preset/script files only emit warnings and never fail the test.
 """
@@ -39,6 +39,7 @@ from typing import Any
 PRESET_JSON_PATH = Path("/root/.cache/upload_perf/test.json")
 OUTPUT_DIR = Path("/root/.cache/upload_perf/results")
 UPLOAD_LABEL = "performance"
+UPLOAD_MODULE = "tools.upload_to_openlibing"
 _DATASET_PREFIX = "vllm-ascend/"
 
 
@@ -181,9 +182,11 @@ def _run_postprocess_script(script_path: Path, output_path: Path) -> None:
     if not script_path.is_file():
         print(f"Warning: Postprocess script not found, skip running: {script_path}")
         return
+    repo_root = script_path.resolve().parent.parent
     cmd = [
         sys.executable,
-        str(script_path),
+        "-m",
+        UPLOAD_MODULE,
         "--label",
         UPLOAD_LABEL,
         "--files",
@@ -197,9 +200,10 @@ def _run_postprocess_script(script_path: Path, output_path: Path) -> None:
             capture_output=True,
             text=True,
             env=env,
+            cwd=str(repo_root),
         )
     except OSError as exc:
-        print(f"Warning: Failed to run postprocess script {script_path}: {exc}")
+        print(f"Warning: Failed to run postprocess script {UPLOAD_MODULE}: {exc}")
         return
     # upload_to_openlibing uses logging (stderr); always forward both streams
     if completed.stdout:

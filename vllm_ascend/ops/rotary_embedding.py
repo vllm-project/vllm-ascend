@@ -336,15 +336,19 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         beta_fast: int = 32,
         beta_slow: int = 1,
         apply_yarn_scaling: bool = True,
+        mscale: float | None = None,
+        mscale_all_dim: float | None = None,
+        attention_factor: float | None = None,
         truncate: bool = False,
     ) -> None:
+        # vLLM main (#56446) replaced the YaRN mscale parameters with
+        # mscale/mscale_all_dim/attention_factor.
         extra_kwargs = {
-            "extrapolation_factor": extrapolation_factor,
-            "attn_factor": attn_factor,
             "beta_fast": beta_fast,
             "beta_slow": beta_slow,
-            "apply_yarn_scaling": apply_yarn_scaling,
-            # TODO: current not support actual truncate，adaptation for extra parameters to be compatible with vllm
+            "mscale": mscale,
+            "mscale_all_dim": mscale_all_dim,
+            "attention_factor": attention_factor,
             "truncate": truncate,
         }
         super().__init__(

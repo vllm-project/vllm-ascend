@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import queue
 import threading
 import unittest
 from types import SimpleNamespace
@@ -23,6 +24,11 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+
+# isort: split
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LayerTransferTask,
@@ -60,7 +66,6 @@ def make_worker(
     pp_rank=0,
     dcp_size=1,
     kv_cache_config=None,
-    pp_rank=0,
     pp_partition=None,
     cache_block_size=16,
 ):
@@ -150,6 +155,163 @@ class TestPCPPoolWorker(unittest.TestCase):
                     self.assertEqual(send_thread.call_args.args[6], pcp_size)
                     self.assertIs(recv_thread.call_args.args[1], worker.token_database)
                     self.doCleanups()
+
+
+class TestLayerwiseAttentionSave(unittest.TestCase):
+    def make_worker(self):
+        plan = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    [f"model.layers.{layer}.attn"],
+                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32),
+                )
+                for layer in range(2)
+            ]
+        )
+        worker = make_worker(self, use_layerwise=True, kv_cache_config=plan)
+        worker.kv_send_thread = MagicMock(request_queue=queue.Queue())
+        worker.kv_recv_thread = MagicMock(request_queue=queue.Queue())
+        return worker
+
+    def test_single_group_recurrent_layer_keeps_post_compute_save(self):
+        plan = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["model.layers.7.attn"],
+                    MambaSpec(
+                        block_size=16,
+                        shapes=((8,), (8,)),
+                        dtypes=(torch.float32, torch.float32),
+                        mamba_cache_mode="align",
+                    ),
+                )
+            ]
+        )
+        worker = make_worker(self, num_layers=1, use_layerwise=True, kv_cache_config=plan)
+        worker.kv_recv_thread = MagicMock()
+        worker.layer_load_finished_events = [threading.Event()]
+        gate = SimpleNamespace(on_start=None, on_finish=None)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.reset_attention_compute_start_gate",
+            return_value=gate,
+        ):
+            worker.wait_for_layer_load()
+        self.assertFalse(worker.use_hybrid)
+        self.assertEqual(worker._recurrent_layers, {0})
+        self.assertIsNone(gate.on_start)
+
+    def test_pp_maps_global_mamba_layer_to_local_post_compute_save(self):
+        from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+        full_spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+        mamba_spec = MambaSpec(
+            block_size=16,
+            shapes=((8,), (8,)),
+            dtypes=(torch.float32, torch.float32),
+            mamba_cache_mode="align",
+        )
+        for wrapped in (False, True):
+            with self.subTest(wrapped=wrapped):
+                groups = []
+                for layer, spec in zip((2, 3), (full_spec, mamba_spec), strict=True):
+                    layer_name = f"model.layers.{layer}.attn"
+                    group_spec = UniformTypeKVCacheSpecs.from_specs({layer_name: spec}) if wrapped else spec
+                    groups.append(KVCacheGroupSpec([layer_name], group_spec))
+                worker = make_worker(
+                    self,
+                    num_layers=2,
+                    use_layerwise=True,
+                    kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+                    pp_rank=1,
+                    pp_partition=(2, 2),
+                )
+                worker.kv_recv_thread = MagicMock()
+                worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+
+                self.assertEqual(worker.pp_rank, 1)
+                self.assertEqual(worker._global_to_local_layer, {2: 0, 3: 1})
+                self.assertEqual(worker._recurrent_layers, {1})
+
+                full_attention_gate = SimpleNamespace(on_start=None, on_finish=None)
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker."
+                    "reset_attention_compute_start_gate",
+                    return_value=full_attention_gate,
+                ):
+                    worker.wait_for_layer_load()
+                self.assertIsNotNone(full_attention_gate.on_start)
+
+                worker.current_layer = 1
+                mamba_gate = SimpleNamespace(on_start=None, on_finish=None)
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker."
+                    "reset_attention_compute_start_gate",
+                    return_value=mamba_gate,
+                ):
+                    worker.wait_for_layer_load()
+                self.assertIsNone(mamba_gate.on_start)
+                self.assertIsNotNone(mamba_gate.on_finish)
+                self.doCleanups()
+
+    def test_backpressure_bounds_send_without_draining_prefetch(self):
+        worker = self.make_worker()
+        send_queue = worker.kv_send_thread.request_queue
+        limit = worker.layerwise_protocol.send_fence_backlog()
+        for _ in range(limit + 1):
+            send_queue.put(object())
+        worker.kv_recv_thread.request_queue.put(object())
+        finished = threading.Event()
+
+        def fence():
+            worker._finish_attention_window()
+            finished.set()
+
+        thread = threading.Thread(target=fence, daemon=True)
+        thread.start()
+        try:
+            self.assertFalse(finished.wait(timeout=0.05))
+            send_queue.get_nowait()
+            send_queue.task_done()
+            self.assertTrue(finished.wait(timeout=2))
+            self.assertEqual(send_queue.unfinished_tasks, limit)
+            self.assertEqual(worker.kv_recv_thread.request_queue.unfinished_tasks, 1)
+        finally:
+            while not send_queue.empty():
+                send_queue.get_nowait()
+                send_queue.task_done()
+            thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+
+    def test_empty_final_layer_still_waits_for_earlier_put(self):
+        worker = self.make_worker()
+        worker.current_layer = worker.num_layers - 1
+        worker.sync_save_events = [MagicMock() for _ in range(worker.num_layers)]
+        worker.layer_save_finished_events = [threading.Event() for _ in range(worker.num_layers)]
+        send_queue = worker.kv_send_thread.request_queue
+        send_queue.put(object())
+        finished = threading.Event()
+
+        def save():
+            worker.save_kv_layer(AscendConnectorMetadata(set()))
+            finished.set()
+
+        thread = threading.Thread(target=save, daemon=True)
+        thread.start()
+        try:
+            self.assertFalse(finished.wait(timeout=0.05))
+        finally:
+            send_queue.get_nowait()
+            send_queue.task_done()
+            thread.join(timeout=2)
+        self.assertTrue(finished.is_set())
+        self.assertFalse(thread.is_alive())
+
+    def test_send_failure_is_reported_at_attention_boundary(self):
+        worker = self.make_worker()
+        worker.kv_send_thread.raise_if_failed.side_effect = RuntimeError("send failed")
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            worker._finish_attention_window()
+        self.assertTrue(worker._layer_load_aborted.is_set())
 
 
 class TestKVPPPoolWorker(unittest.TestCase):
@@ -792,6 +954,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
     def _patch_all(self):
         """Return a dict of started patches."""
+        self._stop_all()
         patches = {
             "tp_rank": patch(
                 "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank",
@@ -815,6 +978,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         mocks = {}
         for name, p in patches.items():
             mocks[name] = p.start()
+            self.addCleanup(p.stop)
         pcp_group = MagicMock()
         pcp_group.world_size = 1
         mocks["pcp_group"].return_value = pcp_group

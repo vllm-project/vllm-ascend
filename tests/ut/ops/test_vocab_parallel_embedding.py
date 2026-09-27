@@ -25,6 +25,8 @@ from vllm_ascend.ops.vocab_parallel_embedding import (
     AscendLogitsProcessor,
     AscendParallelLMHead,
     AscendVocabParallelEmbedding,
+    VocabParallelMode,
+    _resolve_vocab_parallel_plan,
 )
 
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
@@ -41,6 +43,10 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.mock_group.world_size = 2
         self.mock_group.rank_in_group = 0
         self.mock_group.unique_name = "test_tp_group"
+
+        self.mock_pcp_group = mock.MagicMock()
+        self.mock_pcp_group.world_size = 1
+        self.mock_pcp_group.rank_in_group = 0
 
         parallel_state._MLP_TP = self.mock_group
         parallel_state._OTP = self.mock_group
@@ -61,6 +67,14 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
             patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.get_tp_group",
                 return_value=self.mock_group,
+            ),
+            patch(
+                "vllm_ascend.ops.vocab_parallel_embedding.get_pcp_group",
+                return_value=self.mock_pcp_group,
+            ),
+            patch(
+                "vllm_ascend.ops.vocab_parallel_embedding.enable_pcp_embedding_lmhead_weight_sharding",
+                return_value=False,
             ),
         ]
 
@@ -234,7 +248,9 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         )
 
         self.assertTrue(layer.disable_tp)
-        self.assertIs(layer.comm_group, parallel_state.get_replicated_group())
+        self.assertIs(layer.parallel_mode, VocabParallelMode.REPLICATED)
+        self.assertIsNone(layer.token_exchange_group)
+        self.assertIsNone(layer.output_reduce_group)
         self.assertEqual(layer.tp_size, 1)
         self.assertEqual(layer.tp_rank, 0)
 
@@ -249,11 +265,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         so every rank holds the full table and forward skips all
         communication.
         """
-        markov_group = MagicMock()
-        markov_group.world_size = 1
-        markov_group.rank_in_group = 0
         with (
-            patch("vllm_ascend.ops.vocab_parallel_embedding.get_replicated_group", return_value=markov_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=MagicMock()),
             patch(
                 "vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_rank",
@@ -279,16 +291,202 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
                 disable_tp=True,
             )
 
-        self.assertIs(layer.comm_group, markov_group)
+        self.assertIs(layer.parallel_mode, VocabParallelMode.REPLICATED)
+        self.assertIsNone(layer.token_exchange_group)
+        self.assertIsNone(layer.output_reduce_group)
         self.assertEqual(layer.tp_size, 1)
         self.assertEqual(layer.tp_rank, 0)
-        self.assertIsNone(layer.forward_type)
 
         # tp_size==1: shard indices cover the full padded vocab, so each rank
         # holds the entire markov table (no padding rows reserved for peers).
         self.assertEqual(layer.num_embeddings_per_partition, layer.num_embeddings_padded)
         self.assertEqual(layer.num_org_embeddings_per_partition, layer.org_vocab_size_padded)
         self.assertEqual(layer.num_added_embeddings_per_partition, layer.num_added_embeddings)
+
+    def test_pcp_embedding_communication_order(self):
+        layer = self._create_layer()
+        pcp_group = MagicMock(world_size=2, device_group="pcp")
+        tp_group = MagicMock(world_size=2, unique_name="tp")
+        layer.token_exchange_group = pcp_group
+        layer.output_reduce_group = tp_group
+        layer.embedding_tp_capacity = 2
+        layer.params_dtype = torch.float32
+        events = []
+
+        def all_gather(output, input_, *, group):
+            events.append(("pcp_all_gather", group))
+            output.copy_(input_.repeat(2))
+
+        def embedding(_, input_):
+            events.append(("embedding", None))
+            return input_.unsqueeze(-1).expand(-1, layer.embedding_dim).float()
+
+        def reduce_scatter(output, input_, *, group):
+            events.append(("pcp_reduce_scatter", group))
+            output.copy_(input_[: output.shape[0]])
+
+        def all_reduce(output, group_name):
+            events.append(("tp_all_reduce", group_name))
+            return output
+
+        layer.quant_method.embedding = MagicMock(side_effect=embedding)
+        with (
+            patch("vllm_ascend.ops.vocab_parallel_embedding.dist.all_gather_into_tensor", side_effect=all_gather),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.dist.reduce_scatter_tensor", side_effect=reduce_scatter),
+            patch("torch.ops.vllm.all_reduce", side_effect=all_reduce),
+        ):
+            output = layer(torch.tensor([15, 16]))
+
+        self.assertEqual(
+            events,
+            [
+                ("pcp_all_gather", "pcp"),
+                ("embedding", None),
+                ("pcp_reduce_scatter", "pcp"),
+                ("tp_all_reduce", "tp"),
+            ],
+        )
+        self.assertEqual(output.shape, (2, self.embedding_dim))
+
+
+class TestVocabParallelPlan(unittest.TestCase):
+    def test_resolve_vocab_parallel_plan(self):
+        """Cover layout selection, communication groups, and conflicts."""
+
+        def group(rank, world_size):
+            return MagicMock(rank_in_group=rank, world_size=world_size)
+
+        tp_group = group(1, 2)
+        pcp_group = group(1, 2)
+        embed_group = group(2, 4)
+        lmhead_group = group(3, 4)
+        pcp_config = MagicMock()
+        pcp_config.parallel_config.prefill_context_parallel_size = 2
+        cases: tuple[tuple[str, str, bool, bool, bool, bool, VocabParallelMode, int, int], ...] = (
+            ("replicated", "layers.0.markov_head", True, False, False, False, VocabParallelMode.REPLICATED, 0, 1),
+            ("standard", "model.norm", False, False, False, False, VocabParallelMode.STANDARD, 1, 2),
+            (
+                "fine-grained embedding",
+                "model.embed_tokens",
+                False,
+                False,
+                True,
+                False,
+                VocabParallelMode.FINE_GRAINED,
+                2,
+                4,
+            ),
+            (
+                "fine-grained lm head",
+                "lm_head",
+                False,
+                False,
+                False,
+                True,
+                VocabParallelMode.FINE_GRAINED,
+                3,
+                4,
+            ),
+            (
+                "pcp embedding",
+                "model.embed_tokens",
+                False,
+                True,
+                False,
+                False,
+                VocabParallelMode.PCP_X_TP,
+                3,
+                4,
+            ),
+            (
+                "pcp lm head",
+                "lm_head",
+                False,
+                True,
+                False,
+                False,
+                VocabParallelMode.PCP_X_TP,
+                3,
+                4,
+            ),
+        )
+
+        for name, prefix, disable_tp, pcp, embed_tp, lmhead_tp, mode, rank, world_size in cases:
+            with (
+                self.subTest(name=name),
+                patch(
+                    "vllm_ascend.ops.vocab_parallel_embedding.enable_pcp_embedding_lmhead_weight_sharding",
+                    return_value=pcp,
+                ),
+                patch("vllm_ascend.ops.vocab_parallel_embedding.embedding_tp_enable", return_value=embed_tp),
+                patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=lmhead_tp),
+                patch(
+                    "vllm_ascend.ops.vocab_parallel_embedding.get_current_vllm_config",
+                    return_value=pcp_config,
+                ),
+                patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=tp_group),
+                patch("vllm_ascend.ops.vocab_parallel_embedding.get_pcp_group", return_value=pcp_group),
+                patch("vllm_ascend.ops.vocab_parallel_embedding.get_embed_tp_group", return_value=embed_group),
+                patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group", return_value=lmhead_group),
+            ):
+                plan = _resolve_vocab_parallel_plan(prefix=prefix, disable_tp=disable_tp)
+
+            self.assertIs(plan.mode, mode)
+            self.assertEqual((plan.shard_rank, plan.shard_world_size), (rank, world_size))
+            if name == "pcp embedding":
+                self.assertIs(plan.token_exchange_group, pcp_group)
+                self.assertIs(plan.output_reduce_group, tp_group)
+            elif name == "fine-grained embedding":
+                self.assertIs(plan.token_exchange_group, embed_group)
+                self.assertIsNone(plan.output_reduce_group)
+            elif mode is VocabParallelMode.STANDARD:
+                self.assertIsNone(plan.token_exchange_group)
+                self.assertIs(plan.output_reduce_group, tp_group)
+            else:
+                self.assertIsNone(plan.token_exchange_group)
+                self.assertIsNone(plan.output_reduce_group)
+
+        non_pcp_config = MagicMock()
+        non_pcp_config.parallel_config.prefill_context_parallel_size = 1
+        with (
+            patch(
+                "vllm_ascend.ops.vocab_parallel_embedding.enable_pcp_embedding_lmhead_weight_sharding",
+                return_value=True,
+            ),
+            patch(
+                "vllm_ascend.ops.vocab_parallel_embedding.get_current_vllm_config",
+                return_value=non_pcp_config,
+            ),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.embedding_tp_enable", return_value=False),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=False),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=tp_group),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_pcp_group") as get_pcp_group,
+        ):
+            plan = _resolve_vocab_parallel_plan(prefix="model.embed_tokens", disable_tp=False)
+
+        self.assertIs(plan.mode, VocabParallelMode.STANDARD)
+        get_pcp_group.assert_not_called()
+
+        for prefix, embed_tp, lmhead_tp, error in (
+            ("model.embed_tokens", True, False, "embedding_tensor_parallel_size"),
+            ("lm_head", False, True, "lmhead_tensor_parallel_size"),
+        ):
+            with (
+                self.subTest(prefix=prefix, error=error),
+                patch(
+                    "vllm_ascend.ops.vocab_parallel_embedding.enable_pcp_embedding_lmhead_weight_sharding",
+                    return_value=True,
+                ),
+                patch("vllm_ascend.ops.vocab_parallel_embedding.embedding_tp_enable", return_value=embed_tp),
+                patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=lmhead_tp),
+                patch(
+                    "vllm_ascend.ops.vocab_parallel_embedding.get_current_vllm_config",
+                    return_value=pcp_config,
+                ),
+                patch("vllm_ascend.ops.vocab_parallel_embedding.get_pcp_group", return_value=pcp_group),
+                self.assertRaisesRegex(ValueError, error),
+            ):
+                _resolve_vocab_parallel_plan(prefix=prefix, disable_tp=False)
 
 
 class TestAscendLogitsProcessor(unittest.TestCase):
@@ -311,6 +509,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_group = MagicMock()
         self.mock_group.world_size = 2
         self.mock_group.rank_in_group = 0
+        self.mock_pcp_group = MagicMock(world_size=1, rank_in_group=0)
         self.mock_ascend_config = MagicMock()
         # enable_reduce_sample must be explicitly False so _get_logits_lmheadtp
         # reaches the lmhead_all_to_all branch (a MagicMock attribute is truthy
@@ -324,6 +523,14 @@ class TestAscendLogitsProcessor(unittest.TestCase):
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_ascend_config", return_value=self.mock_ascend_config),
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=True),
+            patch(
+                "vllm_ascend.ops.vocab_parallel_embedding.get_pcp_group",
+                return_value=self.mock_pcp_group,
+            ),
+            patch(
+                "vllm_ascend.ops.vocab_parallel_embedding.enable_pcp_embedding_lmhead_weight_sharding",
+                return_value=False,
+            ),
             patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.dist.all_to_all_single",
                 self.mock_all_to_all_single,
@@ -369,6 +576,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         hidden_states = torch.randn(1, 4)
         replicated_head = MagicMock()
         replicated_head.tp_size = 1
+        replicated_head.parallel_mode = VocabParallelMode.REPLICATED
         processor = AscendLogitsProcessor(vocab_size=self.vocab_size)
         with (
             patch.object(processor, "_get_logits_normal", return_value="normal") as mock_normal,
@@ -385,6 +593,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         hidden_states = torch.randn(1, 4)
         sharded_head = MagicMock()
         sharded_head.tp_size = 2
+        sharded_head.parallel_mode = VocabParallelMode.FINE_GRAINED
         processor = AscendLogitsProcessor(vocab_size=self.vocab_size)
         with (
             patch.object(processor, "_get_logits_normal") as mock_normal,
@@ -395,3 +604,31 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.assertEqual(result, "lmheadtp")
         mock_lmheadtp.assert_called_once_with(hidden_states, sharded_head, None)
         mock_normal.assert_not_called()
+
+    def test_get_logits_pcp_reconstructs_vocab_in_group_order(self):
+        processor = AscendLogitsProcessor(vocab_size=7)
+        lm_head = MagicMock(parallel_mode=VocabParallelMode.PCP_X_TP)
+        events = []
+
+        pcp_group = MagicMock(world_size=2)
+        tp_group = MagicMock(world_size=2)
+
+        def pcp_all_gather(logits, *, dim):
+            events.append(("pcp", dim))
+            return torch.cat((logits, logits + 10), dim=dim)
+
+        def tp_all_gather(logits, *, dim):
+            events.append(("tp", dim))
+            return torch.cat((logits, logits + 20), dim=dim)
+
+        pcp_group.all_gather.side_effect = pcp_all_gather
+        tp_group.all_gather.side_effect = tp_all_gather
+        with (
+            patch.object(processor, "_apply_head", return_value=torch.tensor([[0.0, 1.0]])),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_pcp_group", return_value=pcp_group),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=tp_group),
+        ):
+            logits = processor._get_logits(torch.randn(1, 4), lm_head)
+
+        self.assertEqual(events, [("pcp", -1), ("tp", -1)])
+        self.assertTrue(torch.equal(logits, torch.tensor([[0.0, 1.0, 10.0, 11.0, 20.0, 21.0, 30.0]])))

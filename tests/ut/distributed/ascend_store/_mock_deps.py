@@ -412,7 +412,7 @@ for _mod_name in [
     "yr.datasystem.object_client",
     "zmq",
 ]:
-    if _mod_name not in sys.modules:
+    if _mod_name not in sys.modules and (_mod_name != "zmq" or importlib.util.find_spec("zmq") is None):
         sys.modules[_mod_name] = MagicMock()
 
 # ---------------------------------------------------------------------------

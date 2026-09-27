@@ -120,6 +120,11 @@ public:
         int64_t linearIndex = 0;
         for (uint64_t dim = 0; dim < indexDim_; ++dim) {
             int64_t idxValue = indicesInt64Local.GetValue(rowIdx * indexDim_ + dim);
+            // 负索引越界守卫：对齐 arch35 逐维检查语义，任一维为负即视为越界；
+            // 返回 -1 由 ProcessOneBlock 的范围检查（startInt64_ >= 0）跳过
+            if (idxValue < 0) {
+                return -1;
+            }
             int64_t stride = static_cast<int64_t>(indicesMask_[dim]);
             linearIndex += idxValue * stride;
         }
