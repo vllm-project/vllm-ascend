@@ -80,9 +80,8 @@ class AscendEPLBController(EPLBController):
             is_sampling = state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
             should_record = is_sampling and self._load_collection_phase_matched
             state.should_record_tensor.fill_(should_record)
-            if state.uses_custom_load_stats:
-                state._is_load_sampling_step = is_sampling
-                state._should_collect_local_load = should_record
+            state._is_load_sampling_step = is_sampling
+            state._should_collect_local_load = should_record
             if should_record:
                 state._has_fresh_recorded_load = True
 

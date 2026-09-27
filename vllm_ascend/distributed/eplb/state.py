@@ -143,8 +143,7 @@ class AscendEplbState(_eplb_state.EplbState):
         device: torch.device,
         policy: AbstractEplbPolicy | None = None,
     ) -> None:
-        with _configured_upstream_policy(parallel_config.eplb_config.policy, policy):
-            super().__init__(parallel_config, device)
+        super().__init__(parallel_config, device)
         self._configured_policy = policy
         if policy is not None:
             self.policy = policy
