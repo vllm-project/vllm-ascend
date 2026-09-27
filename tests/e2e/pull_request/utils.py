@@ -4,7 +4,7 @@ from typing import Any
 
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
-from vllm.v1.metrics.reader import Counter
+from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 
@@ -240,12 +240,13 @@ SPEC_DECODE_PROMPTS = (
 def _run_speculative_decoding(
     model_name: str,
     speculative_config: dict[str, object],
-    expected_acceptance_length: float,
+    expected_acceptance_length: float | None,
     runner_kwargs: dict[str, Any],
     example_prompts: Sequence[str] = SPEC_DECODE_PROMPTS,
     max_tokens: int = 1024,
     acceptance_length_rtol: float = ACCEPTANCE_LENGTH_RTOL,
     is_moe: bool = True,
+    log_acceptance_per_pos: bool = False,
 ) -> float:
     prompts = list(example_prompts)
     with VllmRunner(
@@ -277,6 +278,7 @@ def _run_speculative_decoding(
 
     num_drafts = 0
     num_accepted_tokens = 0
+    accepted_per_pos = [0] * int(speculative_config["num_speculative_tokens"]) if log_acceptance_per_pos else []
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
@@ -284,16 +286,27 @@ def _run_speculative_decoding(
         elif metric.name == "vllm:spec_decode_num_accepted_tokens":
             assert isinstance(metric, Counter)
             num_accepted_tokens += metric.value
+        elif log_acceptance_per_pos and metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos, count in enumerate(metric.values):
+                accepted_per_pos[pos] += count
 
     acceptance_length = 1 + num_accepted_tokens / num_drafts if num_drafts > 0 else 1
-    relative_error = abs(acceptance_length - expected_acceptance_length) / expected_acceptance_length
-    assert relative_error <= acceptance_length_rtol, (
-        f"Acceptance length regression detected for {model_name}!\n"
-        f" Expected: {expected_acceptance_length:.3f}\n"
-        f" Actual: {acceptance_length:.3f}\n"
-        f" Relative error: {relative_error:.2%} (tolerance: {acceptance_length_rtol:.2%})\n"
-        f" Drafts: {num_drafts}, Accepted tokens: {num_accepted_tokens}"
-    )
+    print(f"Model: {model_name}, Acceptance length: {acceptance_length:.3f}", flush=True)
+    if log_acceptance_per_pos:
+        assert num_drafts > 0
+        assert sum(accepted_per_pos) == num_accepted_tokens
+        acceptance_per_pos = [count / num_drafts for count in accepted_per_pos]
+        print(f"Model: {model_name}, Acceptance rates per draft position: {acceptance_per_pos}", flush=True)
+    if expected_acceptance_length is not None:
+        relative_error = abs(acceptance_length - expected_acceptance_length) / expected_acceptance_length
+        assert relative_error <= acceptance_length_rtol, (
+            f"Acceptance length regression detected for {model_name}!\n"
+            f" Expected: {expected_acceptance_length:.3f}\n"
+            f" Actual: {acceptance_length:.3f}\n"
+            f" Relative error: {relative_error:.2%} (tolerance: {acceptance_length_rtol:.2%})\n"
+            f" Drafts: {num_drafts}, Accepted tokens: {num_accepted_tokens}"
+        )
 
     cleanup_dist_env_and_memory()
     return acceptance_length
