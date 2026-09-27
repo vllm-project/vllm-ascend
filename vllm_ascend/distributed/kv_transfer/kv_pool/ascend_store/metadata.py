@@ -1209,6 +1209,9 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         self.requests: list[ReqMeta] = []
         self.preempted_req_ids = preempted_req_ids
         self.loading_req_ids = loading_req_ids or set()
+        # Requests whose blocks became reusable since the previous step
+        # (finished + preempted); the worker fences their in-flight saves.
+        self.released_req_ids: set[str] = set(preempted_req_ids or ())
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata."""
