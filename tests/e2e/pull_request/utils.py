@@ -277,7 +277,9 @@ def _run_speculative_decoding(
 
     num_drafts = 0
     num_accepted_tokens = 0
-    accepted_per_pos = [0] * int(speculative_config["num_speculative_tokens"])
+    num_speculative_tokens = speculative_config["num_speculative_tokens"]
+    assert isinstance(num_speculative_tokens, int)
+    accepted_per_pos = [0] * num_speculative_tokens
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
