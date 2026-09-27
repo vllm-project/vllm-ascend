@@ -110,7 +110,7 @@ templates:
       - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
       - --gpu-memory-utilization
-      - "0.94"
+      - "0.96"
       - --quantization
       - "ascend"
       - --block-size
@@ -164,7 +164,7 @@ templates:
       - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
       - --gpu-memory-utilization
-      - "0.94"
+      - "0.96"
       - --quantization
       - "ascend"
       - --block-size
