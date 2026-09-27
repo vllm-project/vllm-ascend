@@ -141,7 +141,7 @@ def test_draft_factory_forwards_cpu_lengths_and_explicit_config(monkeypatch):
     monkeypatch.setattr(attn_utils, "_BUILD_ATTN_METADATA_MODULE", module)
     lengths = torch.tensor([32, 128, 0, 0], dtype=torch.int32)
     config = SimpleNamespace(decode_context_parallel_size=8, cp_kv_cache_interleave_size=4)
-    with attn_utils.draft_attn_metadata_context(
+    with attn_utils.build_attn_metadata_factory(
         torch.arange(8),
         4,
         torch.zeros(4, dtype=torch.bool),
