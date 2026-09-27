@@ -140,6 +140,12 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
 
         attn_backend = self.speculator.attn_backend
         draft_vllm_config = self.speculator.draft_vllm_config
+        # Eagle3 GQA replays an updatable graph. Rebuilding draft attention
+        # metadata here runs before the graph launch and adds that CPU cost to
+        # every decode step. Replicated PCP and DCP drafts cannot share the
+        # target block table, so only those layouts pay for the rebuild.
+        if use_updatable_graph(attn_backend) and self.speculator.reuses_target_block_table():
+            return self._updatable_graph_replay(desc, None)
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             desc.num_tokens,
@@ -196,9 +202,10 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
     def _updatable_graph_replay(self, desc, draft_attn_metadatas):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
+        draft_attn_metadata = None if draft_attn_metadatas is None else draft_attn_metadatas[0]
         fia_params = self.speculator.build_fia_params(
             desc.num_reqs,
-            draft_attn_metadatas[0],
+            draft_attn_metadata,
             self.is_draft_model_prefill,
         )
         resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
