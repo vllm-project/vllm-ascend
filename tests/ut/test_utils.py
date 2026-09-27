@@ -886,8 +886,7 @@ class TestRefreshBlockSizeC8MXFP(TestBase):
         cache_config = SimpleNamespace(
             block_size=block_size,
             cache_dtype="mxfp8",
-            # What the hybrid config hook leaves behind: it runs before the
-            # quant config exists, so it sizes everything for BF16 K/V.
+            # Start from a BF16-sized page to verify MXFP8 recalculation.
             mamba_page_size_padded=2048 * 2 * self.HEAD_SIZE * 2 + self.CONV_BYTES,
             mamba_block_size=32768,
             mamba_cache_mode="none",
@@ -922,6 +921,48 @@ class TestRefreshBlockSizeC8MXFP(TestBase):
     def test_dense_model_keeps_the_kernel_block_size(self):
         cache_config = self._refresh(*self._config(is_hybrid=False, block_size=128))
         self.assertEqual(cache_config.block_size, utils.A5_C8_MXFP_KV_CACHE_BLOCK_SIZE)
+
+    def test_dense_model_preserves_explicit_supported_block_size(self):
+        cache_config = self._refresh(*self._config(is_hybrid=False, block_size=512, user_specified_block_size=True))
+        self.assertEqual(cache_config.block_size, 512)
+
+    def test_dense_model_rejects_explicit_unsupported_block_size(self):
+        with self.assertRaisesRegex(ValueError, "--block-size 512"):
+            self._refresh(*self._config(is_hybrid=False, block_size=128, user_specified_block_size=True))
+
+    def test_hybrid_config_hook_and_refresh_use_same_layout(self):
+        from vllm_ascend.patch.platform.patch_mamba_config import verify_and_update_config
+
+        config, model_cls = self._config(is_hybrid=True)
+        config.kv_transfer_config = None
+        config.scheduler_config.disable_hybrid_kv_cache_manager = False
+        config.model_config.max_model_len = 32768
+        with (
+            mock.patch("vllm.model_executor.models.config.MambaModelConfig.verify_and_update_config"),
+            mock.patch(
+                "vllm.model_executor.models.ModelRegistry.resolve_model_cls",
+                return_value=(model_cls, "FakeHybridForCausalLM"),
+            ),
+        ):
+            verify_and_update_config.__func__(None, config)
+            first_layout = (config.cache_config.block_size, config.cache_config.mamba_page_size_padded)
+            utils.refresh_block_size(config)
+        self.assertEqual(first_layout, (4096, 2 * self.SSM_BYTES * 33 // 32 + self.CONV_BYTES))
+        self.assertEqual(first_layout, (config.cache_config.block_size, config.cache_config.mamba_page_size_padded))
+
+    def test_hybrid_shared_layout_preserves_bf16_sizing(self):
+        from vllm_ascend.patch.platform.patch_mamba_config import update_hybrid_cache_layout
+
+        config, model_cls = self._config(is_hybrid=True, block_size=128)
+        config.cache_config.cache_dtype = "auto"
+        config.model_config.dtype = torch.bfloat16
+        with mock.patch(
+            "vllm.model_executor.models.ModelRegistry.resolve_model_cls",
+            return_value=(model_cls, "FakeHybridForCausalLM"),
+        ):
+            update_hybrid_cache_layout(config)
+        self.assertEqual(config.cache_config.block_size, 2048)
+        self.assertEqual(config.cache_config.mamba_page_size_padded, 2 * self.SSM_BYTES + self.CONV_BYTES)
 
     def test_hybrid_block_is_sized_from_fp8_bytes(self):
         cache_config = self._refresh(*self._config(is_hybrid=True))

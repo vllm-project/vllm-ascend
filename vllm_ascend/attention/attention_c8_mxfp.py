@@ -26,7 +26,6 @@ runner.
 """
 
 import math
-from typing import Any
 
 import torch
 import torch_npu
@@ -190,6 +189,7 @@ def scatter_mxfp_pa_nz_kv_cache(
     num_kv_heads, head_dim = quant_key.shape[1], quant_key.shape[2]
 
     def _as_bytes(t: torch.Tensor) -> torch.Tensor:
+        # Bitcast for scatter only: FP8 values are not requantized to INT8.
         return t if t.dtype == torch.int8 else t.view(torch.int8)
 
     def _nz_view(cache: torch.Tensor) -> torch.Tensor:
@@ -427,32 +427,6 @@ def _build_qfa_cu_seqlens(cumulative_seq_lengths: list[int], device: torch.devic
     return torch.tensor([0, *cumulative_seq_lengths], dtype=torch.int32, device=device)
 
 
-# Resolved lazily and cached: (main_op, metadata_op), delivered through the
-# cann_ops_transformer package shipped with the CANN toolkit. Captured
-# directly by npugraph_ex (internal at::empty allocations land in the graph's
-# private pool); no task_group/update machinery is needed on our side.
-_QFA_OPS: tuple[Any, Any] | None = None
-
-
-def _get_qfa_ops() -> tuple[Any, Any]:
-    global _QFA_OPS
-    if _QFA_OPS is None:
-        try:
-            from cann_ops_transformer.ops import quant_flash_attn as main_op  # type: ignore[import-not-found]
-            from cann_ops_transformer.ops import (  # type: ignore[import-not-found]
-                quant_flash_attn_metadata as metadata_op,
-            )
-        except ImportError:
-            raise RuntimeError(
-                "C8_MXFP requires the QFA dual operators delivered in the "
-                "cann_ops_transformer package (shipped with the CANN toolkit): "
-                "cann_ops_transformer.ops.quant_flash_attn(_metadata) could not "
-                "be imported in this environment."
-            ) from None
-        _QFA_OPS = (main_op, metadata_op)
-    return _QFA_OPS
-
-
 class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     """MXFP8 KV cache backend computed by the QFA dual-operator interface.
 
@@ -490,21 +464,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     # this subclass's constructor. Class-level defaults are therefore
     # required for objects that predate the class swap.
     enable_hamming_sparse: bool = False
-
-    @property
-    def main_op(self) -> Any:
-        """The QFA main operator, resolved through the module-level cache.
-
-        A property rather than an __init__ attribute: this impl is installed
-        by ``layer.impl.__class__`` assignment, which never calls the
-        subclass constructor.
-        """
-        return _get_qfa_ops()[0]
-
-    @property
-    def metadata_op(self) -> Any:
-        """The QFA metadata (AICPU planning) operator."""
-        return _get_qfa_ops()[1]
 
     def _nz_5d_view(self, cache: torch.Tensor, block_size: int) -> torch.Tensor:
         """View a natural (num_blocks, block_size, num_kv_heads, head_dim) C8
@@ -617,7 +576,9 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             # TND + PA: pass cu_seqlens_q only; the KV side is addressed via
             # block_table + seqused_kv. batch_size must NOT be passed with a
             # TND layout_q (the checker rejects it).
-            metadata = self.metadata_op(
+            from cann_ops_transformer.ops import quant_flash_attn_metadata
+
+            metadata = quant_flash_attn_metadata(
                 self.num_heads,
                 self.num_kv_heads,
                 self.head_size,
@@ -708,11 +669,12 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         key_scale = key_scale.view(torch.float8_e8m0fnu)
         value_scale = value_scale.view(torch.float8_e8m0fnu)
         query_scale = query_scale.view(torch.float8_e8m0fnu)
-        main_op = self.main_op
+        from cann_ops_transformer.ops import quant_flash_attn
+
         # cann_ops_transformer delivery signature (verified on-device): the
         # allocating wrapper is capture-safe under npugraph_ex (ops-transformer
         # golden tests capture exactly this call, GRAPH_PATH=7).
-        result = main_op(
+        result = quant_flash_attn(
             quant_query,
             key,
             value,

@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 import os
 from importlib import import_module, util
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 from uuid import uuid4
 
 import torch
@@ -329,7 +329,9 @@ class NPUPlatform(Platform):
             # widened it, so append the Ascend-only dtypes here.
             dtype_action = parser._option_string_actions.get("--kv-cache-dtype")
             if dtype_action and hasattr(dtype_action, "choices") and dtype_action.choices:
-                for dtype in ("int8", "mxfp8"):
+                from vllm.config.cache import CacheConfig
+
+                for dtype in get_args(CacheConfig.__dataclass_fields__["cache_dtype"].type):
                     if dtype not in dtype_action.choices:
                         dtype_action.choices.append(dtype)
 

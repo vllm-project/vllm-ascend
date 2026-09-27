@@ -470,7 +470,12 @@ class TestNPUPlatform(TestBase):
         mock_parser = MagicMock()
         mock_action = MagicMock()
         mock_action.choices = ["awq", "gptq"]
-        mock_parser._option_string_actions = {"--quantization": mock_action}
+        dtype_action = MagicMock()
+        dtype_action.choices = ["auto"]
+        mock_parser._option_string_actions = {
+            "--quantization": mock_action,
+            "--kv-cache-dtype": dtype_action,
+        }
 
         self.platform.pre_register_and_update(mock_parser)
 
@@ -478,6 +483,9 @@ class TestNPUPlatform(TestBase):
 
         self.assertTrue(ASCEND_QUANTIZATION_METHOD in mock_action.choices)
         self.assertEqual(len(mock_action.choices), 3)  # original 2 + ascend
+        self.assertIn("int8", dtype_action.choices)
+        self.assertIn("mxfp8", dtype_action.choices)
+        self.assertEqual(dtype_action.choices.count("auto"), 1)
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.configs.modelslim_config.AscendModelSlimConfig")

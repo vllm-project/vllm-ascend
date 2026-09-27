@@ -367,7 +367,7 @@ class TestScatterMXFPKScaleCache(TestBase):
 
 
 class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
-    """Quant-method wiring: v_cache_scale fallback and backend installation."""
+    """Quant-method wiring: V scale loading and backend installation."""
 
     def _make_layer(self, with_impl: bool = False):
         from vllm_ascend.attention.attention_c8_mxfp import AscendC8MXFPAttentionBackendImpl
@@ -438,15 +438,17 @@ class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
             _quant_weight_loader(param, full)
         self.assertTrue(_torch.equal(param, _torch.full((256,), 100, dtype=_torch.uint8)))
 
-    def test_missing_v_scale_uses_e8m0_unity_default(self):
+    def test_loaded_v_scale_produces_expected_reciprocal(self):
         method = AscendC8MXFPKVCacheAttentionMethod.__new__(AscendC8MXFPKVCacheAttentionMethod)
         layer = torch.nn.Module()
         layer.num_kv_heads = 2
         layer.head_size_v = 4
         method.create_weights(layer)
-        # The missing-weight fallback: E8M0 127 is the neutral scale of 1.0.
         self.assertEqual(layer.v_cache_scale.dtype, torch.uint8)
-        self.assertTrue(torch.equal(layer.v_cache_scale, torch.full((8,), 127, dtype=torch.uint8)))
+        self.assertEqual(layer.v_cache_scale.shape, (8,))
+        checkpoint_scale = torch.full((8,), 128, dtype=torch.uint8)
+        layer.v_cache_scale.weight_loader(layer.v_cache_scale, checkpoint_scale)
+        self.assertTrue(torch.equal(layer.v_cache_scale, checkpoint_scale))
 
         vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
         with patch(
@@ -455,8 +457,8 @@ class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
         ):
             method.process_weights_after_loading(layer)
 
-        # The all-127 fallback is a neutral scale of 1.0, so is its reciprocal.
-        self.assertTrue(torch.equal(layer.v_cache_scale_float_reciprocal, torch.ones(8, dtype=torch.bfloat16)))
+        # E8M0 128 represents 2.0, whose reciprocal is 0.5.
+        self.assertTrue(torch.equal(layer.v_cache_scale_float_reciprocal, torch.full((8,), 0.5, dtype=torch.bfloat16)))
 
     def test_installs_c8_backend_with_512_token_blocks(self):
         from vllm_ascend.attention.attention_c8_mxfp import (
