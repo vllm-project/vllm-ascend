@@ -24,7 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
 )
 
-from ..protocol.coordinates import TokenRange
+from .coordinates import TokenRange
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
@@ -41,7 +41,7 @@ BlockHashes = Sequence[BlockHash | str]
 
 
 @dataclass(frozen=True, slots=True)
-class ChunkSelection:
+class GroupSelection:
     """Logical chunks selected for one original vLLM cache group."""
 
     group_id: int
@@ -53,40 +53,45 @@ class ChunkSelection:
 
 
 @dataclass(frozen=True, slots=True)
-class KVRegion:
-    """A token envelope with the chunks selected in each cache group."""
+class KVSelection:
+    """Content-identified semantic KV selected on the token axis."""
 
     token_range: TokenRange
-    chunk_selections: tuple[ChunkSelection, ...]
+    block_hashes: tuple[BlockHash | str, ...]
+    groups: tuple[GroupSelection, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class LookupObservation:
-    """Per-chunk Backend observations produced by one Lookup task."""
+class ChunkAvailability:
+    """Backend availability observed for one semantic KV chunk."""
+
+    token_range: TokenRange
+    content_hash: BlockHash | str
+    available: bool
+
+
+@dataclass(frozen=True, slots=True)
+class GroupAvailability:
+    """Semantic chunk observations for one original vLLM cache group."""
 
     group_id: int
-    chunk_ends: tuple[int, ...]
-    chunk_hashes: tuple[BlockHash | str, ...]
-    chunk_presence: tuple[bool, ...]
+    chunks: tuple[ChunkAvailability, ...]
 
 
-class KVRegionOperator(Protocol):
-    """Derive logical KV regions without owning object projection or I/O."""
+class KVReachability(Protocol):
+    """Select semantic KV and resolve a common externally available frontier."""
 
     group_ids: tuple[int, ...]
 
-    def lookup_region(self, query_range: TokenRange) -> KVRegion: ...
+    def select_for_lookup(self, block_hashes: BlockHashes, query_range: TokenRange) -> KVSelection: ...
 
-    def resolve_lookup(
-        self,
-        block_hashes: BlockHashes,
-        query_region: KVRegion,
-        observations: Sequence[LookupObservation],
-    ) -> int: ...
+    def resolve_available_end(self, selection: KVSelection, availability: Sequence[GroupAvailability]) -> int: ...
 
-    def load_region(self, block_hashes: BlockHashes, load_range: TokenRange) -> KVRegion: ...
+    def select_for_load(self, block_hashes: BlockHashes, load_range: TokenRange) -> KVSelection: ...
 
-    def store_region(self, store_range: TokenRange, num_prompt_tokens: int) -> KVRegion: ...
+    def select_for_store(
+        self, block_hashes: BlockHashes, store_range: TokenRange, num_prompt_tokens: int
+    ) -> KVSelection: ...
 
 
 class ExternalCachedBlockPool:
@@ -109,8 +114,8 @@ class ExternalCachedBlockPool:
         return None
 
 
-class UnitaryKVRegionOperator:
-    """Derive regions for one transferable cache group."""
+class UnitaryReachability:
+    """Select reachable KV for one transferable cache group."""
 
     def __init__(
         self,
@@ -118,43 +123,40 @@ class UnitaryKVRegionOperator:
         max_model_len: int,
         cache_transfer_granularity: int,
     ) -> None:
-        self.group_ids = (group_id,)
+        self.group_ids: tuple[int, ...] = (group_id,)
         self._max_model_len = max_model_len
         self._cache_transfer_granularity = cache_transfer_granularity
 
-    def lookup_region(self, query_range: TokenRange) -> KVRegion:
-        return KVRegion(query_range, (ChunkSelection(self.group_ids[0], None),))
+    def select_for_lookup(self, block_hashes: BlockHashes, query_range: TokenRange) -> KVSelection:
+        return KVSelection(query_range, tuple(block_hashes), (GroupSelection(self.group_ids[0], None),))
 
-    def resolve_lookup(
-        self,
-        block_hashes: BlockHashes,
-        query_region: KVRegion,
-        observations: Sequence[LookupObservation],
-    ) -> int:
-        if len(observations) != 1 or observations[0].group_id != self.group_ids[0]:
+    def resolve_available_end(self, selection: KVSelection, availability: Sequence[GroupAvailability]) -> int:
+        if len(availability) != 1 or availability[0].group_id != self.group_ids[0]:
             raise ValueError(f"Expected one Lookup observation for group {self.group_ids[0]}")
 
-        query_range = query_region.token_range
+        query_range = selection.token_range
         max_hit_length = min(query_range.end_token, self._max_model_len)
         hit_end = min(query_range.start_token, max_hit_length)
         hit_end -= hit_end % self._cache_transfer_granularity
-        observation = observations[0]
-        for end, is_present in zip(observation.chunk_ends, observation.chunk_presence, strict=True):
-            if end > max_hit_length or not is_present:
+        observation = availability[0]
+        for chunk in observation.chunks:
+            if chunk.token_range.end_token > max_hit_length or not chunk.available:
                 break
-            if end % self._cache_transfer_granularity == 0:
-                hit_end = end
+            if chunk.token_range.end_token % self._cache_transfer_granularity == 0:
+                hit_end = chunk.token_range.end_token
         return hit_end
 
-    def load_region(self, block_hashes: BlockHashes, load_range: TokenRange) -> KVRegion:
-        return KVRegion(load_range, (ChunkSelection(self.group_ids[0], None),))
+    def select_for_load(self, block_hashes: BlockHashes, load_range: TokenRange) -> KVSelection:
+        return KVSelection(load_range, tuple(block_hashes), (GroupSelection(self.group_ids[0], None),))
 
-    def store_region(self, store_range: TokenRange, num_prompt_tokens: int) -> KVRegion:
-        return KVRegion(store_range, (ChunkSelection(self.group_ids[0], None),))
+    def select_for_store(
+        self, block_hashes: BlockHashes, store_range: TokenRange, num_prompt_tokens: int
+    ) -> KVSelection:
+        return KVSelection(store_range, tuple(block_hashes), (GroupSelection(self.group_ids[0], None),))
 
 
-class HybridKVRegionOperator:
-    """Derive reachable regions across heterogeneous transfer groups.
+class HybridReachability:
+    """Select reachable KV across heterogeneous transfer groups.
 
     This mirrors vLLM's external KV reachability rules but uses AscendStore's external
     key granularity. Compressed specs already expose raw-token block sizes,
@@ -232,27 +234,23 @@ class HybridKVRegionOperator:
             for group_index in self.spec_groups[spec_group_index][1]
         }
 
-    def lookup_region(self, query_range: TokenRange) -> KVRegion:
+    def select_for_lookup(self, block_hashes: BlockHashes, query_range: TokenRange) -> KVSelection:
         aligned_token_len = cdiv(min(query_range.end_token, self.max_model_len), self.lcm_block_size)
         aligned_token_len *= self.lcm_block_size
         lookup_masks = self.lookup_mask(aligned_token_len)
         chunk_selections = tuple(
-            ChunkSelection(group_id, None if mask is None else tuple(mask))
+            GroupSelection(group_id, None if mask is None else tuple(mask))
             for group_id, mask in zip(self.group_ids, lookup_masks, strict=True)
         )
-        return KVRegion(query_range, chunk_selections)
+        return KVSelection(query_range, tuple(block_hashes), chunk_selections)
 
-    def resolve_lookup(
-        self,
-        block_hashes: BlockHashes,
-        query_region: KVRegion,
-        observations: Sequence[LookupObservation],
-    ) -> int:
-        observations_by_group = {observation.group_id: observation for observation in observations}
+    def resolve_available_end(self, selection: KVSelection, availability: Sequence[GroupAvailability]) -> int:
+        observations_by_group = {observation.group_id: observation for observation in availability}
         if set(observations_by_group) != set(self.group_ids):
             raise ValueError(f"Lookup observations do not match configured groups {self.group_ids}")
 
-        query_range = query_region.token_range
+        query_range = selection.token_range
+        block_hashes = selection.block_hashes
         max_hit_length = min(query_range.end_token, self.max_model_len)
         block_hashes_to_check = block_hashes[: max_hit_length // self.hash_block_size]
         cached_hashes: set[tuple[int, bytes]] = set()
@@ -266,13 +264,9 @@ class HybridKVRegionOperator:
             )
             observation = observations_by_group[group_id]
             cached_hashes.update(
-                (group_index, block_hash_to_bytes(block_hash))
-                for block_hash, is_present in zip(
-                    observation.chunk_hashes,
-                    observation.chunk_presence,
-                    strict=True,
-                )
-                if is_present
+                (group_index, block_hash_to_bytes(chunk.content_hash))
+                for chunk in observation.chunks
+                if chunk.available
             )
 
         if not cached_hashes:
@@ -285,20 +279,23 @@ class HybridKVRegionOperator:
         )
         return hit_length
 
-    def load_region(self, block_hashes: BlockHashes, load_range: TokenRange) -> KVRegion:
-        return KVRegion(load_range, self._group_selections(self.load_mask(block_hashes, load_range.end_token)))
+    def select_for_load(self, block_hashes: BlockHashes, load_range: TokenRange) -> KVSelection:
+        selections = self._group_selections(self.load_mask(block_hashes, load_range.end_token))
+        return KVSelection(load_range, tuple(block_hashes), selections)
 
-    def store_region(self, store_range: TokenRange, num_prompt_tokens: int) -> KVRegion:
-        try:
+    def select_for_store(
+        self, block_hashes: BlockHashes, store_range: TokenRange, num_prompt_tokens: int
+    ) -> KVSelection:
+        if store_range.end_token % self.lcm_block_size == 0:
             selections = self._group_selections(self.store_mask(store_range.end_token, num_prompt_tokens))
-        except AssertionError as error:
-            logger.debug("Use unfiltered Store chunks for unaligned end token %d: %s", store_range.end_token, error)
-            selections = tuple(ChunkSelection(group_id, None) for group_id in self.group_ids)
-        return KVRegion(store_range, selections)
+        else:
+            logger.debug("Use unfiltered Store chunks for unaligned end token %d", store_range.end_token)
+            selections = tuple(GroupSelection(group_id, None) for group_id in self.group_ids)
+        return KVSelection(store_range, tuple(block_hashes), selections)
 
-    def _group_selections(self, masks: Sequence[Sequence[bool] | None]) -> tuple[ChunkSelection, ...]:
+    def _group_selections(self, masks: Sequence[Sequence[bool] | None]) -> tuple[GroupSelection, ...]:
         return tuple(
-            ChunkSelection(group_id, None if mask is None else tuple(mask))
+            GroupSelection(group_id, None if mask is None else tuple(mask))
             for group_id, mask in zip(self.group_ids, masks, strict=True)
         )
 
@@ -369,7 +366,7 @@ class HybridKVRegionOperator:
         return tuple([True] * num_chunks if mask is None else mask for num_chunks, mask in masks)
 
     def lookup_mask(self, aligned_token_len: int) -> tuple[list[bool] | None, ...]:
-        masks = self._reachable_masks(aligned_token_len, None, None)
+        masks = self._reachable_masks(aligned_token_len, self.retention_interval, None)
         for num_chunks, mask in masks:
             if mask is not None:
                 assert len(mask) == num_chunks

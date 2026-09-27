@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.v1.core.kv_cache_utils import BlockHash
 
-from .coordinates import TokenRange
+from ..graph.coordinates import TokenRange
 
 
 @dataclass(frozen=True, slots=True)
-class LoadRequest:
+class LoadCommand:
     """A Scheduler-approved Load command."""
 
     request_id: str
@@ -21,7 +21,7 @@ class LoadRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class StoreRequest:
+class StoreCommand:
     """A Scheduler-approved asynchronous Store command."""
 
     request_id: str
@@ -32,22 +32,22 @@ class StoreRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class LoadRequestBatch:
-    """Load requests approved for one Worker step."""
+class LoadCommandBatch:
+    """Load commands approved for one Worker step."""
 
-    requests: tuple[LoadRequest, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class StoreRequestBatch:
-    """Store requests approved for one Worker step."""
-
-    requests: tuple[StoreRequest, ...] = ()
+    commands: tuple[LoadCommand, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
-class AscendStoreV1Metadata(KVConnectorMetadata):
-    """vLLM step envelope carrying approved Load and Store commands."""
+class StoreCommandBatch:
+    """Store commands approved for one Worker step."""
 
-    load: LoadRequestBatch = LoadRequestBatch()
-    store: StoreRequestBatch = StoreRequestBatch()
+    commands: tuple[StoreCommand, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class KVTransferStep(KVConnectorMetadata):
+    """One Scheduler-to-Worker step carrying approved transfer commands."""
+
+    load: LoadCommandBatch = LoadCommandBatch()
+    store: StoreCommandBatch = StoreCommandBatch()

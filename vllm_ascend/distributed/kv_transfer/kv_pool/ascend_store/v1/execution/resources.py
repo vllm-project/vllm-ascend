@@ -1,4 +1,4 @@
-"""Worker-owned cache resources shared by KV pool operations."""
+"""Own Backend state, key derivation and registered local KV memory."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from ..backend import BackendAdapter, create_backend
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig
 
-    from .layout import KVCacheGroupLayout
+    from ..graph.topology import KVCacheGroupTopology
 
 
 def _physical_layer_index(layer_name: str) -> int:
@@ -25,8 +25,8 @@ def _physical_layer_index(layer_name: str) -> int:
     return int(first_number.group()) if first_number is not None else 0
 
 
-class WorkerCacheResources:
-    """Own the backend, token database and registered Worker KV tensors."""
+class KVResources:
+    """Own the Backend, token database and registered local KV tensors."""
 
     def __init__(
         self,
@@ -40,6 +40,7 @@ class WorkerCacheResources:
         self.num_blocks = num_blocks
         self._layer_names_by_group = layer_names_by_group
         self.kv_caches: dict[str, torch.Tensor] | None = None
+        self._registered = False
         self._closed = False
 
     @classmethod
@@ -47,15 +48,16 @@ class WorkerCacheResources:
         cls,
         parallel_config: ParallelConfig,
         extra_config: dict[str, Any],
-        kv_cache_groups: tuple[KVCacheGroupLayout, ...],
+        kv_cache_groups: tuple[KVCacheGroupTopology, ...],
         hash_block_size: int,
         num_blocks: int,
-    ) -> WorkerCacheResources:
+        consumer_pipeline_partitions: tuple[int, ...] | None,
+    ) -> KVResources:
         backend_name = extra_config.get("backend", "mooncake").strip().lower()
         token_database = ChunkedTokenDatabase(
             [group.key_metadata for group in kv_cache_groups],
             [group.block_size for group in kv_cache_groups],
-            None,
+            None if consumer_pipeline_partitions is None else list(consumer_pipeline_partitions),
             hash_block_size,
         )
         layer_names_by_group = {group.group_id: group.layer_names for group in kv_cache_groups}
@@ -63,8 +65,13 @@ class WorkerCacheResources:
         return cls(backend, token_database, num_blocks, layer_names_by_group)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        self.kv_caches = kv_caches
+        if self._closed:
+            raise RuntimeError("KV resources are closed")
+        if self._registered:
+            raise RuntimeError("KV caches are already registered")
         self._register_kv_buffers(kv_caches)
+        self.kv_caches = kv_caches
+        self._registered = True
 
     def close(self) -> None:
         if self._closed:
@@ -76,9 +83,9 @@ class WorkerCacheResources:
         self._closed = True
 
     def _register_kv_buffers(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        addresses_by_group = {group_id: [] for group_id in self._layer_names_by_group}
-        block_lengths_by_group = {group_id: [] for group_id in self._layer_names_by_group}
-        block_strides_by_group = {group_id: [] for group_id in self._layer_names_by_group}
+        addresses_by_group: dict[int, list[int]] = {group_id: [] for group_id in self._layer_names_by_group}
+        block_lengths_by_group: dict[int, list[int]] = {group_id: [] for group_id in self._layer_names_by_group}
+        block_strides_by_group: dict[int, list[int]] = {group_id: [] for group_id in self._layer_names_by_group}
         registered_regions: dict[int, tuple[int, int]] = {}
 
         for group_id, layer_names in self._layer_names_by_group.items():
@@ -105,7 +112,14 @@ class WorkerCacheResources:
                     block_lengths_by_group[group_id].append(block_length)
                     block_strides_by_group[group_id].append(block_stride)
 
-        self.token_database.set_group_buffers(addresses_by_group, block_lengths_by_group, block_strides_by_group)
+        self.token_database.set_group_buffers(
+            addresses_by_group,
+            block_lengths_by_group,
+            block_strides_by_group,
+            group_num_layers={
+                group_id: len(layer_names) for group_id, layer_names in self._layer_names_by_group.items()
+            },
+        )
         self.backend.register_buffer(
             [start for start, _ in registered_regions.values()],
             [end - start for start, end in registered_regions.values()],
