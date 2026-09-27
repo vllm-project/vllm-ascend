@@ -209,3 +209,13 @@ stream-event samples confirm the eligible route remains faster:
 
 These are wrapper-level screens, not new device-kernel measurements. The
 type-check result itself awaits the next CI run.
+
+## Round 5 — align the CPU forward-flow test fixture
+
+CI pre-commit, including mypy, passed after Round 4. The selected CPU UT
+then found that its mocked MoE configuration lacked the `dp_size` and
+`pcp_size` fields now used by the eligibility guard. Adding these two fields
+to the fixture made all eight forward-flow parameterizations pass. The
+kernel and production dispatch are unchanged; the 18-case NPU suite also
+passed. A ten-sample wrapper screen at T/E/K=64/16/8 measured main
+573.29 µs versus fused 381.43 µs (1.50×), consistent with prior rounds.
