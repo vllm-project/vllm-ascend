@@ -23,6 +23,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
+from vllm_ascend.distributed.eplb.hixl_communicator import AscendHixlEplbCommunicator
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.distributed.eplb.state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,
@@ -122,6 +123,21 @@ def _patch_eplb_policy_config() -> None:
     policy_field.type = policy_type
     policy_field.default = "stair"
     validator.func = _validate_with_stair
+
+
+def _patch_eplb_communicator_config() -> None:
+    """Add HIXL to the upstream communicator selector."""
+    config_cls = _parallel_config.EPLBConfig
+    communicator_field = getattr(config_cls, "__dataclass_fields__", {}).get("communicator")
+    if communicator_field is None:
+        raise RuntimeError("Unsupported vLLM EPLB contract: communicator field is missing.")
+    communicator_type = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl", "hixl"] | None
+    if communicator_field.type == communicator_type:
+        return
+
+    _parallel_config.EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl", "hixl"]
+    config_cls.__annotations__["communicator"] = communicator_type
+    communicator_field.type = communicator_type
     rebuild_dataclass(config_cls, force=True)
     rebuild_dataclass(_parallel_config.ParallelConfig, force=True)
 
@@ -134,9 +150,18 @@ def _wrap_communicator_factory(original_factory):
     @wraps(original_factory)
     def _create_eplb_communicator(*args, **kwargs):
         bound = factory_signature.bind(*args, **kwargs)
-        return AscendGlooEplbCommunicator(
-            cpu_group=bound.arguments["group_coordinator"].cpu_group,
-        )
+        backend = bound.arguments["backend"]
+        if backend == "torch_gloo":
+            return AscendGlooEplbCommunicator(
+                cpu_group=bound.arguments["group_coordinator"].cpu_group,
+            )
+        if backend == "hixl":
+            return AscendHixlEplbCommunicator(
+                cpu_group=bound.arguments["group_coordinator"].cpu_group,
+                all_expert_weights=bound.arguments["expert_weights"],
+                expert_buffer=bound.arguments["expert_buffer"],
+            )
+        return original_factory(*bound.args, **bound.kwargs)
 
     setattr(_create_eplb_communicator, _PATCH_MARKER, True)
     return _create_eplb_communicator
@@ -429,6 +454,8 @@ def _move_changed_layer_to_workspace(model_state, ep_rank: int) -> None:
     result = model_state.pending_result
     assert result is not None
     if result.layer_idx is not None:
+        if isinstance(model_state.communicator, AscendHixlEplbCommunicator):
+            model_state.communicator.wait_for_transfer_safety()
         _eplb_state.move_from_buffer(
             expert_weights=model_state.model.expert_weights[result.layer_idx],
             expert_weights_buffers=model_state.expert_buffer,
@@ -537,6 +564,22 @@ def _wrap_move_to_workspace(original_move):
                                 rank_transfers,
                                 cross_node_transfers,
                             )
+                hixl_timings = getattr(model_state.communicator, "_eplb_hixl_phase_timings", [])
+                if hixl_timings:
+                    logger.info(
+                        "HIXL EPLB transfer: model=%s rank=%d launch_ms=%.3f transfer_ms=%.3f "
+                        "confirmation_ms=%.3f exposed_wait_ms=%.3f requests=%d bytes=%d layers=%d",
+                        model_state.model_name,
+                        bound.arguments["ep_rank"],
+                        sum(timing.launch_ms for timing in hixl_timings),
+                        sum(timing.transfer_ms for timing in hixl_timings),
+                        sum(timing.confirmation_ms for timing in hixl_timings),
+                        sum(timing.exposed_wait_ms for timing in hixl_timings),
+                        sum(timing.request_count for timing in hixl_timings),
+                        sum(timing.transfer_bytes for timing in hixl_timings),
+                        len(hixl_timings),
+                    )
+                model_state.communicator.__dict__.pop("_eplb_hixl_phase_timings", None)
         finally:
             if pending_result is not None and consumed_event is not None:
                 pending_result.consumed_event = consumed_event
@@ -555,6 +598,7 @@ def _patch_async_move_to_workspace() -> None:
 
 
 _patch_eplb_policy_config()
+_patch_eplb_communicator_config()
 _patch_parallel_config()
 _patch_initial_expert_layout()
 _patch_communicator_factory()
