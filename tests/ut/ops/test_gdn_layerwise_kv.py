@@ -26,6 +26,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ops.gdn import (
     AscendGatedDeltaNetAttention,
+    DeviceOperator,
     _pack_conv_weights,
     initialize_packed_conv_weight,
 )
@@ -96,6 +97,11 @@ class _GDNForwardWrapper(nn.Module):
             return None, None, None
         projected = mixed_qkv.reshape(1, mixed_qkv.shape[0], 1, 2)
         return projected, projected, projected
+
+    def rearrange_mixed_qkv_and_fused_gdn_gating(self, mixed_qkv, A_log, a, b, dt_bias):
+        query, key, value = self.rearrange_mixed_qkv(mixed_qkv)
+        g, beta = DeviceOperator.fused_gdn_gating(A_log, a, b, dt_bias)
+        return query, key, value, g, beta
 
 
 def _run_gdn_forward(

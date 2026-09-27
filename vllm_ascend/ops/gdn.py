@@ -16,6 +16,7 @@
 #
 
 from functools import wraps
+from typing import cast
 
 import torch
 import torch_npu
@@ -260,6 +261,57 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return AscendGDNAttentionBackend
+
+    def _view_packed_qkv(
+        self,
+        packed_qkv: torch.Tensor,
+        num_tokens: int,
+        q_dim: int,
+        k_dim: int,
+        v_dim: int,
+    ):
+        query, key, value = packed_qkv.split([num_tokens * q_dim, num_tokens * k_dim, num_tokens * v_dim])
+        return (
+            query.view(1, num_tokens, q_dim // self.head_k_dim, self.head_k_dim),
+            key.view(1, num_tokens, k_dim // self.head_k_dim, self.head_k_dim),
+            value.view(1, num_tokens, v_dim // self.head_v_dim, self.head_v_dim),
+        )
+
+    def rearrange_mixed_qkv_and_fused_gdn_gating(
+        self,
+        mixed_qkv: torch.Tensor,
+        A_log: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        dt_bias: torch.Tensor,
+    ):
+        q_dim = self.key_dim // self.tp_size
+        k_dim = q_dim
+        v_dim = self.value_dim // self.tp_size
+        outputs = DeviceOperator.fused_rearrange_mix_qkv_gdn_gating(
+            mixed_qkv,
+            a,
+            b,
+            A_log,
+            dt_bias,
+            q_dim,
+            k_dim,
+            v_dim,
+        )
+        if outputs is not None:
+            packed_qkv, g, beta = outputs
+            query, key, value = self._view_packed_qkv(
+                packed_qkv,
+                mixed_qkv.shape[0],
+                q_dim,
+                k_dim,
+                v_dim,
+            )
+            return query, key, value, g.unsqueeze(0), beta.unsqueeze(0)
+
+        query, key, value = self.rearrange_mixed_qkv(mixed_qkv)
+        g, beta = DeviceOperator.fused_gdn_gating(A_log, a, b, dt_bias)
+        return query, key, value, g, beta
 
     def forward(
         self,
@@ -509,11 +561,29 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
-
-        # 2. Recurrent attention
-        g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+        # A batch that mixes speculative and non-speculative tokens rearranges
+        # two indexed tensors, so neither input has the same rows as a/b.  Fuse
+        # only when exactly one rearrange input owns the complete token batch.
+        fuse_gating = (mixed_qkv_spec is None) != (mixed_qkv_non_spec is None)
+        if fuse_gating:
+            fused_input = mixed_qkv_non_spec if mixed_qkv_spec is None else mixed_qkv_spec
+            query, key, value, g, beta = self.rearrange_mixed_qkv_and_fused_gdn_gating(
+                fused_input,
+                self.A_log,
+                a,
+                b,
+                self.dt_bias,
+            )
+            if mixed_qkv_spec is None:
+                query_non_spec, key_non_spec, value_non_spec = query, key, value
+                query_spec = key_spec = value_spec = None
+            else:
+                query_spec, key_spec, value_spec = query, key, value
+                query_non_spec = key_non_spec = value_non_spec = None
+        else:
+            query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+            query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
+            g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 g_spec = g
@@ -548,9 +618,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
                 query=query_spec.squeeze(0),
                 key=key_spec.squeeze(0),
-                value=value_spec.squeeze(0),
-                g=g_spec.squeeze(0),
-                beta=beta_spec.squeeze(0),
+                value=cast(torch.Tensor, value_spec).squeeze(0),
+                g=cast(torch.Tensor, g_spec).squeeze(0),
+                beta=cast(torch.Tensor, beta_spec).squeeze(0),
                 state=ssm_state,
                 scale=key_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,

@@ -10,6 +10,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ops.gdn import (
     AscendGatedDeltaNetAttention,
+    DeviceOperator,
     _pack_conv_weights,
     initialize_packed_conv_weight,
 )
@@ -106,6 +107,16 @@ def _make_layer() -> SimpleNamespace:
     layer.rearrange_mixed_qkv = Mock(
         name="rearrange_mixed_qkv",
         side_effect=rearrange_mixed_qkv,
+    )
+
+    def fused_rearrange(mixed_qkv, A_log, a, b, dt_bias):
+        query, key, value = layer.rearrange_mixed_qkv(mixed_qkv)
+        g, beta = DeviceOperator.fused_gdn_gating(A_log, a, b, dt_bias)
+        return query, key, value, g, beta
+
+    layer.rearrange_mixed_qkv_and_fused_gdn_gating = Mock(
+        name="rearrange_mixed_qkv_and_fused_gdn_gating",
+        side_effect=fused_rearrange,
     )
     return layer
 
@@ -213,10 +224,9 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
         torch.tensor([[[21.0, 22.0]]]),
     )
 
-    # The spec and non-spec branches both invoke rearrange_mixed_qkv.
-    # In this non-spec mixed batch, the spec invocation receives None.
-    # Verify that only one invocation processes an actual tensor, so the
-    # decode prefix is not rearranged for a second time.
+    # This non-spec batch takes the fused dispatch with the complete tensor.
+    # Verify that the decode prefix is not rearranged a second time.
+    layer.rearrange_mixed_qkv_and_fused_gdn_gating.assert_called_once()
     non_none_calls = [call for call in layer.rearrange_mixed_qkv.call_args_list if call.args[0] is not None]
     assert len(non_none_calls) == 1
 
