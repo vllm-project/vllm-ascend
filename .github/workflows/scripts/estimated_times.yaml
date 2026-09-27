@@ -142,6 +142,8 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_gemma4.py: 290
   tests/e2e/pull_request/four_card/test_minimax_m3.py: 240
   tests/e2e/pull_request/four_card/test_kimi_k3.py: 600
+  # Conservative per-job scheduling budget; observed A3 wall times are documented in docs/glm53flash-ci.md.
+  tests/e2e/pull_request/four_card/test_glm5_3_flash.py: 420
   tests/e2e/pull_request/one_card/test_attention_v1_precision.py: 480
   tests/e2e/pull_request/one_card/test_mla_precision.py: 210
   tests/e2e/pull_request/one_card/test_sfa_v1_precision.py: 90
