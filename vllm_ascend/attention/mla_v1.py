@@ -774,6 +774,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
     ):
+        # TODO: Drop SpecDecoding after legacy V1/310P graph capture callers migrate.
         if attn_state in {AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding}:
             attn_metadata = self.build(
                 common_prefix_len=0,
@@ -1668,24 +1669,17 @@ class AscendMLAImpl(MLAAttentionImpl):
                 k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
 
         attn_output_shape: tuple | None = None
+        # TODO: Drop SpecDecoding after V1/310P MTP paths use DecodeOnly and
+        # verify that their FIA query layout still matches graph capture.
         if (
-            (
-                attn_metadata.attn_state
-                in [
-                    AscendAttentionState.SpecDecoding,
-                    AscendAttentionState.ChunkedPrefill,
-                    AscendAttentionState.DecodeOnly,
-                    AscendAttentionState.PrefillNoCache,  # for extremely short prefills
-                ]
-                and self.speculative_config is not None
-            )
-            # vLLM main (#56181) restructured the draft decode metadata flow;
-            # the draft decode graph capture then records a non-TND layout,
-            # while replay still passes cumulative actual_seq_lengths_q. Force
-            # TND for the draft (its metadata uses cumulative lengths). Use the
-            # forward-context flag, not self.is_draft_model: the draft MLA impl
-            # shares the target's vllm_config, so runner_type is "generate".
-            or _EXTRA_CTX.is_draft_model
+            attn_metadata.attn_state
+            in [
+                AscendAttentionState.SpecDecoding,
+                AscendAttentionState.ChunkedPrefill,
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.PrefillNoCache,  # for extremely short prefills
+            ]
+            and self.speculative_config is not None
         ):
             # The right part layout indicates the layout of the attention
             # output. It is set to NTD to avoid the need for a transpose
