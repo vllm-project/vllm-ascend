@@ -82,6 +82,6 @@ class LoadService:
 
     @staticmethod
     def _find_failed_block_ids(task: LoadTask, result: LoadExecutionResult) -> set[int]:
-        if result.result_codes is None or len(result.result_codes) != len(task.chunks):
-            return {chunk.block_id for chunk in task.chunks}
-        return {chunk.block_id for chunk, code in zip(task.chunks, result.result_codes) if code != 0}
+        if result.result_codes is None or len(result.result_codes) != len(task.bindings):
+            return {binding.block_id for binding in task.bindings}
+        return {binding.block_id for binding, code in zip(task.bindings, result.result_codes, strict=True) if code != 0}

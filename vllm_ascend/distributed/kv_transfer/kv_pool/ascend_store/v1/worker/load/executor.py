@@ -13,7 +13,7 @@ from .task import LoadTask
 
 @dataclass(frozen=True, slots=True)
 class LoadExecutionResult:
-    """Raw Backend result codes aligned with one Load task's chunks."""
+    """Raw Backend result codes aligned with one Load task's bindings."""
 
     request_id: str
     result_codes: tuple[int, ...] | None
@@ -54,12 +54,12 @@ class SynchronousLoadExecutor:
         return []
 
     def execute(self, task: LoadTask) -> LoadExecutionResult:
-        if not task.chunks:
+        if not task.bindings:
             return LoadExecutionResult(task.request_id, ())
 
         result_codes = self._backend.get(
-            [chunk.backend_key for chunk in task.chunks],
-            [list(chunk.addresses) for chunk in task.chunks],
-            [list(chunk.sizes) for chunk in task.chunks],
+            [binding.backend_key for binding in task.bindings],
+            [list(binding.memory_slice.addresses) for binding in task.bindings],
+            [list(binding.memory_slice.sizes) for binding in task.bindings],
         )
         return LoadExecutionResult(task.request_id, None if result_codes is None else tuple(result_codes))
