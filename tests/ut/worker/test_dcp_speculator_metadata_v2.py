@@ -158,10 +158,10 @@ def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width,
     if full_rebuild:
         result = spec.build_draft_attn_metadatas(padded, spec.input_batch.seq_lens_cpu_upper_bound)[0]
     else:
-        result = spec._build_draft_attn_metadata(
+        result = spec._build_attn_metadata(
             num_reqs=2,
-            num_reqs_padded=padded,
-            num_tokens_padded=padded * width,
+            batch_desc=BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=padded * width, num_reqs=padded),
+            query_start_loc_np=np.arange(padded + 1, dtype=np.int32) * width,
             seq_lens_cpu_upper_bound=spec.input_batch.seq_lens_cpu_upper_bound,
             step=width,
             causal=spec._group_causal,
@@ -233,10 +233,10 @@ def test_non_dcp_preserves_existing_length_fallback(monkeypatch, kind, architect
                     step=width,
                 )
             else:
-                result = spec._build_draft_attn_metadata(
+                result = spec._build_attn_metadata(
                     num_reqs=2,
-                    num_reqs_padded=2,
-                    num_tokens_padded=2 * width,
+                    batch_desc=BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=2 * width, num_reqs=2),
+                    query_start_loc_np=np.arange(3, dtype=np.int32) * width,
                     seq_lens_cpu_upper_bound=spec.input_batch.seq_lens_cpu_upper_bound,
                     step=width,
                 )

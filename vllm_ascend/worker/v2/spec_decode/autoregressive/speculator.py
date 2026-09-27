@@ -241,6 +241,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             slot_mappings_tensor,
             self.kv_cache_config,
         )
+        # This is draft prefill, not the later one-token-per-request decode.
+        # Query lengths may differ, so do not use _build_uniform_attn_metadata.
         attn_metadata = self._build_attn_metadata(
             num_reqs=input_batch.num_reqs,
             batch_desc=BatchExecutionDescriptor(
@@ -520,11 +522,11 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     ) -> dict[str, Any] | None:
         """Build Ascend draft metadata for uniform and explicit query layouts."""
         assert self.input_batch is not None
-        num_reqs_padded = batch_desc.num_reqs or num_reqs
         seq_lens_cpu = None
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
         if self.use_dcp:
             assert self.dcp_manager is not None
+            num_reqs_padded = batch_desc.num_reqs or num_reqs
             seq_lens_cpu, is_prefilling = self.dcp_manager.prepare_draft_dcp_metadata_inputs(
                 target_seq_lens_cpu=self._get_seq_lens_cpu(num_reqs_padded),
                 is_prefilling=is_prefilling,
@@ -557,8 +559,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 if metadata is None:
                     continue
                 metadata.attn_state = AscendAttentionState.DecodeOnly
-            # Eager rebuilds metadata each draft step; update CPU-side lengths
-            # before FIA consumes them rather than after the forward.
+            # Only draft decode steps (step > 0) update CPU-side lengths.
+            # Step 0 is draft prefill and skips this decode update.
             if step > 0:
                 self._update_decode_attn_metadata(attn_metadata, step, num_reqs)
         return attn_metadata

@@ -1,13 +1,17 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
+from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.aclgraph as aclgraph_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
@@ -63,6 +67,63 @@ def test_set_attn_preserves_cache_group_order(monkeypatch):
     assert list(speculator.attn_backends) == ["draft.2", "draft.0"]
     assert speculator._context_slot_mappings.dtype == torch.int32
     assert active_context == []
+
+
+@pytest.mark.parametrize("architecture", ["GQA", "MLA"])
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE])
+def test_draft_metadata_matches_full_or_actual_query_shape(monkeypatch, architecture, graph_mode):
+    metadata = SimpleNamespace(actual_seq_lengths_q=[8, 16, 24, 24])
+    layer_metadata = SimpleNamespace(decode=metadata) if architecture == "MLA" else metadata
+    parent_build = MagicMock(return_value={"draft.0": layer_metadata})
+    metadata_factory = MagicMock(return_value=nullcontext())
+    monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", parent_build)
+    monkeypatch.setattr(speculator_module, "build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(speculator_module, "build_draft_attn_metadata_factory", metadata_factory)
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+
+    speculator = _speculator(
+        attn_architecture=architecture,
+        num_query_per_req=8,
+        arange_np=np.arange(5, dtype=np.int32),
+        input_buffers=SimpleNamespace(positions=object()),
+        vllm_config=SimpleNamespace(parallel_config=object()),
+    )
+    speculator._prepare_draft_dcp_metadata_inputs = MagicMock(return_value=(None, torch.zeros(4, dtype=torch.bool)))
+    batch_desc = BatchExecutionDescriptor(cg_mode=graph_mode, num_tokens=32, num_reqs=4)
+
+    result = speculator._build_uniform_attn_metadata(
+        batch_desc=batch_desc,
+        num_reqs=3,
+        num_query_per_req=8,
+        seq_lens_cpu_upper_bound=torch.tensor([8, 8, 8]),
+        step=8,
+    )
+
+    assert result == {"draft.0": layer_metadata}
+    assert parent_build.call_args.kwargs["batch_desc"] is batch_desc
+    np.testing.assert_array_equal(parent_build.call_args.kwargs["query_start_loc_np"], [0, 8, 16, 24])
+    assert metadata_factory.call_args.args[1] == (32 if graph_mode == CUDAGraphMode.FULL else 24)
+    assert metadata.actual_seq_lengths_q == ([8, 16, 24, 32] if graph_mode == CUDAGraphMode.FULL else [8, 16, 24, 24])
+
+
+def test_sfa_draft_metadata_passes_through_upstream(monkeypatch):
+    metadata = {"draft.0": object()}
+    parent_build = MagicMock(return_value=metadata)
+    monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", parent_build)
+    monkeypatch.setattr(speculator_module, "build_draft_attn_metadata_factory", MagicMock(side_effect=AssertionError))
+    speculator = _speculator(attn_architecture="SFA", arange_np=np.arange(5, dtype=np.int32))
+    batch_desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=32, num_reqs=4)
+
+    result = speculator._build_uniform_attn_metadata(
+        batch_desc=batch_desc,
+        num_reqs=3,
+        num_query_per_req=8,
+        seq_lens_cpu_upper_bound=torch.tensor([8, 8, 8]),
+        step=8,
+    )
+
+    assert result is metadata
+    assert parent_build.call_args.kwargs["batch_desc"] is batch_desc
 
 
 @pytest.mark.parametrize("query_count", [1, 7, 8])
