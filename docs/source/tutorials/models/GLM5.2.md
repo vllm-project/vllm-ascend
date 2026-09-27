@@ -1,10 +1,10 @@
-# GLM-5.2
+# GLM-5.2 & GLM-5.3
 
 ## 1 Introduction
 
-[GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
+[GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks. [GLM-5.3](https://huggingface.co/zai-org/GLM-5.3) shares its base model with GLM-5.2 but has different post-training. This page covers both models; commands and validation results are version-specific unless explicitly stated otherwise.
 
-This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
+This document shows the verification steps for both models, including supported features, environment preparation, single-node and multi-node deployment, accuracy, and performance evaluation.
 
 ## 2 Supported Features
 
@@ -20,10 +20,12 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 |--------------------------|-------------------------------------------------------------------|----------------|
 |  `GLM-5.2-W8A8C8`        | 2 Atlas 800 A3 (64GB × 16) node or 4 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/GLM-5.2-W8A8C8) |
 |  `GLM-5.2-W8A8C8-mxfp8` | 950PR&950DT Products | [ModelScope](https://modelscope.cn/models/Eco-Tech/GLM-5.2-W8A8C8-mxfp8) |
+|  `GLM-5.3-W8A8C8`        | Atlas 800 A3 / A2 (see [GLM-5.3 deployment](#11-glm-53-deployment)) | [ModelScope](https://modelscope.cn/models/Eco-Tech/GLM-5.3-W8A8C8) |
+|  `GLM-5.3-W8A8C8-mxfp8` | 950PR&950DT Products; deployment not yet verified here | [ModelScope](https://modelscope.cn/models/Eco-Tech/GLM-5.3-W8A8C8-mxfp8) |
 |  `GLM-5.2-w4a8c8`        | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8) |
 |  `GLM-5.2-w4a4c8`        | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/glm_5_2/glm_5_2_w4a4c8_mxfp4.yaml) |
 
-- `GLM-5.2-W8A8C8`: The weights have been verified and are recommended for use on A3.
+- `GLM-5.2-W8A8C8`: The weights have been verified and are recommended for use on A3. For GLM-5.3, use its own checkpoint and the version-specific commands below; do not apply the GLM-5.2 accuracy or performance results to GLM-5.3.
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 - `GLM-5.2-w4a4c8`(W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
@@ -1705,3 +1707,291 @@ A: For 950PR&950DT Products, the W4A4C8 weights of GLM-5.2 are quantized with [m
     - Precision-sensitive modules (the indexer and some attention layers) are configured as C8 fallback layers in the quantization configuration: they are excluded from C8 quantization during inference and run in high precision.
 
 For W4A4C8 accuracy scores, see [Accuracy Evaluation](#7-accuracy-evaluation).
+
+
+## 11 GLM-5.3 Deployment
+
+GLM-5.3 uses its own W8A8C8 checkpoint. The A3 single-node reference follows [GLM-5.2 single-node deployment](#511-single-node-deployment) with only the model path changed to `/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8`; this substitution has not been revalidated in this documentation update. The multi-node commands below were originally verified with `vllm-ascend:v0.23.0` and must not be assumed to work unchanged on newer images. GLM-5.3 1M-context and PD-disaggregated serving have not been verified here. Do not set `enable_thinking: false` or `thinking: false` for GLM-5.3.
+
+### 11.1 Multi-node Deployment (v0.23.0)
+
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
+
+Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
+
+#### 11.1.1 Context Below 1M
+
+=== "A3 series"
+    -  `GLM-5.3-W8A8C8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
+
+    Run the following scripts on two nodes respectively.
+
+    **node 0**
+
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
+
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
+
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_TRANSFER_TIMEOUT=600
+    export HCCL_EXEC_TIMEOUT=3600
+    export HCCL_CONNECT_TIMEOUT=3600
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=400
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+
+    # Ensure the model path matches the directory recorded during download
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8 \
+        --host 0.0.0.0 \
+        --port 8077 \
+        --safetensors-load-strategy prefetch \
+        --api-server-count 1 \
+        --data-parallel-size 8 \
+        --data-parallel-start-rank 0 \
+        --data-parallel-size-local 4 \
+        --data-parallel-address $node0_ip \
+        --data-parallel-rpc-port 12980 \
+        --tensor-parallel-size 4 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name glm-5 \
+        --tool-call-parser glm47 \
+        --reasoning-parser glm45 \
+        --enable-auto-tool-choice \
+        --max-num-seqs 6 \
+        --max-model-len 202752 \
+        --max-num-batched-tokens 4096 \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.90 \
+        --quantization ascend \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --kv-cache-dtype int8 \
+        --attention_config.indexer_kv_dtype int8 \
+        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'  \
+        --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+    ```
+
+    **node 1**
+
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
+
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
+
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_TRANSFER_TIMEOUT=600
+    export HCCL_EXEC_TIMEOUT=3600
+    export HCCL_CONNECT_TIMEOUT=3600
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=400
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+
+    # Ensure the model path matches the directory recorded during download
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8 \
+        --host 0.0.0.0 \
+        --port 8077 \
+        --headless \
+        --data-parallel-size 8 \
+        --data-parallel-start-rank 4 \
+        --data-parallel-size-local 4 \
+        --data-parallel-address $node0_ip \
+        --data-parallel-rpc-port 12980 \
+        --tensor-parallel-size 4 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name glm-5 \
+        --tool-call-parser glm47 \
+        --reasoning-parser glm45 \
+        --enable-auto-tool-choice \
+        --max-num-seqs 6 \
+        --max-model-len 202752 \
+        --max-num-batched-tokens 4096 \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.92 \
+        --quantization ascend \
+        --enable-chunked-prefill \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --kv-cache-dtype int8 \
+        --attention_config.indexer_kv_dtype int8 \
+        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}' \
+        --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+    ```
+
+=== "A2 series"
+
+    - `GLM-5.3-W8A8C8`: can be deployed on 4 Atlas 800 A2 (64GB × 32).
+
+    Run the following scripts on four nodes respectively.
+
+    **node 0**
+
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
+
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxx"
+
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export VLLM_RPC_TIMEOUT=360000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=200
+    export HCCL_CONNECT_TIMEOUT=120
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ACL_OP_INIT_MODE=1
+    export CPU_AFFINITY_CONF=1
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=1200
+
+    # Ensure the model path matches the directory recorded during download
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8 \
+        --host 0.0.0.0 \
+        --port 8077 \
+        --max-model-len 135000 \
+        --data-parallel-size 4 \
+        --data-parallel-size-local 1 \
+        --data-parallel-start-rank 0 \
+        --data-parallel-address "${node0_ip}" \
+        --data-parallel-rpc-port 12980 \
+        --tensor-parallel-size 8 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name glm-5 \
+        --safetensors-load-strategy prefetch \
+        --max-num-seqs 128 \
+        --max-num-batched-tokens 8192 \
+        --trust-remote-code \
+        --quantization ascend \
+        --gpu-memory-utilization 0.92 \
+        --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --kv-cache-dtype int8 \
+        --attention_config.indexer_kv_dtype int8 \
+        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}' \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --api-server-count 1
+    ```
+
+    **node 1-3**
+
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="xxx"
+
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxx"
+
+    # node1: dp_start_rank=1, node2: dp_start_rank=2, node3: dp_start_rank=3
+    dp_start_rank=1
+
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export VLLM_RPC_TIMEOUT=360000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=200
+    export HCCL_CONNECT_TIMEOUT=120
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ACL_OP_INIT_MODE=1
+    export CPU_AFFINITY_CONF=1
+    export VLLM_ASCEND_ENABLE_MLAPO=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=1200
+
+    # Ensure the model path matches the directory recorded during download
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W8A8C8 \
+        --host 0.0.0.0 \
+        --port 8077 \
+        --headless \
+        --max-model-len 135000 \
+        --data-parallel-size 4 \
+        --data-parallel-size-local 1 \
+        --data-parallel-start-rank ${dp_start_rank} \
+        --data-parallel-address "${node0_ip}" \
+        --data-parallel-rpc-port 12980 \
+        --tensor-parallel-size 8 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name glm-5 \
+        --safetensors-load-strategy prefetch \
+        --max-num-seqs 128 \
+        --max-num-batched-tokens 8192 \
+        --trust-remote-code \
+        --quantization ascend \
+        --gpu-memory-utilization 0.92 \
+        --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --kv-cache-dtype int8 \
+        --attention_config.indexer_kv_dtype int8 \
+        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}' \
+        --enable-prefix-caching \
+        --async-scheduling
+    ```
+
+Key Parameter Descriptions:
+
+Only the key parameters specific to this model/scenario are described below. max-model-len and max-num-seqs need to be set according to the actual usage scenario.
+
+**Multi-node network and data parallel configuration:**
+
+- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
+- `--data-parallel-size 8`: Total number of data parallel ranks across all nodes (4 ranks per node in this scenario).
+- `--data-parallel-size-local 4`: Number of data parallel ranks on the current node.
+- `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Node 0 uses `0`, node 1 uses `4`.
+- `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
+- `--data-parallel-rpc-port 12980`: RPC port for data parallel master communication. Must be the same across all nodes.
+- `--headless`: Indicates a non-master node (used on node 1-3). Do not use on node 0.
+
+**A2-specific environment variables:**
+
+- `CPU_AFFINITY_CONF=1`: Enables CPU core affinity binding for worker processes.
+- `ACL_OP_INIT_MODE=1`: ACL operator initialization mode to speed up operator compilation.
+- `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time.
+
+**Notice:**
+This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
+
+### 11.2 Accuracy Reference
+
+The original `vllm-ascend:v0.23.0` GLM-5.3 W8A8C8 GPQA Diamond results were 92.42 on A3 and 90.40 on A2 (accuracy, generation mode). These are reference results for that version and are not GLM-5.2 baselines.
+
+### 11.3 Status
+
+GLM-5.3 service reliability and production readiness have not been fully validated. Do not use the GLM-5.2 1M or PD configurations as evidence of GLM-5.3 support.
