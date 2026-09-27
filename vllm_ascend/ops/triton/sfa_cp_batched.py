@@ -130,13 +130,11 @@ def _fused_sfa_dcp_lse_combine_batched_kernel(
     num_heads,
     total_rows,
     DCP_SIZE: tl.constexpr,
-    SCATTER_TOKENS: tl.constexpr,
-    LSE_PACK_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
-    RETURN_LSE: tl.constexpr = False,
-    HAS_LOCAL: tl.constexpr = False,
 ):
+    # The caller selects BF16, scatter-head, local-output, no-return-LSE cases.
+    # Each received row therefore ends with four packed LSE values.
     program_idx = tl.program_id(0)
     num_programs = tl.num_programs(0)
     d_offsets = tl.arange(0, BLOCK_D)[None, :]
@@ -147,51 +145,36 @@ def _fused_sfa_dcp_lse_combine_batched_kernel(
         token_idx = (linear_idx // num_heads).to(tl.int64)
         head_idx = (linear_idx % num_heads).to(tl.int64)
 
-        if SCATTER_TOKENS:
-            scatter_idx = token_idx
-            replicated_idx = head_idx
-        else:
-            scatter_idx = head_idx
-            replicated_idx = token_idx
-
         # Keep LSE state per row and one [BLOCK_ROWS, BLOCK_D] accumulator.
         # Stream ranks to avoid a [DCP_SIZE, BLOCK_ROWS, BLOCK_D] live buffer.
-        lse_max = -float("inf")
-        if HAS_LOCAL:
-            local_lse = tl.load(
-                local_lse_ptr + token_idx * local_lse_stride_t + head_idx * local_lse_stride_h, mask=row_mask, other=0.0
-            ).to(tl.float32)
-            local_valid = (local_lse == local_lse) & (local_lse != float("inf")) & (local_lse != -float("inf"))
-            lse_max = tl.where(local_valid, local_lse, -float("inf"))
+        local_lse = tl.load(
+            local_lse_ptr + token_idx * local_lse_stride_t + head_idx * local_lse_stride_h, mask=row_mask, other=0.0
+        ).to(tl.float32)
+        local_valid = (local_lse == local_lse) & (local_lse != float("inf")) & (local_lse != -float("inf"))
+        lse_max = tl.where(local_valid, local_lse, -float("inf"))
         for rank_idx in tl.static_range(DCP_SIZE):
             recv_base = (
-                rank_idx * recv_stride_rank
-                + scatter_idx * recv_stride_scatter
-                + replicated_idx * recv_stride_replicated
+                rank_idx * recv_stride_rank + head_idx * recv_stride_scatter + token_idx * recv_stride_replicated
             )
-            if LSE_PACK_DIM == 1:
-                lse = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d, mask=row_mask, other=0.0).to(tl.float32)
-                valid_lse = (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
-            else:
-                exponent_code = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d, mask=row_mask, other=0.0).to(
-                    tl.float32
-                )
-                significand_hi = tl.load(
-                    recv_ptr + recv_base + (head_dim + 1) * recv_stride_d, mask=row_mask, other=0.0
-                ).to(tl.float32)
-                significand_mid = tl.load(
-                    recv_ptr + recv_base + (head_dim + 2) * recv_stride_d, mask=row_mask, other=0.0
-                ).to(tl.float32)
-                significand_lo = tl.load(
-                    recv_ptr + recv_base + (head_dim + 3) * recv_stride_d, mask=row_mask, other=0.0
-                ).to(tl.float32)
-                packed_valid = exponent_code != 0.0
-                sign = tl.where(exponent_code < 0.0, -1.0, 1.0)
-                exponent_magnitude = tl.where(exponent_code < 0.0, -exponent_code, exponent_code)
-                safe_exponent = exponent_magnitude - 128.0
-                significand = significand_hi * 65536.0 + significand_mid * 256.0 + significand_lo
-                lse = sign * significand * tl.exp2(safe_exponent - 23.0)
-                valid_lse = packed_valid & (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
+            exponent_code = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d, mask=row_mask, other=0.0).to(
+                tl.float32
+            )
+            significand_hi = tl.load(
+                recv_ptr + recv_base + (head_dim + 1) * recv_stride_d, mask=row_mask, other=0.0
+            ).to(tl.float32)
+            significand_mid = tl.load(
+                recv_ptr + recv_base + (head_dim + 2) * recv_stride_d, mask=row_mask, other=0.0
+            ).to(tl.float32)
+            significand_lo = tl.load(
+                recv_ptr + recv_base + (head_dim + 3) * recv_stride_d, mask=row_mask, other=0.0
+            ).to(tl.float32)
+            packed_valid = exponent_code != 0.0
+            sign = tl.where(exponent_code < 0.0, -1.0, 1.0)
+            exponent_magnitude = tl.where(exponent_code < 0.0, -exponent_code, exponent_code)
+            safe_exponent = exponent_magnitude - 128.0
+            significand = significand_hi * 65536.0 + significand_mid * 256.0 + significand_lo
+            lse = sign * significand * tl.exp2(safe_exponent - 23.0)
+            valid_lse = packed_valid & (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
             lse_max = tl.maximum(lse_max, tl.where(valid_lse, lse, -float("inf")))
 
         any_valid_lse = lse_max != -float("inf")
@@ -201,33 +184,27 @@ def _fused_sfa_dcp_lse_combine_batched_kernel(
         d_mask = (d_offsets < head_dim) & row_mask
         for rank_idx in tl.static_range(DCP_SIZE):
             recv_base = (
-                rank_idx * recv_stride_rank
-                + scatter_idx * recv_stride_scatter
-                + replicated_idx * recv_stride_replicated
+                rank_idx * recv_stride_rank + head_idx * recv_stride_scatter + token_idx * recv_stride_replicated
             )
-            if LSE_PACK_DIM == 1:
-                lse = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d, mask=row_mask, other=0.0).to(tl.float32)
-                valid_lse = (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
-            else:
-                exponent_code = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d, mask=row_mask, other=0.0).to(
-                    tl.float32
-                )
-                significand_hi = tl.load(
-                    recv_ptr + recv_base + (head_dim + 1) * recv_stride_d, mask=row_mask, other=0.0
-                ).to(tl.float32)
-                significand_mid = tl.load(
-                    recv_ptr + recv_base + (head_dim + 2) * recv_stride_d, mask=row_mask, other=0.0
-                ).to(tl.float32)
-                significand_lo = tl.load(
-                    recv_ptr + recv_base + (head_dim + 3) * recv_stride_d, mask=row_mask, other=0.0
-                ).to(tl.float32)
-                packed_valid = exponent_code != 0.0
-                sign = tl.where(exponent_code < 0.0, -1.0, 1.0)
-                exponent_magnitude = tl.where(exponent_code < 0.0, -exponent_code, exponent_code)
-                safe_exponent = exponent_magnitude - 128.0
-                significand = significand_hi * 65536.0 + significand_mid * 256.0 + significand_lo
-                lse = sign * significand * tl.exp2(safe_exponent - 23.0)
-                valid_lse = packed_valid & (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
+            exponent_code = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d, mask=row_mask, other=0.0).to(
+                tl.float32
+            )
+            significand_hi = tl.load(
+                recv_ptr + recv_base + (head_dim + 1) * recv_stride_d, mask=row_mask, other=0.0
+            ).to(tl.float32)
+            significand_mid = tl.load(
+                recv_ptr + recv_base + (head_dim + 2) * recv_stride_d, mask=row_mask, other=0.0
+            ).to(tl.float32)
+            significand_lo = tl.load(
+                recv_ptr + recv_base + (head_dim + 3) * recv_stride_d, mask=row_mask, other=0.0
+            ).to(tl.float32)
+            packed_valid = exponent_code != 0.0
+            sign = tl.where(exponent_code < 0.0, -1.0, 1.0)
+            exponent_magnitude = tl.where(exponent_code < 0.0, -exponent_code, exponent_code)
+            safe_exponent = exponent_magnitude - 128.0
+            significand = significand_hi * 65536.0 + significand_mid * 256.0 + significand_lo
+            lse = sign * significand * tl.exp2(safe_exponent - 23.0)
+            valid_lse = packed_valid & (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
             weight = tl.where(valid_lse, tl.exp(lse - safe_lse_max), 0.0)
             partial_output = tl.load(
                 recv_ptr + recv_base + d_offsets * recv_stride_d,
@@ -240,20 +217,15 @@ def _fused_sfa_dcp_lse_combine_batched_kernel(
             merged += partial_output * weight
             weight_sum += weight
 
-        if HAS_LOCAL:
-            local_weight = tl.where(local_valid, tl.exp(local_lse - safe_lse_max), 0.0)
-            local_offsets = (
-                token_idx * local_output_stride_t + head_idx * local_output_stride_h + d_offsets * local_output_stride_d
-            )
-            local_output = tl.load(local_output_ptr + local_offsets, mask=d_mask, other=0.0).to(tl.float32)
-            merged += tl.where(local_valid, local_output, 0.0) * local_weight
-            weight_sum += local_weight
+        local_weight = tl.where(local_valid, tl.exp(local_lse - safe_lse_max), 0.0)
+        local_offsets = (
+            token_idx * local_output_stride_t + head_idx * local_output_stride_h + d_offsets * local_output_stride_d
+        )
+        local_output = tl.load(local_output_ptr + local_offsets, mask=d_mask, other=0.0).to(tl.float32)
+        merged += tl.where(local_valid, local_output, 0.0) * local_weight
+        weight_sum += local_weight
 
         denominator = tl.where(weight_sum > 0.0, weight_sum, 1.0)
         merged /= denominator
         output_offsets = token_idx * output_stride_t + head_idx * output_stride_h + d_offsets * output_stride_d
         tl.store(output_ptr + output_offsets, merged, mask=d_mask)
-        if RETURN_LSE:
-            merged_lse = tl.where(any_valid_lse, safe_lse_max + tl.log(denominator), -float("inf"))
-            lse_offset = token_idx * output_stride_t + head_idx * output_stride_h + head_dim * output_stride_d
-            tl.store(output_ptr + lse_offset, merged_lse, mask=row_mask)

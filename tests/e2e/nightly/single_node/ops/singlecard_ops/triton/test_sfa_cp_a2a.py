@@ -37,31 +37,29 @@ def _simulate_receive(
     return torch.stack([send_buffers[source_rank][destination_rank] for source_rank in range(dcp_size)])
 
 
-@pytest.mark.parametrize(
-    ("num_tokens", "num_heads", "head_dim", "dcp_size", "output_stride", "local_stride", "pack_batch", "combine_batch"),
-    [
-        pytest.param(64, 96, 512, 8, 1, 1, True, True, id="original-shape"),
-        pytest.param(4, 96, 512, 8, 1, 1, False, False, id="too-few-pack-rows"),
-        pytest.param(7, 96, 512, 8, 1, 1, True, False, id="small-token-count"),
-        pytest.param(64, 8, 512, 8, 1, 1, True, False, id="few-local-heads"),
-        pytest.param(64, 32, 128, 4, 1, 1, True, True, id="dcp4-narrow-head"),
-        pytest.param(64, 12, 512, 3, 1, 1, True, True, id="dcp3-combine-boundary"),
-        pytest.param(65, 12, 512, 3, 1, 1, True, True, id="partial-row-tile"),
-        pytest.param(64, 4, 512, 1, 1, 1, False, False, id="dcp1-wide-small-rows"),
-        pytest.param(128, 4, 512, 1, 1, 1, True, True, id="dcp1-wide-enough-rows"),
-        pytest.param(64, 4, 128, 1, 1, 1, False, True, id="dcp1-narrow-combine"),
-        pytest.param(128, 8, 257, 2, 1, 1, True, True, id="dcp2-contiguous-wide-local"),
-        pytest.param(128, 8, 257, 2, 1, 2, True, False, id="dcp2-strided-wide-local"),
-        pytest.param(64, 96, 1024, 8, 1, 1, True, False, id="wide-pack-combine-fallback"),
-        pytest.param(64, 96, 2048, 8, 1, 1, True, False, id="pack-dim-limit"),
-        pytest.param(64, 96, 512, 8, 2, 1, False, True, id="strided-pack-fallback"),
-        pytest.param(257, 32, 128, 4, 1, 1, True, True, id="beyond-old-token-limit"),
-        pytest.param(64, 36, 128, 9, 1, 1, True, False, id="dcp9-pack-only"),
-        pytest.param(64, 64, 128, 16, 1, 1, True, None, id="dcp16-pack-only"),
-    ],
+_A5_FIXED_CASES = (
+    pytest.param(64, 96, 512, 8, 1, 1, True, id="original-shape"),
+    pytest.param(4, 96, 512, 8, 1, 1, True, id="too-few-pack-rows"),
+    pytest.param(7, 96, 512, 8, 1, 1, True, id="small-token-count"),
+    pytest.param(64, 8, 512, 8, 1, 1, True, id="few-local-heads"),
+    pytest.param(64, 32, 128, 4, 1, 1, True, id="dcp4-narrow-head"),
+    pytest.param(64, 12, 512, 3, 1, 1, True, id="dcp3-combine-boundary"),
+    pytest.param(64, 4, 512, 1, 1, 1, True, id="dcp1-wide-small-rows"),
+    pytest.param(128, 4, 512, 1, 1, 1, True, id="dcp1-wide-enough-rows"),
+    pytest.param(64, 4, 128, 1, 1, 1, True, id="dcp1-narrow-combine"),
+    pytest.param(128, 8, 257, 2, 1, 1, True, id="dcp2-contiguous-wide-local"),
+    pytest.param(128, 8, 257, 2, 1, 2, True, id="dcp2-strided-wide-local"),
+    pytest.param(64, 96, 1024, 8, 1, 1, True, id="wide-pack-combine-fallback"),
+    pytest.param(64, 96, 2048, 8, 1, 1, True, id="pack-dim-limit"),
+    pytest.param(64, 96, 512, 8, 2, 1, True, id="strided-pack-fallback"),
+    pytest.param(257, 32, 128, 4, 1, 1, True, id="beyond-old-token-limit"),
+    pytest.param(64, 36, 128, 9, 1, 1, True, id="dcp9-pack-only"),
+    pytest.param(64, 64, 128, 16, 1, 1, False, id="dcp16-pack-only"),
 )
+
+
 @torch.inference_mode()
-def test_a5_generalized_batching_matches_scalar_path(
+def _check_a5_batching_case(
     monkeypatch: pytest.MonkeyPatch,
     num_tokens: int,
     num_heads: int,
@@ -69,24 +67,13 @@ def test_a5_generalized_batching_matches_scalar_path(
     dcp_size: int,
     output_stride: int,
     local_stride: int,
-    pack_batch: bool,
-    combine_batch: bool | None,
+    run_combine: bool,
 ) -> None:
-    """Check A5 dispatch boundaries against the scalar kernels."""
+    """Compare one A5 shape with scalar kernels and check its dispatch."""
     if not sfa_cp.is_950():
         pytest.skip("The batched SFA kernels are enabled only on A5")
     sfa_cp.init_device_properties_triton()
     vector_cores = sfa_cp.get_vectorcore_num()
-    # The case table describes shapes for a 64-core A5. Scale token counts so
-    # the same dispatch boundaries are exercised on other vector-core counts.
-    tail_rows = num_tokens == 65
-    num_tokens = (num_tokens * vector_cores + 63) // 64
-    if tail_rows:
-        # Keep the dedicated tail case odd after scaling: both row counts
-        # (12 * tokens for pack, 4 * tokens for combine) then have a tail.
-        num_tokens |= 1
-        assert num_tokens * num_heads % 8 != 0
-        assert num_tokens * (num_heads // dcp_size) % 8 != 0
     torch.manual_seed(2026 + num_tokens + dcp_size)
     output = torch.randn(num_tokens, num_heads, head_dim * output_stride, device="npu", dtype=torch.bfloat16)[
         ..., ::output_stride
@@ -100,7 +87,7 @@ def test_a5_generalized_batching_matches_scalar_path(
 
     monkeypatch.setattr(sfa_cp, "is_950", lambda: False)
     scalar_send = pack_sfa_dcp_output_lse(output, lse, dcp_size, 1)
-    if combine_batch is not None:
+    if run_combine:
         scalar_combined = fused_sfa_dcp_lse_combine(
             scalar_send, head_dim, 1, local_output=local_output, local_lse=local_lse
         )
@@ -125,7 +112,7 @@ def test_a5_generalized_batching_matches_scalar_path(
     monkeypatch.setattr(sfa_cp, "_fused_sfa_dcp_lse_combine_batched_kernel", combine_spy)
     monkeypatch.setattr(sfa_cp, "is_950", lambda: True)
     batched_send = pack_sfa_dcp_output_lse(output, lse, dcp_size, 1)
-    if combine_batch is not None:
+    if run_combine:
         batched_combined = fused_sfa_dcp_lse_combine(
             batched_send, head_dim, 1, local_output=local_output, local_lse=local_lse
         )
@@ -139,8 +126,9 @@ def test_a5_generalized_batching_matches_scalar_path(
     decoded_lse = torch.where(exponent_code < 0, -1.0, 1.0) * significand * torch.exp2(exponent_code.abs() - 151)
     expected_lse = lse.reshape(num_tokens, dcp_size, local_heads, 1).permute(1, 2, 0, 3)
     torch.testing.assert_close(decoded_lse, expected_lse, atol=1e-2, rtol=1e-2)
-    assert pack_spy.calls == int(pack_batch)
-    if combine_batch is not None:
+    expected_pack_batch = output_stride == 1 and head_dim <= 2048 and num_tokens * num_heads >= 8 * vector_cores
+    assert pack_spy.calls == int(expected_pack_batch)
+    if run_combine:
         torch.testing.assert_close(batched_combined, scalar_combined, atol=2e-2, rtol=2e-2)
         rank_values = batched_send[..., :head_dim].permute(0, 2, 1, 3)
         rank_lse = decoded_lse.squeeze(-1).permute(0, 2, 1)
@@ -149,7 +137,70 @@ def test_a5_generalized_batching_matches_scalar_path(
             torch.cat((rank_lse, local_lse[..., 0].unsqueeze(0))),
         )
         torch.testing.assert_close(batched_combined, expected_combined, atol=2e-2, rtol=2e-2)
-        assert combine_spy.calls == int(combine_batch)
+        combine_rows = num_tokens * local_heads
+        min_rows_per_core = 8 if dcp_size <= 2 and head_dim > 256 else 4
+        expected_combine_batch = (
+            dcp_size <= 8
+            and head_dim <= 512
+            and combine_rows >= min_rows_per_core * vector_cores
+            and (dcp_size > 2 or head_dim <= 256 or local_stride == 1)
+        )
+        assert combine_spy.calls == int(expected_combine_batch)
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "num_heads", "head_dim", "dcp_size", "output_stride", "local_stride", "run_combine"),
+    _A5_FIXED_CASES,
+)
+def test_a5_generalized_batching_matches_scalar_path(
+    monkeypatch: pytest.MonkeyPatch,
+    num_tokens: int,
+    num_heads: int,
+    head_dim: int,
+    dcp_size: int,
+    output_stride: int,
+    local_stride: int,
+    run_combine: bool,
+) -> None:
+    """Keep business shapes fixed on every A5 variant."""
+    _check_a5_batching_case(
+        monkeypatch, num_tokens, num_heads, head_dim, dcp_size, output_stride, local_stride, run_combine
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "pack-below-threshold",
+        "pack-at-threshold",
+        "combine-below-threshold",
+        "combine-at-threshold",
+        "partial-row-tile",
+    ],
+)
+@torch.inference_mode()
+def test_a5_core_relative_batching_boundaries(monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    if not sfa_cp.is_950():
+        pytest.skip("The batched SFA kernels are enabled only on A5")
+    sfa_cp.init_device_properties_triton()
+    vector_cores = sfa_cp.get_vectorcore_num()
+    if case.startswith("pack-"):
+        num_tokens = (8 * vector_cores + 11) // 12
+        if case == "pack-below-threshold":
+            num_tokens -= 1
+    else:
+        num_tokens = vector_cores
+        if case == "combine-below-threshold":
+            num_tokens -= 1
+        elif case == "partial-row-tile":
+            num_tokens |= 1
+    assert num_tokens > 0
+    if case == "partial-row-tile":
+        # Twelve pack heads and four post-scatter heads both leave a tail
+        # when the token count is odd.
+        assert num_tokens * 12 % 8 != 0
+        assert num_tokens * 4 % 8 != 0
+    _check_a5_batching_case(monkeypatch, num_tokens, 12, 512, 3, 1, 1, True)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])

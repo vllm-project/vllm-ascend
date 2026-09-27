@@ -432,24 +432,21 @@ def fused_sfa_dcp_lse_combine(
         and not return_lse
     )
     if batched:
+        assert local_output is not None and local_lse is not None
         _fused_sfa_dcp_lse_combine_batched_kernel[(grid_size,)](
             recv,
             output,
-            local_output if local_output is not None else recv,
-            local_lse if local_lse is not None else recv,
-            *(local_output.stride() if local_output is not None else (0, 0, 0)),
-            *(local_lse.stride()[:2] if local_lse is not None else (0, 0)),
+            local_output,
+            local_lse,
+            *local_output.stride(),
+            *local_lse.stride()[:2],
             *recv.stride(),
             *output.stride(),
             head_dim,
             num_heads,
             total_rows,
             DCP_SIZE=dcp_size,
-            SCATTER_TOKENS=scatter_dim == 0,
-            LSE_PACK_DIM=lse_pack_dim,
             BLOCK_D=triton.next_power_of_2(head_dim),
-            RETURN_LSE=return_lse,
-            HAS_LOCAL=local_output is not None,
             BLOCK_ROWS=8,
         )
         return output
