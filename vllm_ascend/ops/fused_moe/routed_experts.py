@@ -693,6 +693,22 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         pertoken_scale = prepare_output.pertoken_scale
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
+        eplb_state = self.router.eplb_state
+        if eplb_state is not None:
+            eplb_state.fused_map_record_active = False
+            # These paths alter ids after the router or contain padding. Keep
+            # their existing downstream count source instead of counting the
+            # router's provisional decisions.
+            eplb_state.fused_record_allowed = (
+                self._use_v2_model_runner
+                and mc2_mask is None
+                and self.moe_config.dp_size == 1
+                and self.moe_config.pcp_size == 1
+                and self.log2phy is None
+                and not getattr(self, "mix_placement", False)
+                and not get_ascend_config().enable_force_eplb
+                and not enable_force_load_balance
+            )
         topk_weights, topk_ids = self._select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -714,8 +730,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
 
-        if self._use_v2_model_runner:
+        if self._use_v2_model_runner and not getattr(eplb_state, "fused_map_record_active", False):
             _record_v2_eplb_load(self.router, fused_experts_results)
+        if eplb_state is not None:
+            eplb_state.fused_map_record_active = False
+            eplb_state.fused_record_allowed = False
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens
