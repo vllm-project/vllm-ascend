@@ -15,18 +15,26 @@
 # limitations under the License.
 
 import vllm.v1.engine.core as _engine_core_mod
-from vllm.v1.engine.core import EngineCoreProc
+from vllm.logger import logger
+from vllm.v1.engine.core import EngineCore, EngineCoreProc
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceDPEngineCoreProc, _balance_scheduling_enabled
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import DyntraLBDPEngineCoreProc, _get_dyntra_lb_config
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import _print_rank_0 as dyntra_print_rank_0
 from vllm_ascend.patch.platform.patch_pp_mtp import _patch_engine_core as pp_mtp_patch_post_step
-from vllm_ascend.patch.platform.patch_profiling_chunk import _apply_profiling_patches
 
 _PATCHED = False
 
+_OriginalEngineCoreInit = EngineCore.__init__
 _OriginalRunEngineCore = EngineCoreProc.run_engine_core
+
+
+def _patched_engine_core_init(self, *args, **kwargs):
+    _OriginalEngineCoreInit(self, *args, **kwargs)
+    if hasattr(self.scheduler, "run_profiling_chunk_init"):
+        logger.info("[ProfilingChunk] Running profiling initialization...")
+        self.scheduler.run_profiling_chunk_init(self.model_executor)
 
 
 def _patch_dp_engine_core_proc(vllm_config, dp_rank: int):
@@ -44,13 +52,7 @@ def _patch_dp_engine_core_proc(vllm_config, dp_rank: int):
 
 def _run_engine_core_patch_func(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     vllm_config = kwargs.get("vllm_config")
-    ascend_config = init_ascend_config(vllm_config)
-
-    # Call _apply_profiling_patches to patch EngineCore.__init__
-    # when the child unpickles the patch.
-    if ascend_config.scheduler_config.profiling_chunk_config.enabled:
-        _apply_profiling_patches()
-
+    init_ascend_config(vllm_config)
     _patch_dp_engine_core_proc(vllm_config, dp_rank)
 
     return _OriginalRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
@@ -64,10 +66,12 @@ def _apply_patch() -> None:
 
     # Patch EngineCore.post_step
     pp_mtp_patch_post_step()
+    # Patch EngineCore.__init__ for profiling chunk startup.
+    EngineCore.__init__ = _patched_engine_core_init
     # Patch EngineCoreProc.run_engine_core
     # And in _run_engine_core_patch_func:
-    # 1. Patch EngineCore.__init__ by _apply_profiling_patches
-    # 2. Patch class DPEngineCoreProc by _patch_dp_engine_core_proc
+    # 1. Initialize AscendConfig in the child process.
+    # 2. Patch class DPEngineCoreProc by _patch_dp_engine_core_proc.
     EngineCoreProc.run_engine_core = staticmethod(_run_engine_core_patch_func)
 
 

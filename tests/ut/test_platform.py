@@ -379,44 +379,6 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
         self.assertEqual(NPUPlatform.supported_quantization, [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD])
 
-    def test_get_recompute_scheduler_cls(self):
-        from vllm_ascend import platform
-
-        cases = (
-            (
-                False,
-                False,
-                "vllm_ascend.core.recompute_scheduler.RecomputeScheduler",
-            ),
-            (
-                True,
-                False,
-                "vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler",
-            ),
-            (
-                False,
-                True,
-                "vllm_ascend.core.recompute_scheduler.DyntraLBRecomputeScheduler",
-            ),
-            (
-                True,
-                True,
-                "vllm_ascend.core.recompute_scheduler.AsyncDyntraLBRecomputeScheduler",
-            ),
-        )
-        for async_scheduling, dyntra_lb_enabled, expected_scheduler_cls in cases:
-            with self.subTest(
-                async_scheduling=async_scheduling,
-                dyntra_lb_enabled=dyntra_lb_enabled,
-            ):
-                self.assertEqual(
-                    platform._get_recompute_scheduler_cls(
-                        async_scheduling=async_scheduling,
-                        dyntra_lb_enabled=dyntra_lb_enabled,
-                    ),
-                    expected_scheduler_cls,
-                )
-
     def test_is_sleep_mode_available(self):
         self.assertTrue(self.platform.is_sleep_mode_available())
 
@@ -1454,7 +1416,10 @@ class TestNPUPlatform(TestBase):
                 ):
                     self.platform.check_and_update_config(vllm_config)
 
-                self.assertIsNone(vllm_config.scheduler_config.scheduler_cls)
+                self.assertEqual(
+                    vllm_config.scheduler_config.scheduler_cls,
+                    "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstScheduler",
+                )
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch(
@@ -1523,7 +1488,10 @@ class TestNPUPlatform(TestBase):
         mock_init_recompute.assert_not_called()
         self.assertFalse(vllm_config.additional_config["scheduler_config"]["recompute_scheduler_enable"])
         self.assertTrue(ascend_config.scheduler_config.short_request_first_config.enabled)
-        self.assertIsNone(vllm_config.scheduler_config.scheduler_cls)
+        self.assertEqual(
+            vllm_config.scheduler_config.scheduler_cls,
+            "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstScheduler",
+        )
         self.assertIn("recompute_scheduler_enable is ignored", mock_warning.call_args.args[0])
 
     def test_validate_kv_load_failure_policy_rejects_hybrid_recompute(self):
@@ -1576,26 +1544,6 @@ class TestNPUPlatform(TestBase):
             vllm_config.scheduler_config.scheduler_cls,
             "vllm_ascend.core.dyntra_lb_scheduler.DyntraLBScheduler",
         )
-
-    def test_get_dyntra_lb_scheduler_cls(self):
-        from vllm_ascend import platform
-
-        cases = (
-            (
-                False,
-                "vllm_ascend.core.dyntra_lb_scheduler.DyntraLBScheduler",
-            ),
-            (
-                True,
-                "vllm_ascend.core.dyntra_lb_scheduler.AsyncDyntraLBScheduler",
-            ),
-        )
-        for async_scheduling, expected_scheduler_cls in cases:
-            with self.subTest(async_scheduling=async_scheduling):
-                self.assertEqual(
-                    platform._get_dyntra_lb_scheduler_cls(async_scheduling=async_scheduling),
-                    expected_scheduler_cls,
-                )
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)

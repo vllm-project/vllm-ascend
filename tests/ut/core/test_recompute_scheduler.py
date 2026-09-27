@@ -46,16 +46,16 @@ def test_recompute_scheduler_keeps_local_schedule_for_ascend_spec_padding():
     assert RecomputeScheduler.update_from_output is not Scheduler.update_from_output
 
 
-def test_recompute_scheduler_config_picks_sync_and_async_class():
+def test_recompute_scheduler_config_leaves_class_selection_to_platform():
     vllm_config = make_dyntra_test_config()
 
     vllm_config.scheduler_config.async_scheduling = False
     sync_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
-    assert sync_config.scheduler_cls == ("vllm_ascend.core.recompute_scheduler.RecomputeScheduler")
+    assert sync_config.scheduler_cls is None
 
     vllm_config.scheduler_config.async_scheduling = True
     async_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
-    assert async_config.scheduler_cls == ("vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler")
+    assert async_config.scheduler_cls is None
 
 
 def test_preempt_offloads_before_upstream_releases_blocks():
