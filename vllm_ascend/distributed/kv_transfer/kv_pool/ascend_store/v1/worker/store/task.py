@@ -12,21 +12,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import Ch
 
 from ...protocol.transfer import StoreRequest
 from ..projection import (
-    EffectiveTPKeyProjector,
+    ContiguousKVBindingProjector,
+    KVBinding,
+    KVMemorySlice,
     KVObjectProjection,
-    StridedKVMemoryProjector,
+    StridedKVBindingProjector,
     bind_local_blocks,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class StoreChunk:
-    """One Backend key and its aligned local source segments."""
-
-    group_id: int
-    backend_key: str
-    addresses: tuple[int, ...]
-    sizes: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +27,7 @@ class StoreTask:
 
     request_id: str
     source_ready_event: torch.npu.Event
-    chunks: tuple[StoreChunk, ...]
+    bindings: tuple[KVBinding, ...]
 
 
 class StoreTaskBuilder(Protocol):
@@ -50,11 +42,12 @@ class StoreTaskBuilder(Protocol):
 
 
 class ContiguousStoreTaskBuilder:
-    """Map Store chunks to the contiguous segments of local KV blocks."""
+    """Select owned objects and compile their contiguous Store bindings."""
 
     def __init__(
         self,
         token_database: ChunkedTokenDatabase,
+        binding_projector: ContiguousKVBindingProjector,
         tp_rank: int,
         pcp_rank: int,
         pcp_size: int,
@@ -64,6 +57,7 @@ class ContiguousStoreTaskBuilder:
         align_state_group_ids: Set[int] = frozenset(),
     ) -> None:
         self.token_database = token_database
+        self._binding_projector = binding_projector
         self.tp_rank = tp_rank
         self.pcp_rank = pcp_rank
         self.pcp_size = pcp_size
@@ -78,7 +72,7 @@ class ContiguousStoreTaskBuilder:
         source_ready_event: torch.npu.Event,
         projections: tuple[KVObjectProjection, ...],
     ) -> StoreTask:
-        chunks = []
+        bindings = []
         for projection in projections:
             group_id = projection.group_id
             group_block_ids = request.block_ids_by_group[group_id]
@@ -94,52 +88,51 @@ class ContiguousStoreTaskBuilder:
             tp_replicas = self.put_step if self.dcp_size <= 1 and not uses_align_state else 1
             shard_rank = self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas
             shard_size = self.pcp_size * tp_replicas
-            keys = []
-            addresses = []
-            sizes = []
-            for candidate_index, allocated_object in enumerate(allocated_objects):
-                if shard_size > 1 and candidate_index % shard_size != shard_rank:
-                    continue
-                kv_object = allocated_object.object
-                address, size, _ = self.token_database.prepare_value(
-                    kv_object.token_range.start_token,
-                    kv_object.token_range.end_token,
-                    list(group_block_ids),
-                    kv_cache_group_id=group_id,
-                    block_id=allocated_object.block_id,
-                )
-                keys.append(kv_object.backend_key)
-                addresses.append(address)
-                sizes.append(size)
-
+            owned_objects = tuple(
+                allocated_object
+                for candidate_index, allocated_object in enumerate(allocated_objects)
+                if shard_size <= 1 or candidate_index % shard_size == shard_rank
+            )
+            group_bindings = self._binding_projector.project(group_id, group_block_ids, owned_objects)
             if self.kv_role == "kv_consumer":
-                keys, addresses, sizes = self.token_database.decode_adaptor_prefill_pp(
-                    keys,
-                    addresses,
-                    sizes,
-                    kv_cache_group_id=group_id,
+                group_bindings = self._adapt_consumer_pp(group_bindings)
+            bindings.extend(group_bindings)
+        return StoreTask(request.request_id, source_ready_event, tuple(bindings))
+
+    def _adapt_consumer_pp(self, bindings: tuple[KVBinding, ...]) -> tuple[KVBinding, ...]:
+        adapted_bindings = []
+        for binding in bindings:
+            keys, addresses, sizes = self.token_database.decode_adaptor_prefill_pp(
+                [binding.backend_key],
+                [list(binding.memory_slice.addresses)],
+                [list(binding.memory_slice.sizes)],
+                kv_cache_group_id=binding.group_id,
+            )
+            adapted_bindings.extend(
+                KVBinding(
+                    binding.group_id,
+                    binding.base_object,
+                    key,
+                    binding.block_id,
+                    KVMemorySlice(tuple(address), tuple(size)),
                 )
-            chunks.extend(
-                StoreChunk(group_id, key, tuple(address), tuple(size))
                 for key, address, size in zip(keys, addresses, sizes)
             )
-        return StoreTask(request.request_id, source_ready_event, tuple(chunks))
+        return tuple(adapted_bindings)
 
 
 class StridedStoreTaskBuilder:
-    """Map Store chunks to the effective-TP head slices owned by this rank."""
+    """Select owned objects and compile their effective-TP Store bindings."""
 
     def __init__(
         self,
         pcp_rank: int,
         pcp_size: int,
-        key_projector: EffectiveTPKeyProjector,
-        memory_projector: StridedKVMemoryProjector,
+        binding_projector: StridedKVBindingProjector,
     ) -> None:
         self.pcp_rank = pcp_rank
         self.pcp_size = pcp_size
-        self._key_projector = key_projector
-        self._memory_projector = memory_projector
+        self._binding_projector = binding_projector
 
     def build(
         self,
@@ -152,16 +145,10 @@ class StridedStoreTaskBuilder:
         projection = projections[0]
         group_id = projection.group_id
         allocated_objects = bind_local_blocks(projection, request.block_ids_by_group[group_id])
-        chunks = []
-        for candidate_index, allocated_object in enumerate(allocated_objects):
-            if self.pcp_size > 1 and candidate_index % self.pcp_size != self.pcp_rank:
-                continue
-            kv_object = allocated_object.object
-            keys = self._key_projector.project(kv_object.backend_key)
-            memory_slices = self._memory_projector.project(
-                allocated_object.block_id,
-                kv_object.token_range.end_token - kv_object.token_range.start_token,
-            )
-            for key, memory_slice in zip(keys, memory_slices, strict=True):
-                chunks.append(StoreChunk(group_id, key, memory_slice.addresses, memory_slice.sizes))
-        return StoreTask(request.request_id, source_ready_event, tuple(chunks))
+        owned_objects = tuple(
+            allocated_object
+            for candidate_index, allocated_object in enumerate(allocated_objects)
+            if self.pcp_size <= 1 or candidate_index % self.pcp_size == self.pcp_rank
+        )
+        bindings = self._binding_projector.project(group_id, owned_objects)
+        return StoreTask(request.request_id, source_ready_event, bindings)

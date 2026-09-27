@@ -53,6 +53,17 @@ class KVMemorySlice:
     sizes: tuple[int, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class KVBinding:
+    """One concrete Backend object bound to its Worker-local memory slice."""
+
+    group_id: int
+    base_object: KVObject
+    backend_key: str
+    block_id: int
+    memory_slice: KVMemorySlice
+
+
 class KVObjectProjector:
     """Turn semantic regions and content hashes into Backend object identities."""
 
@@ -105,6 +116,41 @@ def bind_local_blocks(
             if not skip_null_blocks or block_id > 0:
                 allocated_objects.append(AllocatedKVObject(kv_object, block_id))
     return tuple(allocated_objects)
+
+
+class ContiguousKVBindingProjector:
+    """Complete key-to-memory bindings for contiguous Worker KV blocks."""
+
+    def __init__(self, token_database: ChunkedTokenDatabase) -> None:
+        self._token_database = token_database
+
+    def project(
+        self,
+        group_id: int,
+        block_ids: Sequence[int],
+        allocated_objects: Sequence[AllocatedKVObject],
+    ) -> tuple[KVBinding, ...]:
+        local_block_ids = list(block_ids)
+        bindings = []
+        for allocated_object in allocated_objects:
+            kv_object = allocated_object.object
+            addresses, sizes, block_id = self._token_database.prepare_value(
+                kv_object.token_range.start_token,
+                kv_object.token_range.end_token,
+                local_block_ids,
+                kv_cache_group_id=group_id,
+                block_id=allocated_object.block_id,
+            )
+            bindings.append(
+                KVBinding(
+                    group_id,
+                    kv_object,
+                    kv_object.backend_key,
+                    block_id,
+                    KVMemorySlice(tuple(addresses), tuple(sizes)),
+                )
+            )
+        return tuple(bindings)
 
 
 class EffectiveTPKeyProjector:
@@ -166,3 +212,34 @@ class StridedKVMemoryProjector:
                     sizes.append(slice_size)
             slices.append(KVMemorySlice(tuple(addresses), tuple(sizes)))
         return tuple(slices)
+
+
+class StridedKVBindingProjector:
+    """Pair each effective-TP key with the matching local head slice."""
+
+    def __init__(
+        self,
+        key_projector: EffectiveTPKeyProjector,
+        memory_projector: StridedKVMemoryProjector,
+    ) -> None:
+        self._key_projector = key_projector
+        self._memory_projector = memory_projector
+
+    def project(
+        self,
+        group_id: int,
+        allocated_objects: Sequence[AllocatedKVObject],
+    ) -> tuple[KVBinding, ...]:
+        bindings = []
+        for allocated_object in allocated_objects:
+            base_object = allocated_object.object
+            backend_keys = self._key_projector.project(base_object.backend_key)
+            memory_slices = self._memory_projector.project(
+                allocated_object.block_id,
+                base_object.token_range.end_token - base_object.token_range.start_token,
+            )
+            bindings.extend(
+                KVBinding(group_id, base_object, backend_key, allocated_object.block_id, memory_slice)
+                for backend_key, memory_slice in zip(backend_keys, memory_slices, strict=True)
+            )
+        return tuple(bindings)

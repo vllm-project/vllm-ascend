@@ -10,7 +10,8 @@ from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
-from .task import StoreChunk, StoreTask
+from ..projection import KVBinding
+from .task import StoreTask
 
 STORE_BARRIER_POLL_INTERVAL_S = 1.0
 
@@ -137,35 +138,35 @@ class StoreExecutor(threading.Thread):
 
     def _execute_task(self, task: StoreTask) -> StoreExecutionResult:
         try:
-            chunks = self._select_missing_chunks(task)
-            if not chunks:
+            bindings = self._select_missing_bindings(task)
+            if not bindings:
                 return StoreExecutionResult(task.request_id, ())
 
             task.source_ready_event.synchronize()
             result_codes = self._backend.put(
-                [chunk.backend_key for chunk in chunks],
-                [list(chunk.addresses) for chunk in chunks],
-                [list(chunk.sizes) for chunk in chunks],
+                [binding.backend_key for binding in bindings],
+                [list(binding.memory_slice.addresses) for binding in bindings],
+                [list(binding.memory_slice.sizes) for binding in bindings],
             )
             codes = None if result_codes is None else tuple(result_codes)
-            if codes is not None and len(codes) != len(chunks):
-                error = RuntimeError(f"Store returned {len(codes)} results for {len(chunks)} chunks")
+            if codes is not None and len(codes) != len(bindings):
+                error = RuntimeError(f"Store returned {len(codes)} results for {len(bindings)} bindings")
                 return StoreExecutionResult(task.request_id, codes, error)
             return StoreExecutionResult(task.request_id, codes)
         except Exception as error:
             return StoreExecutionResult(task.request_id, None, error)
 
-    def _select_missing_chunks(self, task: StoreTask) -> tuple[StoreChunk, ...]:
-        if not task.chunks or not self._backend.requires_exists_before_put:
-            return task.chunks
+    def _select_missing_bindings(self, task: StoreTask) -> tuple[KVBinding, ...]:
+        if not task.bindings or not self._backend.requires_exists_before_put:
+            return task.bindings
 
-        keys = [chunk.backend_key for chunk in task.chunks]
+        keys = [binding.backend_key for binding in task.bindings]
         present = self._backend.exists(keys)
         if len(present) != len(keys):
-            raise RuntimeError(f"Store exists returned {len(present)} results for {len(keys)} chunks")
+            raise RuntimeError(f"Store exists returned {len(present)} results for {len(keys)} bindings")
         if any(value not in (0, 1) for value in present):
             raise RuntimeError("Store exists returned states other than 0 or 1")
-        return tuple(chunk for chunk, value in zip(task.chunks, present, strict=True) if value != 1)
+        return tuple(binding for binding, value in zip(task.bindings, present, strict=True) if value != 1)
 
     @staticmethod
     def _raise_for_incomplete_store(result: StoreExecutionResult) -> None:
