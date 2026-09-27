@@ -31,12 +31,16 @@ def _load_method(path: Path, class_name: str, method_name: str):
 class _BlockTable:
     def __init__(self, rows: int, cols: int):
         self.shape = (rows, cols)
-        self.viewed = None
+        self.viewed: tuple[tuple[int, int], tuple[int, int]] | None = None
 
-    def stride(self):
+    def stride(self) -> tuple[int, int]:
         return (self.shape[1], 1)
 
-    def as_strided(self, size, stride):
+    def as_strided(
+        self,
+        size: tuple[int, int],
+        stride: tuple[int, int],
+    ) -> "_BlockTable":
         self.viewed = (size, stride)
         return self
 
@@ -70,6 +74,7 @@ def test_shared_replay_views_target_block_table_without_rebuilt_metadata():
 
     params = build_fia_params(speculator, 4, None, False)
 
+    assert block_table.viewed is not None
     assert block_table.viewed[0] == (4, 8)
     assert [item["block_table"] for item in params] == [block_table, block_table]
     assert params[0]["actual_seq_lengths_kv"] == [11, 0, 0, 0]
@@ -105,6 +110,7 @@ def test_updatable_replay_skips_metadata_rebuild_when_block_table_is_shared():
     assert "use_updatable_graph" in test_source
     returned = early_return.body[0]
     assert isinstance(returned, ast.Return)
+    assert returned.value is not None
     assert ast.unparse(returned.value) == "self._updatable_graph_replay(desc, None)"
 
     rebuild = next(
