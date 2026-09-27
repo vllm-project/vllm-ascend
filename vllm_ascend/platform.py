@@ -1328,12 +1328,6 @@ def _setup_worker_and_scheduler(
     if scheduler_cls is not None:
         vllm_config.scheduler_config.scheduler_cls = scheduler_cls
 
-    if scheduler_cls == _SCHEDULER_QUALNAMES[("profiling_chunk", async_scheduling)]:
-        # Apply the EngineCore.__init__ patch here for the InprocClient (in-process).
-        # And the EngineCore.__init__ patch for EngineCoreProc (the spawned child process)
-        # has been moved to patch_engine_core.py.
-        import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
-
 
 def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config

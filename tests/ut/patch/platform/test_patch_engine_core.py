@@ -3,9 +3,8 @@
 
 ``patch_engine_core.py`` is the single entry-point patch for
 ``EngineCoreProc.run_engine_core``: it replaces the per-feature wrappers that
-used to live in ``patch_balance_schedule``, ``patch_dyntra_lb_core`` and
-``patch_profiling_chunk`` (each re-wrapping ``run_engine_core`` in import
-order). What is guarded here (everything reachable from CPU UT):
+used to live in ``patch_balance_schedule`` and ``patch_dyntra_lb_core``.
+What is guarded here (everything reachable from CPU UT):
 
 * the consolidated patch is applied eagerly at import: the live
   ``EngineCoreProc.run_engine_core`` is ``_run_engine_core_patch_func``;
@@ -17,15 +16,11 @@ order). What is guarded here (everything reachable from CPU UT):
   ``BalanceDPEngineCoreProc`` when balance is enabled, else leaves the
   module-global ``DPEngineCoreProc`` untouched (the deferred-swap invariant
   the balance patch depends on);
-* ``_run_engine_core_patch_func`` initializes the ascend config, re-applies
-  the profiling patches only when profiling-based chunk sizing is enabled,
-  and delegates to the upstream entry point with ``dp_rank`` /
+* ``_run_engine_core_patch_func`` initializes the ascend config and delegates
+  to the upstream entry point with ``dp_rank`` /
   ``local_dp_rank`` passed through;
-* ``_apply_patch`` is idempotent and also installs the pp-mtp ``post_step``
-  patch that previously ran from ``patch_pp_mtp``'s own ``_apply_patch``;
-* importing ``patch_engine_core`` pulls in ``patch_profiling_chunk`` (the
-  child process re-applies the profiling patch exactly through this import
-  chain when unpickling the ``run_engine_core`` wrapper).
+* ``_apply_patch`` is idempotent and installs both the profiling
+  ``EngineCore.__init__`` hook and the pp-mtp ``post_step`` patch.
 """
 
 import inspect
@@ -38,17 +33,8 @@ from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
 
 import vllm_ascend.patch.platform.patch_engine_core as _engine_core_patch
-import vllm_ascend.patch.platform.patch_profiling_chunk as _profiling_patch
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceDPEngineCoreProc
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import DyntraLBDPEngineCoreProc
-
-
-def _ascend_config(profiling_enabled: bool):
-    return SimpleNamespace(
-        scheduler_config=SimpleNamespace(
-            profiling_chunk_config=SimpleNamespace(enabled=profiling_enabled),
-        )
-    )
 
 
 def _dyntra_config(enabled: bool, enable_diagnostics: bool = True):
@@ -63,6 +49,7 @@ def _dyntra_config(enabled: bool, enable_diagnostics: bool = True):
 def test_engine_core_patch_applied_at_import():
     assert _engine_core_patch._PATCHED is True
     assert _UpstreamEngineCoreProc.run_engine_core is _engine_core_patch._run_engine_core_patch_func
+    assert EngineCore.__init__ is _engine_core_patch._patched_engine_core_init
 
 
 def test_original_run_engine_core_stashes_pristine_upstream():
@@ -98,12 +85,19 @@ def test_apply_patch_is_idempotent(monkeypatch):
     assert _UpstreamEngineCoreProc.run_engine_core is _engine_core_patch._run_engine_core_patch_func
 
 
-def test_profiling_patch_loaded_through_engine_core_patch():
-    """The spawned child re-applies the profiling patch by importing this
-    module when unpickling the run_engine_core wrapper; importing
-    patch_engine_core must therefore pull in patch_profiling_chunk and run
-    its module-level _apply_profiling_patches()."""
-    assert _profiling_patch._profiling_patches_applied is True
+def test_engine_core_init_runs_profiling_for_supported_scheduler(monkeypatch):
+    scheduler = SimpleNamespace(run_profiling_chunk_init=MagicMock())
+    model_executor = object()
+
+    def original_init(self, *args, **kwargs):
+        self.scheduler = scheduler
+        self.model_executor = model_executor
+
+    monkeypatch.setattr(_engine_core_patch, "_OriginalEngineCoreInit", original_init)
+    engine_core = EngineCore.__new__(EngineCore)
+    _engine_core_patch._patched_engine_core_init(engine_core)
+
+    scheduler.run_profiling_chunk_init.assert_called_once_with(model_executor)
 
 
 # ---------------------------------------------------------------------------
@@ -165,10 +159,8 @@ def test_run_engine_core_patch_delegates_and_passes_rank_args(monkeypatch):
         return expected
 
     monkeypatch.setattr(_engine_core_patch, "_OriginalRunEngineCore", original)
-    init_ascend = MagicMock(return_value=_ascend_config(profiling_enabled=False))
+    init_ascend = MagicMock(return_value=object())
     monkeypatch.setattr(_engine_core_patch, "init_ascend_config", init_ascend)
-    profiling = MagicMock()
-    monkeypatch.setattr(_engine_core_patch, "_apply_profiling_patches", profiling)
     dp_proc_patch = MagicMock()
     monkeypatch.setattr(_engine_core_patch, "_patch_dp_engine_core_proc", dp_proc_patch)
 
@@ -191,20 +183,3 @@ def test_run_engine_core_patch_delegates_and_passes_rank_args(monkeypatch):
     ]
     init_ascend.assert_called_once_with(vllm_config)
     dp_proc_patch.assert_called_once_with(vllm_config, 1)
-    profiling.assert_not_called()
-
-
-def test_run_engine_core_patch_applies_profiling_when_enabled(monkeypatch):
-    monkeypatch.setattr(_engine_core_patch, "_OriginalRunEngineCore", MagicMock())
-    monkeypatch.setattr(
-        _engine_core_patch,
-        "init_ascend_config",
-        MagicMock(return_value=_ascend_config(profiling_enabled=True)),
-    )
-    profiling = MagicMock()
-    monkeypatch.setattr(_engine_core_patch, "_apply_profiling_patches", profiling)
-    monkeypatch.setattr(_engine_core_patch, "_patch_dp_engine_core_proc", MagicMock())
-
-    _engine_core_patch._run_engine_core_patch_func(vllm_config=object())
-
-    profiling.assert_called_once_with()
