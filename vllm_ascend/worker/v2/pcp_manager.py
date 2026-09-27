@@ -57,6 +57,8 @@ class AscendPCPManager(PCPManager):
 
     vllm_config: VllmConfig
     kv_cache_config: KVCacheConfig | None = None
+    global_input_buffers: AscendInputBuffers | None = None
+    _capture_global_batch: AscendInputBatch | None = None
     _global_batch_slot_mappings: torch.Tensor | None
     _gathered_kv_slot_mappings: torch.Tensor | None
     _pad_slot_id: torch.Tensor
@@ -495,6 +497,10 @@ class AscendPCPManager(PCPManager):
         """
         slot_mappings = super().prepare_slot_mappings()
         assert self._global_batch is not None
+        assert self._global_batch_slot_mappings is not None
+        self._global_batch_slot_mappings[
+            :, self._global_batch.num_tokens : self._global_batch.num_tokens_after_padding
+        ].fill_(-1)
         graph_num_tokens = self._global_batch.num_tokens_after_padding
         is_decode_only = not bool(self._global_batch.is_prefilling_np.any())
         if not is_decode_only or graph_num_tokens <= self._global_batch.num_tokens:
@@ -538,6 +544,27 @@ class AscendPCPManager(PCPManager):
             assert slot_mappings is not None
             num_tokens = input_batch.num_tokens_after_padding
             restore_start = self.pcp_rank * num_tokens
+            global_buffers = self.global_input_buffers
+            if global_buffers is not None:
+                global_batch = self._capture_global_batch
+                if global_batch is None:
+                    global_batch = AscendInputBatch.make_dummy(  # type: ignore[call-arg]
+                        input_batch.num_reqs_after_padding,
+                        num_tokens,
+                        global_buffers,
+                        max_query_len=input_batch.max_query_len,
+                    )
+                assert global_batch.num_tokens_after_padding == num_tokens
+                assert self._block_tables is not None
+                assert self._global_batch_slot_mappings is not None
+                global_slots = self._global_batch_slot_mappings[:, :num_tokens]
+                global_slots.fill_(-1)
+                return AscendPCPAttentionContext(
+                    global_batch=global_batch,
+                    global_block_tables=self._block_tables.get_dummy_block_tables(global_batch.num_reqs_after_padding),
+                    global_slot_mappings=global_slots,
+                    hidden_restore_idx=torch.arange(restore_start, restore_start + num_tokens, device=self.device),
+                )
             return AscendPCPAttentionContext(
                 global_batch=input_batch,
                 global_block_tables=block_tables,

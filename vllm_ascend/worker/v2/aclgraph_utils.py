@@ -73,9 +73,8 @@ def _prepare_pcp_inputs_to_capture(
     # supplies capture-only PCP metadata instead. The block tables must
     # retain the same PCP-local backing that runtime prepare_attn updates,
     # because the SFA full graph cannot rebind their captured pointer.
-    # The Ascend dummy carries the seq_lens_np/attn_state views consumed
-    # by Ascend metadata builders and doubles as the capture-time PCP
-    # global batch (is_dummy=True).
+    # The local dummy owns model inputs. DSA also needs a global dummy
+    # backed by the runner buffers that its cache metadata uses on replay.
     input_batch = AscendInputBatch.make_dummy(  # type: ignore[call-arg]
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
@@ -93,15 +92,23 @@ def _prepare_pcp_inputs_to_capture(
         num_reqs_padded=input_batch.num_reqs_after_padding,
     )
 
-    attn_metadata = model_state.prepare_attn(
-        input_batch,
-        CUDAGraphMode.NONE,
-        input_block_tables,
-        slot_mappings,
-        attn_groups,
-        kv_cache_config,
-        for_capture=full_cudagraph,
-    )
+    global_buffers = pcp_manager.global_input_buffers
+    if full_cudagraph and global_buffers is not None:
+        pcp_manager._capture_global_batch = AscendInputBatch.make_dummy(  # type: ignore[call-arg]
+            num_reqs, num_tokens, global_buffers, max_query_len=max_query_len
+        )
+    try:
+        attn_metadata = model_state.prepare_attn(
+            input_batch,
+            CUDAGraphMode.NONE,
+            input_block_tables,
+            slot_mappings,
+            attn_groups,
+            kv_cache_config,
+            for_capture=full_cudagraph,
+        )
+    finally:
+        pcp_manager._capture_global_batch = None
     return cudagraph_utils.AttentionState(attn_metadata, slot_mappings_by_layer)
 
 

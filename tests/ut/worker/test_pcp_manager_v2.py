@@ -823,6 +823,7 @@ def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
     attn_metadata = object()
     block_tables = MagicMock(cp_size=1, cp_rank=0, cp_interleave=1)
     pcp_manager = MagicMock()
+    pcp_manager.global_input_buffers = None
     pcp_manager.get_dummy_block_tables.return_value = input_block_tables
     pcp_manager.get_dummy_slot_mappings.return_value = slot_mappings
     model_state = MagicMock()
@@ -1019,6 +1020,82 @@ def test_validate_config_pcp_dp_graph_modes(dp_size, cudagraph_mode, allowed):
     else:
         with pytest.raises(NotImplementedError, match=r"PCP\+DP supports eager mode or FULL_DECODE_ONLY"):
             AscendPCPManager.validate_config(config, supports_mm_inputs=False)
+
+
+def test_pcp_capture_uses_runner_buffers_for_global_dsa_metadata():
+    local_batch = MagicMock()
+    global_batch = MagicMock()
+    global_buffers = object()
+    pcp_manager = MagicMock(global_input_buffers=global_buffers)
+    pcp_manager.get_dummy_block_tables.return_value = ()
+    pcp_manager.get_dummy_slot_mappings.return_value = torch.empty((1, 8))
+    model_state = MagicMock()
+
+    def check_capture(*args, **kwargs):
+        assert args[0] is local_batch
+        assert pcp_manager._capture_global_batch is global_batch
+        return {}
+
+    model_state.prepare_attn.side_effect = check_capture
+    with (
+        patch(
+            "vllm_ascend.worker.v2.aclgraph_utils.AscendInputBatch.make_dummy",
+            side_effect=[local_batch, global_batch],
+        ) as make_dummy,
+        patch("vllm_ascend.worker.v2.aclgraph_utils.cudagraph_utils.build_slot_mappings_by_layer"),
+        patch("vllm_ascend.worker.v2.aclgraph_utils.maybe_prepare_dcp_local_seq_lens"),
+    ):
+        _prepare_pcp_inputs_to_capture(
+            num_reqs=2,
+            num_tokens=8,
+            model_state=model_state,
+            input_buffers=MagicMock(),
+            _block_tables=MagicMock(cp_size=1, cp_rank=0, cp_interleave=1),
+            attn_groups=[],
+            kv_cache_config=object(),
+            full_cudagraph=True,
+            pcp_manager=pcp_manager,
+        )
+
+    assert make_dummy.call_args_list[1].args == (2, 8, global_buffers)
+    assert pcp_manager._capture_global_batch is None
+
+
+@pytest.mark.parametrize("capturing", [False, True])
+def test_dsa_dummy_attention_context_uses_runner_global_buffers(capturing):
+    manager = AscendPCPManager(2, 1, torch.device("cpu"))
+    manager.global_input_buffers = object()
+    manager._global_batch_slot_mappings = torch.full((2, 16), 99, dtype=torch.int64)
+    global_tables = (torch.zeros((2, 1), dtype=torch.int32),)
+    manager._block_tables = SimpleNamespace(
+        get_dummy_block_tables=MagicMock(return_value=global_tables),
+    )
+    dummy = _make_local_pcp_batch()
+    dummy.is_dummy = True
+    global_dummy = SimpleNamespace(num_reqs_after_padding=2, num_tokens_after_padding=6)
+    manager._capture_global_batch = global_dummy if capturing else None
+    with patch.object(AscendInputBatch, "make_dummy", return_value=global_dummy) as make_dummy:
+        context = manager.build_attention_context(
+            dummy,
+            (torch.ones((2, 1), dtype=torch.int32),),
+            torch.arange(24, dtype=torch.int64).reshape(2, 12),
+        )
+
+    if capturing:
+        make_dummy.assert_not_called()
+    else:
+        make_dummy.assert_called_once_with(
+            dummy.num_reqs_after_padding,
+            dummy.num_tokens_after_padding,
+            manager.global_input_buffers,
+            max_query_len=dummy.max_query_len,
+        )
+    assert context.global_batch is global_dummy
+    assert context.global_block_tables is global_tables
+    assert context.global_slot_mappings.data_ptr() == manager._global_batch_slot_mappings.data_ptr()
+    torch.testing.assert_close(context.global_slot_mappings, torch.full((2, 6), -1, dtype=torch.int64))
+    torch.testing.assert_close(context.hidden_restore_idx, torch.arange(6, 12))
+    manager._block_tables.get_dummy_block_tables.assert_called_once_with(2)
 
 
 @pytest.mark.parametrize("pcp_rank", [0, 1])
