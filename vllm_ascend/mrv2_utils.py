@@ -17,11 +17,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import os
+from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs_vllm
 from vllm.logger import logger
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.device.device_config import is_310p
 
 if TYPE_CHECKING:
@@ -122,6 +124,8 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         reasons.append("draft_window_size")
     if _is_enabled(_additional(vllm_config, "enable_reduce_sample")):
         reasons.append("enable_reduce_sample")
+    if _uses_eplb(vllm_config):
+        reasons.append("EPLB")
 
     if _is_configured(spec_config):
         method = getattr(spec_config, "method", None)
@@ -135,6 +139,46 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
             reasons.append("dflash2 graph")
 
     return reasons
+
+
+def _env_flag_enabled(value: str | None, *, true_only: bool = False) -> bool:
+    if value is None:
+        return False
+    normalized = value.lower()
+    if true_only:
+        return normalized == "true"
+    return normalized in ("true", "1")
+
+
+def _eplb_config(vllm_config: VllmConfig) -> dict[str, Any]:
+    extra = getattr(vllm_config, "additional_config", None)
+    if not _is_configured(extra) or not isinstance(extra, dict):
+        return {}
+    eplb_config = extra.get("eplb_config") or {}
+    return eplb_config if isinstance(eplb_config, dict) else {}
+
+
+def _uses_eplb(vllm_config: VllmConfig) -> bool:
+    """Return whether this request enables V1 or V2 EPLB.
+
+    Detection is limited to explicit EPLB signals. Default-filled
+    ``additional_config.eplb_config`` values must not trip the blacklist.
+    """
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    if _is_configured(parallel_config) and bool(getattr(parallel_config, "enable_eplb", False)):
+        return True
+    if _env_flag_enabled(envs_ascend.DYNAMIC_EPLB) or _env_flag_enabled(
+        os.getenv("EXPERT_MAP_RECORD"), true_only=True
+    ):
+        return True
+
+    eplb_config = _eplb_config(vllm_config)
+    return bool(
+        eplb_config.get("dynamic_eplb")
+        or eplb_config.get("expert_map_path")
+        or eplb_config.get("expert_map_record_path")
+        or "load_collection_phase" in eplb_config
+    )
 
 
 def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
@@ -153,6 +197,7 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
     * draft_window_size
     * enable_reduce_sample
+    * EPLB (``--enable-eplb``, ``DYNAMIC_EPLB``, or explicit eplb_config)
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
     * parallel_drafting

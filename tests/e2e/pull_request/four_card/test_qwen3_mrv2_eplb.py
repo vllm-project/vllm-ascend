@@ -6,11 +6,8 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-import regex as re
-from vllm import SamplingParams
 
 from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
-from vllm_ascend.distributed.eplb.state import ASYNC_EPLB_CYCLE_COMMITTED_LOG
 
 MODEL = os.environ.get("QWEN3_MRV2_EPLB_MODEL_PATH", "vllm-ascend/Qwen3-30B-A3B-W8A8")
 PROMPTS = [
@@ -33,8 +30,6 @@ EXPECTED_ANSWER_PREFIXES = [
     ("cold",),
     ("January",),
 ]
-ASYNC_EPLB_CYCLE_CHUNK_TOKENS = 32
-ASYNC_EPLB_CYCLE_MAX_CHUNKS = 12
 
 
 def _assert_expected_answers(outputs, name: str) -> None:
@@ -63,7 +58,7 @@ def _assert_expected_answers(outputs, name: str) -> None:
         )
 
 
-def _run_dp2_tp2(capfd: pytest.CaptureFixture[str]):
+def _run_dp2_tp2():
     runner_kwargs: dict[str, Any] = {
         "data_parallel_size": 2,
         "tensor_parallel_size": 2,
@@ -80,44 +75,19 @@ def _run_dp2_tp2(capfd: pytest.CaptureFixture[str]):
         "enable_prefix_caching": False,
         "dp_start_timeout": 1800,
         "dp_request_timeout": 1800,
-        "enable_eplb": True,
-        "eplb_config": {
-            "window_size": 2,
-            "step_interval": 2,
-            "num_redundant_experts": 4,
-            "log_balancedness": False,
-            "use_async": True,
-        },
         "additional_config": {
             "eplb_config": {
-                "load_collection_phase": "prefill",
+                "dynamic_eplb": True,
+                "expert_heat_collection_interval": 2,
+                "algorithm_execution_interval": 2,
+                "num_redundant_experts": 4,
+                "eplb_heat_collection_stage": "prefill",
             },
         },
     }
 
-    captured_output = ""
     with DPVllmRunner(MODEL, **runner_kwargs) as runner:
-        outputs = runner.generate_greedy(PROMPTS, max_tokens=16)
-        captured = capfd.readouterr()
-        captured_output += captured.out + captured.err
-        for _ in range(ASYNC_EPLB_CYCLE_MAX_CHUNKS):
-            if ASYNC_EPLB_CYCLE_COMMITTED_LOG in captured_output:
-                break
-            # The upstream async worker commits one of this model's 48 MoE
-            # layers per forward step. Decode in bounded chunks so weight
-            # transfers have time to finish, stopping as soon as the cycle is
-            # observable.
-            runner.generate(
-                [PROMPTS[0]],
-                SamplingParams(
-                    temperature=0.0,
-                    max_tokens=ASYNC_EPLB_CYCLE_CHUNK_TOKENS,
-                    ignore_eos=True,
-                ),
-            )
-            captured = capfd.readouterr()
-            captured_output += captured.out + captured.err
-    return outputs, captured_output
+        return runner.generate_greedy(PROMPTS, max_tokens=16)
 
 
 @pytest.mark.e2e_model(MODEL)
@@ -133,7 +103,7 @@ def _run_dp2_tp2(capfd: pytest.CaptureFixture[str]):
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "DYNAMIC_EPLB": "true",
         "VLLM_LOGGING_LEVEL": "INFO",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "1024",
@@ -141,16 +111,8 @@ def _run_dp2_tp2(capfd: pytest.CaptureFixture[str]):
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.7, max_wait_seconds=180)
-def test_qwen3_moe_w8a8_dp2_tp2_async_eplb_accuracy(
-    capfd: pytest.CaptureFixture[str],
-):
-    eplb_outputs, output = _run_dp2_tp2(capfd)
-    _assert_expected_answers(eplb_outputs, "MRV2 asynchronous EPLB")
-    captured = capfd.readouterr()
-    output += captured.out + captured.err
-    committed_cycle = re.search(
-        rf"{re.escape(ASYNC_EPLB_CYCLE_COMMITTED_LOG)}: model=.+",
-        output,
-    )
-    eplb_log_lines = [line for line in output.splitlines() if "eplb" in line.lower()]
-    assert committed_cycle is not None, "No asynchronous EPLB cycle completed.\n" + "\n".join(eplb_log_lines)
+def test_qwen3_moe_w8a8_dp2_tp2_eplb_accuracy():
+    # EPLB is blacklisted on V2. Do not set VLLM_USE_V2_MODEL_RUNNER; the
+    # DYNAMIC_EPLB config selects Model Runner V1 automatically.
+    eplb_outputs = _run_dp2_tp2()
+    _assert_expected_answers(eplb_outputs, "V1 dynamic EPLB")

@@ -63,7 +63,15 @@ def test_environment_override_wins(monkeypatch, env_value):
         SimpleNamespace(additional_config={"enable_kvpp": True}),
         SimpleNamespace(additional_config={"enable_reduce_sample": False}),
         SimpleNamespace(additional_config={"enable_reduce_sample": "false"}),
-        SimpleNamespace(additional_config={"eplb_config": {"dynamic_eplb": True}}),
+        SimpleNamespace(
+            additional_config={
+                "eplb_config": {
+                    "dynamic_eplb": False,
+                    "expert_map_path": None,
+                    "expert_map_record_path": None,
+                }
+            }
+        ),
         SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector="AscendStoreConnector")),
         SimpleNamespace(
             kv_transfer_config=SimpleNamespace(
@@ -82,7 +90,7 @@ def test_environment_override_wins(monkeypatch, env_value):
         "kvpp",
         "reduce-sample-disabled",
         "reduce-sample-string-false",
-        "dynamic-eplb",
+        "default-eplb-config",
         "kv-pool-connector",
         "kv-pool-memcache",
     ],
@@ -90,6 +98,8 @@ def test_environment_override_wins(monkeypatch, env_value):
 def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
     monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+    monkeypatch.delenv("DYNAMIC_EPLB", raising=False)
+    monkeypatch.delenv("EXPERT_MAP_RECORD", raising=False)
 
     assert use_v2_model_runner(config) is True
 
@@ -129,6 +139,11 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
                 draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             )
         ),
+        SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True)),
+        SimpleNamespace(additional_config={"eplb_config": {"dynamic_eplb": True}}),
+        SimpleNamespace(additional_config={"eplb_config": {"expert_map_path": "map.json"}}),
+        SimpleNamespace(additional_config={"eplb_config": {"expert_map_record_path": "record.json"}}),
+        SimpleNamespace(additional_config={"eplb_config": {"load_collection_phase": "prefill"}}),
     ],
     ids=[
         "lora",
@@ -153,11 +168,18 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "ngram-gpu-speculative-decoding",
         "parallel-drafting",
         "dflash2-graph",
+        "enable-eplb",
+        "dynamic-eplb",
+        "expert-map-path",
+        "expert-map-record-path",
+        "load-collection-phase",
     ],
 )
 def test_blacklisted_features_default_to_v1(monkeypatch, config):
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
     monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+    monkeypatch.delenv("DYNAMIC_EPLB", raising=False)
+    monkeypatch.delenv("EXPERT_MAP_RECORD", raising=False)
 
     assert use_v2_model_runner(config) is False
 
@@ -202,12 +224,15 @@ def test_blacklist_does_not_override_explicit_env(monkeypatch):
         use_v2_model_runner(SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector="AscendStoreConnector")))
         is True
     )
+    assert use_v2_model_runner(SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))) is True
 
 
 def test_default_v2_logs_selection(monkeypatch):
     info_calls = []
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
     monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+    monkeypatch.delenv("DYNAMIC_EPLB", raising=False)
+    monkeypatch.delenv("EXPERT_MAP_RECORD", raising=False)
     monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: info_calls.append(args))
 
     assert use_v2_model_runner(SimpleNamespace()) is True
@@ -222,6 +247,17 @@ def test_blacklist_logs_fallback(monkeypatch):
     assert use_v2_model_runner(SimpleNamespace(lora_config=object())) is False
     assert len(warning_calls) == 1
     assert "LoRA" in warning_calls[0][1]
+
+
+@pytest.mark.parametrize("env_name,env_value", [("DYNAMIC_EPLB", "true"), ("EXPERT_MAP_RECORD", "true")])
+def test_eplb_environment_falls_back_to_v1(monkeypatch, env_name, env_value):
+    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+    monkeypatch.delenv("DYNAMIC_EPLB", raising=False)
+    monkeypatch.delenv("EXPERT_MAP_RECORD", raising=False)
+    monkeypatch.setenv(env_name, env_value)
+
+    assert use_v2_model_runner(SimpleNamespace()) is False
 
 
 def test_validation_is_decoupled_from_upstream():
