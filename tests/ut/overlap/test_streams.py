@@ -21,7 +21,7 @@ All logic tests run on CPU via the torch/torch_npu mocks installed by
 marked NPU-only and skipped when ``torch.npu.is_available()`` is False.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 import torch
@@ -190,10 +190,11 @@ class TestEventLedger(PytestBase):
         ledger = get_event_ledger()
         event = ledger.record("before_gmm2")
         assert event is not None
-        # Default stream resolution calls torch.npu.current_stream(); the
-        # event is retrievable and was recorded once.
+        # Default stream resolution calls torch.npu.current_stream(); verify
+        # the most recent record target without depending on shared mock
+        # call-count history from the full UT process.
         assert ledger.get_event("before_gmm2") is event
-        event.record.assert_called_once()
+        assert event.record.call_args == call(torch.npu.current_stream())
 
     def test_record_with_explicit_stream(self):
         ledger = get_event_ledger()
@@ -201,7 +202,7 @@ class TestEventLedger(PytestBase):
         event = ledger.record("before_combine", stream=stream)
         assert event is not None
         # The recorded event must be told about the explicit stream.
-        event.record.assert_called_once_with(stream)
+        assert event.record.call_args == call(stream)
         assert ledger.get_event("before_combine") is event
 
     def test_wait_before_record_returns_false(self):
