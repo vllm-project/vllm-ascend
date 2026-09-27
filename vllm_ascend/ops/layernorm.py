@@ -195,6 +195,17 @@ class AscendRMSNormGated(RMSNormGated):
 
     def forward_oot(self, x, z=None):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
+        # bug3(defect-2) fail-safe: on the inductor track dynamo traces the
+        # LayerNormFn Triton kernel (out-param writing a torch.empty_like) into
+        # higher_order.triton_kernel_wrapper_mutation, for which
+        # triton_experimental has no codegen emission — the HOP is silently
+        # dropped, leaving `out` unwritten while downstream ops consume it
+        # (zero-page warmup looks fine, real steps read garbage/NaN). Under
+        # compilation take the upstream pure-aten forward_static instead
+        # (traced into the graph and fused normally); the eager/legacy track
+        # keeps the original fused Triton path unchanged.
+        if torch.compiler.is_compiling():
+            return self.forward_native(x, z)
         return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)
 
 
