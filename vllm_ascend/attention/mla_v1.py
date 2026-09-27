@@ -1435,14 +1435,32 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
         kv_c_normed = kv_c_normed.view(num_tokens, self.num_kv_heads, self.kv_lora_rank)
         k_pe = k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim)
-        DeviceOperator.reshape_and_cache(
-            key=kv_c_normed,
-            value=k_pe,
-            key_cache=kv_cache[0],
-            value_cache=kv_cache[1],
-            slot_mapping=slots,
-        )
+        key_cache, value_cache = kv_cache[0], kv_cache[1]
+        if key_cache.is_contiguous() and value_cache.is_contiguous():
+            DeviceOperator.reshape_and_cache(
+                key=kv_c_normed,
+                value=k_pe,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                slot_mapping=slots,
+            )
+        else:
+            # A fused MLA cache exposes nope/rope as page-strided views whose
+            # token stride is kv_lora_rank + qk_rope_head_dim, so the paged
+            # scatter (contiguous-only) cannot take them. Write each component
+            # with strided indexed assignment instead; never materialize a copy
+            # of the cache.
+            self._strided_kv_write(key_cache, kv_c_normed, slots)
+            self._strided_kv_write(value_cache, k_pe, slots)
         return k_pe, kv_c_normed
+
+    @staticmethod
+    def _strided_kv_write(cache: torch.Tensor, token: torch.Tensor, slots: torch.Tensor) -> None:
+        """Scatter token rows into a page-strided cache view without copying it."""
+        block_size = cache.shape[1]
+        idx = slots.to(torch.int64)
+        row = token.reshape(-1, *cache.shape[2:]).to(cache.dtype)
+        cache[idx // block_size, idx % block_size] = row
 
     def _exec_kv_mla_nope(self, kv_no_split, kv_cache, slots, is_prefill: bool):
         # GLM MLA-NoPE: qk_rope_head_dim==0. KvRmsNormRopeCache rejects empty cos.
