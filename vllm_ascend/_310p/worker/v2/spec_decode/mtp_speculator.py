@@ -29,6 +29,8 @@ from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
@@ -153,6 +155,80 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         next_seqs_cpu[num_reqs:].fill_(0)
         return next_seqs_cpu
 
+    def _build_draft_attn_metadata(
+        self,
+        num_reqs: int,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        cg_mode: CUDAGraphMode,
+        num_query_per_req: int = 1,
+        causal: bool = True,
+        query_start_loc_np: np.ndarray | None = None,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        """Keep the legacy metadata entry point for 310P draft graphs."""
+        assert self.input_batch is not None
+        seq_lens_cpu = None
+        is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
+        if self.use_dcp:
+            assert self.dcp_manager is not None
+            seq_lens_cpu, is_prefilling = self.dcp_manager.prepare_draft_dcp_metadata_inputs(
+                target_seq_lens_cpu=self._get_seq_lens_cpu(num_reqs_padded),
+                is_prefilling=is_prefilling,
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                step=step,
+                max_model_len=self.max_model_len,
+            )
+
+        with build_attn_metadata_factory(
+            self.input_buffers.positions,
+            num_tokens_padded,
+            is_prefilling,
+            seq_lens_cpu=seq_lens_cpu,
+            parallel_config=self.draft_vllm_config.parallel_config,
+        ):
+            # The upstream builders now take a batch descriptor. Preserve the
+            # 310P call sites while routing through the current Ascend hooks.
+            batch_desc = BatchExecutionDescriptor(
+                cg_mode=cg_mode,
+                num_tokens=num_tokens_padded,
+                num_reqs=num_reqs_padded,
+            )
+            if query_start_loc_np is not None:
+                attn_metadata = self._build_attn_metadata(
+                    num_reqs=num_reqs,
+                    batch_desc=batch_desc,
+                    query_start_loc_np=query_start_loc_np,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=step,
+                    causal=causal,
+                    dcp_local_seq_lens=dcp_local_seq_lens,
+                )
+            else:
+                attn_metadata = self._build_uniform_attn_metadata(
+                    batch_desc=batch_desc,
+                    num_reqs=num_reqs,
+                    num_query_per_req=num_query_per_req,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=step,
+                    causal=causal,
+                    dcp_local_seq_lens=dcp_local_seq_lens,
+                )
+        if attn_metadata is not None:
+            # Draft attention uses decode state even during graph capture.
+            for metadata in attn_metadata.values():
+                if metadata is None:
+                    continue
+                metadata.attn_state = AscendAttentionState.DecodeOnly
+
+            # Step 0 is draft prefill; only decode steps update CPU lengths.
+            if step > 0:
+                self._update_decode_attn_metadata(attn_metadata, step, num_reqs)
+        return attn_metadata
+
     @torch.inference_mode()
     def propose(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         num_rejected = kwargs.get("num_rejected")
@@ -232,6 +308,7 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
                     num_tokens_padded=batch_desc.num_tokens,
                     seq_lens_cpu_upper_bound=seq_ub,
                     step=step,
+                    cg_mode=batch_desc.cg_mode,
                 )
                 if attn_metadata is not None:
                     for meta in attn_metadata.values():

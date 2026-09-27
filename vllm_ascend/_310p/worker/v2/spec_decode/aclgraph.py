@@ -166,6 +166,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                     num_tokens_padded=num_tokens,
                     seq_lens_cpu_upper_bound=seq_ub,
                     step=1,
+                    cg_mode=desc.cg_mode,
                 )
                 # Move capture-stable attn tensors to NPU before graph begin
                 # (pageable H2D inside capture is banned).
