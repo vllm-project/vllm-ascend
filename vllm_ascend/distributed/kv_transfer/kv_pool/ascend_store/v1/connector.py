@@ -13,12 +13,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 
+from .assembly import build_kv_pool_graph, build_transfer_planner
 from .backend import BACKEND_IMPORTS
-from .factory import build_scheduler_service, build_worker_service
-from .protocol.transfer import AscendStoreV1Metadata
-from .scheduler.lookup import SchedulerLookupRequest
-from .worker.load import LoadResult
-from .worker.lookup import LookupServer
+from .kv_pool import LoadResult
+from .planning.availability import LookupQuery
+from .protocol.rpc import LookupServer
+from .protocol.transfer import KVTransferStep
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -29,12 +29,12 @@ if TYPE_CHECKING:
     from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
 
-    from .scheduler.service import SchedulerService
-    from .worker.service import WorkerService
+    from .kv_pool import KVPoolGraph
+    from .planning.planner import TransferPlanner
 
 
 class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
-    """Adapt vLLM hooks to AscendStore v1 services."""
+    """Adapt vLLM hooks to the AscendStore v1 planner and KV Pool graph."""
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig) -> None:
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
@@ -45,18 +45,18 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         if backend_name not in BACKEND_IMPORTS:
             raise ValueError(f"Unsupported AscendStore v1 backend: {backend_name}")
 
-        self.scheduler: SchedulerService | None = None
-        self.worker: WorkerService | None = None
+        self.planner: TransferPlanner | None = None
+        self.graph: KVPoolGraph | None = None
         self.lookup_server: LookupServer | None = None
         self._pending_load_result: LoadResult | None = None
         if role == KVConnectorRole.SCHEDULER:
             lookup_address = self._resolve_lookup_address(vllm_config)
-            self.scheduler = build_scheduler_service(vllm_config, kv_cache_config, lookup_address)
+            self.planner = build_transfer_planner(vllm_config, kv_cache_config, lookup_address)
         else:
-            self.worker = build_worker_service(vllm_config, kv_cache_config)
+            self.graph = build_kv_pool_graph(vllm_config, kv_cache_config)
             if vllm_config.parallel_config.rank == 0:
                 lookup_address = self._resolve_lookup_address(vllm_config)
-                self.lookup_server = LookupServer(self.worker.lookup, lookup_address)
+                self.lookup_server = LookupServer(self.graph.lookup, lookup_address)
 
     @staticmethod
     def _resolve_lookup_address(vllm_config: VllmConfig) -> str:
@@ -70,49 +70,49 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         return
 
     def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
-        assert self.scheduler is not None
-        lookup_request = SchedulerLookupRequest(
+        assert self.planner is not None
+        lookup_query = LookupQuery(
             request_id=request.request_id,
             prompt_token_len=len(request.prompt_token_ids),
             request_token_len=request.num_tokens,
             block_hashes=request.block_hashes,
             local_cached_tokens=num_computed_tokens,
         )
-        lookup_result = self.scheduler.lookup(lookup_request)
-        return lookup_result.num_new_matched_tokens, lookup_result.load_is_deferred
+        prefix_plan = self.planner.lookup(lookup_query)
+        return prefix_plan.num_new_matched_tokens, prefix_plan.load_is_deferred
 
     def update_state_after_alloc(self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int) -> None:
-        assert self.scheduler is not None
-        self.scheduler.update_state_after_alloc(request, blocks.get_block_ids(), num_external_tokens)
+        assert self.planner is not None
+        self.planner.confirm_allocation(request, blocks.get_block_ids(), num_external_tokens)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         return
 
-    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> AscendStoreV1Metadata:
-        assert self.scheduler is not None
-        return self.scheduler.build_connector_meta(scheduler_output)
+    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVTransferStep:
+        assert self.planner is not None
+        return self.planner.build_step(scheduler_output)
 
     def request_finished(self, request: Request, block_ids: list[int]) -> tuple[bool, None]:
-        assert self.scheduler is not None
+        assert self.planner is not None
         return False, None
 
     def request_finished_all_groups(self, request: Request, block_ids: tuple[list[int], ...]) -> tuple[bool, None]:
-        assert self.scheduler is not None
+        assert self.planner is not None
         return False, None
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        assert self.worker is not None
-        self.worker.register_kv_caches(kv_caches)
+        assert self.graph is not None
+        self.graph.register_kv_caches(kv_caches)
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
-        assert self.worker is not None
-        self.worker.wait_for_previous_store()
+        assert self.graph is not None
+        self.graph.wait_for_previous_store()
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
-        assert self.worker is not None
+        assert self.graph is not None
         metadata = self._get_connector_metadata()
-        assert isinstance(metadata, AscendStoreV1Metadata)
-        self.worker.load(metadata.load)
+        assert isinstance(metadata, KVTransferStep)
+        self.graph.load(metadata.load)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         return
@@ -121,17 +121,17 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         return
 
     def wait_for_save(self) -> None:
-        assert self.worker is not None
+        assert self.graph is not None
         metadata = self._get_connector_metadata()
-        assert isinstance(metadata, AscendStoreV1Metadata)
-        self.worker.submit_store(metadata.store)
+        assert isinstance(metadata, KVTransferStep)
+        self.graph.submit_store(metadata.store)
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
-        assert self.worker is not None
+        assert self.graph is not None
         if self._pending_load_result is not None:
             raise RuntimeError("Previous Load result has not been fully consumed")
         # A finished request can still own blocks held for an in-flight async Load; its late completion releases them.
-        load_result = self.worker.collect_load_result()
+        load_result = self.graph.collect_load_result()
         if load_result.failed_request_ids:
             raise RuntimeError(
                 "Hybrid KV Load failed, but this vLLM version cannot report request-level Load failures: "
@@ -141,7 +141,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         return set(), set(self._pending_load_result.completed_request_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
-        assert self.worker is not None
+        assert self.graph is not None
         if self._pending_load_result is None:
             return set()
         failed_block_ids = set(self._pending_load_result.failed_block_ids)
@@ -149,9 +149,9 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         return failed_block_ids
 
     def shutdown(self) -> None:
-        if self.scheduler is not None:
-            self.scheduler.close()
+        if self.planner is not None:
+            self.planner.close()
         if self.lookup_server is not None:
             self.lookup_server.close()
-        if self.worker is not None:
-            self.worker.close()
+        if self.graph is not None:
+            self.graph.close()

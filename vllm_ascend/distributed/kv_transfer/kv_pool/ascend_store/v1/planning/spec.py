@@ -1,4 +1,4 @@
-"""Static transfer layout shared by Scheduler operation services."""
+"""Resolve the static inputs and policies used by Scheduler-side transfer planning."""
 
 from __future__ import annotations
 
@@ -13,16 +13,17 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class SchedulerTransferLayout:
+class TransferPlanningSpec:
     cache_transfer_granularity: int
     hash_block_size: int
     transfer_group_ids: tuple[int, ...]
     discard_partial_chunks: bool
 
 
-def resolve_scheduler_transfer_layout(
-    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
-) -> SchedulerTransferLayout:
+def resolve_transfer_planning_spec(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+) -> TransferPlanningSpec:
     cache_transfer_granularity, hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(
         kv_cache_config, vllm_config
     )
@@ -31,7 +32,7 @@ def resolve_scheduler_transfer_layout(
     transfer_group_ids = tuple(
         getattr(kv_cache_config, "transfer_group_ids", range(len(kv_cache_config.kv_cache_groups)))
     )
-    return SchedulerTransferLayout(
+    return TransferPlanningSpec(
         cache_transfer_granularity,
         hash_block_size,
         transfer_group_ids,

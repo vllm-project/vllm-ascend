@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +22,16 @@ BACKEND_IMPORTS = MappingProxyType(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class BackendStoreEvidence:
+    """Normalized Store facts returned by one synchronous Backend call."""
+
+    result_codes: tuple[int, ...] | None
+    succeeded: bool
+    source_release_confirmed: bool
+    error: Exception | None = None
+
+
 class BackendAdapter:
     """Expose Backend operations without discarding native Store results."""
 
@@ -32,23 +43,51 @@ class BackendAdapter:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._backend, name)
 
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[int] | None:
-        if self._backend_name == "mooncake":
-            self._backend.ensure_initialized()
-            if self._backend.store is None:
-                raise RuntimeError("Mooncake store is unavailable for put")
-            return self._backend.store.batch_put_from_multi_buffers(
-                keys, addrs, sizes, self._backend._build_replicate_config()
-            )
-        if self._backend_name == "memcache":
-            self._backend.ensure_initialized()
-            if self._backend.store is None:
-                raise RuntimeError("Memcache store is unavailable for put")
-            direction = self._backend_module.MmcDirect.COPY_L2G.value
-            return self._backend.store.batch_put_from_layers(keys, addrs, sizes, direction)
-        if self._backend.store is None:
-            raise RuntimeError("Yuanrong store is unavailable for put")
-        return self._backend.store.mset_d2h_from_multi_buffers(keys, addrs, sizes, self._backend._ds_set_param)
+    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> BackendStoreEvidence:
+        source_addresses_handed_off = False
+        try:
+            if self._backend_name == "mooncake":
+                self._backend.ensure_initialized()
+                if self._backend.store is None:
+                    raise RuntimeError("Mooncake store is unavailable for put")
+                replicate_config = self._backend._build_replicate_config()
+                put = self._backend.store.batch_put_from_multi_buffers
+                source_addresses_handed_off = True
+                native_result = put(keys, addrs, sizes, replicate_config)
+            elif self._backend_name == "memcache":
+                self._backend.ensure_initialized()
+                if self._backend.store is None:
+                    raise RuntimeError("Memcache store is unavailable for put")
+                direction = self._backend_module.MmcDirect.COPY_L2G.value
+                put = self._backend.store.batch_put_from_layers
+                source_addresses_handed_off = True
+                native_result = put(keys, addrs, sizes, direction)
+            else:
+                if self._backend.store is None:
+                    raise RuntimeError("Yuanrong store is unavailable for put")
+                put = self._backend.store.mset_d2h_from_multi_buffers
+                set_param = self._backend._ds_set_param
+                source_addresses_handed_off = True
+                native_result = put(keys, addrs, sizes, set_param)
+        except Exception as error:
+            return BackendStoreEvidence(None, False, not source_addresses_handed_off, error)
+
+        if self._backend_name == "yuanrong":
+            return BackendStoreEvidence(None, True, source_release_confirmed=True)
+        return self._interpret_result_codes(keys, native_result)
+
+    def _interpret_result_codes(self, keys: list[str], native_result: Any) -> BackendStoreEvidence:
+        try:
+            codes = None if native_result is None else tuple(native_result)
+        except Exception as error:
+            return BackendStoreEvidence(None, False, source_release_confirmed=True, error=error)
+        if codes is None:
+            store_error = RuntimeError(f"{self._backend_name} Store returned no per-key results")
+            return BackendStoreEvidence(None, False, source_release_confirmed=True, error=store_error)
+        if len(codes) != len(keys):
+            store_error = RuntimeError(f"{self._backend_name} Store returned {len(codes)} results for {len(keys)} keys")
+            return BackendStoreEvidence(codes, False, source_release_confirmed=True, error=store_error)
+        return BackendStoreEvidence(codes, all(code == 0 for code in codes), source_release_confirmed=True)
 
 
 def create_backend(backend_name: str, parallel_config: ParallelConfig, extra_config: dict[str, Any]) -> BackendAdapter:
