@@ -105,9 +105,19 @@ def _serve(socket_fd: int) -> None:
             except EOFError:
                 return
             try:
-                *plan_inputs, config_values, sample_counts = request
+                (
+                    logical_load_values,
+                    current_rank_expert_ids,
+                    last_committed_mean_ratios,
+                    rank_node_ids,
+                    config_values,
+                    sample_counts,
+                ) = request
                 plan = StairEplbPolicy.plan_rebalance(
-                    *plan_inputs,
+                    logical_load_values,
+                    current_rank_expert_ids,
+                    last_committed_mean_ratios,
+                    rank_node_ids,
                     StairConfig(**config_values),
                     sample_counts=sample_counts,
                 )

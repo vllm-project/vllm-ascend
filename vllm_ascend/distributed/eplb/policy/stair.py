@@ -1259,7 +1259,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 current_imbalance.mean_ratio,
                 current_imbalance.p95_ratio,
             )
-            current_imbalance = cls.gated_layer_imbalance(
+            gated_imbalance = cls.gated_layer_imbalance(
                 load_bins[:, layer_id],
                 bin_sample_counts,
                 current[layer_id],
@@ -1267,12 +1267,12 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 config,
                 current_imbalance,
             )
-            if current_imbalance is None:
+            if gated_imbalance is None:
                 continue
             relative_deterioration = (
-                0.0 if np.isnan(anchors[layer_id]) else current_imbalance.mean_ratio / anchors[layer_id] - 1.0
+                0.0 if np.isnan(anchors[layer_id]) else gated_imbalance.mean_ratio / anchors[layer_id] - 1.0
             )
-            layer_priority_keys.append((-current_imbalance.mean_ratio, -relative_deterioration, layer_id))
+            layer_priority_keys.append((-gated_imbalance.mean_ratio, -relative_deterioration, layer_id))
 
         for _, _, layer_id in sorted(layer_priority_keys):
             layer_plan = cls.plan_layer(load_bins[:, layer_id], bin_sample_counts, current[layer_id], node_ids, config)
