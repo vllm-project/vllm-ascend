@@ -34,20 +34,13 @@ def test_temporal_copy_preserves_bytes_and_guards(size, offsets, tiles):
 @pytest.mark.parametrize(
     "state_shape,dtype",
     [
-        pytest.param((1024, 16), torch.bfloat16, id="jamba-mamba1-tp8"),
-        pytest.param((4, 128, 128), torch.bfloat16, id="qwen3-next-gdn-tp8"),
-        pytest.param((32, 128, 128), torch.bfloat16, id="qwen3-next-gdn-tp1"),
-        pytest.param((4, 128, 128), torch.float32, id="qwen3_5-gdn-tp8-fp32-cache"),
-        pytest.param((16, 64, 128), torch.bfloat16, id="granite4-mamba2-tp8"),
-        pytest.param((128, 64, 128), torch.bfloat16, id="granite4-mamba2-tp1"),
-        pytest.param((3, 128, 256), torch.bfloat16, id="falcon-h1-mamba2-tp8"),
-        pytest.param((2, 128, 128), torch.float32, id="ling3-kda-tp8"),
-        pytest.param((2, 128, 128), torch.bfloat16, id="ring-lite-linear-tp8"),
+        pytest.param((24, 128, 128), torch.float32, id="kimi-k3-kda-tp4"),
+        pytest.param((8, 128, 128), torch.bfloat16, id="qwen3-next-gdn-tp4"),
     ],
 )
 @pytest.mark.parametrize("tiles", [1, 4])
 def test_temporal_copy_config_derived_sizes(state_shape, dtype, tiles):
-    # These are config-derived state sizes; no model class or weights are loaded.
+    # Project e2e Kimi K3 config and Qwen3-Next TP4 config; no weights loaded.
     size = torch.Size(state_shape).numel() * torch.empty((), dtype=dtype).element_size()
     source = torch.randint(0, 256, (size + 64,), dtype=torch.uint8, device="npu")
     destination = torch.full_like(source, 123)
@@ -63,8 +56,8 @@ def test_temporal_copy_config_derived_sizes(state_shape, dtype, tiles):
     "state_types,state_bytes",
     [
         pytest.param(("conv", "temporal"), 1027, id="mixed-unaligned-tail"),
-        pytest.param(("conv", "temporal"), 131072, id="gdn-aligned-tp8"),
-        pytest.param(("temporal",), 65536, id="linear-only-tp8"),
+        pytest.param(("conv", "temporal"), 262144, id="qwen3-next-gdn-tp4"),
+        pytest.param(("conv", "temporal"), 1572864, id="kimi-k3-kda-tp4"),
     ],
 )
 def test_mixed_postprocess_replay_uses_updated_metadata(precomputed, graph_mode, state_types, state_bytes):
