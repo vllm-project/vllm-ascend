@@ -1,0 +1,154 @@
+test_name: "GLM51_PD_35k15k_A5_Performance_Test_01"
+model: "/root/.cache/modelscope/hub/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4"
+num_nodes: 2
+npu_per_node: 8
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0 ]
+    decoder: [ 1 ]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 1
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 8
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: "${PORT}"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+env_prefill: &env_prefill
+  <<: *env_common
+  HCCL_EXEC_TIMEOUT: "204"
+  HCCL_BUFFSIZE: "300"
+  DYNAMIC_EPLB: "true"
+
+env_decode: &env_decode
+  <<: *env_common
+  DISABLE_L2_CACHE: "1"
+  HCCL_EXEC_TIMEOUT: "200"
+  HCCL_BUFFSIZE: "1200"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --max-model-len
+      - "202752"
+      - --max-num-batched-tokens
+      - "8192"
+      - --gpu-memory-utilization
+      - "0.95"
+      - --enable-expert-parallel
+      - --async-scheduling
+      - --max-num-seqs
+      - "20"
+      - --no-enable-prefix-caching
+      - --trust-remote-code
+      - --enforce-eager
+      - --quantization
+      - "ascend"
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - "glm47"
+      - --reasoning-parser
+      - "glm45"
+      - --speculative-config
+      - '{"num_speculative_tokens": 1,"method": "deepseek_mtp", "enforce_eager":true}'
+      - --hf-overrides
+      - '{"use_index_cache": true, "index_topk_freq": 4}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 1, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 1}, "ascend_local_comm_res_path":"/etc/hixlep"}}'
+      - --additional-config
+      - '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "recompute_scheduler_enable": "True", "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_dsa_cp": true,"eplb_config": {"dynamic_eplb": "True","expert_heat_collection_interval": 50,"algorithm_execution_interval": 5,"num_redundant_experts": 8,"eplb_policy_type": 2}}'
+
+  - node_index: 1
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --max-model-len
+      - "202752"
+      - --max-num-batched-tokens
+      - "240"
+      - --gpu-memory-utilization
+      - "0.95"
+      - --enable-expert-parallel
+      - --async-scheduling
+      - --max-num-seqs
+      - "60"
+      - --no-enable-prefix-caching
+      - --trust-remote-code
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --speculative-config
+      - '{"num_speculative_tokens": 3,"method": "deepseek_mtp", "enforce_eager":true}'
+      - --hf-overrides
+      - '{"use_index_cache": true, "index_topk_freq": 4}'
+      - --quantization
+      - "ascend"
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - "glm47"
+      - --reasoning-parser
+      - "glm45"
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30300", "engine_id": "3", "kv_connector_extra_config": {"prefill": {"dp_size": 1, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 1}, "ascend_local_comm_res_path": "/etc/hixlep"}}'
+      - --additional-config
+      - '{"enable_cpu_binding": "True", "recompute_scheduler_enable": "True", "multistream_overlap_shared_expert": "True", "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}'
+
+benchmarks:
+  perf_3500_1500_num800_pc0:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs1200_deepseek
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 800
+    max_out_len: 1500
+    batch_size: 200
+    request_rate: 5.2
+    baseline: 6090.363
+    threshold: 0.97
