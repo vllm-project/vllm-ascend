@@ -14,14 +14,8 @@ from .scheduler.load import LoadService as SchedulerLoadService
 from .scheduler.lookup import LookupService as SchedulerLookupService
 from .scheduler.service import SchedulerService
 from .scheduler.store import StoreService as SchedulerStoreService
-from .worker.coordinator import (
-    HybridKVTransferCoordinator,
-    KVTransferCoordinator,
-    UnitaryKVTransferCoordinator,
-)
 from .worker.layout import (
     KVCacheGroupLayout,
-    StridedKVPartitioner,
     WorkerTransferLayout,
     resolve_worker_transfer_layout,
 )
@@ -32,6 +26,8 @@ from .worker.load.task import ContiguousLoadTaskBuilder, StridedLoadTaskBuilder
 from .worker.lookup import LookupService as WorkerLookupService
 from .worker.lookup.executor import LookupExecutor
 from .worker.lookup.task import LookupTaskBuilder
+from .worker.projection import EffectiveTPKeyProjector, KVObjectProjector, StridedKVMemoryProjector
+from .worker.region import HybridKVRegionOperator, KVRegionOperator, UnitaryKVRegionOperator
 from .worker.resources import WorkerCacheResources
 from .worker.service import WorkerService
 from .worker.store import StoreService as WorkerStoreService
@@ -79,6 +75,7 @@ def build_scheduler_service(
 
 def build_worker_service(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> WorkerService:
     layout = resolve_worker_transfer_layout(vllm_config, kv_cache_config)
+    align_state_group_ids = frozenset(group.group_id for group in layout.kv_cache_groups if group.uses_align_state)
     parallel_config = vllm_config.parallel_config
     transfer_config = vllm_config.kv_transfer_config
     extra_config = transfer_config.kv_connector_extra_config
@@ -90,71 +87,71 @@ def build_worker_service(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
         kv_cache_config.num_blocks,
     )
     kv_cache_group = layout.kv_cache_groups[layout.transfer_group_ids[0]]
-    kv_partitioner = _build_strided_kv_partitioner(cache_resources, layout, kv_cache_group)
-    coordinator = _build_kv_transfer_coordinator(vllm_config, kv_cache_config, layout)
-    lookup_service = _build_worker_lookup_service(cache_resources, layout, coordinator)
+    tp_mismatch_projectors = _build_tp_mismatch_projectors(cache_resources, layout, kv_cache_group)
+    region_operator = _build_kv_region_operator(vllm_config, kv_cache_config, layout)
+    object_projector = KVObjectProjector(cache_resources.token_database)
+    lookup_service = _build_worker_lookup_service(cache_resources, layout, region_operator, object_projector)
     load_service = _build_worker_load_service(
         cache_resources,
         layout,
-        kv_cache_group,
-        kv_partitioner,
+        tp_mismatch_projectors,
         _resolve_load_execution_mode(vllm_config),
-        coordinator,
+        region_operator,
+        object_projector,
+        align_state_group_ids,
     )
     store_service = _build_worker_store_service(
         cache_resources,
         layout,
-        kv_cache_group,
-        kv_partitioner,
+        tp_mismatch_projectors,
         transfer_config.kv_role,
         _is_store_enabled(vllm_config),
-        coordinator,
+        region_operator,
+        object_projector,
+        align_state_group_ids,
     )
     return WorkerService(cache_resources, lookup_service, load_service, store_service)
 
 
-def _build_strided_kv_partitioner(
+def _build_tp_mismatch_projectors(
     cache_resources: WorkerCacheResources,
     layout: WorkerTransferLayout,
     kv_cache_group: KVCacheGroupLayout,
-) -> StridedKVPartitioner | None:
+) -> tuple[EffectiveTPKeyProjector, StridedKVMemoryProjector] | None:
     if not layout.tp_partition.tp_mismatch:
         return None
     if len(layout.transfer_group_ids) != 1:
         raise ValueError("AscendStore v1 TP mismatch requires one transferable KV cache group")
-    return StridedKVPartitioner(
-        cache_resources.token_database,
-        kv_cache_group.block_size,
-        layout.tp_rank,
-        layout.tp_partition.key_slices_per_rank,
+    return (
+        EffectiveTPKeyProjector(layout.tp_rank, layout.tp_partition.key_slices_per_rank),
+        StridedKVMemoryProjector(
+            cache_resources.token_database,
+            kv_cache_group.group_id,
+            kv_cache_group.block_size,
+            layout.tp_partition.key_slices_per_rank,
+        ),
     )
 
 
 def _build_worker_lookup_service(
     cache_resources: WorkerCacheResources,
     layout: WorkerTransferLayout,
-    coordinator: KVTransferCoordinator,
+    region_operator: KVRegionOperator,
+    object_projector: KVObjectProjector,
 ) -> WorkerLookupService:
-    task_builder = LookupTaskBuilder(
-        cache_resources.token_database,
-        layout.tp_partition.key_rank_count,
-        layout.pp_size,
-        layout.dcp_size,
-    )
-    return WorkerLookupService(coordinator, task_builder, LookupExecutor(cache_resources.backend))
+    task_builder = LookupTaskBuilder(layout.tp_partition.key_rank_count, layout.pp_size, layout.dcp_size)
+    return WorkerLookupService(region_operator, object_projector, task_builder, LookupExecutor(cache_resources.backend))
 
 
-def _build_kv_transfer_coordinator(
+def _build_kv_region_operator(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
     layout: WorkerTransferLayout,
-) -> KVTransferCoordinator:
-    layouts_by_group = {group.group_id: group for group in layout.kv_cache_groups}
+) -> KVRegionOperator:
     if len(layout.transfer_group_ids) == 1:
         group_id = layout.transfer_group_ids[0]
-        return UnitaryKVTransferCoordinator(
+        return UnitaryKVRegionOperator(
             group_id,
-            layouts_by_group[group_id].block_size,
             vllm_config.model_config.max_model_len,
             layout.cache_transfer_granularity,
         )
@@ -163,7 +160,7 @@ def _build_kv_transfer_coordinator(
         replace(group, kv_cache_spec=resolve_dcp_kv_cache_spec(group.kv_cache_spec, layout.dcp_size))
         for group in kv_cache_config.transfer_groups
     ]
-    return HybridKVTransferCoordinator(
+    return HybridKVRegionOperator(
         layout.transfer_group_ids,
         transfer_groups,
         scheduler_block_size=layout.cache_transfer_granularity,
@@ -188,30 +185,26 @@ def _uses_eagle_block_drop(vllm_config: VllmConfig) -> bool:
 def _build_worker_load_service(
     cache_resources: WorkerCacheResources,
     layout: WorkerTransferLayout,
-    kv_cache_group: KVCacheGroupLayout,
-    kv_partitioner: StridedKVPartitioner | None,
+    tp_mismatch_projectors: tuple[EffectiveTPKeyProjector, StridedKVMemoryProjector] | None,
     execution_mode: LoadExecutionMode,
-    coordinator: KVTransferCoordinator,
+    region_operator: KVRegionOperator,
+    object_projector: KVObjectProjector,
+    align_state_group_ids: frozenset[int],
 ) -> WorkerLoadService:
-    if kv_partitioner is None:
+    if tp_mismatch_projectors is None:
         task_builder = ContiguousLoadTaskBuilder(
             cache_resources.token_database,
-            {group.group_id: group.block_size for group in layout.kv_cache_groups},
             layout.tp_rank,
+            align_state_group_ids,
         )
     else:
-        task_builder = StridedLoadTaskBuilder(
-            cache_resources.token_database,
-            kv_cache_group.block_size,
-            layout.cache_transfer_granularity,
-            kv_partitioner,
-        )
+        task_builder = StridedLoadTaskBuilder(*tp_mismatch_projectors)
     executor_type = AsyncLoadExecutor if execution_mode is LoadExecutionMode.ASYNCHRONOUS else SynchronousLoadExecutor
     return WorkerLoadService(
-        coordinator,
+        region_operator,
+        object_projector,
         task_builder,
         executor_type(cache_resources.backend),
-        layout.cache_transfer_granularity,
         uses_group_scoped_block_ids=len(layout.kv_cache_groups) > 1,
     )
 
@@ -219,34 +212,33 @@ def _build_worker_load_service(
 def _build_worker_store_service(
     cache_resources: WorkerCacheResources,
     layout: WorkerTransferLayout,
-    kv_cache_group: KVCacheGroupLayout,
-    kv_partitioner: StridedKVPartitioner | None,
+    tp_mismatch_projectors: tuple[EffectiveTPKeyProjector, StridedKVMemoryProjector] | None,
     kv_role: str,
     enabled: bool,
-    coordinator: KVTransferCoordinator,
+    region_operator: KVRegionOperator,
+    object_projector: KVObjectProjector,
+    align_state_group_ids: frozenset[int],
 ) -> WorkerStoreService | None:
     if not enabled:
         return None
-    if kv_partitioner is None:
+    if tp_mismatch_projectors is None:
         task_builder = ContiguousStoreTaskBuilder(
             cache_resources.token_database,
-            {group.group_id: group.block_size for group in layout.kv_cache_groups},
             layout.tp_rank,
             layout.pcp_rank,
             layout.pcp_size,
             layout.dcp_size,
             layout.put_step,
             kv_role,
+            align_state_group_ids,
         )
     else:
         task_builder = StridedStoreTaskBuilder(
-            cache_resources.token_database,
-            kv_cache_group.block_size,
             layout.pcp_rank,
             layout.pcp_size,
-            kv_partitioner,
+            *tp_mismatch_projectors,
         )
-    return WorkerStoreService(coordinator, task_builder, StoreExecutor(cache_resources.backend))
+    return WorkerStoreService(region_operator, object_projector, task_builder, StoreExecutor(cache_resources.backend))
 
 
 def _resolve_load_execution_mode(vllm_config: VllmConfig) -> LoadExecutionMode:

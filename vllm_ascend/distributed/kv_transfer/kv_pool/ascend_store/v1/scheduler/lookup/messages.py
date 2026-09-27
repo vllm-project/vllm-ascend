@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 
+from ...protocol.coordinates import TokenRange
+
 
 @dataclass(frozen=True, slots=True)
 class SchedulerLookupRequest:
@@ -16,6 +18,14 @@ class SchedulerLookupRequest:
     request_token_len: int
     block_hashes: list[BlockHash]
     local_cached_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class LookupAvailability:
+    """Load range and matched endpoint derived from remote availability."""
+
+    load_range: TokenRange
+    matched_end_token: int
 
 
 @dataclass(frozen=True, slots=True)

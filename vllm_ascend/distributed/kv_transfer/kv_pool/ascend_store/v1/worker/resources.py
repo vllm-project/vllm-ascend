@@ -7,10 +7,9 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase
 
-from ..backend import create_backend
+from ..backend import BackendAdapter, create_backend
 
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig
@@ -31,7 +30,7 @@ class WorkerCacheResources:
 
     def __init__(
         self,
-        backend: Backend,
+        backend: BackendAdapter,
         token_database: ChunkedTokenDatabase,
         num_blocks: int,
         layer_names_by_group: dict[int, tuple[str, ...]],

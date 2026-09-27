@@ -10,6 +10,7 @@ from .load import LoadResult, LoadService
 from .lookup import LookupService
 from .resources import WorkerCacheResources
 from .store import StoreService
+from .store.executor import StoreExecutionResult
 
 
 class WorkerService:
@@ -57,9 +58,10 @@ class WorkerService:
         if self._store_service is not None:
             self._store_service.submit(request_batch)
 
-    def wait_for_previous_store(self) -> None:
+    def wait_for_previous_store(self) -> tuple[StoreExecutionResult, ...]:
         if self._store_service is not None:
-            self._store_service.wait_for_previous_store()
+            return self._store_service.wait_for_previous_store()
+        return ()
 
     def collect_load_result(self) -> LoadResult:
         return self._load_service.collect_result()
