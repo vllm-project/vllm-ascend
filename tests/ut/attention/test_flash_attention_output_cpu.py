@@ -61,8 +61,36 @@ def test_empty_gate_does_not_launch():
 
 def test_gate_rejects_mismatched_shape():
     ops, kernel, _ = load()
-    with pytest.raises(AssertionError, match="Gate shape"):
+    with pytest.raises(ValueError, match="Gate shape"):
         ops.flash_attention_gate(torch.empty(2, 128), torch.empty(1, 128))
+    assert not kernel.calls
+
+
+def test_gate_rejects_short_mask():
+    ops, kernel, _ = load()
+    with pytest.raises(ValueError, match="cover all projected rows"):
+        ops.flash_attention_gate(torch.empty(2, 128), torch.empty(2, 128), torch.ones(1))
+    assert not kernel.calls
+
+
+@pytest.mark.parametrize("strided", ["projected", "gate"])
+def test_gate_rejects_noncontiguous_columns(strided):
+    ops, kernel, _ = load()
+    projected = torch.empty(2, 128)
+    gate = torch.empty(2, 128)
+    if strided == "projected":
+        projected = torch.empty(2, 256)[:, ::2]
+    else:
+        gate = torch.empty(2, 256)[:, ::2]
+    with pytest.raises(ValueError, match="columns must be contiguous"):
+        ops.flash_attention_gate(projected, gate)
+    assert not kernel.calls
+
+
+def test_gate_rejects_strided_mask():
+    ops, kernel, _ = load()
+    with pytest.raises(ValueError, match="Token mask must be contiguous"):
+        ops.flash_attention_gate(torch.empty(2, 128), torch.empty(2, 128), torch.ones(4)[::2])
     assert not kernel.calls
 
 
@@ -77,10 +105,32 @@ def test_output_limits_live_rows_and_preserves_output_stride():
     assert kwargs["HIDDEN"] == 128
 
 
-def test_output_rejects_narrow_hidden_dimension():
+@pytest.mark.parametrize("output_hidden", [127, 129])
+def test_output_rejects_mismatched_hidden_dimension(output_hidden):
     ops, _, kernel = load()
-    with pytest.raises(AssertionError, match="Output hidden dimension"):
-        ops.flash_attention_output(torch.empty(2, 128), torch.ones(2), torch.empty(2, 127))
+    with pytest.raises(ValueError, match="Output hidden dimension"):
+        ops.flash_attention_output(torch.empty(2, 128), torch.ones(2), torch.empty(2, output_hidden))
+    assert not kernel.calls
+
+
+@pytest.mark.parametrize("strided", ["result", "output"])
+def test_output_rejects_noncontiguous_columns(strided):
+    ops, _, kernel = load()
+    result = torch.empty(2, 128)
+    output = torch.empty(2, 128)
+    if strided == "result":
+        result = torch.empty(2, 256)[:, ::2]
+    else:
+        output = torch.empty(2, 256)[:, ::2]
+    with pytest.raises(ValueError, match="columns must be contiguous"):
+        ops.flash_attention_output(result, torch.ones(2), output)
+    assert not kernel.calls
+
+
+def test_output_rejects_strided_mask():
+    ops, _, kernel = load()
+    with pytest.raises(ValueError, match="Token mask must be contiguous"):
+        ops.flash_attention_output(torch.empty(2, 128), torch.ones(4)[::2], torch.empty(2, 128))
     assert not kernel.calls
 
 

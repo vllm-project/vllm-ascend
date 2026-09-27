@@ -36,10 +36,20 @@ def flash_attention_gate(
     gate: torch.Tensor,
     token_live: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Fuse output gating and NaN-safe masking before a bias-free O projection."""
+    """Fuse output gating for 2-D tensors with contiguous columns."""
     if projected.numel() == 0:
         return projected
-    assert gate.shape == projected.shape, f"Gate shape {gate.shape} must match projected shape {projected.shape}"
+    if projected.ndim != 2 or gate.ndim != 2:
+        raise ValueError("Projected and gate tensors must be 2-D")
+    if gate.shape != projected.shape:
+        raise ValueError(f"Gate shape {gate.shape} must match projected shape {projected.shape}")
+    if projected.stride(1) != 1 or gate.stride(1) != 1:
+        raise ValueError("Projected and gate columns must be contiguous")
+    if token_live is not None:
+        if token_live.ndim != 1 or token_live.shape[0] < projected.shape[0]:
+            raise ValueError("Token mask must be 1-D and cover all projected rows")
+        if token_live.stride(0) != 1:
+            raise ValueError("Token mask must be contiguous")
     init_device_properties_triton()
     block = (
         2048
@@ -93,16 +103,23 @@ def flash_attention_output(
     token_live: torch.Tensor,
     output: torch.Tensor,
 ) -> torch.Tensor:
-    """Write contiguous hidden rows, zeroing inactive tokens and graph padding."""
+    """Write equal-width hidden rows, zeroing inactive tokens and graph padding."""
     if output.numel() == 0:
         return output
+    if result.ndim != 2 or output.ndim != 2 or token_live.ndim != 1:
+        raise ValueError("Result and output must be 2-D, and token mask must be 1-D")
     # TP ranks beyond the last live row still own a padded output shard.
     # Avoid passing an empty mask storage to the NPU scalar load lowering.
     if token_live.numel() == 0 or result.shape[0] == 0:
         return output.zero_()
-    assert output.shape[1] >= result.shape[1], (
-        f"Output hidden dimension {output.shape[1]} must be at least result hidden dimension {result.shape[1]}"
-    )
+    if output.shape[1] != result.shape[1]:
+        raise ValueError(
+            f"Output hidden dimension {output.shape[1]} must match result hidden dimension {result.shape[1]}"
+        )
+    if result.stride(1) != 1 or output.stride(1) != 1:
+        raise ValueError("Result and output columns must be contiguous")
+    if token_live.stride(0) != 1:
+        raise ValueError("Token mask must be contiguous")
     init_device_properties_triton()
     # A fixed 1-D tile bounds UB use independently of hidden size or batch.
     block = 1024
