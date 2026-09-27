@@ -14,7 +14,6 @@ from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 import torch
-from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
@@ -267,17 +266,6 @@ def _run_execute_model(runner, hidden_states, dummy_run=True, is_profile=False):
         patch.object(GPUModelRunner, "execute_model", side_effect=super_execute),
     ):
         return runner.execute_model(MagicMock(), dummy_run=dummy_run, is_profile=is_profile)
-
-
-def test_finegrained_tp_guard_contract():
-    runner = object.__new__(NPUModelRunner)
-    runner._finegrained_tp_requires_graph = False
-    NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.NONE)
-    runner._finegrained_tp_requires_graph = True
-    with pytest.raises(RuntimeError, match="captured graph"):
-        NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.NONE)
-    NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.FULL_DECODE_ONLY)
-    NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.FULL)
 
 
 class _ConcreteSpeculator(AscendAutoRegressiveSpeculator):

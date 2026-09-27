@@ -554,3 +554,43 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_
             assert forward_context.moe_comm_method is (expected if model_owned else legacy_method)
 
     assert seen["inside"] is False
+
+
+def test_set_ascend_forward_context_mirrors_profile_run(monkeypatch):
+    # The V1 runner passes in_profile_run=True for its profiling dummy run; the
+    # fine-grained TP ops read the module mirror this context manager maintains.
+    vllm_config = _make_vllm_config()
+
+    @contextmanager
+    def _noop(*_args, **_kwargs):
+        yield
+
+    monkeypatch.setattr(afc, "set_current_vllm_config", _noop)
+    monkeypatch.setattr(afc, "set_forward_context", _noop)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: SimpleNamespace(dp_metadata=None))
+    monkeypatch.setattr(afc, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(afc, "get_dp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(afc, "has_layer_idx", lambda _model: False)
+    monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
+    moe_mod_name = "vllm_ascend.ops.fused_moe.moe_comm_method"
+    if moe_mod_name in sys.modules:
+        monkeypatch.setattr(sys.modules[moe_mod_name], "get_moe_comm_method", lambda _t: object())
+    else:
+        monkeypatch.setitem(sys.modules, moe_mod_name, SimpleNamespace(get_moe_comm_method=lambda _t: object()))
+
+    with afc.set_ascend_forward_context(None, vllm_config, num_tokens=4, in_profile_run=True):
+        assert afc._IN_PROFILE_RUN is True
+    assert afc._IN_PROFILE_RUN is False
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("setup boom")
+
+    # A setup-region failure must not leave the mirror stuck True.
+    monkeypatch.setattr(afc, "select_moe_comm_method", _boom)
+    with (
+        pytest.raises(RuntimeError),
+        afc.set_ascend_forward_context(None, vllm_config, num_tokens=4, in_profile_run=True),
+    ):
+        pass
+    assert afc._IN_PROFILE_RUN is False

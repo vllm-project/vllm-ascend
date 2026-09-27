@@ -1296,7 +1296,8 @@ class FinegrainedTPConfig:
                     "require tensor_parallel_size == 1, got "
                     f"{vc.parallel_config.tensor_parallel_size}."
                 )
-            # Graph dispatch is the only lane that aligns DP token counts (eager keeps per-rank counts).
+            # Graph mode stays a deployment precondition; the self-padded static
+            # exchanges (linear_op.py) tolerate steps that degrade to eager.
             if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
                 raise AssertionError(
                     "oproj_tensor_parallel_size / mlp_tensor_parallel_size are only supported in graph mode"
@@ -1312,31 +1313,21 @@ class FinegrainedTPConfig:
                     "oproj_tensor_parallel_size / mlp_tensor_parallel_size are not supported "
                     "with prefill_context_parallel_size > 1."
                 )
-            # decode_query_len mirrors _get_default_max_cudagraph_capture_size in platform.py.
-            decode_query_len = 1
-            speculative_config = vc.speculative_config
-            if speculative_config and speculative_config.num_speculative_tokens:
-                decode_query_len += speculative_config.num_speculative_tokens
-            max_step = min(
-                vc.scheduler_config.max_num_batched_tokens, vc.scheduler_config.max_num_seqs * decode_query_len
-            )
-            capture_bound = vc.compilation_config.max_cudagraph_capture_size
-            # An explicit sizes list is the bound until _set_cudagraph_sizes backfills the capture max.
-            if capture_bound is None:
-                capture_sizes = vc.compilation_config.cudagraph_capture_sizes
-                capture_bound = max(capture_sizes) if capture_sizes else None
-            # A step beyond the capture bound dispatches to eager and desyncs the cross-DP collectives.
-            if capture_bound is None or capture_bound < max_step:
+            # Exchanges always run at the static capacity regardless of the replayed
+            # bucket, so a multi-bucket ladder only adds padding waste (recipe in warning).
+            capture_sizes = vc.compilation_config.cudagraph_capture_sizes
+            if capture_sizes is None or len(capture_sizes) != 1:
                 logger.warning(
                     "Disabling oproj_tensor_parallel_size=%d and mlp_tensor_parallel_size=%d: "
-                    "the largest cudagraph capture size (%s) does not cover the largest "
-                    "possible step (%d tokens); an oversized step would dispatch to eager "
-                    "and hang the cross-DP HCCL collectives. Raise max_cudagraph_capture_size "
-                    "to re-enable them.",
+                    "fine-grained TP exchanges always run at the static capacity regardless "
+                    "of the replayed capture bucket, so a multi-bucket ladder only adds "
+                    "padding waste. Set compilation_config.cudagraph_capture_sizes to "
+                    "[min(max_num_batched_tokens, max_num_seqs * decode_query_len)] (a "
+                    "decode_query_len multiple under speculative decoding) so the bucket "
+                    "equals the exchange capacity, got %s.",
                     self.oproj_tensor_parallel_size,
                     self.mlp_tensor_parallel_size,
-                    str(capture_bound),
-                    max_step,
+                    "the default size ladder" if capture_sizes is None else capture_sizes,
                 )
                 self.oproj_tensor_parallel_size = 0
                 self.mlp_tensor_parallel_size = 0

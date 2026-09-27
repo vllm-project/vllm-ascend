@@ -1116,7 +1116,8 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     # with per-child copies that cannot see sibling connectors.
     kv_transfer_config = vllm_config.kv_transfer_config
     offload_missing = kv_transfer_config is None or not kv_transfer_config.has_connector("PreemptOffloadConnector")
-    # Only a real split (size > 1) needs the offload guarantee, mirroring the runner gate.
+    # Only a real split (size > 1) exchanges across DP ranks, so only it needs
+    # the offload guarantee.
     ftpc = ascend_config.finegrained_tp_config
     if offload_missing and (ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1):
         raise AssertionError(
