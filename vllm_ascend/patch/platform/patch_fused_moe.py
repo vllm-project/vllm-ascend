@@ -75,6 +75,8 @@ def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
     eplb_state = self.eplb_state
     if eplb_state is None:
         return topk_ids
+    if getattr(eplb_state, "fused_map_record_active", False):
+        return topk_ids
     self._validate_eplb_state()
     expert_replica_routing_table = eplb_state.expert_replica_routing_table
     if expert_replica_routing_table is None:
