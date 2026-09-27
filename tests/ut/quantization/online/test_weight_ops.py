@@ -263,7 +263,9 @@ class TestQuantizeWeightMxFp8(TestBase):
         get_alg.assert_not_called()
 
     def test_npu_scale_policy_delegates_to_production_selector(self):
-        with unittest.mock.patch.object(wo, "get_dynamic_mx_quant_scale_alg", return_value=1) as get_alg:
+        with unittest.mock.patch(
+            "vllm_ascend.quantization.utils.get_dynamic_mx_quant_scale_alg", return_value=1
+        ) as get_alg:
             self.assertEqual(wo._get_npu_mx_scale_alg(), 1)
         get_alg.assert_called_once_with()
 
@@ -274,7 +276,7 @@ class TestQuantizeWeightMxFp8(TestBase):
         self.assertFalse(wo._is_npu_tensor(cpu_weight))
 
     def test_npu_wrapper_skipped_without_hardware(self):
-        if wo.torch_npu is None or not torch.npu.is_available():
+        if wo.torch_npu is None or not hasattr(torch.Tensor, "npu") or not torch.npu.is_available():
             self.skipTest("requires NPU hardware")
         weight = make_weight(64, 64, seed=20).npu()
         quantized, scale = wo.quantize_weight_mx_fp8(weight)
