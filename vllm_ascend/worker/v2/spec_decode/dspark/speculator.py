@@ -28,6 +28,10 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 )
 
 from vllm_ascend.ascend_config import validate_additional_config_bool
+from vllm_ascend.ops.triton.v2.spec_decode.greedy import (
+    sample_greedy_markov,
+    scratch_shape,
+)
 from vllm_ascend.utils import (
     get_rotation_path,
     vllm_version_is,
@@ -35,10 +39,6 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
-)
-from vllm_ascend.worker.v2.spec_decode.dspark.greedy import (
-    sample_greedy_markov,
-    scratch_shape,
 )
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
