@@ -390,7 +390,7 @@ def test_qwen36_35b_dspark_spec_decoding(
 ) -> None:
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     num_speculative_tokens = 7
-    # Provisional baseline; recalibrate it from this 40-prompt CI run.
+    # Baseline calibrated from repeated 40-prompt CI runs.
     _run_speculative_decoding(
         model_name=model,
         speculative_config={
@@ -408,5 +408,4 @@ def test_qwen36_35b_dspark_spec_decoding(
             "compilation_config": compilation_config,
         },
         max_tokens=max_tokens,
-        log_acceptance_per_pos=True,
     )
