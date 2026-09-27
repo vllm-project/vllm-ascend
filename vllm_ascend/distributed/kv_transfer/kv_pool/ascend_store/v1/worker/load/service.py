@@ -6,9 +6,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from ...protocol.transfer import LoadRequestBatch
-from ..coordinator import KVTransferCoordinator
+from ..projection import KVObjectProjector
+from ..region import KVRegionOperator
 from .executor import LoadExecutionResult, LoadExecutor, LoadTaskCompletion
-from .task import LoadTask, LoadTaskBuilder, resolve_load_end_token
+from .task import LoadTask, LoadTaskBuilder
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,16 +26,16 @@ class LoadService:
 
     def __init__(
         self,
-        coordinator: KVTransferCoordinator,
+        region_operator: KVRegionOperator,
+        object_projector: KVObjectProjector,
         task_builder: LoadTaskBuilder,
         executor: LoadExecutor,
-        cache_transfer_granularity: int,
         uses_group_scoped_block_ids: bool,
     ) -> None:
-        self._coordinator = coordinator
+        self._region_operator = region_operator
+        self._object_projector = object_projector
         self._task_builder = task_builder
         self._executor = executor
-        self._cache_transfer_granularity = cache_transfer_granularity
         self._uses_group_scoped_block_ids = uses_group_scoped_block_ids
         self._failed_request_ids: set[str] = set()
         self._failed_block_ids: set[int] = set()
@@ -49,9 +50,9 @@ class LoadService:
     def load(self, request_batch: LoadRequestBatch) -> None:
         tasks = []
         for request in request_batch.requests:
-            load_end_token = resolve_load_end_token(request, self._cache_transfer_granularity)
-            selections = self._coordinator.select_load(request.block_hashes, load_end_token)
-            tasks.append(self._task_builder.build(request, load_end_token, selections))
+            load_region = self._region_operator.load_region(request.block_hashes, request.load_range)
+            projections = self._object_projector.project(load_region, request.block_hashes)
+            tasks.append(self._task_builder.build(request, projections))
         task_completions = tuple(self._executor.submit(tasks))
         self._record_failures(task_completions)
         if task_completions and self._failed_request_ids:

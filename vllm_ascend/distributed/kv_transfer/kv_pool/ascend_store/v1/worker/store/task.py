@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Set
 from dataclasses import dataclass
 from typing import Protocol
 
 import torch
-from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase
 
 from ...protocol.transfer import StoreRequest
-from ..coordinator import ChunkSelection
-from ..layout import StridedKVPartitioner
+from ..projection import (
+    EffectiveTPKeyProjector,
+    KVObjectProjection,
+    StridedKVMemoryProjector,
+    bind_local_blocks,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +45,7 @@ class StoreTaskBuilder(Protocol):
         self,
         request: StoreRequest,
         source_ready_event: torch.npu.Event,
-        selections: Sequence[ChunkSelection],
+        projections: tuple[KVObjectProjection, ...],
     ) -> StoreTask: ...
 
 
@@ -52,49 +55,60 @@ class ContiguousStoreTaskBuilder:
     def __init__(
         self,
         token_database: ChunkedTokenDatabase,
-        group_block_sizes: dict[int, int],
         tp_rank: int,
         pcp_rank: int,
         pcp_size: int,
         dcp_size: int,
         put_step: int,
         kv_role: str,
+        align_state_group_ids: Set[int] = frozenset(),
     ) -> None:
         self.token_database = token_database
-        self.group_block_sizes = group_block_sizes
         self.tp_rank = tp_rank
         self.pcp_rank = pcp_rank
         self.pcp_size = pcp_size
         self.dcp_size = dcp_size
         self.put_step = put_step
         self.kv_role = kv_role
+        self._align_state_group_ids = align_state_group_ids
 
     def build(
         self,
         request: StoreRequest,
         source_ready_event: torch.npu.Event,
-        selections: Sequence[ChunkSelection],
+        projections: tuple[KVObjectProjection, ...],
     ) -> StoreTask:
         chunks = []
-        for selection in selections:
-            group_id = selection.group_id
-            candidates = self._select_group_chunks(request, selection)
-            if not candidates:
+        for projection in projections:
+            group_id = projection.group_id
+            group_block_ids = request.block_ids_by_group[group_id]
+            uses_align_state = group_id in self._align_state_group_ids
+            allocated_objects = bind_local_blocks(
+                projection,
+                group_block_ids,
+                skip_null_blocks=uses_align_state,
+            )
+            if not allocated_objects:
                 continue
 
+            tp_replicas = self.put_step if self.dcp_size <= 1 and not uses_align_state else 1
+            shard_rank = self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas
+            shard_size = self.pcp_size * tp_replicas
             keys = []
             addresses = []
             sizes = []
-            group_block_ids = list(request.block_ids_by_group[group_id])
-            for start, end, key, _, block_id in candidates:
+            for candidate_index, allocated_object in enumerate(allocated_objects):
+                if shard_size > 1 and candidate_index % shard_size != shard_rank:
+                    continue
+                kv_object = allocated_object.object
                 address, size, _ = self.token_database.prepare_value(
-                    start,
-                    end,
-                    group_block_ids,
+                    kv_object.token_range.start_token,
+                    kv_object.token_range.end_token,
+                    list(group_block_ids),
                     kv_cache_group_id=group_id,
-                    block_id=block_id,
+                    block_id=allocated_object.block_id,
                 )
-                keys.append(key)
+                keys.append(kv_object.backend_key)
                 addresses.append(address)
                 sizes.append(size)
 
@@ -111,68 +125,43 @@ class ContiguousStoreTaskBuilder:
             )
         return StoreTask(request.request_id, source_ready_event, tuple(chunks))
 
-    def _select_group_chunks(
-        self,
-        request: StoreRequest,
-        selection: ChunkSelection,
-    ) -> list[tuple[int, int, str, BlockHash | str, int]]:
-        if selection.chunk_mask is not None and not any(selection.chunk_mask):
-            return []
-
-        group_id = selection.group_id
-        group_block_size = self.group_block_sizes[group_id]
-
-        tp_replicas = self.put_step if self.dcp_size <= 1 else 1
-        chunks = self.token_database.process_token_key_strings_with_block_ids(
-            request.store_end_token,
-            list(request.block_hashes),
-            list(request.block_ids_by_group[group_id]),
-            kv_cache_group_id=group_id,
-            chunk_filter=lambda start: selection.includes(start, group_block_size),
-            shard_rank=self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas,
-            shard_size=self.pcp_size * tp_replicas,
-        )
-        return list(chunks)
-
 
 class StridedStoreTaskBuilder:
     """Map Store chunks to the effective-TP head slices owned by this rank."""
 
     def __init__(
         self,
-        token_database: ChunkedTokenDatabase,
-        block_size: int,
         pcp_rank: int,
         pcp_size: int,
-        kv_partitioner: StridedKVPartitioner,
+        key_projector: EffectiveTPKeyProjector,
+        memory_projector: StridedKVMemoryProjector,
     ) -> None:
-        self.token_database = token_database
-        self.block_size = block_size
         self.pcp_rank = pcp_rank
         self.pcp_size = pcp_size
-        self.kv_partitioner = kv_partitioner
+        self._key_projector = key_projector
+        self._memory_projector = memory_projector
 
     def build(
         self,
         request: StoreRequest,
         source_ready_event: torch.npu.Event,
-        selections: Sequence[ChunkSelection],
+        projections: tuple[KVObjectProjection, ...],
     ) -> StoreTask:
-        if len(selections) != 1:
-            raise ValueError("Strided Store requires one cache-group selection")
-        selection = selections[0]
-        group_id = selection.group_id
-        token_chunks = self.token_database.process_token_key_strings_with_block_ids(
-            request.store_end_token,
-            list(request.block_hashes),
-            list(request.block_ids_by_group[group_id]),
-            kv_cache_group_id=group_id,
-            chunk_filter=lambda start: selection.includes(start, self.block_size),
-            shard_rank=self.pcp_rank,
-            shard_size=self.pcp_size,
-        )
+        if len(projections) != 1:
+            raise ValueError("Strided Store requires one cache-group projection")
+        projection = projections[0]
+        group_id = projection.group_id
+        allocated_objects = bind_local_blocks(projection, request.block_ids_by_group[group_id])
         chunks = []
-        for start, end, base_key, _, block_id in token_chunks:
-            for key, addresses, sizes in self.kv_partitioner.partition(base_key, block_id, end - start):
-                chunks.append(StoreChunk(group_id, key, addresses, sizes))
+        for candidate_index, allocated_object in enumerate(allocated_objects):
+            if self.pcp_size > 1 and candidate_index % self.pcp_size != self.pcp_rank:
+                continue
+            kv_object = allocated_object.object
+            keys = self._key_projector.project(kv_object.backend_key)
+            memory_slices = self._memory_projector.project(
+                allocated_object.block_id,
+                kv_object.token_range.end_token - kv_object.token_range.start_token,
+            )
+            for key, memory_slice in zip(keys, memory_slices, strict=True):
+                chunks.append(StoreChunk(group_id, key, memory_slice.addresses, memory_slice.sizes))
         return StoreTask(request.request_id, source_ready_event, tuple(chunks))

@@ -35,15 +35,15 @@ class SchedulerService:
         self.preempted_request_ids: set[str] = set()
 
     def lookup(self, request: SchedulerLookupRequest) -> SchedulerLookupResult:
-        kv_pool_cached_tokens = self._lookup_service.lookup(request)
-        if kv_pool_cached_tokens is None:
+        availability = self._lookup_service.lookup(request)
+        if availability is None:
             return SchedulerLookupResult(0, False)
 
         self._load_service.record_candidate(
             request.request_id,
-            LoadCandidate(request.local_cached_tokens, kv_pool_cached_tokens),
+            LoadCandidate(availability.load_range, availability.matched_end_token),
         )
-        num_new_matched_tokens = kv_pool_cached_tokens - request.local_cached_tokens
+        num_new_matched_tokens = availability.matched_end_token - request.local_cached_tokens
         return SchedulerLookupResult(num_new_matched_tokens, self._load_service.is_deferred)
 
     def update_state_after_alloc(
@@ -55,13 +55,9 @@ class SchedulerService:
         if candidate is None:
             return
 
-        target_tokens = candidate.kv_pool_cached_tokens
-        granularity = self._layout.cache_transfer_granularity
-        if target_tokens % granularity != 0 and target_tokens == len(request.prompt_token_ids) - 1:
-            target_tokens += 1
         self.request_trackers[request_id] = RequestTracker(
             request_id,
-            target_tokens,
+            candidate.load_range.end_token,
             [list(group_block_ids) for group_block_ids in blocks],
             request.block_hashes,
             len(request.prompt_token_ids),
@@ -200,11 +196,11 @@ class SchedulerService:
         self, tracker: RequestTracker, load_candidate: LoadCandidate | None
     ) -> tuple[LoadRequest | None, StoreRequest | None]:
         """Choose the operation and publish only its executable request."""
-        transfer_end_token = self._resolve_transfer_end_token(tracker.request_token_len, len(tracker.block_hashes))
         if load_candidate is not None:
-            load_request = self._load_service.schedule_request(tracker, transfer_end_token, load_candidate)
+            load_request = self._load_service.schedule_request(tracker, load_candidate)
             return load_request, None
 
+        transfer_end_token = self._resolve_transfer_end_token(tracker.request_token_len, len(tracker.block_hashes))
         store_request = self._store_service.schedule_request(tracker, transfer_end_token)
         return None, store_request
 

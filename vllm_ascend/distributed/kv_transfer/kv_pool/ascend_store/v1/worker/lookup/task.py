@@ -6,10 +6,7 @@ from dataclasses import dataclass
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase
-
-from ...protocol.lookup import LookupRequest
-from ..coordinator import LookupChunkSelection
+from ..projection import KVObjectProjection
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,33 +23,21 @@ class LookupTask:
 class LookupTaskBuilder:
     """Resolve Lookup inputs into rank-expanded Backend keys."""
 
-    def __init__(self, token_database: ChunkedTokenDatabase, num_head_ranks: int, pp_size: int, dcp_size: int) -> None:
-        self.token_database = token_database
+    def __init__(self, num_head_ranks: int, pp_size: int, dcp_size: int) -> None:
         self.num_head_ranks = num_head_ranks
         self.pp_size = pp_size
         self.dcp_size = dcp_size
 
-    def build(self, request: LookupRequest, selection: LookupChunkSelection) -> LookupTask:
-        group_id = selection.group_id
-        block_size = self.token_database.get_block_size(group_id)
-        chunks = list(
-            self.token_database.process_token_key_strings(
-                request.lookup_end_token,
-                list(request.block_hashes),
-                mask_num=selection.query_start_token,
-                kv_cache_group_id=group_id,
-                chunk_filter=lambda start: selection.includes(start, block_size),
-            )
-        )
-        if not chunks:
-            return LookupTask(group_id, (), (), (), 0)
+    def build(self, projection: KVObjectProjection) -> LookupTask:
+        if not projection.objects:
+            return LookupTask(projection.group_id, (), (), (), 0)
 
-        keys = [key for _, _, key, _ in chunks]
+        keys = [kv_object.backend_key for kv_object in projection.objects]
         rank_keys = self._expand_rank_keys(keys)
         return LookupTask(
-            group_id=group_id,
-            chunk_ends=tuple(end for _, end, _, _ in chunks),
-            chunk_hashes=tuple(chunk_hash for _, _, _, chunk_hash in chunks),
+            group_id=projection.group_id,
+            chunk_ends=tuple(kv_object.token_range.end_token for kv_object in projection.objects),
+            chunk_hashes=tuple(kv_object.content_hash for kv_object in projection.objects),
             backend_keys=tuple(rank_keys),
             num_ranks=len(rank_keys) // len(keys),
         )
