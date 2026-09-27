@@ -274,7 +274,7 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
         captured.update(pad=pad, is_prefilling=is_prefilling, attn_state=attn_state)
         yield
 
-    monkeypatch.setattr(shared, "build_draft_attn_metadata_factory", factory)
+    monkeypatch.setattr(shared, "draft_attn_metadata_context", factory)
     result = spec.build_draft_attn_metadatas(2, torch.tensor([128]))
     assert captured["pad"] == 10
     assert result == [metadata]
@@ -320,7 +320,7 @@ def test_metadata_factory_applies_configured_state(monkeypatch, fail, attn_state
     with (
         pytest.raises(RuntimeError, match="build failed") if fail else nullcontext(),
         attn_utils.build_attn_metadata_wrapper(),
-        attn_utils.build_draft_attn_metadata_factory(torch.arange(10), 6, flags, attn_state=attn_state),
+        attn_utils.draft_attn_metadata_context(torch.arange(10), 6, flags, attn_state=attn_state),
     ):
         module.build_attn_metadata(num_tokens=6, attn_state=AscendAttentionState.DecodeOnly)
         if fail:
@@ -359,9 +359,7 @@ def test_query_builder_overrides_and_restores_target_context(monkeypatch, archit
     monkeypatch.setattr(DSparkSpeculator, "_build_uniform_attn_metadata", parent)
     with (
         attn_utils.build_attn_metadata_wrapper(),
-        attn_utils.build_draft_attn_metadata_factory(
-            torch.arange(20), 20, flags, attn_state=AscendAttentionState.DecodeOnly
-        ),
+        attn_utils.draft_attn_metadata_context(torch.arange(20), 20, flags, attn_state=AscendAttentionState.DecodeOnly),
     ):
         outer = module.build_attn_metadata
         with pytest.raises(RuntimeError, match="query failed") if fail else nullcontext():

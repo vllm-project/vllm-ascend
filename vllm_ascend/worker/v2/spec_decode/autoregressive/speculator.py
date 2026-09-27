@@ -46,7 +46,7 @@ from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
-    build_draft_attn_metadata_factory,
+    draft_attn_metadata_context,
 )
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -538,7 +538,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
         # Upstream's uniform builder calls self._build_attn_metadata, so this
         # single hook also covers graph capture and eager draft decode.
-        with build_draft_attn_metadata_factory(
+        with draft_attn_metadata_context(
             self.input_buffers.positions,
             batch_desc.num_tokens,
             is_prefilling,

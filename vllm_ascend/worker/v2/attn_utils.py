@@ -1249,7 +1249,7 @@ def build_attn_metadata_wrapper():
 
 
 @contextmanager
-def build_draft_attn_metadata_factory(
+def draft_attn_metadata_context(
     positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None
 ):
     """Wrap build_attn_metadata with Ascend draft-model context.

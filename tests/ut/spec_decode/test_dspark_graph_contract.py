@@ -78,7 +78,7 @@ def test_draft_metadata_matches_full_or_actual_query_shape(monkeypatch, architec
     metadata_factory = MagicMock(return_value=nullcontext())
     monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", parent_build)
     monkeypatch.setattr(speculator_module, "build_attn_metadata_wrapper", nullcontext)
-    monkeypatch.setattr(speculator_module, "build_draft_attn_metadata_factory", metadata_factory)
+    monkeypatch.setattr(speculator_module, "draft_attn_metadata_context", metadata_factory)
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
 
     speculator = _speculator(
@@ -110,7 +110,7 @@ def test_sfa_draft_metadata_passes_through_upstream(monkeypatch):
     metadata = {"draft.0": object()}
     parent_build = MagicMock(return_value=metadata)
     monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", parent_build)
-    monkeypatch.setattr(speculator_module, "build_draft_attn_metadata_factory", MagicMock(side_effect=AssertionError))
+    monkeypatch.setattr(speculator_module, "draft_attn_metadata_context", MagicMock(side_effect=AssertionError))
     speculator = _speculator(attn_architecture="SFA", arange_np=np.arange(5, dtype=np.int32))
     batch_desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=32, num_reqs=4)
 

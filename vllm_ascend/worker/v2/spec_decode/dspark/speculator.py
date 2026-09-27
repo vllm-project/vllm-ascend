@@ -37,7 +37,7 @@ from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
-    build_draft_attn_metadata_factory,
+    draft_attn_metadata_context,
 )
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
@@ -159,7 +159,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         )
         with (
             build_attn_metadata_wrapper(),
-            build_draft_attn_metadata_factory(
+            draft_attn_metadata_context(
                 self.input_buffers.positions,
                 num_tokens_padded,
                 is_prefilling=is_prefilling,
@@ -217,7 +217,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(num_reqs, num_reqs_padded, step)
         with (
             build_attn_metadata_wrapper(),
-            build_draft_attn_metadata_factory(
+            draft_attn_metadata_context(
                 self.input_buffers.positions,
                 num_tokens,
                 is_prefilling=is_prefilling,
@@ -280,7 +280,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             sync_state = None
         with (
             build_attn_metadata_wrapper(),
-            build_draft_attn_metadata_factory(
+            draft_attn_metadata_context(
                 self.input_buffers.positions,
                 self.max_num_tokens,
                 torch.from_numpy(self.input_batch.is_prefilling_np),
