@@ -339,11 +339,14 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale_bias=None,
             )
         else:
+            # DFC path: prefer the per-expert tensorlist built in
+            # process_weights_after_loading (fallbacks keep it in sync with
+            # the stacked tensors).
             return MoEWeights(
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
+                w1=getattr(layer, "w13_weight_list", None) or [layer.w13_weight],
+                w2=getattr(layer, "w2_weight_list", None) or [layer.w2_weight],
+                w1_scale=getattr(layer, "w13_weight_scale_list", None) or [layer.w13_weight_scale],
+                w2_scale=getattr(layer, "w2_weight_scale_list", None) or [layer.w2_weight_scale],
                 w1_scale_bias=None,
                 w2_scale_bias=None,
             )
@@ -386,12 +389,12 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 "w2_weight_scale": tuple(layer.w2_weight_scale.data.shape),
             }
 
-        if use_cann_megamoe(get_current_vllm_config()):
-            g_num, n_size, k_size = layer.w13_weight_scale.shape
-            layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-            g_num, n_size, k_size = layer.w2_weight_scale.shape
-            layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
+        g_num, n_size, k_size = layer.w13_weight_scale.shape
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
+        g_num, n_size, k_size = layer.w2_weight_scale.shape
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
 
+        if use_cann_megamoe(get_current_vllm_config()):
             # MegaMoe (FUSED_MC2 on A5) consumes per-expert weights in their
             # original (out, in) layout and reshaped, non-transposed E8M0 scales.
             layer.cann_mega_moe_w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
@@ -403,38 +406,39 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.cann_mega_moe_w2_weight_scale_list = [
                 w2_weight_scale.clone() for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
             ]
+            # NOTE: the stacked weights are intentionally kept (transposed to
+            # FRACTAL_NZ below) so the non-fused MoE paths (MC2 / ALLGATHER /
+            # ALLTOALL via grouped_matmul) can still run when the fused
+            # MegaMoe path is unavailable at runtime (e.g. per-rank token
+            # count exceeds the sym-buffer capacity).
 
-            tensor_names = (
-                "w13_weight",
-                "w2_weight",
-                "w13_weight_scale",
-                "w2_weight_scale",
-            )
-            for tensor_name in tensor_names:
-                dispose_tensor(getattr(layer, tensor_name))
+        if not hasattr(layer, "_mxfp8_moe_buffers"):
+            layer._mxfp8_moe_buffers = {}
+        for weight_name in ("w13_weight", "w2_weight"):
+            weight = getattr(layer, weight_name)
+            scale = getattr(layer, f"{weight_name}_scale")
+            if weight_name not in layer._mxfp8_moe_buffers:
+                layer._mxfp8_moe_buffers[weight_name] = maybe_trans_nz_with_scale(
+                    weight.data,
+                    scale.data,
+                    transpose_dims=(1, 2),
+                    customize_dtype=torch.float8_e4m3fn,
+                )
+            else:
+                # ACL graphs retain both weight and scale addresses across RL reloads.
+                # Materialize sources before copying because restored views can alias.
+                weight_buffer, scale_buffer = layer._mxfp8_moe_buffers[weight_name]
+                weight_buffer.copy_(weight.data.transpose(1, 2).contiguous())
+                scale_buffer.copy_(scale.data.transpose(1, 2).contiguous())
+            weight.data, scale.data = layer._mxfp8_moe_buffers[weight_name]
 
-        else:
-            if not hasattr(layer, "_mxfp8_moe_buffers"):
-                layer._mxfp8_moe_buffers = {}
-            for weight_name in ("w13_weight", "w2_weight"):
-                weight = getattr(layer, weight_name)
-                scale = getattr(layer, f"{weight_name}_scale")
-                g_num, n_size, k_size = scale.shape
-                target_scale = scale.data.reshape(g_num, n_size, k_size // 2, 2)
-                if weight_name not in layer._mxfp8_moe_buffers:
-                    layer._mxfp8_moe_buffers[weight_name] = maybe_trans_nz_with_scale(
-                        weight.data,
-                        target_scale,
-                        transpose_dims=(1, 2),
-                        customize_dtype=torch.float8_e4m3fn,
-                    )
-                else:
-                    # ACL graphs retain both weight and scale addresses across RL reloads.
-                    # Materialize sources before copying because restored views can alias.
-                    weight_buffer, scale_buffer = layer._mxfp8_moe_buffers[weight_name]
-                    weight_buffer.copy_(weight.data.transpose(1, 2).contiguous())
-                    scale_buffer.copy_(target_scale.transpose(1, 2).contiguous())
-                weight.data, scale.data = layer._mxfp8_moe_buffers[weight_name]
+        # Per-expert tensorlist views (no extra memory) consumed by all GMM
+        # paths; scales follow the same per-expert layout so the aclnn
+        # len(weight) == len(scale) requirement holds.
+        layer.w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
+        layer.w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
+        layer.w13_weight_scale_list = list(layer.w13_weight_scale.data.unbind(dim=0))
+        layer.w2_weight_scale_list = list(layer.w2_weight_scale.data.unbind(dim=0))
 
         # Mark as transformed
         layer._mxfp8_transformed = True
@@ -501,9 +505,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
         hidden_states, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
             x=hidden_states,
-            weight=[layer.w13_weight],
+            weight=getattr(layer, "w13_weight_list", None) or [layer.w13_weight],
             group_list=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 0),
-            weight_scale=[layer.w13_weight_scale],
+            weight_scale=getattr(layer, "w13_weight_scale_list", None) or [layer.w13_weight_scale],
             x_scale=pertoken_scale,
             dequant_mode=2,
             quant_mode=2,
@@ -524,8 +528,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         assert layer is not None
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[layer.w13_weight],
-            scale=[layer.w13_weight_scale],
+            weight=getattr(layer, "w13_weight_list", None) or [layer.w13_weight],
+            scale=getattr(layer, "w13_weight_scale_list", None) or [layer.w13_weight_scale],
             per_token_scale=[pertoken_scale],
             bias=None,
             split_item=2,
@@ -557,8 +561,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         )
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[layer.w2_weight],
-            scale=[layer.w2_weight_scale],
+            weight=getattr(layer, "w2_weight_list", None) or [layer.w2_weight],
+            scale=getattr(layer, "w2_weight_scale_list", None) or [layer.w2_weight_scale],
             bias=None,
             per_token_scale=[act_out_scale],
             split_item=2,

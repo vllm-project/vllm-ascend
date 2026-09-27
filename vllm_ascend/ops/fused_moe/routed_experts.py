@@ -130,9 +130,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 else:
                     layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
                     layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                    del layer.w13_weight
-                    del layer.w2_weight
-                    torch.npu.empty_cache()
+                    # NOTE: the stacked weights are intentionally kept so the
+                    # non-fused MoE paths (MC2 / ALLGATHER / ALLTOALL via
+                    # grouped_matmul) can still run when the fused path is
+                    # unavailable at runtime (e.g. per-rank token count
+                    # exceeds the sym-buffer capacity).
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)

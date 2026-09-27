@@ -1037,7 +1037,31 @@ class AscendConfig:
             moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
-        if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:
+        # The operator's `intermediate_hidden` is the weight2 input dim, which
+        # equals the HF `moe_intermediate_size`. Operator constraint (A2/A3):
+        # 512 <= intermediate_hidden <= 3072 and intermediate_hidden % 256 == 0.
+        if moe_intermediate_size < 512 or moe_intermediate_size > 3072 or moe_intermediate_size % 256 != 0:
+            return False
+
+        # Operator constraint (A2/A3): 1 <= num_topk <= 16.
+        num_top_k = getattr(
+            hf_text_config,
+            "num_experts_per_tok",
+            getattr(hf_text_config, "top_k_experts", 1),
+        )
+        if not (1 <= int(num_top_k) <= 16):
+            return False
+
+        # Operator constraints (A2/A3): ep_world_size must be one of
+        # {2, 4, 8, 16, 32, 48, 64, 96, 128}, num_experts <= 1024 and evenly
+        # divisible by ep_world_size, num_experts_per_rank <= 128.
+        ep_world_size = (
+            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+        )
+        if ep_world_size not in {2, 4, 8, 16, 32, 48, 64, 96, 128}:
+            return False
+        num_experts = int(vllm_config.model_config.get_num_experts())
+        if num_experts % ep_world_size != 0 or num_experts > 1024 or num_experts // ep_world_size > 128:
             return False
 
         quant_type = getattr(hf_text_config, "moe_quantize", getattr(hf_text_config, "quantize", None))
@@ -1085,12 +1109,17 @@ class AscendConfig:
         supported_intermediate_sizes = {1024, 2048, 3072, 4096, 7168}
         if is_minimax_m3:
             supported_intermediate_sizes.add(6144)
-        # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
-        intermediate_hidden = 2 * int(moe_intermediate_size)
-        if intermediate_hidden not in supported_intermediate_sizes:
+        # Per the MegaMoE doc, the operator's intermediate_hidden (weight2
+        # input dim) equals moe_intermediate_size and Linear1's full output
+        # width is 2 * intermediate_hidden. The whitelist below is on that
+        # full output width, i.e. intermediate_hidden itself is restricted to
+        # {512, 1024, 1536, 2048, 3072, 3584} — a tested-model subset of the
+        # operator's [256, 4096] / 128-aligned constraint.
+        l1_full_output_width = 2 * int(moe_intermediate_size)
+        if l1_full_output_width not in supported_intermediate_sizes:
             logger.warning(
-                "mega moe operator is not supported by current a5 config, for intermediate_hidden size %s is not in %s",
-                intermediate_hidden,
+                "mega moe operator is not supported by current a5 config, for Linear1 full output width %s is not in %s",
+                l1_full_output_width,
                 sorted(supported_intermediate_sizes),
             )
             return False

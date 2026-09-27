@@ -315,6 +315,17 @@ def _select_capacity_and_expert_density_moe_comm_method(
     return MoECommType.ALLGATHER
 
 
+def _get_fused_mc2_per_rank_capacity(vllm_config: VllmConfig, mc2_tokens_capacity: int) -> int:
+    """Per-rank token capacity enforced by the fused paths (MegaMoe / DFC).
+
+    TokenDispatcherWithMC2.max_num_tokens_per_rank (and the MegaMoe sym-buffer
+    num_max_tokens_per_rank) is derived from mc2_tokens_capacity // tp_size;
+    a batch exceeding it makes the fused operators fail at runtime.
+    """
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    return max(1, mc2_tokens_capacity // tp_size)
+
+
 def _select_fused_or_capacity_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
@@ -322,9 +333,20 @@ def _select_fused_or_capacity_moe_comm_method(
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
+    fused_capacity = _get_fused_mc2_per_rank_capacity(vllm_config, mc2_tokens_capacity)
+    fused_available = num_tokens is None or num_tokens <= fused_capacity
     if use_cann_megamoe(vllm_config):
-        return MoECommType.FUSED_MC2
-    if get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
+        if is_draft_model and draft_moe_quant_type not in A5_SUPPORT_MEGA_MOE_QUANT_TYPES:
+            # The A5 mega moe (FUSED_MC2) operator only supports a subset of
+            # quantized weight layouts. An unquantized (or unsupported-quantized)
+            # MTP draft MoE layer must skip FUSED_MC2 and fall through to the
+            # original MoE path (MC2/ALLGATHER/ALLTOALL) below.
+            pass
+        elif fused_available:
+            return MoECommType.FUSED_MC2
+        # else: per-rank token count exceeds the MegaMoe sym-buffer capacity;
+        # fall through to the non-fused paths instead of crashing.
+    elif get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32 and fused_available:
         return MoECommType.FUSED_MC2
 
     if num_tokens is None or num_tokens <= mc2_tokens_capacity:
@@ -341,6 +363,8 @@ def _select_capacity_and_world_size_moe_comm_method(
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
     if get_ascend_config().enable_fused_mc2 == 1:
+        fused_capacity = _get_fused_mc2_per_rank_capacity(vllm_config, mc2_tokens_capacity)
+        fused_available = num_tokens is None or num_tokens <= fused_capacity
         if is_mega_moe_supported():
             if is_draft_model and draft_moe_quant_type not in A5_SUPPORT_MEGA_MOE_QUANT_TYPES:
                 # The A5 mega moe (FUSED_MC2) operator only supports a subset of
@@ -348,8 +372,10 @@ def _select_capacity_and_world_size_moe_comm_method(
                 # MTP draft MoE layer must skip FUSED_MC2 and fall through to the
                 # original MoE path (MC2/ALLGATHER/ALLTOALL) below.
                 pass
-            else:
+            elif fused_available:
                 return MoECommType.FUSED_MC2
+            # else: per-rank token count exceeds the fused capacity; fall
+            # through to the non-fused paths instead of crashing.
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,
         "num_experts_per_tok",

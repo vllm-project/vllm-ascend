@@ -346,22 +346,24 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             layer.cann_mega_moe_w2_weight_scale_list = [
                 w2_weight_scale.clone() for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
             ]
-            tensor_names = (
-                "w13_weight",
-                "w2_weight",
-                "w13_weight_scale",
-                "w2_weight_scale",
-            )
-            for tensor_name in tensor_names:
-                dispose_tensor(getattr(layer, tensor_name))
-
-        else:
-            # The A5 MXFP4 fused grouped-matmul-swiglu op relies on the
-            # transpose stride to interpret packed FP4 weights as logical K.
-            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
-            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
+            # NOTE: the stacked weights are intentionally kept (transposed
+            # below) so the non-fused MoE paths (MC2 / ALLGATHER / ALLTOALL
+            # via grouped_matmul) can still run when the fused MegaMoe path
+            # is unavailable at runtime (e.g. per-rank token count exceeds
+            # the sym-buffer capacity).
+        # The A5 MXFP4 fused grouped-matmul-swiglu op relies on the
+        # transpose stride to interpret packed FP4 weights as logical K.
+        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
+        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
+        # Per-expert tensorlist views (no extra memory) consumed by all GMM
+        # paths; scales follow the same per-expert layout so the aclnn
+        # len(weight) == len(scale) requirement holds.
+        layer.w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
+        layer.w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
+        layer.w13_weight_scale_list = list(layer.w13_weight_scale.data.unbind(dim=0))
+        layer.w2_weight_scale_list = list(layer.w2_weight_scale.data.unbind(dim=0))
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states
@@ -370,9 +372,9 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         assert layer is not None
         out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
             x=hidden_states,
-            weight=[layer.w13_weight],
+            weight=getattr(layer, "w13_weight_list", None) or [layer.w13_weight],
             group_list=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 0),
-            weight_scale=[layer.w13_weight_scale],
+            weight_scale=getattr(layer, "w13_weight_scale_list", None) or [layer.w13_weight_scale],
             x_scale=pertoken_scale,
             dequant_mode=2,
             quant_mode=2,
@@ -395,8 +397,8 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         # operator does not dispatch them as an unsupported uint8/uint8 pair.
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[layer.w13_weight],
-            scale=[layer.w13_weight_scale],
+            weight=getattr(layer, "w13_weight_list", None) or [layer.w13_weight],
+            scale=getattr(layer, "w13_weight_scale_list", None) or [layer.w13_weight_scale],
             per_token_scale=[pertoken_scale],
             split_item=2,
             group_type=0,
@@ -429,8 +431,8 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         )
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[layer.w2_weight],
-            scale=[layer.w2_weight_scale],
+            weight=getattr(layer, "w2_weight_list", None) or [layer.w2_weight],
+            scale=getattr(layer, "w2_weight_scale_list", None) or [layer.w2_weight_scale],
             bias=None,
             per_token_scale=[act_out_scale],
             split_item=2,
