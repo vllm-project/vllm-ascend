@@ -58,7 +58,7 @@ jobs:
       base_sha: ${{ steps.source.outputs.base_sha }}
     env:
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
-      HEAD_FORK: vllm-ascend-ci/vllm-ascend
+      HEAD_FORK: dev-submitter/vllm-ascend
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -82,8 +82,8 @@ jobs:
             exit 1
           fi
 
-          git config user.name "main2main-bot"
-          git config user.email "main2main-bot@users.noreply.github.com"
+          git config user.name "dev-submitter"
+          git config user.email "330005789+dev-submitter@users.noreply.github.com"
           # This fetch gates the whole run; retry transient failures.
           attempt=0
           until git fetch "https://github.com/${UPSTREAM_REPO}.git" main; do
@@ -199,12 +199,12 @@ jobs:
       run:
         shell: bash -el {0}
     env:
-      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+      GH_TOKEN: ${{ secrets.DEV_SUBMITTER_TOKEN }}
       MAIN2MAIN_IMAGE_TAG: 9.1.0-a3-ubuntu22.04-py3.12
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
       PUSH_TO_GITHUB: 'true'
       GITHUB_REPO: vllm-project/vllm-ascend
-      HEAD_FORK: vllm-ascend-ci/vllm-ascend
+      HEAD_FORK: dev-submitter/vllm-ascend
       MAIN2MAIN_KEEP_BRANCH: 'true'
       MAIN2MAIN_WORKSPACE: /tmp/main2main_flow/workspace
       MAIN2MAIN_CASES_FILE: .github/workflows/scripts/main2main_tests.json
@@ -274,8 +274,8 @@ jobs:
             fi
           fi
 
-          git config user.name "main2main-bot"
-          git config user.email "main2main-bot@users.noreply.github.com"
+          git config user.name "dev-submitter"
+          git config user.email "330005789+dev-submitter@users.noreply.github.com"
           gh --version
 
       - name: Load main2main test cases

@@ -35,8 +35,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
@@ -95,6 +97,7 @@ def test_build_draft_metadata_submits_only_non_cp_device_tasks(
         sliding_window=None,
         _per_group_block_table_buffers={group_id: torch.ones((1, 1), dtype=torch.int32) for group_id in range(2)},
         _per_group_query_slot_mapping_buffers={group_id: torch.zeros(1, dtype=torch.int32) for group_id in range(2)},
+        _get_primary_draft_attn_group=lambda: groups[0],
     )
     common_attn_metadata = SimpleNamespace(
         num_reqs=1,
@@ -130,7 +133,7 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
         device_metadata_executor=executor,
         dcp_manager=None,
         input_batch=SimpleNamespace(lora_id_to_lora_request={}),
-        _sync_metadata_across_dp=lambda num_tokens, **kwargs: (num_tokens, None, None),
+        _sync_metadata_across_dp=lambda num_tokens, **kwargs: (num_tokens, torch.tensor(1), None),
         dynamic_eplb=False,
         eplb_heat_collection_status=False,
     )
@@ -140,7 +143,6 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
     proposer.model = SimpleNamespace(combine_hidden_states=lambda hidden_states: hidden_states)
     proposer.hidden_size = 4
     proposer.use_cuda_graph = False
-    proposer.dp_rank = 0
     proposer.dcp_size = 1
     proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(use_mla=True))
     proposer.draft_window_size = None
@@ -154,7 +156,9 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
     proposer.parallel_drafting = True
     proposer.token_indices_to_sample = torch.zeros(2, dtype=torch.int32)
     proposer.enable_enpu = False
+    proposer.draft_attn_groups = [MagicMock()]
     proposer._update_full_graph_params_if_needed = MagicMock()
+    proposer._maybe_update_metadata = MagicMock()
     proposer.set_inputs_first_pass = MagicMock()
     proposer.build_draft_attn_metadata = MagicMock()
 
@@ -345,6 +349,8 @@ class _DSparkProposerTestBase:
         context=None,
         num_rejected=None,
         with_optional_attrs=False,
+        inherited_prefill_flags=None,
+        inherited_dcp_metadata=None,
     ):
         """Drive ``set_inputs_first_pass`` with a configurable cad.
 
@@ -363,6 +369,10 @@ class _DSparkProposerTestBase:
         seq_lens_cpu = torch.full((num_reqs,), host_seq_len, dtype=torch.int32)
         cad = SimpleNamespace(
             num_reqs=num_reqs,
+            is_prefilling=inherited_prefill_flags,
+            context_parallel_metadata=inherited_dcp_metadata,
+            dcp_local_seq_lens=torch.full((num_reqs,), -777, dtype=torch.int32),
+            dcp_local_seq_lens_cpu=torch.full((num_reqs,), -888, dtype=torch.int32),
             query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32) * block_size,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=torch.full((num_reqs,), seq_len, dtype=torch.int32),
@@ -385,6 +395,139 @@ class _DSparkProposerTestBase:
         return num_query_total, token_indices, cad, extra, next_token_ids, target_hidden_states
 
 
+class TestDSparkDraftQueryPhase(_DSparkProposerTestBase):
+    @pytest.mark.parametrize(
+        "backend,interleave,sample_from_anchor",
+        [("mla", 1, True), ("sfa", 4, False), ("gqa", 128, True), ("mixed", 128, False)],
+    )
+    def test_first_pass_refreshes_common_dcp_lengths(self, monkeypatch, backend, interleave, sample_from_anchor):
+        from vllm_ascend.attention.utils import split_decodes_and_prefills
+
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            MagicMock(),
+        )
+        monkeypatch.setattr(
+            "vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled",
+            lambda: False,
+        )
+        proposer = self._make_proposer(
+            max_num_tokens=64,
+            num_reqs=2,
+            block_size=5,
+            hf_config=SimpleNamespace(sample_from_anchor=sample_from_anchor),
+        )
+        proposer.dcp_size = 8
+        proposer.dcp_rank = 1
+        proposer.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave))
+        primary = proposer.draft_attn_groups[0]
+        primary.kv_cache_spec = MagicMock(spec=FullAttentionSpec if backend == "gqa" else AscendMLAAttentionSpec)
+        if backend in ("sfa", "mixed"):
+            proposer.draft_attn_groups.append(
+                SimpleNamespace(
+                    kv_cache_group_id=0,
+                    kv_cache_spec=MagicMock(spec=AscendSFAIndexerCacheSpec if backend == "sfa" else FullAttentionSpec),
+                    layer_names=["L1"],
+                )
+            )
+        manager = object.__new__(DCPManager)
+        manager.dcp_world_size = 8
+        manager.dcp_world_rank = 1
+        manager.vllm_config = proposer.vllm_config
+        proposer.runner = SimpleNamespace(dcp_manager=manager)
+        stale_target = SimpleNamespace(query_lens_cpu=torch.tensor([19, 23]), max_query_len=23)
+        with patch.object(manager, "prepare_legacy_dcp_metadata", wraps=manager.prepare_legacy_dcp_metadata) as legacy:
+            _, _, cad, extra, _, _ = self._invoke_set_inputs_first_pass(
+                proposer,
+                num_reqs=2,
+                block_size=5,
+                seq_len=260,
+                host_seq_len=251,
+                num_rejected=torch.tensor([2, 3], dtype=torch.int32),
+                async_metadata=True,
+                inherited_prefill_flags=torch.tensor([True, False]),
+                inherited_dcp_metadata=stale_target,
+            )
+        width = proposer.num_query_per_req
+        device_global = [260 - 2 + width, 260 - 3 + width]
+        host_global = [251 + width] * 2
+
+        def local(length, rank):
+            return sum((pos // interleave) % 8 == rank for pos in range(length))
+
+        assert cad.seq_lens.tolist() == device_global
+        assert cad._seq_lens_cpu.tolist() == host_global
+        assert cad.seq_lens_cpu is None
+        assert cad.dcp_local_seq_lens.tolist() == [local(length, 1) for length in device_global]
+        assert cad.dcp_local_seq_lens_cpu.tolist() == [local(length, 1) for length in host_global]
+        assert cad.is_prefilling.tolist() == [False, False]
+        assert cad.query_start_loc_cpu.tolist() == [0, width, 2 * width]
+        assert extra is None
+        assert stale_target.max_query_len == 23
+        assert split_decodes_and_prefills(cad, decode_threshold=width, treat_short_extends_as_decodes=False) == (
+            2,
+            0,
+            2 * width,
+            0,
+        )
+        if backend in ("gqa", "mixed"):
+            legacy.assert_called_once_with(cad)
+            metadata = cad.context_parallel_metadata
+            assert metadata.num_computed_tokens_of_dcp.tolist() == [
+                [local(length, rank) for rank in range(8)] for length in host_global
+            ]
+            assert metadata.query_lens_cpu.tolist() == [width, width]
+            assert metadata.max_query_len == width
+        else:
+            legacy.assert_not_called()
+            assert cad.context_parallel_metadata is None
+
+    @pytest.mark.parametrize("dcp_size", [1, 8])
+    def test_only_dcp_overrides_target_prefill_flags(self, monkeypatch, dcp_size):
+        from vllm_ascend.attention.utils import split_decodes_and_prefills
+
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            MagicMock(),
+        )
+        monkeypatch.setattr(
+            "vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled",
+            lambda: False,
+        )
+        proposer = self._make_proposer(max_num_tokens=64, num_reqs=2, block_size=5)
+        proposer.dcp_size = dcp_size
+        proposer.dcp_rank = 0
+        proposer.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=384),
+        )
+
+        manager = object.__new__(DCPManager)
+        manager.dcp_world_size = dcp_size
+        manager.dcp_world_rank = 0
+        manager.vllm_config = proposer.vllm_config
+        monkeypatch.setattr(
+            manager, "prepare_parallel_draft_metadata", MagicMock(wraps=manager.prepare_parallel_draft_metadata)
+        )
+        proposer.runner = SimpleNamespace(dcp_manager=manager)
+        inherited = torch.tensor([False, True], dtype=torch.bool)
+        _, _, cad, _, _, hidden = self._invoke_set_inputs_first_pass(
+            proposer,
+            num_reqs=2,
+            block_size=5,
+            context=2,
+            inherited_prefill_flags=inherited,
+        )
+        assert cad.is_prefilling.tolist() == ([False, False] if dcp_size > 1 else [False, True])
+        assert proposer._dflash_num_context == 2
+        assert torch.equal(proposer._dflash_hidden_states[:2], hidden)
+        assert split_decodes_and_prefills(
+            cad,
+            decode_threshold=6,
+            treat_short_extends_as_decodes=False,
+        ) == ((2, 0, 10, 0) if dcp_size > 1 else (1, 1, 5, 5))
+        assert manager.prepare_parallel_draft_metadata.call_count == (dcp_size > 1)
+
+
 class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
     """Guard: under multi-DP the dspark draft proposer must hand DSA attention a
     full-length positions buffer so ``positions[:num_input_tokens]`` never reads
@@ -395,6 +538,7 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
         # query_start_loc_cpu[num_reqs] is 0 so _dflash_num_context becomes 0.
         cad = SimpleNamespace(
             num_reqs=num_reqs,
+            is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
             query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32) * block_size,
             query_start_loc_cpu=torch.zeros(num_reqs + 1, dtype=torch.int32),
             seq_lens=torch.full((num_reqs,), 128, dtype=torch.int32),
@@ -593,6 +737,43 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         assert proposer.draft_attn_groups[0].kv_cache_spec.block_size == 384
         assert kwargs["block_size"] == 128
 
+    def test_dcp_passes_parallel_kernel_args_and_delegates_metadata(self, monkeypatch):
+        kernel = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            kernel,
+        )
+        proposer = self._make_proposer(max_num_tokens=64, num_reqs=1, block_size=5)
+        proposer.dcp_size = 8
+        proposer.dcp_rank = 3
+        proposer.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
+        )
+        dcp_manager = SimpleNamespace(
+            prepare_spec_decode_first_pass_inputs=MagicMock(),
+            prepare_spec_decode_drafting_cp_metadata=MagicMock(),
+            prepare_parallel_draft_metadata=MagicMock(),
+        )
+        proposer.runner = SimpleNamespace(
+            dcp_manager=dcp_manager,
+        )
+
+        num_query_total, _, cad, extra, _, _ = self._invoke_set_inputs_first_pass(
+            proposer,
+            num_reqs=1,
+            block_size=5,
+        )
+
+        kwargs = kernel[1,].call_args.kwargs
+        assert kwargs["DCP_SIZE"] == 8
+        assert kwargs["DCP_RANK"] == 3
+        assert kwargs["CP_INTERLEAVE_SIZE"] == 1
+        assert extra is None
+        dcp_manager.prepare_spec_decode_first_pass_inputs.assert_not_called()
+        dcp_manager.prepare_spec_decode_drafting_cp_metadata.assert_not_called()
+        dcp_manager.prepare_parallel_draft_metadata.assert_called_once_with(cad, proposer.draft_attn_groups)
+        assert num_query_total == 5
+
     def test_cad_rewritten_to_cross_attention_shape(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
         proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
@@ -651,27 +832,47 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
     """The ``has_num_rejected`` branch must shrink ``seq_lens`` by the rejected
     token count before adding the draft block size, and flag the kernel."""
 
-    def test_seq_lens_subtracts_rejected(self, monkeypatch):
+    @pytest.mark.parametrize("dcp_size", [1, 8])
+    @pytest.mark.parametrize("async_metadata", [False, True])
+    def test_seq_lens_subtracts_rejected(self, monkeypatch, dcp_size, async_metadata):
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             MagicMock(),
         )
         num_reqs, block_size, max_num_tokens = 4, 5, 256
         proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
+        proposer.dcp_size = dcp_size
+        proposer.dcp_rank = 0
+        proposer.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=384))
+        expected_host = torch.full((num_reqs,), 131, dtype=torch.int32)
+
+        def check_metadata(common_attn_metadata, draft_attn_groups):
+            torch.testing.assert_close(common_attn_metadata._seq_lens_cpu, expected_host)
+            return None, None
+
+        proposer.runner = SimpleNamespace(
+            dcp_manager=SimpleNamespace(
+                prepare_parallel_draft_metadata=check_metadata,
+            )
+        )
         rejected = torch.full((num_reqs,), 2, dtype=torch.int32)
         _nqt, _ti, cad, _extra = self._invoke_set_inputs_first_pass(
             proposer,
             num_reqs=num_reqs,
             block_size=block_size,
             host_seq_len=126,
-            async_metadata=True,
+            async_metadata=async_metadata,
             num_rejected=rejected,
         )[:4]
+        # CPU lengths already include rejection correction; do not subtract twice.
         # effective = seq_lens(128) - rejected(2) = 126; then + block_size(5) = 131.
         assert torch.equal(cad.seq_lens, torch.full((num_reqs,), 128 - 2 + block_size, dtype=torch.int32))
         expected_host = torch.full((num_reqs,), 126 + block_size, dtype=torch.int32)
         assert torch.equal(cad._seq_lens_cpu, expected_host)
-        assert cad.seq_lens_cpu is None
+        if async_metadata:
+            assert cad.seq_lens_cpu is None
+        else:
+            torch.testing.assert_close(cad.seq_lens_cpu, expected_host)
 
     def test_kernel_called_with_has_num_rejected(self, monkeypatch):
         kernel = MagicMock()
@@ -703,7 +904,37 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         proposer.device = torch.device("cpu")
         proposer.runner = SimpleNamespace(device_metadata_executor=None)
         proposer.dcp_size = 1
+        proposer._per_group_block_tables = {}
+        proposer._per_group_slot_mappings = {}
         return proposer
+
+    def test_deepseek_v41_draft_uses_only_group_twelve(self, monkeypatch):
+        from tests.deepseek_v41_utils import make_cache_config
+
+        config = make_cache_config(17, draft_layers=3)
+        draft_names = config.kv_cache_groups[12].layer_names
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "AscendDSASWABackend"
+        modules = {name: SimpleNamespace(get_attn_backend=lambda: backend) for name in draft_names}
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config", lambda *args, **kw: modules
+        )
+        proposer = self._make_proposer_for_init()
+        proposer.model = SimpleNamespace(get_draft_kv_cache_layer_names=lambda: draft_names)
+        proposer.max_query_tokens = 16
+        proposer.max_num_tokens = 32
+        with patch.object(AttentionGroup, "create_metadata_builders"):
+            proposer.initialize_attn_backend(config, [128, 32] + [128] * 11)
+        assert proposer.kv_cache_gid == 12
+        assert len(proposer.draft_attn_groups) == 1
+        assert set(proposer.draft_attn_groups[0].layer_names) == set(draft_names)
+        assert proposer._layer_group_idx == [12, 12, 12]
+        target_table = torch.tensor([[2]], dtype=torch.int32)
+        draft_table = torch.tensor([[7]], dtype=torch.int32)
+        proposer.set_per_group_attn_metadata(2, target_table, torch.tensor([256]))
+        proposer.set_per_group_attn_metadata(12, draft_table, torch.tensor([896]))
+        assert proposer._per_group_block_tables[12] is draft_table
+        assert proposer._per_group_block_tables[12] is not target_table
 
     @pytest.mark.parametrize(
         ("dcp_size", "pcp_enabled", "has_executor", "expected_tokens"),

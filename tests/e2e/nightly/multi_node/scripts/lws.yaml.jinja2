@@ -78,6 +78,8 @@ spec:
                 bash /root/.cache/tests/run.sh \
                   "{{ soc_version | default("") }}" \
                   "{{ max_good_age_days | default("3") }}"
+{% set soc = soc_version | default("a3") | lower %}
+{% if soc in ["a2","a3"] %}
             resources:
               limits:
                 memory: 512Gi
@@ -87,6 +89,17 @@ spec:
                 ephemeral-storage: 100Gi
                 cpu: 125
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+{% elif soc == "a5" %}
+            resources:
+              limits:
+                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
+                memory: 512Gi
+                ephemeral-storage: 100Gi
+              requests:
+                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
+                ephemeral-storage: 100Gi
+                cpu: 125
+{% endif %}
             ports:
               - containerPort: 8080
             volumeMounts:
@@ -175,6 +188,8 @@ spec:
                 bash /root/.cache/tests/run.sh \
                   "{{ soc_version | default("") }}" \
                   "{{ max_good_age_days | default("3") }}"
+{% set soc = soc_version | default("a3") | lower %}
+{% if soc in ["a2","a3"] %}
             resources:
               limits:
                 memory: 512Gi
@@ -184,6 +199,17 @@ spec:
                 ephemeral-storage: 100Gi
                 cpu: 125
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+{% elif soc == "a5" %}
+            resources:
+              limits:
+                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
+                memory: 512Gi
+                ephemeral-storage: 100Gi
+              requests:
+                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
+                ephemeral-storage: 100Gi
+                cpu: 125
+{% endif %}
             volumeMounts:
               - mountPath: /root/.cache
                 name: shared-volume

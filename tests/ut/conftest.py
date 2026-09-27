@@ -51,7 +51,7 @@ if not _npu_available:
     torch_npu.__path__ = []
     torch_npu.npu = MagicMock()  # type: ignore[attr-defined]
     torch_npu.npu_fusion_attention = MagicMock()  # type: ignore[attr-defined]
-    torch_npu.npu_format_cast = MagicMock(side_effect=lambda weight, fmt: weight)  # type: ignore[attr-defined]
+    torch_npu.npu_format_cast = MagicMock(side_effect=lambda weight, fmt, **kwargs: weight)  # type: ignore[attr-defined]
     torch_npu._C = MagicMock()  # type: ignore[attr-defined]
     torch_npu._C._NPUTaskGroupHandle = MagicMock
     # Note: Assign missing attributes with values from real scenarios
@@ -173,6 +173,18 @@ if not _npu_available:
     torch_npu.npu.stream = MagicMock()  # type: ignore[attr-defined]
     torch.version.cann = None
     torch.distributed.is_hccl_available = MagicMock(return_value=True)
+
+    # The NPU privateuse1 backend has no registered hooks in this CPU-only
+    # environment, so pinned-memory staging (`Tensor.pin_memory`,
+    # `async_tensor_h2d`, `CpuGpuBuffer.copy_to_gpu`) raises
+    # "Please register PrivateUse1HooksInterface". Disable pinned memory for
+    # the whole CPU UT session. Both bindings must be updated because
+    # `vllm.v1.utils` imports the value by name.
+    import vllm.utils.torch_utils as _vllm_torch_utils
+    import vllm.v1.utils as _vllm_v1_utils
+
+    _vllm_torch_utils.PIN_MEMORY = False
+    _vllm_v1_utils.PIN_MEMORY = False
 
 import pytest
 

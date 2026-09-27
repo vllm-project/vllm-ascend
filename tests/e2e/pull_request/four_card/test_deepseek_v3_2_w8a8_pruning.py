@@ -47,9 +47,15 @@ def test_moe_w8a8_tp_pp_ep_full_decode_only():
         assert len(outputs[0][1]) > len(prompts[0])
 
 
-@wait_until_npu_memory_free()
-def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
-    """Verify W8A8 1P1D PD disaggregation with full decode only."""
+def _run_pd_disaggregation_w8a8_sfa(
+    *,
+    prefill_tp_size: int,
+    prefill_pcp_size: int,
+    decode_tp_size: int,
+    async_scheduling: bool,
+    use_model_runner_v2: bool,
+) -> None:
+    """Run one W8A8 1P1D SFA request through the disaggregated proxy."""
     prefiller_port = [get_open_port()]
     decoder_port = [get_open_port()]
     proxy_port = get_open_port()
@@ -58,6 +64,8 @@ def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
     env_dict = {
         "LD_LIBRARY_PATH": f"/usr/local/lib:{ld_library_path}",
     }
+    if use_model_runner_v2:
+        env_dict["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 
     vllm_server_args = [
         [
@@ -78,7 +86,9 @@ def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
             "--max-num-seqs",
             "4",
             "--tensor-parallel-size",
-            "2",
+            str(prefill_tp_size),
+            "--prefill-context-parallel-size",
+            str(prefill_pcp_size),
             "--gpu-memory-utilization",
             "0.9",
             "--kv-transfer-config",
@@ -88,8 +98,8 @@ def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
                     "kv_role": "kv_producer",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
-                        "prefill": {"dp_size": 1, "tp_size": 2},
-                        "decode": {"dp_size": 1, "tp_size": 2},
+                        "prefill": {"dp_size": 1, "tp_size": prefill_tp_size},
+                        "decode": {"dp_size": 1, "tp_size": decode_tp_size},
                     },
                 }
             ),
@@ -113,7 +123,7 @@ def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
             "--max-num-seqs",
             "4",
             "--tensor-parallel-size",
-            "2",
+            str(decode_tp_size),
             "--gpu-memory-utilization",
             "0.9",
             "--kv-transfer-config",
@@ -123,8 +133,8 @@ def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
                     "kv_role": "kv_consumer",
                     "kv_port": "30200",
                     "kv_connector_extra_config": {
-                        "prefill": {"dp_size": 1, "tp_size": 2},
-                        "decode": {"dp_size": 1, "tp_size": 2},
+                        "prefill": {"dp_size": 1, "tp_size": prefill_tp_size},
+                        "decode": {"dp_size": 1, "tp_size": decode_tp_size},
                     },
                 }
             ),
@@ -135,6 +145,7 @@ def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
                     "cudagraph_capture_sizes": [1, 2, 4, 8],
                 }
             ),
+            *(["--async-scheduling"] if async_scheduling else []),
         ],
     ]
 
@@ -147,10 +158,10 @@ def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
         ) as proxy,
     ):
         response = requests.post(
-            proxy.url_for("v1", "completions"),
+            proxy.url_for("v1", "chat", "completions"),
             json={
                 "model": "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
-                "prompt": "Hello, my name is",
+                "messages": [{"role": "user", "content": "Hello, my name is"}],
                 "max_tokens": 5,
                 "temperature": 0.0,
             },
@@ -159,4 +170,28 @@ def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
         response.raise_for_status()
         output = response.json()
 
-        assert output["choices"][0]["text"]
+        assert output["choices"][0]["message"]["content"]
+
+
+@wait_until_npu_memory_free()
+def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
+    """Verify the existing TP2 1P1D SFA deployment."""
+    _run_pd_disaggregation_w8a8_sfa(
+        prefill_tp_size=2,
+        prefill_pcp_size=1,
+        decode_tp_size=2,
+        async_scheduling=False,
+        use_model_runner_v2=False,
+    )
+
+
+@wait_until_npu_memory_free()
+def test_pd_disaggregation_w8a8_sfa_pcp_full_decode_only():
+    """Verify PCP2 prefill KV transfer to an async TP1 decode server."""
+    _run_pd_disaggregation_w8a8_sfa(
+        prefill_tp_size=1,
+        prefill_pcp_size=2,
+        decode_tp_size=1,
+        async_scheduling=True,
+        use_model_runner_v2=True,
+    )

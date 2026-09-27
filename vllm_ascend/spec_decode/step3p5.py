@@ -219,12 +219,10 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         is_profile=False,
     ):
         (
-            _,
+            num_tokens,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
-        if num_tokens_across_dp is not None:
-            num_tokens = int(num_tokens_across_dp[self.dp_rank].item())
 
         multi_steps_attn_metadata: list[dict[str, Any]] = []
         if not self.use_cuda_graph:
@@ -291,6 +289,12 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             inputs_embeds = None
 
         self.token_indices_to_sample.fill_(0)
+
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            self._maybe_update_metadata(
+                self.draft_attn_groups[0].backend,
+                multi_steps_attn_metadata,
+            )
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -389,12 +393,10 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             num_input_tokens = num_tokens
 
         (
-            _,
+            num_input_tokens,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
-        if num_tokens_across_dp is not None:
-            num_input_tokens = int(num_tokens_across_dp[self.dp_rank].item())
 
         if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
@@ -473,6 +475,12 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
+
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            self._maybe_update_metadata(
+                self.draft_attn_groups[0].backend,
+                multi_steps_attn_metadata,
+            )
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],

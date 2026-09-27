@@ -142,8 +142,8 @@ protected:
     uint64_t keyGmStart_ = 0;      // L1数据对应的GM S2偏移
     uint64_t keyLoadedSize_ = 0;   // L1中实际加载的S2元素数量
     uint64_t s2BasicBlock_ = 128;
-    uint64_t qkHeadDim_ = 128;            // Q/K单行GM搬入宽度；MXFP4为打包后的headDim/2，其他场景为headDim
-    uint64_t scaleHeadDim_ = 4;           // MX scale单行元素数，即headDim/32，MXFP8/MXFP4共用
+    uint64_t qkHeadDim_ = 128;  // Q/K单行GM搬入宽度；MXFP4为打包后的headDim/2，其他场景为headDim
+    uint64_t scaleHeadDim_ = 4; // MX scale单行元素数，即headDim/32，MXFP8/MXFP4共用
     uint64_t keyBufferOffset_ = 16384;    // Key L1乒乓缓冲区步长，s2BasicBlock_ * D_BASIC_BLOCK
     uint64_t keyScaleBufferOffset_ = 512; // Key scale L1乒乓缓冲区步长，s2BasicBlock_ * D_BASIC_BLOCK / 32
 
@@ -214,7 +214,7 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::InitMm1GlobalTensor(const GlobalTens
     keyGm_ = keyGm;
     queryGm_ = queryGm;
     if constexpr (IS_MX) {
-        mxKeyScaleGmBf16_ = keyScaleGmBf16;  // gitleaks:allow
+        mxKeyScaleGmBf16_ = keyScaleGmBf16;
         mxQueryScaleGmBf16_ = queryScaleGmBf16;
     }
 }
@@ -712,9 +712,9 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::Fixp(uint64_t s1gGmOffset, uint64_t 
                                                      cL0_[(l0BufIdx_ % L0_BUF_NUM) * l0cBufferOffset_], fixpipeParams);
 
         fixpipeParams.subBlockId = 1;
-        Fixpipe<QK_T, CL0_T, QLIV2_CFG_ROW_MAJOR_UB>(
-            mm1ResUB_[(runInfo.loop % 2) * (UB_BANK_STRIDE / sizeof(QK_T))],
-            cL0_[(l0BufIdx_ % L0_BUF_NUM) * l0cBufferOffset_ + mSize / 2 * 16], fixpipeParams);
+        Fixpipe<QK_T, CL0_T, QLIV2_CFG_ROW_MAJOR_UB>(mm1ResUB_[(runInfo.loop % 2) * (UB_BANK_STRIDE / sizeof(QK_T))],
+                                                     cL0_[(l0BufIdx_ % L0_BUF_NUM) * l0cBufferOffset_ + mSize / 2 * 16],
+                                                     fixpipeParams);
     }
 }
 

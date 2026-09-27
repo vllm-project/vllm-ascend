@@ -26,6 +26,7 @@ def _compute_slot_mapping_kernel(
     PAD_ID: tl.constexpr,
     TILE_BLOCK_SIZE: tl.constexpr,
     BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
+    IS_CIRCULAR: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
 
@@ -49,7 +50,10 @@ def _compute_slot_mapping_kernel(
         offsets = i + tl.arange(0, TILE_BLOCK_SIZE)
         mask = offsets < end_idx
         pos = tl.load(positions_ptr + offsets, mask=mask, other=0).to(tl.int32)
-        if TOTAL_CP_WORLD_SIZE == 1:
+        if IS_CIRCULAR:
+            block_indices = tl.full((TILE_BLOCK_SIZE,), 0, tl.int32)
+            slot_offsets = pos % block_size
+        elif TOTAL_CP_WORLD_SIZE == 1:
             block_indices = pos // block_size
             slot_offsets = pos - block_indices * block_size
         else:
@@ -79,6 +83,8 @@ def _compute_slot_mapping_kernel(
             relative_block_indices = tl.where(mask & is_local, block_indices - block_idx_base, 0)
         block_numbers = tl.gather(block_table_window, relative_block_indices, 0).to(tl.int32)
         slot_ids = block_numbers * block_size + slot_offsets
+        if IS_CIRCULAR:
+            slot_ids = tl.where(pos >= 0, slot_ids, PAD_ID)
         if TOTAL_CP_WORLD_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
@@ -94,6 +100,7 @@ def _compute_slot_mapping_request(
     block_table_stride,
     block_size,
     slot_mapping_ptr,
+    is_circular,
     KV_CACHE_BLOCK_SIZE: tl.constexpr,
     BLOCKS_PER_KV_BLOCK: tl.constexpr,
     TOTAL_CP_WORLD_SIZE: tl.constexpr,
@@ -110,8 +117,8 @@ def _compute_slot_mapping_request(
         mask = offsets < end_idx
         pos = tl.load(positions_ptr + offsets, mask=mask, other=0).to(tl.int32)
         if TOTAL_CP_WORLD_SIZE == 1:
-            block_indices = pos // block_size
-            slot_offsets = pos - block_indices * block_size
+            block_indices = tl.where(is_circular, 0, pos // block_size)
+            slot_offsets = pos % block_size
         else:
             virtual_block_size = KV_CACHE_BLOCK_SIZE * TOTAL_CP_WORLD_SIZE
             virtual_block_indices = pos // virtual_block_size
@@ -139,6 +146,7 @@ def _compute_slot_mapping_request(
             relative_block_indices = tl.where(mask & is_local, block_indices - block_idx_base, 0)
         block_numbers = tl.gather(block_table_window, relative_block_indices, 0).to(tl.int32)
         slot_ids = block_numbers * block_size + slot_offsets
+        slot_ids = tl.where(is_circular & (pos < 0), PAD_ID, slot_ids)
         if TOTAL_CP_WORLD_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
@@ -154,6 +162,8 @@ def _compute_slot_mapping_fused_groups_kernel(
     slot_mapping_addrs_ptr,
     block_table_strides_ptr,
     block_sizes_ptr,
+    is_circular_ptr,
+    HAS_CIRCULAR: tl.constexpr,
     PAD_ID: tl.constexpr,
     NUM_REQS: tl.constexpr,
     TILE_BLOCK_SIZE: tl.constexpr,
@@ -186,6 +196,7 @@ def _compute_slot_mapping_fused_groups_kernel(
     end_idx = tl.load(query_start_loc_ptr + req_idx + 1).to(tl.int64)
     block_table_stride = tl.load(block_table_strides_ptr + group_idx)
     block_size = tl.load(block_sizes_ptr + group_idx)
+    is_circular = tl.load(is_circular_ptr + group_idx) if HAS_CIRCULAR else False
     row_offset = req_idx * block_table_stride
     block_table_offsets = tl.arange(0, BLOCK_TABLE_WINDOW_SIZE)
     for i in range(
@@ -196,8 +207,8 @@ def _compute_slot_mapping_fused_groups_kernel(
         offsets = i + tl.arange(0, TILE_BLOCK_SIZE)
         mask = offsets < end_idx
         pos = tl.load(positions_ptr + offsets, mask=mask, other=0).to(tl.int32)
-        block_indices = pos // block_size
-        slot_offsets = pos - block_indices * block_size
+        block_indices = tl.where(is_circular, 0, pos // block_size)
+        slot_offsets = pos % block_size
 
         INT32_MAX = 2147483647
         valid_block_indices = tl.where(mask, block_indices, INT32_MAX)
@@ -211,6 +222,7 @@ def _compute_slot_mapping_fused_groups_kernel(
         relative_block_indices = tl.where(mask, block_indices - block_idx_base, 0)
         block_numbers = tl.gather(block_table_window, relative_block_indices, 0).to(tl.int32)
         slot_ids = block_numbers * block_size + slot_offsets
+        slot_ids = tl.where(is_circular & (pos < 0), PAD_ID, slot_ids)
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
 
 
@@ -224,6 +236,8 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
     slot_mapping_addrs_ptr,
     block_table_strides_ptr,
     block_sizes_ptr,
+    is_circular_ptr,
+    HAS_CIRCULAR: tl.constexpr,
     PAD_ID: tl.constexpr,
     NUM_REQS: tl.constexpr,
     SMALL_TILE_BLOCK_SIZE: tl.constexpr,
@@ -255,6 +269,7 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
     end_idx = tl.load(query_start_loc_ptr + req_idx + 1).to(tl.int64)
     block_table_stride = tl.load(block_table_strides_ptr + group_idx)
     block_size = tl.load(block_sizes_ptr + group_idx)
+    is_circular = tl.load(is_circular_ptr + group_idx) if HAS_CIRCULAR else False
     request_tokens = end_idx - start_idx
     if request_tokens <= SMALL_TILE_BLOCK_SIZE:
         _compute_slot_mapping_request(
@@ -266,6 +281,7 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
             block_table_stride,
             block_size,
             slot_mapping_ptr,
+            is_circular,
             1,
             1,
             1,
@@ -285,6 +301,7 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
             block_table_stride,
             block_size,
             slot_mapping_ptr,
+            is_circular,
             1,
             1,
             1,
@@ -334,6 +351,7 @@ def compute_slot_mapping_fused_groups(
     min_block_size,
     *,
     pad_id,
+    is_circular_ptr=None,
 ):
     tile_block_size, parallel_tiles = _select_slot_mapping_launch_config(num_reqs, num_tokens)
     block_table_window_size = _next_power_of_2((tile_block_size + min_block_size - 1) // min_block_size + 1)
@@ -347,6 +365,8 @@ def compute_slot_mapping_fused_groups(
             slot_mapping_addrs_ptr,
             block_table_strides_ptr,
             block_sizes_ptr,
+            is_circular_ptr,
+            HAS_CIRCULAR=is_circular_ptr is not None,
             PAD_ID=pad_id,
             NUM_REQS=num_reqs,
             SMALL_TILE_BLOCK_SIZE=tile_block_size,
@@ -364,6 +384,8 @@ def compute_slot_mapping_fused_groups(
             slot_mapping_addrs_ptr,
             block_table_strides_ptr,
             block_sizes_ptr,
+            is_circular_ptr,
+            HAS_CIRCULAR=is_circular_ptr is not None,
             PAD_ID=pad_id,
             NUM_REQS=num_reqs,
             TILE_BLOCK_SIZE=tile_block_size,

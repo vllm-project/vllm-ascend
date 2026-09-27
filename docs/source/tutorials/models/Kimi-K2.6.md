@@ -18,11 +18,24 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `Kimi-K2.6-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.6-W4A8).
-- `kimi-k2.6-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.6): [Download model weight](https://huggingface.co/lightseekorg/kimi-k2.6-eagle3)
-- `Kimi-K2.5-DFlash` (a speculative decoding framework that leverages a lightweight block diffusion model for parallel drafting): [Download model weight](https://huggingface.co/z-lab/Kimi-K2.5-DFlash)
+|  Weight Version | Hardware Requirements | Download Links |
+|-----------------|-----------------------|----------------|
+| `Kimi-K2.6-w4a8` (Quantized version for w4a8) | 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.6-W4A8) |
+| `kimi-k2.6-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.6) |          | [Hugging Face](https://huggingface.co/lightseekorg/kimi-k2.6-eagle3) |
+| `Kimi-K2.5-DFlash` (a speculative decoding framework that leverages a lightweight block <br>diffusion model for parallel drafting) |          | [Hugging Face](https://huggingface.co/z-lab/Kimi-K2.5-DFlash) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+With vLLM 0.30, Ascend preserves the vLLM 0.29 YaRN amplitude for the
+legacy `Kimi-K2.5-DFlash` configuration used here. The draft's plain YaRN
+configuration has `factor=64`, `mscale=1` and `mscale_all_dim=1`; without
+compatibility handling, the new scaling semantics reduce its acceptance rate.
+For this recognized configuration, a missing `attention_factor` defaults to
+`1 + 0.1 * ln(64)` (approximately `1.4158883083`). An explicit
+`attention_factor` in the draft checkpoint takes precedence, including `1.0`
+to select the new ratio-based amplitude. The target model's RoPE is unchanged.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -146,6 +159,7 @@ sysctl -w kernel.sched_migration_cost_ns=50000
 
 export HCCL_BUFFSIZE=600
 
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --quantization ascend \
     --tool-call-parser kimi_k2 \
@@ -320,7 +334,8 @@ Parameter descriptions:
 
     export HCCL_BUFFSIZE=1536
     export ASCEND_RT_VISIBLE_DEVICES=$1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
         --host 0.0.0.0 \
         --port $2 \
@@ -402,6 +417,7 @@ Parameter descriptions:
     export HCCL_BUFFSIZE=1536
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
         --host 0.0.0.0 \
         --port $2 \
@@ -482,6 +498,7 @@ Parameter descriptions:
     export HCCL_BUFFSIZE=800
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
         --host 0.0.0.0 \
         --port $2 \
@@ -562,6 +579,7 @@ Parameter descriptions:
     export HCCL_BUFFSIZE=800
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
         --host 0.0.0.0 \
         --port $2 \
@@ -769,7 +787,7 @@ The service returns HTTP 200 OK. The JSON response contains the `choices` field 
 
 Here is one accuracy evaluation method.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -783,11 +801,11 @@ Here is one accuracy evaluation method.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Run performance evaluation of `Kimi-K2.6-w4a8` as an example.
 

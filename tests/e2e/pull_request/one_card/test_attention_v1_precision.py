@@ -34,6 +34,7 @@ def default_vllm_config():
     mock_config.speculative_config = None
     mock_config.cache_config = MagicMock()
     mock_config.cache_config.block_size = 128
+    mock_config.cache_config.cache_dtype = "float16"
     mock_config.kv_transfer_config = None
     mock_config.additional_config = None
     mock_config.quant_config = None

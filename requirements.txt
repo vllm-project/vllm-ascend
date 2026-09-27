@@ -37,3 +37,4 @@ memcache_hybrid==1.2.0
 arctic-inference==0.1.1
 transformers==5.14.1
 fastapi<0.124.0
+fastokens==0.2.0

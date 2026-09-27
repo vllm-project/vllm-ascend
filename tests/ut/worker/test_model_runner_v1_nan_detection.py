@@ -5,10 +5,9 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner, nans_to_dict
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
-@unittest.skipIf(nans_to_dict is None, "nans_to_dict requires vLLM newer than v0.28.0")
 class TestNPUModelRunnerNaNDetection(unittest.TestCase):
     """Exercise NaN bookkeeping with CPU tensors only."""
 

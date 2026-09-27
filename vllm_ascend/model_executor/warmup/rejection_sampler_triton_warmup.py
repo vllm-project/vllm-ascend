@@ -333,6 +333,14 @@ def rejection_sampler_triton_warmup(worker: NPUWorker) -> None:
     """JIT rejection sampler Triton kernels before the first spec-decode request."""
     if not HAS_TRITON:
         return
+    try:
+        from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
+            join_early_kernel_warmup,
+        )
+
+        join_early_kernel_warmup("rejection_sampler")
+    except ImportError:
+        pass
 
     spec_config = worker.vllm_config.speculative_config
     if spec_config is None:

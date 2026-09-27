@@ -55,7 +55,7 @@ __global__ __aicore__ void compressor(
     GET_TILING_DATA_WITH_STRUCT(optiling::CompressorTilingData, tilingDataIn, tiling);
     if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::EMPTY_X) {
         return;
-    }
+    } else {
     const optiling::CompressorTilingData *__restrict tilingData = &tilingDataIn;
     TPipe pipe;
     constexpr auto xLayout = static_cast<X_LAYOUT>(XLayout);
@@ -76,4 +76,5 @@ __global__ __aicore__ void compressor(
             INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, coff, rotaryMode, cacheMode);
         }
     #endif
+    }
 }

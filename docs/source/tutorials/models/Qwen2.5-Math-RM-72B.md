@@ -1,6 +1,6 @@
 # Qwen2.5-Math-RM-72B
 
-## Introduction
+## 1 Introduction
 
 Qwen2.5-Math-RM-72B is a 72-billion parameter reward model designed for mathematical reasoning and evaluation. It is part of Alibaba Cloud's Qwen 2.5 series, specifically optimized for scoring and ranking mathematical problem solutions. The model supports a maximum context window of 128k tokens and delivers enhanced capabilities in mathematical computation, step-by-step reasoning evaluation, and solution quality assessment.
 
@@ -8,24 +8,25 @@ This document provides a detailed workflow for the complete deployment and verif
 
 The `Qwen2.5-Math-RM-72B` model is supported since `vllm-ascend:v0.9.0`.
 
-## Supported Features
+## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Environment Preparation
+## 3 Environment Preparation
 
-### Model Weight
+### 3.1 Model Weight
 
-- `Qwen2.5-Math-RM-72B` (BF16 version):
-    - With CPU offloading: requires at least 1 Atlas 910B4 (32GB × 1) card or higher
-    - Without CPU offloading: requires at least 4 Atlas 910B4 (32GB × 4) cards or higher
-  [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen2.5-Math-RM-72B)
+|  Weight Version                       | Hardware Requirements           | Download Links |
+|---------------------------------------|---------------------------------|----------------|
+| `Qwen2.5-Math-RM-72B` (BF16 version)  | With CPU offloading: requires at least 1 Atlas 910B4 (32GB × 1) card or higher<br>Without CPU offloading: requires at least 4 Atlas 910B4 (32GB × 4) cards or higher | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen2.5-Math-RM-72B) |
 
 It is recommended to download the model weights to a local directory (e.g., `./Qwen2.5-Math-RM-72B/`) for quick access during deployment.
 
-### Installation
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+
+### 4 Installation
 
 You can use our official docker image to run `Qwen2.5-Math-RM-72B` directly.
 
@@ -53,9 +54,9 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-## Deployment
+## 5 Deployment
 
-### Single-node Deployment
+### 5.1 Single-node Deployment
 
 Qwen2.5-Math-RM-72B supports single-node single-card deployment on the 910B4 platform. Follow these steps to start the inference service:
 
@@ -66,7 +67,7 @@ Qwen2.5-Math-RM-72B supports single-node single-card deployment on the 910B4 pla
 #!/bin/sh
 export ASCEND_RT_VISIBLE_DEVICES=0
 export MODEL_PATH="Qwen/Qwen2.5-Math-RM-72B"
-
+# Ensure the model path matches the directory recorded during download
 vllm serve ${MODEL_PATH} \
           --host 0.0.0.0 \
           --port 8000 \
@@ -80,7 +81,7 @@ vllm serve ${MODEL_PATH} \
 
     The `--task reward` parameter is required to run the model in reward model mode for scoring mathematical solutions.
 
-## Functional Verification
+## 6 Functional Verification
 
 After starting the service, verify functionality using a `curl` request:
 
@@ -99,7 +100,7 @@ curl http://localhost:8000/v1/reward \
 
 A valid response (e.g., `{"reward_score": 1.69}`) indicates successful deployment.
 
-### Batch Reward Scoring
+### 6.1 Batch Reward Scoring
 
 You can also score multiple responses for comparison:
 
@@ -135,7 +136,7 @@ curl http://localhost:8000/v1/reward/batch \
 }'
 ```
 
-## References
+## 7 References
 
 - [Qwen2.5-Math Technical Report](https://arxiv.org/abs/2409.12122)
 - [HuggingFace Model Card](https://huggingface.co/Qwen/Qwen2.5-Math-RM-72B)

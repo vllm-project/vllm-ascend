@@ -1,17 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import contextmanager
 from dataclasses import fields
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+import pytest
 import torch
+from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel import mla_cp
 from vllm_ascend.attention.context_parallel.mla_cp import (
     AscendMLADCPDecodeMetadata,
     AscendMlaDCPImpl,
     AscendMlaDCPMetadataBuilder,
     DCPChunkedContextMetadata,
+    MLASplitAttentionKind,
 )
 from vllm_ascend.attention.mla_v1 import (
     AscendMLADecodeMetadata,
@@ -19,6 +24,7 @@ from vllm_ascend.attention.mla_v1 import (
     AscendMLAMetadata,
     AscendMLAMetadataBuilder,
     AscendMLAPrefillMetadata,
+    DecodeMLAPreprocessResult,
 )
 
 
@@ -33,6 +39,99 @@ def test_mla_dcp_extends_v1_backend() -> None:
     dcp_fields = {field.name for field in fields(AscendMLADCPDecodeMetadata)}
     assert {"cp_seq_len", "dcp_mtp_attn_mask"}.isdisjoint(base_fields)
     assert {"cp_seq_len", "dcp_mtp_attn_mask"} <= dcp_fields
+
+
+@pytest.mark.parametrize("dcp_size", [1, 8])
+def test_mla_dcp_passes_runner_v2_cp_compatibility(dcp_size) -> None:
+    group = SimpleNamespace(world_size=dcp_size, rank_in_group=0)
+    with patch("vllm.distributed.parallel_state.get_dcp_group", return_value=group):
+        impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    assert impl.need_to_return_lse_for_decode == (dcp_size > 1)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=dcp_size,
+            cp_kv_cache_interleave_size=1,
+        ),
+        speculative_config=None,
+    )
+    with patch(
+        "vllm.v1.worker.cp_utils.get_layers_from_vllm_config",
+        return_value={"attention": SimpleNamespace(impl=impl)},
+    ):
+        check_attention_cp_compatibility(config)
+
+
+@pytest.mark.parametrize("num_decodes", [1, 2], ids=["v1-padding", "v2-empty-row"])
+def test_mla_dcp_consumes_local_lengths_and_only_partitions_history(num_decodes) -> None:
+    lengths = torch.tensor([20, 0][:num_decodes], dtype=torch.int32)
+    decode = AscendMLADCPDecodeMetadata(
+        input_positions=torch.arange(4 * num_decodes),
+        block_table=torch.ones((num_decodes, 2), dtype=torch.int32),
+        seq_lens=lengths,
+        max_seq_lens=20,
+        seq_lens_list=lengths.tolist(),
+        actual_seq_lengths_q=[4, 8],
+    )
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.num_decodes = num_decodes
+    builder.dcp_size = 2
+    builder.dcp_rank = 0
+    builder.cp_local_block_size = 4
+    builder.seq_lens = lengths
+    builder.query_lens = torch.tensor([4, 4], dtype=torch.int32)
+    # A sentinel distinct from recomputing total lengths proves producer ownership.
+    common = SimpleNamespace(dcp_local_seq_lens_cpu=torch.tensor([11, 0], dtype=torch.int32))
+    with (
+        patch.object(AscendMLAMetadataBuilder, "build_decode_metadata", return_value=decode),
+        patch.object(mla_cp, "get_dcp_local_seq_lens", wraps=mla_cp.get_dcp_local_seq_lens) as partition,
+    ):
+        result = builder.build_decode_metadata(0, common)
+    partition.assert_called_once()
+    assert partition.call_args.args[0].tolist() == [16, 0][:num_decodes]
+    assert result is decode
+    assert result.cp_seq_len == [11, 0][:num_decodes]
+    assert result.cp_history_seq_len == [8, 0]
+    assert result.actual_seq_lengths_q == [4, 8]
+    assert result.dcp_mtp_attn_mask is None
+
+
+@pytest.mark.parametrize("num_prefills,dcp_size", [(1, 2), (31, 8)])
+def test_mla_dcp_v2_mixed_batch_survives_base_decode_length_slice(num_prefills, dcp_size) -> None:
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.num_decodes = 1
+    builder.num_decode_tokens = 1
+    builder.num_actual_tokens = 1 + 5 * num_prefills
+    builder.dcp_size = dcp_size
+    builder.dcp_rank = 0
+    builder.cp_local_block_size = 1
+    builder.seq_lens = torch.tensor([11] + [18] * num_prefills, dtype=torch.int32)
+    builder.query_lens = torch.tensor([1] + [5] * num_prefills, dtype=torch.int32)
+    builder.block_table = torch.ones((1 + num_prefills, 2), dtype=torch.int32)
+    builder.graph_pad_size = -1
+    builder.use_mla_rope = False
+    builder.attn_mask_builder = Mock()
+    builder.nope_zero_rope_cache = None
+    common = SimpleNamespace(
+        context_parallel_metadata=None,
+        num_reqs=1 + num_prefills,
+        dcp_local_seq_lens_cpu=torch.tensor(
+            [(length + dcp_size - 1) // dcp_size for length in [11] + [18] * num_prefills],
+            dtype=torch.int32,
+        ),
+        query_start_loc_cpu=torch.cat([torch.zeros(1, dtype=torch.int32), builder.query_lens.cumsum(0)]),
+        positions=torch.arange(builder.num_actual_tokens),
+    )
+
+    # Exercise the real base builder, which slices seq_lens to decodes but
+    # deliberately retains the complete mixed-batch query_lens tensor.
+    result = builder.build_decode_metadata(0, common)
+
+    assert result.cp_seq_len == [(11 + dcp_size - 1) // dcp_size]
+    assert result.cp_history_seq_len == [(10 + dcp_size - 1) // dcp_size]
+    assert result.actual_seq_lengths_q == [1]
+    assert builder.seq_lens.tolist() == [11]
+    assert builder.query_lens.tolist() == [1] + [5] * num_prefills
 
 
 def test_mla_dcp_reorg_decode_query_gathers_fused_query() -> None:
@@ -146,7 +245,17 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
         torch.randn(1, 2, 4, 1),
     )
 
-    impl._forward_decode(q_nope, q_pe, k_nope, k_pe, 2, metadata)
+    metadata.causal = False
+    impl._forward_decode(
+        DecodeMLAPreprocessResult(
+            q_nope,
+            q_pe,
+            k_nope,
+            k_pe,
+        ),
+        2,
+        metadata,
+    )
 
     call_args = mock_fia.call_args.args
     call_kwargs = mock_fia.call_args.kwargs
@@ -155,3 +264,268 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
     assert call_kwargs["actual_seq_lengths"] == [4]
     assert call_kwargs["block_table"].shape[0] == 1
     assert call_kwargs["actual_seq_lengths_kv"].tolist() == [10]
+
+
+@patch(
+    "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
+    SimpleNamespace(is_draft_model=False, capturing=False),
+)
+@patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score")
+def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.dcp_size = 8
+    impl.num_heads = 12
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = 3
+    impl.qk_rope_head_dim = 2
+    impl.scale = 1.0
+    impl.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+
+    merged = {}
+
+    def merge(output, softmax_lse, _rank):
+        merged["output_shape"] = output.shape
+        merged["softmax_lse_shape"] = softmax_lse.shape
+        return output
+
+    impl._merge_dcp_attention_output = merge
+    impl._v_up_proj_batch_major = lambda output: output
+
+    decode = AscendMLADCPDecodeMetadata(
+        input_positions=torch.arange(4),
+        block_table=torch.ones((1, 2), dtype=torch.int32),
+        seq_lens=torch.tensor([20]),
+        max_seq_lens=20,
+        seq_lens_list=[20],
+        cp_seq_len=torch.tensor([10], dtype=torch.int32),
+        dcp_mtp_attn_mask=torch.zeros((1, 1, 4, 4)),
+    )
+    metadata = AscendMLAMetadata(
+        num_actual_tokens=4,
+        slot_mapping=torch.arange(4),
+        query_start_loc=torch.tensor([0, 4]),
+        seq_lens=torch.tensor([20]),
+        seq_lens_cpu=torch.tensor([20]),
+        block_tables=torch.ones((1, 2), dtype=torch.int32),
+        num_decodes=1,
+        num_decode_tokens=4,
+        num_prefills=0,
+        query_lens=[4],
+        attn_state=AscendAttentionState.DecodeOnly,
+        decode=decode,
+    )
+
+    q_nope = torch.randn(4, 96, 3)
+    q_pe = torch.randn(4, 96, 2)
+    k_nope = torch.randn(2, 1, 2, 3)
+    k_pe = torch.randn(2, 1, 2, 2)
+    mock_fia.return_value = (
+        torch.randn(1, 4, 96, 3),
+        torch.randn(1, 96, 4, 1),
+    )
+
+    metadata.causal = False
+    impl._forward_decode(
+        DecodeMLAPreprocessResult(
+            q_nope,
+            q_pe,
+            k_nope,
+            k_pe,
+        ),
+        2,
+        metadata,
+    )
+
+    call_args = mock_fia.call_args.args
+    call_kwargs = mock_fia.call_args.kwargs
+    assert call_args[0].shape == (1, 4, 96, 3)
+    assert call_kwargs["query_rope"].shape == (1, 4, 96, 2)
+    assert call_kwargs["num_heads"] == 96
+    assert merged["output_shape"] == (4, 96, 3)
+    assert merged["softmax_lse_shape"] == (4, 96, 1)
+
+
+@pytest.mark.parametrize(
+    "dcp_size,dcp_rank,workspace_sizes,cached_size",
+    [
+        (1, 0, None, None),
+        (2, 0, None, None),
+        (2, 1, None, None),
+        (16, 15, None, None),
+        (2, 1, (64, 128), None),
+        (2, 1, (128, 64), None),
+        (2, 1, (64, 128), 256),
+    ],
+)
+@pytest.mark.parametrize("history_dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_split_decode_packs_on_main_overlapping_current_attention(
+    dcp_size, dcp_rank, workspace_sizes, cached_size, history_dtype
+):
+    import vllm_ascend.attention.context_parallel.mla_cp as mla_cp
+
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.scale = 0.5
+    impl.num_heads = 2
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = 4
+    impl.qk_rope_head_dim = 2
+    impl.dcp_size = dcp_size
+    impl.dcp_rank = dcp_rank
+    impl.dcp_device_group = object()
+    impl.dcp_group = SimpleNamespace(unique_name="dcp-test")
+    q_nope = torch.arange(2 * 2 * dcp_size * 4).float().view(2, 2 * dcp_size, 4)
+    q_pe = torch.zeros(2, 2 * dcp_size, 2)
+    current_k = torch.ones(2, 1, 4)
+    current_pe = torch.ones(2, 1, 2)
+    decode = AscendMLADCPDecodeMetadata(
+        input_positions=torch.arange(2),
+        block_table=torch.zeros(1, 1, dtype=torch.int32),
+        seq_lens=torch.tensor([4]),
+        max_seq_lens=4,
+        seq_lens_list=[4],
+        actual_seq_lengths_q=[2],
+        cp_history_seq_len=[2],
+    )
+    decode.attn_mask = torch.zeros(2, 2, dtype=torch.bool)
+    history_output = torch.ones(2, 2 * dcp_size, 4, dtype=history_dtype)
+    history_lse = torch.zeros(2, 2 * dcp_size, 1)
+    current_output = torch.full((2, 2, 4), 3.0)
+    current_lse = torch.zeros(2, 2, 1)
+    transferred = torch.ones(dcp_size, 2, 2, 5)
+    transferred[..., 4] = 0.0
+    transferred[:, :, 1, :4] = float("nan")
+    transferred[:, :, 1, 4] = -torch.inf
+    current_lse[1] = torch.inf
+    current_output[1] = float("nan")
+    expected = torch.full((2, 2, 4), (dcp_size + 3.0) / (dcp_size + 1.0))
+    expected[1] = 0.0
+    events: list[object] = []
+    active = ["main"]
+    main = Mock()
+    attn = Mock()
+
+    def record_history_ready() -> str:
+        events.append("history_ready")
+        return "ready"
+
+    def record_attn_done() -> str:
+        events.append("attn_done")
+        return "done"
+
+    main.record_event.side_effect = record_history_ready
+    attn.wait_event.side_effect = lambda event: events.append(("attn_wait", event))
+    attn.record_event.side_effect = record_attn_done
+    main.wait_event.side_effect = lambda event: events.append(("main_wait", event))
+
+    @contextmanager
+    def on_stream(stream):
+        assert stream is attn
+        active[0] = "attn"
+        yield
+        active[0] = "main"
+
+    graph_params = SimpleNamespace(workspaces={2: torch.empty(cached_size, dtype=torch.uint8) if cached_size else None})
+    workspace_query = Mock(
+        side_effect=[torch.empty(n, dtype=torch.uint8) for n in workspace_sizes] if workspace_sizes else []
+    )
+
+    def attention(q, q_rope, k, k_rope, **kwargs):
+        if workspace_sizes is not None:
+            assert set(graph_params.workspaces) == {2}
+            assert graph_params.workspaces[2].numel() == (cached_size or max(workspace_sizes))
+        expected_stream = "main" if kwargs["attention_kind"] == MLASplitAttentionKind.HISTORY else "attn"
+        assert active[0] == expected_stream
+        events.append(kwargs["attention_kind"])
+        if kwargs["attention_kind"] == MLASplitAttentionKind.HISTORY:
+            torch.testing.assert_close(q, q_nope)
+            torch.testing.assert_close(q_rope, q_pe)
+            assert kwargs["actual_seq_lengths_kv"] == [2]
+            assert kwargs["actual_seq_lengths"] == [2]
+            assert kwargs["block_table"] is decode.block_table
+            assert kwargs["block_size"] == 2
+            assert kwargs["attn_mask"] is None
+            assert kwargs["sparse_mode"] == 0
+            return history_output, history_lse
+        start = dcp_rank * impl.num_heads
+        torch.testing.assert_close(q, q_nope[:, start : start + impl.num_heads])
+        torch.testing.assert_close(q_rope, q_pe[:, start : start + impl.num_heads])
+        torch.testing.assert_close(k, current_k)
+        torch.testing.assert_close(k_rope, current_pe)
+        assert kwargs["actual_seq_lengths"] == [2]
+        assert kwargs["actual_seq_lengths_kv"] == [2]
+        assert kwargs["attn_mask"] is decode.attn_mask
+        assert kwargs["block_size"] == 0
+        assert kwargs["block_table"] is None
+        assert kwargs["sparse_mode"] == 3
+        return current_output, current_lse
+
+    def communicate(out, lse, size, scatter_dim, group_name, defer_combine):
+        assert active[0] == "main"
+        assert out is history_output and lse is history_lse
+        assert size == dcp_size and scatter_dim == 1 and defer_combine
+        assert group_name == ("dcp-test" if dcp_size > 1 else "")
+        events.append("history_collective")
+        return transferred
+
+    def merge(partials, head_dim, scatter_dim, local_output, local_lse):
+        assert active[0] == "main"
+        assert events[-1] == ("main_wait", "done")
+        assert partials is transferred
+        assert head_dim == 4 and scatter_dim == 1
+        assert local_output is current_output and local_lse is current_lse
+        events.append("merge")
+        # Independent reference counts every history rank and current KV once.
+        history = partials.transpose(1, 2)
+        lses = torch.cat((history[..., 4:], local_lse.unsqueeze(0)), dim=0)
+        values = torch.cat((history[..., :4], local_output.unsqueeze(0)), dim=0)
+        valid = torch.isfinite(lses)
+        weights = torch.softmax(lses.masked_fill(~valid, -torch.inf), dim=0)
+        weights = torch.nan_to_num(weights, nan=0.0)
+        return (torch.where(valid, values, 0.0) * weights).sum(0)
+
+    impl._run_dcp_mtp_split_attention_op = attention
+    impl._v_up_proj_batch_major = Mock(side_effect=lambda x: x)
+    with (
+        patch.object(
+            mla_cp, "_EXTRA_CTX", SimpleNamespace(capturing=workspace_sizes is not None, is_draft_model=False)
+        ),
+        patch.object(mla_cp, "get_graph_params", return_value=graph_params),
+        patch.object(mla_cp.torch_npu, "_npu_fused_infer_attention_score_get_max_workspace", workspace_query),
+        patch.object(mla_cp, "_dcp_mtp_comm_stream", return_value=attn),
+        patch.object(torch.npu, "current_stream", return_value=main),
+        patch.object(torch.npu, "stream", side_effect=on_stream),
+        patch.object(torch.Tensor, "record_stream", autospec=True) as record_stream,
+        patch("torch.ops.vllm.sfa_dcp_a2a_fused", side_effect=communicate) as history_update,
+        patch.object(mla_cp, "fused_sfa_dcp_lse_combine", side_effect=merge) as update,
+        patch("torch_npu.npu_attention_update", side_effect=AssertionError("unexpected NPU update")),
+    ):
+        metadata = SimpleNamespace(decode=decode, causal=True)
+        assert impl._decode_requires_current_kv(metadata)
+        assert not AscendMLAImpl.__new__(AscendMLAImpl)._decode_requires_current_kv(metadata)
+        actual = impl._forward_decode(
+            DecodeMLAPreprocessResult(
+                ql_nope=q_nope,
+                q_pe=q_pe,
+                k_nope=torch.zeros(1, 1, 2, 4),
+                k_pe=torch.zeros(1, 1, 2, 2),
+                current_k_nope=current_k,
+                current_k_pe=current_pe,
+            ),
+            2,
+            metadata,
+        )
+    torch.testing.assert_close(actual, expected)
+    assert workspace_query.call_count == (2 if workspace_sizes is not None and cached_size is None else 0)
+    history_update.assert_called_once()
+    update.assert_called_once()
+    assert record_stream.call_count == 7
+    assert events == [
+        MLASplitAttentionKind.HISTORY,
+        "history_ready",
+        ("attn_wait", "ready"),
+        MLASplitAttentionKind.CURRENT,
+        "attn_done",
+        "history_collective",
+        ("main_wait", "done"),
+        "merge",
+    ]

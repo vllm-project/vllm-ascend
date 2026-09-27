@@ -123,6 +123,8 @@ def _extract_step_logprobs(request_output):
     extra_kwargs={
         "load_format": "dummy",
         "hf_overrides": SMALL_QWEN3_OVERRIDES,
+        "enable_chunked_prefill": False,
+        "block_size": 128,
     },
 )
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: pytest.MonkeyPatch):

@@ -18,11 +18,15 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-235B-A22B-Instruct` (BF16 version): requires 1 Atlas 800 A3 (64G x 16) node or 2 Atlas 800 A2 (64G x 8) nodes. [Model Weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/).
-- `Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot` (quantized version used by single-node validation): requires 1 Atlas 800 A3 (64G x 16) node. [Model Weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot).
-- `Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8` (quantized version): requires 1 Ascend 950DT (96G x 8) node. [Model Weight](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8)
+|  Weight Version | Hardware Requirements | Download Links |
+|-----------------|-----------------------|----------------|
+| `Qwen3-VL-235B-A22B-Instruct` (BF16 version)  | 1 Atlas 800 A3 (64G x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/) |
+| `Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot` (quantized version used by single-node validation) | 1 Atlas 800 A3 (64GB x 16) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot) |
+| `Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8` (quantized version) | 1 950DT Products (96GB x 8) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8) |
 
 It is recommended to download the model weight to a shared directory across multiple nodes.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -34,12 +38,12 @@ If you want to deploy the model in a multi-node environment, verify the communic
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-=== "Ascend 950DT series"
+=== "950DT Products"
 
     Start the docker image on your each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950DT
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -201,9 +205,9 @@ For more details, please refer to the [Installation Guide](../../getting_started
 
 Single-node deployment runs both Prefill and Decode on the same node. The W8A8 version needs `--quantization ascend`.
 
-=== "Ascend 950DT series"
+=== "950DT Products"
 
-    Run the following script to execute online inference on 1 Ascend 950DT (96G x 8). The quantized version (`Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8`) can be deployed on a single Ascend 950DT node.
+    Run the following script to execute online inference on 1 950DT Products (96G x 8). The quantized version (`Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8`) can be deployed on a single 950DT Products node.
 
     ```shell
     #!/bin/sh
@@ -216,7 +220,7 @@ Single-node deployment runs both Prefill and Decode on the same node. The W8A8 v
 
     # Reduce memory fragmentation and avoid out-of-memory errors.
 
-
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8 \
       --host 0.0.0.0 \
       --port 8000 \
@@ -253,7 +257,7 @@ Single-node deployment runs both Prefill and Decode on the same node. The W8A8 v
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # Reduce memory fragmentation and avoid out-of-memory errors.
-
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
       --host 0.0.0.0 \
       --port 8000 \
@@ -319,7 +323,7 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --host 0.0.0.0 \
   --port 8000 \
@@ -369,7 +373,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # The value of node0_ip must be consistent with local_ip on node 0.
 node0_ip="xxxx"
 
-
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --host 0.0.0.0 \
   --port 8000 \
@@ -443,6 +447,7 @@ export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --host 0.0.0.0 \
   --port 8080 \
@@ -484,6 +489,7 @@ export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --host 0.0.0.0 \
   --port 8080 \

@@ -69,6 +69,49 @@ This keeps cross-module results deterministic. Use `--index-workers 1` to use th
 The CI implementation does not write or restore persistent repository-index or file-fragment data. This avoids relying
 on state that is not preserved by the job's ephemeral container.
 
+### Avoiding repeated work within a run
+
+The scope interpreter copies an already-normalized state when there is only one execution path, instead of sorting
+and merging every name again. Multiple paths still use the existing binding-alternative merge.
+
+Each base/head snapshot computes a module or class's final namespace once and reuses named bindings, fingerprints,
+and resolved API contracts. Call-contract reuse is keyed by the target expression, access kind, receiver type,
+member, and invocation kind; argument binding and return-use checks still run separately for every call site.
+Snapshots remain isolated between revisions and analysis branches.
+
+Each snapshot lazily starts one `git cat-file --batch` process and requests source blobs only when needed, avoiding
+a separate `git show` process for every file. Responses are read as length-delimited binary data before decoding, so
+empty files, CRLF content, and non-ASCII source retain the previous behavior. Malformed or failed Git reads raise an
+analysis error rather than being treated as missing symbols. Git processes and temporary stderr streams are closed
+on successful completion and on exceptions. This does not introduce a persistent source cache or preload all files.
+
+Execution-path state copies also reuse their immutable binding tuples while retaining independent dictionaries.
+
+Repository indexing derives always-bound module names from the final namespace already computed for that module,
+instead of interpreting its body again. Decorator and direct-call resolution reuse namespace states for identical
+statement prefixes and version-guard settings. Each prefix memo is limited to 256 entries and is replaced for each
+module. It stores AST objects rather than numeric IDs and returns independent state dictionaries. Only namespace
+states are reused: expression resolution and caller-specific fallback rules still run for every query. Source trees
+are treated as immutable for the lifetime of the memo; nothing is shared between revisions, workers, or CI runs.
+
+Symbol alias resolution checks the full qualified name and successively shorter dot-delimited prefixes directly in
+the alias table. This preserves longest-prefix lookup and cycle protection without sorting and scanning all aliases
+for each query. The current table is read on every lookup, including while index finalization is updating aliases.
+
+Import checks first resolve symbol presence without computing unused signatures or return contracts. Full endpoint
+details are still produced for findings, and all affected import locations are retained. Import discovery also reuses
+the already-parsed vllm-ascend module trees, with a source-reading fallback for files absent from the index.
+
+Import presence is determined from the final module namespace, not from whether an assignment or import appeared
+earlier in the file. A later `del` removes a binding; an annotation without a value does not create one or remove an
+existing one. Constants, functions, classes, and re-exports that remain bound can be imported. A P1 requires presence
+at the PR base and absence at its head to be proven. Path-dependent bindings, star imports, and module `__getattr__`
+exports remain unresolved when their presence cannot be established, rather than being treated as definite removals.
+Package-submodule fallback is retained when a missing package attribute can still be imported as a submodule.
+
+These are in-process optimizations only: no pickle files, persistent cache, new environment variables, or reduced
+analysis scope are required. Complete source indexing and input verification still run for every PR.
+
 ### Classification and result
 
 New incompatibilities are reported as introduced breaks. Historical incompatibilities are not attributed to the PR,

@@ -12,11 +12,15 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 ### 3.1 Model Weight
 
-- `Qwen3-Embedding-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B)
-- `Qwen3-Embedding-4B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B)
-- `Qwen3-Embedding-0.6B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B)
+|  Weight Version        | Download Links |
+|------------------------|----------------|
+| `Qwen3-Embedding-8B`  | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B) |
+| `Qwen3-Embedding-4B`   | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B) |
+| `Qwen3-Embedding-0.6B` | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B) |
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -117,6 +121,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     ```shell
     #!/bin/sh
+    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-Embedding-0.6B  \
       --served-model-name Qwen/Qwen3-Embedding-0.6B  \
       --runner pooling \
@@ -128,6 +133,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     ```shell
     #!/bin/sh
+    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-Embedding-0.6B  \
       --served-model-name Qwen/Qwen3-Embedding-0.6B  \
       --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \
@@ -203,7 +209,7 @@ For more usage examples, please reference the [examples](https://github.com/vllm
 
 Here are two accuracy evaluation methods.
 
-### Using MTEB
+### 7.1 Using MTEB
 
 1. Refer to [MTEB](https://docs.mteb.org/) for details.
 
@@ -239,7 +245,7 @@ Here are two accuracy evaluation methods.
 
 ## 8 Performance Evaluation
 
-### Using vLLM Benchmark
+### 8.1 Using vLLM Benchmark
 
 Run performance of `Qwen3-Embedding-0.6B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more details.

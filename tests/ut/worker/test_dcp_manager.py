@@ -39,6 +39,18 @@ def _make_dcp_manager(
     return manager
 
 
+def _enable_batch_info_tracking(
+    manager: DCPManager,
+    max_num_reqs: int = 4,
+) -> None:
+    manager.decode_threshold = 8
+    manager.pd_decode_recompute_scheduler_enabled = False
+    manager.query_lens_full = SimpleNamespace(
+        cpu=torch.full((max_num_reqs,), -1, dtype=torch.int32),
+        copy_to_gpu=MagicMock(),
+    )
+
+
 @pytest.mark.parametrize(
     "dcp_world_size, interleave_size, expected",
     [
@@ -95,6 +107,124 @@ def test_get_dcp_local_seq_lens_interleaves_kv_across_ranks(
     actual = manager._get_dcp_local_seq_lens(seq_lens)
 
     assert torch.equal(actual, torch.tensor(expected))
+
+
+@pytest.mark.parametrize(
+    ("seq_len", "expected_seq_len", "expected_num_computed_tokens"),
+    [
+        (4, 5, [1, 3]),
+        (16, 16, [12, 14]),
+    ],
+)
+def test_prepare_uniform_decode_dummy_run_metadata(
+    seq_len: int,
+    expected_seq_len: int,
+    expected_num_computed_tokens: list[int],
+) -> None:
+    manager = _make_dcp_manager(
+        dcp_world_size=2,
+        dcp_rank=0,
+        interleave_size=1,
+    )
+    _enable_batch_info_tracking(manager)
+    num_scheduled_tokens = np.array([4, 2], dtype=np.int32)
+    stale_num_computed_tokens = np.array([0, 128], dtype=np.int32)
+    stale_num_prompt_tokens = np.array([64, 128], dtype=np.int32)
+
+    metadata = manager.prepare_dummy_run_metadata(
+        num_scheduled_tokens=num_scheduled_tokens,
+        num_reqs=2,
+        seq_len=seq_len,
+        num_computed_tokens=stale_num_computed_tokens,
+        num_prompt_tokens=stale_num_prompt_tokens,
+        uniform_decode=True,
+    )
+
+    assert metadata is not None
+    assert metadata.seq_len == expected_seq_len
+    np.testing.assert_array_equal(
+        metadata.seq_lens_cpu,
+        np.full(2, expected_seq_len, dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        metadata.num_computed_tokens_cpu,
+        np.array(expected_num_computed_tokens, dtype=np.int32),
+    )
+    np.testing.assert_array_equal(manager.decode_req_mask, [True, True])
+    assert manager.num_decode_reqs == 2
+    assert manager.num_prefill_reqs == 0
+    assert manager.num_decode_tokens == 6
+    assert torch.equal(
+        manager.query_lens_full.cpu,
+        torch.tensor([4, 2, 0, 0], dtype=torch.int32),
+    )
+    manager.query_lens_full.copy_to_gpu.assert_called_once_with()
+    np.testing.assert_array_equal(stale_num_computed_tokens, [0, 128])
+    np.testing.assert_array_equal(stale_num_prompt_tokens, [64, 128])
+
+
+def test_prepare_non_uniform_dummy_run_metadata_uses_input_batch_state() -> None:
+    manager = _make_dcp_manager(
+        dcp_world_size=2,
+        dcp_rank=0,
+        interleave_size=1,
+    )
+    _enable_batch_info_tracking(manager)
+    num_scheduled_tokens = np.array([2, 16], dtype=np.int32)
+    num_computed_tokens = np.array([64, 32], dtype=np.int32)
+    num_prompt_tokens = np.array([64, 48], dtype=np.int32)
+
+    metadata = manager.prepare_dummy_run_metadata(
+        num_scheduled_tokens=num_scheduled_tokens,
+        num_reqs=2,
+        seq_len=16,
+        num_computed_tokens=num_computed_tokens,
+        num_prompt_tokens=num_prompt_tokens,
+        uniform_decode=False,
+    )
+
+    assert metadata is None
+    np.testing.assert_array_equal(manager.decode_req_mask, [True, False])
+    assert manager.num_decode_reqs == 1
+    assert manager.num_prefill_reqs == 1
+    assert manager.num_decode_tokens == 2
+    assert torch.equal(
+        manager.query_lens_full.cpu,
+        torch.tensor([2, 16, 0, 0], dtype=torch.int32),
+    )
+    manager.query_lens_full.copy_to_gpu.assert_called_once_with()
+
+
+@pytest.mark.parametrize("prefill_flags", [[False, False], [True, False]])
+def test_prepare_legacy_dcp_metadata_uses_full_query_kv_length(prefill_flags) -> None:
+    manager = _make_dcp_manager(
+        dcp_world_size=2,
+        dcp_rank=0,
+        interleave_size=1,
+    )
+    common_attn_metadata = SimpleNamespace(
+        num_reqs=2,
+        _seq_lens_cpu=torch.tensor([133, 261], dtype=torch.int32),
+        seq_lens=torch.tensor([133, 261], dtype=torch.int32),
+        is_prefilling=torch.tensor(prefill_flags),
+        context_parallel_metadata=None,
+    )
+
+    common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 5, 10], dtype=torch.int32)
+    common_attn_metadata.max_query_len = 5
+    manager.prepare_legacy_dcp_metadata(common_attn_metadata)
+
+    metadata = common_attn_metadata.context_parallel_metadata
+    np.testing.assert_array_equal(
+        metadata.num_computed_tokens_of_dcp,
+        np.array([[67, 66], [131, 130]], dtype=np.int32),
+    )
+    assert torch.equal(
+        metadata.query_lens_cpu,
+        torch.tensor([5, 5], dtype=torch.int32),
+    )
+    assert metadata.max_query_len == 5
+    assert metadata.dcp_mtp_attn_mask is None
 
 
 @pytest.mark.parametrize("dcp_rank", [0, 1])
@@ -172,63 +302,39 @@ def test_update_spec_decode_drafting_metadata_skips_prefill() -> None:
 
 
 def test_prepare_spec_decode_drafting_metadata_transitions_to_decode() -> None:
-    manager = object.__new__(DCPManager)
-    manager.dcp_world_rank = 1
-    local_seq_lens = torch.tensor([[4, 3], [6, 5]], dtype=torch.int32)
-    manager._get_dcp_local_seq_lens = MagicMock(return_value=local_seq_lens)
-    mtp_mask = torch.ones((2, 4, 16), dtype=torch.bool)
+    manager = _make_dcp_manager(2, 1, 1)
     original_dcp_metadata = AscendDCPMetadata(
         num_computed_tokens_of_dcp=[[3, 2], [5, 4]],
         query_lens_cpu=torch.tensor([8, 4], dtype=torch.int32),
         max_query_len=8,
-        dcp_mtp_attn_mask=mtp_mask,
     )
     common_attn_metadata = SimpleNamespace(
         context_parallel_metadata=original_dcp_metadata,
         query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
         is_prefilling=torch.tensor([True, True]),
+        _seq_lens_cpu=torch.tensor([8, 12], dtype=torch.int32),
+        seq_lens=torch.tensor([7, 11], dtype=torch.int32),
+        seq_lens_cpu=None,
+        num_reqs=2,
+        dcp_local_seq_lens_cpu=torch.tensor([99, 99], dtype=torch.int32),
     )
-    seq_lens = torch.tensor([7, 11], dtype=torch.int32)
-    seq_lens_cpu = torch.tensor([6, 10], dtype=torch.int32)
 
     with patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=True):
         manager.prepare_spec_decode_drafting_cp_metadata(
             common_attn_metadata=common_attn_metadata,
             kv_cache_spec=object(),
-            seq_lens=seq_lens,
-            seq_lens_cpu=seq_lens_cpu,
+            seq_lens=torch.tensor([7, 11], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([6, 10], dtype=torch.int32),
             draft_index=1,
         )
 
-    draft_dcp_metadata = common_attn_metadata.context_parallel_metadata
-    assert draft_dcp_metadata is not original_dcp_metadata
-    assert torch.equal(
-        draft_dcp_metadata.query_lens_cpu,
-        torch.tensor([1, 1], dtype=torch.int32),
-    )
-    assert draft_dcp_metadata.max_query_len == 1
-    np.testing.assert_array_equal(
-        draft_dcp_metadata.num_computed_tokens_of_dcp,
-        local_seq_lens.numpy(),
-    )
-    assert torch.equal(
-        draft_dcp_metadata.draft_cp_seq_len,
-        torch.tensor([3, 5], dtype=torch.int32),
-    )
-    assert torch.equal(
-        draft_dcp_metadata.draft_base_seq_lens,
-        torch.tensor([13, 13], dtype=torch.int32),
-    )
-    assert draft_dcp_metadata.dcp_mtp_attn_mask is mtp_mask
+    # The common global lengths have already advanced; do not add another step.
+    assert common_attn_metadata.dcp_local_seq_lens_cpu.tolist() == [4, 6]
+    assert common_attn_metadata.dcp_local_seq_lens.tolist() == [3, 5]
+    assert common_attn_metadata.context_parallel_metadata is None
     assert not torch.any(common_attn_metadata.is_prefilling)
     assert original_dcp_metadata.max_query_len == 8
     assert original_dcp_metadata.draft_cp_seq_len is None
-    assert original_dcp_metadata.draft_base_seq_lens is None
-    manager._get_dcp_local_seq_lens.assert_called_once()
-    assert torch.equal(
-        manager._get_dcp_local_seq_lens.call_args.args[0],
-        torch.tensor([15, 15], dtype=torch.int32),
-    )
 
 
 def test_update_spec_decode_drafting_metadata_requires_mla_decode() -> None:

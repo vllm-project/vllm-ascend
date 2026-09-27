@@ -74,7 +74,7 @@ through MemFabric. Optional LIC8 scale data follows the indexer destination.
 The MemFabric data path is selected at launch through
 `kv_connector_extra_config["memfabric_transfer_protocol"]` instead of hardware
 detection: `sdma` (default) and `device_rdma` target A3 series nodes, while
-`device_urma` targets A5 series nodes. Prefill and Decode must use the same
+`device_urma` targets 950PR&950DT Products nodes. Prefill and Decode must use the same
 protocol.
 
 ### Transfer granularity

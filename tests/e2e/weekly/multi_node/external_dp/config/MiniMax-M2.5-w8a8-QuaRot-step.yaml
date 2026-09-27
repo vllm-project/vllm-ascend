@@ -10,6 +10,7 @@ env_common: &env_common
     VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
     ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+    VLLM_USE_MODELSCOPE: "true"
     SERVER_PORT: "${PORT}"
 
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
@@ -73,7 +74,7 @@ templates:
       - --enforce-eager
       - --no-enable-prefix_caching
       - --speculative_config
-      - '{"method":"eagle3", "model":"popowww/MiniMax-M2.5-Eagle3", "num_speculative_tokens":3}'
+      - '{"method":"eagle3", "model":"/root/.cache/huggingface/hub/models--IamBerbec--MiniMax-M2.5-Eagle3/snapshots/617519890c5acff825a14b5a96cf03ed72f3c524", "num_speculative_tokens":3}'
       - --additional-config
       - '{"recompute_scheduler_enable":true}'
       - --kv-transfer-config
@@ -126,7 +127,7 @@ templates:
       - --quantization
       - "ascend"
       - --speculative_config
-      - '{"method":"eagle3", "model":"popowww/MiniMax-M2.5-Eagle3", "num_speculative_tokens":3}'
+      - '{"method":"eagle3", "model":"/root/.cache/huggingface/hub/models--IamBerbec--MiniMax-M2.5-Eagle3/snapshots/617519890c5acff825a14b5a96cf03ed72f3c524", "num_speculative_tokens":3}'
       - --async-scheduling
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'

@@ -72,11 +72,7 @@ def build_mlp_compute_input(
         raise ValueError("fused_experts_input.quant.mxfp is required for MXFP quant types.")
 
     expanded_row_idx = getattr(token_dispatch_output.combine_metadata, "expanded_row_idx", None)
-    activation = (
-        fused_experts_input.activation
-        if moe_config is None
-        else getattr(moe_config, "activation", fused_experts_input.activation)
-    )
+    activation = fused_experts_input.activation
     activation_situ_beta = None if moe_config is None else moe_config.activation_situ_beta
     activation_situ_linear_beta = None if moe_config is None else moe_config.activation_situ_linear_beta
     # Prefer the per-layer swiglu params threaded through the fused-experts

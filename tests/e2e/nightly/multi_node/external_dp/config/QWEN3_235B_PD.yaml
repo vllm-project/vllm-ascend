@@ -1,5 +1,5 @@
 test_name: "QWEN3_235B_PD"
-model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
 num_nodes: 3
 npu_per_node: 16
 
@@ -68,8 +68,6 @@ env_decode: &env_decode
   DISABLE_L2_CACHE: "1"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   VLLM_TORCH_PROFILER_WITH_STACK: 0
-  EXPERT_MAP_RECORD: "true"
-  DYNAMIC_EPLB: "true"
   HCCL_BUFFSIZE: "1024"
 
 templates:
@@ -149,8 +147,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[6,12,18]}'
       - --additional-config
-      # #5533 renamed and nested the legacy EPLB keys below.
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":4000,"algorithm_execution_interval":200,"num_redundant_experts":0},"enable_mlapo":true}'
+      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 1, "tp_size": 16}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -191,8 +188,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[6,12,18]}'
       - --additional-config
-      # #5533 renamed and nested the legacy EPLB keys below.
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":4000,"algorithm_execution_interval":200,"num_redundant_experts":0},"enable_mlapo":true}'
+      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 1, "tp_size": 16}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 

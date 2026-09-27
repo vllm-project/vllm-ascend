@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput
@@ -267,6 +268,7 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
+        self._mega_moe_hccl_state_stale = False
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
@@ -288,6 +290,57 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
+
+    def prepare_hccl_teardown(self) -> bool:
+        """Invalidate the MegaMoe context before its MC2 group is destroyed."""
+        symm_buffer = getattr(self, "mega_moe_symm_buffer", None)
+        if symm_buffer is None:
+            return True
+
+        context_manager = getattr(symm_buffer, "_ctx_manager", None)
+        update_group = getattr(context_manager, "update_group", None)
+        if not callable(update_group):
+            raise RuntimeError(
+                "The installed cann_ops_transformer MegaMoe context manager "
+                "does not expose update_group(); refusing to tear down its HCCL group."
+            )
+
+        self._mega_moe_hccl_state_stale = True
+        logger.info("Marked MegaMoe HCCL runtime context stale before MC2 group teardown.")
+        return True
+
+    def refresh_hccl_runtime_state(self) -> bool:
+        """Rebind a stale MegaMoe context to the restored MC2 communicator."""
+        symm_buffer = getattr(self, "mega_moe_symm_buffer", None)
+        if symm_buffer is None or not self._mega_moe_hccl_state_stale:
+            return True
+
+        device_group = get_mc2_group().device_group
+        local_rank = torch.distributed.get_rank(group=device_group)
+        backend = device_group._get_backend(torch.device("npu"))
+        group_name = backend.get_hccl_comm_name(local_rank)
+        context_manager = symm_buffer._ctx_manager
+
+        # The context tensor was created under inference mode during model
+        # initialization. CANN updates it in place, so preserve that mode here.
+        with torch.inference_mode():
+            context_manager.update_group(group_name, symm_buffer.context)
+        symm_buffer.group = device_group
+        symm_buffer.rank_id = local_rank
+        symm_buffer.group_name = group_name
+        symm_buffer.ep_world_size = torch.distributed.get_world_size(group=device_group)
+        symm_buffer.ccl_buffer_size = context_manager.ccl_buffer_size
+        torch.distributed.barrier(
+            group=device_group,
+            device_ids=[torch.npu.current_device()],
+        )
+        self._mega_moe_hccl_state_stale = False
+        logger.info(
+            "Refreshed MegaMoe HCCL runtime context after MC2 group restore: rank=%d, world_size=%d.",
+            local_rank,
+            symm_buffer.ep_world_size,
+        )
+        return True
 
     def _init_mega_moe_symm_buffer(
         self,
@@ -333,6 +386,9 @@ class FusedMC2CommImpl(MoECommMethod):
             # P nodes and PD-mixed nodes use the configured value. This keeps
             # the existing memory/performance tradeoff for prefill workloads.
             max_recv_token_num = get_ascend_config().mega_moe_max_tokens
+            # absolute_safe_max_recv_token_num is the max value required by mega moe api
+            if max_recv_token_num > absolute_safe_max_recv_token_num:
+                max_recv_token_num = absolute_safe_max_recv_token_num
             logger.warning_once(
                 "MegaMoe symm buffer: max_recv_token_num is set from "
                 "mega_moe_max_tokens=%d (reference value) on a P or PD-mixed "
@@ -416,20 +472,32 @@ class FusedMC2CommImpl(MoECommMethod):
 
         activation_clamp = self.swiglu_limit if self.swiglu_limit > 0 else None
         x_active_mask = None
-        if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
-            # mc2_mask comes from the reserved bool buffer in
-            # ascend_forward_context.set_mc2_mask. MegaMoe wants int8 as
-            # the per-token active mask, so cast only when the dtype does
-            # not already match — saves the kernel launch when an upstream
-            # change ever flips the reserved buffer to int8.
-            raw_mask = fused_experts_input.routing.mc2_mask
-            if raw_mask.dtype == torch.int8:
-                x_active_mask = raw_mask.contiguous()
-            else:
-                x_active_mask = raw_mask.to(torch.int8).contiguous()
+        # Ascend 950 (A5) MegaMoe only support a null x_active_mask, and it
+        # must be passed as None. But on A2/A3 it must be valid.
+        if get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+            x_active_mask = None
+        else:
+            if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
+                # mc2_mask comes from the reserved bool buffer in
+                # ascend_forward_context.set_mc2_mask. MegaMoe wants int8 as
+                # the per-token active mask, so cast only when the dtype does
+                # not already match — saves the kernel launch when an upstream
+                # change ever flips the reserved buffer to int8.
+                raw_mask = fused_experts_input.routing.mc2_mask
+                if raw_mask.dtype == torch.int8:
+                    x_active_mask = raw_mask.contiguous()
+                else:
+                    x_active_mask = raw_mask.to(torch.int8).contiguous()
         # A8W4-INT precision-compensation biases B1/B2 (l1_bias/l2_bias).
         l1_bias = weights.w1_scale_bias
         l2_bias = weights.w2_scale_bias
+        activation_kwargs = moe_utils.select_mega_moe_activation_kwargs(
+            self.mega_moe,
+            activation=fused_experts_input.activation,
+            activation_clamp=activation_clamp,
+            swiglu_alpha=self.swiglu_alpha,
+            swiglu_beta=self.swiglu_beta,
+        )
 
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
@@ -443,9 +511,9 @@ class FusedMC2CommImpl(MoECommMethod):
             l1_bias=l1_bias,
             l2_bias=l2_bias,
             x_active_mask=x_active_mask,
-            activation_clamp=activation_clamp,
             weight1_type=weight_type,
             weight2_type=weight_type,
+            **activation_kwargs,
         )
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a

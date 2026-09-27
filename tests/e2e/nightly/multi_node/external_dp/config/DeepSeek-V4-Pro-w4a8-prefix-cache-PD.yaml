@@ -63,7 +63,6 @@ env_prefill: &env_prefill
   <<: *env_common
   HCCL_CONNECT_TIMEOUT: "6000"
   HCCL_BUFFSIZE: "1024"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
 
 env_decode: &env_decode
@@ -116,11 +115,13 @@ templates:
       - "ascend"
       - --block-size
       - "32"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --enforce-eager
       - --speculative-config
       - '{"num_speculative_tokens": 1,"method": "mtp"}'
       - --additional-config
-      - '{"enable_cpu_binding": true, "enable_dsa_cp": true,"enable_fused_mc2":1}'
+      - '{"enable_cpu_binding": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 
@@ -168,11 +169,13 @@ templates:
       - "ascend"
       - --block-size
       - "32"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --enforce-eager
       - --speculative-config
       - '{"num_speculative_tokens": 1,"method": "mtp"}'
       - --additional-config
-      - '{"enable_cpu_binding": true, "enable_dsa_cp": true,"enable_fused_mc2":1}'
+      - '{"enable_cpu_binding": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 
@@ -206,6 +209,8 @@ templates:
       - --async-scheduling
       - --block-size
       - "32"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --no-enable-prefix-caching
       - --tokenizer-mode
       - "deepseek_v4"
@@ -261,6 +266,8 @@ templates:
       - --async-scheduling
       - --block-size
       - "32"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --no-enable-prefix-caching
       - --tokenizer-mode
       - "deepseek_v4"
@@ -287,28 +294,6 @@ templates:
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
 
 benchmarks:
-  perf_TPOT50_128k_1_prefix_warmup:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 4
-    max_out_len: 1
-    batch_size: 4
-    request_rate: 0
-    baseline: 0
-    threshold: 0.95
-  perf_TPOT50_128k_1_prefix90:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 192
-    max_out_len: 1024
-    batch_size: 48
-    request_rate: 1
-    baseline: 869.13
-    threshold: 0.95
   acc_aime2025:
     case_type: accuracy
     dataset_path: vllm-ascend/aime2025
@@ -321,3 +306,25 @@ benchmarks:
     batch_size: 32
     baseline: 90
     threshold: 10
+  perf_TPOT50_128k_1_prefix_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 48
+    max_out_len: 128
+    batch_size: 48
+    request_rate: 0
+    baseline: 0
+    threshold: 0.95
+  perf_TPOT50_128k_1_prefix90:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 192
+    max_out_len: 1024
+    batch_size: 48
+    request_rate: 1
+    baseline: 792.58
+    threshold: 0.95

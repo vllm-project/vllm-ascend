@@ -18,10 +18,14 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 ### 3.1 Model Weight
 
-- `Qwen3.6-35B-A3B` (BF16 version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B).
-- `Qwen3.6-35B-A3B-w8a8` (quantized version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8).
+|  Weight Version  | Hardware Requirements | Download Links |
+|------------------|-----------------------|----------------|
+| `Qwen3.6-35B-A3B` (BF16 version) | 1 Atlas A3 inference products (64GB x 16) node, 1 Atlas A2 inference products (64GB x 8) node, or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B) |
+| `Qwen3.6-35B-A3B-w8a8` (quantized version) | 1 Atlas A3 inference products (64GB x 16) node, 1 Atlas A2 inference products (64GB x 8) node, or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8) |
 
 It is recommended to download the model weight to `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -183,6 +187,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     sysctl -w kernel.numa_balancing=0
     sysctl kernel.sched_migration_cost_ns=50000
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
       --host 0.0.0.0 \
       --port 8000 \
@@ -219,7 +224,8 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     ```shell
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
       --host 127.0.0.1 \
       --port 8080 \

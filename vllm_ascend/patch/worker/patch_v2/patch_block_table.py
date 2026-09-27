@@ -18,9 +18,9 @@
 #
 from vllm.v1.worker.gpu import model_runner
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
-if is_310p():
+if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
     from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables as AscendBlockTables
 else:
     from vllm_ascend.worker.v2.block_table import AscendBlockTables

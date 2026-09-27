@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import queue
 import threading
 import unittest
 from types import SimpleNamespace
@@ -23,6 +24,11 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+
+# isort: split
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LayerTransferTask,
@@ -53,19 +59,31 @@ def make_worker(
     use_mla=False,
     enable_kv_events=False,
     num_hidden_layers=None,
+    use_kvpp=False,
+    pcp_size=1,
+    pcp_rank=0,
+    pp_size=1,
+    pp_rank=0,
+    dcp_size=1,
+    kv_cache_config=None,
+    pp_partition=None,
+    cache_block_size=16,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
     start_patch(test, f"{module}.get_tensor_model_parallel_world_size", return_value=tp_size)
+    start_patch(test, f"{module}.get_pp_group", return_value=SimpleNamespace(rank_in_group=pp_rank))
     pcp_group = start_patch(test, f"{module}.get_pcp_group")
-    pcp_group.return_value.world_size = 1
-    start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=1)
+    pcp_group.return_value.world_size = pcp_size
+    pcp_group.return_value.rank_in_group = pcp_rank
+    start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=dcp_size)
     start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=0)
     importlib = start_patch(test, f"{module}.importlib")
     importlib.import_module.return_value = MagicMock()
 
     config = MagicMock()
     config.model_config.model = "org/llama-7b"
+    config.model_config.max_model_len = 1024
     config.model_config.use_mla = use_mla
     config.model_config.hf_text_config = MagicMock(spec=[])
     if num_hidden_layers is not None:
@@ -73,21 +91,346 @@ def make_worker(
     config.model_config.get_num_layers.return_value = num_layers
     config.model_config.get_total_num_kv_heads.return_value = num_kv_heads
     config.parallel_config.data_parallel_rank = 0
-    config.parallel_config.rank = 0
-    config.parallel_config.pipeline_parallel_size = 1
+    config.parallel_config.rank = (pp_rank * pcp_size + pcp_rank) * tp_size + tp_rank
+    config.parallel_config.pipeline_parallel_size = pp_size
+    config.parallel_config.tensor_parallel_size = tp_size
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    config.parallel_config.decode_context_parallel_size = dcp_size
+    if pp_partition is not None:
+        config.parallel_config.pipeline_parallel_size = len(pp_partition)
+        config.parallel_config.rank = pp_rank * tp_size + tp_rank
+        config.model_config.get_layers_start_end_indices.side_effect = lambda parallel: (
+            sum(pp_partition[: parallel.rank // tp_size]),
+            sum(pp_partition[: parallel.rank // tp_size + 1]),
+        )
+        config.model_config.get_total_num_hidden_layers.return_value = sum(pp_partition)
+        config.model_config.compute_hash.return_value = "test-model-config"
+        config.cache_config.compute_hash.return_value = "test-cache-config"
+        config.cache_config.cache_dtype = "auto"
+        config.speculative_config = None
+    config.additional_config = {"enable_kvpp": use_kvpp}
     config.kv_transfer_config.kv_role = kv_role
     config.kv_transfer_config.kv_connector_extra_config = {
         "backend": "mooncake",
         **(extra_config or {}),
     }
-    config.cache_config.block_size = 16
+    if kv_cache_config is not None:
+        config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    config.cache_config.block_size = cache_block_size
     config.kv_events_config = None
     if enable_kv_events:
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)
 
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-    return KVPoolWorker(config, use_layerwise=use_layerwise)
+    return KVPoolWorker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
+
+
+class TestPCPPoolWorker(unittest.TestCase):
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
+    def test_replica_keys_geometry_and_thread_ownership(self, send_thread, recv_thread, event):
+        for pcp_size, dcp_size in ((1, 1), (2, 1), (4, 1), (1, 2)):
+            for pcp_rank in range(pcp_size):
+                with self.subTest(pcp_size=pcp_size, pcp_rank=pcp_rank, dcp_size=dcp_size):
+                    worker = make_worker(
+                        self,
+                        kv_role="kv_both",
+                        pcp_size=pcp_size,
+                        pcp_rank=pcp_rank,
+                        dcp_size=dcp_size,
+                        tp_size=dcp_size,
+                        extra_config={"load_async": True},
+                    )
+                    self.assertEqual(worker.grouped_block_size, [16 * dcp_size])
+                    self.assertEqual(worker.hash_block_size, 16 * dcp_size)
+                    key = worker.token_database._make_key_by_hash("h0").to_string()
+                    self.assertEqual(
+                        key,
+                        "llama-7b@dcp:0@head_or_tp_rank:0@pp_rank:0@group:0@cache_role:kv@cache_family:default@h0",
+                    )
+                    worker._start_kv_transfer_threads()
+                    self.assertEqual(send_thread.call_args.args[5], pcp_rank)
+                    self.assertEqual(send_thread.call_args.args[6], pcp_size)
+                    self.assertIs(recv_thread.call_args.args[1], worker.token_database)
+                    self.doCleanups()
+
+
+class TestLayerwiseAttentionSave(unittest.TestCase):
+    def make_worker(self):
+        plan = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    [f"model.layers.{layer}.attn"],
+                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32),
+                )
+                for layer in range(2)
+            ]
+        )
+        worker = make_worker(self, use_layerwise=True, kv_cache_config=plan)
+        worker.kv_send_thread = MagicMock(request_queue=queue.Queue())
+        worker.kv_recv_thread = MagicMock(request_queue=queue.Queue())
+        return worker
+
+    def test_single_group_recurrent_layer_keeps_post_compute_save(self):
+        plan = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["model.layers.7.attn"],
+                    MambaSpec(
+                        block_size=16,
+                        shapes=((8,), (8,)),
+                        dtypes=(torch.float32, torch.float32),
+                        mamba_cache_mode="align",
+                    ),
+                )
+            ]
+        )
+        worker = make_worker(self, num_layers=1, use_layerwise=True, kv_cache_config=plan)
+        worker.kv_recv_thread = MagicMock()
+        worker.layer_load_finished_events = [threading.Event()]
+        gate = SimpleNamespace(on_start=None, on_finish=None)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.reset_attention_compute_start_gate",
+            return_value=gate,
+        ):
+            worker.wait_for_layer_load()
+        self.assertFalse(worker.use_hybrid)
+        self.assertEqual(worker._recurrent_layers, {0})
+        self.assertIsNone(gate.on_start)
+
+    def test_pp_maps_global_mamba_layer_to_local_post_compute_save(self):
+        from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+        full_spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+        mamba_spec = MambaSpec(
+            block_size=16,
+            shapes=((8,), (8,)),
+            dtypes=(torch.float32, torch.float32),
+            mamba_cache_mode="align",
+        )
+        for wrapped in (False, True):
+            with self.subTest(wrapped=wrapped):
+                groups = []
+                for layer, spec in zip((2, 3), (full_spec, mamba_spec), strict=True):
+                    layer_name = f"model.layers.{layer}.attn"
+                    group_spec = UniformTypeKVCacheSpecs.from_specs({layer_name: spec}) if wrapped else spec
+                    groups.append(KVCacheGroupSpec([layer_name], group_spec))
+                worker = make_worker(
+                    self,
+                    num_layers=2,
+                    use_layerwise=True,
+                    kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+                    pp_rank=1,
+                    pp_partition=(2, 2),
+                )
+                worker.kv_recv_thread = MagicMock()
+                worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+
+                self.assertEqual(worker.pp_rank, 1)
+                self.assertEqual(worker._global_to_local_layer, {2: 0, 3: 1})
+                self.assertEqual(worker._recurrent_layers, {1})
+
+                full_attention_gate = SimpleNamespace(on_start=None, on_finish=None)
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker."
+                    "reset_attention_compute_start_gate",
+                    return_value=full_attention_gate,
+                ):
+                    worker.wait_for_layer_load()
+                self.assertIsNotNone(full_attention_gate.on_start)
+
+                worker.current_layer = 1
+                mamba_gate = SimpleNamespace(on_start=None, on_finish=None)
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker."
+                    "reset_attention_compute_start_gate",
+                    return_value=mamba_gate,
+                ):
+                    worker.wait_for_layer_load()
+                self.assertIsNone(mamba_gate.on_start)
+                self.assertIsNotNone(mamba_gate.on_finish)
+                self.doCleanups()
+
+    def test_backpressure_bounds_send_without_draining_prefetch(self):
+        worker = self.make_worker()
+        send_queue = worker.kv_send_thread.request_queue
+        limit = worker.layerwise_protocol.send_fence_backlog()
+        for _ in range(limit + 1):
+            send_queue.put(object())
+        worker.kv_recv_thread.request_queue.put(object())
+        finished = threading.Event()
+
+        def fence():
+            worker._finish_attention_window()
+            finished.set()
+
+        thread = threading.Thread(target=fence, daemon=True)
+        thread.start()
+        try:
+            self.assertFalse(finished.wait(timeout=0.05))
+            send_queue.get_nowait()
+            send_queue.task_done()
+            self.assertTrue(finished.wait(timeout=2))
+            self.assertEqual(send_queue.unfinished_tasks, limit)
+            self.assertEqual(worker.kv_recv_thread.request_queue.unfinished_tasks, 1)
+        finally:
+            while not send_queue.empty():
+                send_queue.get_nowait()
+                send_queue.task_done()
+            thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+
+    def test_empty_final_layer_still_waits_for_earlier_put(self):
+        worker = self.make_worker()
+        worker.current_layer = worker.num_layers - 1
+        worker.sync_save_events = [MagicMock() for _ in range(worker.num_layers)]
+        worker.layer_save_finished_events = [threading.Event() for _ in range(worker.num_layers)]
+        send_queue = worker.kv_send_thread.request_queue
+        send_queue.put(object())
+        finished = threading.Event()
+
+        def save():
+            worker.save_kv_layer(AscendConnectorMetadata(set()))
+            finished.set()
+
+        thread = threading.Thread(target=save, daemon=True)
+        thread.start()
+        try:
+            self.assertFalse(finished.wait(timeout=0.05))
+        finally:
+            send_queue.get_nowait()
+            send_queue.task_done()
+            thread.join(timeout=2)
+        self.assertTrue(finished.is_set())
+        self.assertFalse(thread.is_alive())
+
+    def test_send_failure_is_reported_at_attention_boundary(self):
+        worker = self.make_worker()
+        worker.kv_send_thread.raise_if_failed.side_effect = RuntimeError("send failed")
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            worker._finish_attention_window()
+        self.assertTrue(worker._layer_load_aborted.is_set())
+
+
+class TestKVPPPoolWorker(unittest.TestCase):
+    def test_pcp_registers_persistent_owner_layers_and_mtp(self):
+        import torch
+
+        from tests.ut.kvpp_utils import layer_name, make_kvpp_config
+
+        names = [layer_name(index) for index in (9, 10, 11, 12, 17)]
+        for pcp_rank in range(2):
+            for tp_rank in range(2):
+                with self.subTest(pcp_rank=pcp_rank, tp_rank=tp_rank):
+                    worker = make_worker(
+                        self,
+                        tp_rank=tp_rank,
+                        tp_size=2,
+                        pcp_rank=pcp_rank,
+                        pcp_size=2,
+                        num_layers=18,
+                        use_mla=True,
+                        use_kvpp=True,
+                    )
+                    worker.vllm_config = make_kvpp_config(2)
+                    worker.vllm_config.parallel_config.prefill_context_parallel_size = 2
+                    worker._transfer_threads_started = True
+                    caches = {name: torch.zeros((4, 16, 8)) for name in names}
+                    worker.register_kv_caches(caches)
+                    owner = pcp_rank * 2 + tp_rank
+                    expected = [names[owner], names[-1]]
+                    self.assertEqual(worker.kvpp_rank, owner)
+                    self.assertEqual(worker.get_group_tp_size(0), 4)
+                    self.assertEqual(worker.head_or_tp_rank, owner)
+                    self.assertEqual(list(worker.kv_caches), expected)
+                    self.assertEqual(worker.group_num_layers, {0: 2})
+                    self.assertEqual(worker.num_layers, 18)
+                    self.assertEqual(
+                        worker.group_kv_caches_base_addr[0], [caches[name].data_ptr() for name in expected]
+                    )
+                    self.assertEqual(worker.grouped_block_size, [16])
+                    self.assertEqual(worker.hash_block_size, 16)
+                    key = worker.token_database._make_key_by_hash("h0").to_string()
+                    self.assertIn(f"@head_or_tp_rank:{owner}@", key)
+                    self.doCleanups()
+
+    def test_pcp_lookup_requires_every_owner_across_pipeline_stages(self):
+        worker = make_worker(self, tp_size=2, pcp_size=2, pp_size=2, pp_rank=1, use_mla=True, use_kvpp=True)
+        self.assertEqual(worker.pp_rank, 1)
+        for missing_shard in range(8):
+            for missing_block in range(2):
+                with self.subTest(missing_shard=missing_shard, missing_block=missing_block):
+                    exists = [1] * 16
+                    exists[missing_shard * 2 + missing_block] = 0
+                    worker.m_store.exists.return_value = exists
+                    self.assertEqual(worker.lookup_scheduler(32, ["h0", "h1"]), missing_block * 16)
+        worker.m_store.exists.return_value = [1] * 16
+        self.assertEqual(worker.lookup_scheduler(32, ["h0", "h1"]), 32)
+        keys = worker.m_store.exists.call_args.args[0]
+        self.assertEqual(len(set(keys)), 16)
+        for shard in range(8):
+            shard_keys = keys[shard * 2 : shard * 2 + 2]
+            self.assertTrue(all(f"@pp_rank:{shard // 4}@" in key for key in shard_keys))
+            self.assertTrue(all(f"@head_or_tp_rank:{shard % 4}@" in key for key in shard_keys))
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
+    def test_pcp_owner_sends_all_blocks(self, send_thread, recv_thread, event):
+        for pcp_rank in range(2):
+            for tp_rank in range(2):
+                with self.subTest(pcp_rank=pcp_rank, tp_rank=tp_rank):
+                    worker = make_worker(
+                        self,
+                        tp_rank=tp_rank,
+                        tp_size=2,
+                        pcp_rank=pcp_rank,
+                        pcp_size=2,
+                        use_mla=True,
+                        use_kvpp=True,
+                        extra_config={"load_async": True},
+                    )
+                    worker._start_kv_transfer_threads()
+                    # Layer owners are independent shards, so token striping
+                    # over either PCP or replicated TP must be disabled.
+                    self.assertEqual(send_thread.call_args.args[5:7], (0, 1))
+                    self.assertEqual(send_thread.call_args.args[8], 1)
+                    self.assertIs(recv_thread.call_args.args[1], worker.token_database)
+                    self.doCleanups()
+
+    def test_registers_persistent_layers_and_mtp(self):
+        import torch
+
+        from tests.ut.kvpp_utils import layer_name, make_kvpp_config
+
+        for rank in (0, 1):
+            with self.subTest(rank=rank):
+                worker = make_worker(self, tp_rank=rank, tp_size=2, num_layers=18, use_mla=True, use_kvpp=True)
+                worker.vllm_config = make_kvpp_config(2)
+                worker._transfer_threads_started = True
+                names = [layer_name(i) for i in (9, 10, 17)]
+                caches = {name: torch.zeros((4, 16, 8)) for name in names}
+                worker.register_kv_caches(caches)
+                expected = [names[rank], names[2]]
+                self.assertEqual(list(worker.kv_caches), expected)
+                self.assertEqual(worker.group_num_layers, {0: 2})
+                self.assertEqual(worker.num_layers, 18)
+                self.assertEqual(worker.group_kv_caches_base_addr[0], [caches[name].data_ptr() for name in expected])
+                self.assertEqual(worker.head_or_tp_rank, rank)
+                self.assertEqual(worker.put_step, 1)
+
+    def test_lookup_requires_every_tp_shard(self):
+        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True)
+        for exists, expected in (([1, 1, 1, 1], 32), ([1, 1, 1, 0], 16), ([1, 1, 0, 0], 0)):
+            with self.subTest(exists=exists):
+                worker.m_store.exists.return_value = exists
+                self.assertEqual(worker.lookup_scheduler(32, ["h0", "h1"]), expected)
+                keys = worker.m_store.exists.call_args.args[0]
+                self.assertEqual(len(keys), 4)
+                self.assertTrue(all("@head_or_tp_rank:0" in key for key in keys[:2]))
+                self.assertTrue(all("@head_or_tp_rank:1" in key for key in keys[2:]))
 
 
 class _SparseSWAHitManager:
@@ -138,10 +481,12 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
                 self.assertEqual(cls.check_all_layers_exists(None, exists, num_layers), expected)
 
     def test_uses_mamba_kv_cache_inside_uniform_group(self):
+        import torch
         from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
         cls = self._make_worker_class()
-        mamba_spec = MambaSpec(block_size=384, shapes=((1,),), dtypes=(np.dtype("float32"),))
+        # vLLM #53896 now compares page sizes while forming uniform groups.
+        mamba_spec = MambaSpec(block_size=384, shapes=((1,),), dtypes=(torch.float32,))
         uniform_spec = UniformTypeKVCacheSpecs.from_specs({"mamba.layer": mamba_spec})
         self.assertIsNotNone(uniform_spec)
         kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=uniform_spec)])
@@ -609,6 +954,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
     def _patch_all(self):
         """Return a dict of started patches."""
+        self._stop_all()
         patches = {
             "tp_rank": patch(
                 "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank",
@@ -632,6 +978,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         mocks = {}
         for name, p in patches.items():
             mocks[name] = p.start()
+            self.addCleanup(p.stop)
         pcp_group = MagicMock()
         pcp_group.world_size = 1
         mocks["pcp_group"].return_value = pcp_group
@@ -822,9 +1169,14 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         kwargs["invalid_block_ids"].add(7)
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
-    def test_wait_for_save_waits_for_save(self):
+    def test_wait_for_save_submits_batch_without_joining_queue(self):
         worker = self._make_worker()
-        worker.kv_send_thread = MagicMock()
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
+
+        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        worker.kv_send_thread.request_queue = MagicMock()
+        save_batch = MagicMock()
+        worker.kv_send_thread.add_save_batch.return_value = save_batch
 
         req = ReqMeta(
             req_id="r1",
@@ -835,10 +1187,12 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         )
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
-        worker.wait_for_save(meta)
-        worker.kv_send_thread.add_stored_request.assert_called_with("r1")
-        worker.kv_send_thread.add_request.assert_called_once()
-        worker.kv_send_thread.request_queue.join.assert_called_once()
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+        with patch(f"{module}.torch.npu", create=True):
+            worker.wait_for_save(meta)
+        worker.kv_send_thread.add_save_batch.assert_called_once_with([req])
+        worker.kv_send_thread.request_queue.join.assert_not_called()
+        self.assertIs(worker._previous_save_batch, save_batch)
 
     def test_wait_for_save_skip_non_save(self):
         worker = self._make_worker()
@@ -857,7 +1211,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.kv_send_thread.add_stored_request.assert_not_called()
         worker.kv_send_thread.request_queue.join.assert_not_called()
 
-    def test_get_finished_producer(self):
+    def test_get_finished_producer_clears_synchronous_completions(self):
         worker = self._make_worker(kv_role="kv_producer")
 
         send_thread = MagicMock()
@@ -866,8 +1220,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
         meta = AscendConnectorMetadata(set(), set())
         done_s, done_r = worker.get_finished({"r1"}, meta)
-        self.assertIn("r1", done_s)
+        self.assertEqual(done_s, set())
         self.assertEqual(done_r, set())
+        send_thread.get_and_clear_finished_requests.assert_called_once_with()
 
     def test_get_finished_consumer(self):
         worker = self._make_worker(kv_role="kv_consumer")
@@ -1866,6 +2221,40 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         self.assertEqual(len(sizes), 2)
         self.assertEqual(block_ids, [10, 10])
         self.assertTrue(keys[0].endswith(f"@{b'h1'.hex()}"))
+
+    def test_tp_mismatch_pcp_write_ownership(self):
+        for pcp_size in (1, 2, 4):
+            for tp_rank in (0, 1):
+                with self.subTest(pcp_size=pcp_size, tp_rank=tp_rank):
+                    written = []
+                    for pcp_rank in range(pcp_size):
+                        worker = self._make_strided_worker(tp_rank=tp_rank)
+                        worker.pcp_rank, worker.pcp_size = pcp_rank, pcp_size
+                        worker.enable_kv_events = True
+                        worker.kv_send_thread = MagicMock()
+                        worker.kv_send_thread.lookup.side_effect = lambda keys: [False] * len(keys)
+                        worker.m_store = MagicMock()
+                        req = ReqMeta(
+                            req_id="r1",
+                            token_len_chunk=8,
+                            block_ids=[10, 11],
+                            block_hashes=[b"h0", b"h1"],
+                            original_block_size=4,
+                        )
+                        worker._store_kv_tp_mismatch(req)
+                        expected_blocks = [i for i in range(2) if i % pcp_size == pcp_rank]
+                        if expected_blocks:
+                            keys = worker.m_store.put.call_args.args[0]
+                            self.assertEqual(len(keys), 2 * len(expected_blocks))
+                            written.extend(keys)
+                            events = worker.kv_send_thread.update_kv_event.call_args.args[0]
+                            self.assertEqual(len(events), len(req.block_hashes))
+                        else:
+                            worker.m_store.put.assert_not_called()
+                            worker.kv_send_thread.update_kv_event.assert_not_called()
+                        worker.kv_send_thread.dec_stored_request.assert_called_once_with("r1")
+                    self.assertEqual(len(written), 4)
+                    self.assertEqual(len(set(written)), 4)
 
     def test_load_kv_tp_mismatch_calls_backend_get(self):
         worker = self._make_strided_worker()

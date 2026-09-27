@@ -25,7 +25,8 @@ Usage from the repository root (these commands do not execute the blocks):
   python3 tests/e2e/doctests/scripts/doctest_helper.py plan [selection] [image repositories]
 Raw extraction preserves macros; expansion and planning require PyYAML.
 Diff planning compares Git refs but uses working-tree MkDocs values for image tags.
-Manual selections default to none; non-none choices cannot be combined with diff selection.
+Manual selections accept comma-separated values; empty values skip that test type.
+Manual selections cannot be combined with diff selection.
 Use plan --check-resources for PR planning; explicit manual runs remain strict.
 Run the actual tests with scripts/run_doctests.sh under tests/e2e/doctests/.
 """
@@ -53,6 +54,8 @@ DOCTEST_CODE_FENCE_RE = re.compile(r"^(?P<indent>[ \t]*)```(?:bash|python)[ \t]*
 MKDOCS_EXTRA_MACRO_RE = re.compile(r"{{\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*}}")
 
 DOCTEST_OSES = ("ubuntu", "openeuler")
+QUICKSTART_DEVICES = ("a2", "310p")
+INSTALLATION_METHODS = ("pip", "uv", "source")
 INSTALLATION_OS_IMAGE_TAGS = {
     "ubuntu": "ubuntu22.04",
     "openeuler": "openeuler24.03",
@@ -167,10 +170,8 @@ INSTALLATION_UV_MARKERS = (
 INSTALLATION_SOURCE_MARKERS = ("installation-source-install",)
 
 SHARED_DOCTEST_PATHS = {
-    ".github/workflows/schedule_doctest.yaml",
-    "tests/e2e/doctests/scripts/common.sh",
-    "tests/e2e/doctests/scripts/run_doctests.sh",
-    "tests/e2e/doctests/scripts/doctest_helper.py",
+    ".github/workflows/schedule_doc_getting_started_test.yaml",
+    "tests/e2e/doctests/scripts",
 }
 QUICKSTART_TEST_SCRIPT = "tests/e2e/doctests/001-quickstart-test.sh"
 INSTALLATION_TEST_SCRIPT = "tests/e2e/doctests/002-installation-test.sh"
@@ -178,6 +179,17 @@ INSTALLATION_TEST_SCRIPT = "tests/e2e/doctests/002-installation-test.sh"
 
 class DoctestError(ValueError):
     pass
+
+
+def parse_manual_selection(value: str, choices: tuple[str, ...], name: str) -> list[str]:
+    """Parse a comma-separated manual selection, with an empty value meaning no tests."""
+    if not value.strip():
+        return []
+    selected = [item.strip() for item in value.split(",")]
+    invalid = [item for item in selected if item not in choices]
+    if invalid:
+        raise DoctestError(f"Invalid {name}: {', '.join(invalid)}. Choose from: {', '.join(choices)}.")
+    return list(dict.fromkeys(selected))
 
 
 def extract_doctest_block(text: str, marker: str, source: str = "input") -> str | None:
@@ -293,10 +305,24 @@ def doctest_block_changed(base_text: str | None, head_text: str | None, marker: 
     return base_block != head_block
 
 
-def get_changed_paths(base: str, head: str) -> set[str]:
-    """Return changed repository paths and fail if the Git refs cannot be compared."""
+def get_merge_base(base: str, head: str) -> str:
+    """Return the common ancestor used as the pull request comparison base."""
     result = subprocess.run(
-        ["git", "diff", "--name-only", "--no-renames", base, head, "--"],
+        ["git", "merge-base", base, head],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise DoctestError(result.stderr.strip() or f"Cannot find a merge base for {base} and {head}.")
+    return result.stdout.strip()
+
+
+def get_changed_paths(base: str, head: str) -> set[str]:
+    """Return paths changed by the pull request using a three-dot comparison."""
+    result = subprocess.run(
+        ["git", "diff", "--name-only", "--no-renames", f"{base}...{head}", "--"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -330,20 +356,23 @@ def any_doctest_blocks_changed(
 
 def select_doctests(base: str, head: str) -> dict[str, list[str]]:
     """Select affected devices and installation methods using the fixed change rules."""
+    comparison_base = get_merge_base(base, head)
     changed_paths = get_changed_paths(base, head)
     content_cache: dict[str, tuple[str | None, str | None]] = {}
     run_a2 = run_310p = QUICKSTART_TEST_SCRIPT in changed_paths
-    if any_doctest_blocks_changed(base, head, QUICKSTART_COMMON_MARKERS, content_cache):
+    if any_doctest_blocks_changed(comparison_base, head, QUICKSTART_COMMON_MARKERS, content_cache):
         run_a2 = run_310p = True
-    if any_doctest_blocks_changed(base, head, QUICKSTART_A2_MARKERS, content_cache):
+    if any_doctest_blocks_changed(comparison_base, head, QUICKSTART_A2_MARKERS, content_cache):
         run_a2 = True
-    if any_doctest_blocks_changed(base, head, QUICKSTART_310P_MARKERS, content_cache):
+    if any_doctest_blocks_changed(comparison_base, head, QUICKSTART_310P_MARKERS, content_cache):
         run_310p = True
 
-    pip_changed = any_doctest_blocks_changed(base, head, INSTALLATION_PIP_MARKERS, content_cache)
-    uv_changed = any_doctest_blocks_changed(base, head, INSTALLATION_UV_MARKERS, content_cache)
-    source_changed = any_doctest_blocks_changed(base, head, INSTALLATION_SOURCE_MARKERS, content_cache)
-    installation_common_changed = any_doctest_blocks_changed(base, head, INSTALLATION_COMMON_MARKERS, content_cache)
+    pip_changed = any_doctest_blocks_changed(comparison_base, head, INSTALLATION_PIP_MARKERS, content_cache)
+    uv_changed = any_doctest_blocks_changed(comparison_base, head, INSTALLATION_UV_MARKERS, content_cache)
+    source_changed = any_doctest_blocks_changed(comparison_base, head, INSTALLATION_SOURCE_MARKERS, content_cache)
+    installation_common_changed = any_doctest_blocks_changed(
+        comparison_base, head, INSTALLATION_COMMON_MARKERS, content_cache
+    )
     installation_script_changed = INSTALLATION_TEST_SCRIPT in changed_paths
     run_pip = installation_script_changed or pip_changed
     run_uv = installation_script_changed or uv_changed
@@ -352,11 +381,16 @@ def select_doctests(base: str, head: str) -> dict[str, list[str]]:
     if installation_common_changed and not (pip_changed or uv_changed or source_changed):
         run_pip = True
 
-    base_text = read_repo_text(MKDOCS_PATH, base)
+    base_text = read_repo_text(MKDOCS_PATH, comparison_base)
     head_text = read_repo_text(MKDOCS_PATH, head)
     assert base_text is not None and head_text is not None
     # Shared tooling or release changes add both devices and pip, retaining other selections.
-    if release_config_changed(base_text, head_text) or bool(changed_paths & SHARED_DOCTEST_PATHS):
+    shared_doctest_changed = any(
+        path == shared_path or path.startswith(f"{shared_path}/")
+        for path in changed_paths
+        for shared_path in SHARED_DOCTEST_PATHS
+    )
+    if release_config_changed(base_text, head_text) or shared_doctest_changed:
         run_a2 = run_310p = run_pip = True
 
     quickstart_devices = []
@@ -587,8 +621,8 @@ def parse_args() -> argparse.Namespace:
     plan_parser = subparsers.add_parser("plan")
     plan_parser.add_argument("--base")
     plan_parser.add_argument("--head")
-    plan_parser.add_argument("--quickstart", choices=("none", "a2", "310p"), default="none")
-    plan_parser.add_argument("--installation", choices=("none", "pip", "uv", "source"), default="none")
+    plan_parser.add_argument("--quickstart-devices", default="")
+    plan_parser.add_argument("--installation-methods", default="")
     plan_parser.add_argument("--quickstart-image-repository", required=True)
     plan_parser.add_argument("--installation-image-repository", required=True)
     plan_parser.add_argument("--check-resources", action="store_true")
@@ -596,7 +630,7 @@ def parse_args() -> argparse.Namespace:
     if args.command == "plan" and (args.base is not None or args.head is not None):
         if args.base is None or args.head is None:
             parser.error("--base and --head must be used together")
-        if args.quickstart != "none" or args.installation != "none":
+        if args.quickstart_devices.strip() or args.installation_methods.strip():
             parser.error("manual doctest options cannot be used with --base/--head")
     return args
 
@@ -620,8 +654,12 @@ def main() -> int:
                 args.installation_image_repository,
             )
         else:
-            quickstart_devices = [] if args.quickstart == "none" else [args.quickstart]
-            installation_methods = [] if args.installation == "none" else [args.installation]
+            quickstart_devices = parse_manual_selection(
+                args.quickstart_devices, QUICKSTART_DEVICES, "Quick Start device"
+            )
+            installation_methods = parse_manual_selection(
+                args.installation_methods, INSTALLATION_METHODS, "installation method"
+            )
             plan = build_doctest_plan(
                 quickstart_devices,
                 installation_methods,

@@ -12,8 +12,6 @@ compute and communication under expert parallelism. SP MoE keeps the expert
 inputs sharded by sequence and restores the expected layout at the MoE output
 boundary instead.
 
-**The original flashcomm feature overlapped functionally with the SP feature and has been deprecated since v0.27.1.**
-
 ## Principle
 
 SP MoE shards the input along the token dimension in each
@@ -43,35 +41,35 @@ reduces duplicate computation and unnecessary communication.
 
 Steps to follow to enable SP currently:
 
-- `tensor_parallel_size > 1` and `data_parallel_size > 1`.
+- `tensor_parallel_size > 1`.
 - `enable_expert_parallel` is set (MoE models only).
 - `--additional-config '{"enable_flashcomm1": true}'` set `flashcomm1`
 
-### Temporary FlashComm switch (Ascend only)
+> [!NOTE]
+> **Difference from upstream.** Upstream vLLM enables MoE sequence parallelism only when `data_parallel_size > 1`, together with a supported all2all backend, expert parallelism, and `tensor_parallel_size > 1`. On vLLM Ascend, `data_parallel_size > 1` is not part of the enablement condition. Ascend FlashComm also supports the TP/EP topology with `data_parallel_size = 1`, so SP MoE can be enabled when DP is 1 as long as the conditions above are met. `data_parallel_size > 1` remains supported.
 
-Until SP support is fully validated, vLLM Ascend keeps SP MoE option by original flashcomm option.
+### FlashComm switch (Ascend only)
 
-To opt into upstream SP MoE, set one of the following (the
-`additional_config` form is preferred):
+vLLM Ascend enables SP MoE through the FlashComm switch. The switch is still
+required; SP MoE is not enabled from the parallel configuration alone.
+
+To enable SP MoE, set one of the following (the `additional_config` form is
+preferred):
 
 ```bash
-# Preferred.
+# Preferred. On vLLM Ascend, data-parallel-size may be 1.
+# Upstream requires data-parallel-size > 1 for the same SP path.
 vllm serve <moe-model> \
-  --data-parallel-size 2 \
+  --data-parallel-size 1 \
   --tensor-parallel-size 2 \
   --enable-expert-parallel \
   --additional-config '{"enable_flashcomm1": true}'
 ```
 
 ```bash
-# Kept for compatibility.
+# Kept for compatibility. data-parallel-size may be 1 on vLLM Ascend.
 VLLM_ASCEND_ENABLE_FLASHCOMM1=1 vllm serve <moe-model> \
-  --data-parallel-size 2 \
+  --data-parallel-size 1 \
   --tensor-parallel-size 2 \
   --enable-expert-parallel
 ```
-
-This switch is temporary and deprecated. Referencing either form logs a
-`FlashComm is deprecated` warning from `init_ascend_config`, and the override
-carries a `TODO` to remove it once SP is supported — after that, the upstream
-configuration above takes effect directly.
