@@ -31,16 +31,54 @@ def test_temporal_copy_preserves_bytes_and_guards(size, offsets, tiles):
     assert torch.equal(destination.cpu(), expected)
 
 
+@pytest.mark.parametrize(
+    "state_shape,dtype",
+    [
+        pytest.param((1024, 16), torch.bfloat16, id="jamba-mamba1-tp8"),
+        pytest.param((4, 128, 128), torch.bfloat16, id="qwen3-next-gdn-tp8"),
+        pytest.param((32, 128, 128), torch.bfloat16, id="qwen3-next-gdn-tp1"),
+        pytest.param((4, 128, 128), torch.float32, id="qwen3_5-gdn-tp8-fp32-cache"),
+        pytest.param((16, 64, 128), torch.bfloat16, id="granite4-mamba2-tp8"),
+        pytest.param((128, 64, 128), torch.bfloat16, id="granite4-mamba2-tp1"),
+        pytest.param((3, 128, 256), torch.bfloat16, id="falcon-h1-mamba2-tp8"),
+        pytest.param((2, 128, 128), torch.float32, id="ling3-kda-tp8"),
+        pytest.param((2, 128, 128), torch.bfloat16, id="ring-lite-linear-tp8"),
+    ],
+)
+@pytest.mark.parametrize("tiles", [1, 4])
+def test_temporal_copy_model_state_sizes(state_shape, dtype, tiles):
+    # Sizes are per-layer, per-physical-block temporal states after TP sharding.
+    size = torch.Size(state_shape).numel() * torch.empty((), dtype=dtype).element_size()
+    source = torch.randint(0, 256, (size + 64,), dtype=torch.uint8, device="npu")
+    destination = torch.full_like(source, 123)
+    expected = destination.cpu()
+    expected[:size] = source.cpu()[:size]
+    _copy_temporal_test_kernel[(tiles,)](source, destination, size, tiles)
+    assert torch.equal(destination.cpu(), expected)
+
+
 @pytest.mark.parametrize("precomputed", [False, True])
 @pytest.mark.parametrize("graph_mode", [False, True])
-def test_mixed_postprocess_replay_uses_updated_metadata(precomputed, graph_mode):
+@pytest.mark.parametrize(
+    "state_types,state_bytes",
+    [
+        pytest.param(("conv", "temporal"), 1027, id="mixed-unaligned-tail"),
+        pytest.param(("conv", "temporal"), 131072, id="gdn-aligned-tp8"),
+        pytest.param(("temporal",), 65536, id="linear-only-tp8"),
+    ],
+)
+def test_mixed_postprocess_replay_uses_updated_metadata(precomputed, graph_mode, state_types, state_bytes):
     """Check mixed state types, padded pages and changed decisions in one graph."""
     num_requests, num_blocks, num_layers = 4, 8, 2
-    state_bytes, conv_width, conv_inner = 1027, 7, 12
+    conv_width, conv_inner = 7, 12
     conv_bytes = conv_width * conv_inner * 2
-    strides = [conv_bytes + 64, 1152] * num_layers
-    sizes = [conv_bytes, state_bytes] * num_layers
-    offsets = [0, 1, 0, 0]
+    state_kinds = state_types * num_layers
+    sizes = [conv_bytes if kind == "conv" else state_bytes for kind in state_kinds]
+    strides = [
+        conv_bytes + 64 if kind == "conv" else state_bytes + (125 if state_bytes == 1027 else 128)
+        for kind in state_kinds
+    ]
+    offsets = [1 if kind == "temporal" and state_bytes == 1027 and i == 1 else 0 for i, kind in enumerate(state_kinds)]
     storage = [
         torch.randint(0, 256, (num_requests * num_blocks, stride), dtype=torch.uint8, device="npu")
         for stride in strides
@@ -65,19 +103,19 @@ def test_mixed_postprocess_replay_uses_updated_metadata(precomputed, graph_mode)
         num_blocks,
         tensor([data.data_ptr() + offset for data, offset in zip(storage, offsets)]),
         tensor(strides),
-        tensor([2, 1] * num_layers),
-        tensor([conv_inner, state_bytes] * num_layers),
-        tensor([conv_width, 0] * num_layers, torch.int32),
-        tensor([0] * (num_layers * 2), torch.int32),
-        tensor([0] * (num_layers * 2), torch.int32),
-        tensor([0] * (num_layers * 2)),
+        tensor([2 if kind == "conv" else 1 for kind in state_kinds]),
+        tensor([conv_inner if kind == "conv" else state_bytes for kind in state_kinds]),
+        tensor([conv_width if kind == "conv" else 0 for kind in state_kinds], torch.int32),
+        tensor([0] * len(state_kinds), torch.int32),
+        tensor([0] * len(state_kinds), torch.int32),
+        tensor([0] * len(state_kinds)),
         accepted_out,
         mapping,
         num_requests,
     )
 
     def launch():
-        postprocess_mamba_fused_kernel[(num_requests, num_layers * 2, 1)](
+        postprocess_mamba_fused_kernel[(num_requests, len(state_kinds), 1)](
             *args,
             block_size=128,
             COPY_BLOCK_SIZE=1024,
@@ -124,7 +162,7 @@ def test_mixed_postprocess_replay_uses_updated_metadata(precomputed, graph_mode)
             if src == dst and bias == 0:
                 continue
             for state, offset in enumerate(offsets):
-                if state % 2 == 0:
+                if state_kinds[state] == "conv":
                     copy_size = (conv_width - bias) * conv_inner * 2
                     src_block = batch * num_blocks + src
                     src_offset = offset + bias * conv_inner * 2
