@@ -21,7 +21,9 @@ def test_uses_upstream_policy_and_async_worker_lifecycle():
     assert AscendEplbState.start_async_loop is upstream_eplb_state.EplbState.start_async_loop
 
 
-def test_result_readiness_waits_for_next_rearrangement_boundary():
+def test_result_readiness_waits_for_next_rearrangement_boundary(monkeypatch):
+    group = SimpleNamespace(device_group=SimpleNamespace(size=lambda: 1))
+    monkeypatch.setattr(upstream_eplb_state, "get_ep_group", lambda: group)
     state = AscendEplbState.__new__(AscendEplbState)
     state.expert_rearrangement_step_interval = 10
     model_state = SimpleNamespace(pending_result=object(), rebalanced=True)
@@ -31,6 +33,37 @@ def test_result_readiness_waits_for_next_rearrangement_boundary():
 
     state.expert_rearrangement_step = 10
     assert state._all_ranks_result_ready(model_state)
+
+
+@pytest.mark.parametrize("local_ready, ready_ranks, expected", [(False, 0, False), (True, 1, False), (True, 2, True)])
+def test_result_readiness_polls_all_ranks_without_sleep(monkeypatch, local_ready, ready_ranks, expected):
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.expert_rearrangement_step_interval = 10
+    state.expert_rearrangement_step = 10
+    state.async_worker = SimpleNamespace(is_alive=lambda: True)
+    model_state = SimpleNamespace(pending_result=object() if local_ready else None, rebalanced=True)
+    cpu_group = SimpleNamespace(size=lambda: 2)
+    monkeypatch.setattr(upstream_eplb_state, "get_ep_group", lambda: SimpleNamespace(cpu_group=cpu_group))
+
+    def reduce_ready(flag, group):
+        assert group is cpu_group
+        assert flag.device.type == "cpu"
+        assert flag.item() == int(local_ready)
+        flag.fill_(ready_ranks)
+
+    monkeypatch.setattr(upstream_eplb_state, "all_reduce", reduce_ready)
+    monkeypatch.setattr(eplb_state.time, "sleep", lambda _: pytest.fail("foreground waited for EPLB transfer"))
+    assert state._all_ranks_result_ready(model_state) is expected
+
+
+def test_result_readiness_reports_stopped_worker(monkeypatch):
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.expert_rearrangement_step_interval = 10
+    state.expert_rearrangement_step = 10
+    state.async_worker = SimpleNamespace(is_alive=lambda: False)
+    model_state = SimpleNamespace(pending_result=None, rebalanced=True)
+    with pytest.raises(RuntimeError, match="background worker terminated"):
+        state._all_ranks_result_ready(model_state)
 
 
 def test_configured_upstream_policy_registration_is_scoped():

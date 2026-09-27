@@ -444,15 +444,11 @@ class AscendEplbState(_eplb_state.EplbState):
                     time.sleep(0.001)
 
     def _all_ranks_result_ready(self, model_state: Any) -> bool:
-        """Consume results at the next shared rearrangement boundary."""
+        """Poll all ranks at the shared boundary without waiting for transfer."""
         if self.expert_rearrangement_step < self.expert_rearrangement_step_interval:
             return False
-        while model_state.pending_result is None:
-            _raise_if_async_worker_stopped(self)
-            if not model_state.rebalanced:
-                return False
-            time.sleep(0.001)
-        return True
+        _raise_if_async_worker_stopped(self)
+        return super()._all_ranks_result_ready(model_state)
 
     @classmethod
     def from_mapping(
