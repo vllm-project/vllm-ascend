@@ -399,7 +399,7 @@ def test_qwen36_35b_dspark_spec_decoding(
             "num_speculative_tokens": num_speculative_tokens,
         },
         example_prompts=SPEC_DECODE_PROMPTS,
-        expected_acceptance_length=3.5,
+        expected_acceptance_length=3.93,
         runner_kwargs={
             "max_model_len": 4096,
             "tensor_parallel_size": 2,
