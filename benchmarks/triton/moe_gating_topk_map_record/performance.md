@@ -193,3 +193,19 @@ T/E/K=64/16/8 fused device kernel at 26.10 µs, block dim 32, versus
 attribute to the repair without repeated profiles. The tested compiler was
 `bishengir-compile` 1.2.0, SHA256
 `89655a56941efe9a184e4d5dfccb783ad88458707827ff6fdd146e7bd2d4af5c`.
+
+## Round 4 — CI typing correction in wrapper validation
+
+The CI mypy check reported a fixed-length tuple inferred as four elements
+and then extended to five. The device-validation tuple now has a fixed five
+slots from construction; the Triton kernel and launch configuration are
+unchanged. The final source passed the 18-case NPU suite. Ten post-warmup
+stream-event samples confirm the eligible route remains faster:
+
+| T | E | K | Main µs | Fused µs | Main / fused |
+|---:|---:|---:|---:|---:|---:|
+| 64 | 16 | 8 | 550.11 | 380.93 | 1.44× |
+| 4096 | 32 | 8 | 541.32 | 494.22 | 1.10× |
+
+These are wrapper-level screens, not new device-kernel measurements. The
+type-check result itself awaits the next CI run.

@@ -146,9 +146,13 @@ def moe_gating_topk_map_record(
         raise ValueError("record_enabled must contain one device value")
     if isinstance(valid_tokens, torch.Tensor) and valid_tokens.numel() != 1:
         raise ValueError("valid_tokens must contain one device value")
-    tensors = (routing_table, expert_load, record_enabled, bias)
-    if isinstance(valid_tokens, torch.Tensor):
-        tensors += (valid_tokens,)
+    tensors = (
+        routing_table,
+        expert_load,
+        record_enabled,
+        bias,
+        valid_tokens if isinstance(valid_tokens, torch.Tensor) else None,
+    )
     if any(tensor is not None and tensor.device != logits.device for tensor in tensors):
         raise ValueError("all tensors must be on the same device")
     if routing_table.shape[0] == 0:
