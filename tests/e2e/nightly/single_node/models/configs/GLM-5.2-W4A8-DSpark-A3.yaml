@@ -12,6 +12,7 @@ test_cases:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       VLLM_USE_MODELSCOPE: "true"
       SERVER_PORT: "DEFAULT_PORT"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
     server_cmd:
       - "--tensor-parallel-size"
       - "8"
