@@ -152,8 +152,9 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
 --gpu-memory-utilization 0.92 \
 --quantization ascend \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--kv-cache-dtype int8 \
 --attention_config.indexer_kv_dtype int8 \
---additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"multistream_overlap_shared_expert":true, "enable_flashcomm1": true, "enable_fused_mc2": 0}' \
+--additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"multistream_overlap_shared_expert":true, "enable_flashcomm1": true}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 
 ```
@@ -215,7 +216,7 @@ The parameters are explained as follows:
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "multistream_overlap_shared_expert": true, "c8_enable_reshape_optim": false, "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "multistream_overlap_shared_expert": false, "c8_enable_reshape_optim": false, "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
@@ -263,11 +264,9 @@ The parameters are explained as follows:
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "multistream_overlap_shared_expert": true, "c8_enable_reshape_optim": false, "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "multistream_overlap_shared_expert": false, "c8_enable_reshape_optim": false, "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
-
-    On vLLM 0.29, keep an API server on both nodes: `--headless` on node 1 is rejected in external/hybrid DP load-balancing mode. The old `fuse_muls_add` additional-config field is also rejected by this version.
 
 === "A2 series"
 
