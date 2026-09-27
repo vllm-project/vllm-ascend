@@ -1773,7 +1773,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
         kv_cache: tuple[torch.Tensor, ...] | None,
-        attn_metadata: DSAMetadataDict,
+        attn_metadata: DSAMetadataDict | None,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
