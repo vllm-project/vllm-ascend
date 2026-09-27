@@ -1211,7 +1211,16 @@ def _reshape_kv_cache_v2(
                 )
 
             k_dtype = v_dtype = kv_cache_spec.dtype
-            if enable_fa_quant(vllm_config):
+            # Sparse C8 already selects its dtype from --kv-cache-dtype. V1
+            # skips enable_fa_quant on that path. Calling it here raises for a
+            # kv consumer that has no FA quant weights, which is how
+            # GLM-5.1-W8A8C8 decode fails on Model Runner V2.
+            if sparse_sfa_c8:
+                k_dtype = kv_cache_dtype_str_to_dtype(
+                    vllm_config.cache_config.cache_dtype,
+                    vllm_config.model_config,
+                )
+            elif enable_fa_quant(vllm_config):
                 k_dtype, v_dtype = vllm_config.quant_config.get_kv_quant_dtype(
                     layer_name,
                     kv_cache_spec.dtype,
@@ -1220,7 +1229,6 @@ def _reshape_kv_cache_v2(
 
             if sparse_sfa_c8:
                 raw_k_tensor = raw_cache
-                k_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
             elif isinstance(raw_cache, tuple):
