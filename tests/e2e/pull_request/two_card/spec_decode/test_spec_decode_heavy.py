@@ -359,7 +359,7 @@ def test_hang():
     "compilation_config",
     [
         pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
+            {"cudagraph_mode": "FULL_DECODE_ONLY"},
             id="full_decode_only",
         )
     ],
