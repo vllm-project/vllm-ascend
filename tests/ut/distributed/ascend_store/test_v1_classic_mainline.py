@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import backend as v1_backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import connector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import factory as service_factory
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.coordinates import TokenRange
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import (
     LookupCodec,
     LookupRequest,
@@ -60,16 +61,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.scheduler.store
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import layout as worker_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import resources as worker_resources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker import service as worker_module
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.coordinator import (
-    ChunkSelection,
-    HybridKVTransferCoordinator,
-    LookupChunkSelection,
-    LookupObservation,
-    UnitaryKVTransferCoordinator,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layout import (
     KVCacheGroupLayout,
-    StridedKVPartitioner,
     TPPartitionSpec,
     WorkerTransferLayout,
     resolve_tp_partition,
@@ -87,8 +80,23 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.load.tas
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.lookup import LookupService
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.lookup.executor import LookupExecutor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.lookup.task import LookupTaskBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.projection import (
+    EffectiveTPKeyProjector,
+    KVObjectProjector,
+    StridedKVMemoryProjector,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.region import (
+    ChunkSelection,
+    HybridKVRegionOperator,
+    KVRegion,
+    LookupObservation,
+    UnitaryKVRegionOperator,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.store import StoreService
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.store.executor import StoreExecutor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.store.executor import (
+    StoreBatch,
+    StoreExecutor,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.store.task import (
     ContiguousStoreTaskBuilder,
     StoreTask,
@@ -136,22 +144,40 @@ def make_worker_transfer_layout(*, tp_mismatch: bool = False) -> WorkerTransferL
     return WorkerTransferLayout(0, 1, 1, 0, 1, 1, 1, 4, 4, tp_partition, (kv_group,), (0,))
 
 
-def make_unitary_coordinator(
+def make_unitary_region_operator(
     *,
     group_id: int = 0,
-    block_size: int = 4,
     max_model_len: int = 64,
     cache_transfer_granularity: int = 4,
-) -> UnitaryKVTransferCoordinator:
-    return UnitaryKVTransferCoordinator(group_id, block_size, max_model_len, cache_transfer_granularity)
+) -> UnitaryKVRegionOperator:
+    return UnitaryKVRegionOperator(group_id, max_model_len, cache_transfer_granularity)
 
 
-def test_coordinators_preserve_original_group_ids() -> None:
-    unitary = make_unitary_coordinator(group_id=3)
+def project_region(database, region: KVRegion, block_hashes) -> tuple:
+    return KVObjectProjector(database).project(region, block_hashes)
 
-    assert unitary.select_load((b"a",), 4) == (ChunkSelection(3, None),)
 
-    hybrid = HybridKVTransferCoordinator(
+def make_tp_mismatch_projectors(
+    database, block_size: int, tp_rank: int, slices_per_rank: int, group_id: int = 0
+) -> tuple:
+    return (
+        EffectiveTPKeyProjector(tp_rank, slices_per_rank),
+        StridedKVMemoryProjector(database, group_id, block_size, slices_per_rank),
+    )
+
+
+@pytest.mark.parametrize(("start_token", "end_token"), [(-1, 0), (4, 3)])
+def test_token_range_rejects_invalid_coordinates(start_token: int, end_token: int) -> None:
+    with pytest.raises(ValueError):
+        TokenRange(start_token, end_token)
+
+
+def test_region_operators_preserve_original_group_ids() -> None:
+    unitary = make_unitary_region_operator(group_id=3)
+
+    assert unitary.load_region((b"a",), TokenRange(0, 4)) == KVRegion(TokenRange(0, 4), (ChunkSelection(3, None),))
+
+    hybrid = HybridKVRegionOperator(
         (1, 3),
         [
             KVCacheGroupSpec(
@@ -173,9 +199,11 @@ def test_coordinators_preserve_original_group_ids() -> None:
         LookupObservation(3, (8, 16), (block_hashes[1], block_hashes[3]), (True, False)),
     )
 
-    assert tuple(selection.group_id for selection in hybrid.select_lookup(16, 0)) == (1, 3)
-    assert tuple(selection.group_id for selection in hybrid.select_store(16, 16)) == (1, 3)
-    assert hybrid.resolve_lookup(block_hashes, 16, 0, observations) == 8
+    query_region = hybrid.lookup_region(TokenRange(0, 16))
+    store_region = hybrid.store_region(TokenRange(0, 16), 16)
+    assert tuple(selection.group_id for selection in query_region.chunk_selections) == (1, 3)
+    assert tuple(selection.group_id for selection in store_region.chunk_selections) == (1, 3)
+    assert hybrid.resolve_lookup(block_hashes, query_region, observations) == 8
 
 
 def configure_worker_factory(monkeypatch) -> None:
@@ -260,7 +288,7 @@ def test_tp_mismatch_rejects_multiple_transfer_groups() -> None:
     cache_resources = SimpleNamespace(token_database=object())
 
     with pytest.raises(ValueError, match="TP mismatch requires one transferable KV cache group"):
-        service_factory._build_strided_kv_partitioner(cache_resources, layout, SimpleNamespace(block_size=4))
+        service_factory._build_tp_mismatch_projectors(cache_resources, layout, SimpleNamespace(block_size=4))
 
 
 @pytest.mark.parametrize(
@@ -369,15 +397,35 @@ def test_scheduler_lookup_preserves_full_hit_allocation() -> None:
     request = scheduler_lookup.SchedulerLookupRequest("request", 12, 12, block_hashes, 0)
 
     assert service.lookup(request) == scheduler_lookup.SchedulerLookupResult(11, False)
-    assert calls == [LookupRequest(12, (0,), 0, tuple(block_hashes))]
+    assert calls == [LookupRequest(TokenRange(0, 12), (0,), tuple(block_hashes))]
     load_candidate = service._load_service._pending_candidates["request"]
-    assert load_candidate is not None
-    assert load_candidate.kv_pool_cached_tokens == 11
+    assert load_candidate.load_range == TokenRange(0, 12)
+    assert load_candidate.matched_end_token == 11
+
+
+def test_scheduler_full_hit_does_not_load_across_the_allocated_chunk_boundary() -> None:
+    lookup_service = scheduler_lookup.LookupService(
+        "ipc:///unused/lookup",
+        transfer_group_ids=(0,),
+        cache_transfer_granularity=4,
+        discard_partial_chunks=False,
+        enabled=True,
+    )
+    lookup_service.client = SimpleNamespace(lookup=lambda request: LookupResult(5))
+    service = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
+    service._lookup_service = lookup_service
+    service._load_service = make_scheduler_load_service()
+    request = scheduler_lookup.SchedulerLookupRequest("request", 5, 5, [b"a", b"b"], 0)
+
+    assert service.lookup(request) == scheduler_lookup.SchedulerLookupResult(4, False)
+    load_candidate = service._load_service._pending_candidates["request"]
+    assert load_candidate.load_range == TokenRange(0, 4)
+    assert load_candidate.matched_end_token == 4
 
 
 def test_lookup_protocol_round_trip_preserves_business_messages() -> None:
     codec = LookupCodec()
-    request = LookupRequest(12, (1, 3), 4, (b"a", b"b"))
+    request = LookupRequest(TokenRange(4, 12), (1, 3), (b"a", b"b"))
     result = LookupResult(8)
 
     assert codec.decode_request(codec.encode_request(request)) == request
@@ -401,7 +449,8 @@ def test_disabled_scheduler_lookup_skips_rpc() -> None:
 def test_scheduler_publishes_async_load_after_allocation() -> None:
     service = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
     configure_scheduler_transfer_boundary(service)
-    service._lookup_service = SimpleNamespace(lookup=lambda request: 11)
+    availability = scheduler_lookup.LookupAvailability(TokenRange(0, 12), 11)
+    service._lookup_service = SimpleNamespace(lookup=lambda request: availability)
     service._load_service = make_scheduler_load_service(deferred=True)
     service._store_service = make_scheduler_store_service()
     service.request_trackers = {}
@@ -421,11 +470,142 @@ def test_scheduler_publishes_async_load_after_allocation() -> None:
     metadata = service.build_connector_meta(output)
     assert metadata.store.requests == ()
     assert metadata.load.requests == (
-        LoadRequest("request", 12, ((1, 2, 3), (10, 11, 12)), tuple(block_hashes), 0, 11),
+        LoadRequest("request", TokenRange(0, 12), ((1, 2, 3), (10, 11, 12)), tuple(block_hashes)),
     )
 
     next_metadata = service.build_connector_meta(output)
     assert next_metadata.load.requests == ()
+
+
+def test_hybrid_deferred_load_preserves_nonzero_range_across_group_block_sizes() -> None:
+    database = ChunkedTokenDatabase(
+        [KeyMetadata("model", 0, 0, 0, 0), KeyMetadata("model", 0, 0, 0, 1)],
+        [4, 8],
+        None,
+        4,
+    )
+    database.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [32]}, {0: [16], 1: [32]})
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["full_attention"],
+            FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
+        ),
+        KVCacheGroupSpec(
+            ["sliding_window"],
+            SlidingWindowSpec(
+                block_size=8,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=8,
+            ),
+        ),
+    ]
+    region_operator = HybridKVRegionOperator(
+        (0, 1),
+        kv_cache_groups,
+        scheduler_block_size=8,
+        hash_block_size=4,
+        max_model_len=64,
+    )
+    block_hashes = [bytes([index + 1]) for index in range(6)]
+    group_0_keys = [key for _, _, key, _ in database.process_token_key_strings(24, block_hashes, kv_cache_group_id=0)]
+    group_1_keys = [key for _, _, key, _ in database.process_token_key_strings(24, block_hashes, kv_cache_group_id=1)]
+
+    class Backend:
+        def __init__(self) -> None:
+            self.existing_keys = {*group_0_keys[2:4], group_1_keys[1]}
+            self.lookup_keys = []
+            self.loaded_keys = []
+            self.loaded_addresses = []
+            self.loaded_sizes = []
+
+        def set_device(self) -> None:
+            return
+
+        def exists(self, keys):
+            self.lookup_keys.extend(keys)
+            return [int(key in self.existing_keys) for key in keys]
+
+        def get(self, keys, addresses, sizes):
+            self.loaded_keys.extend(keys)
+            self.loaded_addresses.extend(addresses)
+            self.loaded_sizes.extend(sizes)
+            return [0] * len(keys)
+
+    backend = Backend()
+    object_projector = KVObjectProjector(database)
+    worker_lookup_service = LookupService(
+        region_operator,
+        object_projector,
+        LookupTaskBuilder(1, 1, 1),
+        LookupExecutor(backend),
+    )
+    worker_load_service = WorkerLoadService(
+        region_operator,
+        object_projector,
+        ContiguousLoadTaskBuilder(database, 0),
+        AsyncLoadExecutor(backend),
+        uses_group_scoped_block_ids=True,
+    )
+    scheduler_lookup_service = scheduler_lookup.LookupService(
+        "ipc:///unused/lookup",
+        transfer_group_ids=(0, 1),
+        cache_transfer_granularity=8,
+        discard_partial_chunks=True,
+        enabled=True,
+    )
+    scheduler_lookup_service.client = SimpleNamespace(lookup=worker_lookup_service.lookup)
+    scheduler_service = scheduler.SchedulerService(
+        SchedulerTransferLayout(8, 4, (0, 1), True),
+        scheduler_lookup_service,
+        make_scheduler_load_service(deferred=True),
+        SchedulerStoreService(
+            cache_transfer_granularity=8,
+            discard_partial_chunks=True,
+            save_decode_cache=False,
+            enabled=True,
+        ),
+    )
+    request = SimpleNamespace(
+        request_id="request",
+        prompt_token_ids=[0] * 24,
+        block_hashes=block_hashes,
+    )
+
+    lookup_request = scheduler_lookup.SchedulerLookupRequest("request", 24, 24, block_hashes, 8)
+    assert scheduler_service.lookup(lookup_request) == scheduler_lookup.SchedulerLookupResult(8, True)
+    assert backend.lookup_keys == [*group_0_keys[2:], *group_1_keys[1:]]
+
+    block_ids_by_group = ([10, 11, 12, 13], [20, 21])
+    scheduler_service.update_state_after_alloc(request, block_ids_by_group, 8)
+    scheduler_output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
+    )
+    metadata = scheduler_service.build_connector_meta(scheduler_output)
+    assert metadata.store.requests == ()
+    assert metadata.load.requests == (
+        LoadRequest("request", TokenRange(8, 16), ((10, 11, 12, 13), (20, 21)), tuple(block_hashes)),
+    )
+
+    worker_load_service.start()
+    try:
+        worker_load_service.load(metadata.load)
+        worker_load_service._executor._task_queue.join()
+
+        assert worker_load_service.collect_result() == LoadResult(
+            frozenset({"request"}),
+            frozenset(),
+            frozenset(),
+        )
+        assert backend.loaded_keys == [*group_0_keys[2:4], group_1_keys[1]]
+        assert backend.loaded_addresses == [[1192], [1208], [2672]]
+        assert backend.loaded_sizes == [[16], [16], [32]]
+    finally:
+        worker_load_service.close()
 
 
 @pytest.mark.parametrize(
@@ -458,7 +638,9 @@ def test_classic_transfer_requests_match_legacy_operation(
     )
     tracker = RequestTracker("request", target_tokens, [[1, 2, 3]], hashes, 12)
     legacy_load = LegacyLoadSpec(0, load_tokens, can_load) if load_tokens is not None else None
-    load_candidate = LoadCandidate(0, load_tokens) if load_tokens is not None and can_load else None
+    load_candidate = None
+    if load_tokens is not None and can_load:
+        load_candidate = LoadCandidate(TokenRange(0, load_tokens), load_tokens)
 
     legacy = LegacyReqMeta.from_request_tracker(
         legacy_tracker,
@@ -473,24 +655,26 @@ def test_classic_transfer_requests_match_legacy_operation(
     service._load_service = make_scheduler_load_service()
     service._store_service = make_scheduler_store_service(discard_partial_chunks=discard_partial_chunks)
     if saved_tokens:
-        service._store_service._scheduled_tokens["request"] = saved_tokens
+        service._store_service._scheduled_end_tokens["request"] = saved_tokens
     load_request, store_request = service._schedule_request_transfer(tracker, load_candidate)
 
-    assert service._store_service._scheduled_tokens.get("request", 0) == legacy_tracker.num_saved_tokens
+    assert service._store_service._scheduled_end_tokens.get("request", 0) == legacy_tracker.num_saved_tokens
     if legacy is None or (not legacy.can_save and legacy.load_spec is None):
         assert load_request is store_request is None
     elif legacy.load_spec is not None:
         assert load_request is not None and store_request is None
-        assert load_request.transfer_end_token == legacy.token_len_chunk
-        assert load_request.kv_pool_cached_tokens == legacy.load_spec.kvpool_cached_tokens
+        assert load_request.load_range == TokenRange(
+            legacy.load_spec.vllm_cached_tokens,
+            legacy.load_spec.kvpool_cached_tokens,
+        )
     else:
         assert store_request is not None and load_request is None
-        assert store_request.store_end_token == legacy.token_len_chunk
+        assert store_request.store_range == TokenRange(legacy.save_start_token, legacy.token_len_chunk)
 
 
 def test_finished_request_keeps_unconsumed_load_candidate_like_legacy() -> None:
     service = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
-    load_candidate = LoadCandidate(0, 4)
+    load_candidate = LoadCandidate(TokenRange(0, 4), 4)
     service._load_service = make_scheduler_load_service()
     service._load_service.record_candidate("request", load_candidate)
     service._store_service = make_scheduler_store_service()
@@ -530,13 +714,13 @@ def test_missing_scheduler_state_reports_legacy_error(branch: str, expected_mess
     new_requests = []
     cached_requests = SimpleNamespace(req_ids=[], new_block_ids=[])
     if branch == "new":
-        service._load_service.record_candidate("request", LoadCandidate(0, 4))
+        service._load_service.record_candidate("request", LoadCandidate(TokenRange(0, 4), 4))
         new_requests = [SimpleNamespace(req_id="request", num_computed_tokens=0)]
     else:
         cached_requests = SimpleNamespace(req_ids=["request"], new_block_ids=[([1],)])
         if branch == "preempted":
             service.preempted_request_ids.add("request")
-            service._load_service.record_candidate("request", LoadCandidate(0, 4))
+            service._load_service.record_candidate("request", LoadCandidate(TokenRange(0, 4), 4))
         if branch == "running_tracker":
             service.unfinished_requests["request"] = SimpleNamespace(num_computed_tokens=0, num_prompt_tokens=4)
         if branch == "running_request":
@@ -597,7 +781,7 @@ def test_preempted_cached_request_matches_legacy(resume_load: bool) -> None:
     current.preempted_request_ids = set()
     current._load_service = make_scheduler_load_service()
     current._store_service = make_scheduler_store_service()
-    current._store_service._scheduled_tokens["request"] = 8
+    current._store_service._scheduled_end_tokens["request"] = 8
 
     empty_cached = SimpleNamespace(req_ids=[], new_block_ids=[])
     preempt_step = SimpleNamespace(
@@ -617,7 +801,7 @@ def test_preempted_cached_request_matches_legacy(resume_load: bool) -> None:
 
     if resume_load:
         legacy.load_specs["request"] = LegacyLoadSpec(4, 8, False)
-        current._load_service.record_candidate("request", LoadCandidate(4, 8))
+        current._load_service.record_candidate("request", LoadCandidate(TokenRange(4, 8), 8))
     allocated_blocks = SimpleNamespace(get_block_ids=lambda: [[3, 4]])
     external_tokens = 4 if resume_load else 0
     legacy.update_state_after_alloc(request, allocated_blocks, external_tokens)
@@ -639,8 +823,10 @@ def test_preempted_cached_request_matches_legacy(resume_load: bool) -> None:
         current_request = current_meta.load.requests[0]
         assert current_request.request_id == legacy_request.req_id
         assert current_request.block_ids_by_group == tuple(tuple(ids) for ids in legacy_request.block_ids_by_group)
-        assert current_request.transfer_end_token == legacy_request.token_len_chunk
-        assert current_request.kv_pool_cached_tokens == legacy_request.load_spec.kvpool_cached_tokens == 8
+        assert current_request.load_range == TokenRange(
+            legacy_request.load_spec.vllm_cached_tokens,
+            legacy_request.load_spec.kvpool_cached_tokens,
+        )
         assert legacy_request.load_spec.can_load
     else:
         assert current_meta.load.requests == ()
@@ -648,10 +834,11 @@ def test_preempted_cached_request_matches_legacy(resume_load: bool) -> None:
         current_request = current_meta.store.requests[0]
         assert current_request.request_id == legacy_request.req_id
         assert current_request.block_ids_by_group == tuple(tuple(ids) for ids in legacy_request.block_ids_by_group)
-        assert current_request.store_end_token == legacy_request.token_len_chunk
+        assert current_request.store_range.start_token == legacy_request.save_start_token
+        assert current_request.store_range.end_token == legacy_request.token_len_chunk
         assert legacy_request.can_save
     assert current.request_trackers["request"].request_token_len == legacy._request_trackers["request"].token_len
-    current_saved_tokens = current._store_service._scheduled_tokens.get("request", 0)
+    current_saved_tokens = current._store_service._scheduled_end_tokens.get("request", 0)
     assert current_saved_tokens == legacy._request_trackers["request"].num_saved_tokens
     assert current_saved_tokens == (0 if resume_load else 8)
     assert "request" not in legacy.load_specs
@@ -672,7 +859,7 @@ def test_allocation_mismatch_raises_legacy_assertion() -> None:
     current = scheduler.SchedulerService.__new__(scheduler.SchedulerService)
     current.unfinished_requests = {}
     current._load_service = make_scheduler_load_service()
-    current._load_service.record_candidate("request", LoadCandidate(0, 8))
+    current._load_service.record_candidate("request", LoadCandidate(TokenRange(0, 8), 8))
 
     with pytest.raises(AssertionError):
         legacy.update_state_after_alloc(request, blocks, 4)
@@ -735,7 +922,7 @@ def test_running_cached_request_matches_legacy(
     current.preempted_request_ids = set()
     current._load_service = make_scheduler_load_service()
     current._store_service = make_scheduler_store_service(save_decode_cache=save_decode_cache)
-    current._store_service._scheduled_tokens["request"] = computed_tokens
+    current._store_service._scheduled_end_tokens["request"] = computed_tokens
 
     output = SimpleNamespace(
         finished_req_ids=set(),
@@ -753,13 +940,14 @@ def test_running_cached_request_matches_legacy(
     current_tracker = current.request_trackers["request"]
     assert current_tracker.request_token_len == legacy_tracker.token_len == expected_tokens
     assert current_tracker.block_ids_by_group == legacy_tracker.allocated_block_ids_by_group
-    assert current._store_service._scheduled_tokens["request"] == legacy_tracker.num_saved_tokens
+    assert current._store_service._scheduled_end_tokens["request"] == legacy_tracker.num_saved_tokens
     if should_emit_meta:
         current_request = current_meta.store.requests[0]
         legacy_request = legacy_meta.requests[0]
         assert current_request.request_id == legacy_request.req_id
         assert current_request.block_ids_by_group == tuple(tuple(ids) for ids in legacy_request.block_ids_by_group)
-        assert current_request.store_end_token == legacy_request.token_len_chunk == expected_tokens
+        assert current_request.store_range == TokenRange(legacy_request.save_start_token, expected_tokens)
+        assert legacy_request.token_len_chunk == expected_tokens
         assert legacy_request.can_save
         assert legacy_request.load_spec is None
 
@@ -802,7 +990,7 @@ def test_running_cached_request_stores_completed_chunk_without_new_block() -> No
     assert first_metadata.store.requests == ()
     assert service.request_trackers["request"].request_token_len == 4
     assert len(second_metadata.store.requests) == 1
-    assert second_metadata.store.requests[0].store_end_token == 4
+    assert second_metadata.store.requests[0].store_range == TokenRange(0, 4)
     assert second_metadata.store.requests[0].block_ids_by_group == ((1,),)
 
 
@@ -823,7 +1011,7 @@ def test_running_decode_without_new_block_follows_store_policy(
     service.preempted_request_ids = set()
     service._load_service = make_scheduler_load_service()
     service._store_service = make_scheduler_store_service(save_decode_cache=save_decode_cache)
-    service._store_service._scheduled_tokens["request"] = 4
+    service._store_service._scheduled_end_tokens["request"] = 4
     output = SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
@@ -837,7 +1025,7 @@ def test_running_decode_without_new_block_follows_store_policy(
     assert service.request_trackers["request"].request_token_len == expected_token_len
     assert len(metadata.store.requests) == expected_store_count
     if metadata.store.requests:
-        assert metadata.store.requests[0].store_end_token == 8
+        assert metadata.store.requests[0].store_range == TokenRange(4, 8)
 
 
 @pytest.mark.parametrize(
@@ -846,15 +1034,14 @@ def test_running_decode_without_new_block_follows_store_policy(
 )
 def test_classic_load_task_reports_failed_blocks(get_result, invalid_block_ids) -> None:
     class Database:
-        def load_mask(self, block_hashes, token_len):
-            assert token_len == 8
-            return [[True, True]]
+        hash_block_size = 4
 
-        def process_token_key_strings_with_block_ids(
-            self, token_len, block_hashes, block_ids, mask_num, kv_cache_group_id, chunk_filter
-        ):
+        def get_block_size(self, group_id):
+            return 4
+
+        def process_token_key_strings(self, token_len, block_hashes, mask_num, kv_cache_group_id, chunk_filter):
             assert kv_cache_group_id == 0
-            return [(0, 4, "first", 0, 1), (4, 8, "second", 0, 2)]
+            return [(0, 4, "first", b"a"), (4, 8, "second", b"b")]
 
         def prepare_value(self, start, end, block_ids, kv_cache_group_id, block_id):
             assert kv_cache_group_id == 0
@@ -867,12 +1054,13 @@ def test_classic_load_task_reports_failed_blocks(get_result, invalid_block_ids) 
             assert sizes == [[16], [16]]
             return get_result
 
-    request = LoadRequest("request", 8, ((1, 2),), (b"a", b"b"), 0, 8)
+    database = Database()
+    request = LoadRequest("request", TokenRange(0, 8), ((1, 2),), (b"a", b"b"))
     load_service = WorkerLoadService(
-        make_unitary_coordinator(),
-        ContiguousLoadTaskBuilder(Database(), {0: 4}, 1),
+        make_unitary_region_operator(),
+        KVObjectProjector(database),
+        ContiguousLoadTaskBuilder(database, 1),
         SynchronousLoadExecutor(Backend()),
-        4,
         uses_group_scoped_block_ids=False,
     )
     load_service.load(LoadRequestBatch((request,)))
@@ -890,14 +1078,14 @@ def test_load_treats_misaligned_backend_results_as_failed(get_result) -> None:
         ),
     )
     load_service = WorkerLoadService(
-        SimpleNamespace(select_load=lambda block_hashes, load_end_token: ()),
-        SimpleNamespace(build=lambda request, load_end_token, selections: task),
+        SimpleNamespace(load_region=lambda block_hashes, load_range: KVRegion(load_range, ())),
+        SimpleNamespace(project=lambda region, block_hashes: ()),
+        SimpleNamespace(build=lambda request, projections: task),
         SynchronousLoadExecutor(SimpleNamespace(get=lambda keys, addresses, sizes: get_result)),
-        4,
         uses_group_scoped_block_ids=False,
     )
 
-    load_service.load(LoadRequestBatch((LoadRequest("request", 8, ((1, 2),), (b"a", b"b"), 0, 8),)))
+    load_service.load(LoadRequestBatch((LoadRequest("request", TokenRange(0, 8), ((1, 2),), (b"a", b"b")),)))
 
     assert load_service.collect_result() == LoadResult(frozenset(), frozenset(), frozenset({1, 2}))
 
@@ -914,11 +1102,14 @@ def test_grouped_load_builds_one_backend_call_from_each_group() -> None:
     class Reachability:
         group_ids = (0, 1)
 
-        def select_load(self, block_hashes, token_len):
-            assert token_len == 16
-            return (
-                ChunkSelection(0, (True, True, True, True)),
-                ChunkSelection(1, (False, True)),
+        def load_region(self, block_hashes, load_range):
+            assert load_range == TokenRange(0, 16)
+            return KVRegion(
+                load_range,
+                (
+                    ChunkSelection(0, (True, True, True, True)),
+                    ChunkSelection(1, (False, True)),
+                ),
             )
 
     class Backend:
@@ -929,19 +1120,46 @@ def test_grouped_load_builds_one_backend_call_from_each_group() -> None:
             assert sizes == [[16], [16], [16], [16], [32]]
             return [0] * 5
 
-    request = LoadRequest("request", 16, ((1, 2, 3, 4), (10, 11)), (b"a", b"b", b"c", b"d"), 0, 16)
-    task_builder = ContiguousLoadTaskBuilder(database, {0: 4, 1: 8}, 0)
+    request = LoadRequest("request", TokenRange(0, 16), ((1, 2, 3, 4), (10, 11)), (b"a", b"b", b"c", b"d"))
+    task_builder = ContiguousLoadTaskBuilder(database, 0)
     load_service = WorkerLoadService(
         Reachability(),
+        KVObjectProjector(database),
         task_builder,
         SynchronousLoadExecutor(Backend()),
-        16,
         uses_group_scoped_block_ids=True,
     )
 
     load_service.load(LoadRequestBatch((request,)))
 
     assert load_service.collect_result() == LoadResult(frozenset(), frozenset(), frozenset())
+
+
+def test_contiguous_load_skips_null_blocks_only_for_align_state_groups() -> None:
+    database = ChunkedTokenDatabase(
+        [KeyMetadata("model", 0, 0, 0, 0), KeyMetadata("model", 0, 0, 0, 1)],
+        [4, 4],
+        None,
+        4,
+    )
+    database.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [16]}, {0: [16], 1: [16]})
+    block_hashes = (b"a", b"b", b"c")
+    request = LoadRequest("request", TokenRange(0, 12), ((0, 2, 3), (0, 5, 6)), block_hashes)
+    projections = project_region(
+        database,
+        KVRegion(request.load_range, (ChunkSelection(0, None), ChunkSelection(1, None))),
+        block_hashes,
+    )
+
+    task = ContiguousLoadTaskBuilder(database, 0, frozenset({1})).build(request, projections)
+
+    assert [(chunk.group_id, chunk.block_id) for chunk in task.chunks] == [
+        (0, 0),
+        (0, 2),
+        (0, 3),
+        (1, 5),
+        (1, 6),
+    ]
 
 
 def test_grouped_synchronous_load_fails_before_forward() -> None:
@@ -953,15 +1171,15 @@ def test_grouped_synchronous_load_fails_before_forward() -> None:
         ),
     )
     load_service = WorkerLoadService(
-        SimpleNamespace(select_load=lambda block_hashes, load_end_token: ()),
-        SimpleNamespace(build=lambda request, load_end_token, selections: task),
+        SimpleNamespace(load_region=lambda block_hashes, load_range: KVRegion(load_range, ())),
+        SimpleNamespace(project=lambda region, block_hashes: ()),
+        SimpleNamespace(build=lambda request, projections: task),
         SynchronousLoadExecutor(SimpleNamespace(get=lambda keys, addresses, sizes: [0, -1])),
-        4,
         uses_group_scoped_block_ids=True,
     )
 
     with pytest.raises(RuntimeError, match="Hybrid KV Load failed for requests: \\['request'\\]"):
-        load_service.load(LoadRequestBatch((LoadRequest("request", 4, ((1,), (1,)), (b"a",), 0, 4),)))
+        load_service.load(LoadRequestBatch((LoadRequest("request", TokenRange(0, 4), ((1,), (1,)), (b"a",)),)))
 
     assert load_service.collect_result() == LoadResult(frozenset(), frozenset({"request"}), frozenset())
 
@@ -976,14 +1194,14 @@ def test_grouped_asynchronous_load_reports_request_failure() -> None:
     )
     backend = SimpleNamespace(set_device=lambda: None, get=lambda keys, addresses, sizes: [0, -1])
     load_service = WorkerLoadService(
-        SimpleNamespace(select_load=lambda block_hashes, load_end_token: ()),
-        SimpleNamespace(build=lambda request, load_end_token, selections: task),
+        SimpleNamespace(load_region=lambda block_hashes, load_range: KVRegion(load_range, ())),
+        SimpleNamespace(project=lambda region, block_hashes: ()),
+        SimpleNamespace(build=lambda request, projections: task),
         AsyncLoadExecutor(backend),
-        4,
         uses_group_scoped_block_ids=True,
     )
     load_service.start()
-    load_service.load(LoadRequestBatch((LoadRequest("request", 4, ((1,), (1,)), (b"a",), 0, 4),)))
+    load_service.load(LoadRequestBatch((LoadRequest("request", TokenRange(0, 4), ((1,), (1,)), (b"a",)),)))
     load_service._executor._task_queue.join()
 
     assert load_service.collect_result() == LoadResult(frozenset({"request"}), frozenset({"request"}), frozenset())
@@ -1005,13 +1223,13 @@ def test_async_load_aggregates_success_failure_and_empty_tasks() -> None:
             return [0] if keys == ["success"] else [-1]
 
     load_service = WorkerLoadService(
-        SimpleNamespace(select_load=lambda block_hashes, load_end_token: ()),
-        SimpleNamespace(build=lambda request, load_end_token, selections: tasks[request.request_id]),
+        SimpleNamespace(load_region=lambda block_hashes, load_range: KVRegion(load_range, ())),
+        SimpleNamespace(project=lambda region, block_hashes: ()),
+        SimpleNamespace(build=lambda request, projections: tasks[request.request_id]),
         AsyncLoadExecutor(Backend()),
-        4,
         uses_group_scoped_block_ids=True,
     )
-    requests = tuple(LoadRequest(request_id, 4, ((1,), (2,)), (b"a",), 0, 4) for request_id in tasks)
+    requests = tuple(LoadRequest(request_id, TokenRange(0, 4), ((1,), (2,)), (b"a",)) for request_id in tasks)
     load_service.start()
     load_service.load(LoadRequestBatch(requests))
     load_service._executor._task_queue.join()
@@ -1028,14 +1246,14 @@ def test_async_load_reports_completion_and_failed_blocks() -> None:
     completed = Event()
 
     class Database:
-        def load_mask(self, block_hashes, token_len):
-            return [[True, True]]
+        hash_block_size = 4
 
-        def process_token_key_strings_with_block_ids(
-            self, token_len, block_hashes, block_ids, mask_num, kv_cache_group_id, chunk_filter
-        ):
+        def get_block_size(self, group_id):
+            return 4
+
+        def process_token_key_strings(self, token_len, block_hashes, mask_num, kv_cache_group_id, chunk_filter):
             assert kv_cache_group_id == 0
-            return [(0, 4, "first", 0, 1), (4, 8, "second", 0, 2)]
+            return [(0, 4, "first", b"a"), (4, 8, "second", b"b")]
 
         def prepare_value(self, start, end, block_ids, kv_cache_group_id, block_id):
             assert kv_cache_group_id == 0
@@ -1049,15 +1267,16 @@ def test_async_load_reports_completion_and_failed_blocks() -> None:
             completed.set()
             return [0, -1]
 
+    database = Database()
     load_service = WorkerLoadService(
-        make_unitary_coordinator(),
-        ContiguousLoadTaskBuilder(Database(), {0: 4}, 0),
+        make_unitary_region_operator(),
+        KVObjectProjector(database),
+        ContiguousLoadTaskBuilder(database, 0),
         AsyncLoadExecutor(Backend()),
-        4,
         uses_group_scoped_block_ids=False,
     )
     load_service.start()
-    load_service.load(LoadRequestBatch((LoadRequest("request", 8, ((1, 2),), (b"a", b"b"), 0, 8),)))
+    load_service.load(LoadRequestBatch((LoadRequest("request", TokenRange(0, 8), ((1, 2),), (b"a", b"b")),)))
     assert completed.wait(2)
     load_service._executor._task_queue.join()
 
@@ -1071,14 +1290,14 @@ def test_async_load_reports_terminal_request_after_late_completion(monkeypatch) 
     allow_load_to_finish = Event()
 
     class Database:
-        def load_mask(self, block_hashes, token_len):
-            return [[True]]
+        hash_block_size = 4
 
-        def process_token_key_strings_with_block_ids(
-            self, token_len, block_hashes, block_ids, mask_num, kv_cache_group_id, chunk_filter
-        ):
+        def get_block_size(self, group_id):
+            return 4
+
+        def process_token_key_strings(self, token_len, block_hashes, mask_num, kv_cache_group_id, chunk_filter):
             assert kv_cache_group_id == 0
-            return [(0, 4, "key", 0, 1)]
+            return [(0, 4, "key", b"a")]
 
         def prepare_value(self, start, end, block_ids, kv_cache_group_id, block_id):
             assert kv_cache_group_id == 0
@@ -1093,15 +1312,16 @@ def test_async_load_reports_terminal_request_after_late_completion(monkeypatch) 
             assert allow_load_to_finish.wait(2)
             return [0]
 
+    database = Database()
     load_service = WorkerLoadService(
-        make_unitary_coordinator(),
-        ContiguousLoadTaskBuilder(Database(), {0: 4}, 0),
+        make_unitary_region_operator(),
+        KVObjectProjector(database),
+        ContiguousLoadTaskBuilder(database, 0),
         AsyncLoadExecutor(Backend()),
-        4,
         uses_group_scoped_block_ids=False,
     )
     load_service.start()
-    load_service.load(LoadRequestBatch((LoadRequest("request", 4, ((1,),), (b"a",), 0, 4),)))
+    load_service.load(LoadRequestBatch((LoadRequest("request", TokenRange(0, 4), ((1,),), (b"a",)),)))
     assert load_started.wait(2)
 
     worker = worker_module.WorkerService.__new__(worker_module.WorkerService)
@@ -1143,11 +1363,12 @@ def test_classic_lookup_service_returns_continuous_rank_hit(present, max_model_l
             return present
 
     service = LookupService(
-        make_unitary_coordinator(max_model_len=max_model_len, cache_transfer_granularity=granularity),
-        LookupTaskBuilder(database, 2, 1, 1),
+        make_unitary_region_operator(max_model_len=max_model_len, cache_transfer_granularity=granularity),
+        KVObjectProjector(database),
+        LookupTaskBuilder(2, 1, 1),
         LookupExecutor(Backend()),
     )
-    assert service.lookup(LookupRequest(12, (0,), 0, tuple(block_hashes))) == LookupResult(expected_hit)
+    assert service.lookup(LookupRequest(TokenRange(0, 12), (0,), tuple(block_hashes))) == LookupResult(expected_hit)
 
 
 def test_classic_lookup_service_returns_zero_on_backend_error() -> None:
@@ -1158,45 +1379,48 @@ def test_classic_lookup_service_returns_zero_on_backend_error() -> None:
             raise RuntimeError("lookup unavailable")
 
     service = LookupService(
-        make_unitary_coordinator(max_model_len=12),
-        LookupTaskBuilder(database, 1, 1, 1),
+        make_unitary_region_operator(max_model_len=12),
+        KVObjectProjector(database),
+        LookupTaskBuilder(1, 1, 1),
         LookupExecutor(Backend()),
     )
-    assert service.lookup(LookupRequest(4, (0,), 0, (b"a",))) == LookupResult(0)
+    assert service.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"a",))) == LookupResult(0)
 
 
 @pytest.mark.parametrize("presence_codes", ((), (1, 1)))
 def test_lookup_returns_zero_for_misaligned_backend_results(presence_codes) -> None:
     database = ChunkedTokenDatabase([KeyMetadata("model", 0, 0, 0)], [4], None, 4)
     service = LookupService(
-        make_unitary_coordinator(max_model_len=4),
-        LookupTaskBuilder(database, 1, 1, 1),
+        make_unitary_region_operator(max_model_len=4),
+        KVObjectProjector(database),
+        LookupTaskBuilder(1, 1, 1),
         LookupExecutor(SimpleNamespace(exists=lambda keys: presence_codes)),
     )
 
-    assert service.lookup(LookupRequest(4, (0,), 0, (b"a",))) == LookupResult(0)
+    assert service.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"a",))) == LookupResult(0)
 
 
 def test_lookup_empty_selection_skips_backend_and_preserves_observation() -> None:
     database = ChunkedTokenDatabase([KeyMetadata("model", 0, 0, 0)], [4], None, 4)
 
-    class Coordinator:
+    class RegionOperator:
         group_ids = (0,)
 
-        def select_lookup(self, lookup_end_token, local_cached_tokens):
-            return (LookupChunkSelection(0, (False,), 0),)
+        def lookup_region(self, query_range):
+            return KVRegion(query_range, (ChunkSelection(0, (False,)),))
 
-        def resolve_lookup(self, block_hashes, lookup_end_token, local_cached_tokens, observations):
+        def resolve_lookup(self, block_hashes, query_region, observations):
             assert observations == (LookupObservation(0, (), (), ()),)
             return 0
 
     service = LookupService(
-        Coordinator(),
-        LookupTaskBuilder(database, 1, 1, 1),
+        RegionOperator(),
+        KVObjectProjector(database),
+        LookupTaskBuilder(1, 1, 1),
         LookupExecutor(SimpleNamespace(exists=lambda keys: pytest.fail("Backend must not receive an empty Lookup"))),
     )
 
-    assert service.lookup(LookupRequest(4, (0,), 0, (b"a",))) == LookupResult(0)
+    assert service.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"a",))) == LookupResult(0)
 
 
 def test_tp_mismatch_lookup_checks_every_effective_tp_rank() -> None:
@@ -1209,12 +1433,13 @@ def test_tp_mismatch_lookup_checks_every_effective_tp_rank() -> None:
             return [1, 1, 1, 0]
 
     service = LookupService(
-        make_unitary_coordinator(max_model_len=4),
-        LookupTaskBuilder(database, 4, 1, 1),
+        make_unitary_region_operator(max_model_len=4),
+        KVObjectProjector(database),
+        LookupTaskBuilder(4, 1, 1),
         LookupExecutor(Backend()),
     )
 
-    assert service.lookup(LookupRequest(4, (0,), 0, (b"a",))) == LookupResult(0)
+    assert service.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"a",))) == LookupResult(0)
     assert [f"@head_or_tp_rank:{rank}@" in key for rank, key in enumerate(queried_keys)] == [True] * 4
 
 
@@ -1232,15 +1457,14 @@ def test_grouped_lookup_returns_common_contiguous_hit() -> None:
                 return [1, 1, 1]
             return [1]
 
-    class Coordinator:
+    class RegionOperator:
         group_ids = (0, 1)
 
-        def select_lookup(self, token_len, local_cached_tokens):
-            assert token_len == 12
-            assert local_cached_tokens == 0
-            return LookupChunkSelection(0, None, 0), LookupChunkSelection(1, None, 0)
+        def lookup_region(self, query_range):
+            assert query_range == TokenRange(0, 12)
+            return KVRegion(query_range, (ChunkSelection(0, None), ChunkSelection(1, None)))
 
-        def resolve_lookup(self, block_hashes, token_len, local_cached_tokens, observations):
+        def resolve_lookup(self, block_hashes, query_region, observations):
             hit_ends = []
             for observation in observations:
                 hit_end = 0
@@ -1252,12 +1476,13 @@ def test_grouped_lookup_returns_common_contiguous_hit() -> None:
             return min(hit_ends)
 
     service = LookupService(
-        Coordinator(),
-        LookupTaskBuilder(database, 1, 1, 1),
+        RegionOperator(),
+        KVObjectProjector(database),
+        LookupTaskBuilder(1, 1, 1),
         LookupExecutor(Backend()),
     )
 
-    assert service.lookup(LookupRequest(12, (0, 1), 0, (b"a", b"b", b"c"))) == LookupResult(8)
+    assert service.lookup(LookupRequest(TokenRange(0, 12), (0, 1), (b"a", b"b", b"c"))) == LookupResult(8)
 
 
 def test_grouped_lookup_queries_only_reachable_chunks_after_hbm_hit() -> None:
@@ -1278,12 +1503,11 @@ def test_grouped_lookup_queries_only_reachable_chunks_after_hbm_hit() -> None:
     class Reachability:
         group_ids = (0, 1)
 
-        def select_lookup(self, token_len, local_cached_tokens):
-            assert token_len == 16
-            assert local_cached_tokens == 4
-            return LookupChunkSelection(0, None, 4), LookupChunkSelection(1, (False, True), 0)
+        def lookup_region(self, query_range):
+            assert query_range == TokenRange(4, 16)
+            return KVRegion(query_range, (ChunkSelection(0, None), ChunkSelection(1, (False, True))))
 
-        def resolve_lookup(self, block_hashes, token_len, local_cached_tokens, observations):
+        def resolve_lookup(self, block_hashes, query_region, observations):
             assert [observation.group_id for observation in observations] == [0, 1]
             assert [len(observation.chunk_hashes) for observation in observations] == [3, 1]
             assert all(all(observation.chunk_presence) for observation in observations)
@@ -1291,11 +1515,13 @@ def test_grouped_lookup_queries_only_reachable_chunks_after_hbm_hit() -> None:
 
     service = LookupService(
         Reachability(),
-        LookupTaskBuilder(database, 1, 1, 1),
+        KVObjectProjector(database),
+        LookupTaskBuilder(1, 1, 1),
         LookupExecutor(Backend()),
     )
 
-    assert service.lookup(LookupRequest(16, (0, 1), 4, (b"a", b"b", b"c", b"d"))) == LookupResult(8)
+    request = LookupRequest(TokenRange(4, 16), (0, 1), (b"a", b"b", b"c", b"d"))
+    assert service.lookup(request) == LookupResult(8)
     assert len(queries[0]) == 3
     assert len(queries[1]) == 1
 
@@ -1303,12 +1529,11 @@ def test_grouped_lookup_queries_only_reachable_chunks_after_hbm_hit() -> None:
 def test_strided_load_task_maps_effective_rank_keys_to_head_slices() -> None:
     database = ChunkedTokenDatabase([KeyMetadata("model", 1, 0, 0)], [4], None, 4)
     database.set_group_buffers({0: [1000, 2000]}, {0: [64, 64]}, {0: [128, 128]})
-    request = LoadRequest("request", 8, ((10, 11),), (b"a", b"b"), 0, 8)
+    request = LoadRequest("request", TokenRange(0, 8), ((10, 11),), (b"a", b"b"))
 
-    task = StridedLoadTaskBuilder(database, 4, 4, StridedKVPartitioner(database, 4, 1, 2)).build(
+    task = StridedLoadTaskBuilder(*make_tp_mismatch_projectors(database, 4, 1, 2)).build(
         request,
-        8,
-        (ChunkSelection(0, None),),
+        project_region(database, KVRegion(request.load_range, (ChunkSelection(0, None),)), request.block_hashes),
     )
 
     assert [chunk.block_id for chunk in task.chunks] == [10, 11, 11, 10]
@@ -1318,17 +1543,34 @@ def test_strided_load_task_maps_effective_rank_keys_to_head_slices() -> None:
     assert task.chunks[0].sizes == (8,) * 8
 
 
-def test_strided_kv_partitioner_keeps_one_slice_when_local_tp_is_larger() -> None:
+def test_effective_tp_key_and_strided_memory_projection_keep_one_local_slice() -> None:
     database = ChunkedTokenDatabase([KeyMetadata("model", 3, 0, 0)], [4], None, 4)
     database.set_group_buffers({0: [1000]}, {0: [64]}, {0: [128]})
     base_key = next(database.process_token_key_strings(4, [b"a"]))[2]
+    key_projector, memory_projector = make_tp_mismatch_projectors(database, 4, 3, 1)
 
-    slices = list(StridedKVPartitioner(database, 4, 3, 1).partition(base_key, 2, 4))
+    keys = key_projector.project(base_key)
+    memory_slices = memory_projector.project(2, 4)
 
-    assert len(slices) == 1
-    assert "@head_or_tp_rank:3@" in slices[0][0]
-    assert slices[0][1] == (1256, 1272, 1288, 1304)
-    assert slices[0][2] == (16,) * 4
+    assert len(keys) == len(memory_slices) == 1
+    assert "@head_or_tp_rank:3@" in keys[0]
+    assert memory_slices[0].addresses == (1256, 1272, 1288, 1304)
+    assert memory_slices[0].sizes == (16,) * 4
+
+
+def test_strided_memory_projection_uses_original_group_id() -> None:
+    database = ChunkedTokenDatabase(
+        [KeyMetadata("model", 0, 0, 0, 0), KeyMetadata("model", 0, 0, 0, 1)],
+        [4, 4],
+        None,
+        4,
+    )
+    database.set_group_buffers({1: [2000]}, {1: [64]}, {1: [128]})
+
+    memory_slices = StridedKVMemoryProjector(database, 1, 4, 2).project(2, 4)
+
+    assert memory_slices[0].addresses == (2256, 2272, 2288, 2304)
+    assert memory_slices[1].addresses == (2264, 2280, 2296, 2312)
 
 
 def test_async_load_executes_strided_task() -> None:
@@ -1344,16 +1586,16 @@ def test_async_load_executes_strided_task() -> None:
             loaded_keys.extend(keys)
             return [0] * len(keys)
 
-    task_builder = StridedLoadTaskBuilder(database, 4, 4, StridedKVPartitioner(database, 4, 0, 2))
+    task_builder = StridedLoadTaskBuilder(*make_tp_mismatch_projectors(database, 4, 0, 2))
     load_service = WorkerLoadService(
-        make_unitary_coordinator(),
+        make_unitary_region_operator(),
+        KVObjectProjector(database),
         task_builder,
         AsyncLoadExecutor(Backend()),
-        4,
         uses_group_scoped_block_ids=False,
     )
     load_service.start()
-    load_service.load(LoadRequestBatch((LoadRequest("request", 4, ((1,),), (b"a",), 0, 4),)))
+    load_service.load(LoadRequestBatch((LoadRequest("request", TokenRange(0, 4), ((1,),), (b"a",)),)))
     load_service._executor._task_queue.join()
 
     assert load_service.collect_result() == LoadResult(frozenset({"request"}), frozenset(), frozenset())
@@ -1372,16 +1614,16 @@ def test_async_strided_load_reports_failed_block() -> None:
         def get(self, keys, addresses, sizes):
             return [0, -1]
 
-    task_builder = StridedLoadTaskBuilder(database, 4, 4, StridedKVPartitioner(database, 4, 0, 2))
+    task_builder = StridedLoadTaskBuilder(*make_tp_mismatch_projectors(database, 4, 0, 2))
     load_service = WorkerLoadService(
-        make_unitary_coordinator(),
+        make_unitary_region_operator(),
+        KVObjectProjector(database),
         task_builder,
         AsyncLoadExecutor(Backend()),
-        4,
         uses_group_scoped_block_ids=False,
     )
     load_service.start()
-    load_service.load(LoadRequestBatch((LoadRequest("request", 4, ((1,),), (b"a",), 0, 4),)))
+    load_service.load(LoadRequestBatch((LoadRequest("request", TokenRange(0, 4), ((1,),), (b"a",)),)))
     load_service._executor._task_queue.join()
 
     assert load_service.collect_result() == LoadResult(frozenset({"request"}), frozenset(), frozenset({1}))
@@ -1450,6 +1692,49 @@ def test_worker_layout_preserves_per_group_geometry_and_key_namespace(monkeypatc
         KVCacheGroupLayout(1, 16, ("layers.1",), KeyMetadata("model", 0, 1, 0, 1)),
     )
     assert layout.transfer_group_ids == (0, 1)
+
+
+def test_worker_layout_preserves_per_group_align_state_key_namespace(monkeypatch) -> None:
+    class FakeMambaSpec:
+        def __init__(self, mamba_cache_mode: str) -> None:
+            self.mamba_cache_mode = mamba_cache_mode
+
+    class FakeUniformTypeKVCacheSpecs:
+        def __init__(self, kv_cache_specs) -> None:
+            self.kv_cache_specs = kv_cache_specs
+
+    monkeypatch.setattr(worker_layout, "MambaSpec", FakeMambaSpec)
+    monkeypatch.setattr(worker_layout, "UniformTypeKVCacheSpecs", FakeUniformTypeKVCacheSpecs)
+    monkeypatch.setattr(worker_layout, "get_tensor_model_parallel_rank", lambda: 3)
+    monkeypatch.setattr(worker_layout.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_: (4, 4))
+    monkeypatch.setattr(worker_layout.kv_cache_utils, "resolve_dcp_kv_block_size", lambda *_: 4)
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            rank=3,
+            tensor_parallel_size=4,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
+        model_config=SimpleNamespace(model="model", use_mla=False, get_total_num_kv_heads=lambda: 2),
+        kv_transfer_config=SimpleNamespace(kv_role="kv_producer", kv_connector_extra_config={}),
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(layer_names=["layers.0"], kv_cache_spec=SimpleNamespace()),
+            SimpleNamespace(
+                layer_names=["layers.1"],
+                kv_cache_spec=FakeUniformTypeKVCacheSpecs({"layers.1": FakeMambaSpec("align")}),
+            ),
+        ]
+    )
+
+    layout = worker_layout.resolve_worker_transfer_layout(vllm_config, kv_cache_config)
+
+    assert not layout.kv_cache_groups[0].uses_align_state
+    assert layout.kv_cache_groups[0].key_metadata.head_or_tp_rank == 1
+    assert layout.kv_cache_groups[1].uses_align_state
+    assert layout.kv_cache_groups[1].key_metadata.head_or_tp_rank == 3
 
 
 @pytest.mark.parametrize(
@@ -1710,9 +1995,59 @@ def test_worker_cache_resources_selects_configured_backend(monkeypatch, backend_
     resources = worker_resources.WorkerCacheResources.create(parallel_config, extra_config, (kv_group,), 4, 8)
 
     assert imported_modules == [v1_backend.BACKEND_IMPORTS[backend_name][0]]
-    assert isinstance(resources.backend, SelectedBackend)
+    assert isinstance(resources.backend, v1_backend.BackendAdapter)
     assert resources.backend.parallel_config is parallel_config
     assert resources.backend.extra_config is extra_config
+
+
+def test_v1_backend_adapter_preserves_mooncake_store_results() -> None:
+    store = SimpleNamespace(batch_put_from_multi_buffers=lambda keys, addrs, sizes, config: [0, -1])
+    backend = SimpleNamespace(
+        ensure_initialized=lambda: None,
+        store=store,
+        _build_replicate_config=lambda: object(),
+    )
+    adapter = v1_backend.BackendAdapter("mooncake", backend, SimpleNamespace())
+
+    assert adapter.put(["first", "second"], [[1], [2]], [[3], [4]]) == [0, -1]
+
+
+def test_v1_backend_adapter_preserves_memcache_store_results() -> None:
+    calls = []
+
+    def put(keys, addrs, sizes, direction):
+        calls.append((keys, addrs, sizes, direction))
+        return [0]
+
+    backend = SimpleNamespace(ensure_initialized=lambda: None, store=SimpleNamespace(batch_put_from_layers=put))
+    backend_module = SimpleNamespace(MmcDirect=SimpleNamespace(COPY_L2G=SimpleNamespace(value=7)))
+    adapter = v1_backend.BackendAdapter("memcache", backend, backend_module)
+
+    assert adapter.put(["key"], [[1]], [[2]]) == [0]
+    assert calls == [(["key"], [[1]], [[2]], 7)]
+
+
+def test_v1_backend_adapter_preserves_unknown_yuanrong_store_result() -> None:
+    store = SimpleNamespace(mset_d2h_from_multi_buffers=lambda keys, addrs, sizes, params: None)
+    backend = SimpleNamespace(store=store, _ds_set_param=object())
+    adapter = v1_backend.BackendAdapter("yuanrong", backend, SimpleNamespace())
+
+    assert adapter.put(["key"], [[1]], [[2]]) is None
+
+
+def test_v1_backend_adapter_does_not_hide_store_exceptions() -> None:
+    def fail_put(keys, addrs, sizes, config) -> list[int]:
+        raise RuntimeError("put failed")
+
+    backend = SimpleNamespace(
+        ensure_initialized=lambda: None,
+        store=SimpleNamespace(batch_put_from_multi_buffers=fail_put),
+        _build_replicate_config=lambda: object(),
+    )
+    adapter = v1_backend.BackendAdapter("mooncake", backend, SimpleNamespace())
+
+    with pytest.raises(RuntimeError, match="put failed"):
+        adapter.put(["key"], [[1]], [[2]])
 
 
 def test_worker_cache_resources_closes_backend_once_when_supported() -> None:
@@ -1739,7 +2074,7 @@ def test_worker_cache_resources_skips_backend_close_when_unsupported() -> None:
 def test_store_executor_reports_failure_while_waiting_for_previous_batch() -> None:
     executor = StoreExecutor(SimpleNamespace())
     executor.wait_for_previous_store()
-    executor._previous_batch_barrier = SimpleNamespace(completed=Event())
+    executor._previous_batch = StoreBatch(())
     executor._fatal_error = RuntimeError("sender stopped")
 
     with pytest.raises(RuntimeError, match="failed during asynchronous transfer") as error:
@@ -1747,24 +2082,32 @@ def test_store_executor_reports_failure_while_waiting_for_previous_batch() -> No
     assert isinstance(error.value.__cause__, RuntimeError)
 
 
-def test_store_service_keeps_task_build_failures_inside_the_store_batch(monkeypatch) -> None:
+def test_store_service_reports_task_build_failure_before_submission(monkeypatch) -> None:
     source_ready_event = SimpleNamespace(record=lambda: None)
     submitted_tasks = []
 
-    def build_task(request, event):
-        if request.request_id == "failed":
-            raise RuntimeError("invalid Store task")
-        return StoreTask(request.request_id, event, ())
+    def build_task(request, event, projections):
+        raise RuntimeError("invalid Store task")
 
     store_service = StoreService.__new__(StoreService)
     store_service._task_builder = SimpleNamespace(build=build_task)
+    store_service._region_operator = SimpleNamespace(
+        store_region=lambda store_range, num_prompt_tokens: KVRegion(store_range, ())
+    )
+    store_service._object_projector = SimpleNamespace(project=lambda region, block_hashes: ())
     store_service._executor = SimpleNamespace(submit_batch=submitted_tasks.extend)
     monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=lambda: source_ready_event), raising=False)
 
-    store_service.submit(StoreRequestBatch((SimpleNamespace(request_id="failed"), SimpleNamespace(request_id="ready"))))
+    request = SimpleNamespace(
+        request_id="failed",
+        store_range=TokenRange(0, 4),
+        num_prompt_tokens=4,
+        block_hashes=(),
+    )
+    with pytest.raises(RuntimeError, match="invalid Store task"):
+        store_service.submit(StoreRequestBatch((request,)))
 
-    assert [task.request_id for task in submitted_tasks] == ["failed", "ready"]
-    assert all(task.source_ready_event is source_ready_event for task in submitted_tasks)
+    assert submitted_tasks == []
 
 
 def test_connector_rejects_request_level_load_failure(monkeypatch) -> None:
@@ -1854,13 +2197,13 @@ def test_strided_store_task_maps_effective_rank_keys_to_head_slices() -> None:
     database = ChunkedTokenDatabase([KeyMetadata("model", 1, 0, 0)], [4], None, 4)
     database.set_group_buffers({0: [1000, 2000]}, {0: [64, 64]}, {0: [128, 128]})
     source_ready_event = SimpleNamespace()
-    request = StoreRequest("request", 8, ((10, 11),), (b"a", b"b"), 8)
-    kv_partitioner = StridedKVPartitioner(database, 4, 1, 2)
+    request = StoreRequest("request", TokenRange(0, 8), ((10, 11),), (b"a", b"b"), 8)
+    tp_mismatch_projectors = make_tp_mismatch_projectors(database, 4, 1, 2)
 
-    task = StridedStoreTaskBuilder(database, 4, 0, 1, kv_partitioner).build(
+    task = StridedStoreTaskBuilder(0, 1, *tp_mismatch_projectors).build(
         request,
         source_ready_event,
-        (ChunkSelection(0, None),),
+        project_region(database, KVRegion(request.store_range, (ChunkSelection(0, None),)), request.block_hashes),
     )
 
     assert task.source_ready_event is source_ready_event
@@ -1879,10 +2222,11 @@ def test_strided_store_shards_chunks_between_pcp_ranks_before_splitting_heads() 
     block_ids = [10, 11, 12, 13]
     token_chunks = database.process_token_key_strings_with_block_ids(16, block_hashes, block_ids)
     base_keys = [key for _, _, key, _, _ in token_chunks]
-    request = StoreRequest("request", 16, (tuple(block_ids),), tuple(block_hashes), 16)
+    request = StoreRequest("request", TokenRange(0, 16), (tuple(block_ids),), tuple(block_hashes), 16)
 
-    task_builder = StridedStoreTaskBuilder(database, 4, 1, 2, StridedKVPartitioner(database, 4, 0, 2))
-    task = task_builder.build(request, SimpleNamespace(), (ChunkSelection(0, None),))
+    task_builder = StridedStoreTaskBuilder(1, 2, *make_tp_mismatch_projectors(database, 4, 0, 2))
+    projections = project_region(database, KVRegion(request.store_range, (ChunkSelection(0, None),)), block_hashes)
+    task = task_builder.build(request, SimpleNamespace(), projections)
 
     expected_keys = []
     for base_key in (base_keys[1], base_keys[3]):
@@ -1896,7 +2240,6 @@ def test_strided_store_shards_chunks_between_pcp_ranks_before_splitting_heads() 
     [
         ([1, 0, 1], True, [1]),
         ([1, 1, 1], True, []),
-        (RuntimeError("lookup unavailable"), True, [0, 1, 2]),
         (None, False, [0, 1, 2]),
     ],
 )
@@ -1921,13 +2264,15 @@ def test_classic_store_task_filters_keys_before_reading_source(
 
         def put(self, selected_keys, addresses, sizes):
             steps.append(("put", selected_keys, addresses, sizes))
+            return [0] * len(selected_keys)
 
     source_ready_event = SimpleNamespace(synchronize=lambda: steps.append(("source_ready",)))
-    request = StoreRequest("request", 12, ((1, 2, 3),), tuple(block_hashes), 12)
-    task_builder = ContiguousStoreTaskBuilder(database, {0: 4}, 0, 0, 1, 1, 1, "kv_producer")
-    task = task_builder.build(request, source_ready_event, (ChunkSelection(0, None),))
+    request = StoreRequest("request", TokenRange(0, 12), ((1, 2, 3),), tuple(block_hashes), 12)
+    task_builder = ContiguousStoreTaskBuilder(database, 0, 0, 1, 1, 1, "kv_producer")
+    projections = project_region(database, KVRegion(request.store_range, (ChunkSelection(0, None),)), block_hashes)
+    task = task_builder.build(request, source_ready_event, projections)
     executor = StoreExecutor(Backend())
-    executor._execute_task(task)
+    result = executor._execute_task(task)
 
     expected_steps = [("exists", keys)] if requires_exists_before_put else []
     if stored_indices:
@@ -1941,6 +2286,53 @@ def test_classic_store_task_filters_keys_before_reading_source(
             )
         )
     assert steps == expected_steps
+    assert result.result_codes == (0,) * len(stored_indices)
+    assert result.source_released
+
+
+def test_store_task_starts_at_the_previous_aligned_store_boundary() -> None:
+    database = ChunkedTokenDatabase([KeyMetadata("model", 0, 0, 0)], [4], None, 4)
+    database.set_group_buffers({0: [100]}, {0: [16]}, {0: [16]})
+    block_hashes = (b"a", b"b", b"c")
+    keys = [key for _, _, key, _ in database.process_token_key_strings(12, list(block_hashes))]
+    request = StoreRequest("request", TokenRange(5, 12), ((1, 2, 3),), block_hashes, 12)
+
+    task = ContiguousStoreTaskBuilder(database, 0, 0, 1, 1, 1, "kv_producer").build(
+        request,
+        SimpleNamespace(),
+        project_region(database, KVRegion(request.store_range, (ChunkSelection(0, None),)), block_hashes),
+    )
+
+    assert [chunk.backend_key for chunk in task.chunks] == keys[1:]
+
+
+def test_store_exists_failure_is_not_treated_as_all_keys_missing() -> None:
+    error = RuntimeError("lookup unavailable")
+    chunk = SimpleNamespace(backend_key="key", addresses=(1,), sizes=(2,))
+    task = StoreTask("request", SimpleNamespace(synchronize=lambda: None), (chunk,))
+
+    def fail_exists(keys) -> list[int]:
+        raise error
+
+    backend = SimpleNamespace(requires_exists_before_put=True, exists=fail_exists)
+
+    result = StoreExecutor(backend)._execute_task(task)
+
+    assert result.result_codes is None
+    assert result.error is error
+    assert not result.source_released
+
+
+def test_store_exists_unknown_state_is_not_treated_as_a_missing_key() -> None:
+    chunk = SimpleNamespace(backend_key="key", addresses=(1,), sizes=(2,))
+    task = StoreTask("request", SimpleNamespace(synchronize=lambda: None), (chunk,))
+    backend = SimpleNamespace(requires_exists_before_put=True, exists=lambda keys: [-1])
+
+    result = StoreExecutor(backend)._execute_task(task)
+
+    assert result.result_codes is None
+    assert isinstance(result.error, RuntimeError)
+    assert not result.source_released
 
 
 def test_grouped_store_builds_one_backend_call_from_each_group() -> None:
@@ -1962,42 +2354,132 @@ def test_grouped_store_builds_one_backend_call_from_each_group() -> None:
             assert addresses == [[1016], [1032], [1048], [1064], [2352]]
             assert sizes == [[16], [16], [16], [16], [32]]
             steps.append("put")
+            return [0] * len(keys)
 
     source_ready_event = SimpleNamespace(synchronize=lambda: steps.append("source_ready"))
-    request = StoreRequest("request", 16, ((1, 2, 3, 4), (10, 11)), (b"a", b"b", b"c", b"d"), 16)
-    task_builder = ContiguousStoreTaskBuilder(database, {0: 4, 1: 8}, 0, 0, 1, 1, 1, "kv_producer")
+    request = StoreRequest("request", TokenRange(0, 16), ((1, 2, 3, 4), (10, 11)), (b"a", b"b", b"c", b"d"), 16)
+    task_builder = ContiguousStoreTaskBuilder(database, 0, 0, 1, 1, 1, "kv_producer")
     task = task_builder.build(
         request,
         source_ready_event,
-        (
-            ChunkSelection(0, (True, True, True, True)),
-            ChunkSelection(1, (False, True)),
+        project_region(
+            database,
+            KVRegion(
+                request.store_range,
+                (
+                    ChunkSelection(0, (True, True, True, True)),
+                    ChunkSelection(1, (False, True)),
+                ),
+            ),
+            request.block_hashes,
         ),
     )
 
     assert [chunk.group_id for chunk in task.chunks] == [0, 0, 0, 0, 1]
-    StoreExecutor(Backend())._execute_task(task)
+    result = StoreExecutor(Backend())._execute_task(task)
 
     assert steps == ["source_ready", "put"]
+    assert result.source_released
+
+
+def test_contiguous_store_applies_per_group_align_state_ownership() -> None:
+    database = ChunkedTokenDatabase(
+        [KeyMetadata("model", 0, 0, 0, 0), KeyMetadata("model", 1, 0, 0, 1)],
+        [4, 4],
+        None,
+        4,
+    )
+    database.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [16]}, {0: [16], 1: [16]})
+    block_hashes = (b"a", b"b", b"c")
+    request = StoreRequest("request", TokenRange(0, 12), ((1, 2, 3), (0, 5, 6)), block_hashes, 12)
+    projections = project_region(
+        database,
+        KVRegion(request.store_range, (ChunkSelection(0, None), ChunkSelection(1, None))),
+        block_hashes,
+    )
+
+    task = ContiguousStoreTaskBuilder(database, 1, 0, 1, 1, 2, "kv_producer", frozenset({1})).build(
+        request,
+        SimpleNamespace(),
+        projections,
+    )
+
+    assert [chunk.group_id for chunk in task.chunks] == [0, 1, 1]
 
 
 def test_store_empty_selection_skips_source_wait_and_backend() -> None:
     database = ChunkedTokenDatabase([KeyMetadata("model", 0, 0, 0)], [4], None, 4)
     source_ready_event = SimpleNamespace(synchronize=lambda: pytest.fail("Empty Store must not wait for its source"))
-    request = StoreRequest("request", 4, ((1,),), (b"a",), 4)
-    task = ContiguousStoreTaskBuilder(database, {0: 4}, 0, 0, 1, 1, 1, "kv_producer").build(
+    request = StoreRequest("request", TokenRange(0, 4), ((1,),), (b"a",), 4)
+    task = ContiguousStoreTaskBuilder(database, 0, 0, 1, 1, 1, "kv_producer").build(
         request,
         source_ready_event,
-        (ChunkSelection(0, (False,)),),
+        project_region(database, KVRegion(request.store_range, (ChunkSelection(0, (False,)),)), request.block_hashes),
     )
 
     assert task.chunks == ()
-    StoreExecutor(
+    result = StoreExecutor(
         SimpleNamespace(
             requires_exists_before_put=False,
             put=lambda keys, addresses, sizes: pytest.fail("Backend must not receive an empty Store"),
         )
     )._execute_task(task)
+    assert result.result_codes == ()
+    assert result.source_released
+
+
+def test_store_preserves_misaligned_backend_results_as_failure_evidence() -> None:
+    chunk = SimpleNamespace(backend_key="key", addresses=(1,), sizes=(2,))
+    task = StoreTask("request", SimpleNamespace(synchronize=lambda: None), (chunk,))
+    backend = SimpleNamespace(requires_exists_before_put=False, put=lambda keys, addresses, sizes: [0, -1])
+
+    result = StoreExecutor(backend)._execute_task(task)
+
+    assert result.result_codes == (0, -1)
+    assert isinstance(result.error, RuntimeError)
+    assert not result.source_released
+
+
+def test_store_batch_returns_execution_results_at_the_next_step_fence() -> None:
+    chunk = SimpleNamespace(backend_key="key", addresses=(1,), sizes=(2,))
+    task = StoreTask("request", SimpleNamespace(synchronize=lambda: None), (chunk,))
+    backend = SimpleNamespace(
+        set_device=lambda: None,
+        requires_exists_before_put=False,
+        put=lambda keys, addresses, sizes: [0],
+    )
+    executor = StoreExecutor(backend)
+    executor.start_and_wait_ready()
+    executor.submit_batch([task])
+
+    result = executor.wait_for_previous_store()
+
+    assert result[0].request_id == "request"
+    assert result[0].result_codes == (0,)
+    assert result[0].source_released
+    executor.close()
+
+
+@pytest.mark.parametrize("put_result", ([-1], None))
+def test_store_batch_failure_reaches_the_next_step_fence(put_result) -> None:
+    failing_task = StoreTask(
+        "failed",
+        SimpleNamespace(synchronize=lambda: None),
+        (SimpleNamespace(backend_key="key", addresses=(1,), sizes=(2,)),),
+    )
+    failing_backend = SimpleNamespace(
+        set_device=lambda: None,
+        requires_exists_before_put=False,
+        put=lambda keys, addresses, sizes: put_result,
+    )
+    failing_executor = StoreExecutor(failing_backend)
+    failing_executor.start_and_wait_ready()
+    failing_executor.submit_batch([failing_task])
+
+    with pytest.raises(RuntimeError, match="failed during asynchronous transfer"):
+        failing_executor.wait_for_previous_store()
+    with pytest.raises(RuntimeError, match="failed during asynchronous transfer"):
+        failing_executor.close()
 
 
 def test_grouped_connector_preserves_original_group_ids_across_mainline(monkeypatch) -> None:
@@ -2045,7 +2527,10 @@ def test_grouped_connector_preserves_original_group_ids_across_mainline(monkeypa
         instance = None
 
         def __init__(self, parallel_config, extra_config) -> None:
-            self.store = SimpleNamespace(close=lambda: 0)
+            self.store = SimpleNamespace(
+                close=lambda: 0,
+                batch_put_from_multi_buffers=lambda keys, addresses, sizes, config: self.put(keys, addresses, sizes),
+            )
             self.existing_keys: set[str] = set()
             self.loaded_keys: list[str] = []
             self.stored_keys: list[str] = []
@@ -2054,6 +2539,12 @@ def test_grouped_connector_preserves_original_group_ids_across_mainline(monkeypa
             self.stored_addresses: list[list[int]] = []
             self.stored_sizes: list[list[int]] = []
             Backend.instance = self
+
+        def ensure_initialized(self) -> None:
+            return
+
+        def _build_replicate_config(self):
+            return object()
 
         def set_device(self) -> None:
             return
@@ -2080,6 +2571,7 @@ def test_grouped_connector_preserves_original_group_ids_across_mainline(monkeypa
             self.stored_addresses.extend(addresses)
             self.stored_sizes.extend(sizes)
             self.existing_keys.update(keys)
+            return [0] * len(keys)
 
     backend_module = ModuleType("mooncake_backend")
     backend_module.MooncakeBackend = Backend

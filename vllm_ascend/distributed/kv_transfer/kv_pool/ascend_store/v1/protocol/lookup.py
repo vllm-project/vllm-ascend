@@ -9,6 +9,8 @@ import zmq
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
+from .coordinates import TokenRange
+
 WireFrame = bytes | bytearray | memoryview | zmq.Frame
 _TOKEN_COUNT_BYTES = 4
 _REQUEST_FRAME_COUNT = 4
@@ -18,9 +20,8 @@ _REQUEST_FRAME_COUNT = 4
 class LookupRequest:
     """Content hashes and cache groups participating in one remote Lookup."""
 
-    lookup_end_token: int
+    query_range: TokenRange
     transfer_group_ids: tuple[int, ...]
-    local_cached_tokens: int
     block_hashes: tuple[BlockHash, ...]
 
 
@@ -28,7 +29,7 @@ class LookupRequest:
 class LookupResult:
     """Contiguous token prefix available from the KV pool."""
 
-    kv_pool_cached_tokens: int
+    available_end_token: int
 
 
 class LookupCodec:
@@ -42,9 +43,9 @@ class LookupCodec:
         group_frames = self._encoder.encode(list(request.transfer_group_ids))
         hash_frames = self._encoder.encode([block_hash.hex() for block_hash in request.block_hashes])
         return [
-            request.lookup_end_token.to_bytes(_TOKEN_COUNT_BYTES, byteorder="big"),
+            request.query_range.end_token.to_bytes(_TOKEN_COUNT_BYTES, byteorder="big"),
             *group_frames,
-            request.local_cached_tokens.to_bytes(_TOKEN_COUNT_BYTES, byteorder="big"),
+            request.query_range.start_token.to_bytes(_TOKEN_COUNT_BYTES, byteorder="big"),
             *hash_frames,
         ]
 
@@ -53,15 +54,17 @@ class LookupCodec:
             raise ValueError(f"Lookup request requires {_REQUEST_FRAME_COUNT} frames, received {len(frames)}")
         hash_strings = self._decoder.decode(frames[3:])
         return LookupRequest(
-            lookup_end_token=int.from_bytes(frames[0], byteorder="big"),
+            query_range=TokenRange(
+                int.from_bytes(frames[2], byteorder="big"),
+                int.from_bytes(frames[0], byteorder="big"),
+            ),
             transfer_group_ids=tuple(self._decoder.decode([frames[1]])),
-            local_cached_tokens=int.from_bytes(frames[2], byteorder="big"),
             block_hashes=tuple(BlockHash(bytes.fromhex(block_hash)) for block_hash in hash_strings),
         )
 
     @staticmethod
     def encode_result(result: LookupResult) -> bytes:
-        return result.kv_pool_cached_tokens.to_bytes(_TOKEN_COUNT_BYTES, byteorder="big")
+        return result.available_end_token.to_bytes(_TOKEN_COUNT_BYTES, byteorder="big")
 
     @staticmethod
     def decode_result(frame: WireFrame) -> LookupResult:

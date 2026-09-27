@@ -7,17 +7,17 @@ from dataclasses import dataclass
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.v1.core.kv_cache_utils import BlockHash
 
+from .coordinates import TokenRange
+
 
 @dataclass(frozen=True, slots=True)
 class LoadRequest:
     """A Scheduler-approved Load command."""
 
     request_id: str
-    transfer_end_token: int
+    load_range: TokenRange
     block_ids_by_group: tuple[tuple[int, ...], ...]
     block_hashes: tuple[BlockHash, ...]
-    local_cached_tokens: int
-    kv_pool_cached_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +25,7 @@ class StoreRequest:
     """A Scheduler-approved asynchronous Store command."""
 
     request_id: str
-    store_end_token: int
+    store_range: TokenRange
     block_ids_by_group: tuple[tuple[int, ...], ...]
     block_hashes: tuple[BlockHash, ...]
     num_prompt_tokens: int

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from vllm.utils.math_utils import cdiv
+
+from ...protocol.coordinates import TokenRange
 from ...protocol.lookup import LookupRequest
 from .client import LookupClient
-from .messages import SchedulerLookupRequest
+from .messages import LookupAvailability, SchedulerLookupRequest
 
 
 class LookupService:
@@ -26,7 +29,7 @@ class LookupService:
         self.enabled = enabled
         self.client: LookupClient | None = None
 
-    def lookup(self, request: SchedulerLookupRequest) -> int | None:
+    def lookup(self, request: SchedulerLookupRequest) -> LookupAvailability | None:
         if not self.enabled:
             return None
 
@@ -40,22 +43,29 @@ class LookupService:
             self.client = LookupClient(self.lookup_address)
         lookup_result = self.client.lookup(
             LookupRequest(
-                lookup_end_token,
+                TokenRange(request.local_cached_tokens, lookup_end_token),
                 self.transfer_group_ids,
-                request.local_cached_tokens,
                 tuple(request.block_hashes),
             )
         )
-        kv_pool_cached_tokens = lookup_result.kv_pool_cached_tokens
-        if kv_pool_cached_tokens == 0:
+        available_end_token = lookup_result.available_end_token
+        if available_end_token <= request.local_cached_tokens:
             return None
 
-        if kv_pool_cached_tokens == request.request_token_len:
-            kv_pool_cached_tokens -= 1
-        if kv_pool_cached_tokens <= request.local_cached_tokens:
+        matched_end_token = available_end_token
+        if matched_end_token == request.request_token_len:
+            matched_end_token -= 1
+        if matched_end_token <= request.local_cached_tokens:
             return None
 
-        return kv_pool_cached_tokens
+        # Keep one token for vLLM computation on a full hit, but load its KV when the containing chunk is allocated.
+        allocated_end_token = cdiv(matched_end_token, self.cache_transfer_granularity)
+        allocated_end_token *= self.cache_transfer_granularity
+        load_end_token = min(available_end_token, allocated_end_token)
+        return LookupAvailability(
+            TokenRange(request.local_cached_tokens, load_end_token),
+            matched_end_token,
+        )
 
     def close(self) -> None:
         if self.client is not None:

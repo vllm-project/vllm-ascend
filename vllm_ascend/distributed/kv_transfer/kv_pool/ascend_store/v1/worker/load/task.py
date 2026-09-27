@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Set
 from dataclasses import dataclass
-from functools import partial
 from typing import Protocol
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase
 
 from ...protocol.transfer import LoadRequest
-from ..coordinator import ChunkSelection
-from ..layout import StridedKVPartitioner
+from ..projection import (
+    EffectiveTPKeyProjector,
+    KVObjectProjection,
+    StridedKVMemoryProjector,
+    bind_local_blocks,
+)
 
 
 def _circular_shift(values: list, offset: int) -> list:
@@ -42,43 +45,42 @@ class LoadTask:
 class LoadTaskBuilder(Protocol):
     """Build one Backend-ready task from an approved Load request."""
 
-    def build(self, request: LoadRequest, load_end_token: int, selections: Sequence[ChunkSelection]) -> LoadTask: ...
+    def build(self, request: LoadRequest, projections: tuple[KVObjectProjection, ...]) -> LoadTask: ...
 
 
 class ContiguousLoadTaskBuilder:
     """Map each cached chunk to the contiguous segments of local KV blocks."""
 
-    def __init__(self, token_database: ChunkedTokenDatabase, group_block_sizes: dict[int, int], tp_rank: int) -> None:
+    def __init__(
+        self,
+        token_database: ChunkedTokenDatabase,
+        tp_rank: int,
+        align_state_group_ids: Set[int] = frozenset(),
+    ) -> None:
         self.token_database = token_database
-        self.group_block_sizes = group_block_sizes
         self.tp_rank = tp_rank
+        self._align_state_group_ids = align_state_group_ids
 
-    def build(self, request: LoadRequest, load_end_token: int, selections: Sequence[ChunkSelection]) -> LoadTask:
-        block_hashes = list(request.block_hashes)
+    def build(self, request: LoadRequest, projections: tuple[KVObjectProjection, ...]) -> LoadTask:
         chunks = []
-        for selection in selections:
-            group_id = selection.group_id
-            group_block_size = self.group_block_sizes[group_id]
-            group_block_ids = list(request.block_ids_by_group[group_id])
-            local_cache_boundary = request.local_cached_tokens // group_block_size * group_block_size
-
-            token_chunks = self.token_database.process_token_key_strings_with_block_ids(
-                load_end_token,
-                block_hashes,
+        for projection in projections:
+            group_id = projection.group_id
+            group_block_ids = request.block_ids_by_group[group_id]
+            allocated_objects = bind_local_blocks(
+                projection,
                 group_block_ids,
-                local_cache_boundary,
-                kv_cache_group_id=group_id,
-                chunk_filter=partial(selection.includes, block_size=group_block_size),
+                skip_null_blocks=group_id in self._align_state_group_ids,
             )
-            for start, end, key, _, block_id in token_chunks:
+            for allocated_object in allocated_objects:
+                kv_object = allocated_object.object
                 address, size, block_id = self.token_database.prepare_value(
-                    start,
-                    end,
-                    group_block_ids,
+                    kv_object.token_range.start_token,
+                    kv_object.token_range.end_token,
+                    list(group_block_ids),
                     kv_cache_group_id=group_id,
-                    block_id=block_id,
+                    block_id=allocated_object.block_id,
                 )
-                chunks.append(LoadChunk(group_id, key, tuple(address), tuple(size), block_id))
+                chunks.append(LoadChunk(group_id, kv_object.backend_key, tuple(address), tuple(size), block_id))
         chunks = _circular_shift(chunks, self.tp_rank % len(chunks)) if chunks else []
         return LoadTask(request.request_id, tuple(chunks))
 
@@ -88,42 +90,35 @@ class StridedLoadTaskBuilder:
 
     def __init__(
         self,
-        token_database: ChunkedTokenDatabase,
-        block_size: int,
-        cache_transfer_granularity: int,
-        kv_partitioner: StridedKVPartitioner,
+        key_projector: EffectiveTPKeyProjector,
+        memory_projector: StridedKVMemoryProjector,
     ) -> None:
-        self.token_database = token_database
-        self.block_size = block_size
-        self.cache_transfer_granularity = cache_transfer_granularity
-        self.kv_partitioner = kv_partitioner
+        self._key_projector = key_projector
+        self._memory_projector = memory_projector
 
-    def build(self, request: LoadRequest, load_end_token: int, selections: Sequence[ChunkSelection]) -> LoadTask:
-        if len(selections) != 1:
-            raise ValueError("Strided Load requires one cache-group selection")
-        selection = selections[0]
-        group_id = selection.group_id
-        block_ids = list(request.block_ids_by_group[group_id])
-        local_cache_boundary = request.local_cached_tokens // self.block_size * self.block_size
-        token_chunks = self.token_database.process_token_key_strings_with_block_ids(
-            load_end_token,
-            list(request.block_hashes),
-            block_ids,
-            local_cache_boundary,
-            kv_cache_group_id=group_id,
-            chunk_filter=lambda start: selection.includes(start, self.block_size),
-        )
+    def build(self, request: LoadRequest, projections: tuple[KVObjectProjection, ...]) -> LoadTask:
+        if len(projections) != 1:
+            raise ValueError("Strided Load requires one cache-group projection")
+        projection = projections[0]
+        group_id = projection.group_id
+        block_ids = request.block_ids_by_group[group_id]
         chunks = []
-        for start, end, base_key, _, block_id in token_chunks:
-            for key, addresses, sizes in self.kv_partitioner.partition(base_key, block_id, end - start):
-                chunks.append(LoadChunk(group_id, key, addresses, sizes, block_id))
-        chunks = _circular_shift(chunks, self.kv_partitioner.tp_rank % len(chunks)) if chunks else []
+        for allocated_object in bind_local_blocks(projection, block_ids):
+            kv_object = allocated_object.object
+            keys = self._key_projector.project(kv_object.backend_key)
+            memory_slices = self._memory_projector.project(
+                allocated_object.block_id,
+                kv_object.token_range.end_token - kv_object.token_range.start_token,
+            )
+            for key, memory_slice in zip(keys, memory_slices, strict=True):
+                chunks.append(
+                    LoadChunk(
+                        group_id,
+                        key,
+                        memory_slice.addresses,
+                        memory_slice.sizes,
+                        allocated_object.block_id,
+                    )
+                )
+        chunks = _circular_shift(chunks, self._key_projector.tp_rank % len(chunks)) if chunks else []
         return LoadTask(request.request_id, tuple(chunks))
-
-
-def resolve_load_end_token(request: LoadRequest, cache_transfer_granularity: int) -> int:
-    if request.kv_pool_cached_tokens % cache_transfer_granularity != 0 and (
-        request.kv_pool_cached_tokens == request.transfer_end_token - 1
-    ):
-        return request.kv_pool_cached_tokens + 1
-    return request.kv_pool_cached_tokens

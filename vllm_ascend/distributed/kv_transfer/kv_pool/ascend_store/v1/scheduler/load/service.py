@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ...protocol.coordinates import TokenRange
 from ...protocol.transfer import LoadRequest
 from ..request_tracker import RequestTracker
 from .scheduling import LoadScheduling
@@ -13,8 +14,8 @@ from .scheduling import LoadScheduling
 class LoadCandidate:
     """A Lookup hit awaiting vLLM block-allocation confirmation."""
 
-    local_cached_tokens: int
-    kv_pool_cached_tokens: int
+    load_range: TokenRange
+    matched_end_token: int
 
 
 class LoadService:
@@ -38,10 +39,10 @@ class LoadService:
         if allocated_external_tokens == 0:
             return None
 
-        expected_tokens = candidate.kv_pool_cached_tokens - candidate.local_cached_tokens
+        expected_tokens = candidate.matched_end_token - candidate.load_range.start_token
         assert allocated_external_tokens == expected_tokens, (
             f"Mismatch in number of tokens: {allocated_external_tokens} vs "
-            f"{candidate.kv_pool_cached_tokens} - {candidate.local_cached_tokens} for request {request_id}"
+            f"{candidate.matched_end_token} - {candidate.load_range.start_token} for request {request_id}"
         )
         self._pending_candidates.pop(request_id)
         return self._scheduling.confirm(request_id, candidate)
@@ -56,16 +57,13 @@ class LoadService:
     def schedule_request(
         self,
         tracker: RequestTracker,
-        transfer_end_token: int,
         candidate: LoadCandidate,
     ) -> LoadRequest:
         return LoadRequest(
             request_id=tracker.request_id,
-            transfer_end_token=transfer_end_token,
+            load_range=candidate.load_range,
             block_ids_by_group=tuple(tuple(block_ids) for block_ids in tracker.block_ids_by_group),
             block_hashes=tuple(tracker.block_hashes),
-            local_cached_tokens=candidate.local_cached_tokens,
-            kv_pool_cached_tokens=candidate.kv_pool_cached_tokens,
         )
 
     def discard_transfer(self, request_id: str) -> None:

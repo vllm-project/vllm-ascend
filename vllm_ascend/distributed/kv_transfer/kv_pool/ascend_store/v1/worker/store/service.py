@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import torch
-from vllm.logger import logger
 
 from ...protocol.transfer import StoreRequestBatch
-from ..coordinator import ChunkSelection, KVTransferCoordinator
-from .executor import StoreExecutor
-from .task import StoreTask, StoreTaskBuilder
+from ..projection import KVObjectProjector
+from ..region import KVRegionOperator
+from .executor import StoreExecutionResult, StoreExecutor
+from .task import StoreTaskBuilder
 
 
 class StoreService:
@@ -16,11 +16,13 @@ class StoreService:
 
     def __init__(
         self,
-        coordinator: KVTransferCoordinator,
+        region_operator: KVRegionOperator,
+        object_projector: KVObjectProjector,
         task_builder: StoreTaskBuilder,
         executor: StoreExecutor,
     ) -> None:
-        self._coordinator = coordinator
+        self._region_operator = region_operator
+        self._object_projector = object_projector
         self._task_builder = task_builder
         self._executor = executor
 
@@ -36,22 +38,18 @@ class StoreService:
             return
         source_ready_event = torch.npu.Event()
         source_ready_event.record()
-        tasks = []
-        for request in request_batch.requests:
-            try:
-                selections = self._select_chunks(request.store_end_token, request.num_prompt_tokens)
-                tasks.append(self._task_builder.build(request, source_ready_event, selections))
-            except Exception:
-                logger.exception("Failed to prepare Store task for request %s", request.request_id)
-                tasks.append(StoreTask(request.request_id, source_ready_event, ()))
+        tasks = [
+            self._task_builder.build(
+                request,
+                source_ready_event,
+                self._object_projector.project(
+                    self._region_operator.store_region(request.store_range, request.num_prompt_tokens),
+                    request.block_hashes,
+                ),
+            )
+            for request in request_batch.requests
+        ]
         self._executor.submit_batch(tasks)
 
-    def _select_chunks(self, store_end_token: int, num_prompt_tokens: int) -> tuple[ChunkSelection, ...]:
-        try:
-            return self._coordinator.select_store(store_end_token, num_prompt_tokens)
-        except AssertionError as error:
-            logger.debug("Use unfiltered Store chunks for unaligned end token %d: %s", store_end_token, error)
-            return tuple(ChunkSelection(group_id, None) for group_id in self._coordinator.group_ids)
-
-    def wait_for_previous_store(self) -> None:
-        self._executor.wait_for_previous_store()
+    def wait_for_previous_store(self) -> tuple[StoreExecutionResult, ...]:
+        return self._executor.wait_for_previous_store()
