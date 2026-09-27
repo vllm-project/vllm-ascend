@@ -376,7 +376,7 @@ def write_json_file(tbe_ops_info, json_file_path):
     ----------------
     """
     json_file_real_path = os.path.realpath(json_file_path)
-    wr_flag = os.O_WRONLY | os.O_CREAT
+    wr_flag = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     wr_mode = stat.S_IWUSR | stat.S_IRUSR
     with os.fdopen(os.open(json_file_real_path, wr_flag, wr_mode), "w") as file_path:
         # The owner have all rights£¬group only have read rights

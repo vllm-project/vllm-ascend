@@ -36,6 +36,14 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Experimental A5 Flash MLA prefill route. Valid values: 0 (default, the
+    # existing FIA backend) or 1 (non-absorbed MLA prefill through the CANN
+    # FlashAttn operator). Non-sensitive. It only activates on hardware whose
+    # profile provides the FlashAttn 192/128 operator ABI, for BF16 MLA with
+    # QK-Nope/V 128/128, latent 512, one KV head, PCP1/DCP1 and an installed
+    # binding that exposes `head_dim_v`. A2/A3/310P and every other case keep
+    # the FIA prefill, which still consumes host-side lengths.
+    "VLLM_ASCEND_ENABLE_FLASH_MLA": lambda: _strict_binary_env("VLLM_ASCEND_ENABLE_FLASH_MLA"),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

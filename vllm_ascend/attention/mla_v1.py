@@ -25,10 +25,18 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.mla_prefill import (
+    PrefillMetadata,
+    build_prefill_plan,
+    full_prefill,
+    native_flash_adapters,
+    prepare_metadata,
+)
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
@@ -70,6 +78,11 @@ if TYPE_CHECKING:
 
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
+
+# The A5 FlashAttn prefill expands cached history in bounded 128-token pages and
+# merges output/LSE online, so the per-chunk budget stays small on purpose.
+FLASH_PREFILL_MAX_WORKSPACE_TOKENS = 16384
+FLASH_PREFILL_KERNEL_BLOCK_SIZE = 128
 
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
@@ -239,6 +252,22 @@ class AscendMLAMetadata:
     decode: AscendMLADecodeMetadata | None = None
     prefill: AscendMLAPrefillMetadata | None = None
     reshape_cache_event: torch.npu.Event = None
+    # A5 Flash MLA lanes. Each lane owns a disjoint row range of the same batch
+    # and is built independently, so a mixed batch carries both and a lane that
+    # falls back never changes the other lane's plan:
+    #   decode prefix  [0, num_decode_tokens)                  -> decode lane
+    #   prefill suffix [num_decode_tokens, num_actual_tokens)   -> flash_full_prefill
+    # `flash_full_prefill` holds the bounded non-absorbed FlashAttn plan and is
+    # present only when the A5 route is enabled and usable for this batch.
+    #
+    # The decode lane (absorbed FlashMLA through
+    # `torch.ops._C_ascend.flash_mla_with_kvcache`) is not implemented here. When
+    # it lands it binds its own `flash_decode` field, mirroring
+    # `flash_full_prefill`: a prefix-scoped plan holding the graph-stable
+    # query/schedule/block_table/cache_lens operands, refreshed through
+    # DeviceMetadataStage.ATTENTION because decode is graph-captured instead of
+    # rebuilt on the host like this prefill lane.
+    flash_full_prefill: PrefillMetadata | None = None
 
     def __post_init__(self):
         pass
@@ -332,6 +361,15 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.query_lens: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
+        self.flash_prefill_enabled = envs.VLLM_ASCEND_ENABLE_FLASH_MLA
+        self.flash_num_heads = 0
+        self.flash_unabsorbed_prefill = False
+        if self.flash_prefill_enabled and layer_names:
+            impl = static_forward_context[layer_names[0]].impl
+            self.flash_num_heads = getattr(impl, "num_heads", 0)
+            self.flash_unabsorbed_prefill = self.flash_num_heads > 0 and bool(
+                getattr(impl, "flash_unabsorbed_prefill", False)
+            )
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -467,6 +505,64 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     ):
         self.num_actual_tokens = common_attn_metadata.num_actual_tokens
 
+    def _build_flash_prefill_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> PrefillMetadata | None:
+        """Plan the bounded non-absorbed FlashAttn prefill for this batch.
+
+        The plan consumes runner-owned exact prefill context lengths, so a
+        history gather never sizes itself from an optimistic decode mirror.
+        The current chunk stays causal (mask_mode 3); every history chunk is
+        noncausal (mask_mode 0) and is merged online.
+
+        Only the prefill suffix `[num_decode_tokens, num_actual_tokens)` is
+        planned: a mixed batch keeps its decode prefix on the decode lane, and
+        the plan is offset by `num_decodes` so it never depends on how that lane
+        is implemented. Conversely, returning `None` here only falls the prefill
+        suffix back to FIA; it must not disable the decode lane.
+        """
+        contexts = common_attn_metadata.num_computed_prefill_tokens_cpu
+        if (
+            not self.flash_unabsorbed_prefill
+            or self.dcp_enabled
+            or self.pcp_enabled
+            or not common_attn_metadata.causal
+            or contexts is None
+        ):
+            return None
+        # Only real requests contribute. The runner may pad query_start_loc for
+        # graph/SP rows and those empty rows must never enter the kernel.
+        offsets = common_attn_metadata.query_start_loc_cpu[: common_attn_metadata.num_reqs + 1].clamp_max(
+            common_attn_metadata.num_actual_tokens
+        )
+        real_reqs = int((offsets[1:] > offsets[:-1]).sum())
+        if real_reqs <= self.num_decodes:
+            return None
+        try:
+            plan = build_prefill_plan(
+                offsets[: real_reqs + 1],
+                self.num_decodes,
+                contexts[self.num_decodes : real_reqs],
+                min(self.chunked_prefill_workspace_size, FLASH_PREFILL_MAX_WORKSPACE_TOKENS),
+                kernel_block_size=FLASH_PREFILL_KERNEL_BLOCK_SIZE,
+            )
+            expected_tokens = common_attn_metadata.num_actual_tokens - self.num_decode_tokens
+            if plan.num_tokens != expected_tokens:
+                raise ValueError(f"prefill plan covers {plan.num_tokens} tokens, expected {expected_tokens}")
+        except ValueError as exc:
+            # A batch shape the plan cannot describe (for example a padded row
+            # between live prefill requests) keeps the existing FIA prefill for
+            # this step instead of failing the whole request.
+            logger.warning_once("A5 Flash MLA prefill falls back to FIA for this batch: %s", exc)
+            return None
+        schedule, _ = native_flash_adapters(
+            self.flash_num_heads,
+            1.0,
+            self.attn_mask_builder.get_splitfuse_attn_mask(),
+        )
+        return prepare_metadata(plan, self.device, schedule)
+
     def build(
         self,
         common_prefix_len: int,
@@ -512,9 +608,25 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         block_table_size = self.get_block_table_size(common_attn_metadata, BUILD_METADATA_STEP_PREFILL)
         self.block_table = common_attn_metadata.block_table_tensor[:block_table_size]
 
+        # A5 Flash MLA lanes, built independently so a mixed batch can carry both
+        # and a lane that falls back leaves the other lane's plan untouched.
+        # Prefill suffix lane: its presence removes the legacy FIA chunk plan (and
+        # every host-side length list it derives) for this batch.
+        flash_prefill = None
+        if self.flash_prefill_enabled and self.num_prefills > 0:
+            flash_prefill = self._build_flash_prefill_metadata(common_attn_metadata)
+        # Decode prefix lane: unbound in this implementation, so the FIA decode keeps
+        # rows `[0, num_decode_tokens)`. The absorbed FlashMLA lane binds a
+        # `flash_decode` metadata object here (see `AscendMLAMetadata`), built
+        # independently of `flash_prefill` so a mixed batch can carry both.
+
         prefill_metadata = None
         if self.num_prefills > 0:
-            prefill_metadata = self.build_prefill_metadata(common_prefix_len, common_attn_metadata)
+            prefill_metadata = self.build_prefill_metadata(
+                common_prefix_len,
+                common_attn_metadata,
+                with_chunked_context=flash_prefill is None,
+            )
 
         decode_metadata = None
         if self.num_decodes > 0:
@@ -533,6 +645,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             causal=common_attn_metadata.causal,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            flash_full_prefill=flash_prefill,
             query_start_loc=query_start_loc,
             block_tables=self.block_table,
             seq_lens=self.seq_lens,
@@ -638,6 +751,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        *,
+        with_chunked_context: bool = True,
     ) -> AscendMLAPrefillMetadata:
         query_start_loc = common_attn_metadata.query_start_loc
 
@@ -646,7 +761,13 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         # equal-sized KV all-gathers.
         input_positions = common_attn_metadata.positions.long()
 
-        chunked_context_metadata = self.build_chunked_metadata(common_prefix_len, common_attn_metadata)
+        # The bounded FlashAttn plan owns history expansion, so the legacy FIA
+        # chunk plan -- host chunk sizing plus per-chunk length lists and their
+        # pinned host-to-device copies -- is dead work on that route and is not
+        # built at all.
+        chunked_context_metadata = (
+            self.build_chunked_metadata(common_prefix_len, common_attn_metadata) if with_chunked_context else None
+        )
         reqs_start = self.num_decodes  # prefill_start
         tokens_start = self.num_decode_tokens
         max_query_len = self.query_lens[reqs_start:].max().item()
@@ -805,6 +926,10 @@ class PrefillMLAPreprocessResult(NamedTuple):
     k_nope: torch.Tensor | None = None
     k_pe: torch.Tensor | None = None
     value: torch.Tensor | None = None
+    # A5 FlashAttn prefill keeps the compressed operands instead of the
+    # expanded K/V: the projection happens inside `full_prefill`.
+    latent: torch.Tensor | None = None
+    current_k_pe: torch.Tensor | None = None
 
 
 class AscendMLAImpl(MLAAttentionImpl):
@@ -883,6 +1008,55 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_num_heads = self.num_heads
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
+        self.flash_unabsorbed_prefill = self._probe_flash_unabsorbed_prefill()
+
+    def _probe_flash_unabsorbed_prefill(self) -> bool:
+        """Decide whether this layer may use the A5 non-absorbed FlashAttn prefill.
+
+        The CANN binding and the native library must be a matched pair exposing
+        `head_dim_v`; B035's wrapper allocates V/output at QK width and cannot
+        run 192/128, so it must keep the absorbed FIA prefill. Every unsupported
+        configuration silently falls back instead of failing the service.
+        """
+        if not envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            return False
+        reason = None
+        if not get_current_hardware_profile().supports(HardwareCapability.FLASH_MLA_PREFILL):
+            reason = "requires the A5 FlashAttn 192/128 operator ABI; this device keeps the FIA prefill"
+        elif (self.kv_lora_rank, self.qk_rope_head_dim, self.num_kv_heads) != (512, 64, 1):
+            reason = "requires latent=512, rope=64 and a single KV head"
+        elif (self.qk_nope_head_dim, self.v_head_dim) != (128, 128):
+            reason = "requires QK-Nope/V 128/128"
+        elif self.vllm_config.model_config.dtype != torch.bfloat16:
+            reason = "requires BF16 activations"
+        elif self.fa_quant_layer:
+            reason = "requires an unquantized BF16 KV cache"
+        elif self.enable_kv_nz:
+            # `exec_kv_prefill` writes the persistent cache as NZ blocks when
+            # this is set, while `full_prefill` gathers history through the BD
+            # views; the pair cannot describe the same physical layout.
+            reason = "requires the BD KV cache layout"
+        elif self.pcp_enabled or enable_dcp():
+            reason = "requires PCP1/DCP1"
+        else:
+            # `head_padding` is not a gate here: it exists for the FIA ops that
+            # require a power-of-two query head count, and this lane never touches
+            # `num_heads_padded`. Its operands come from `mla_preprocess_prefill`
+            # (`self.q_proj`, unpadded) and are handed to the operator at
+            # `self.num_heads`, so a padded layer still runs this prefill
+            # unpadded while its decode lane keeps padding for FIA v2.
+            try:
+                from cann_ops_transformer.ops import flash_attn_metadata
+            except ImportError as exc:
+                reason = f"the CANN FlashAttn binding is unavailable ({exc})"
+            else:
+                if "head_dim_v" not in str(flash_attn_metadata.default._schema):
+                    reason = "the installed CANN FlashAttn binding has no head_dim_v"
+        if reason is not None:
+            logger.info_once("A5 Flash MLA prefill disabled: %s", reason)
+            return False
+        logger.info_once("A5 Flash MLA prefill enabled for the non-absorbed 192/128 path.")
+        return True
 
     @staticmethod
     def update_graph_params(
@@ -1412,6 +1586,54 @@ class AscendMLAImpl(MLAAttentionImpl):
             attn_output = attn_output.to(original_dtype)
 
         return attn_output
+
+    def _forward_flash_full_prefill(
+        self,
+        prefill_preprocess_res: PrefillMLAPreprocessResult,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMLAMetadata,
+    ) -> torch.Tensor:
+        """Run the A5 non-absorbed QK192/V128 FlashAttn prefill.
+
+        The bounded plan in `attn_metadata.flash_full_prefill` expands cached
+        history in chunks, attends each chunk with the native operator and
+        merges output/LSE online, so peak memory follows the scheduled prefill
+        tokens instead of the cached prefix.
+
+        This covers the prefill suffix only; the decode prefix of a mixed batch
+        is produced by the decode lane. The operands handed over by
+        `mla_preprocess_prefill` are already sliced to that suffix.
+        """
+        prefill_meta = attn_metadata.prefill
+        plan_meta = attn_metadata.flash_full_prefill
+        assert prefill_meta is not None
+        assert plan_meta is not None
+        assert prefill_preprocess_res.latent is not None
+        assert prefill_preprocess_res.current_k_pe is not None
+        num_prefills = len(plan_meta.plan.query_lengths)
+        # `bf16_prepare` packs the expanded K192/V128 views with cat/contiguous
+        # before the prefill kernel, preserving every input BF16 bit.
+        _, attention = native_flash_adapters(
+            self.num_heads,
+            self.scale,
+            prefill_meta.attn_mask,
+            bf16_prepare=True,
+        )
+        record_attention_compute_start()
+        attn_output, _ = full_prefill(
+            prefill_preprocess_res.q_nope,
+            prefill_preprocess_res.q_pe,
+            prefill_preprocess_res.latent,
+            prefill_preprocess_res.current_k_pe,
+            kv_cache,
+            prefill_meta.block_table[:num_prefills],
+            plan_meta,
+            self.kv_b_proj,
+            attention,
+            DeviceOperator.kv_cache_load,
+            torch_npu.npu_attention_update,
+        )
+        return attn_output.reshape([prefill_preprocess_res.q_nope.shape[0], self.num_heads * self.v_head_dim])
 
     def _exec_kv_no_rope(
         self,
@@ -1999,6 +2221,16 @@ class AscendMLAImpl(MLAAttentionImpl):
             prefill_slots,
             attn_metadata=attn_metadata,
         )
+        if attn_metadata.flash_full_prefill is not None:
+            # The A5 FlashAttn route expands the compressed history and runs
+            # kv_b_proj inside `full_prefill`, so hand it the compressed
+            # operands and skip the projection only the FIA path consumes.
+            return PrefillMLAPreprocessResult(
+                prefill_q_nope,
+                prefill_q_pe,
+                latent=prefill_k_c_normed.reshape(-1, self.num_kv_heads, self.kv_lora_rank),
+                current_k_pe=prefill_k_pe.reshape(-1, self.num_kv_heads, self.qk_rope_head_dim),
+            )
         prefill_k_nope, prefill_value = (
             self.kv_b_proj(prefill_k_c_normed)[0]
             .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
@@ -2169,6 +2401,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding
+            # Decode lane, rows `[0, num_decode_tokens)`. The absorbed FlashMLA
+            # variant (`flash_mla_with_kvcache`, fed by `attn_metadata.flash_decode`)
+            # will replace this FIA call under the same row contract; it must not
+            # read or write the prefill lane's `flash_full_prefill`.
             output_decode = self._forward_decode(decode_preprocess_res, kv_cache[0].shape[1], attn_metadata)
 
             o_proj_input[:num_decode_tokens] = output_decode
@@ -2177,15 +2413,25 @@ class AscendMLAImpl(MLAAttentionImpl):
             # FIX: aicore move should be also placed on the comm stream in dbo,
             # otherwise it may affect the accuracy
             # TODO: use an elegant way to overlap
-            output_prefill = self._forward_prefill(
-                prefill_preprocess_res.q_nope,
-                prefill_preprocess_res.q_pe,
-                prefill_preprocess_res.k_nope,
-                prefill_preprocess_res.k_pe,
-                prefill_preprocess_res.value,
-                kv_cache,
-                attn_metadata,
-            )
+            # Prefill lane: it consumes only the suffix
+            # `[num_decode_tokens, num_actual_tokens)` and never reads
+            # `flash_decode`, so both lanes can be present in one mixed batch.
+            if getattr(attn_metadata, "flash_full_prefill", None) is not None:
+                output_prefill = self._forward_flash_full_prefill(
+                    prefill_preprocess_res,
+                    kv_cache,
+                    attn_metadata,
+                )
+            else:
+                output_prefill = self._forward_prefill(
+                    prefill_preprocess_res.q_nope,
+                    prefill_preprocess_res.q_pe,
+                    prefill_preprocess_res.k_nope,
+                    prefill_preprocess_res.k_pe,
+                    prefill_preprocess_res.value,
+                    kv_cache,
+                    attn_metadata,
+                )
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
         if gate is not None:
