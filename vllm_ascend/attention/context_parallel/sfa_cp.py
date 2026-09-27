@@ -188,7 +188,7 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         num_tokens = hidden_states.shape[0]
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
         # Graph padding is not included in num_decode_tokens.
-        if attn_metadata.num_prefills == 0:
+        if attn_metadata.num_prefills == 0 and not attn_metadata.pcp_has_global_prefill:
             return super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, slot_mapping[:num_tokens])
         group = get_pcp_group()
         rank_slots = slot_mapping[: group.world_size * num_tokens].view(group.world_size, num_tokens)
@@ -238,7 +238,7 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
-        if attn_metadata.num_prefills == 0:
+        if attn_metadata.num_prefills == 0 and not attn_metadata.pcp_has_global_prefill:
             return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots[: kv_no_split.shape[0]], attn_metadata)
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
         (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs((kv_no_split, cos, sin), slots, num_decode_tokens)
@@ -921,7 +921,7 @@ class AscendSFADCPMetadataBuilder(
         )
         kv_gather_block_ids = None
         kv_gather_block_table = None
-        if num_prefills > 0:
+        if num_prefills > 0 or metadata.pcp_has_global_prefill:
             kv_gather_block_ids, kv_gather_block_table = self._build_compact_kv_gather_metadata(
                 dcp_block_table,
                 global_dcp_block_table=global_dcp_block_table,
@@ -1086,7 +1086,7 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
                 global_dcp_num_blocks = pcp_context.global_block_table_num_blocks[pcp_cache_group_idx]
         metadata = self._build_with_metadata_view(
             common_attn_metadata,
-            lambda: self._build(common_attn_metadata, draft_index=None),
+            lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=pcp_context),
             global_dcp_block_table=global_dcp_block_table,
             global_dcp_num_blocks=global_dcp_num_blocks,
         )
@@ -1183,7 +1183,9 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
 
     @staticmethod
     def _has_prefill(attn_metadata: M) -> bool:
-        return attn_metadata.num_prefills > 0
+        # PCP ranks with no local prefill still join the DCP KV gather and use
+        # the same attention path as ranks that received prefill tokens.
+        return attn_metadata.num_prefills > 0 or attn_metadata.pcp_has_global_prefill
 
     def _record_dcp_kv_gather_context(
         self,

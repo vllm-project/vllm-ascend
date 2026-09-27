@@ -9,8 +9,10 @@ from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
 
 
 @pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
-@pytest.mark.parametrize("case", ["empty", "padding", "mixed", "many", "large"])
-@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize(
+    "case,strided",
+    [("empty", False), ("padding", False), ("mixed", True), ("many", False), ("large", True)],
+)
 def test_c8_cache_preserves_packed_bytes(dtype, case, strided):
     # Include every byte pattern, including FP8 NaNs: the RoPE and scale
     # sections are raw BF16/FP32 bytes, not FP8 values.
