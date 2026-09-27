@@ -39,6 +39,7 @@ def flash_attention_gate(
     """Fuse output gating and NaN-safe masking before a bias-free O projection."""
     if projected.numel() == 0:
         return projected
+    assert gate.shape == projected.shape, f"Gate shape {gate.shape} must match projected shape {projected.shape}"
     init_device_properties_triton()
     block = (
         2048
@@ -99,6 +100,9 @@ def flash_attention_output(
     # Avoid passing an empty mask storage to the NPU scalar load lowering.
     if token_live.numel() == 0 or result.shape[0] == 0:
         return output.zero_()
+    assert output.shape[1] >= result.shape[1], (
+        f"Output hidden dimension {output.shape[1]} must be at least result hidden dimension {result.shape[1]}"
+    )
     init_device_properties_triton()
     # A fixed 1-D tile bounds UB use independently of hidden size or batch.
     block = 1024

@@ -59,6 +59,13 @@ def test_empty_gate_does_not_launch():
     assert not kernel.calls
 
 
+def test_gate_rejects_mismatched_shape():
+    ops, kernel, _ = load()
+    with pytest.raises(AssertionError, match="Gate shape"):
+        ops.flash_attention_gate(torch.empty(2, 128), torch.empty(1, 128))
+    assert not kernel.calls
+
+
 def test_output_limits_live_rows_and_preserves_output_stride():
     ops, _, kernel = load()
     result = torch.empty(3, 128)
@@ -68,6 +75,13 @@ def test_output_limits_live_rows_and_preserves_output_stride():
     _, args, kwargs = kernel.calls[0]
     assert args[3:] == (2, 4, 128, 136)
     assert kwargs["HIDDEN"] == 128
+
+
+def test_output_rejects_narrow_hidden_dimension():
+    ops, _, kernel = load()
+    with pytest.raises(AssertionError, match="Output hidden dimension"):
+        ops.flash_attention_output(torch.empty(2, 128), torch.ones(2), torch.empty(2, 127))
+    assert not kernel.calls
 
 
 def test_empty_mask_zeros_padded_shard_without_launch():
