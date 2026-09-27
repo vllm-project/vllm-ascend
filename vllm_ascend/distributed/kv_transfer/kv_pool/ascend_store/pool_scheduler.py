@@ -1,4 +1,6 @@
+import hashlib
 import importlib
+import json
 import math
 from collections.abc import Sequence
 from typing import Any
@@ -14,12 +16,13 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackEncoder
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
@@ -59,6 +62,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pd_transfer import PoolPDTransfer
 
 
 class KVPoolScheduler:
@@ -249,6 +253,105 @@ class KVPoolScheduler:
         self.model_name = model_config.model.split("/")[-1]
 
         self.client: LookupKeyClient | None = None
+        self.pool_pd = vllm_config.kv_transfer_config.kv_connector_extra_config.get("pool_pd", False) is True
+        self._pd_transfers: dict[str, PoolPDTransfer] = {}
+        if self.pool_pd:
+            if (
+                not (self.use_block_key_layerwise or self.use_layerwise_transfer)
+                or self.backend_name not in ("mooncake", "memcache")
+                or self.use_hybrid
+                or self.pp_size != 1
+                or self.pcp_size != 1
+                or self.dcp_size != 1
+                or self.tp_mismatch
+                or speculative_config is not None
+                or self.kv_role not in ("kv_producer", "kv_consumer")
+                or self.save_decode_cache
+                or self.consumer_is_to_put
+                or getattr(vllm_config, "use_v2_model_runner", False) is True
+            ):
+                raise ValueError(
+                    "Pool PD v1 requires the V1 runner, Mooncake/MemCache layerwise, matching TP, "
+                    "one full-attention group, "
+                    "PP/CP=1, no speculative decoding, and separate producer/consumer roles"
+                )
+            for group in kv_cache_groups or []:
+                spec = group.kv_cache_spec
+                specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else [spec]
+                if any(not isinstance(item, FullAttentionSpec) for item in specs):
+                    raise ValueError("Pool PD v1 only supports full Attention/MLA")
+            layout = {
+                "model": model_config.model,
+                "revision": getattr(model_config, "revision", None),
+                "dtype": str(model_config.dtype),
+                "cache_dtype": vllm_config.cache_config.cache_dtype,
+                "block_size": self._block_size,
+                "hash_block_size": self.hash_block_size,
+                "tp_size": self.tp_size,
+                "layers": self.num_layers,
+                "kv_heads": self.num_kv_head,
+            }
+            self._pd_layout_id = hashlib.sha256(json.dumps(layout, sort_keys=True).encode()).hexdigest()
+
+    def _pd_keys(self, transfer: PoolPDTransfer) -> list[list[str]]:
+        return [self._make_layerwise_hit_check_keys(0, object_id) for object_id in transfer.object_ids]
+
+    def _get_pd_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
+        if request.lora_request is not None or request.mm_features or request.prompt_token_ids is None:
+            raise ValueError("Pool PD v1 only supports token prompts without LoRA or multimodal inputs")
+        if self.kv_role == "kv_producer":
+            if request.request_id not in self._pd_transfers:
+                hashes = get_block_hashes(request.block_hashes, self._block_size, self.hash_block_size)
+                count = len(request.prompt_token_ids) // self._block_size
+                self._pd_transfers[request.request_id] = PoolPDTransfer.create(
+                    request.prompt_token_ids,
+                    self._block_size,
+                    self._pd_layout_id,
+                    [block_hash_to_str(h) for h in hashes[:count]],
+                )
+            if self.vllm_config.kv_transfer_config.kv_connector_extra_config.get("pool_pd_prefix_reuse") is True:
+                prompt_len = len(request.prompt_token_ids)
+                hit_tokens = self._lookup_block_key_contiguous(request, prompt_len, num_computed_tokens)
+                cached_tokens = min(hit_tokens, prompt_len - 1)
+                if cached_tokens > num_computed_tokens:
+                    self.load_specs[request.request_id] = LoadSpec(
+                        vllm_cached_tokens=num_computed_tokens,
+                        kvpool_cached_tokens=cached_tokens,
+                        kvpool_store_skip_tokens=hit_tokens,
+                        can_load=False,
+                    )
+                    logger.info(
+                        "POOL_PD_PREFIX request=%s prompt_tokens=%d pool_hit_tokens=%d",
+                        request.request_id,
+                        prompt_len,
+                        hit_tokens,
+                    )
+                    return cached_tokens - num_computed_tokens, False
+            return 0, False
+        params = request.kv_transfer_params or {}
+        transfer = PoolPDTransfer.from_wire(
+            params.get("pool_pd"), request.prompt_token_ids, self._block_size, self._pd_layout_id
+        )
+        if not all(self._query_layerwise_block_hits(self._pd_keys(transfer))):
+            raise ValueError("Pool PD snapshot is missing or no longer readable")
+        self._pd_transfers[request.request_id] = transfer
+        # Loading the last physical page and counting computed tokens are separate.
+        # The last prompt token is replayed to produce logits on D.
+        cached_tokens = transfer.num_tokens - 1
+        self.load_specs[request.request_id] = LoadSpec(
+            vllm_cached_tokens=num_computed_tokens,
+            kvpool_cached_tokens=cached_tokens,
+            kvpool_store_skip_tokens=transfer.num_tokens,
+            can_load=True,
+        )
+        logger.info(
+            "POOL_PD_LOAD request=%s transfer=%s kv_tokens=%d tail_tokens=%d replay_tokens=1",
+            request.request_id,
+            transfer.transfer_id,
+            transfer.num_tokens,
+            transfer.tail_tokens,
+        )
+        return max(cached_tokens - num_computed_tokens, 0), False
 
     def _get_or_create_request_tracker(self, req_id: str) -> RequestTracker:
         tracker = self._request_trackers.get(req_id)
@@ -392,7 +495,11 @@ class KVPoolScheduler:
         readable: list[bool] = []
         for start in range(0, len(all_keys), batch_size):
             batch = all_keys[start : start + batch_size]
-            batch_readable = self.store_scheduler.batch_is_readable(batch)
+            batch_readable = (
+                self.store_scheduler.batch_is_committed(batch)
+                if self.pool_pd
+                else self.store_scheduler.batch_is_readable(batch)
+            )
             if len(batch_readable) != len(batch) or any(type(state) is not bool for state in batch_readable):
                 raise RuntimeError("Layerwise readability probe returned invalid results")
             readable.extend(batch_readable)
@@ -576,6 +683,8 @@ class KVPoolScheduler:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
+        if self.pool_pd:
+            return self._get_pd_matched_tokens(request, num_computed_tokens)
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
 
@@ -759,7 +868,9 @@ class KVPoolScheduler:
         skip_save: bool | None,
     ):
         last_chunk_tokens_num = self._get_last_chunk_tokens_num(prompt_token_ids)
-        return ReqMeta.from_request_tracker(
+        transfer = self._pd_transfers.get(request_tracker.req_id)
+        final_pd_chunk = transfer is not None and request_tracker.token_len >= transfer.num_tokens
+        result = ReqMeta.from_request_tracker(
             request_tracker,
             self.cache_transfer_granularity,
             load_spec=load_spec,
@@ -769,9 +880,15 @@ class KVPoolScheduler:
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
             kv_cache_group_families=self.kv_cache_group_families,
-            save_partial_block=self.layerwise_offload,
+            save_partial_block=self.layerwise_offload or final_pd_chunk,
             hash_block_size=self.hash_block_size,
         )
+        if result is not None and transfer is not None:
+            result.pd_transfer = transfer.to_wire()
+            result.is_last_chunk = final_pd_chunk
+            if final_pd_chunk and transfer.tail_tokens:
+                result.partial_block_index = transfer.num_tokens // transfer.block_size
+        return result
 
     def _process_new_request(
         self,
@@ -950,6 +1067,7 @@ class KVPoolScheduler:
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
             self._loading_req_ids.discard(finished_req_id)
+            self._pd_transfers.pop(finished_req_id, None)
 
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
@@ -977,6 +1095,7 @@ class KVPoolScheduler:
                     and not self.tp_mismatch
                     and not self.layerwise_offload
                     and not self.save_decode_cache
+                    and not self.pool_pd
                 ):
                     continue
                 if req_id in self._preempted_req_ids:
@@ -1082,6 +1201,27 @@ class KVPoolScheduler:
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         """Allow the scheduler to free blocks after synchronous saving."""
+        if self.pool_pd and self.kv_role == "kv_producer":
+            transfer = self._pd_transfers.get(request.request_id)
+            if transfer is None or request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
+                return False, None
+            readable = self._query_layerwise_block_hits(self._pd_keys(transfer))
+            ready = request.num_computed_tokens >= transfer.num_tokens and all(readable)
+            params = transfer.to_wire()
+            params["status"] = "ready" if ready else "failed"
+            logger.info(
+                "POOL_PD_SAVE request=%s transfer=%s status=%s kv_tokens=%d tail_tokens=%d "
+                "computed_tokens=%d readable_objects=%d/%d",
+                request.request_id,
+                transfer.transfer_id,
+                params["status"],
+                transfer.num_tokens,
+                transfer.tail_tokens,
+                request.num_computed_tokens,
+                sum(readable),
+                len(readable),
+            )
+            return False, {"pool_pd": params}
         return False, None
 
     def request_finished_all_groups(
@@ -1090,6 +1230,8 @@ class KVPoolScheduler:
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         """Allow the scheduler to free all groups after synchronous saving."""
+        if self.pool_pd:
+            return self.request_finished(request, block_ids[0])
         return False, None
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:

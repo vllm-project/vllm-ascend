@@ -98,6 +98,10 @@ class Backend(ABC):
     def batch_is_exist(self, keys: list[str]) -> list[int]:
         return self.exists(keys)
 
+    def batch_is_committed(self, keys: list[str]) -> list[bool]:
+        """Check publication before handing a pool snapshot to another instance."""
+        return self.batch_is_readable(keys)
+
     def batch_is_readable(self, keys: list[str]) -> list[bool]:
         """Return whether each key is committed and readable.
 

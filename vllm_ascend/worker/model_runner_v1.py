@@ -149,6 +149,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
     prepare_copy_sfa_request_slots,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pd_transfer import (
+    prepare_pool_pd_forward,
+    requires_layerwise_eager_load,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     allocate_kv_offload_topk_profile_buffers,
@@ -2373,7 +2377,8 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     max_num_scheduled_tokens=max_num_scheduled_tokens,
                     use_cascade_attn=cascade_attn_prefix_lens is not None,
-                    force_eager=self.model_config.enforce_eager,
+                    force_eager=self.model_config.enforce_eager
+                    or requires_layerwise_eager_load(scheduler_output, self.vllm_config.kv_transfer_config),
                     num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                 )
 
@@ -2536,6 +2541,7 @@ class NPUModelRunner(GPUModelRunner):
             get_pp_group().is_last_rank or self.broadcast_pp_output
         )
         active_device_metadata_executor = self._prepare_device_metadata_for_forward(cudagraph_mode)
+        scheduler_output = prepare_pool_pd_forward(scheduler_output, self.vllm_config.kv_transfer_config)
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(

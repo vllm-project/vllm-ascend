@@ -210,6 +210,10 @@ class MemcacheBackend(Backend):
         if not self._lazy_init:
             self.store = self._setup_store()
             self._store_initialized = True
+        if extra_config and extra_config.get("pool_pd") is True:
+            self.ensure_initialized()
+            if not callable(getattr(self.store, "batch_write_finish", None)):
+                raise RuntimeError("Pool PD requires MemCache batch_write_finish for publishing complete KV snapshots")
 
     def ensure_initialized(self):
         if self._store_initialized:
@@ -378,6 +382,29 @@ class MemcacheBackend(Backend):
         self.ensure_initialized()
         assert self.store is not None
         return self.store.batch_alloc(keys, sizes, 1, lease_ttl_ms)
+
+    def batch_is_committed(self, keys: list[str]) -> list[bool]:
+        """Probe publication with short read leases, then release the probes.
+
+        MemCache exposes positive GVA metadata even while a blob is WRITING.
+        Only a successful read lease establishes that write_finish completed.
+        Call from the scheduler or producer before transfers, never while the
+        caller owns an active read of these keys (leases are process-scoped).
+        """
+        readable = self.batch_is_readable(keys)
+        candidates = [key for key, valid in zip(keys, readable) if valid]
+        if not candidates:
+            return readable
+        results = self.batch_add_lease(candidates, 1000)
+        leased = [key for key, result in zip(candidates, results) if result == 0]
+        try:
+            if len(results) != len(candidates):
+                raise BatchResultShapeError("MemCache publication probe returned an unexpected result count")
+            committed = {key for key, result in zip(candidates, results) if result == 0}
+            return [key in committed for key in keys]
+        finally:
+            if leased and self.batch_remove_lease(leased) != 0:
+                raise RuntimeError("MemCache publication probe failed to release its read leases")
 
     def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:
         assert self.store is not None
