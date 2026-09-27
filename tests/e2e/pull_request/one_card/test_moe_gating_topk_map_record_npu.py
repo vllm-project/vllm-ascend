@@ -9,7 +9,7 @@ from vllm_ascend.ops.triton.moe_gating_topk_map_record import moe_gating_topk_ma
 from vllm_ascend.utils import enable_custom_op
 
 
-@pytest.mark.parametrize("tokens,experts,top_k", [(64, 8, 6), (128, 16, 8), (512, 32, 8)])
+@pytest.mark.parametrize("tokens,experts,top_k", [(64, 8, 6), (65, 16, 8), (128, 16, 8), (512, 32, 8)])
 @pytest.mark.parametrize("scoring", ["softmax", "sigmoid"])
 @pytest.mark.parametrize("with_bias", [False, True])
 def test_gating_topk_map_record_matches_cann(tokens, experts, top_k, scoring, with_bias):
@@ -42,6 +42,7 @@ def test_gating_topk_map_record_matches_cann(tokens, experts, top_k, scoring, wi
         logits, bias, table, load, enabled, valid_tokens, k=top_k, scoring=scoring
     )
     torch.npu.synchronize()
+    assert torch.isfinite(weights).all()
     torch.testing.assert_close(ids, expected_ids, rtol=0, atol=0)
     torch.testing.assert_close(weights, expected_weights, rtol=1e-4, atol=1e-5)
     expected_load = torch.bincount(expected_ids[:valid_tokens].long().flatten(), minlength=experts).to(torch.int32)

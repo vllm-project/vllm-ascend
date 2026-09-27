@@ -145,3 +145,51 @@ test suite (14/14 passed); no throughput claim is made for those inputs.
 The unchanged contiguous T/E/K=64/16/8 path was remeasured with ten
 post-warmup stream-event samples: main 543.76 µs, fused 372.19 µs (1.46×),
 consistent with Round 1.
+
+## Round 3 — finite softmax state for masked tail rows
+
+An out-of-bounds token row previously reduced an all-`-inf` logit vector,
+creating an internal `-inf - (-inf)` NaN before masked output stores. The
+softmax now uses a finite zero maximum for an empty row and a nonzero
+denominator. The new T=65 case exercises the non-divisible tail; the NPU
+suite passed 18/18 and the full 96-case accuracy matrix passed 96/96.
+
+Five post-warmup stream-event samples per implementation and case, medians
+across K=6/8 and softmax/sigmoid at each T/E (the ratio is the median of
+per-case ratios):
+
+| T | E | Main µs | Fused µs | Main / fused |
+|---:|---:|---:|---:|---:|
+| 64 | 8 | 513.4 | 375.8 | 1.38× |
+| 64 | 16 | 525.1 | 353.0 | 1.53× |
+| 64 | 32 | 512.5 | 400.7 | 1.30× |
+| 128 | 8 | 506.8 | 334.4 | 1.52× |
+| 128 | 16 | 507.4 | 330.0 | 1.54× |
+| 128 | 32 | 496.3 | 325.3 | 1.52× |
+| 256 | 8 | 496.3 | 328.7 | 1.52× |
+| 256 | 16 | 506.2 | 322.6 | 1.57× |
+| 256 | 32 | 507.4 | 328.3 | 1.55× |
+| 512 | 8 | 504.0 | 335.2 | 1.51× |
+| 512 | 16 | 519.4 | 342.1 | 1.52× |
+| 512 | 32 | 515.4 | 336.2 | 1.54× |
+| 65536 | 8 | 2272.9 | 2524.3 | 0.89× |
+| 65536 | 16 | 2320.3 | 2498.4 | 0.92× |
+| 65536 | 32 | 2373.8 | 2682.9 | 0.89× |
+| 131072 | 8 | 4338.3 | 4755.2 | 0.91× |
+| 131072 | 16 | 4416.0 | 4715.0 | 0.93× |
+| 131072 | 32 | 4557.9 | 5059.6 | 0.90× |
+| 262144 | 8 | 8533.5 | 9235.7 | 0.92× |
+| 262144 | 16 | 8678.2 | 9133.3 | 0.94× |
+| 262144 | 32 | 8942.5 | 9817.6 | 0.91× |
+| 524288 | 8 | 16930.1 | 18122.1 | 0.93× |
+| 524288 | 16 | 17230.0 | 17921.3 | 0.95× |
+| 524288 | 32 | 17822.5 | 19361.8 | 0.92× |
+
+All 48 decode business cases still favor fusion. A 72-case gradient scan
+found all 36 cases at T≤4096 faster; T=8192 had three regressions, so the
+dispatch guard stays at 4096. `msprof op` measured the repaired
+T/E/K=64/16/8 fused device kernel at 26.10 µs, block dim 32, versus
+25.70 µs in Round 1. This single 0.40 µs difference is too small to
+attribute to the repair without repeated profiles. The tested compiler was
+`bishengir-compile` 1.2.0, SHA256
+`89655a56941efe9a184e4d5dfccb783ad88458707827ff6fdd146e7bd2d4af5c`.

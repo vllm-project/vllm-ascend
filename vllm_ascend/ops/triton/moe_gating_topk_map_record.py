@@ -52,8 +52,10 @@ def _moe_gating_topk_map_record_kernel(
     ).to(tl.float32)
     if SOFTMAX:
         safe_logits = tl.where(valid, logits, float("-inf"))
-        exponent = tl.exp(safe_logits - tl.max(safe_logits, 1)[:, None])
-        score = exponent / tl.sum(exponent, 1)[:, None]
+        max_logits = tl.max(safe_logits, 1)
+        safe_max = tl.where(max_logits == float("-inf"), 0.0, max_logits)
+        exponent = tl.exp(safe_logits - safe_max[:, None])
+        score = exponent / (tl.sum(exponent, 1)[:, None] + 1e-20)
     else:
         score = tl.sigmoid(logits)
 
