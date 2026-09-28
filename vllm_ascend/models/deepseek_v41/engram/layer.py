@@ -5,7 +5,7 @@
 import torch
 from torch import nn
 
-from .common import engram_gate
+from .gate_npu import engram_gate_fused
 
 
 class AscendEngram(nn.Module):
@@ -34,7 +34,7 @@ class AscendEngram(nn.Module):
     ) -> torch.Tensor:
         kv = self.wkv(rows)
         key, value = kv.split([self.hc_mult * self.dim, self.dim], -1)
-        return engram_gate(
+        return engram_gate_fused(
             hidden_states,
             key.view(hidden_states.shape[0], self.hc_mult, self.dim),
             value,

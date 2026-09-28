@@ -13,8 +13,8 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+from vllm_ascend.models.deepseek_v41.engram import common, npu
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
-from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.patch.platform.patch_engram_config import AscendEngramConfig
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -55,6 +55,40 @@ def test_dp_shared_memory_config_and_topologies(tp, dp, external):
         AscendEngramConfig(cpu_offload=False, dp_shared_memory=True)
     with pytest.raises(ValueError, match="single-node"):
         config.verify_parallel_config(_topology(tp, dp, nnodes=2))
+
+
+def test_gate_preserves_masked_rows():
+    torch.manual_seed(7)
+    hidden = torch.randn(3, 4, 32).bfloat16()
+    out = common.engram_gate(
+        hidden,
+        torch.randn(3, 4, 32).bfloat16(),
+        torch.randn(3, 32).bfloat16(),
+        torch.randn(4, 32),
+        torch.eye(32),
+        torch.tensor([True, False, True]),
+        1e-5,
+    )
+    assert torch.equal(out[1], hidden[1]) and torch.isfinite(out.float()).all()
+
+
+def test_fused_gate_falls_back_for_cpu_inputs(monkeypatch):
+    """The feature flag never changes CPU/reference behavior."""
+    from vllm_ascend.models.deepseek_v41.engram import gate_npu
+
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_ENGRAM_GATE_FUSION", "1")
+    hidden = torch.randn(2, 4, 32).bfloat16()
+    args = (
+        hidden,
+        torch.randn_like(hidden),
+        torch.randn(2, 32).bfloat16(),
+        torch.randn(4, 32),
+        torch.eye(32),
+        torch.tensor([True, False]),
+        1e-5,
+    )
+    assert not gate_npu._supports_fused_gate(*args[:-1])
+    torch.testing.assert_close(gate_npu.engram_gate_fused(*args), common.engram_gate(*args))
 
 
 def test_dp_shared_memory_survives_cli_parsing():
