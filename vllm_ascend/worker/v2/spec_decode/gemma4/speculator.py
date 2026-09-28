@@ -19,24 +19,22 @@
 """Ascend Gemma4 MTP speculator for Model Runner V2.
 
 Beyond the wiring inherited from the upstream ``Gemma4Speculator``, this
-subclass restores the execution semantics of the v1 ``Gemma4Proposer`` that
-the V2 port dropped. Four defects cost ~5.3pp of draft acceptance on
-Ascend (89.3% -> 94.8%, matching MRv1 bit-for-bit):
+subclass restores two pieces of the v1 ``Gemma4Proposer`` execution
+semantics that the V2 port dropped. Together they lift draft acceptance
+on Ascend from 89.3% to 94.8%, matching MRv1's greedy output text:
 
 1. The draft prefill window reused the target's ``PrefillNoCache``
    metadata, running pure in-batch attention with no KV-cache reads while
    MRv1's draft reads the target's int8 KV cache — a different numeric
-   path that changes the window sample.
-2. The decode window was the rejection-shrunk prefix of EAGLE-shifted ids;
-   MRv1 keeps the full-width verify rows with the sequence's post-commit
-   values (accepted prefix, recovery token at the rejected slot, stale
-   tail rows as in-batch context).
-3. The window head hidden must be the target hidden of the position right
-   before the window (a cross-propose stash), with the other hiddens
-   right-shifted one row.
-4. The KV view for the window and the decode steps must sit at the
-   committed boundary (not the post-update seq_lens, which also counts
-   the unverified bonus and the next round's drafts).
+   path that changes the window sample. Pure-prefill batches now rebuild
+   cache-based draft attention metadata at the committed boundary and run
+   the draft steps under a constant, pinned KV view.
+2. The decode-continue window rows carry EAGLE-shaped positions and
+   hiddens. They are retimed to the Gemma4 MTP contract: true positions,
+   hiddens right-shifted one row, and the pre-window target hidden (a
+   cross-propose stash) as the head row. Window ids and the decode-round
+   attention metadata intentionally stay on the stock path, which measures
+   at parity with MRv1.
 """
 
 import importlib
@@ -99,12 +97,10 @@ def _gemma4_prefill_inputs(spec, input_batch, num_sampled, num_rejected):
     window rebuild for the duration of one ``propose`` call.
 
     The upstream autoregressive loop builds its draft window with EAGLE
-    semantics (ids shifted one left, the freshly sampled bonus appended at
-    the tail, positions of the hidden rows). Gemma4 MTP needs the full-width
-    verify rows with post-commit ids, right-shifted hiddens with a stashed
-    head, and the KV boundary at the committed edge. Rewriting the buffers
-    right after the stock kernel keeps every other bookkeeping write
-    (query_start_loc, last_token_indices, padding) intact.
+    semantics. Gemma4 MTP rows must pair (token_t, h_{t-1}) at true
+    positions, so the retiming rewrites positions and hiddens right after
+    the stock kernel, keeping every other bookkeeping write (ids,
+    query_start_loc, last_token_indices, padding) intact.
     """
     orig = _vllm_ar_speculator.prepare_prefill_inputs
 
@@ -121,13 +117,13 @@ def _gemma4_prefill_inputs(spec, input_batch, num_sampled, num_rejected):
 
 
 def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
-    """Rebuild the Gemma4 MTP draft windows in the speculator buffers.
+    """Retime the Gemma4 MTP draft windows in the speculator buffers.
 
-    Decode-continue rounds get the MRv1-shaped window over the FULL width
-    of scheduled verify rows; the stock kernel only fills the
-    rejection-shrunk prefix, leaving tail rows stale even though the
-    forward runs full-width. True (chunked) prefill rounds keep the stock
-    window — it matches MRv1 byte-for-byte there.
+    Decode-continue rounds get true positions, right-shifted hiddens and
+    a stashed head row (ids and metadata stay stock — measured at parity
+    with MRv1). True (chunked) prefill rounds keep the stock window
+    byte-for-byte and only report the committed boundary so `_prefill`
+    can rebuild cache-based draft attention metadata.
     """
     num_reqs = input_batch.num_reqs
     if num_reqs == 0:
@@ -141,6 +137,7 @@ def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
         num_sampled_h = num_sampled[:num_reqs].tolist()
         idx_slots = input_batch.idx_mapping[:num_reqs].tolist()
         is_prefilling = input_batch.is_prefilling_np
+        saw_decode_continue = False
 
         ids_buf = spec.input_buffers.input_ids
         pos_buf = spec.input_buffers.positions
@@ -156,6 +153,11 @@ def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
                 continue
             slot = idx_slots[i]
             if num_sampled_h[i] > 0 and not is_prefilling[i]:
+                # Decode-continue: keep the stock window ids and attention
+                # metadata (measured at parity with the v1 path) and only
+                # retime the window rows — stash head + right-shifted
+                # hiddens + true positions.
+                saw_decode_continue = True
                 head_hidden = stash[slot].clone()
                 # The stash for the NEXT round = the target's hidden at the
                 # last committed position = the pre-shift hidden[qs].
@@ -164,22 +166,16 @@ def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
                 hidden[qs].copy_(head_hidden)
                 hidden[qs + 1 : qe].copy_(shifted)
                 pos_buf[qs:qe].copy_(input_batch.positions[qs:qe])
-                # Window ids = the SEQUENCE values at each row's position
-                # (post-commit: accepted values, the recovery token at the
-                # rejected slot, stale tail values beyond). The verify input
-                # rows would show the rejected draft at the recovery slot.
-                tok = spec.model_state.req_states.all_token_ids.gpu
-                pos = input_batch.positions[qs:qe].long()
-                ids_buf[qs:qe].copy_(tok[slot].gather(0, pos))
-                # KV boundary = one past the window's last position.
-                committed_count = int(pos_buf[qe - 1].item()) + 1
-                spec.input_buffers.seq_lens[i] = committed_count
-                committed.append(committed_count)
-                spec._g4_window_dirty = True
             else:
                 # True (chunked) prefill: the stock window matches MRv1.
                 committed.append(int(input_batch.positions[qe - 1].item()) + 1)
-        spec._g4_committed = np.asarray(committed, dtype=np.int32)
+        if not saw_decode_continue:
+            # Pure-prefill batch: hand `_prefill` the committed boundary so
+            # it rebuilds cache-based draft attention metadata (the stock
+            # path reuses the target's PrefillNoCache metadata) and pins the
+            # draft-step KV view. Decode-continue batches leave it unset and
+            # run the stock metadata path.
+            spec._g4_committed = np.asarray(committed, dtype=np.int32)
     except Exception:
         logger.exception("[gemma4] window rebuild failed; keeping stock window")
 
@@ -200,30 +196,10 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
             dtype=self.hidden_states.dtype,
             device=device,
         )
-        # Set when the latest propose built at least one decode-continue
-        # window, so `_prefill` knows to build fresh draft attention
-        # metadata instead of reusing the target's.
-        self._g4_window_dirty = False
+        # Committed boundary of the latest pure-prefill batch; set only
+        # there so `_prefill` rebuilds the draft attention metadata and the
+        # decode-continue rounds keep the stock metadata path.
         self._g4_committed = None
-
-    def set_attn(self, *args, **kwargs):
-        super().set_attn(*args, **kwargs)
-        # The window rebuild reads the committed sequence history from the
-        # runner's RequestState (``all_token_ids``), but the speculator only
-        # receives the target's ModelState, which has no back-reference to
-        # it. Capture the RequestState the runner hands to prepare_inputs on
-        # every step, so the rebuild can gather post-commit token ids.
-        ms = self.model_state
-        if getattr(self, "_g4_req_states_hooked", False):
-            return
-        self._g4_req_states_hooked = True
-        orig_prepare_inputs = ms.prepare_inputs
-
-        def prepare_inputs_with_req_states(input_batch, req_states, *a, **kw):
-            ms.req_states = req_states
-            return orig_prepare_inputs(input_batch, req_states, *a, **kw)
-
-        ms.prepare_inputs = prepare_inputs_with_req_states
 
     def propose(
         self,
@@ -245,7 +221,6 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         is_profile=None,
         dp_sync=None,
     ):
-        self._g4_window_dirty = False
         self._g4_committed = None
         with _gemma4_prefill_inputs(self, input_batch, num_sampled, num_rejected):
             return super().propose(
