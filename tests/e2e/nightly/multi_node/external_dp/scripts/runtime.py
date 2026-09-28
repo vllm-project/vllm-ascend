@@ -341,16 +341,31 @@ class ServerCommandBuilder:
             for arg in template.server_cmd_template
         ]
         cmd = ["vllm", "serve", self.config.model, *rendered_args]
-
         env = {key: str(value) for key, value in rendered_env.items()}
+        env.update(self._build_pp_envs(rank))
         display_cmd = format_server_cmd(cmd, env)
-        logger.info(
+        [logger.info](https://logger.info)(
             "External DP server command node=%s rank=%s: %s",
             rank.node_index,
             rank.local_rank,
             display_cmd,
         )
         return ServerCommand(cmd=cmd, env=env, display_cmd=display_cmd)
+    def _build_pp_envs(self, rank: RankInfo) -> dict[str, str]:
+        """Inject vLLM PP required envs only when pipeline-parallel is enabled."""
+        if rank.pp_size <= 1:
+            return {}
+        envs: dict[str, str] = {
+            "MASTER_ADDR": rank.pp_master_addr,
+            "MASTER_PORT": str(rank.pp_master_port),
+            "WORLD_SIZE": str(rank.pp_size),
+            "RANK": str(rank.pp_node_rank),
+            "LOCAL_RANK": str(rank.pp_node_rank),
+            "LOCAL_WORLD_SIZE": str(rank.pp_size_local),
+        }
+        if rank.pp_layer_partition:
+            envs["VLLM_PP_LAYER_PARTITION"] = rank.pp_layer_partition
+        return envs
 
     def build_all(self, ranks: list[RankInfo]) -> list[ServerCommand]:
         return [self.build(rank, self.config.launch_templates[rank.node_index]) for rank in ranks]
@@ -369,6 +384,11 @@ class ServerCommandBuilder:
             "CP_SIZE": str(rank.cp_size),
             "SP_SIZE": str(rank.sp_size),
             "PP_SIZE": str(rank.pp_size),
+            "PP_SIZE_LOCAL": str(rank.pp_size_local),
+            "PP_NODE_RANK": str(rank.pp_node_rank),
+            "PP_LAYER_PARTITION": rank.pp_layer_partition or "",
+            "PP_MASTER_ADDR": rank.pp_master_addr,
+            "PP_MASTER_PORT": str(rank.pp_master_port),
             "DP_ADDRESS": rank.dp_address,
             "DP_RPC_PORT": str(rank.dp_rpc_port),
             "VISIBLE_DEVICES": rank.visible_devices,
@@ -576,22 +596,33 @@ def build_dist_envs(cur_ip: str, master_ip: str) -> dict[str, str]:
     }
 
 
-def build_proxy_server_cmd(config: ExternalDPConfig, ranks: list[RankInfo]) -> list[str]:
+def build_proxy_server_cmd (config: ExternalDPConfig, ranks: list [RankInfo]) -> list [str]:
     routing = config.routing
-    cmd = [sys.executable, routing.proxy_script, "--host", routing.proxy_host, "--port", str(routing.proxy_port)]
+    cmd = [sys.executable, routing.proxy_script, "--host", routing.proxy_host, "--port", str (routing.proxy_port)]
 
+    def _engine_master_ranks (group: list [RankInfo]) -> list [RankInfo]:
+        """PP 模式下 proxy 只路由到每个 dp_rank 组里 pp_node_rank=0 的 engine master。"""
+        if group and group [0].pp_size_local <= 1:
+            return group
+        masters: list [RankInfo] = []
+        seen_dp_ranks: set [int] = set ()
+        for rank in group:
+            if rank.pp_node_rank == 0 and rank.dp_rank not in seen_dp_ranks:
+                masters.append (rank)
+                seen_dp_ranks.add (rank.dp_rank)
+        return masters
     if routing.type == ROUTING_DISAGGREGATED_PREFILL:
-        prefiller_ranks = [rank for rank in ranks if rank.role == "prefiller"]
-        decoder_ranks = [rank for rank in ranks if rank.role == "decoder"]
+        prefiller_ranks = _engine_master_ranks ([rank for rank in ranks if rank.role == "prefiller"])
+        decoder_ranks = _engine_master_ranks ([rank for rank in ranks if rank.role == "decoder"])
         if not prefiller_ranks or not decoder_ranks:
-            raise ValueError("disaggregated_prefill proxy requires prefiller and decoder ranks")
-        cmd.extend(["--prefiller-hosts", *[rank.host for rank in prefiller_ranks]])
-        cmd.extend(["--prefiller-ports", *[str(rank.port) for rank in prefiller_ranks]])
-        cmd.extend(["--decoder-hosts", *[rank.host for rank in decoder_ranks]])
-        cmd.extend(["--decoder-ports", *[str(rank.port) for rank in decoder_ranks]])
+            raise ValueError ("disaggregated_prefill proxy requires prefiller and decoder ranks")    
+        cmd.extend (["--prefiller-hosts", *[rank.host for rank in prefiller_ranks]])
+        cmd.extend (["--prefiller-ports", *[str (rank.port) for rank in prefiller_ranks]])
+        cmd.extend (["--decoder-hosts", *[rank.host for rank in decoder_ranks]])
+        cmd.extend (["--decoder-ports", *[str (rank.port) for rank in decoder_ranks]])
         return cmd
 
-    raise ValueError(f"Unsupported routing.type: {routing.type}")
+    raise ValueError (f"Unsupported routing.type: {routing.type}")
 
 
 def proxy_server_health_url(config: ExternalDPConfig) -> str:
@@ -610,7 +641,8 @@ def master_rank_health_url(ranks: list[RankInfo]) -> str:
 
 
 def rank_label(rank: RankInfo) -> str:
-    return f"node={rank.node_index} rank={rank.local_rank} role={rank.role} url={rank_health_url(rank)}"
+    pp_tag = f" pp_node_rank={rank.pp_node_rank}/{rank.pp_size}" if rank.pp_size > 1 else ""
+    return f"node={rank.node_index} rank={rank.local_rank} role={rank.role} dp_rank={rank.dp_rank}{pp_tag} url={rank_health_url(rank)}"
 
 
 def format_http_status(label: str, url: str) -> str:
