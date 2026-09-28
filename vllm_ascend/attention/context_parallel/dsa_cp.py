@@ -2428,7 +2428,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             num_prefills=0,
             attn_state=local_common_attn_metadata.attn_state,
             req_metadata=None,
-            hadamard=dsa_v1.AscendDSAMetadataBuilder.hadamard,
+            hadamard=self.hadamard,
         )
 
     def build(
