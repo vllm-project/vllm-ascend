@@ -176,9 +176,6 @@ jobs:
   build-push-digest:
     name: build
     runs-on: ${{ matrix.runner_info.runner }}
-    env:
-      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     container:
       image: ${{ format('{0}:{1}-{2}-ubuntu22.04-py3.12', inputs.cann_swr_url, inputs.cann_image_version, inputs.soc) }}
       env:
@@ -275,6 +272,7 @@ jobs:
         ref: ${{ inputs.branch_ref }}
 
     - name: Checkout incremental-cache workflow helpers
+      if: ${{ github.event_name != 'pull_request' }}
       uses: actions/checkout@v7
       with:
         ref: ${{ github.sha }}
@@ -415,6 +413,7 @@ jobs:
     # Add temporary tags to digests to prevent them from being removed.
     - name: Export incremental cache from image
       if: >-
+        github.event_name != 'pull_request' &&
         steps.cache-csrc.outputs.cache-hit != 'true' &&
         steps.image-l1.outputs.supported == 'true'
       env:
@@ -437,14 +436,15 @@ jobs:
 
     - name: Save incremental cache for image build
       if: >-
+        github.event_name != 'pull_request' &&
         steps.cache-csrc.outputs.cache-hit != 'true' &&
         steps.image-l1.outputs.supported == 'true'
       uses: $/.github/actions/csrc-l1-save
       with:
         cache-dir: ${{ github.workspace }}/csrc/build_cache
         primary-key: ${{ steps.image-l1.outputs.primary-key }}
-        access-key-id: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
-        secret-access-key: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
+        access-key-id: ${{ secrets.HW_OBS_AK }}
+        secret-access-key: ${{ secrets.HW_OBS_SK }}
     - name: Tag digest to prevent GC
       if: ${{ inputs.should_push }}
       run: |
