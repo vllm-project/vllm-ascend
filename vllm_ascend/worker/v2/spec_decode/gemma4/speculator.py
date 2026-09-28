@@ -202,7 +202,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         # decode-continue rounds keep the stock metadata path.
         self._g4_committed = None
 
-    def propose(
+    def propose(  # type: ignore[override]
         self,
         input_batch: InputBatch,
         attn_metadata: dict[str, Any],
@@ -233,21 +233,21 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         self._g4_committed = None
         with _gemma4_prefill_inputs(self, input_batch, num_sampled, num_rejected):
             return super().propose(
-                input_batch,
-                attn_metadata,
-                slot_mappings,
-                last_hidden_states,
-                aux_hidden_states,
-                num_sampled,
-                num_rejected,
-                last_sampled,
-                next_prefill_tokens,
-                temperature,
-                seeds,
-                num_tokens_across_dp,
-                dummy_run,
-                skip_attn_for_dummy_run,
-                mm_inputs,
+                input_batch=input_batch,
+                attn_metadata=attn_metadata,
+                slot_mappings=slot_mappings,
+                last_hidden_states=last_hidden_states,
+                aux_hidden_states=aux_hidden_states,
+                num_sampled=num_sampled,
+                num_rejected=num_rejected,
+                last_sampled=last_sampled,
+                next_prefill_tokens=next_prefill_tokens,
+                temperature=temperature,
+                seeds=seeds,
+                num_tokens_across_dp=num_tokens_across_dp,
+                dummy_run=dummy_run,
+                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                mm_inputs=mm_inputs,
                 is_profile=is_profile,
                 dp_sync=dp_sync,
             )
