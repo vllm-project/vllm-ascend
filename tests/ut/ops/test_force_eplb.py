@@ -71,26 +71,21 @@ def test_get_force_eplb_topk_reuses_cached_table():
     assert len(moe_comm_method._force_eplb_topk_cache) == 1
 
 
-def test_get_force_eplb_topk_passthrough_without_comm_method():
-    # The caller assigns the result straight back to topk_ids, so the
-    # no-op path must return the original ids rather than None.
+def test_get_force_eplb_topk_returns_none_without_comm_method():
     topk_ids = torch.empty((2, 2))
 
     extras = SimpleNamespace(moe_comm_method=None)
     with patch.object(force_eplb, "_EXTRA_CTX", extras):
         result = force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
 
-    assert result is topk_ids
+    assert result is None
 
 
-def test_get_force_eplb_topk_passthrough_without_forward_context():
-    # Outside the model runner (e.g. unit tests) no forward context exists;
-    # the helper must degrade to a pass-through instead of raising.
+def test_get_force_eplb_topk_requires_forward_context():
     topk_ids = torch.empty((2, 2))
 
-    result = force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
-
-    assert result is topk_ids
+    with pytest.raises(AssertionError, match="Forward context is not set"):
+        force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
 
 
 @pytest.mark.parametrize(

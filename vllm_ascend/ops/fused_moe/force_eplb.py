@@ -91,16 +91,11 @@ def build_force_eplb_topk(
 def get_force_eplb_topk(
     topk_ids: torch.Tensor,
     num_logical_experts: int,
-) -> torch.Tensor:
+) -> torch.Tensor | None:
     """Return deterministic round-robin ids when the policy is enabled."""
-    try:
-        moe_comm_method = _EXTRA_CTX.moe_comm_method
-    except AssertionError:
-        # The helper is also used by CPU-side tests and tooling that run
-        # outside a model forward context.
-        return topk_ids
+    moe_comm_method = _EXTRA_CTX.moe_comm_method
     if moe_comm_method is None:
-        return topk_ids
+        return None
     top_k = int(topk_ids.shape[1])
     return _build_or_get_topk(
         moe_comm_method,
