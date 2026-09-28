@@ -683,7 +683,7 @@ class AscendConfig:
             raise ValueError(
                 "DSA-CP and PCP cannot be enabled at the same time. "
                 "Use PCP instead: remove enable_dsa_cp from additional_config "
-                "when --prefill-context-parallel-size is greater than 1."
+                "and keep --prefill-context-parallel-size greater than 1."
             )
         self._check_mooncake_c8_kv_cache_quant(vc)
 

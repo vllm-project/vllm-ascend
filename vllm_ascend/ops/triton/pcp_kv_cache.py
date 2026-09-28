@@ -8,76 +8,49 @@ from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, get_vectorcor
 
 @triton.jit
 def _copy_pcp_kv_cache_kernel(
-    key_cache,
-    rope_cache,
-    slots,
-    packed,
-    num_tokens,
-    cache_block_size: tl.constexpr,
-    key_stride_block,
-    key_stride_offset,
-    key_stride_d,
-    rope_stride_block,
-    rope_stride_offset,
-    rope_stride_d,
-    key_dim: tl.constexpr,
-    rope_dim: tl.constexpr,
-    BLOCK_COLS: tl.constexpr,
-    BLOCK_ROWS: tl.constexpr,
+    K,
+    R,
+    S,
+    P,
+    N,
+    BS: tl.constexpr,
+    KS0: tl.constexpr,
+    KS1: tl.constexpr,
+    KS3: tl.constexpr,
+    RS0: tl.constexpr,
+    RS1: tl.constexpr,
+    RS3: tl.constexpr,
+    KD: tl.constexpr,
+    RD: tl.constexpr,
+    B: tl.constexpr,
+    ROWS: tl.constexpr,
 ):
-    if BLOCK_ROWS == 1:
+    if ROWS == 1:
         # Keep scalar slot addressing for small batches: the Ascend compiler
         # cannot lower the modulo expression in a singleton 2D tile.
-        d = tl.arange(0, BLOCK_COLS)
-        for t in range(tl.program_id(0), num_tokens, tl.num_programs(0)):
-            s = tl.load(slots + t).to(tl.int64)
+        d = tl.arange(0, B)
+        for t in range(tl.program_id(0), N, tl.num_programs(0)):
+            s = tl.load(S + t).to(tl.int64)
             valid = s >= 0
-            safe_slot = tl.where(valid, s, 0)
-            key_offset = (
-                (safe_slot // cache_block_size) * key_stride_block
-                + (safe_slot % cache_block_size) * key_stride_offset
-                + d * key_stride_d
-            )
-            key = tl.load(key_cache + key_offset, mask=valid & (d < key_dim), other=0)
-            tl.store(packed + t * (key_dim + rope_dim) + d, key, mask=d < key_dim)
-            if rope_dim > 0:
-                rope_offset = (
-                    (safe_slot // cache_block_size) * rope_stride_block
-                    + (safe_slot % cache_block_size) * rope_stride_offset
-                    + d * rope_stride_d
-                )
-                rope = tl.load(rope_cache + rope_offset, mask=valid & (d < rope_dim), other=0)
-                tl.store(packed + t * (key_dim + rope_dim) + key_dim + d, rope, mask=d < rope_dim)
+            ko = (s // BS) * KS0 + (s % BS) * KS1 + d * KS3
+            ro = (s // BS) * RS0 + (s % BS) * RS1 + d * RS3
+            k = tl.load(K + ko, mask=valid & (d < KD), other=0)
+            r = tl.load(R + ro, mask=valid & (d < RD), other=0)
+            tl.store(P + t * (KD + RD) + d, k, mask=d < KD)
+            tl.store(P + t * (KD + RD) + KD + d, r, mask=d < RD)
     else:
-        d = tl.arange(0, BLOCK_COLS)[None, :]
-        for tile in range(tl.program_id(0), tl.cdiv(num_tokens, BLOCK_ROWS), tl.num_programs(0)):
-            t = tile * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
-            s = tl.load(slots + t, mask=t < num_tokens, other=-1).to(tl.int64)
-            valid = (t < num_tokens) & (s >= 0)
-            safe_slot = tl.where(valid, s, 0)
-            key_offset = (
-                (safe_slot[:, None] // cache_block_size) * key_stride_block
-                + (safe_slot[:, None] % cache_block_size) * key_stride_offset
-                + d * key_stride_d
-            )
-            key = tl.load(key_cache + key_offset, mask=valid[:, None] & (d < key_dim), other=0)
-            tl.store(
-                packed + t[:, None] * (key_dim + rope_dim) + d,
-                key,
-                mask=(t[:, None] < num_tokens) & (d < key_dim),
-            )  # type: ignore[index]
-            if rope_dim > 0:
-                rope_offset = (
-                    (safe_slot[:, None] // cache_block_size) * rope_stride_block
-                    + (safe_slot[:, None] % cache_block_size) * rope_stride_offset
-                    + d * rope_stride_d
-                )
-                rope = tl.load(rope_cache + rope_offset, mask=valid[:, None] & (d < rope_dim), other=0)
-                tl.store(
-                    packed + t[:, None] * (key_dim + rope_dim) + key_dim + d,
-                    rope,
-                    mask=(t[:, None] < num_tokens) & (d < rope_dim),
-                )  # type: ignore[index]
+        d = tl.arange(0, B)[None, :]
+        for tile in range(tl.program_id(0), tl.cdiv(N, ROWS), tl.num_programs(0)):
+            t = tile * ROWS + tl.arange(0, ROWS)
+            s = tl.load(S + t, mask=t < N, other=-1).to(tl.int64)
+            valid = (t < N) & (s >= 0)
+            ko = (s[:, None] // BS) * KS0 + (s[:, None] % BS) * KS1 + d * KS3
+            k = tl.load(K + ko, mask=valid[:, None] & (d < KD), other=0)
+            tl.store(P + t[:, None] * (KD + RD) + d, k, mask=(t[:, None] < N) & (d < KD))  # type: ignore[index]
+            if RD > 0:
+                ro = (s[:, None] // BS) * RS0 + (s[:, None] % BS) * RS1 + d * RS3
+                r = tl.load(R + ro, mask=valid[:, None] & (d < RD), other=0)
+                tl.store(P + t[:, None] * (KD + RD) + KD + d, r, mask=(t[:, None] < N) & (d < RD))  # type: ignore[index]
 
 
 def _get_pcp_kv_cache_rows(num_tokens: int, num_cores: int, block_cols: int, element_size: int, num_caches: int) -> int:
