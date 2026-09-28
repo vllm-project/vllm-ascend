@@ -196,3 +196,75 @@ def test_beta_shape_must_match_gamma():
     short_beta = torch.ones(64, dtype=torch.bfloat16, device="npu")
     with pytest.raises(Exception):
         torch.ops._C_ascend.npu_add_rms_norm_bias(x1, x2, gamma, short_beta, 1e-6)
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.bfloat16, torch.float32],
+)
+def test_extreme_scale_overflow_domain(dtype):
+    # x ~ 3e17 with numCol=7168: per-element (x^2 * 1/N) stays finite in fp32
+    # while the raw sum of squares (9e34 * 7168) would overflow. The golden
+    # scales per element before summing, and the kernel must match - this
+    # pins the pre-reduce scaling contract that the avgFactor fold broke
+    # (fold reverted for fp32/bf16 in d7132b0d5).
+    row, col = 64, 7168
+    x = (torch.full((row, col), 3.0e17) * torch.linspace(0.9, 1.1, col)).to(dtype)
+    zeros = torch.zeros_like(x)
+    gamma = torch.ones(col, dtype=dtype)
+    beta = torch.zeros(col, dtype=dtype)
+    y, rstd, x_out = torch.ops._C_ascend.npu_add_rms_norm_bias(
+        x.npu(), zeros.npu(), gamma.npu(), beta.npu(), 1e-6
+    )
+    y = y.cpu()
+    rstd = rstd.cpu()
+    x_out = x_out.cpu()
+    y1, rstd1, x1 = npu_add_rms_norm_bias_golden(
+        x, zeros, gamma, beta, KERNEL_TYPE[dtype], epsilon=0.000001
+    )
+    # the whole point: rstd must be finite (the raw-sum fold would give Inf -> 0)
+    assert torch.isfinite(rstd).all(), "rstd must stay finite at extreme input scale"
+    torch.testing.assert_close(rstd, rstd1, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(x_out, x1, rtol=0, atol=0)
+    atol, rtol = Y_ATOL_RTOL[dtype]
+    torch.testing.assert_close(y, y1, atol=atol, rtol=rtol)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize(
+    "row, col, dtype",
+    [
+        (2600, 7168, torch.bfloat16),
+        (128, 3000, torch.bfloat16),
+    ],
+)
+def test_row_contrast_rstd_separation(row: int, col: int, dtype):
+    # Rows with deliberately very different RMS (amplitude cycling 1 / 100 /
+    # 0.01 -> rstd differing by ~100x between adjacent rows): any row-mixing
+    # in the rstd path fails the 1e-3 check by orders of magnitude, which
+    # uniform random rows cannot guarantee.
+    shape_x = [row, col]
+    amp = torch.tensor([1.0, 100.0, 0.01]).repeat(row // 3 + 1)[:row].unsqueeze(1)
+    base = torch.empty(shape_x).uniform_(1.0, 2.0)
+    x1 = (base * amp).to(dtype)
+    x2 = torch.zeros_like(x1)
+    gamma = torch.ones(col, dtype=dtype)
+    beta = torch.zeros(col, dtype=dtype)
+    y, rstd, x_out = torch.ops._C_ascend.npu_add_rms_norm_bias(
+        x1.npu(), x2.npu(), gamma.npu(), beta.npu(), 1e-6
+    )
+    y = y.cpu()
+    rstd = rstd.cpu()
+    x_out = x_out.cpu()
+    y1, rstd1, x1g = npu_add_rms_norm_bias_golden(
+        x1, x2, gamma, beta, KERNEL_TYPE[dtype], epsilon=0.000001
+    )
+    torch.testing.assert_close(rstd, rstd1, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(x_out, x1g, rtol=0, atol=0)
+    atol, rtol = Y_ATOL_RTOL[dtype]
+    torch.testing.assert_close(y, y1, atol=atol, rtol=rtol)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
