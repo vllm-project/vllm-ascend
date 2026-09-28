@@ -94,64 +94,13 @@ GOLDEN = [
     ),
 ]
 
-# After #15299, routing weights are preserved without intermediate dtype
-# casts, which deterministically changes greedy decoding for the DP2+PP2
-# path of DeepSeek-V2-Lite-Chat. Keep a separate baseline so the TP2+PP2
-# golden above stays unaffected.
-DP_GOLDEN = [
-    (
-        [
-            17464,
-            11,
-            601,
-            1210,
-            317,
-            459,
-            6946,
-            29,
-            32,
-            1568,
-            32092,
-            535,
-            6946,
-            29,
-            285,
-            304,
-            608,
-            245,
-            459,
-            6946,
-            29,
-        ],
-        "Hello, my name is <strong>Alessandro</strong> and I am a <strong>",
-    ),
-    (
-        [
-            549,
-            3680,
-            280,
-            20838,
-            317,
-            6464,
-            11,
-            285,
-            359,
-            487,
-            82,
-            1872,
-            276,
-            330,
-            245,
-            2624,
-            12,
-            73309,
-            279,
-            254,
-            1843,
-        ],
-        "The future of AI is bright, and it’s going to be a game-changer in the world",
-    ),
-]
+# After #15299, routing weights were preserved without intermediate dtype
+# casts, which deterministically changed greedy decoding for the DP2+PP2
+# path of DeepSeek-V2-Lite-Chat, so a separate DP baseline was kept (#15875).
+# After #17068, the router GEMM runs bf16 x bf16 with fp32 accumulation on
+# every path (gate weights follow the model dtype), and the DP2+PP2 greedy
+# decoding re-converges with TP2+PP2 — the separate baseline is no longer
+# needed.
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -201,7 +150,7 @@ def test_models_pp2_dp2(model: str, dp_size: int, pp_size: int, distributed_exec
         outputs = vllm_model.generate_greedy(prompts, 16)
         check_outputs_equal(
             outputs_0_lst=outputs,
-            outputs_1_lst=DP_GOLDEN,
+            outputs_1_lst=GOLDEN,
             name_0=f"{model}-dp{dp_size}pp{pp_size}",
             name_1="GOLDEN",
         )
