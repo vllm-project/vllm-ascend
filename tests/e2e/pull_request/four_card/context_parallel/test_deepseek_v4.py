@@ -43,7 +43,7 @@ COMMON_ENV = {
     "VLLM_USE_V2_MODEL_RUNNER": "1",
     "VLLM_BATCH_INVARIANT": "1",
     "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-    "HCCL_BUFFSIZE": "2560",
+    "HCCL_BUFFSIZE": "768",
     "ATB_MATMUL_SHUFFLE_K_ENABLE": "0",
     "CLOSE_MATMUL_K_SHIFT": "1",
     "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
@@ -89,7 +89,6 @@ def _run_test(
         attention_config={"indexer_kv_dtype": "int8"},
         additional_config={
             "enable_dsa_cp": False,
-            "enable_prefill_mc2": True,
             # TODO: Re-enable after PCP decode sharding lands; DSV4 results are unstable.
             "enable_pcp_o_proj_weight_sharding": False,
         },
