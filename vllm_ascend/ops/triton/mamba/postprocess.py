@@ -16,9 +16,10 @@ def _copy_temporal_state(
 ):
     # Temporal states do not overlap. Use the same u64 transfer width as
     # precopy, retaining byte handling for unusual offsets and trailing data.
+    BYTES_PER_UINT64: tl.constexpr = 8
     offsets = tl.arange(0, COPY_BLOCK_SIZE)
-    if ((src_addr | dst_addr) & 7) == 0:
-        copy_size_u64 = copy_size // 8
+    if ((src_addr | dst_addr) & (BYTES_PER_UINT64 - 1)) == 0:
+        copy_size_u64 = copy_size // BYTES_PER_UINT64
         per_tile = tl.cdiv(copy_size_u64, TEMPORAL_TILES)
         per_tile = tl.cdiv(per_tile, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
         start = tile_idx.to(tl.int64) * per_tile
@@ -30,8 +31,8 @@ def _copy_temporal_state(
             data = tl.load(src_u64 + i + offsets, mask=mask)
             tl.store(dst_u64 + i + offsets, data, mask=mask)
         if tile_idx == 0:
-            tail_start = copy_size_u64 * 8
-            tail_offsets = tl.arange(0, 8)
+            tail_start = copy_size_u64 * BYTES_PER_UINT64
+            tail_offsets = tl.arange(0, BYTES_PER_UINT64)
             tail_mask = tail_offsets < copy_size - tail_start
             tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
             tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
