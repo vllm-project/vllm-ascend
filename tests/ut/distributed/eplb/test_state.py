@@ -21,16 +21,21 @@ def test_uses_upstream_policy_and_async_worker_lifecycle():
     assert AscendEplbState.start_async_loop is upstream_eplb_state.EplbState.start_async_loop
 
 
-def test_result_readiness_waits_for_next_rearrangement_boundary():
+def test_result_readiness_defers_incomplete_transfer(monkeypatch):
+    readiness = iter((False, True))
+    monkeypatch.setattr(
+        upstream_eplb_state.EplbState,
+        "_all_ranks_result_ready",
+        lambda _self, _model_state: next(readiness),
+    )
     state = AscendEplbState.__new__(AscendEplbState)
-    state.expert_rearrangement_step_interval = 10
-    model_state = SimpleNamespace(pending_result=object(), rebalanced=True)
+    state.async_worker = None
+    model_state = SimpleNamespace()
 
-    state.expert_rearrangement_step = 9
     assert not state._all_ranks_result_ready(model_state)
-
-    state.expert_rearrangement_step = 10
     assert state._all_ranks_result_ready(model_state)
+    assert model_state._eplb_migration_span_steps == 2
+    assert model_state._eplb_migration_deferred_steps == 1
 
 
 def test_configured_upstream_policy_registration_is_scoped():

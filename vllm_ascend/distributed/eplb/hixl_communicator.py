@@ -24,24 +24,11 @@ _TRANSFER_TIMEOUT_SECONDS = 300
 _STATUS_POLL_SECONDS = 0.0005
 
 
-@dataclass
-class _PendingConfirmation:
-    work: Any
-    completed: torch.Tensor
-    local_error: Exception | None
-    confirmation_started_at: float
-    launch_ms: float
-    transfer_ms: float
-    request_count: int
-    transfer_bytes: int
-
-
 @dataclass(frozen=True)
 class _HixlTransferTiming:
     launch_ms: float
     transfer_ms: float
     confirmation_ms: float
-    exposed_wait_ms: float
     request_count: int
     transfer_bytes: int
 
@@ -87,7 +74,6 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         self._layer_idx: int | None = None
         self._pending_reads: dict[int, list[tuple[int, int, int]]] = {}
         self._pending_bytes = 0
-        self._pending_confirmation: _PendingConfirmation | None = None
 
         self._validate_tensors(all_expert_weights, expert_buffer)
         self._initialize(all_expert_weights, expert_buffer)
@@ -300,8 +286,6 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
     def execute(self) -> None:
         if self._layer_idx is None:
             raise RuntimeError("set_transfer_context() must precede HIXL execution")
-        if self._pending_confirmation is not None:
-            raise RuntimeError("HIXL EPLB started a transfer before the previous one was committed")
         phase_started_at = time.perf_counter()
         requests: list[int] = []
         local_error: Exception | None = None
@@ -317,62 +301,25 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
             local_error = error
         transfer_finished_at = time.perf_counter()
         try:
-            # No rank may overwrite live weights until every one-sided READ
-            # has completed. Start the confirmation here, but let it overlap
-            # foreground execution until the layer is committed.
-            completed = torch.tensor(int(local_error is None), dtype=torch.int32)
-            work = torch.distributed.all_reduce(
-                completed,
-                group=self._cpu_group,
-                async_op=True,
-            )
-            self._pending_confirmation = _PendingConfirmation(
-                work=work,
-                completed=completed,
-                local_error=local_error,
-                confirmation_started_at=transfer_finished_at,
-                launch_ms=(launch_finished_at - phase_started_at) * 1000,
-                transfer_ms=(transfer_finished_at - launch_finished_at) * 1000,
-                request_count=len(requests),
-                transfer_bytes=self._pending_bytes,
-            )
+            # Publish the layer only after every one-sided READ is complete.
+            # The foreground can then defer an unavailable result instead of
+            # waiting for transfer safety during workspace commit.
+            self._confirm_all_ranks(local_error, "transfer")
         finally:
+            confirmed_at = time.perf_counter()
+            self.__dict__.setdefault("_eplb_hixl_phase_timings", []).append(
+                _HixlTransferTiming(
+                    launch_ms=(launch_finished_at - phase_started_at) * 1000,
+                    transfer_ms=(transfer_finished_at - launch_finished_at) * 1000,
+                    confirmation_ms=(confirmed_at - transfer_finished_at) * 1000,
+                    request_count=len(requests),
+                    transfer_bytes=self._pending_bytes,
+                )
+            )
             self._pending_reads.clear()
             self._pending_bytes = 0
             self._expert_to_src_row = None
             self._layer_idx = None
-
-    def wait_for_transfer_safety(self) -> float:
-        """Wait until every rank has finished reading the current layer."""
-        pending = self._pending_confirmation
-        if pending is None:
-            return 0.0
-        wait_started_at = time.perf_counter()
-        confirmation_error: Exception | None = None
-        try:
-            pending.work.wait(timeout=timedelta(seconds=_TRANSFER_TIMEOUT_SECONDS))
-        except Exception as error:
-            confirmation_error = error
-        confirmed_at = time.perf_counter()
-        blocked_ms = (confirmed_at - wait_started_at) * 1000
-        self._pending_confirmation = None
-        self.__dict__.setdefault("_eplb_hixl_phase_timings", []).append(
-            _HixlTransferTiming(
-                launch_ms=pending.launch_ms,
-                transfer_ms=pending.transfer_ms,
-                confirmation_ms=(confirmed_at - pending.confirmation_started_at) * 1000,
-                exposed_wait_ms=blocked_ms,
-                request_count=pending.request_count,
-                transfer_bytes=pending.transfer_bytes,
-            )
-        )
-        if pending.local_error is not None:
-            raise pending.local_error
-        if confirmation_error is not None:
-            raise confirmation_error
-        if pending.completed.item() != self._world_size:
-            raise RuntimeError("HIXL EPLB transfer failed on another rank")
-        return blocked_ms
 
     def _confirm_all_ranks(self, local_error: Exception | None, operation: str) -> None:
         completed = torch.tensor(int(local_error is None), dtype=torch.int32)
@@ -424,8 +371,6 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         engine = getattr(self, "_engine", None)
         if engine is None:
             return
-        with contextlib.suppress(Exception):
-            self.wait_for_transfer_safety()
         self._engine = None
         with contextlib.suppress(Exception):
             torch.npu.set_device(self._device)

@@ -475,16 +475,14 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     assert hasattr(model_state.communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) == (not is_last_layer)
 
 
-def test_hixl_workspace_waits_for_read_safety_and_logs_transfer(monkeypatch):
+def test_hixl_workspace_logs_background_transfer_span(monkeypatch):
     call_order: list[str] = []
     communicator = object.__new__(patch_eplb.AscendHixlEplbCommunicator)
-    communicator.wait_for_transfer_safety = MagicMock(side_effect=lambda: call_order.append("wait"))
     communicator._eplb_hixl_phase_timings = [
         SimpleNamespace(
             launch_ms=1.0,
             transfer_ms=2.0,
             confirmation_ms=3.0,
-            exposed_wait_ms=4.0,
             request_count=5,
             transfer_bytes=6,
         )
@@ -503,6 +501,8 @@ def test_hixl_workspace_waits_for_read_safety_and_logs_transfer(monkeypatch):
         model=SimpleNamespace(num_moe_layers=1, expert_weights=[[object()]]),
         expert_buffer=[object()],
         model_name="model",
+        _eplb_migration_span_steps=7,
+        _eplb_migration_deferred_steps=2,
     )
     monkeypatch.setattr(
         patch_eplb._eplb_state,
@@ -519,10 +519,13 @@ def test_hixl_workspace_waits_for_read_safety_and_logs_transfer(monkeypatch):
 
     patch_eplb._wrap_move_to_workspace(original_move)(model_state, 0)
 
-    assert call_order == ["wait", "move"]
+    assert call_order == ["move"]
     consumed_event.record.assert_called_once_with(None)
     assert "_eplb_hixl_phase_timings" not in communicator.__dict__
-    assert any(call.args[0].startswith("HIXL EPLB transfer:") for call in log_info.call_args_list)
+    assert not hasattr(model_state, "_eplb_migration_span_steps")
+    assert not hasattr(model_state, "_eplb_migration_deferred_steps")
+    hixl_log = next(call for call in log_info.call_args_list if call.args[0].startswith("HIXL EPLB transfer:"))
+    assert hixl_log.args[-2:] == (7, 2)
 
 
 def test_async_workspace_refresh_failure_keeps_target_and_defers_ack(monkeypatch):

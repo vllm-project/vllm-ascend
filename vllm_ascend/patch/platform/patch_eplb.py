@@ -454,8 +454,6 @@ def _move_changed_layer_to_workspace(model_state, ep_rank: int) -> None:
     result = model_state.pending_result
     assert result is not None
     if result.layer_idx is not None:
-        if isinstance(model_state.communicator, AscendHixlEplbCommunicator):
-            model_state.communicator.wait_for_transfer_safety()
         _eplb_state.move_from_buffer(
             expert_weights=model_state.model.expert_weights[result.layer_idx],
             expert_weights_buffers=model_state.expert_buffer,
@@ -568,18 +566,22 @@ def _wrap_move_to_workspace(original_move):
                 if hixl_timings:
                     logger.info(
                         "HIXL EPLB transfer: model=%s rank=%d launch_ms=%.3f transfer_ms=%.3f "
-                        "confirmation_ms=%.3f exposed_wait_ms=%.3f requests=%d bytes=%d layers=%d",
+                        "confirmation_ms=%.3f requests=%d bytes=%d layers=%d migration_span_steps=%d "
+                        "migration_deferred_steps=%d",
                         model_state.model_name,
                         bound.arguments["ep_rank"],
                         sum(timing.launch_ms for timing in hixl_timings),
                         sum(timing.transfer_ms for timing in hixl_timings),
                         sum(timing.confirmation_ms for timing in hixl_timings),
-                        sum(timing.exposed_wait_ms for timing in hixl_timings),
                         sum(timing.request_count for timing in hixl_timings),
                         sum(timing.transfer_bytes for timing in hixl_timings),
                         len(hixl_timings),
+                        getattr(model_state, "_eplb_migration_span_steps", 0),
+                        getattr(model_state, "_eplb_migration_deferred_steps", 0),
                     )
                 model_state.communicator.__dict__.pop("_eplb_hixl_phase_timings", None)
+                model_state.__dict__.pop("_eplb_migration_span_steps", None)
+                model_state.__dict__.pop("_eplb_migration_deferred_steps", None)
         finally:
             if pending_result is not None and consumed_event is not None:
                 pending_result.consumed_event = consumed_event
