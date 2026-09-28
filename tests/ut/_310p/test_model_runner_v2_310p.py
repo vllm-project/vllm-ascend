@@ -424,9 +424,11 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
         num_computed_tokens_cpu=torch.zeros(2, dtype=torch.int32),
         last_sampled_tokens=torch.zeros((2, 1), dtype=torch.int64),
         last_sampled_tokens_cpu=torch.tensor([[20], [11]], dtype=torch.int64),
+        next_prefill_tokens=torch.zeros(2, dtype=torch.int64),
     )
     runner.model_state = MagicMock()
-    runner.speculator = object()
+    # Must allow attribute assignment for host-mirror publish in postprocess_sampled.
+    runner.speculator = SimpleNamespace()
     runner.rejection_sampler = MagicMock()
     runner._decode_req_indices = model_runner_module.CpuGpuBuffer(
         2, dtype=torch.int64, device=runner.device, pin_memory=False
