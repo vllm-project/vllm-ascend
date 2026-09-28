@@ -47,8 +47,8 @@ from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import logger
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import Gemma4Speculator
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import (
@@ -59,12 +59,8 @@ from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
 
-_vllm_ar_speculator = importlib.import_module(
-    "vllm.v1.worker.gpu.spec_decode.autoregressive.speculator"
-)
-_vllm_draft_speculator = importlib.import_module(
-    "vllm.v1.worker.gpu.spec_decode.speculator"
-)
+_vllm_ar_speculator = importlib.import_module("vllm.v1.worker.gpu.spec_decode.autoregressive.speculator")
+_vllm_draft_speculator = importlib.import_module("vllm.v1.worker.gpu.spec_decode.speculator")
 
 
 @contextmanager
@@ -139,7 +135,6 @@ def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
         is_prefilling = input_batch.is_prefilling_np
         saw_decode_continue = False
 
-        ids_buf = spec.input_buffers.input_ids
         pos_buf = spec.input_buffers.positions
         hidden = spec.hidden_states
         stash = spec._g4_stash
@@ -291,9 +286,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
             self.input_buffers.positions,
             num_tokens_padded=num_tokens,
         )
-        slot_mappings = build_slot_mappings_by_layer(
-            slot_mappings_tensor, self.kv_cache_config
-        )
+        slot_mappings = build_slot_mappings_by_layer(slot_mappings_tensor, self.kv_cache_config)
         # `_g4_committed` is the committed boundary the window rebuild
         # computed for this pure-prefill batch; use it directly for the CPU
         # upper bound (and via _inject_seq_lens_np the Ascend seq_lens_np
@@ -308,9 +301,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         is_prefilling_true = torch.ones(num_reqs, dtype=torch.bool)
         with (
             build_attn_metadata_wrapper(),
-            build_draft_attn_metadata_factory(
-                self.input_buffers.positions, num_tokens, is_prefilling_true
-            ),
+            build_draft_attn_metadata_factory(self.input_buffers.positions, num_tokens, is_prefilling_true),
             _inject_seq_lens_np(seq_lens_upper.numpy()),
         ):
             attn_metadata = DraftModelSpeculator._build_draft_attn_metadata(
@@ -346,9 +337,9 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         committed = self._g4_committed
         if committed is not None and step >= 1:
             committed_t = torch.from_numpy(committed)
-            self.input_buffers.seq_lens[:num_reqs] = committed_t.to(
-                self.input_buffers.seq_lens.dtype
-            ).to(self.input_buffers.seq_lens.device)
+            self.input_buffers.seq_lens[:num_reqs] = committed_t.to(self.input_buffers.seq_lens.dtype).to(
+                self.input_buffers.seq_lens.device
+            )
             with _inject_seq_lens_np(committed):
                 metadata = super()._build_draft_attn_metadata(
                     num_reqs=num_reqs,
@@ -395,21 +386,14 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
             if num_reqs is None:
                 num_reqs = num_reqs_padded
             query_lens_list = list(range(1, num_reqs_padded + 1))
-            seq_lens_list = [
-                int(committed[i]) if i < len(committed) else 0
-                for i in range(num_reqs_padded)
-            ]
+            seq_lens_list = [int(committed[i]) if i < len(committed) else 0 for i in range(num_reqs_padded)]
             for metadata in attn_metadata.values():
                 if metadata is None:
                     continue
-                decode_metadata = (
-                    metadata.decode if self.attn_architecture == "MLA" else metadata
-                )
+                decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
                 decode_metadata.seq_lens_list = seq_lens_list
                 decode_metadata.actual_seq_lengths_q = query_lens_list
-                metadata.seq_lens_cpu.copy_(
-                    torch.tensor(seq_lens_list, dtype=metadata.seq_lens_cpu.dtype)
-                )
+                metadata.seq_lens_cpu.copy_(torch.tensor(seq_lens_list, dtype=metadata.seq_lens_cpu.dtype))
             return
         super()._update_decode_attn_metadata(attn_metadata, step, num_reqs)
 
