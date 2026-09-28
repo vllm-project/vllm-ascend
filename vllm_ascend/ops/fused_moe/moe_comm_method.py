@@ -527,6 +527,8 @@ class FusedMC2CommImpl(MoECommMethod):
         fused_experts_input: MoEFusedExpertsInput,
         quant_method=None,
     ):
+        if fused_experts_input.weights.low_rank is not None:
+            return super().fused_experts(fused_experts_input, quant_method=quant_method)
         if quant_method is not None:
             weights = quant_method.get_fused_mc2_weights(fused_experts_input.layer)
         else:
