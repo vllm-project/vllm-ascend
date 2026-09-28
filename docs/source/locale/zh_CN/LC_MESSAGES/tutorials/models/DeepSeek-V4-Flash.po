@@ -861,3 +861,8 @@ msgid ""
 msgstr ""
 "| GPQA | v0.27.1rc | accuracy | gen | 90.57 | Ascend 950DT server 1P1D "
 "DSpark |"
+
+msgid ""
+"This document adds support for the Ascend 950DT server based on vLLM-Ascend "
+"v0.27.1rc."
+msgstr "本文档基于 vLLM-Ascend v0.27.1rc 添加对 Ascend 950DT 服务器的支持。"
