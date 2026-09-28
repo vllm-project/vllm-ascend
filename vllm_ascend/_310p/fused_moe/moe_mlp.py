@@ -17,12 +17,13 @@
 import torch
 
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.moe_mlp import maybe_record_event
 
 
 def apply_moe_mlp(
     mlp_compute_input: MoEMlpComputeInput,
     quant_method,
-) -> tuple[torch.Tensor, torch.npu.Event]:
+) -> tuple[torch.Tensor, torch.npu.Event | None]:
     """
     Unified MoE MLP entry (310P).
 
@@ -38,6 +39,6 @@ def apply_moe_mlp(
 
     hidden_states, act_out_scale = quant_method.apply_gmm1_act_quant(mlp_compute_input)
 
-    before_gmm2_evt = torch.npu.current_stream().record_event()
+    before_gmm2_evt = maybe_record_event()
     hidden_states = quant_method.apply_gmm2(mlp_compute_input, hidden_states, act_out_scale)
     return hidden_states, before_gmm2_evt

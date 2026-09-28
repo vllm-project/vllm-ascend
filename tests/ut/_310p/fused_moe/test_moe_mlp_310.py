@@ -88,7 +88,14 @@ class _W8A8Layer(SimpleNamespace):
 
 
 class TestApplyMoEMLP310(TestBase):
-    def test_fused_activation_path_dispatches_to_fused_hook(self):
+    # The gmm2 milestone is only recorded when the shared-expert multistream
+    # overlap is enabled; enable it so the event-returning contract of
+    # apply_moe_mlp is exercised here.
+    @patch(
+        "vllm_ascend.ops.fused_moe.moe_mlp.get_ascend_config",
+        return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+    )
+    def test_fused_activation_path_dispatches_to_fused_hook(self, _mock_config):
         quant_method = MagicMock()
         quant_method.supports_fused_activation.return_value = True
         quant_method.apply_gmm1_act_quant.return_value = (torch.randn(4, 8), None)
@@ -109,7 +116,11 @@ class TestApplyMoEMLP310(TestBase):
         quant_method.apply_gmm2.assert_called_once()
         self.assertIsNotNone(before_gmm2_evt)
 
-    def test_only_fused_path_is_used_for_supported_activation(self):
+    @patch(
+        "vllm_ascend.ops.fused_moe.moe_mlp.get_ascend_config",
+        return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+    )
+    def test_only_fused_path_is_used_for_supported_activation(self, _mock_config):
         quant_method = MagicMock()
         quant_method.supports_fused_activation.return_value = True
         quant_method.apply_gmm1_act_quant.return_value = (torch.randn(4, 8), None)
@@ -130,6 +141,28 @@ class TestApplyMoEMLP310(TestBase):
         quant_method.apply_act_quant.assert_not_called()
         quant_method.apply_gmm2.assert_called_once()
         self.assertIsNotNone(before_gmm2_evt)
+
+    def test_gmm2_event_skipped_when_multistream_overlap_off(self):
+        quant_method = MagicMock()
+        quant_method.supports_fused_activation.return_value = True
+        quant_method.apply_gmm1_act_quant.return_value = (torch.randn(4, 8), None)
+        quant_method.apply_gmm2.return_value = torch.randn(4, 8)
+        mlp_compute_input = build_mlp_compute_input_fixture(
+            hidden_states=torch.randn(4, 8),
+            w1=torch.randn(2, 8, 16),
+            w2=torch.randn(2, 16, 8),
+            group_list=torch.tensor([4], dtype=torch.int64),
+            with_quant=True,
+        )
+
+        with patch(
+            "vllm_ascend.ops.fused_moe.moe_mlp.get_ascend_config",
+            return_value=SimpleNamespace(multistream_overlap_shared_expert=False),
+        ):
+            output, before_gmm2_evt = apply_moe_mlp(mlp_compute_input, quant_method)
+
+        quant_method.apply_gmm2.assert_called_once()
+        self.assertIsNone(before_gmm2_evt)
 
     def test_unsupported_activation_is_rejected(self):
         quant_method = MagicMock()
@@ -367,6 +400,10 @@ class TestApplyMoeMLPFullChain310(TestBase):
         with (
             patch("torch_npu.npu_grouped_matmul", create=True) as mock_gmm,
             patch("torch_npu.npu_swiglu") as mock_swiglu,
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.get_ascend_config",
+                return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+            ),
         ):
             mock_gmm.side_effect = [[gmm1_out], [gmm2_out]]
             mock_swiglu.return_value = torch.randn(4, 32, dtype=torch.float16)
@@ -419,6 +456,10 @@ class TestApplyMoeMLPFullChain310(TestBase):
         with (
             patch("torch_npu.npu_quant_grouped_matmul_dequant", create=True) as mock_quant_gmm,
             patch("torch_npu.npu_swiglu") as mock_swiglu,
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.get_ascend_config",
+                return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+            ),
         ):
             mock_quant_gmm.side_effect = [gmm1_out, gmm2_out]
             mock_swiglu.return_value = torch.randn(4, 32, dtype=torch.float16)
@@ -499,6 +540,10 @@ class TestAllGatherCommImpl310FusedExperts(TestBase):
             patch("vllm_ascend.ops.fused_moe.moe_comm_method._EXTRA_CTX") as mock_ctx,
             patch("vllm_ascend.ops.fused_moe.moe_comm_method.apply_moe_mlp") as mock_apply_mlp,
             patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.get_ascend_config",
+                return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+            ),
+            patch(
                 "vllm_ascend.ops.fused_moe.dataclass.moe_mlp.enable_fusion_gmmswigluquant",
                 return_value=False,
             ),
@@ -523,6 +568,10 @@ class TestAllGatherCommImpl310FusedExperts(TestBase):
         comm, fused_experts_input, _ = self._build_comm_and_input()
         with (
             patch("vllm_ascend.ops.fused_moe.moe_comm_method._EXTRA_CTX") as mock_ctx,
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.get_ascend_config",
+                return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+            ),
             patch(
                 "vllm_ascend.ops.fused_moe.dataclass.moe_mlp.enable_fusion_gmmswigluquant",
                 return_value=False,

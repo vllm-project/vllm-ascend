@@ -39,6 +39,7 @@ from vllm_ascend.lora.fused_moe import (
 )
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.moe_mlp import maybe_record_event
 from vllm_ascend.quantization.quant_type import QuantType
 
 QuantMoELoRAApply = Callable[[MoEMlpComputeInput, Any], tuple[torch.Tensor, torch.npu.Event | None]]
@@ -253,7 +254,7 @@ def _apply_dynamic_int8_moe_lora(
         act_quant_type=torch.int8,
         use_mxfp_quant=False,
     )
-    before_gmm2_evt = torch.npu.current_stream().record_event()
+    before_gmm2_evt = maybe_record_event()
     down_out = DeviceOperator.npu_grouped_matmul_gmm2(
         hidden_states=quantized_activated,
         weight=w2,
