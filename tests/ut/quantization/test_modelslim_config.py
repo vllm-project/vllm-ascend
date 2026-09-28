@@ -361,17 +361,17 @@ class TestAscendModelSlimConfig(TestBase):
             patch("vllm_ascend.ops.fused_moe.fused_moe.get_forward_context", return_value=forward_context),
             patch("vllm_ascend.ops.fused_moe.fused_moe.get_moe_num_logical_experts", return_value=8),
             patch("vllm_ascend.ops.fused_moe.fused_moe.select_experts", side_effect=fake_select_experts),
+            self.assertRaises(_ExpertSelectionReached),
         ):
-            with self.assertRaises(_ExpertSelectionReached):
-                method.apply(
-                    layer=layer,
-                    x=torch.empty(1, 4),
-                    use_grouped_topk=False,
-                    top_k=2,
-                    router_logits=torch.empty(1, 8),
-                    renormalize=False,
-                    scoring_func="sqrtsoftplus",
-                )
+            method.apply(
+                layer=layer,
+                x=torch.empty(1, 4),
+                use_grouped_topk=False,
+                top_k=2,
+                router_logits=torch.empty(1, 8),
+                renormalize=False,
+                scoring_func="sqrtsoftplus",
+            )
 
         self.assertIs(captured["tid2eid"], tid2eid)
 
