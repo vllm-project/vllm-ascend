@@ -697,9 +697,9 @@ and use the `main` branch with the matching vLLM revision recorded in
 ### 5.4 Service Verification
 
 Set the endpoint for the selected deployment, then verify the health endpoint.
-Use `http://<A3_IP>:8900` for A3 single-node colocated deployment,
-`http://<PROXY_IP>:<PROXY_PORT>` for A3 PD deployment, or
-`http://<A2_NODE0_IP>:8000` for the retained A2 deployment.
+Use `<A3_IP>` with port `8900` for A3 single-node colocated deployment,
+`<PROXY_IP>` with `<PROXY_PORT>` for A3 PD deployment, or `<A2_NODE0_IP>` with
+port `8000` for the retained A2 deployment.
 
 ```shell
 export SERVICE_URL="http://<SERVICE_IP>:<SERVICE_PORT>"
