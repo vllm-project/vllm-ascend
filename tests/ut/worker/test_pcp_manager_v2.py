@@ -110,18 +110,21 @@ def test_validate_config_allows_pipeline_parallelism():
     AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
 
 
-@pytest.mark.parametrize("cudagraph_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
-def test_validate_config_rejects_unsupported_sparse_mla_graph_modes(cudagraph_mode):
+@pytest.mark.parametrize(
+    "cudagraph_mode",
+    [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE],
+)
+def test_validate_config_allows_sparse_mla_piecewise_graph_modes(cudagraph_mode):
     vllm_config = _make_pcp_config(cudagraph_mode)
 
-    with pytest.raises(NotImplementedError, match="sparse MLA PCP supports"):
-        AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
+    AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
 
 
-def test_validate_config_rejects_full_graph_for_non_sparse_mla():
-    vllm_config = _make_pcp_config(CUDAGraphMode.FULL, sparse_mla=False)
+@pytest.mark.parametrize("sparse_mla", [True, False])
+def test_validate_config_rejects_full_graph(sparse_mla):
+    vllm_config = _make_pcp_config(CUDAGraphMode.FULL, sparse_mla=sparse_mla)
 
-    with pytest.raises(NotImplementedError, match="FULL_DECODE_ONLY"):
+    with pytest.raises(NotImplementedError, match="does not support FULL CUDA graphs"):
         AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
 
 
@@ -739,6 +742,42 @@ def test_pcp_manager_restores_model_owned_hidden_buffer() -> None:
     torch.testing.assert_close(hidden_states[3], torch.zeros(2))
 
 
+def test_pcp_manager_pads_compact_restored_hidden_states_to_graph_layout() -> None:
+    """PIECEWISE attention restores compact hidden states; they must be padded
+    back to the fixed graph layout for downstream graph segments."""
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager._global_batch = SimpleNamespace(num_tokens=3, num_tokens_after_padding=6)
+    restored = torch.tensor([[1.0, 2.0], [5.0, 6.0], [3.0, 4.0]])
+
+    with (
+        patch(
+            "vllm_ascend.worker.v2.pcp_manager.get_pp_group",
+            return_value=SimpleNamespace(is_last_rank=True),
+        ),
+        patch.object(PCPManager, "restore_hidden_states", return_value=restored.clone()),
+    ):
+        padded = manager.restore_hidden_states(torch.randn(3, 2))
+
+    assert padded.shape == (6, 2)
+    torch.testing.assert_close(padded[:3], restored)
+    torch.testing.assert_close(padded[3:], torch.zeros(3, 2))
+
+
+def test_pcp_manager_rejects_mismatched_restored_hidden_states() -> None:
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager._global_batch = SimpleNamespace(num_tokens=3, num_tokens_after_padding=6)
+
+    with (
+        patch(
+            "vllm_ascend.worker.v2.pcp_manager.get_pp_group",
+            return_value=SimpleNamespace(is_last_rank=True),
+        ),
+        patch.object(PCPManager, "restore_hidden_states", return_value=torch.randn(5, 2)),
+        pytest.raises(RuntimeError, match="does not match the global graph layout"),
+    ):
+        manager.restore_hidden_states(torch.randn(3, 2))
+
+
 def test_pcp_manager_skips_hidden_restore_before_last_pp_rank() -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
     hidden_states = torch.randn(2, 4)
@@ -1004,21 +1043,18 @@ def test_partition_batch_clears_padded_dcp_local_seq_lens() -> None:
 
 
 @pytest.mark.parametrize(
-    "dp_size,cudagraph_mode,allowed",
+    "dp_size,cudagraph_mode",
     [
-        (2, CUDAGraphMode.NONE, True),
-        (2, CUDAGraphMode.FULL_DECODE_ONLY, True),
-        (2, CUDAGraphMode.PIECEWISE, False),
-        (1, CUDAGraphMode.PIECEWISE, True),
+        (2, CUDAGraphMode.NONE),
+        (2, CUDAGraphMode.FULL_DECODE_ONLY),
+        (2, CUDAGraphMode.PIECEWISE),
+        (2, CUDAGraphMode.FULL_AND_PIECEWISE),
+        (1, CUDAGraphMode.PIECEWISE),
     ],
 )
-def test_validate_config_pcp_dp_graph_modes(dp_size, cudagraph_mode, allowed):
+def test_validate_config_pcp_dp_graph_modes(dp_size, cudagraph_mode):
     config = _make_pcp_config(cudagraph_mode, sparse_mla=False, data_parallel_size=dp_size)
-    if allowed:
-        AscendPCPManager.validate_config(config, supports_mm_inputs=False)
-    else:
-        with pytest.raises(NotImplementedError, match=r"PCP\+DP supports eager mode or FULL_DECODE_ONLY"):
-            AscendPCPManager.validate_config(config, supports_mm_inputs=False)
+    AscendPCPManager.validate_config(config, supports_mm_inputs=False)
 
 
 @pytest.mark.parametrize("pcp_rank", [0, 1])

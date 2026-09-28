@@ -162,9 +162,8 @@ class AscendPCPManager(PCPManager):
         supports_mm_inputs: bool,
     ) -> None:
         """Validate the graph-safe Ascend MRV2 PCP configuration."""
-        parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
-        pcp_size = parallel_config.prefill_context_parallel_size
+        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         if pcp_size <= 1:
             return
 
@@ -174,6 +173,7 @@ class AscendPCPManager(PCPManager):
             raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
+
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
             if speculative_config.method not in ("mtp", "eagle3", "dspark"):
@@ -184,20 +184,10 @@ class AscendPCPManager(PCPManager):
                 raise NotImplementedError(
                     "Ascend MRV2 PCP speculative decoding currently requires greedy draft sampling."
                 )
-        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-        if parallel_config.data_parallel_size > 1 and cudagraph_mode not in {
-            CUDAGraphMode.NONE,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        }:
-            raise NotImplementedError("MRV2 PCP+DP supports eager mode or FULL_DECODE_ONLY CUDA graphs only.")
-        if is_sparse_mla and cudagraph_mode not in {
-            CUDAGraphMode.NONE,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        }:
-            raise NotImplementedError("MRV2 sparse MLA PCP supports eager mode or FULL_DECODE_ONLY CUDA graphs only.")
-        if cudagraph_mode.has_full_cudagraphs() and cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
-            raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
+        if cudagraph_mode == CUDAGraphMode.FULL:
+            raise NotImplementedError("MRV2 PCP does not support FULL CUDA graphs.")
 
     # TODO To bypass the upstream verification, a pseudo-batch method is used to perform reconstruction after bypassing,
     # and the changes will be deleted after the upstream is merged.
@@ -404,6 +394,12 @@ class AscendPCPManager(PCPManager):
         num_tokens_after_padding = self._global_batch.num_tokens_after_padding
         if num_tokens == num_tokens_after_padding:
             return restored_hidden_states
+        if restored_hidden_states.shape[0] == num_tokens:
+            padded_hidden_states = restored_hidden_states.new_zeros(
+                (num_tokens_after_padding, *restored_hidden_states.shape[1:])
+            )
+            padded_hidden_states[:num_tokens].copy_(restored_hidden_states)
+            return padded_hidden_states
         if restored_hidden_states.shape[0] != num_tokens_after_padding:
             raise RuntimeError(
                 "PCP restored hidden-state length does not match the global "

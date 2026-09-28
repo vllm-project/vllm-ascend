@@ -949,3 +949,27 @@ def test_sfa_dcp_slot_mapping_matches_parallel_layout(impl_cls, num_prefills, nu
     else:
         assert result.tolist() == [3200, -1]
         assert result.data_ptr() == full_slots.data_ptr()
+
+
+def test_sfa_pcp_vetoes_fused_preprocessing() -> None:
+    """PCP feeds rank-local tokens while the slot mapping uses the global
+    gathered layout, so the fused preprocessing chain (inline KV-cache writes)
+    is layout incompatible and must be vetoed; only the NATIVE chain, which
+    gathers prefill cache inputs before the KV-cache write, is compatible."""
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl.qk_rope_head_dim = 64
+    impl.kv_a_layernorm = MagicMock()
+    impl.q_a_layernorm = MagicMock()
+    impl.fused_qkv_a_proj = MagicMock()
+    impl.enable_sparse_sfa_c8 = False
+    impl.q_proj = MagicMock()
+    impl.q_proj._chunk_size = 0
+
+    for pp_type in (PreprocessType.PROLOG_V3, PreprocessType.MLAPO):
+        reasons = impl._get_fused_type_unsupported_reasons(pp_type)
+        assert reasons == ["Fused preprocessing does not support SFA-PCP."]
+
+    # The veto is PCP-specific: the base SFA impl keeps fused preprocessing.
+    base_impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    base_impl.__dict__.update(impl.__dict__)
+    assert base_impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3) == []

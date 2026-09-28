@@ -2274,6 +2274,10 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             return_value=caches,
         ),
         patch("vllm_ascend.attention.context_parallel.dsa_cp.get_pcp_group", return_value=pcp_group),
+        patch(
+            "vllm_ascend.attention.context_parallel.dsa_cp.get_forward_context",
+            return_value=SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE),
+        ),
         patch.object(impl, "_update_global_swa_cache") as update_swa,
         patch.object(impl, "_update_global_compressor_cache") as update_compressor,
         patch.object(
