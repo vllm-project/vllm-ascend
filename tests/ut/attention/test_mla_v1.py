@@ -3273,6 +3273,20 @@ def test_fused_bbnd_cache_views_are_detected_without_component_major_views():
     assert not impl._is_fused_mla_cache_views((component_nope, component_rope))
     assert not impl._is_fused_mla_cache_views((component_nope, torch.empty_like(component_rope)))
 
+    # BNBD swaps the block and KV-head axes.  Even when its nope/rope slices
+    # have matching strides, the BBND writer must not consume that contract.
+    bnbd_nope = backing.as_strided(
+        (pages, heads, block_size, impl.kv_lora_rank),
+        (page_stride, block_size * fused_dim, fused_dim, 1),
+        storage_offset=3,
+    )
+    bnbd_rope = backing.as_strided(
+        (pages, heads, block_size, impl.qk_rope_head_dim),
+        (page_stride, block_size * fused_dim, fused_dim, 1),
+        storage_offset=3 + impl.kv_lora_rank,
+    )
+    assert not impl._is_fused_mla_cache_views((bnbd_nope, bnbd_rope))
+
 
 @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_kv_rmsnorm_rope_cache")
 @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_scatter_pa_kv_cache")
@@ -3301,7 +3315,9 @@ def test_fused_bbnd_cache_uses_scatter_writer_and_preserves_decode_contract(mock
     sin = torch.randn(2, impl.qk_rope_head_dim)
     slots = torch.tensor([0, 4], dtype=torch.int64)
 
-    prefill_k_pe, prefill_k_nope = impl.exec_kv_prefill(tokens, cos, sin, (nope, rope), slots)
+    # DSpark context precomputation can bypass forward() and pass the original
+    # fused BBND tensor directly to the prefill writer.
+    prefill_k_pe, prefill_k_nope = impl.exec_kv_prefill(tokens, cos, sin, fused, slots)
     assert prefill_k_pe.shape == (2, impl.num_kv_heads, impl.qk_rope_head_dim)
     assert prefill_k_nope.shape == (2, impl.num_kv_heads, impl.kv_lora_rank)
 
