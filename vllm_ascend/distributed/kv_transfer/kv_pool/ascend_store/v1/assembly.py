@@ -1,4 +1,4 @@
-"""Assemble AscendStore's domain graph at process boundaries."""
+"""Assemble AscendStore's planner, graph and runtime at process boundaries."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_cache_spec
 
 from .execution.io import BackendExistenceMissingFilter, BackendIO, IdentityMissingFilter, MissingFilter
 from .execution.resources import KVResources
+from .execution.runtime import KVPoolRuntime
 from .execution.timeline import AsynchronousLoadTimeline, LoadTimeline, StoreTimeline, SynchronousLoadTimeline
 from .graph.projection import (
     BindingProjection,
@@ -60,8 +61,8 @@ def build_transfer_planner(
     )
 
 
-def build_kv_pool_graph(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> KVPoolGraph:
-    """Assemble the fixed Lookup, Load and Store graph for one KV Pool participant."""
+def build_kv_pool_runtime(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> KVPoolRuntime:
+    """Assemble the fixed KV Pool graph and its process-owned runtime."""
 
     topology = resolve_kv_topology(vllm_config, kv_cache_config)
     transfer_config = vllm_config.kv_transfer_config
@@ -92,7 +93,7 @@ def build_kv_pool_graph(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig)
     backend_io = BackendIO(resources.backend)
     missing_filter: MissingFilter
     if resources.backend.requires_exists_before_put:
-        missing_filter = BackendExistenceMissingFilter(resources.backend)
+        missing_filter = BackendExistenceMissingFilter()
     else:
         missing_filter = IdentityMissingFilter()
     load_timeline: LoadTimeline
@@ -101,17 +102,14 @@ def build_kv_pool_graph(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig)
     else:
         load_timeline = SynchronousLoadTimeline()
     store_timeline = StoreTimeline(backend_io.backend.set_device) if _is_store_enabled(vllm_config) else None
-    return KVPoolGraph(
-        resources,
+    graph = KVPoolGraph(
         topology,
         reachability,
         projection,
         consumer_projection,
         missing_filter,
-        backend_io,
-        load_timeline,
-        store_timeline,
     )
+    return KVPoolRuntime(graph, resources, backend_io, load_timeline, store_timeline)
 
 
 def _build_reachability(

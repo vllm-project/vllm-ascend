@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.io im
     IdentityMissingFilter,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.resources import KVResources
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.runtime import KVPoolRuntime
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.timeline import (
     AsynchronousLoadTimeline,
     LoadCompletion,
@@ -303,7 +304,7 @@ def test_resources_register_memory_geometry_once() -> None:
         resources.register_kv_caches(kv_caches)
 
 
-def make_kv_pool_graph(
+def make_kv_pool_runtime(
     backend,
     database=None,
     *,
@@ -321,11 +322,8 @@ def make_kv_pool_graph(
     load_timeline = AsynchronousLoadTimeline(backend.set_device) if async_load else SynchronousLoadTimeline()
     projection = make_projection(database, topology)
     consumer_projection = IdentityConsumerProjection()
-    missing_filter = (
-        BackendExistenceMissingFilter(backend) if backend.requires_exists_before_put else IdentityMissingFilter()
-    )
+    missing_filter = BackendExistenceMissingFilter() if backend.requires_exists_before_put else IdentityMissingFilter()
     graph = KVPoolGraph(
-        resources,
         topology,
         UnitaryReachability(groups[0], 64, 4)
         if len(groups) == 1
@@ -345,15 +343,27 @@ def make_kv_pool_graph(
         projection,
         consumer_projection,
         missing_filter,
+    )
+    runtime = KVPoolRuntime(
+        graph,
+        resources,
         backend_io,
         load_timeline,
         StoreTimeline(backend.set_device) if store else None,
     )
     if registered:
-        graph.register_kv_caches({"cache": object()})
+        runtime.register_kv_caches({"cache": object()})
     else:
-        projection.compile_memory_mapping()
-    return graph, resources
+        graph.compile_memory_mapping()
+    return runtime, resources
+
+
+def begin_kv_pool_step(
+    runtime: KVPoolRuntime,
+    load: LoadCommandBatch | None = None,
+    store: StoreCommandBatch | None = None,
+):
+    return runtime.begin_step(KVTransferStep(load or LoadCommandBatch(), store or StoreCommandBatch()))
 
 
 @pytest.mark.parametrize(("start_token", "end_token"), [(-1, 0), (4, 3)])
@@ -584,19 +594,19 @@ def test_unitary_reachability_resolves_only_contiguous_available_chunks() -> Non
     assert reachability.resolve_available_end(selection, (availability,)) == 4
 
 
-def test_kv_pool_graph_lookup_requires_every_physical_representation() -> None:
+def test_kv_pool_runtime_lookup_requires_every_physical_representation() -> None:
     backend = FakeBackend()
     backend.presence = [1, 0]
-    graph, _ = make_kv_pool_graph(backend, store=False, key_rank_count=2)
-    result = graph.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"a",)))
+    runtime, _ = make_kv_pool_runtime(backend, store=False, key_rank_count=2)
+    result = runtime.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"a",)))
     assert result == LookupResult(0)
 
 
-def test_kv_pool_graph_lookup_contains_backend_protocol_failure_as_a_miss() -> None:
+def test_kv_pool_runtime_lookup_contains_backend_protocol_failure_as_a_miss() -> None:
     backend = FakeBackend()
     backend.presence = [1, 1]
-    graph, _ = make_kv_pool_graph(backend, store=False)
-    result = graph.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"a",)))
+    runtime, _ = make_kv_pool_runtime(backend, store=False)
+    result = runtime.lookup(LookupRequest(TokenRange(0, 4), (0,), (b"a",)))
     assert result == LookupResult(0)
 
 
@@ -707,111 +717,124 @@ def test_asynchronous_load_failure_terminates_and_drains_pending_requests() -> N
         timeline.close()
 
 
-def test_kv_pool_graph_filters_remote_objects_before_waiting_for_source(monkeypatch) -> None:
+def test_kv_pool_runtime_filters_remote_objects_before_waiting_for_source(monkeypatch) -> None:
     backend = FakeBackend()
     backend.requires_exists_before_put = True
     backend.presence = [1]
     event = FakeEvent()
-    graph, _ = make_kv_pool_graph(backend, registered=True)
+    runtime, _ = make_kv_pool_runtime(backend, registered=True)
     monkeypatch.setattr(torch.npu, "Event", lambda: event)
-    graph.submit_store(StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),)))
-    result = graph.wait_for_previous_store()
-    graph.close()
+    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    runtime.finish_step(begin_kv_pool_step(runtime, store=store))
+    result = runtime.fence_previous_store()
+    runtime.close()
     assert result[0].evidence.succeeded
     assert not event.synchronized
     assert [call[0] for call in backend.calls] == ["set_device", "exists"]
 
 
-def test_kv_pool_graph_keeps_the_configured_missing_filter(monkeypatch) -> None:
+def test_kv_pool_runtime_keeps_the_configured_missing_filter(monkeypatch) -> None:
     backend = FakeBackend()
-    graph, _ = make_kv_pool_graph(backend, registered=True)
+    runtime, _ = make_kv_pool_runtime(backend, registered=True)
     backend.requires_exists_before_put = True
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
-    graph.submit_store(StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),)))
-    graph.wait_for_previous_store()
-    graph.close()
+    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    runtime.finish_step(begin_kv_pool_step(runtime, store=store))
+    runtime.fence_previous_store()
+    runtime.close()
     assert "exists" not in [call[0] for call in backend.calls]
 
 
-def test_kv_pool_graph_preserves_unknown_source_release_after_put_failure(monkeypatch) -> None:
+def test_kv_pool_runtime_preserves_unknown_source_release_after_put_failure(monkeypatch) -> None:
     backend = FakeBackend()
     backend.put_result = BackendStoreEvidence(None, False, False, RuntimeError("put failed"))
-    graph, resources = make_kv_pool_graph(backend, registered=True)
+    runtime, resources = make_kv_pool_runtime(backend, registered=True)
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
-    graph.submit_store(StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),)))
+    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    evaluation = begin_kv_pool_step(runtime, store=store)
+    runtime.finish_step(evaluation)
     with pytest.raises(RuntimeError, match="Store failed"):
-        graph.wait_for_previous_store()
-    batch = graph._pending_store
+        runtime.fence_previous_store()
+    batch = evaluation.pending_store
     assert batch is not None
     result = batch.completions[0]
     assert not result.evidence.source_release_confirmed
     assert isinstance(result.evidence.error, RuntimeError)
     with pytest.raises(RuntimeError, match="previous Store failure"):
-        graph.close()
-    assert graph._store_timeline is not None
-    assert not graph._store_timeline.is_alive()
+        runtime.close()
+    assert runtime._store_timeline is not None
+    assert not runtime._store_timeline.is_alive()
     assert not resources.closed
 
 
-def test_kv_pool_graph_loads_multiple_groups_in_one_backend_call() -> None:
+def test_kv_pool_runtime_loads_multiple_groups_in_one_backend_call() -> None:
     backend = FakeBackend()
     backend.get_result = [0, 0]
-    graph, _ = make_kv_pool_graph(backend, FakeDatabase({0: 4, 1: 4}), groups=(0, 1), store=False)
-    graph.load(LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,), (2,)), (b"a",)),)))
+    runtime, _ = make_kv_pool_runtime(backend, FakeDatabase({0: 4, 1: 4}), groups=(0, 1), store=False)
+    load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,), (2,)), (b"a",)),))
+    runtime.start_load(begin_kv_pool_step(runtime, load=load))
     get_calls = [call for call in backend.calls if call[0] == "get"]
     assert len(get_calls) == 1
     assert len(get_calls[0][1]) == 2
 
 
-def test_kv_pool_graph_reports_grouped_load_failure_at_request_scope() -> None:
+def test_kv_pool_runtime_reports_grouped_load_failure_at_request_scope() -> None:
     backend = FakeBackend()
     backend.get_result = [0, -1]
-    graph, _ = make_kv_pool_graph(backend, FakeDatabase({0: 4, 1: 4}), groups=(0, 1), store=False)
+    runtime, _ = make_kv_pool_runtime(backend, FakeDatabase({0: 4, 1: 4}), groups=(0, 1), store=False)
+    load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,), (2,)), (b"a",)),))
     with pytest.raises(RuntimeError, match="Hybrid KV Load failed"):
-        graph.load(LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,), (2,)), (b"a",)),)))
+        runtime.start_load(begin_kv_pool_step(runtime, load=load))
 
 
-def test_kv_pool_graph_preserves_nonzero_single_group_failure_identity() -> None:
+def test_kv_pool_runtime_preserves_nonzero_single_group_failure_identity() -> None:
     backend = FakeBackend()
     backend.get_result = [-1]
-    graph, _ = make_kv_pool_graph(backend, FakeDatabase({3: 4}), groups=(3,), store=False)
+    runtime, _ = make_kv_pool_runtime(backend, FakeDatabase({3: 4}), groups=(3,), store=False)
     block_ids = ((), (), (), (7,))
-    graph.load(LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), block_ids, (b"a",)),)))
-    assert graph.collect_load_result().failed_block_ids == {7}
+    load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), block_ids, (b"a",)),))
+    evaluation = begin_kv_pool_step(runtime, load=load)
+    runtime.start_load(evaluation)
+    assert runtime.collect_load_result(evaluation).failed_block_ids == {7}
 
 
-def test_kv_pool_graph_async_load_publishes_only_after_backend_completion() -> None:
+def test_kv_pool_runtime_async_load_publishes_only_after_backend_completion() -> None:
     backend = FakeBackend()
     backend.get_result = [0]
-    graph, _ = make_kv_pool_graph(backend, async_load=True, store=False, registered=True)
-    graph.load(LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",)),)))
-    graph._load_timeline._queue.join()
-    assert graph.collect_load_result().completed_request_ids == {"request"}
-    graph.close()
+    runtime, _ = make_kv_pool_runtime(backend, async_load=True, store=False, registered=True)
+    load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",)),))
+    evaluation = begin_kv_pool_step(runtime, load=load)
+    runtime.start_load(evaluation)
+    runtime._load_timeline._queue.join()
+    assert runtime.collect_load_result(evaluation).completed_request_ids == {"request"}
+    runtime.close()
 
 
-def test_kv_pool_graph_store_projects_then_fences_one_step(monkeypatch) -> None:
+def test_kv_pool_runtime_store_projects_then_fences_one_step(monkeypatch) -> None:
     backend = FakeBackend()
     backend.put_result = BackendStoreEvidence((0,), True, True)
-    graph, resources = make_kv_pool_graph(backend, registered=True)
+    runtime, resources = make_kv_pool_runtime(backend, registered=True)
     event = FakeEvent()
     monkeypatch.setattr(torch.npu, "Event", lambda: event)
-    graph.submit_store(StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),)))
-    results = graph.wait_for_previous_store()
-    graph.close()
+    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    runtime.finish_step(begin_kv_pool_step(runtime, store=store))
+    results = runtime.fence_previous_store()
+    runtime.close()
     assert results[0].evidence.succeeded
     assert event.synchronized
     assert [call[0] for call in backend.calls].count("put") == 1
     assert resources.closed
 
 
-def test_kv_pool_graph_close_keeps_resources_when_store_source_release_is_unknown() -> None:
+def test_kv_pool_runtime_close_keeps_resources_when_store_source_release_is_unknown() -> None:
     backend = FakeBackend()
-    graph, resources = make_kv_pool_graph(backend, store=True)
-    graph._pending_store = SimpleNamespace()
-    graph._store_error = RuntimeError("unknown source release")
+    runtime, resources = make_kv_pool_runtime(backend, store=True)
+    evaluation = begin_kv_pool_step(runtime)
+    evaluation.pending_store = SimpleNamespace()
+    runtime._pending_store_evaluation = evaluation
+    runtime._store_error = RuntimeError("unknown source release")
     with pytest.raises(RuntimeError):
-        graph.close()
+        runtime.close()
     assert not resources.closed
 
 
@@ -1042,14 +1065,19 @@ def test_connector_translates_vllm_lookup_into_planner_query() -> None:
     assert queries == [LookupQuery("request", 8, 9, request.block_hashes, 4)]
 
 
-def test_connector_routes_only_step_commands_to_kv_pool_graph(monkeypatch) -> None:
+def test_connector_routes_only_step_commands_to_kv_pool_runtime() -> None:
     received = []
     step = KVTransferStep(LoadCommandBatch(), StoreCommandBatch())
     instance = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
-    instance.graph = SimpleNamespace(load=lambda batch: received.append(batch))
-    monkeypatch.setattr(instance, "_get_connector_metadata", lambda: step)
+    evaluation = object()
+    instance.runtime = SimpleNamespace(
+        begin_step=lambda value: evaluation,
+        start_load=lambda value: received.append(value),
+    )
+    instance._step_evaluation = None
+    instance.bind_connector_metadata(step)
     instance.start_load_kv(SimpleNamespace())
-    assert received == [step.load]
+    assert received == [evaluation]
 
 
 def test_backend_adapter_keeps_source_release_unknown_after_native_put_error() -> None:
