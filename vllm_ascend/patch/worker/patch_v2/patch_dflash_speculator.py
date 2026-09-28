@@ -17,9 +17,11 @@
 #
 import vllm.v1.worker.gpu.spec_decode.dflash.cudagraph as cudagraph_module
 import vllm.v1.worker.gpu.spec_decode.dflash.speculator as speculator_module
+import vllm.v1.worker.gpu.spec_decode.dflash.utils as dflash_utils
 import vllm.v1.worker.gpu.spec_decode.dflash2.speculator as speculator2_module
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
+from vllm_ascend.worker.v2.pp_utils import replace_or_copy_vllm_config
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
     _selector_walk_kernel_ascend,
@@ -27,6 +29,9 @@ from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
 
 cudagraph_module.build_attn_metadata = build_attn_metadata
 speculator_module.DFlashCudaGraphManager = DFlashAclGraphManager
+# The upstream loader uses one imported ``replace`` for both nested dataclasses
+# and VllmConfig. Only the latter is shallow-copied by this compatibility hook.
+dflash_utils.replace = replace_or_copy_vllm_config
 
 # triton-ascend cannot lower tldevice.log1p in the upstream selector walk;
 # swap in the algebraically equivalent log(1 - u) variant.

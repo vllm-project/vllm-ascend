@@ -46,12 +46,17 @@ import vllm.v1.worker.gpu.spec_decode.eagle.utils as eagle_utils
 
 from vllm_ascend.worker.v2.pp_utils import (
     bypass_upstream_spec_pp_guard,
+    replace_or_copy_vllm_config,
     resolve_spec_pp_support,
     use_legacy_spec_pp,
 )
 
 _original_get_draft_quant_config = model_utils.get_draft_quant_config
 _original_load_dspark_model = dspark_utils.load_dspark_model
+
+# Upstream rebuilds the top-level VllmConfig while deriving the draft config.
+# Keep its nested dataclass replacements, but avoid target-only revalidation.
+dspark_utils.replace = replace_or_copy_vllm_config
 
 
 def _load_dspark_model_with_target_quant(target_model, vllm_config):
