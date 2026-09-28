@@ -146,7 +146,6 @@ The standalone explicit prepare/seal API in `ops/triton/kda_state_copy.py` remai
 available for its existing tests; production uses worker-owned plans instead of
 its process-global signature registry and per-call environment checks.
 
-
 ### Reproducible paired performance check
 
 The optional native differential tests skip only when the separately built
