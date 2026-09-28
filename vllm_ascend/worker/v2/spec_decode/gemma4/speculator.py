@@ -206,6 +206,25 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         self._g4_window_dirty = False
         self._g4_committed = None
 
+    def set_attn(self, *args, **kwargs):
+        super().set_attn(*args, **kwargs)
+        # The window rebuild reads the committed sequence history from the
+        # runner's RequestState (``all_token_ids``), but the speculator only
+        # receives the target's ModelState, which has no back-reference to
+        # it. Capture the RequestState the runner hands to prepare_inputs on
+        # every step, so the rebuild can gather post-commit token ids.
+        ms = self.model_state
+        if getattr(self, "_g4_req_states_hooked", False):
+            return
+        self._g4_req_states_hooked = True
+        orig_prepare_inputs = ms.prepare_inputs
+
+        def prepare_inputs_with_req_states(input_batch, req_states, *a, **kw):
+            ms.req_states = req_states
+            return orig_prepare_inputs(input_batch, req_states, *a, **kw)
+
+        ms.prepare_inputs = prepare_inputs_with_req_states
+
     def propose(
         self,
         input_batch,
