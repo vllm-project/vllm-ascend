@@ -18,11 +18,19 @@ class LaunchSpec(NamedTuple):
 
 
 BM_PERSIST_SINGLE = 32
+# A tile wave is one BM32 tile per initialized vector core.
 HOIST_MIN_TILE_WAVES = 16
 
 
 @dataclass(frozen=True)
 class DispatchParams:
+    """M-axis routing policy for the per-group width ``N_group``.
+
+    ``bm_*`` are row-tile heights. ``k_persist_num/den`` is the minimum
+    BM32 tile count per vector core for persistent execution; ``None`` means
+    that a route has not been configured and is rejected if reached.
+    """
+
     bm_small: int | None = None
     bm_multi: int | None = None
     k_persist_num: int | None = None
