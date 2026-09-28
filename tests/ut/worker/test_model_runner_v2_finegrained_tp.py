@@ -258,9 +258,7 @@ def test_execute_model_dummy_joins_target_lmhead_collectives():
     runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states)
     runner.kvpp = MagicMock()
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
-    runner.ascend_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(profiling_chunk_config=None)
-    )
+    runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(profiling_chunk_config=None))
 
     def super_execute(scheduler_output, intermediate_tensors=None, **kwargs):
         return "upstream-output"
@@ -291,9 +289,7 @@ def test_execute_model_dummy_join_uses_dynamic_capacity():
     runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states)
     runner.kvpp = MagicMock()
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
-    runner.ascend_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(profiling_chunk_config=None)
-    )
+    runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(profiling_chunk_config=None))
 
     def super_execute(scheduler_output, intermediate_tensors=None, **kwargs):
         return "upstream-output"
@@ -321,9 +317,7 @@ def test_execute_model_dummy_skips_join_when_gated_off():
     runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states)
     runner.kvpp = MagicMock()
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
-    runner.ascend_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(profiling_chunk_config=None)
-    )
+    runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(profiling_chunk_config=None))
 
     def super_execute(scheduler_output, intermediate_tensors=None, **kwargs):
         return "upstream-output"
@@ -340,10 +334,10 @@ def test_execute_model_dummy_skips_join_when_gated_off():
         runner.model.compute_logits.assert_not_called()
         runner.model.compute_logits.reset_mock()
 
-    _run(dummy_run=False)              # real run
+    _run(dummy_run=False)  # real run
     _run(dummy_run=True, is_profile=True)  # profile run
-    _run(dummy_run=True, lmhead=False)     # feature off
-    _run(dummy_run=True, last_pp=False)    # non-last PP
+    _run(dummy_run=True, lmhead=False)  # feature off
+    _run(dummy_run=True, last_pp=False)  # non-last PP
 
 
 def test_finegrained_tp_guard_contract():

@@ -51,9 +51,7 @@ def test_lmhead_tp_capacity_pads_then_trims():
     proc = _make_processor(vocab=8)
     head = _make_head(capacity=8)
     hidden_states = torch.randn(3, 5)
-    proc._apply_head = MagicMock(
-        side_effect=lambda lm_head, hidden, bias: torch.zeros(hidden.shape[0], 8)
-    )
+    proc._apply_head = MagicMock(side_effect=lambda lm_head, hidden, bias: torch.zeros(hidden.shape[0], 8))
 
     with (
         patch(
@@ -85,9 +83,7 @@ def test_lmhead_tp_capacity_exact_passthrough():
     proc = _make_processor(vocab=8)
     head = _make_head(capacity=8)
     hidden_states = torch.randn(8, 5)
-    proc._apply_head = MagicMock(
-        side_effect=lambda lm_head, hidden, bias: torch.zeros(hidden.shape[0], 8)
-    )
+    proc._apply_head = MagicMock(side_effect=lambda lm_head, hidden, bias: torch.zeros(hidden.shape[0], 8))
 
     with (
         patch(
@@ -115,9 +111,7 @@ def test_lmhead_tp_no_capacity_is_passthrough():
     proc = _make_processor(vocab=8)
     head = _make_head(capacity=None)
     hidden_states = torch.randn(3, 5)
-    proc._apply_head = MagicMock(
-        side_effect=lambda lm_head, hidden, bias: torch.zeros(hidden.shape[0], 8)
-    )
+    proc._apply_head = MagicMock(side_effect=lambda lm_head, hidden, bias: torch.zeros(hidden.shape[0], 8))
 
     with (
         patch(

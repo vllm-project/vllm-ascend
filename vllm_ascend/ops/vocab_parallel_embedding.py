@@ -637,9 +637,7 @@ class AscendLogitsProcessor(LogitsProcessor):
                     f"capacity ({capacity}); desyncs the LM-head collectives."
                 )
             if num_logits < capacity:
-                hidden_states = torch.nn.functional.pad(
-                    hidden_states, (0, 0, 0, capacity - num_logits)
-                )
+                hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, capacity - num_logits))
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
