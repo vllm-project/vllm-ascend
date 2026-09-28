@@ -70,16 +70,6 @@ public:
         this->AICore().AddConfig("ascend910b", aicoreConfig);
         this->AICore().AddConfig("ascend910_93", aicoreConfig);
 
-        // A5(ascend950)：走 apt + arch35，kernel 逻辑与 A2/arch22 相同
-        OpAICoreConfig config_950;
-        config_950.DynamicCompileStaticFlag(true)
-            .DynamicFormatFlag(true)
-            .DynamicRankSupportFlag(true)
-            .DynamicShapeSupportFlag(true)
-            .NeedCheckSupportFlag(false)
-            .ExtendCfgInfo("softsync.flag", "true")
-            .ExtendCfgInfo("opFile.value", "attn_res_fwd_apt");
-        this->AICore().AddConfig("ascend950", config_950);
     }
 };
 

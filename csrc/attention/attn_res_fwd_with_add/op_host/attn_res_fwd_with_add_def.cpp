@@ -54,15 +54,6 @@ public:
         this->Attr("norm_eps").AttrType(OPTIONAL).Float(1e-5f);
         this->Attr("need_backward").AttrType(OPTIONAL).Bool(false);
 
-        OpAICoreConfig config_950;
-        config_950.DynamicCompileStaticFlag(true)
-            .DynamicFormatFlag(true)
-            .DynamicRankSupportFlag(true)
-            .DynamicShapeSupportFlag(true)
-            .NeedCheckSupportFlag(false)
-            .ExtendCfgInfo("softsync.flag", "true")
-            .ExtendCfgInfo("opFile.value", "attn_res_fwd_with_add_apt");
-        this->AICore().AddConfig("ascend950", config_950);
         OpAICoreConfig config_a3;
         config_a3.DynamicCompileStaticFlag(true).DynamicFormatFlag(true).DynamicRankSupportFlag(true)
             .DynamicShapeSupportFlag(true).NeedCheckSupportFlag(false)

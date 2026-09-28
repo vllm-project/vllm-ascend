@@ -10,28 +10,16 @@
 
 add_op_to_compiled_list()
 
-set(CONDITION_UNIT ${ASCEND_COMPUTE_UNIT})
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnnExc PRIVATE
         attn_res_fwd_def.cpp
     )
-    if(CONDITION_UNIT STREQUAL "ascend950")
-        add_ops_compile_options(
-            OP_NAME AttnResFwd
-            OPTIONS --cce-auto-sync=off
-                    -Wno-deprecated-declarations
-                    -Werror
-                    -mllvm
-                    -cce-aicore-dcci-before-kernel-end=false
-        )
-    else()
-        add_ops_compile_options(
-            OP_NAME AttnResFwd
-            OPTIONS --cce-auto-sync=off
-                    -Wno-deprecated-declarations
-                    -Werror
-        )
-    endif()
+    add_ops_compile_options(
+        OP_NAME AttnResFwd
+        OPTIONS --cce-auto-sync=off
+                -Wno-deprecated-declarations
+                -Werror
+    )
 endif()
 
 if(NOT BUILD_OPS_RTY_KERNEL)
