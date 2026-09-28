@@ -68,11 +68,11 @@ if command -v mfcli &>/dev/null; then
     case "${SOC_VERSION:-}" in
         ascend950dt_9582)
             echo "Install memfabric kernel for A5..."
-            mfcli kernel install --soc-version A5
+            mfcli kernel install --soc-version A5 || echo "mfcli kernel install failed (non-fatal), continuing..."
             ;;
         ascend910_9391)
             echo "Install memfabric kernel for A3..."
-            mfcli kernel install --soc-version A3
+            mfcli kernel install --soc-version A3 || echo "mfcli kernel install failed (non-fatal), continuing..."
             ;;
         *)
             echo "Skip memfabric kernel install (SOC_VERSION=${SOC_VERSION:-})."
