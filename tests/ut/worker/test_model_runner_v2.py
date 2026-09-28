@@ -32,6 +32,7 @@ def _make_runner(need_timing: bool = True):
     runner.attn_groups = []
     runner.adaptive_verification = None
     runner.use_fia = False
+    runner.sync_spec_pp_cpu_counts = False
     # Set by NPUModelRunner.__init__ on real instances.
     runner._finegrained_tp_requires_graph = False
     return runner
