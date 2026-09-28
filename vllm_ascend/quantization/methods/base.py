@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -41,6 +42,7 @@ __all__ = [
     "AscendAttentionScheme",
     "AscendLinearScheme",
     "AscendMoEScheme",
+    "PreparedLinearInput",
     "QuantType",
     "WeightLoadPartition",
     "WeightSwitchConfig",
@@ -69,6 +71,15 @@ def get_moe_num_logical_experts(
         return int(num_logical_experts)
 
     return int(num_experts - global_redundant_expert_num - num_shared_experts)
+
+
+@dataclass(frozen=True)
+class PreparedLinearInput:
+    """Quantized input prepared before a multistream scheduling barrier."""
+
+    quantized: torch.Tensor
+    scale: torch.Tensor | None
+    output_dtype: torch.dtype
 
 
 class AscendLinearScheme(WeightSwitchMixin, ABC):
@@ -133,6 +144,20 @@ class AscendLinearScheme(WeightSwitchMixin, ABC):
             Dictionary mapping parameter names to empty tensors.
         """
         return {}
+
+    def prepare_input_for_overlap(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        """Optionally prepare an input before a multistream scheduling barrier.
+
+        The returned object must be accepted by this scheme's ``apply``
+        method. Returning ``None`` keeps the original wrapped execution path.
+        Schemes should opt in only when moving their input preprocessing does
+        not change dtype, shape, padding, scale, or LoRA semantics.
+        """
+        return None
 
     @abstractmethod
     def apply(

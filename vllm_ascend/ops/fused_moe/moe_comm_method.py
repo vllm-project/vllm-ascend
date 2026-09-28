@@ -72,6 +72,7 @@ class FusedExpertsResult:
     before_dispatch_evt: torch.npu.Event | None = None
     before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
+    shared_activation_overlap_start_evt: torch.npu.Event | None = None
     # For dynamic_eplb
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
@@ -79,6 +80,11 @@ class FusedExpertsResult:
 
 class MoECommMethod(ABC):
     """Base class for MoE communication methods."""
+
+    # Staged communication backends normally place shared activation work at
+    # routed GMM2. Dispatch-based MC2 and All2All opt into the larger routed
+    # GMM1 + GMM2 Cube window.
+    shared_activation_overlaps_routed_gmm1 = False
 
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
@@ -140,6 +146,10 @@ class MoECommMethod(ABC):
         )
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
+        shared_activation_overlap_start_evt = None
+        if self.shared_activation_overlaps_routed_gmm1:
+            shared_activation_overlap_start_evt = torch.npu.current_stream().record_event()
+
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=fused_experts_input,
             token_dispatch_output=token_dispatch_output,
@@ -152,6 +162,9 @@ class MoECommMethod(ABC):
         else:
             mlp_output, before_gmm2_evt = apply_moe_mlp(mlp_compute_input, quant_method)
 
+        if shared_activation_overlap_start_evt is None:
+            shared_activation_overlap_start_evt = before_gmm2_evt
+
         before_combine_evt = torch.npu.current_stream().record_event()
         routed_out = self.token_dispatcher.token_combine(
             hidden_states=mlp_output,
@@ -163,6 +176,7 @@ class MoECommMethod(ABC):
             before_dispatch_evt=before_dispatch_evt,
             before_gmm2_evt=before_gmm2_evt,
             before_combine_evt=before_combine_evt,
+            shared_activation_overlap_start_evt=shared_activation_overlap_start_evt,
             group_list_type=token_dispatch_output.group_list_type,
             expert_tokens=token_dispatch_output.group_list,
         )
@@ -222,6 +236,8 @@ class MC2CommImpl(MoECommMethod):
     Communication and Computation parallelism on Ascend devices.
     """
 
+    shared_activation_overlaps_routed_gmm1 = True
+
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
@@ -241,6 +257,8 @@ class AlltoAllCommImpl(MoECommMethod):
     between data parallel ranks before and after the MLP computation. It should
     have better performance than AllGatherCommImpl when DP size > 1.
     """
+
+    shared_activation_overlaps_routed_gmm1 = True
 
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
