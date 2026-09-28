@@ -4,7 +4,7 @@ from unittest import mock
 import pytest
 import torch
 
-from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+from vllm_ascend.device.device_op import A5DeviceAdaptor, Ascend310PDeviceAdaptor, BaseDeviceAdaptor
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
@@ -305,3 +305,29 @@ def test_v41_runner_support_is_hardware_scoped(packed_cache, use_v2, architectur
                 _validate_model_runner_config(config)
         else:
             _validate_model_runner_config(config)
+
+
+@pytest.mark.parametrize(
+    ("adaptor", "uses_fused_kernel"),
+    [
+        (BaseDeviceAdaptor, True),
+        (A5DeviceAdaptor, False),
+        (Ascend310PDeviceAdaptor, False),
+    ],
+)
+def test_clipped_swiglu_kernel_selection_per_adaptor(adaptor, uses_fused_kernel):
+    limit, alpha, beta = 7.0, 1.702, 1.0
+    x = torch.randn(2, 8)
+
+    with mock.patch("vllm_ascend.device.device_op.torch_npu.npu_clipped_swiglu") as mock_kernel:
+        out = adaptor.clipped_swiglu(x, swiglu_limit=limit, swiglu_alpha=alpha, swiglu_beta=beta)
+
+    if uses_fused_kernel:
+        mock_kernel.assert_called_once_with(x, interleaved=False, alpha=alpha, limit=limit, bias=beta)
+        return
+
+    mock_kernel.assert_not_called()
+    d = x.shape[-1] // 2
+    gate = torch.clamp(x[..., :d], max=limit)
+    up = torch.clamp(x[..., d:], min=-limit, max=limit)
+    torch.testing.assert_close(out, gate * torch.sigmoid(alpha * gate) * (up + beta))
