@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from typing import cast
 
 import torch
-from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -397,8 +396,6 @@ class FusedMC2CommImpl(MoECommMethod):
         mc2_group = get_mc2_group()
         group = mc2_group.device_group
         ft_enabled = getattr(self.token_dispatcher, "_ft_enabled", False)
-        if ft_enabled and get_ep_group().ranks != mc2_group.ranks:
-            raise ValueError("MegaMoe fault tolerance requires identical EP and MC2 rank order.")
         # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a
         # collective handshake over the EP (mc2) group. Its shape params —
         # especially num_max_tokens_per_rank — MUST be identical on every EP
@@ -486,7 +483,7 @@ class FusedMC2CommImpl(MoECommMethod):
         )
         if ft_enabled:
             try:
-                get_ep_all2all_manager().bind_mega_moe_buffer(symm_buffer, list(range(mc2_group.world_size)))
+                get_ep_all2all_manager().bind_mega_moe_buffer(symm_buffer)
             except Exception:
                 try:
                     symm_buffer.destroy()

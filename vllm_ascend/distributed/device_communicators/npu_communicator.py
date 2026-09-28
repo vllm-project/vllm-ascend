@@ -45,7 +45,6 @@ class _NpuAll2AllManager:
         self._dead: set[int] = set()
         self._num_local_experts: int = 0
         self._mega_moe_buffer = None
-        self._ep_to_mc2: tuple[int, ...] = ()
 
         # elastic_info layout: [is_scaling_down, dense ep world size,
         #  shared_expert_rank_num, num_physical_experts] + table1(orig->dense)
@@ -58,26 +57,21 @@ class _NpuAll2AllManager:
         self._elastic_info = torch.zeros(size, dtype=torch.int32, device=device)
 
     @property
-    def uses_mega_moe(self) -> bool:
+    def has_mega_moe_buffer(self) -> bool:
         return self._mega_moe_buffer is not None
 
     @torch.inference_mode()
-    def bind_mega_moe_buffer(self, buffer, ep_to_mc2: list[int]) -> None:
+    def bind_mega_moe_buffer(self, buffer) -> None:
         """Attach MegaMoe's stable rank mask before graph capture.
 
-        CPU fault state remains authoritative. MegaMoe uses full-width
-        physical expert ids, whereas MC2 uses elastic_info's dense ids.
+        EP and MC2 use the same rank order. MegaMoe preserves physical
+        expert ids, whereas MC2 uses elastic_info's dense ids.
         """
-        if buffer.ep_world_size != self._ep_world_size or sorted(ep_to_mc2) != list(range(self._ep_world_size)):
-            raise ValueError("MegaMoe fault tolerance requires matching EP and MC2 rank sets.")
-        if self.uses_mega_moe:
-            return
         # A graph captured with mask_buffer=None cannot honor a mask allocated
         # after the fault. Allocate it now and propagate any existing dead ranks.
         buffer.clean_mask_buffer()
         for rank in sorted(self._dead):
-            buffer.update_mask_buffer(ep_to_mc2[rank], True)
-        self._ep_to_mc2 = tuple(ep_to_mc2)
+            buffer.update_mask_buffer(rank, True)
         self._mega_moe_buffer = buffer
 
     @torch.inference_mode()
@@ -85,11 +79,8 @@ class _NpuAll2AllManager:
         """Mark an EP rank dead/alive and rebuild elastic_info in place."""
         if isinstance(rank, bool) or not isinstance(rank, int) or not 0 <= rank < self._ep_world_size:
             raise ValueError(f"EP rank must be in [0, {self._ep_world_size}), got {rank}.")
-        if self.uses_mega_moe:
-            if not masked and rank in self._dead:
-                # Recovery must stop outstanding device work before unmasking.
-                self.clean_buffers()
-            self._mega_moe_buffer.update_mask_buffer(self._ep_to_mc2[rank], masked)
+        if self.has_mega_moe_buffer:
+            self._mega_moe_buffer.update_mask_buffer(rank, masked)
         if masked:
             self._dead.add(rank)
         else:
@@ -114,9 +105,17 @@ class _NpuAll2AllManager:
 
     @torch.inference_mode()
     def clean_buffers(self) -> None:
-        """Clear fused communication flags after reset, keeping dead ranks masked."""
-        if self.uses_mega_moe:
+        """Clear local communication and mask state after device reset.
+
+        The upstream retry flow replays the cumulative dead ranks afterwards.
+        Keep all captured tensor storage in place.
+        """
+        if self.has_mega_moe_buffer:
             self._mega_moe_buffer.get_local_buffer_tensor(torch.uint8).zero_()
+            self._mega_moe_buffer.clean_mask_buffer()
+        self._dead.clear()
+        self._elastic_info_host.zero_()
+        self._elastic_info.zero_()
 
     def get_elastic_info(self) -> torch.Tensor:
         """The device elastic_info tensor for the next MC2 dispatch/combine."""
@@ -135,7 +134,11 @@ class _NpuAll2AllManager:
 
     def _rebuild_elastic_info(self) -> None:
         """Rebuild elastic_info from the dead set into the existing device
-        tensor (never reallocates, so captured graphs stay valid)."""
+        tensor (never reallocates, so captured graphs stay valid).
+
+        Only the unfused MC2 dispatch/combine path consumes this tensor;
+        MegaMoe uses its own mask and retains physical expert ids.
+        """
 
         world_size = self._ep_world_size
         alive = sorted(set(range(world_size)) - self._dead)

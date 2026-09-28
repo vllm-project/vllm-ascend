@@ -182,12 +182,13 @@ class WorkerSentinel(GPUWorkerSentinel):
         self._resolve_drafter()
         ascend_config = get_ascend_config()
         mega_moe = use_cann_megamoe(self.worker.vllm_config)
-        if mega_moe and not get_ep_all2all_manager().uses_mega_moe:
+        if mega_moe and not get_ep_all2all_manager().has_mega_moe_buffer:
             raise ValueError("[FT] MegaMoe fault-tolerance buffer was not initialized during warmup.")
         if ascend_config.enable_fused_mc2 and not mega_moe:
             raise ValueError(
-                "[FT] scale_down with enable_fused_mc2 requires CANN MegaMoe; "
-                "the legacy fused dispatch_ffn_combine operators take no rank mask."
+                "[FT] scale_down with enable_fused_mc2 requires a cann_ops_transformer build "
+                "with MegaMoe rank-mask support. Select enable_fused_mc2=2; "
+                "the legacy dispatch_ffn_combine backend does not support fault tolerance."
             )
         if ascend_config.enable_mc2_hierarchy_comm:
             raise ValueError(
@@ -196,7 +197,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         self._check_mc2_only_execution(raise_on_error=True)
         if not mega_moe and not hasattr(torch_npu, "npu_moe_distribute_dispatch_v2"):
             raise ValueError(
-                "[FT] scale_down requires npu_moe_distribute_dispatch_v2 "
+                "[FT] MC2 scale_down requires npu_moe_distribute_dispatch_v2 "
                 "(aclnn V3+); please upgrade the CANN/torch_npu version."
             )
 
@@ -296,7 +297,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         if reassignments:
             reload_experts_from_disk(model, model_config, load_config, reassignments)
         refresh_model_routing_tables(model_state)
-        if not get_ep_all2all_manager().uses_mega_moe:
+        if not get_ep_all2all_manager().has_mega_moe_buffer:
             self._densify_routing_tables(model_state)
 
     def _resolve_drafter(self) -> tuple[torch.nn.Module, EplbModelState, ModelConfig, LoadConfig] | None:

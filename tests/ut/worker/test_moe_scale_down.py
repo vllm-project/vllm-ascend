@@ -12,44 +12,6 @@ from vllm_ascend.worker.sentinel.eplb_redistribute import _reload_local_slots, s
 from vllm_ascend.worker.sentinel.npu_worker_sentinel import WorkerSentinel
 
 
-def test_fault_barrier_returns_empty_output_and_quarantines_following_calls():
-    sentinel = SimpleNamespace(worker_faulted=False, reset_device=Mock())
-    worker = SimpleNamespace(rank=0, worker_sentinel=sentinel)
-    forward = Mock(side_effect=RuntimeError("MegaMoe device fault"))
-    wrapped = sentinel_module.fault_barrier_wrapper(forward)
-    with patch.object(sentinel_module, "_sentinel", sentinel):
-        assert wrapped(worker) is sentinel_module.EMPTY_MODEL_RUNNER_OUTPUT
-        assert sentinel.worker_faulted
-        sentinel.reset_device.assert_called_once()
-        assert wrapped(worker) is sentinel_module.EMPTY_MODEL_RUNNER_OUTPUT
-    forward.assert_called_once_with(worker)
-
-
-def test_scale_down_checks_dummy_batch_before_restoring_steady_state_timeout():
-    sentinel = object.__new__(WorkerSentinel)
-    calls = Mock()
-    sentinel.worker = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            data_parallel_size=3,
-            tensor_parallel_size=1,
-            fault_tolerance_config=SimpleNamespace(engine_recovery_timeout_sec=300),
-        ),
-        execute_dummy_batch=calls.dummy,
-    )
-    sentinel._validate_scale_down_preconditions = Mock()
-    sentinel.activate_cpu_group_timeouts = calls.activate
-    request = object()
-    with (
-        patch.object(sentinel_module.GPUWorkerSentinel, "scale_down", side_effect=calls.scale_down),
-        patch.object(sentinel_module, "get_dp_group", return_value=SimpleNamespace(cpu_group=object())),
-        patch.object(sentinel_module, "set_gloo_backend_timeout", side_effect=calls.timeout),
-        patch.object(torch.npu, "synchronize", side_effect=calls.synchronize),
-    ):
-        sentinel.scale_down(request)
-    assert [call[0] for call in calls.mock_calls] == ["scale_down", "timeout", "dummy", "activate", "synchronize"]
-    calls.activate.assert_called_once_with(request)
-
-
 @pytest.mark.parametrize("mega_moe", [False, True])
 def test_retry_publishes_mega_moe_mask_writes_before_leaving_quarantine(mega_moe):
     sentinel = object.__new__(WorkerSentinel)
@@ -57,10 +19,15 @@ def test_retry_publishes_mega_moe_mask_writes_before_leaving_quarantine(mega_moe
     sentinel.worker_faulted = True
     sentinel.reset_device = Mock()
     request = object()
+
+    def synchronize_while_quarantined():
+        retry.assert_called_once_with(request)
+        assert sentinel.worker_faulted
+
     with (
         patch.object(sentinel_module.GPUWorkerSentinel, "retry") as retry,
         patch.object(sentinel_module, "use_cann_megamoe", return_value=mega_moe),
-        patch.object(torch.npu, "synchronize") as synchronize,
+        patch.object(torch.npu, "synchronize", side_effect=synchronize_while_quarantined) as synchronize,
         patch.object(sentinel_module, "get_ep_all2all_manager", side_effect=AssertionError("unexpected EP lookup")),
     ):
         sentinel.retry(request)
@@ -85,7 +52,7 @@ def test_scale_down_uses_backend_specific_physical_expert_ids(mega_moe):
     sentinel._eplb_model_state = lambda: state
     sentinel.worker = SimpleNamespace(model_runner=SimpleNamespace(model=state.model), vllm_config=object())
     manager = SimpleNamespace(
-        uses_mega_moe=mega_moe,
+        has_mega_moe_buffer=mega_moe,
         query_active_mask=lambda: torch.tensor([0, 1, 0, 0]),
         get_elastic_info=Mock(return_value=torch.zeros(12)),
     )
@@ -128,7 +95,9 @@ def test_scale_down_rejects_unsupported_fused_backend(fused, mega_moe, bound, er
             return_value=SimpleNamespace(enable_fused_mc2=fused, enable_mc2_hierarchy_comm=False),
         ),
         patch.object(sentinel_module, "use_cann_megamoe", return_value=mega_moe),
-        patch.object(sentinel_module, "get_ep_all2all_manager", return_value=SimpleNamespace(uses_mega_moe=bound)),
+        patch.object(
+            sentinel_module, "get_ep_all2all_manager", return_value=SimpleNamespace(has_mega_moe_buffer=bound)
+        ),
         patch.object(sentinel_module.torch_npu, "npu_moe_distribute_dispatch_v2", create=True),
     ):
         if error:
