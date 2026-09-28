@@ -30,7 +30,8 @@ from typing import Any
 env_variables: dict[str, Callable[[], Any]] = {
     # Opt-in KV block lifecycle tracing. Empty (default) disables all hooks.
     # Otherwise a JSON object: directory (required), run_id, snapshots (bool),
-    # layers (integer indices), max_events and max_snapshot_bytes (positive ints).
+    # layers (integer indices), max_events/max_snapshot_bytes/max_trace_bytes
+    # (positive ints), device_metadata (bool, default true; false avoids trace D2H).
     # Not a credential; generated records contain request IDs and cache metadata.
     "VLLM_ASCEND_KV_TRACE": lambda: os.getenv("VLLM_ASCEND_KV_TRACE", ""),
     # max compile thread number for package building. Usually, it is set to

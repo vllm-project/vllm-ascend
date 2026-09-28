@@ -286,6 +286,8 @@ class NPUModelRunner(GPUModelRunner):
         self._kv_trace_caches = {}
         if self._kv_trace is not None:
             self._model_forward = self._kv_trace.observe_forward(self, self._model_forward, get_forward_context)
+            self.execute_model = self._kv_trace.observe_execution(self, self.execute_model)
+            self._update_states = self._kv_trace.observe_schedule(self, self._update_states)
 
         # Replace the CUDA PrefetchOffloader set by parent __init__ with NPU version.
         offload_cfg = vllm_config.offload_config

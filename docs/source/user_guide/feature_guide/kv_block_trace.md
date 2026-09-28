@@ -5,6 +5,15 @@ and which slots real or dummy forwards access. It is useful for silent KV
 corruption, stale slot mappings, block reuse, and PD request correlation. The
 tracer observes the runtime; it does not mask writes or repair caches.
 
+## Initial P0 implementation
+
+This branch adds allocator generations, scheduler-to-worker context, and log
+completeness checks. These are diagnostic records, not a runtime KV guard.
+Validation for this increment is CPU-only; NPU execution, real PD integration
+and performance remain unverified. PD content checksums, device completion
+tracking, offload adapters, ring-buffer checkpoints and hot reload remain
+future work. The writer still performs synchronous JSONL I/O.
+
 ## Enable tracing
 
 Set the same run ID on P and D, before starting their processes:
@@ -34,6 +43,8 @@ export VLLM_ASCEND_KV_TRACE='{"directory":"/tmp/kv-traces","run_id":"pd-snapshot
 | `layers` | `[-1]` | Layer indices **within each KV group**; negative indices count from the end. `[0,-1]` selects first and last. |
 | `max_events` | `100000` | Per-writer limit, followed by one `trace.truncated` record. |
 | `max_snapshot_bytes` | `8388608` | Per-forward budget for before-snapshot data. A comparison temporarily also holds an after copy. |
+| `device_metadata` | `true` | Observe device slot mappings and block tables. Set `false` for host lifecycle/context only; snapshots must then be disabled. |
+| `max_trace_bytes` | `67108864` | Per-writer JSONL byte budget, plus at most one terminal truncation record. Independent of snapshot memory. |
 
 Tracing intentionally changes timing. Even without snapshots, observing actual
 GPU slot mappings and block tables causes device-to-host synchronization. The
@@ -42,11 +53,24 @@ bounded diagnostic workload, not throughput measurement. Configuration is read
 at component initialization; changing the environment requires restarting the
 processes.
 
+For host-only lifecycle/context tracing without trace-related tensor copies:
+
+```bash
+export VLLM_ASCEND_KV_TRACE='{"directory":"/tmp/kv-traces","run_id":"p0-host","device_metadata":false,"max_trace_bytes":67108864}'
+```
+
+This mode records `metadata_observation=not_observed`; it cannot diagnose actual
+device slot corruption. It still incurs Python bookkeeping and log I/O overhead.
+Event/byte budgets stop the writer rather than silently overwriting its history.
+
 ## Events and coverage
 
 | Stage | Events | Source |
 | --- | --- | --- |
 | Cache layout | `cache.config` | Scheduler cache manager, all KV groups. |
+| Recording scope | `trace.manifest`, `trace.stop` | Installed package versions, loaded module paths, capabilities, and normal writer closure. |
+| Allocator identity | `pool.baseline`, `block.alloc`, `block.ref_change`, `block.evict`, `cache.reset` | Actual BlockPool methods; a unique pool ID and allocation generation independent of request leases. |
+| Schedule correlation | `schedule.dispatch`, `schedule.received`, `schedule.apply`, `mapping.mismatch` | Scheduler message, host-side application and request block-ID comparison. Not a device/kernel mapping check. |
 | Prefix cache lookup | `cache.lookup` | Matched block IDs and token count. |
 | Ownership and reuse | `block.acquire`, `block.release`, `request.blocks` | KVCacheManager allocation, cache, and free boundaries. Includes owners, reference count, and lease. |
 | Allocation pressure | `block.allocation_failed` | `allocate_slots` returned `None`. |
@@ -56,7 +80,7 @@ processes.
 | Worker completion | `transfer.worker_finished` | Completion returned by the worker connector to the scheduler. |
 | Runtime forward | `forward.begin`, `forward.end`, `forward.error` | Real and dummy v1 forwards, including graph replay. |
 | Optional content comparison | `cache.diff`, `snapshot.skipped`, `snapshot.truncated` | Selected attention layers and blocks touched by non-padding slots. |
-| Diagnostics health | `trace.truncated`, `trace.observation_error` | A trace with these events is incomplete. I/O failures disable that writer and log an error. |
+| Diagnostics health | `trace.gap`, `trace.truncated`, `trace.observation_error`, `trace.capability` | Missing context, partial allocator operations, recording limits, or unsupported pool APIs are explicit. I/O failures disable the writer. |
 
 The current transfer integration is **MooncakeConnectorV1** (the P2P connector),
 and the forward integration is **NPUModelRunner v1**. Layerwise, hybrid and pool
@@ -68,7 +92,28 @@ Ownership records describe manager-boundary state, not every internal allocator
 instruction. A `lease` advances when a group/block has no observed request owners
 and is acquired again. Shared prefix owners retain the same lease. A new lease
 does **not** imply the cached bytes changed or that a cache hit was invalid.
-Block zero is retained in metadata but excluded from ownership and snapshots.
+`pool_id + block_id + alloc_epoch` identifies an observed allocation. The epoch
+increases on `get_new_blocks`, not on `touch`, `free_blocks`, or prefix cache
+reset. Existing content at observer attachment has an unknown epoch until a
+real allocation is observed. A failed/partially completed allocator operation
+invalidates observed epochs and emits a gap; later allocations do not reuse old
+epoch values. The pool's null block is excluded from ownership and snapshots;
+without scheduler context, snapshots use the pinned vLLM default null ID zero.
+
+The scheduler wrapper resolves the concrete instance's `schedule` override, so
+Ascend scheduler subclasses retain their output type and additional fields.
+The trace context is attached to `SchedulerOutput` as a JSON-compatible attribute.
+At the pinned vLLM revision, the multiproc MessageQueue pickles the object and
+preserves this attribute. CPU tests verify pickle round trips including output
+subclasses; other transports require independent verification. Missing or
+incompatible worker context emits `trace.gap`, never an inferred correlation.
+
+Each dispatched request carries its allocator block IDs/epochs, mapping
+revision, scheduled token count and available scheduler computed-token count.
+The revision advances when its mapping or allocation identities change. Worker
+`schedule.apply` compares against host request state after `_update_states`.
+Deferred speculative token corrections are explicitly marked, not considered
+finished. No comparison with final kernel arguments is claimed here.
 
 Snapshot support covers attention caches with an explicit token dimension:
 `[blocks,tokens,...]`, tuple/list components (including MLA latent KV and RoPE K),
@@ -91,6 +136,18 @@ sequence number, wall-clock nanoseconds, monotonic nanoseconds, engine ID and DP
 rank. Workers also include TP/PP rank. Forward spans tie input metadata to diffs,
 completion and errors. Preserve the exact P/D request IDs; transfer events link
 them explicitly, without assuming how a proxy forms its IDs.
+
+New records use schema v2: sequence, nanosecond timestamps and allocation epochs
+are decimal strings. `trace_id` is retained alongside `writer_id`; `event_id`
+and `parent_event_ids` link dispatch, application and forward observations.
+The reader accepts schema v1 and v2 without manufacturing missing v1 epochs.
+The display remains an approximate wall-clock merge, not a topological sort.
+
+Execution context is scoped to one `execute_model` call. Dummy spans have no
+request owners; `batch_request_ids` records only stale/persistent batch context.
+Independent dummy runs do not inherit an earlier step. A snapshot epoch is
+marked `scheduler_context` only when matching host request block IDs were
+observed; this is not an independent device-side generation measurement.
 
 Scope a physical block by deployment/run, host, engine, rank, KV group and block
 ID. The same block number on two ranks is not the same storage. Scheduler owners
@@ -119,7 +176,23 @@ python tools/kv_block_trace.py /tmp/kv-traces/pd-debug
 python tools/kv_block_trace.py /tmp/kv-traces/pd-debug --request REQUEST_ID_OR_PREFIX
 python tools/kv_block_trace.py /tmp/kv-traces/pd-debug --engine ENGINE_ID --group 0 --block 1
 python tools/kv_block_trace.py /tmp/kv-traces/pd-debug --block 1 --json > block-1.jsonl
+python tools/kv_block_trace.py /tmp/kv-traces/pd-debug --pool-id POOL_UUID --block 1 --epoch 2 --json
+python tools/kv_block_trace.py /tmp/kv-traces/pd-debug --check
 ```
+
+`--epoch` requires both `--pool-id` and `--block`. Without an epoch, a block
+query intentionally includes all observed uses of that address. Explicit P/D
+request pairs expand request aliases; co-batched requests do not become aliases
+and therefore do not pull in their unrelated later forwards.
+
+`--check` checks all input records (optionally restricted by `--run-id`), not the
+request/block display filter. It reports malformed records, sequence gaps or
+duplicates, missing causal parents, explicit observation failures/skips, and
+missing start/stop records. Exit code 0 means the supplied recording passed
+these checks; exit code 2 means incomplete or unverified. A live writer without
+a stop record is also unverified. It cannot detect a completely absent actor's
+file. Its output always says `kv_integrity: not_checked`: complete logging does
+not establish correct cache contents or complete hook coverage.
 
 Request filtering follows explicit P/D links and retains related forward spans.
 An empty dummy batch has no request ID: inspect its affected **block** to include
@@ -151,3 +224,8 @@ These CPU tests run without a full vLLM/NPU installation. They cover shared
 ownership and reuse, transfer-ID correlation, bounded thread-safe output,
 bitwise cache changes, snapshot limits, profiling/capture exclusion, and error
 propagation. Actual runtime integrations must additionally be exercised on NPU.
+
+The P0 tests also cover nonzero null block IDs, zero-reference prefix reuse,
+allocation generations, iterator preservation, pickle transport, scheduler
+subclass overrides, mapping revisions, missing context, dummy isolation,
+request alias precision, byte limits, reader compatibility and CLI exit codes.

@@ -24,6 +24,7 @@ def install_scheduler_trace(scheduler_cls):
         trace = KVTrace.from_env("scheduler", self.vllm_config)
         if trace is not None:
             attach_manager_trace(self.kv_cache_manager, trace)
+            self.kv_cache_manager._ascend_kv_trace.wrap_schedule(self)
 
     initialize._ascend_kv_trace = True
     scheduler_cls.__init__ = initialize
