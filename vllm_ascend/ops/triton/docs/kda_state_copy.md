@@ -12,16 +12,15 @@ and `torch` for the prior diagnostic baseline. No option is required for the
 automatic production path. The legacy `torch` override is not the automatic
 strided fallback and is not included in the zero-serving-JIT guarantee.
 
-Flow: worker binds cache -> choose fused / strided fallback / contiguous fallback
+Flow: worker binds cache -> choose fused / masked byte-copy fallback
 -> prepare disposable samples -> seal all plans -> publish -> prefill gather ->
 unchanged chunk math -> scatter. Preparation failure aborts startup; it must not
 silently downgrade a requested fused path or publish a partially ready worker.
 
 Both V1 and V2 runners invoke initialization after cache binding. An automatic
-layer cannot serve until initialization has completed. Unsupported contiguous
-caches retain indexing and Torch clearing. Unsupported noncontiguous caches use
-the PR's byte-pointer copy algorithm with a startup-precompiled batch-memcpy
-launcher. The fallback uses Torch clearing to avoid a second lazy Triton kernel.
+layer cannot serve until initialization has completed. Unsupported contiguous and strided
+caches both use the PR's byte-pointer copy algorithm with a startup-precompiled
+batch-memcpy launcher. The fallback uses Torch clearing to avoid a second lazy Triton kernel.
 Invalid inner layouts remain rejected by the strided fallback, as in the PR.
 
 ## Numerical contract
@@ -38,8 +37,9 @@ Invalid inner layouts remain rejected by the strided fallback, as in the PR.
 - Empty selections validate metadata and do not launch a copy kernel.
 - Cache/packed storage must not overlap. Concurrent writers require upstream
   coordination. These are caller preconditions, not synchronizing host scans.
-- The unsupported contiguous indexing fallback retains the PR's original
-  indexing semantics; its invalid-index behavior is not the fused contract.
+- Automatic fallback also gathers invalid indices as zero and skips invalid
+  scatter destinations, including contiguous unsupported caches. The explicit
+  `torch` diagnostic override retains the original indexing semantics.
 
 ## Startup preparation and no serving recompilation
 

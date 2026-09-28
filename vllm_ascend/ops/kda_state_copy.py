@@ -238,7 +238,7 @@ class KDAStateCopyPlan:
 class StridedKDAFallbackPlan:
     """PR #17301 byte-copy fallback, compiled once on disposable startup data.
 
-    Used only for unsupported, noncontiguous NPU caches. Keep the original
+    Used for unsupported contiguous and strided NPU caches. Keep the original
     byte-pointer arithmetic and invalid-row masking, but never enter the
     batch_memcpy JIT in serving. Clearing uses Torch to avoid a second Triton
     warmup contract on unsupported devices. This is not the optimized A5 path.
@@ -371,11 +371,11 @@ def initialize_kda_state_copy(static_forward_context: dict, max_selected: int) -
             raise RuntimeError("Kimi KDA cache state must be a torch.Tensor")
         if layer._kda_state_copy_backend == "triton" or supports_kda_state_copy(state):
             plan_type = KDAStateCopyPlan
-        elif not state.is_contiguous():
-            plan_type = StridedKDAFallbackPlan
         else:
-            selected_plans.append(None)
-            continue
+            # Raw indexing accepts negative rows and rejects upper outliers.
+            # Use the masked byte-copy plan for every unsupported layout so
+            # auto keeps gather-zero/scatter-skip semantics without host sync.
+            plan_type = StridedKDAFallbackPlan
         key = (plan_type, cache_signature(state))
         if key not in plans:
             plans[key] = plan_type.prepare(state, max_selected)

@@ -21,7 +21,8 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 def _make_runner(need_timing: bool = True):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.ascend_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
+        scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing)),
+        kda_state_copy_backend="auto",
     )
     runner.vllm_config = SimpleNamespace()
     runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
@@ -594,16 +595,21 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler.broadcast_drafts.assert_called_once_with()
 
 
-def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
+@pytest.mark.parametrize("backend", ["auto", "triton", "torch"])
+def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(backend):
+    """Cache binding precedes KDA preparation; the diagnostic backend opts out."""
     runner = _make_runner()
-    runner.vllm_config = SimpleNamespace()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.vllm_config = SimpleNamespace(
+        compilation_config=runner.compilation_config, scheduler_config=SimpleNamespace(max_num_seqs=8)
+    )
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = SimpleNamespace()
     runner.model_config = SimpleNamespace(enable_return_routed_experts=True)
     runner.init_routed_experts_capturer = MagicMock()
     kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    runner.ascend_config.kda_state_copy_backend = backend
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
     kv_cache_config = KVCacheConfig(
@@ -618,7 +624,14 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
         seen["cfg"] = kv_cache_config
 
+    def _prepare_kda(context, maximum):
+        # The hook must observe cache binding completed by the parent runner.
+        assert runner.kv_cache_config is kv_cache_config
+        assert context is runner.compilation_config.static_forward_context
+        assert maximum == 8
+
     with (
+        patch("vllm_ascend.ops.kda_state_copy.initialize_kda_state_copy", side_effect=_prepare_kda) as prepare_kda,
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl") as acl_cls,
         patch(
@@ -629,6 +642,10 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
         runner.initialize_kv_cache(kv_cache_config)
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
 
+    if backend in ("auto", "triton"):
+        prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
+    else:
+        prepare_kda.assert_not_called()
     assert seen["cfg"] == kv_cache_config
     assert vllm_model_runner.ModelCudaGraphManager is original
     acl_cls.assert_called_once()
@@ -643,8 +660,10 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
 
 def test_initialize_kv_cache_forwards_allocation_context():
     runner = _make_runner()
-    runner.vllm_config = SimpleNamespace()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.vllm_config = SimpleNamespace(
+        compilation_config=runner.compilation_config, scheduler_config=SimpleNamespace(max_num_seqs=8)
+    )
     runner.pcp_manager = None
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = None
@@ -665,7 +684,14 @@ def test_initialize_kv_cache_forwards_allocation_context():
         self.kv_cache_config = kv_cache_config
         self.attn_groups = []
 
+    def _prepare_kda(context, maximum):
+        # The hook must observe cache binding completed by the parent runner.
+        assert runner.kv_cache_config is kv_cache_config
+        assert context is runner.compilation_config.static_forward_context
+        assert maximum == 8
+
     with (
+        patch("vllm_ascend.ops.kda_state_copy.initialize_kda_state_copy", side_effect=_prepare_kda) as prepare_kda,
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl"),
         patch(
@@ -675,6 +701,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
     ):
         runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=allocation_context)
 
+    prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
     assert called is True
     assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
 

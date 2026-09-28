@@ -226,13 +226,14 @@ def test_plan_matches_pr17301_native_operator(monkeypatch, dtype, index_dtype):
 
 
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("page_stride", [24, 64])
 @torch.inference_mode()
-def test_auto_strided_fp16_fallback_is_precompiled(monkeypatch, index_dtype):
+def test_auto_fp16_fallback_is_precompiled(monkeypatch, index_dtype, page_stride):
     """Unsupported dtype uses byte-copy fallback; dynamic requests never JIT."""
     from vllm_ascend.ops import kda_state_copy as production
 
-    backing = torch.full((8 * 64 + 1,), -23, device="npu", dtype=torch.float16)
-    state = backing.as_strided((8, 2, 3, 4), (64, 12, 4, 1), 1)
+    backing = torch.full((8 * page_stride + 1,), -23, device="npu", dtype=torch.float16)
+    state = backing.as_strided((8, 2, 3, 4), (page_stride, 12, 4, 1), 1)
     state.copy_(torch.arange(8, device="npu")[:, None, None, None])
     initial = backing.cpu()
     layer = SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=(None, state))
@@ -248,18 +249,26 @@ def test_auto_strided_fp16_fallback_is_precompiled(monkeypatch, index_dtype):
     monkeypatch.setattr(production.batch_memcpy_kernel, "run", forbidden)
     for count in (0, 1, 4, 8, 16):
         backing.copy_(initial)
-        ids = torch.arange(count, device="npu", dtype=index_dtype)
+        ids = torch.arange(count, device="npu", dtype=index_dtype) - 1
+        if count >= 4:
+            ids[-2] = torch.iinfo(index_dtype).min
+            ids[-1] = torch.iinfo(index_dtype).max
         flags = (ids % 2) == 0
         actual = plan.gather(state, ids, flags)
-        valid = ids < 8
-        expected = torch.zeros_like(actual)
-        expected[valid & flags] = state[ids[valid & flags]]
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        # Build the oracle on CPU: NPU advanced indexing of an offset FP16
+        # contiguous cache can itself hit an alignment error on this runtime.
+        # The tested path must support that cache without invoking indexing.
+        ids_cpu, flags_cpu = ids.cpu().long(), flags.cpu()
+        valid = (ids_cpu >= 0) & (ids_cpu < 8)
+        expected = torch.zeros(actual.shape, dtype=state.dtype)
+        reference = initial.as_strided(state.shape, state.stride(), 1)
+        expected[valid & flags_cpu] = reference[ids_cpu[valid & flags_cpu]]
+        torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
         final = torch.full_like(actual, 17)
         plan.scatter(state, final, ids)
         expected_backing = initial.clone()
         view = expected_backing.as_strided(state.shape, state.stride(), 1)
-        view[ids[valid].cpu().long()] = 17
+        view[ids_cpu[valid]] = 17
         torch.testing.assert_close(backing.cpu(), expected_backing, rtol=0, atol=0)
 
 
@@ -376,8 +385,9 @@ def test_plan_current_stream_and_device_guard(monkeypatch):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("page_stride", [24, 64])
 @torch.inference_mode()
-def test_fullgraph_state_copy_uses_sealed_context_plan(dtype, monkeypatch):
+def test_fullgraph_state_copy_uses_sealed_context_plan(dtype, page_stride, monkeypatch):
     """Dynamo/FakeTensor tracing preserves gather allocation and scatter writes.
 
     The eager backend tests full-graph tracing, not Inductor performance or a
@@ -386,8 +396,8 @@ def test_fullgraph_state_copy_uses_sealed_context_plan(dtype, monkeypatch):
     """
     from vllm_ascend.ops import kda_state_copy as production
 
-    backing = torch.full((8, 64), -23, dtype=dtype, device="npu")
-    state = backing.as_strided((8, 2, 3, 4), (64, 12, 4, 1))
+    backing = torch.full((8, page_stride), -23, dtype=dtype, device="npu")
+    state = backing.as_strided((8, 2, 3, 4), (page_stride, 12, 4, 1))
     state.copy_(torch.randn_like(state))
     layer = SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=(None, state))
     initialize_kda_state_copy({"layer": layer}, 8)
@@ -533,3 +543,41 @@ def test_prepare_matches_alignment_of_unaligned_scratch_backing(dtype, state_off
     torch.testing.assert_close(packed, expected, rtol=0, atol=0)
     plan.scatter(state, packed + 1, indices)
     torch.testing.assert_close(state[indices], expected + 1, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@torch.inference_mode()
+def test_auto_contiguous_prefill_masks_invalid_rows(monkeypatch, index_dtype):
+    """Exercise real prefill dispatch and copies; only chunk math is substituted."""
+    from vllm_ascend.ops import kda_state_copy as production
+    from vllm_ascend.ops import kimi_kda as kimi
+
+    attention = kimi.AscendKimiK3DeltaAttention.__new__(kimi.AscendKimiK3DeltaAttention)
+    torch.nn.Module.__init__(attention)
+    attention._kda_state_copy_backend = "auto"
+    attention.gate_lower_bound = None
+    attention.A_log, attention.dt_bias = torch.zeros(1), torch.zeros(1)
+    state = torch.arange(8 * 24, dtype=torch.float16, device="npu").reshape(8, 2, 3, 4)
+    attention.kv_cache = (None, state)
+    initialize_kda_state_copy({"layer": attention}, 8)
+    limits = torch.iinfo(index_dtype)
+    ids_cpu = torch.tensor([0, -1, 8, limits.min, limits.max, 3], dtype=index_dtype)
+    flags_cpu = torch.tensor([True, True, True, True, True, False])
+    indices, flags = ids_cpu.to("npu"), flags_cpu.to("npu")
+    expected_cache = state.cpu()
+    expected_gather = torch.zeros((6, 2, 3, 4), dtype=state.dtype)
+    expected_gather[0] = expected_cache[0]
+    final = torch.full((6, 2, 3, 4), 17, dtype=torch.float32, device="npu")
+    chunk = Mock(return_value=("output", final))
+    monkeypatch.setattr(kimi, "run_chunk_kda", chunk)
+    monkeypatch.setattr(kimi, "clear_ssm_states", Mock(side_effect=AssertionError("legacy clear")))
+    _forbid_compilation(monkeypatch)
+    monkeypatch.setattr(production.batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
+    metadata = SimpleNamespace(
+        cu_seqlens_host=tuple(range(7)), cu_seqlens_kern=None, keep_meta=None, chunk_indices_chunk64_host=()
+    )
+    output = attention._run_prefill(None, None, None, None, None, state, indices, flags, metadata)
+    assert output == "output"
+    torch.testing.assert_close(chunk.call_args.args[5].cpu(), expected_gather, rtol=0, atol=0)
+    expected_cache[[0, 3]] = 17
+    torch.testing.assert_close(state.cpu(), expected_cache, rtol=0, atol=0)

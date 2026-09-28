@@ -485,21 +485,13 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         backend = getattr(self, "_kda_state_copy_backend", "torch")
         if backend in ("auto", "triton"):
             state_copy = self._ascend_kda_state_copy
-            if (backend == "triton" and state_copy is None) or (
-                backend == "auto" and not getattr(self, "_kda_state_copy_ready", False)
-            ):
+            if state_copy is None or not getattr(self, "_kda_state_copy_ready", False):
                 raise RuntimeError("strict KDA state copy requires worker cache initialization before prefill")
         if state_copy is not None:
             initial_state_vk = state_copy.gather(recurrent_state, state_indices, has_initial_state)
         else:
             initial_state_vk = recurrent_state[state_indices].contiguous()
-            if backend == "auto":
-                # Unsupported contiguous caches retain indexing semantics. Use
-                # Torch clearing so this fallback has no lazy Triton compilation.
-                flags = has_initial_state.to(device=recurrent_state.device, dtype=torch.bool).reshape(-1)
-                initial_state_vk.masked_fill_(~flags[:, None, None, None], 0)
-            else:
-                clear_ssm_states(initial_state_vk, has_initial_state)
+            clear_ssm_states(initial_state_vk, has_initial_state)
 
         output, final_state = run_chunk_kda(
             q,

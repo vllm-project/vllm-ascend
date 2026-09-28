@@ -109,7 +109,8 @@ def test_actual_prefill_calls_plan_and_preserves_keep_metadata(monkeypatch, keep
     gathered = torch.zeros((selected, 1, 2, 2))
     final_state = gathered + 2
     plan = SimpleNamespace(gather=Mock(return_value=gathered), scatter=Mock())
-    attention._ascend_kda_state_copy = plan
+    monkeypatch.setattr(attention, "_ascend_kda_state_copy", plan, raising=False)
+    attention._kda_state_copy_ready = True
     chunk = Mock(return_value=("output", final_state))
     monkeypatch.setattr(kimi, "run_chunk_kda", chunk)
     monkeypatch.setattr(kimi, "clear_ssm_states", Mock(side_effect=AssertionError("Torch fallback")))
@@ -175,14 +176,22 @@ def test_worker_hook_is_inside_cache_initialization(relative):
     assert '"triton"' in ast.unparse(guard.test) or "'triton'" in ast.unparse(guard.test)
 
 
-def test_auto_unsupported_contiguous_cache_needs_no_plan(monkeypatch):
-    """Auto leaves unsupported contiguous layouts on the ordinary Torch route."""
-    state = torch.zeros((4, 1, 2, 2))
+@pytest.mark.parametrize("contiguous", [True, False])
+def test_auto_unsupported_cache_prepares_masked_fallback(monkeypatch, contiguous):
+    """All unsupported layouts use masked copies, never raw Torch indexing."""
+    state = torch.zeros((4, 1, 2, 2)) if contiguous else torch.empty_strided((4, 1, 2, 2), (8, 4, 2, 1))
     layer = SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=(None, state))
-    monkeypatch.setattr(production.KDAStateCopyPlan, "prepare", Mock(side_effect=AssertionError("unexpected compile")))
+    plan = SimpleNamespace(seal=Mock())
+    prepare = Mock(return_value=plan)
+    monkeypatch.setattr(production, "supports_kda_state_copy", lambda state: False)
+    monkeypatch.setattr(production.KDAStateCopyPlan, "prepare", Mock(side_effect=AssertionError("unexpected fused")))
+    monkeypatch.setattr(production.StridedKDAFallbackPlan, "prepare", prepare)
     production.initialize_kda_state_copy({"layer": layer}, 8)
+    prepare.assert_called_once_with(state, 8)
+    plan.seal.assert_called_once()
     assert layer._kda_state_copy_ready
-    assert layer._ascend_kda_state_copy is None
+    assert layer._ascend_kda_state_copy is not plan
+    assert layer._ascend_kda_state_copy._layer_name == "layer"
 
 
 def test_auto_eligible_cache_selects_prepared_triton(monkeypatch):
