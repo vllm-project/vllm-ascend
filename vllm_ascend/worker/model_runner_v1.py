@@ -4845,15 +4845,20 @@ class NPUModelRunner(GPUModelRunner):
             return False
         if not kv_cache_spec.supports_single_raw_backing:
             return False
+        # Runtime-only exclusions do not need the static forward context. In
+        # particular, sparse layerwise tests synthesize a runner without it.
+        if (
+            use_legacy_shared_by_layout
+            or self.vllm_config.kv_transfer_config is not None
+            or self.use_sparse
+            or self.sparse_kv_offload_enabled
+            or self.use_compress
+        ):
+            return False
         if attn_module is None:
             attn_module = self.compilation_config.static_forward_context.get(layer_name)
         return (
             isinstance(attn_module, MLAAttention)
-            and not use_legacy_shared_by_layout
-            and self.vllm_config.kv_transfer_config is None
-            and not self.use_sparse
-            and not self.sparse_kv_offload_enabled
-            and not self.use_compress
             and getattr(attn_module, "indexer", None) is None
             and not getattr(attn_module.impl, "fa_quant_layer", False)
         )
