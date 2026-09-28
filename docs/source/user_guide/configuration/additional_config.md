@@ -59,6 +59,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of upstream MoE sequence parallelism; either feature or both can be enabled. It improves performance but consumes more memory. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
+| `reuse_kv_cache_groups`            | bool | `False` | Reuse MRV2 attention metadata across compatible GDN, full-attention and sliding-window KV cache groups. KV grouping and capacity are unchanged. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effect on models using MLA (e.g., DeepSeek).                                      |
@@ -357,3 +358,17 @@ non-hybrid MLA, and does not support DCP or KV transfer connectors. PCP gathers
 prefill KV before cache writes; layer broadcasts restore prior-forward cache
 contents before attention. The broadcast decision uses the global scheduled
 batch, not PCP-local segment offsets.
+
+### KV cache group metadata reuse
+
+Enable with `--additional-config '{"reuse_kv_cache_groups":true}'` (default: `false`).
+This reduces repeated metadata preparation in Model Runner V2 by sharing batch-level
+fields across compatible KV cache groups while updating each group's block table,
+slot mapping and, for GDN, recurrent/convolution state indices. It does not merge
+KV cache groups or reduce cache capacity.
+
+Reuse is limited to matching builder types, KV specifications, configuration and
+causality within one metadata build call. Supported paths are the standard Ascend
+GDN builder with Mamba cache mode `none`/`align`, and ordinary non-quantized full
+or sliding-window attention, with PCP/DCP both set to 1. Other paths retain their
+normal metadata builds. Eager execution and ACL graph capture/replay are supported.

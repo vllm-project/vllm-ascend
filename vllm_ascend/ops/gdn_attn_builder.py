@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from copy import copy
+from dataclasses import dataclass, replace
 
 import torch
 from vllm.config import VllmConfig
@@ -314,6 +315,16 @@ def _build_non_spec_chunked_prefill_metadata(
     )
 
 
+@dataclass(frozen=True)
+class _GDNMetadataReuseContext:
+    seq_lens: torch.Tensor
+    graph_request_count: int
+    spec_sequence_indices: torch.Tensor | None
+    non_spec_sequence_indices: torch.Tensor | None
+    spec_padded: bool
+    decode_padded: bool
+
+
 class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
@@ -325,6 +336,15 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        # Derived KDA/310P builders may carry additional group-specific state.
+        # Sharing batch buffers also requires reuse during MRV2 graph capture.
+        self.supports_update_block_table = (
+            type(self) is AscendGDNAttentionMetadataBuilder
+            and getattr(vllm_config, "use_v2_model_runner", False)
+            and vllm_config.parallel_config.prefill_context_parallel_size == 1
+            and vllm_config.parallel_config.decode_context_parallel_size == 1
+            and vllm_config.cache_config.mamba_cache_mode in ("none", "align")
+        )
         sequence_index_capacity = max(
             self.vllm_config.scheduler_config.max_num_seqs,
             self.decode_cudagraph_max_bs,
@@ -944,6 +964,25 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         ):
             self._pad_decode_metadata(attn_metadata, graph_request_count)
             non_spec_conv1d_cache_indices = attn_metadata.non_spec_state_indices_tensor
+        if self.supports_update_block_table:
+            attn_metadata._reuse_context = _GDNMetadataReuseContext(
+                seq_lens=m.seq_lens,
+                graph_request_count=graph_request_count,
+                spec_sequence_indices=spec_sequence_indices,
+                non_spec_sequence_indices=non_spec_sequence_indices,
+                spec_padded=(
+                    self.use_full_cuda_graph
+                    and num_prefills == 0
+                    and num_decodes == 0
+                    and self._can_pad_spec_decode(graph_request_count, num_spec_decode_tokens)
+                ),
+                decode_padded=(
+                    self.use_full_cuda_graph
+                    and num_prefills == 0
+                    and num_spec_decodes == 0
+                    and graph_request_count <= self.decode_cudagraph_max_bs
+                ),
+            )
         # Attach once, using the final graph-stable Tensor references.
         self._attach_non_spec_prefill_metadata(
             attn_metadata, non_spec_chunked_prefill_metadata, non_spec_conv1d_cache_indices
@@ -951,6 +990,81 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         self._attach_spec_decode_metadata(attn_metadata)
         self._attach_non_spec_decode_metadata(attn_metadata, non_spec_conv1d_cache_indices)
         return attn_metadata
+
+    def update_block_table(
+        self,
+        metadata: GDNAttentionMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> GDNAttentionMetadata:
+        """Share batch metadata and gather this group's recurrent/conv indices.
+
+        Capture and replay use the same source batch buffers, while state
+        indices are materialized in the destination builder's stable buffers.
+        GDN addresses its cache by state index, so slot_mapping is unused.
+        """
+        if not self.supports_update_block_table:
+            raise NotImplementedError("GDN metadata reuse requires the MRV2 GDN builder without CP")
+        context = metadata._reuse_context
+        table = mamba_get_block_table_tensor(
+            blk_table,
+            context.seq_lens,
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
+        )
+        # Shallow copy preserves Ascend's attached metadata as well as upstream
+        # fields. Copy each nested object whose cache indices change below.
+        result = copy(metadata)
+        spec_indices = non_spec_indices = conv_indices = prefill_indices = None
+        if context.spec_sequence_indices is None:
+            non_spec_indices = table[:, 0]
+            conv_indices = table
+            if metadata.num_prefills > 0:
+                prefill_indices = non_spec_indices[metadata.num_decodes :]
+        else:
+            spec_indices = torch.index_select(table[:, : self.num_spec + 1], 0, context.spec_sequence_indices)
+            if metadata.non_spec_state_indices_tensor is not None:
+                non_spec_indices = torch.index_select(table[:, 0], 0, context.non_spec_sequence_indices)
+                conv_indices = non_spec_indices
+                prefill_indices = non_spec_indices
+
+        if self.use_full_cuda_graph and self.use_spec_decode and metadata.num_spec_decodes == 0:
+            # Captured spec tasks still reference this group's state buffer.
+            # Their query/accepted-token buffers are shared with the source.
+            self.spec_state_indices_tensor[: context.graph_request_count].fill_(PAD_SLOT_ID)
+        if context.spec_padded:
+            spec_indices = _materialize_graph_request_tensor(
+                self.spec_state_indices_tensor,
+                spec_indices,
+                metadata.num_spec_decodes,
+                context.graph_request_count,
+                self._SPEC_GRAPH_PAD_SLOT_ID,
+            )
+        elif context.decode_padded:
+            non_spec_indices = _materialize_graph_request_tensor(
+                self.non_spec_state_indices_tensor,
+                non_spec_indices,
+                metadata.num_decode_tokens,
+                context.graph_request_count,
+                NULL_BLOCK_ID,
+            )
+            conv_indices = non_spec_indices
+        result.spec_state_indices_tensor = spec_indices
+        result.non_spec_state_indices_tensor = non_spec_indices
+        result.prefill_state_indices = prefill_indices
+
+        for field in ("non_spec_prefill_metadata", "non_spec_decode_metadata"):
+            nested = getattr(metadata, field, None)
+            if nested is not None:
+                rows = nested.causal_conv1d.query_start_loc.size(0) - 1
+                conv = replace(nested.causal_conv1d, cache_indices=conv_indices[:rows])
+                setattr(result, field, replace(nested, causal_conv1d=conv))
+        nested = getattr(metadata, "spec_decode_metadata", None)
+        if nested is not None:
+            rows = nested.spec_causal_conv1d.query_start_loc.size(0) - 1
+            conv = replace(nested.spec_causal_conv1d, cache_indices=spec_indices[:rows])
+            result.spec_decode_metadata = replace(nested, spec_causal_conv1d=conv)
+        return result
 
     def _build_prefill_has_initial_state(
         self,

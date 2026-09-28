@@ -36,10 +36,12 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -220,6 +222,39 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     return kv_cache_spec
 
 
+def _metadata_reuse_value_key(value: Any) -> Any:
+    """Identify identical input views without reading device tensor values."""
+    if isinstance(value, torch.Tensor):
+        return (value.data_ptr(), value.shape, value.stride(), value.dtype, value.device)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return (type(value), value)
+    # Unknown model-specific inputs must not be assumed interchangeable.
+    raise TypeError("Unsupported metadata reuse input")
+
+
+def _metadata_reuse_key(builder, causal, common_kwargs, build_kwargs, group_spec=None):
+    if not builder.supports_update_block_table or not isinstance(
+        builder.kv_cache_spec, (MambaSpec, FullAttentionSpec, SlidingWindowSpec)
+    ):
+        return None
+    try:
+        key = (
+            type(builder),
+            builder.kv_cache_spec,
+            group_spec,
+            id(builder.vllm_config),
+            builder.kernel_block_size,
+            builder.reorder_batch_threshold,
+            causal,
+            tuple((name, _metadata_reuse_value_key(value)) for name, value in sorted(common_kwargs.items())),
+            tuple((name, _metadata_reuse_value_key(value)) for name, value in sorted(build_kwargs.items())),
+        )
+        hash(key)
+        return key
+    except TypeError:
+        return None
+
+
 def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
@@ -291,6 +326,9 @@ def build_attn_metadata(
         positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
 
     attn_metadata: dict[str, Any] = {}
+    # Local to one invocation: never retain request state across steps/captures.
+    reusable_metadata: dict[Any, Any] = {}
+    reuse_config = None
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
@@ -364,19 +402,41 @@ def build_attn_metadata(
                     pcp_cache_group_idx=i,
                 )
 
-            if for_cudagraph_capture:
+            if not for_cudagraph_capture and isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
+                attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
+            reuse_key = None
+            if (
+                getattr(attn_metadata_builder, "supports_update_block_table", False) is True
+                and pcp_context is None
+                and dcp_local_seq_lens is None
+            ):
+                if reuse_config is None:
+                    reuse_config = get_ascend_config()
+                if reuse_config.reuse_kv_cache_groups:
+                    reuse_key = _metadata_reuse_key(
+                        attn_metadata_builder,
+                        group_causal,
+                        dict(common_attn_metadata_extra_kwargs, is_prefilling=common_is_prefilling),
+                        attn_metadata_extra_kwargs,
+                        group_spec=kv_cache_spec.kv_cache_spec,
+                    )
+            if reuse_key is not None and reuse_key in reusable_metadata:
+                metadata = attn_metadata_builder.update_block_table(
+                    reusable_metadata[reuse_key], block_table, slot_mapping
+                )
+            elif for_cudagraph_capture:
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(
                     common_attn_metadata,
                     **attn_metadata_extra_kwargs,
                 )
             else:
-                if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
-                    attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,
                     **attn_metadata_extra_kwargs,
                 )
+            if reuse_key is not None and reuse_key not in reusable_metadata:
+                reusable_metadata[reuse_key] = metadata
             if is_dsa_builder:
                 # Preserve sharing even if a builder replaces one of the
                 # dictionaries while constructing its metadata.

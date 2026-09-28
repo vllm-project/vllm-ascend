@@ -423,6 +423,7 @@ class AscendConfig:
         {
             "refresh": false,
             "enable_cpu_binding": true,
+            "reuse_kv_cache_groups": false,
             "multistream_dsv4_dsa_overlap": true,
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
@@ -564,6 +565,10 @@ class AscendConfig:
     model_config = ConfigDict(extra="forbid")
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
+    # MRV2 metadata reuse across compatible GDN/full/sliding KV groups.
+    # Each group retains its cache addresses; KV grouping and capacity are unchanged.
+    reuse_kv_cache_groups: bool = False
+
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
     enable_prefill_mc2: bool = False

@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -40,7 +40,13 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    CrossAttentionSpec,
+    FullAttentionSpec,
+    KVQuantMode,
+    SlidingWindowSpec,
+)
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -232,6 +238,19 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         self.vllm_config = vllm_config
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_enabled = self.pcp_size > 1
+        # Keep specialized layouts and legacy runner metadata on their own
+        # build paths. Plain full/sliding groups share only batch-level fields.
+        self.supports_update_block_table = (
+            type(self) is AscendAttentionMetadataBuilder
+            and self.metadata_cls is AscendMetadata
+            and getattr(vllm_config, "use_v2_model_runner", False)
+            and self.pcp_size == 1
+            and vllm_config.parallel_config.decode_context_parallel_size == 1
+            and type(kv_cache_spec) in (FullAttentionSpec, SlidingWindowSpec)
+            and kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+            and kv_cache_spec.dtype in (torch.float16, torch.bfloat16, torch.float32)
+            and vllm_config.model_config.runner_type == "generate"
+        )
         self.model_config = vllm_config.model_config
         self.compilation_config = vllm_config.compilation_config
         self.device = device
@@ -406,6 +425,33 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             assert expanded_slot_mapping is not None
             self._finalize_pcp_metadata(attn_metadata, expanded_slot_mapping)
         return attn_metadata
+
+    def update_block_table(
+        self,
+        metadata: AscendMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> AscendMetadata:
+        """Reuse batch fields while retaining this group's cache addresses.
+
+        The caller must match the KV spec, builder configuration and causality.
+        FIA graph parameters resolve the new table from each layer's metadata;
+        query boundaries, lengths and masks remain shared with the source.
+        """
+        if not self.supports_update_block_table:
+            raise NotImplementedError("Attention metadata reuse requires plain MRV2 full/sliding attention without CP")
+        num_reqs_fia = len(metadata.actual_seq_lengths_q)
+        if blk_table is not None and blk_table.shape[0] < num_reqs_fia:
+            blk_table = torch.cat(
+                [blk_table, blk_table.new_zeros((num_reqs_fia - blk_table.shape[0], blk_table.shape[1]))],
+                dim=0,
+            )
+        return replace(
+            metadata,
+            block_tables=blk_table,
+            slot_mapping=slot_mapping[: metadata.num_actual_tokens],
+            reshape_cache_event=None,
+        )
 
     def _finalize_pcp_metadata(
         self,
