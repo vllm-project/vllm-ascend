@@ -190,3 +190,29 @@ def prepared_state_copy():
                 patch.setattr(backend, "compile", forbid_compile)
         yield
         torch.npu.synchronize()
+
+
+@pytest.mark.parametrize("selected", [1, 65, 129])
+@torch.inference_mode()
+def test_selected_count_rebinds_a_prepared_grid(selected):
+    """Use the existing five-row warmup signature on new request grids."""
+    shape = (2, 3, 4)
+    payload, offset = 24, 16
+    stride = 3 * payload + 32
+    backing = torch.full((7 * stride + offset,), -23, dtype=torch.float32, device="npu")
+    state = backing.as_strided((7, *shape), (stride, 12, 4, 1), offset)
+    for row in range(7):
+        state[row].fill_(row + 1)
+    indices = torch.arange(selected, dtype=torch.int32, device="npu") % 7
+    flags = torch.ones(selected, dtype=torch.bool, device="npu")
+    packed = torch.empty((selected, *shape), dtype=torch.float32, device="npu")
+    _copy_state(state, packed, indices, flags, False)
+    expected = ((torch.arange(selected) % 7) + 1).float()[:, None, None, None].expand_as(packed.cpu())
+    torch.testing.assert_close(packed.cpu(), expected, rtol=0, atol=0)
+    # Valid scatter destinations remain unique; all later rows are invalid.
+    indices.copy_(torch.arange(selected, dtype=torch.int32, device="npu"))
+    packed.fill_(9)
+    _copy_state(state, packed, indices, None, True)
+    expected_state = torch.arange(1, 8).float()[:, None, None, None].expand(7, *shape).clone()
+    expected_state[: min(selected, 7)].fill_(9)
+    torch.testing.assert_close(state.cpu(), expected_state, rtol=0, atol=0)

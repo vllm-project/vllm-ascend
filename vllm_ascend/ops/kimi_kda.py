@@ -182,6 +182,13 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         )
         super().__init__(config, vllm_config, prefix)
         self.uses_mixed_projection = uses_mixed_projection
+        # AscendConfig validates this enum before model construction. Retain the
+        # requested backend even before cache binding, so a missed startup hook
+        # cannot silently bypass preparation for an automatic/explicit request.
+        self._kda_state_copy_backend = (getattr(vllm_config, "additional_config", None) or {}).get(
+            "kda_state_copy_backend", "auto"
+        )
+        self._ascend_kda_state_copy = None
         if uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
@@ -467,8 +474,25 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         # The recurrent cache uses [H,V,K]. The fused prefill operator accepts
         # that state layout directly through state_v_first.
-        initial_state_vk = recurrent_state[state_indices].contiguous()
-        clear_ssm_states(initial_state_vk, has_initial_state)
+        state_copy = None
+        backend = getattr(self, "_kda_state_copy_backend", "torch")
+        if backend in ("auto", "triton"):
+            state_copy = self._ascend_kda_state_copy
+            if (backend == "triton" and state_copy is None) or (
+                backend == "auto" and not getattr(self, "_kda_state_copy_ready", False)
+            ):
+                raise RuntimeError("strict KDA state copy requires worker cache initialization before prefill")
+        if state_copy is not None:
+            initial_state_vk = state_copy.gather(recurrent_state, state_indices, has_initial_state)
+        else:
+            initial_state_vk = recurrent_state[state_indices].contiguous()
+            if backend == "auto":
+                # Unsupported contiguous caches retain indexing semantics. Use
+                # Torch clearing so this fallback has no lazy Triton compilation.
+                flags = has_initial_state.to(device=recurrent_state.device, dtype=torch.bool).reshape(-1)
+                initial_state_vk.masked_fill_(~flags[:, None, None, None], 0)
+            else:
+                clear_ssm_states(initial_state_vk, has_initial_state)
 
         output, final_state = run_chunk_kda(
             q,
@@ -483,7 +507,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self.dt_bias,
             lower_bound=self.gate_lower_bound,
         )
-        recurrent_state[state_indices] = final_state.to(recurrent_state.dtype)
+        if state_copy is not None:
+            state_copy.scatter(recurrent_state, final_state, state_indices)
+        else:
+            recurrent_state[state_indices] = final_state.to(recurrent_state.dtype)
         return output
 
     @eager_break_during_capture

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Explicit-lifecycle Triton implementation of KDA state gather/clear/scatter.
 
-This opt-in module has no automatic production dispatch integration.
-This module does not replace or register any existing project operator.
+Production Kimi prefill integration uses the automatic kda_state_copy_backend.
+The worker-owned plan in ops/kda_state_copy.py shares this kernel, not the
+standalone process-global prepare/seal registry below.
 
 Contract:
     state: NPU FP32/BF16 cache [cache_rows, H, V, K]. Inner payload is dense;
@@ -28,6 +29,8 @@ from types import MappingProxyType
 
 import torch
 from vllm.triton_utils import tl, triton
+
+DEFAULT_KDA_BLOCK_SIZE = 8192
 
 
 @triton.jit
@@ -134,13 +137,13 @@ def _copy_kda_states_triton(
     *,
     to_cache: bool = False,
     has_initial_state: torch.Tensor | None = None,
-    block_size: int = 1024,
+    block_size: int = DEFAULT_KDA_BLOCK_SIZE,
     _prepare: bool = False,
 ) -> None:
     """Gather/clear into packed_states, or scatter packed_states into state.
 
     This is an explicit alternative entry point, not an automatic fallback.
-    block_size is a power-of-two tile size in ELEMENTS, defaulting to 1024.
+    block_size is a power-of-two tile size in ELEMENTS, defaulting to 8192.
     Callers must prepare the same explicit block size used during serving.
     The wrapper allocates no payload/output tensor. Metadata conversion below
     may allocate, matching the existing Python wrapper's flag normalization.
@@ -192,6 +195,7 @@ def _copy_kda_states_triton(
     scalars = (cache_rows, cache_stride, payload, index_stride, flag_stride)
     # Validated packed dtype equals cache dtype; normalized flags are boolean.
     # Retain every pointer alignment class and exact scalar specialization.
+    # selected and launch grid are runtime dimensions, not JIT specializations.
     key = (
         device,
         (dtype, dtype, index_dtype, torch.bool if has_flags else index_dtype),
@@ -200,7 +204,6 @@ def _copy_kda_states_triton(
         to_cache,
         has_flags,
         block_size,
-        grid,
         os.environ.get("TRITON_DEBUG", "0"),
     )
     # Skip redundant context switching only when this thread is already on
@@ -216,9 +219,11 @@ def _copy_kda_states_triton(
             compiled = _kda_state_copy_kernel[grid](
                 *tensors, *scalars, TO_CACHE=to_cache, HAS_FLAGS=has_flags, BLOCK_SIZE=block_size
             )
-            _LAUNCHERS[key] = compiled[(grid[0], grid[1], 1)]
+            _LAUNCHERS[key] = compiled
         else:
-            runner(*tensors, *scalars)
+            # Bind the current request grid to the precompiled kernel. This
+            # direct compiled-kernel path cannot enter the Triton JIT.
+            runner[(grid[0], grid[1], 1)](*tensors, *scalars)
 
 
 # Lifecycle is process-local and irreversible. Private state is not a security
@@ -267,7 +272,7 @@ def prepare_kda_states_triton(state, packed_states, indices, **kwargs):
 
     Gather overwrites packed_states; scatter overwrites state. Call outside graph
     capture before serving traffic. Prepare each dtype/device/layout/alignment/
-    block/direction/flag-presence/selected-count class that serving will admit.
+    block/direction/flag-presence class that serving will admit.
     Tensor values are not keys. Do not warm up on live state unless writes are safe.
     """
     with _LOCK:

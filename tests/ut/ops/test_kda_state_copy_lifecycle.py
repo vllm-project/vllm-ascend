@@ -153,19 +153,19 @@ def test_requires_prepare_and_seal(module):
         module._kda_state_copy_kernel.run()
 
 
-@pytest.mark.parametrize("change", ["payload", "selected", "alignment", "index_dtype", "block", "direction", "flags"])
+@pytest.mark.parametrize("change", ["payload", "alignment", "index_dtype", "block", "direction", "flags"])
 def test_unknown_signature_never_compiles(module, change):
     """Unprepared scalar, constexpr, dtype and pointer classes fail closed."""
     module.prepare_kda_states_triton(*inputs())
     module.seal_kda_states_triton()
-    args = inputs(payload=8) if change == "payload" else inputs(selected=3) if change == "selected" else inputs()
+    args = inputs(payload=8) if change == "payload" else inputs()
     kwargs = {}
     if change == "alignment":
         args[0].pointer += 4
     elif change == "index_dtype":
         args[2].dtype = "int64"
     elif change == "block":
-        kwargs["block_size"] = 8192
+        kwargs["block_size"] = 1024
     elif change == "direction":
         kwargs["to_cache"] = True
     elif change == "flags":
@@ -252,3 +252,22 @@ def test_runtime_drift_and_hooks_rejected(module, monkeypatch):
     with pytest.raises(RuntimeError, match="pre-run hooks"):
         module.copy_kda_states_triton(*inputs())
     assert module._kda_state_copy_kernel.launches == 1
+
+
+def test_dynamic_selected_reuses_compiled_kernel(module):
+    """Request count changes the grid, not the compiled signature."""
+    module.prepare_kda_states_triton(*inputs(selected=2))
+    module.seal_kda_states_triton()
+    module.copy_kda_states_triton(*inputs(selected=65))
+    assert len(module._LAUNCHERS) == 1
+    assert module._kda_state_copy_kernel.compiles == 1
+    assert module._kda_state_copy_kernel.launches == 2
+
+
+def test_default_block_matches_explicit_acceptance_configuration(module):
+    """The default call and explicit 8192 block share one signature."""
+    module.prepare_kda_states_triton(*inputs())
+    module.seal_kda_states_triton()
+    module.copy_kda_states_triton(*inputs(), block_size=8192)
+    assert module._kda_state_copy_kernel.compiles == 1
+    assert module._kda_state_copy_kernel.launches == 2
