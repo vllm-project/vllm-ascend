@@ -119,6 +119,8 @@ MRv2 uses the upstream `EPLBConfig` fields:
 
 These fields may also be passed together as JSON through `--eplb-config`.
 They must not be placed in `--additional-config` for MRv2.
+Selecting `hixl` requires the official `hixl` Python package distributed with
+CANN HIXL.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;
