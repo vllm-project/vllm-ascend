@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
 """Common pytest entry for internal and external DP multi-node cases."""
 
 import pytest

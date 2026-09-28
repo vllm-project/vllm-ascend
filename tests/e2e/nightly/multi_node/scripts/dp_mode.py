@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
 """Resolve the DP launch mode declared by a multi-node test case."""
 
 import logging
