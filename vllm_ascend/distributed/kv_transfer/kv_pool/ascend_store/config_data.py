@@ -1025,6 +1025,13 @@ class ReqMeta:
             partial_block_index = None
 
         skip_save = skip_save or (num_tokens_to_save < chunk_boundary and partial_block_index is None)
+        # A ReqMeta must never carry both a save AND a load.
+        # The save would also be wasted work — the bytes are being looked up
+        # in the store right now. Later cached_reqs steps save new tokens
+        # normally. v0.23.0 has no save_partial_block flag, so can_load
+        # always suppresses the save.
+        if load_spec is not None and load_spec.can_load:
+            skip_save = True
         if skip_save and load_spec is None:
             return None
 
