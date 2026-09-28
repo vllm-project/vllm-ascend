@@ -12,16 +12,7 @@ YELLOW="\033[0;33m"
 RED="\033[0;31m"
 NC="\033[0m" # No Color
 
-INTERNAL_DP_TEST_PATH="tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py"
-EXTERNAL_DP_TEST_PATH="tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py"
-
-if [ -z "${MULTI_NODE_TEST_PATH:-}" ]; then
-    if [[ "${CONFIG_BASE_PATH:-}" == *"external_dp/config"* || "${CONFIG_YAML_PATH:-}" == *"external_dp/config"* ]]; then
-        MULTI_NODE_TEST_PATH="$EXTERNAL_DP_TEST_PATH"
-    else
-        MULTI_NODE_TEST_PATH="$INTERNAL_DP_TEST_PATH"
-    fi
-fi
+MULTI_NODE_TEST_PATH="${MULTI_NODE_TEST_PATH:-tests/e2e/nightly/multi_node/scripts/test_multi_node.py}"
 
 # Configuration
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
