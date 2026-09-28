@@ -1369,6 +1369,7 @@ Values in `kv_connector_extra_config` take precedence over environment variables
 | `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
 | `consumer_is_to_put` | bool | false | No | true / false | Whether Decode node puts KV Cache into KV Pool. |
+| `save_decode_cache` | bool | false | No | true / false | Save complete Decode blocks from a consumer while keeping Prefill writes disabled. Requires non-layerwise transfer. |
 | `consumer_is_to_load` | bool | false | No | true / false | Whether Decode node loads KV Cache from KV Pool. |
 | `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load, supported by both Mooncake and Memcache backends. Only supported on the Prefill node. |
 | `prefill_pp_size` | int | 1 | Required when PP + `consumer_is_to_put` | Positive integer | Prefill PP size. |
