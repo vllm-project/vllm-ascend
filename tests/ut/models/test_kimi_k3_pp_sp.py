@@ -416,6 +416,49 @@ def test_draft_mapper_reuses_upstream_rules(owns_embed):
     assert (selected is mapper) is not owns_embed
 
 
+def initialize_pp_cpu_count_sync(runner):
+    tree = ast.parse((ROOT / "vllm_ascend/worker/v2/model_runner.py").read_text())
+    runner_cls = next(node for node in tree.body if getattr(node, "name", None) == "NPUModelRunner")
+    assert isinstance(runner_cls, ast.ClassDef)
+    initializer = next(node for node in runner_cls.body if getattr(node, "name", None) == "__init__")
+    assert isinstance(initializer, ast.FunctionDef)
+    assignment = next(
+        node
+        for node in initializer.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Attribute) and target.attr == "sync_spec_pp_cpu_counts" for target in node.targets
+        )
+    )
+    exec(compile(ast.Module(body=[assignment], type_ignores=[]), "model_runner.py", "exec"), {"self": runner})
+
+
+@pytest.mark.parametrize(
+    "architecture",
+    [
+        "KimiLinearForCausalLM",
+        "KimiK3ForCausalLM",
+        "KimiK3ForConditionalGeneration",
+        "Qwen3_5ForConditionalGeneration",
+        "DeepseekV4ForCausalLM",
+        "GlmMoeDsaForCausalLM",
+        "MiniMaxM3SparseForCausalLM",
+        "Qwen3ForCausalLM",
+    ],
+)
+@pytest.mark.parametrize("use_pp,num_speculative_steps", [(False, 0), (False, 7), (True, 0), (True, 7)])
+def test_pp_cpu_count_sync_is_scoped(architecture, use_pp, num_speculative_steps):
+    runner = SimpleNamespace(
+        use_pp=use_pp,
+        num_speculative_steps=num_speculative_steps,
+        model_config=SimpleNamespace(architecture=architecture),
+    )
+    initialize_pp_cpu_count_sync(runner)
+    enabled = architecture.startswith("Kimi") or architecture == "Qwen3_5ForConditionalGeneration"
+    assert runner.sync_spec_pp_cpu_counts is (enabled and use_pp and num_speculative_steps > 0)
+
+
+@pytest.mark.parametrize("architecture", ["KimiK3ForCausalLM", "DeepseekV4ForCausalLM"])
 @pytest.mark.parametrize("legacy_transport", [False, True])
 @pytest.mark.parametrize(
     "use_pp,num_speculative_steps,owns_speculator,prefill_chunk",
@@ -431,7 +474,7 @@ def test_draft_mapper_reuses_upstream_rules(owns_embed):
     ],
 )
 def test_host_positions_after_rejection_or_chunk(
-    legacy_transport, use_pp, num_speculative_steps, owns_speculator, prefill_chunk
+    architecture, legacy_transport, use_pp, num_speculative_steps, owns_speculator, prefill_chunk
 ):
     events = []
 
@@ -461,12 +504,14 @@ def test_host_positions_after_rejection_or_chunk(
     runner.use_spec_pp = use_pp and num_speculative_steps > 0 and legacy_transport
     runner.use_pp = use_pp
     runner.num_speculative_steps = num_speculative_steps
+    runner.model_config = SimpleNamespace(architecture=architecture)
+    initialize_pp_cpu_count_sync(runner)
     runner.req_states = SimpleNamespace(
         req_id_to_index={"r": 0},
         num_computed_tokens=SimpleNamespace(gpu=torch.tensor([19])),
-        num_computed_tokens_cpu=torch.tensor([19]),
+        num_computed_tokens_cpu=torch.tensor([35]),
     )
-    runner.num_computed_tokens_cpu = torch.tensor([-1])
+    runner.num_computed_tokens_cpu = torch.tensor([35])
     runner.num_computed_tokens_event = SimpleNamespace(synchronize=lambda: events.append("wait"))
     runner.input_buffers = SimpleNamespace(seq_lens_cpu=torch.zeros(1, dtype=torch.int64))
     if prefill_chunk:
@@ -477,9 +522,14 @@ def test_host_positions_after_rejection_or_chunk(
         expected_position = 11
     scheduler = SimpleNamespace(num_scheduled_tokens={"r": 4}, scheduled_cached_reqs=SimpleNamespace(req_ids=["r"]))
     runner._update_seq_lens_cpu(scheduler, ["r"])
-    if owns_speculator or (use_pp and num_speculative_steps > 0):
-        assert events == ["advance" if prefill_chunk else "reject", "copy", "wait"]
-        assert runner.input_buffers.seq_lens_cpu[0] == expected_position + 4
-    else:
-        assert events == ["advance" if prefill_chunk else "reject"]
-        assert runner.input_buffers.seq_lens_cpu[0] == 23
+    needs_sync = owns_speculator or runner.sync_spec_pp_cpu_counts
+    copies_count = runner.sync_spec_pp_cpu_counts if prefill_chunk else needs_sync
+    expected_events = ["advance" if prefill_chunk else "reject"]
+    if copies_count:
+        expected_events.append("copy")
+    if needs_sync:
+        expected_events.append("wait")
+    assert events == expected_events
+    expected_cpu_position = expected_position if copies_count else 35
+    assert runner.input_buffers.seq_lens_cpu[0] == expected_cpu_position + 4
+    assert runner.req_states.num_computed_tokens.gpu[0] == expected_position
