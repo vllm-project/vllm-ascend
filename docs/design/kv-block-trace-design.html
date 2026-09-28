@@ -1,37 +1,338 @@
 <!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="基于 debug_trace.pptx 和 vllm-ascend 现有 KV trace 实现的全链路设计：块身份、调度与执行、PD 传输、外部存储、因果关联和异常取证。">
-<title>KV Block 全链路 Trace · 设计文档</title>
-<style>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="七张 SVG 讲清 KV Block 全链路 Trace：架构、块身份、生命周期、映射、PD、外存与异常归因。">
+<title>KV Block 全链路 Trace · 七图设计说明</title><style>
 :root{--ink:#182c39;--muted:#5a6e7c;--line:#dce5e9;--paper:#fff;--bg:#f5f7f8;--accent:#086f74;--soft:#eaf5f3;--warn:#8c4c08;--warnbg:#fff5e5;--bad:#a32d38;--blue:#295db0;--mono:Consolas,"Cascadia Code",monospace}
 *{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:24px}body{margin:0;color:var(--ink);background:var(--bg);font:16px/1.8 "Segoe UI","Microsoft YaHei",sans-serif}a{color:var(--accent);text-decoration-thickness:1px;text-underline-offset:3px}a:hover{color:var(--blue)}button,select{font:inherit}button{cursor:pointer}nav{position:fixed;inset:0 auto 0 0;width:230px;padding:34px 22px;background:#edf2f3;border-right:1px solid var(--line);overflow-y:auto}nav strong{display:block;font-size:18px;line-height:1.4;margin-bottom:10px}nav .subtitle{font-size:12px;color:var(--muted);margin-bottom:23px}nav a{display:block;padding:5px 0;color:var(--muted);text-decoration:none;font-size:13px}nav a:hover{color:var(--accent)}main{margin-left:230px;background:var(--paper);max-width:1420px;padding:54px 64px 70px}header{padding-bottom:30px;border-bottom:3px solid var(--accent)}.eyebrow{color:var(--accent);font:600 12px/1.5 var(--mono);letter-spacing:1.5px;text-transform:uppercase}h1{font-size:42px;letter-spacing:-1px;line-height:1.3;margin:16px 0 18px}h2{font-size:27px;line-height:1.45;margin:0 0 18px;padding-top:8px}h2 .n{font:500 15px var(--mono);color:var(--accent);display:block;margin-bottom:8px}h3{font-size:19px;margin:25px 0 10px}p{margin:10px 0 15px}.lead{font-size:20px;line-height:1.75;max-width:920px}.meta{font-size:13px;color:var(--muted);margin-top:20px}.meta code{font-size:12px}section{padding:34px 0;border-bottom:1px solid var(--line)}code{font:0.86em/1.65 var(--mono);background:#eef3f5;border-radius:3px;padding:2px 4px;overflow-wrap:anywhere}pre{background:#132d3a;color:#deedf2;padding:22px 24px;border-radius:6px;overflow-x:auto;font:13px/1.7 var(--mono);tab-size:2}pre code{background:none;color:inherit;padding:0;font:inherit;overflow-wrap:normal}.callout{border-left:4px solid var(--accent);background:var(--soft);padding:15px 20px;margin:20px 0}.callout p{margin:0}.warn{border-color:#c38331;background:var(--warnbg)}.small,figcaption{font-size:13px;color:var(--muted)}.table-wrap{overflow-x:auto;margin:16px 0}table{border-collapse:collapse;width:100%;font-size:14px;line-height:1.65}th,td{padding:12px 13px;vertical-align:top;text-align:left;border-bottom:1px solid var(--line)}th{background:#f0f5f6;font-weight:600}td:first-child{font-weight:600}table code{font-size:12px}ul,ol{padding-left:23px}li{margin:6px 0}.flow{display:grid;grid-template-columns:repeat(5,1fr);gap:0;border:1px solid var(--line);margin:23px 0}.flow>div{padding:20px 16px;border-right:1px solid var(--line)}.flow>div:last-child{border:0}.flow b{display:block;color:var(--accent);font-size:15px}.flow span{display:block;font-size:13px;color:var(--muted);line-height:1.65;margin-top:8px}.flow em{font:12px var(--mono);color:var(--muted);font-style:normal}.source{font-size:12px;white-space:nowrap}details{border-top:1px solid var(--line);padding:14px 0}summary{cursor:pointer;font-weight:600}.toolbar{display:flex;gap:9px;flex-wrap:wrap;margin:15px 0}button{border:1px solid var(--line);color:var(--ink);background:white;padding:8px 13px;border-radius:4px;font-size:13px}button[aria-pressed=true]{background:var(--accent);color:#fff;border-color:var(--accent)}button:focus-visible,a:focus-visible{outline:3px solid #f5b849;outline-offset:3px}.timeline{border-left:2px solid #a8c9c8;margin:18px 0 18px 10px;padding:0 0 0 23px}.timeline>div{position:relative;margin:0 0 17px}.timeline>div:before{content:"";position:absolute;width:10px;height:10px;border-radius:50%;background:var(--accent);left:-29px;top:9px}.timeline .bad:before{background:var(--bad)}.timeline b{font-size:14px}.timeline p{margin:0;font-size:14px;color:var(--muted)}.verdict{padding:16px 20px;background:var(--soft);font-size:14px}.verdict strong{display:block;color:var(--accent)}.bad-text{color:var(--bad)}.status{font-size:12px;font-weight:600;color:var(--accent)}.toc-inline{display:none}.equation{padding:15px 20px;background:#f3f6f7;border:1px solid var(--line);font:13px/1.8 var(--mono);overflow-wrap:anywhere}.footer{color:var(--muted);font-size:12px;padding-top:25px}.sources td:first-child{width:60px}.sources td{overflow-wrap:anywhere}.nowrap{white-space:nowrap}
 @media(min-width:1650px){main{margin-left:calc(230px + (100vw - 1650px)/2)}}
 @media(max-width:1150px){main{padding:38px 32px}nav{width:200px}main{margin-left:200px}.flow{grid-template-columns:1fr}.flow>div{border-right:0;border-bottom:1px solid var(--line);padding:12px 16px}.flow span{margin-top:3px}}
 @media(max-width:760px){nav{display:none}main{margin:0;padding:27px 20px}h1{font-size:32px}h2{font-size:24px}.lead{font-size:18px}.toc-inline{display:block;font-size:13px}.table-wrap{margin-left:-4px;margin-right:-4px}table{min-width:620px}th,td{padding:10px}pre{font-size:12px;padding:16px}.meta{overflow-wrap:anywhere}}
 @media print{@page{size:A4;margin:16mm}nav,.toolbar,.print-control,.toc-inline{display:none!important}html{scroll-behavior:auto}body{font-size:10pt;background:white;line-height:1.6}main{margin:0!important;padding:0;max-width:none}h1{font-size:28pt}h2{font-size:18pt}h3{font-size:13pt}header{padding-bottom:12px}.lead{font-size:12pt}section{padding:20px 0}table{font-size:8pt;min-width:0!important}th,td{padding:7px}.table-wrap{overflow:visible}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:8pt;background:#eef3f5;color:#182c39}.flow{grid-template-columns:repeat(5,1fr)}.flow>div{border-bottom:0;border-right:1px solid var(--line);padding:10px}.flow span{font-size:8pt}.flow b{font-size:9pt}tr,.callout,.verdict{break-inside:avoid}h2,h3{break-after:avoid}a{color:inherit}.small,.meta,figcaption{font-size:8pt}}
-</style>
-</head>
-<body>
-<nav aria-label="文档目录">
-<strong>KV Block<br>全链路 Trace</strong><div class="subtitle">设计草案 · 2026-09-28<br>基于已有 trace 分支继续设计</div>
-<a href="#decision">01 设计结论</a><a href="#reference">02 PPT 分析</a><a href="#baseline">03 代码现状与缺口</a><a href="#architecture">04 链路与架构</a><a href="#identity">05 块身份与映射</a><a href="#state">06 生命周期与不变量</a><a href="#events">07 事件契约与因果顺序</a><a href="#hooks">08 代码埋点</a><a href="#transfer">09 PD 与外部存储</a><a href="#evidence">10 内容校验与现场保存</a><a href="#coverage">11 特性覆盖</a><a href="#operations">12 开关、预算与失效</a><a href="#walkthrough">13 交互式定位示例</a><a href="#delivery">14 实施与验收</a><a href="#sources">15 证据索引</a>
-<button class="print-control" type="button" id="print">打印 / 保存 PDF</button>
-</nav>
-<main>
-<header>
-<div class="eyebrow">Engineering design / Ascend inference</div>
-<h1>KV Block 全链路 Trace</h1>
-<p class="lead">沿一个块的<strong>身份、归属、映射、有效内容和搬运关系</strong>重建生命周期，找到 KV 首次偏离预期的边界，并保留足够证据继续定位。</p>
-<p>追踪范围：Scheduler 分配与前缀复用、Worker 批次与读写、PD 传输、CPU / 外部 KV 存储，以及释放后的再次使用。</p>
-<div class="meta">状态：设计草案，本文不代表新增能力已实现或已通过 NPU 验证。<br>文档分支：<code>codex/kv-block-trace-design</code> · 代码基线：<code>origin/codex/kv-block-trace @ a331676cbef9748403207d74e4d9f31924f016e1</code><br>上游参考：仓库指定的 vLLM commit <code>dc68bd8c4199b00631fe71eb37313f406cc66ac1</code> · 输入：<code>debug_trace.pptx</code>，24 页。</div>
-<p class="toc-inline"><a href="#baseline">代码现状</a> · <a href="#identity">身份模型</a> · <a href="#hooks">埋点</a> · <a href="#walkthrough">示例</a> · <a href="#delivery">验收</a></p>
-</header>
 
-<section id="decision">
-<h2><span class="n">01 / DECISION</span>设计结论</h2>
+
+main{max-width:1440px;padding-top:40px}header{padding-bottom:24px}h1{font-size:40px;margin:12px 0}.lead{font-size:20px;margin:10px 0}nav a{padding:8px 0;font-size:14px}.visual-section{padding:32px 0}.visual-section h2{margin-bottom:8px}.visual-section .intro{margin:0 0 18px;color:var(--muted)}.diagram{margin:0;border:1px solid var(--line);border-radius:10px;background:#fff;overflow:hidden}.diagram-scroll{overflow-x:auto}.diagram svg{display:block;width:100%;height:auto;min-width:680px}.diagram figcaption{padding:12px 18px;background:#f7fafb;border-top:1px solid var(--line);line-height:1.7}.diagram-tools{display:flex;gap:8px;justify-content:flex-end;padding:8px 12px;border-top:1px solid var(--line)}.diagram-tools button{padding:4px 10px;font-size:12px}.brief{font-size:14px;color:var(--muted)}.baseline-summary{padding:8px 0;border-top:0}.baseline-summary summary{font-size:13px;color:var(--muted);font-weight:400}.appendix{margin-top:32px;border:1px solid var(--line);border-radius:8px;padding:18px 22px}.appendix>summary{font-size:18px}.appendix-content{margin-top:24px}.appendix-content section{padding:26px 0}.appendix-content h2{font-size:23px}.appendix-content h2 .n{font-size:12px}.section-takeaway{margin-top:14px;color:var(--muted);font-size:14px}.zoom-dialog{width:min(96vw,1500px);max-width:96vw;max-height:94vh;border:1px solid var(--line);border-radius:12px;padding:14px;overflow:auto;color:var(--ink)}.zoom-dialog::backdrop{background:rgba(13,31,42,.7)}.zoom-top{display:flex;justify-content:space-between;align-items:center;position:sticky;top:-14px;background:white;padding:8px 4px;z-index:1}.zoom-body{overflow:auto}.zoom-body svg{display:block;min-width:920px;width:100%;height:auto}.mobile-note{display:none}.rollout-summary{padding:17px 20px;border-left:4px solid var(--accent);background:var(--soft);font-size:15px;margin-top:25px}.rollout-summary p{margin:3px 0}
+@media(max-width:760px){main{padding:25px 18px}h1{font-size:29px}.mobile-note{display:block;font-size:12px;color:var(--muted)}.visual-section h2{font-size:23px}.diagram{border-radius:7px}.appendix{padding:14px}.diagram figcaption{padding:10px 12px}.zoom-body svg{min-width:920px}}
+@media print{.diagram-tools,.zoom-dialog,.mobile-note,.baseline-summary{display:none!important}.visual-section{break-before:page;break-inside:avoid;padding-top:8px;border:0}.visual-section h2{font-size:18pt}.visual-section:first-of-type{break-before:auto}.diagram{break-inside:avoid}.diagram svg{min-width:0!important;width:100%}.diagram-scroll{overflow:visible}.diagram figcaption{font-size:9pt}details:not([open])>:not(summary){display:none!important}.appendix{border:0;padding:0}.rollout-summary{font-size:10pt}header .lead{font-size:12pt}.visual-section .intro{font-size:10pt}}
+</style></head><body>
+<nav aria-label="图解目录"><strong>KV Block<br>全链路 Trace</strong><div class="subtitle">七图设计说明 · 2026-09-29</div><a href="#fig-chain">01 全链路</a><a href="#fig-identity-map">02 块身份</a><a href="#fig-lifecycle">03 生命周期</a><a href="#fig-mapping">04 映射对齐</a><a href="#fig-pd-checkpoints">05 PD</a><a href="#fig-offload">06 外部存储</a><a href="#fig-attribution">07 异常定位</a><a href="#technical-details">技术细节与源码依据</a><button class="print-control" type="button" id="print">打印 / 保存 PDF</button></nav>
+<main><header><div class="eyebrow">KV block tracing / Visual design</div><h1>七张图，讲清 KV Block 全链路 Trace</h1>
+<p class="lead">追踪<strong>哪块数据、归谁使用、经过哪里、何时变坏</strong>。</p>
+<p class="brief">核心方案：统一块身份，串起调度、实际读写和搬运事件，用边界校验定位首次差异。</p>
+<p class="brief"><strong>设计草案：</strong>图中包含待实现能力。现有起点是 Scheduler 归属记录、v1 forward 与 Mooncake 传输事件。</p>
+<details class="baseline-summary"><summary>展开版本与参考信息</summary><p class="meta">分支 <code>codex/kv-block-trace-design</code> · 实现基线 <code>a331676c</code><br>上游参考 <code>dc68bd8c4199b00631fe71eb37313f406cc66ac1</code> · 输入 <code>debug_trace.pptx</code>（24 页）。此次补充图解，未新增运行时代码或执行 NPU 验证。</p></details>
+<p class="mobile-note">窄屏可横向滑动图示，或点“放大”。每张图都可单独下载为 SVG。</p></header>
+<section class="visual-section" id="fig-chain">
+<h2><span class="n">图 01</span>全链路：哪些环节需要看见</h2>
+<p class="intro">一个块经过哪些组件，就在哪些边界留下可关联的事件。</p>
+<figure class="diagram"><div class="diagram-scroll"><svg xmlns="http://www.w3.org/2000/svg" id="svg-chain" viewBox="0 0 1040 540" role="img" aria-labelledby="chain-title chain-desc">
+<title id="chain-title">全链路架构</title><desc id="chain-desc">Scheduler、Worker、PD 与外部存储分别产生事件，进入统一的有界收集器，离线按请求和块回放。</desc>
+<defs>
+<style>text{font-family:"Segoe UI","Microsoft YaHei",sans-serif;fill:#18323f} .dg-title{font-weight:650}.dg-note{fill:#657b89}.dg-mono{font-family:Consolas,"Microsoft YaHei",monospace}</style>
+<marker id="chain-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#086f74"/></marker>
+<marker id="chain-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#295db0"/></marker>
+<marker id="chain-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#657b89"/></marker>
+<marker id="chain-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#ad3444"/></marker>
+</defs><rect width="1040" height="540" fill="#fff"/>
+<rect x="30" y="60" width="280" height="145" rx="12" fill="#f2f6f8" stroke="#d4e0e6" stroke-width="1.5"/>
+<text x="170.0" y="112.5" font-size="22" text-anchor="middle" class="dg-title">Scheduler / BlockPool</text>
+<text x="170.0" y="141.5" font-size="18" text-anchor="middle" class="dg-note">分配 · 前缀共享 · 释放</text>
+<text x="170.0" y="170.5" font-size="18" text-anchor="middle" class="dg-note">归属与调度映射</text>
+<rect x="380" y="60" width="280" height="145" rx="12" fill="#eaf5f3" stroke="#9ecdc5" stroke-width="1.5"/>
+<text x="520.0" y="112.5" font-size="22" text-anchor="middle" class="dg-title">Worker / Attention</text>
+<text x="520.0" y="141.5" font-size="18" text-anchor="middle" class="dg-note">KV 写入 · attention 读取</text>
+<text x="520.0" y="170.5" font-size="18" text-anchor="middle" class="dg-note">实际 slot 与设备完成</text>
+<rect x="730" y="60" width="280" height="145" rx="12" fill="#f2f6f8" stroke="#d4e0e6" stroke-width="1.5"/>
+<text x="870.0" y="112.5" font-size="22" text-anchor="middle" class="dg-title">PD / 外部存储</text>
+<text x="870.0" y="141.5" font-size="18" text-anchor="middle" class="dg-note">P ⇄ D · NPU ⇄ CPU / Store</text>
+<text x="870.0" y="170.5" font-size="18" text-anchor="middle" class="dg-note">搬运映射与内容版本</text>
+<path d="M310 128H378" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#chain-teal)"/>
+<text x="345" y="107" font-size="17" text-anchor="middle" class="">下发</text>
+<path d="M662 128H728" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#chain-teal)" marker-start="url(#chain-teal)"/>
+<text x="695" y="107" font-size="17" text-anchor="middle" class="">搬运</text>
+<path d="M170 206V298" fill="none" stroke="#295db0" stroke-width="2.5" stroke-dasharray="7 6" marker-end="url(#chain-blue)"/>
+<path d="M520 206V298" fill="none" stroke="#295db0" stroke-width="2.5" stroke-dasharray="7 6" marker-end="url(#chain-blue)"/>
+<path d="M870 206V298" fill="none" stroke="#295db0" stroke-width="2.5" stroke-dasharray="7 6" marker-end="url(#chain-blue)"/>
+<rect x="44" y="233" width="252" height="31" rx="2" fill="#fff" stroke="#fff" stroke-width="1.5"/>
+<text x="170" y="255" font-size="18" text-anchor="middle" class="" style="fill:#295db0">归属 / epoch</text>
+<rect x="394" y="233" width="252" height="31" rx="2" fill="#fff" stroke="#fff" stroke-width="1.5"/>
+<text x="520" y="255" font-size="18" text-anchor="middle" class="" style="fill:#295db0">读写 / ready</text>
+<rect x="744" y="233" width="252" height="31" rx="2" fill="#fff" stroke="#fff" stroke-width="1.5"/>
+<text x="870" y="255" font-size="18" text-anchor="middle" class="" style="fill:#295db0">传输 / checksum</text>
+<rect x="30" y="300" width="980" height="87" rx="12" fill="#edf3ff" stroke="#b2c9ee" stroke-width="1.5"/>
+<text x="520.0" y="338.0" font-size="23" text-anchor="middle" class="dg-title">统一事件流 → 有界队列 → JSONL / incident</text>
+<text x="520.0" y="367.0" font-size="18" text-anchor="middle" class="dg-note">记录缺口；异常时冻结事件窗口与选定 KV 快照</text>
+<path d="M520 389V438" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#chain-teal)"/>
+<rect x="180" y="440" width="680" height="70" rx="12" fill="#f2f6f8" stroke="#d4e0e6" stroke-width="1.5"/>
+<text x="520.0" y="482.5" font-size="21" text-anchor="middle" class="dg-title">按请求、块代次和搬运 ID 回放，找到第一条失败边</text>
+</svg></div>
+<figcaption>实线表示业务交互，蓝色虚线表示观测事件。保留现有 KVTrace → JSONL → CLI 路径。 <a href="#architecture">查看技术细节</a></figcaption>
+<div class="diagram-tools"><button type="button" data-zoom="chain" aria-label="放大图 1：全链路：哪些环节需要看见">放大</button><button type="button" data-download="chain" aria-label="下载图 1 SVG">下载 SVG</button></div></figure>
+</section><section class="visual-section" id="fig-identity-map">
+<h2><span class="n">图 02</span>块身份：同一个块号，可能是不同的数据</h2>
+<p class="intro">用 pool + block_id + alloc_epoch 标识分配身份；用 worker / layer / shard 定位实体存储。</p>
+<figure class="diagram"><div class="diagram-scroll"><svg xmlns="http://www.w3.org/2000/svg" id="svg-identity-map" viewBox="0 0 1040 415" role="img" aria-labelledby="identity-map-title identity-map-desc">
+<title id="identity-map-title">块身份与合法复用</title><desc id="identity-map-desc">两个请求可以合法共享同一块和代次。释放引用不表示内容失效；重新分配给新用途时才增加代次。</desc>
+<defs>
+<style>text{font-family:"Segoe UI","Microsoft YaHei",sans-serif;fill:#18323f} .dg-title{font-weight:650}.dg-note{fill:#657b89}.dg-mono{font-family:Consolas,"Microsoft YaHei",monospace}</style>
+<marker id="identity-map-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#086f74"/></marker>
+<marker id="identity-map-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#295db0"/></marker>
+<marker id="identity-map-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#657b89"/></marker>
+<marker id="identity-map-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#ad3444"/></marker>
+</defs><rect width="1040" height="415" fill="#fff"/>
+<rect x="25" y="60" width="205" height="85" rx="12" fill="#f2f6f8" stroke="#d4e0e6" stroke-width="1.5"/>
+<text x="127.5" y="96.5" font-size="22" text-anchor="middle" class="dg-title">请求 A</text>
+<text x="127.5" y="125.5" font-size="18" text-anchor="middle" class="dg-note">prefix reader</text>
+<rect x="25" y="210" width="205" height="85" rx="12" fill="#f2f6f8" stroke="#d4e0e6" stroke-width="1.5"/>
+<text x="127.5" y="246.5" font-size="22" text-anchor="middle" class="dg-title">请求 B</text>
+<text x="127.5" y="275.5" font-size="18" text-anchor="middle" class="dg-note">同一合法前缀</text>
+<rect x="360" y="90" width="285" height="180" rx="12" fill="#eaf5f3" stroke="#9ecdc5" stroke-width="1.5"/>
+<text x="502.5" y="160.0" font-size="22" text-anchor="middle" class="dg-title">物理块 37</text>
+<text x="502.5" y="189.0" font-size="18" text-anchor="middle" class="dg-note">pool-P / epoch 9</text>
+<text x="502.5" y="218.0" font-size="18" text-anchor="middle" class="dg-note">内容 A · 多个 reader</text>
+<path d="M232 103H282V143H358" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#identity-map-teal)"/>
+<path d="M232 253H282V216H358" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#identity-map-teal)"/>
+<text x="289" y="183" font-size="19" text-anchor="middle" class="">共享</text>
+<rect x="775" y="90" width="240" height="180" rx="12" fill="#edf3ff" stroke="#b2c9ee" stroke-width="1.5"/>
+<text x="895.0" y="160.0" font-size="22" text-anchor="middle" class="dg-title">物理块 37</text>
+<text x="895.0" y="189.0" font-size="18" text-anchor="middle" class="dg-note">pool-P / epoch 10</text>
+<text x="895.0" y="218.0" font-size="18" text-anchor="middle" class="dg-note">新用途 · 新生命周期</text>
+<path d="M647 180H773" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#identity-map-teal)"/>
+<text x="710" y="155" font-size="18" text-anchor="middle" class="">重新分配</text>
+<text x="710" y="211" font-size="17" text-anchor="middle" class="dg-mono">epoch + 1</text>
+<rect x="25" y="330" width="990" height="57" rx="12" fill="#fff5e5" stroke="#ead6b1" stroke-width="1.5"/>
+<text x="520" y="365" font-size="20" text-anchor="middle" class="">前提：旧引用和在途使用均已结束；释放引用后，前缀缓存仍可保留。</text>
+</svg></div>
+<figcaption>prefix 命中保持 epoch；新用途分配才递增。迟到的 epoch 9 事件不能归到 epoch 10。 <a href="#identity">查看技术细节</a></figcaption>
+<div class="diagram-tools"><button type="button" data-zoom="identity-map" aria-label="放大图 2：块身份：同一个块号，可能是不同的数据">放大</button><button type="button" data-download="identity-map" aria-label="下载图 2 SVG">下载 SVG</button></div></figure>
+</section><section class="visual-section" id="fig-lifecycle">
+<h2><span class="n">图 03</span>生命周期：把归属、有效内容和在途操作分开</h2>
+<p class="intro">L1 检查读写是否合法；它无法证明合法 offset 上的数值就是正确的。</p>
+<figure class="diagram"><div class="diagram-scroll"><svg xmlns="http://www.w3.org/2000/svg" id="svg-lifecycle" viewBox="0 0 1040 510" role="img" aria-labelledby="lifecycle-title lifecycle-desc">
+<title id="lifecycle-title">有效内容的状态迁移</title><desc id="lifecycle-desc">新分配从 empty 开始，完成的顺序写使内容部分有效，写满后为 sealed。load完成根据有效长度进入partial或sealed。issued不等于ready，读不改变状态，release不等于invalidate。</desc>
+<defs>
+<style>text{font-family:"Segoe UI","Microsoft YaHei",sans-serif;fill:#18323f} .dg-title{font-weight:650}.dg-note{fill:#657b89}.dg-mono{font-family:Consolas,"Microsoft YaHei",monospace}</style>
+<marker id="lifecycle-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#086f74"/></marker>
+<marker id="lifecycle-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#295db0"/></marker>
+<marker id="lifecycle-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#657b89"/></marker>
+<marker id="lifecycle-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#ad3444"/></marker>
+</defs><rect width="1040" height="510" fill="#fff"/>
+<rect x="25" y="70" width="225" height="110" rx="12" fill="#f2f6f8" stroke="#d4e0e6" stroke-width="1.5"/>
+<text x="137.5" y="119.0" font-size="22" text-anchor="middle" class="dg-title">EMPTY</text>
+<text x="137.5" y="148.0" font-size="18" text-anchor="middle" class="dg-note">valid_len = 0</text>
+<rect x="405" y="70" width="230" height="110" rx="12" fill="#edf3ff" stroke="#b2c9ee" stroke-width="1.5"/>
+<text x="520.0" y="119.0" font-size="22" text-anchor="middle" class="dg-title">PARTIAL</text>
+<text x="520.0" y="148.0" font-size="18" text-anchor="middle" class="dg-note">0 &lt; valid_len &lt; B</text>
+<rect x="790" y="70" width="225" height="110" rx="12" fill="#eaf5f3" stroke="#9ecdc5" stroke-width="1.5"/>
+<text x="902.5" y="119.0" font-size="22" text-anchor="middle" class="dg-title">SEALED</text>
+<text x="902.5" y="148.0" font-size="18" text-anchor="middle" class="dg-note">valid_len = B</text>
+<path d="M252 125H403" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#lifecycle-teal)"/>
+<text x="328" y="101" font-size="18" text-anchor="middle" class="">部分写完成</text>
+<path d="M637 125H788" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#lifecycle-teal)"/>
+<text x="712" y="101" font-size="18" text-anchor="middle" class="">写满有效区</text>
+<path d="M140 68V16H902V68" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#lifecycle-teal)"/>
+<text x="284" y="45" font-size="18" text-anchor="middle" class="" style="fill:#086f74">整块写完成</text>
+<path d="M550 70V32H480V68" fill="none" stroke="#295db0" stroke-width="2.5" marker-end="url(#lifecycle-blue)"/>
+<text x="660" y="37" font-size="17" text-anchor="middle" class="" style="fill:#295db0">尾部顺序续写</text>
+<path d="M90 182V235H520V182" fill="none" stroke="#295db0" stroke-width="2.5" marker-end="url(#lifecycle-blue)"/>
+<text x="300" y="222" font-size="18" text-anchor="middle" class="" style="fill:#295db0">LOAD_READY：仅尾块有效</text>
+<path d="M140 182V292H902V182" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#lifecycle-teal)"/>
+<text x="710" y="277" font-size="18" text-anchor="middle" class="" style="fill:#086f74">LOAD_READY：整块有效</text>
+<text x="520" y="337" font-size="18" text-anchor="middle" class="dg-note">图中所有有效性变化，都以对应 layer / component 的完成依赖为准。</text>
+<rect x="25" y="367" width="300" height="78" rx="12" fill="#f2f6f8" stroke="#d4e0e6" stroke-width="1.5"/>
+<text x="175.0" y="399.5" font-size="21" text-anchor="middle" class="dg-title">归属独立</text>
+<text x="175.0" y="428.5" font-size="18" text-anchor="middle" class="dg-note">release 可保留缓存内容</text>
+<rect x="370" y="367" width="300" height="78" rx="12" fill="#edf3ff" stroke="#b2c9ee" stroke-width="1.5"/>
+<text x="520.0" y="399.5" font-size="21" text-anchor="middle" class="dg-title">在途独立</text>
+<text x="520.0" y="428.5" font-size="18" text-anchor="middle" class="dg-note">issued 不等于 ready</text>
+<rect x="715" y="367" width="300" height="78" rx="12" fill="#fff0f1" stroke="#e9adb5" stroke-width="1.5"/>
+<text x="865.0" y="399.5" font-size="21" text-anchor="middle" class="dg-title">失效独立</text>
+<text x="865.0" y="428.5" font-size="18" text-anchor="middle" class="dg-note">invalidate 清除有效范围</text>
+<text x="520" y="487" font-size="20" text-anchor="middle" class="">READ 不改状态；UNKNOWN 不因一次读取自动变成已加载。</text>
+</svg></div>
+<figcaption>这是稠密连续有效区的简化图。CoW、speculative rollback、SWA 等按专门规则适配。 <a href="#state">查看技术细节</a></figcaption>
+<div class="diagram-tools"><button type="button" data-zoom="lifecycle" aria-label="放大图 3：生命周期：把归属、有效内容和在途操作分开">放大</button><button type="button" data-download="lifecycle" aria-label="下载图 3 SVG">下载 SVG</button></div></figure>
+</section><section class="visual-section" id="fig-mapping">
+<h2><span class="n">图 04</span>映射对齐：计划写哪里，实际写到了哪里</h2>
+<p class="intro">Scheduler 表、Worker 表与实际算子入参分别留证据，定位不同步发生在哪一跳。</p>
+<figure class="diagram"><div class="diagram-scroll"><svg xmlns="http://www.w3.org/2000/svg" id="svg-mapping" viewBox="0 0 1040 425" role="img" aria-labelledby="mapping-title mapping-desc">
+<title id="mapping-title">调度意图与真实执行</title><desc id="mapping-desc">Scheduler下发带代次和映射版本的调度表，Worker应用相同版本，再与kernel实际slot比较。通过因果边关联，不能仅用跨机时间排序。</desc>
+<defs>
+<style>text{font-family:"Segoe UI","Microsoft YaHei",sans-serif;fill:#18323f} .dg-title{font-weight:650}.dg-note{fill:#657b89}.dg-mono{font-family:Consolas,"Microsoft YaHei",monospace}</style>
+<marker id="mapping-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#086f74"/></marker>
+<marker id="mapping-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#295db0"/></marker>
+<marker id="mapping-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#657b89"/></marker>
+<marker id="mapping-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#ad3444"/></marker>
+</defs><rect width="1040" height="425" fill="#fff"/>
+<rect x="25" y="50" width="280" height="165" rx="12" fill="#f2f6f8" stroke="#d4e0e6" stroke-width="1.5"/>
+<text x="165.0" y="99.0" font-size="23" text-anchor="middle" class="dg-title">① Scheduler 下发</text>
+<text x="165.0" y="128.0" font-size="18" text-anchor="middle" class="dg-note">request R · step 41</text>
+<text x="165.0" y="157.0" font-size="18" text-anchor="middle" class="dg-note">block 12 / epoch 44</text>
+<text x="165.0" y="186.0" font-size="18" text-anchor="middle" class="dg-note">mapping revision 7</text>
+<rect x="380" y="50" width="280" height="165" rx="12" fill="#edf3ff" stroke="#b2c9ee" stroke-width="1.5"/>
+<text x="520.0" y="99.0" font-size="23" text-anchor="middle" class="dg-title">② Worker 应用</text>
+<text x="520.0" y="128.0" font-size="18" text-anchor="middle" class="dg-note">同一 step 与 epoch</text>
+<text x="520.0" y="157.0" font-size="18" text-anchor="middle" class="dg-note">row → request R</text>
+<text x="520.0" y="186.0" font-size="18" text-anchor="middle" class="dg-note">已应用 revision 7</text>
+<rect x="735" y="50" width="280" height="165" rx="12" fill="#eaf5f3" stroke="#9ecdc5" stroke-width="1.5"/>
+<text x="875.0" y="99.0" font-size="23" text-anchor="middle" class="dg-title">③ Kernel 实际入参</text>
+<text x="875.0" y="128.0" font-size="18" text-anchor="middle" class="dg-note">layer 0 · token 16</text>
+<text x="875.0" y="157.0" font-size="18" text-anchor="middle" class="dg-note">slot = 12 × 128 + 16</text>
+<text x="875.0" y="186.0" font-size="18" text-anchor="middle" class="dg-note">归一化后核对块与 offset</text>
+<path d="M307 132H378" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#mapping-teal)"/>
+<text x="343" y="106" font-size="18" text-anchor="middle" class="">IPC</text>
+<path d="M662 132H733" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#mapping-teal)"/>
+<text x="698" y="106" font-size="18" text-anchor="middle" class="">采集</text>
+<text x="343" y="249" font-size="18" text-anchor="middle" class="" style="fill:#295db0">核对下发 / 应用</text>
+<text x="698" y="249" font-size="18" text-anchor="middle" class="" style="fill:#086f74">核对计划 / 实际</text>
+<rect x="25" y="302" width="142" height="57" rx="12" fill="#edf3ff" stroke="#b2c9ee" stroke-width="1.5"/>
+<text x="96.0" y="336.5" font-size="18" text-anchor="middle" class="dg-title">dispatch</text>
+<path d="M169 330H235" fill="none" stroke="#657b89" stroke-width="2.5" marker-end="url(#mapping-gray)"/>
+<rect x="237" y="302" width="142" height="57" rx="12" fill="#edf3ff" stroke="#b2c9ee" stroke-width="1.5"/>
+<text x="308.0" y="336.5" font-size="18" text-anchor="middle" class="dg-title">apply</text>
+<path d="M381 330H447" fill="none" stroke="#657b89" stroke-width="2.5" marker-end="url(#mapping-gray)"/>
+<rect x="449" y="302" width="142" height="57" rx="12" fill="#eaf5f3" stroke="#9ecdc5" stroke-width="1.5"/>
+<text x="520.0" y="336.5" font-size="18" text-anchor="middle" class="dg-title">op issued</text>
+<path d="M593 330H659" fill="none" stroke="#657b89" stroke-width="2.5" marker-end="url(#mapping-gray)"/>
+<rect x="661" y="302" width="142" height="57" rx="12" fill="#eaf5f3" stroke="#9ecdc5" stroke-width="1.5"/>
+<text x="732.0" y="336.5" font-size="18" text-anchor="middle" class="dg-title">device ready</text>
+<path d="M805 330H871" fill="none" stroke="#657b89" stroke-width="2.5" marker-end="url(#mapping-gray)"/>
+<rect x="873" y="302" width="142" height="57" rx="12" fill="#eaf5f3" stroke="#9ecdc5" stroke-width="1.5"/>
+<text x="944.0" y="336.5" font-size="18" text-anchor="middle" class="dg-title">cache read</text>
+<text x="520" y="400" font-size="18" text-anchor="middle" class="dg-note">按消息 / stream 依赖重建因果；graph replay 每次关联当前 step，不能沿用捕获期 ID。</text>
+</svg></div>
+<figcaption>slot 示例仅适用于 block_size=128 的稠密连续布局；设备完成与 host 返回分开记录。 <a href="#hooks">查看技术细节</a></figcaption>
+<div class="diagram-tools"><button type="button" data-zoom="mapping" aria-label="放大图 4：映射对齐：计划写哪里，实际写到了哪里">放大</button><button type="button" data-download="mapping" aria-label="下载图 4 SVG">下载 SVG</button></div></figure>
+</section><section class="visual-section" id="fig-pd-checkpoints">
+<h2><span class="n">图 05</span>PD：用检查点缩小污染窗口</h2>
+<p class="intro">同时保留产生后、导出前、接收后、布局完成和首次读取的证据。</p>
+<figure class="diagram"><div class="diagram-scroll"><svg xmlns="http://www.w3.org/2000/svg" id="svg-pd-checkpoints" viewBox="0 0 1040 645" role="img" aria-labelledby="pd-checkpoints-title pd-checkpoints-desc">
+<title id="pd-checkpoints-title">PD校验时序</title><desc id="pd-checkpoints-desc">P生成和导出时摘要为A，D收到字节后还需要等待布局转换完成。如果D布局完成时摘要为B，则首次差异在export到layout_ready之间，但不能直接归因网络。</desc>
+<defs>
+<style>text{font-family:"Segoe UI","Microsoft YaHei",sans-serif;fill:#18323f} .dg-title{font-weight:650}.dg-note{fill:#657b89}.dg-mono{font-family:Consolas,"Microsoft YaHei",monospace}</style>
+<marker id="pd-checkpoints-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#086f74"/></marker>
+<marker id="pd-checkpoints-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#295db0"/></marker>
+<marker id="pd-checkpoints-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#657b89"/></marker>
+<marker id="pd-checkpoints-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#ad3444"/></marker>
+</defs><rect width="1040" height="645" fill="#fff"/>
+<rect x="30" y="20" width="250" height="62" rx="12" fill="#eaf5f3" stroke="#9ecdc5" stroke-width="1.5"/>
+<text x="155.0" y="60.0" font-size="24" text-anchor="middle" class="dg-title">P Worker</text>
+<path d="M155 94V558" fill="none" stroke="#657b89" stroke-width="1.5" stroke-dasharray="7 6"/>
+<rect x="395" y="20" width="250" height="62" rx="12" fill="#f2f6f8" stroke="#d4e0e6" stroke-width="1.5"/>
+<text x="520.0" y="60.0" font-size="24" text-anchor="middle" class="dg-title">D 侧 Connector</text>
+<path d="M520 94V558" fill="none" stroke="#657b89" stroke-width="1.5" stroke-dasharray="7 6"/>
+<rect x="750" y="20" width="250" height="62" rx="12" fill="#eaf5f3" stroke="#9ecdc5" stroke-width="1.5"/>
+<text x="875.0" y="60.0" font-size="24" text-anchor="middle" class="dg-title">D Worker</text>
+<path d="M875 94V558" fill="none" stroke="#657b89" stroke-width="1.5" stroke-dasharray="7 6"/>
+<circle cx="155" cy="125" r="7" fill="#086f74"/>
+<text x="178" y="133" font-size="20" text-anchor="start" class="">produced · A</text>
+<circle cx="155" cy="198" r="7" fill="#086f74"/>
+<text x="178" y="184" font-size="20" text-anchor="start" class="">export · A</text>
+<path d="M163 220H518" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#pd-checkpoints-teal)"/>
+<text x="338" y="244" font-size="17" text-anchor="middle" class="dg-mono">T91 · attempt 1 · manifest</text>
+<path d="M522 285H873" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#pd-checkpoints-teal)"/>
+<text x="698" y="267" font-size="18" text-anchor="middle" class="dg-mono">P:37/e9 → D:12/e44</text>
+<circle cx="875" cy="355" r="7" fill="#086f74"/>
+<text x="852" y="360" font-size="20" text-anchor="end" class="">bytes_complete</text>
+<text x="698" y="392" font-size="18" text-anchor="middle" class="" style="fill:#657b89">传输返回 ≠ 布局可读</text>
+<circle cx="875" cy="438" r="7" fill="#ad3444"/>
+<text x="852" y="444" font-size="20" text-anchor="end" class="" style="fill:#ad3444">layout_ready · B</text>
+<circle cx="875" cy="530" r="7" fill="#ad3444"/>
+<text x="852" y="536" font-size="20" text-anchor="end" class="" style="fill:#ad3444">首次 consume · B</text>
+<rect x="25" y="579" width="990" height="47" rx="12" fill="#fff0f1" stroke="#e9adb5" stroke-width="1.5"/>
+<text x="520" y="610" font-size="19" text-anchor="middle" class="" style="fill:#ad3444">A → B：差异在 export 与 layout_ready 之间；继续区分映射、搬运和 reformat。</text>
+<rect x="30" y="327" width="417" height="180" rx="12" fill="#f2f6f8" stroke="#d4e0e6" stroke-width="1.5"/>
+<text x="238" y="366" font-size="22" text-anchor="middle" class="dg-title">只有可比的数据才能对比</text>
+<text x="238" y="403" font-size="18" text-anchor="middle" class="dg-note">相同语义前缀与有效 token 区间</text>
+<text x="238" y="433" font-size="18" text-anchor="middle" class="dg-note">对齐全局 layer / component / shard</text>
+<text x="238" y="463" font-size="18" text-anchor="middle" class="dg-note">布局转换完成后再做 canonical 比较</text>
+</svg></div>
+<figcaption>A/B 是示意摘要。bytes_complete 不代表 layout_ready，也不代表与 P 内容一致；跨 TP/PP 先对齐 shard。 <a href="#transfer">查看技术细节</a></figcaption>
+<div class="diagram-tools"><button type="button" data-zoom="pd-checkpoints" aria-label="放大图 5：PD：用检查点缩小污染窗口">放大</button><button type="button" data-download="pd-checkpoints" aria-label="下载图 5 SVG">下载 SVG</button></div></figure>
+</section><section class="visual-section" id="fig-offload">
+<h2><span class="n">图 06</span>外部存储：索引命中不等于内容正确</h2>
+<p class="intro">传输 ID 连接源目标块，object generation 连接 put / get，checksum 连接内容。</p>
+<figure class="diagram"><div class="diagram-scroll"><svg xmlns="http://www.w3.org/2000/svg" id="svg-offload" viewBox="0 0 1040 450" role="img" aria-labelledby="offload-title offload-desc">
+<title id="offload-title">CPU及外部存储版本闭环</title><desc id="offload-desc">设备卸载到存储对象时绑定对象generation、有效范围与内容摘要，回迁时核对同一个generation，并等H2D完成后才能发布可读。</desc>
+<defs>
+<style>text{font-family:"Segoe UI","Microsoft YaHei",sans-serif;fill:#18323f} .dg-title{font-weight:650}.dg-note{fill:#657b89}.dg-mono{font-family:Consolas,"Microsoft YaHei",monospace}</style>
+<marker id="offload-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#086f74"/></marker>
+<marker id="offload-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#295db0"/></marker>
+<marker id="offload-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#657b89"/></marker>
+<marker id="offload-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#ad3444"/></marker>
+</defs><rect width="1040" height="450" fill="#fff"/>
+<rect x="25" y="45" width="280" height="170" rx="12" fill="#eaf5f3" stroke="#9ecdc5" stroke-width="1.5"/>
+<text x="165.0" y="97.0" font-size="24" text-anchor="middle" class="dg-title">NPU 源块</text>
+<text x="165.0" y="126.0" font-size="18" text-anchor="middle" class="dg-note">block 37 / epoch 9</text>
+<text x="165.0" y="155.0" font-size="18" text-anchor="middle" class="dg-note">有效范围 [0,16)</text>
+<text x="165.0" y="184.0" font-size="18" text-anchor="middle" class="dg-note">内容摘要 A</text>
+<rect x="380" y="45" width="280" height="170" rx="12" fill="#edf3ff" stroke="#b2c9ee" stroke-width="1.5"/>
+<text x="520.0" y="97.0" font-size="24" text-anchor="middle" class="dg-title">CPU / Store 对象</text>
+<text x="520.0" y="126.0" font-size="18" text-anchor="middle" class="dg-note">object key + generation 7</text>
+<text x="520.0" y="155.0" font-size="18" text-anchor="middle" class="dg-note">布局 + 有效范围</text>
+<text x="520.0" y="184.0" font-size="18" text-anchor="middle" class="dg-note">存储摘要 A</text>
+<rect x="735" y="45" width="280" height="170" rx="12" fill="#eaf5f3" stroke="#9ecdc5" stroke-width="1.5"/>
+<text x="875.0" y="97.0" font-size="24" text-anchor="middle" class="dg-title">NPU 目标块</text>
+<text x="875.0" y="126.0" font-size="18" text-anchor="middle" class="dg-note">block 12 / epoch 44</text>
+<text x="875.0" y="155.0" font-size="18" text-anchor="middle" class="dg-note">H2D ready 后发布</text>
+<text x="875.0" y="184.0" font-size="18" text-anchor="middle" class="dg-note">加载摘要应为 A</text>
+<path d="M307 126H378" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#offload-teal)"/>
+<text x="343" y="101" font-size="18" text-anchor="middle" class="">PUT</text>
+<path d="M662 126H733" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#offload-teal)"/>
+<text x="698" y="101" font-size="18" text-anchor="middle" class="">GET</text>
+<path d="M520 217V267H260V292" fill="none" stroke="#ad3444" stroke-width="2.5" marker-end="url(#offload-red)"/>
+<path d="M520 267H790V292" fill="none" stroke="#ad3444" stroke-width="2.5" marker-end="url(#offload-red)"/>
+<rect x="35" y="294" width="450" height="90" rx="12" fill="#fff0f1" stroke="#e9adb5" stroke-width="1.5"/>
+<text x="260.0" y="333.0" font-size="22" text-anchor="middle" class="dg-title">错版本：取回 generation 6</text>
+<text x="260.0" y="362.0" font-size="18" text-anchor="middle" class="dg-note">即使 object key 相同，也不是当前对象</text>
+<rect x="555" y="294" width="450" height="90" rx="12" fill="#fff0f1" stroke="#e9adb5" stroke-width="1.5"/>
+<text x="780.0" y="333.0" font-size="22" text-anchor="middle" class="dg-title">错内容：generation 7，摘要变 B</text>
+<text x="780.0" y="362.0" font-size="18" text-anchor="middle" class="dg-note">索引命中正确，字节仍可能已经损坏</text>
+<text x="520" y="430" font-size="20" text-anchor="middle" class="">D2H ready → 存储提交 → 版本匹配 → H2D ready → 首次读取</text>
+</svg></div>
+<figcaption>如果后端无法提供可关联的对象版本或摘要，只能声明搬运链路可见，不能声明内容校验闭环。 <a href="#transfer">查看技术细节</a></figcaption>
+<div class="diagram-tools"><button type="button" data-zoom="offload" aria-label="放大图 6：外部存储：索引命中不等于内容正确">放大</button><button type="button" data-download="offload" aria-label="下载图 6 SVG">下载 SVG</button></div></figure>
+</section><section class="visual-section" id="fig-attribution">
+<h2><span class="n">图 07</span>异常定位：证据能支持到哪一步，结论就写到哪一步</h2>
+<p class="intro">全链路 trace 的输出是可复查的失败边与证据缺口，避免凭时间相邻就归责。</p>
+<figure class="diagram"><div class="diagram-scroll"><svg xmlns="http://www.w3.org/2000/svg" id="svg-attribution" viewBox="0 0 1040 550" role="img" aria-labelledby="attribution-title attribution-desc">
+<title id="attribution-title">异常证据与归因</title><desc id="attribution-desc">数据出现差异后，先检查事件覆盖、布局和因果是否完整。缺失证据则保留宽窗口；只有快照则无法归责dummy；实际写事件、代次和并发证据齐全才可确认写入责任。</desc>
+<defs>
+<style>text{font-family:"Segoe UI","Microsoft YaHei",sans-serif;fill:#18323f} .dg-title{font-weight:650}.dg-note{fill:#657b89}.dg-mono{font-family:Consolas,"Microsoft YaHei",monospace}</style>
+<marker id="attribution-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#086f74"/></marker>
+<marker id="attribution-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#295db0"/></marker>
+<marker id="attribution-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#657b89"/></marker>
+<marker id="attribution-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#ad3444"/></marker>
+</defs><rect width="1040" height="550" fill="#fff"/>
+<rect x="365" y="20" width="310" height="66" rx="12" fill="#edf3ff" stroke="#b2c9ee" stroke-width="1.5"/>
+<text x="520.0" y="61.5" font-size="23" text-anchor="middle" class="dg-title">KV 出现异常 / 差异</text>
+<path d="M520 88V125" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#attribution-teal)"/>
+<rect x="365" y="127" width="310" height="99" rx="12" fill="#f2f6f8" stroke="#d4e0e6" stroke-width="1.5"/>
+<text x="520.0" y="171.5" font-size="24" text-anchor="middle" class="dg-title">证据完整吗？</text>
+<text x="520.0" y="200.5" font-size="18" text-anchor="middle" class="dg-note">事件 · 布局 · 因果依赖</text>
+<path d="M363 175H298" fill="none" stroke="#ad3444" stroke-width="2.5" marker-end="url(#attribution-red)"/>
+<text x="332" y="152" font-size="18" text-anchor="middle" class="" style="fill:#ad3444">否</text>
+<rect x="25" y="127" width="272" height="99" rx="12" fill="#fff0f1" stroke="#e9adb5" stroke-width="1.5"/>
+<text x="161.0" y="171.5" font-size="24" text-anchor="middle" class="dg-title">不确定</text>
+<text x="161.0" y="200.5" font-size="18" text-anchor="middle" class="dg-note">列出缺口，保留宽窗口</text>
+<path d="M520 228V277" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#attribution-teal)"/>
+<text x="542" y="259" font-size="18" text-anchor="middle" class="" style="fill:#086f74">是</text>
+<path d="M520 277H265V327" fill="none" stroke="#295db0" stroke-width="2.5" marker-end="url(#attribution-blue)"/>
+<path d="M520 277H785V327" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#attribution-teal)"/>
+<rect x="35" y="330" width="460" height="112" rx="12" fill="#edf3ff" stroke="#b2c9ee" stroke-width="1.5"/>
+<text x="265.0" y="381.0" font-size="24" text-anchor="middle" class="dg-title">只有快照前后变化</text>
+<text x="265.0" y="410.0" font-size="18" text-anchor="middle" class="dg-note">疑似：知道变了，但尚不能归责 dummy</text>
+<rect x="545" y="330" width="460" height="112" rx="12" fill="#eaf5f3" stroke="#9ecdc5" stroke-width="1.5"/>
+<text x="775.0" y="381.0" font-size="24" text-anchor="middle" class="dg-title">实际写 + 归属 / 范围 + 因果</text>
+<text x="775.0" y="410.0" font-size="18" text-anchor="middle" class="dg-note">确认非法写后，归因到对应责任操作</text>
+<text x="520" y="499" font-size="24" text-anchor="middle" class="dg-title">确认内容不同 ≠ 确认写入责任</text>
+<text x="520" y="532" font-size="18" text-anchor="middle" class="dg-note">取证顺序：冻结事件窗口 → 找第一条失败边 → 按 token / layer 深挖</text>
+</svg></div>
+<figcaption>confirmed / suspect / inconclusive 分别表达不同证据强度；没有告警不代表不存在污染。 <a href="#evidence">查看技术细节</a></figcaption>
+<div class="diagram-tools"><button type="button" data-zoom="attribution" aria-label="放大图 7：异常定位：证据能支持到哪一步，结论就写到哪一步">放大</button><button type="button" data-download="attribution" aria-label="下载图 7 SVG">下载 SVG</button></div></figure>
+</section>
+<div class="rollout-summary"><p><strong>实施顺序：</strong>先打通身份与事件关联 → 完成 v1 + Mooncake 的内容闭环 → 扩展 CPU / Store 和其他特性。</p><p><strong>验收重点：</strong>合法共享不误报、污染可定位到失败边、缺失证据不冒充确定结论。</p></div>
+<details class="appendix" id="technical-details"><summary>展开技术细节：PPT 分析、事件字段、代码埋点、验收与源码</summary><p class="small">原设计正文保留于此，按需查阅。图中的“查看技术细节”会自动展开对应章节。</p><div class="appendix-content"><section id="decision">
+<h2><span class="n">A01 / DECISION</span>设计结论</h2>
 <p>保留现有 <code>KVTrace → JSONL → tools/kv_block_trace.py</code> 路径，在它上面补全身份、因果关联和边界证据。第一阶段交付可回放的链路，后续把 L1 行为校验、语义摘要和内容校验接到同一事件流。</p>
 <ol>
 <li><strong>物理块号必须带作用域与代次。</strong>单独的 <code>block_id</code> 无法区分不同引擎、rank、存储池和重用后的块。所有跨组件事件携带同一个分配身份，搬运事件显式关联源块和目标块。</li>
@@ -43,7 +344,7 @@
 </section>
 
 <section id="reference">
-<h2><span class="n">02 / INPUT ANALYSIS</span>参考 PPT 的结论与修正</h2>
+<h2><span class="n">A02 / INPUT ANALYSIS</span>参考 PPT 的结论与修正</h2>
 <div class="table-wrap"><table><thead><tr><th>页码</th><th>参考文档内容</th><th>转化为本设计</th></tr></thead><tbody>
 <tr><td>2–3、6–9</td><td>processor 统一入口；检测、报告、请求级 KV dump；异常后生成标杆，逐 token、逐层比较。</td><td>沿用“检测触发取证、离线定位”流程。PPT 描述的热更新与四类 detector 未在本次 trace 基线中检索到，作为待集成接口，不能写成当前功能。</td></tr>
 <tr><td>4 / Case 3</td><td>首个输出 token 已发散，图中 layer 11 开始明显下降；PPT 倾向计算问题。</td><td>记录同一 token 路径的逐层边界。此现象支持继续查计算路径，但仅凭末态相似度无法严格排除中间 KV 被改写。</td></tr>
@@ -56,7 +357,7 @@
 </section>
 
 <section id="baseline">
-<h2><span class="n">03 / CURRENT BASELINE</span>已实现的起点和缺口</h2>
+<h2><span class="n">A03 / CURRENT BASELINE</span>已实现的起点和缺口</h2>
 <p>远端主分支为 <code>5e19a5a8</code>，已有 trace 分支在其上增加了 12 个文件的变更。本设计分支直接继承 <code>a331676c</code>，下面“现有”均指这一 commit 的静态代码事实。</p>
 <div class="table-wrap"><table><thead><tr><th>环节</th><th>现有能力</th><th>全链路仍需补齐</th></tr></thead><tbody>
 <tr><td>Scheduler</td><td>包装 KVCacheManager 的 <code>get_computed_blocks / allocate_slots / cache_blocks / free</code>；记录 owners、ref_count、lease。<a class="source" href="#s2">[S2]</a></td><td>真实 BlockPool 分配、evict、reset、引用变更与 invalidation；SchedulerOutput 下发版本。Manager 边界观察不能替代分配器内部事件。</td></tr>
@@ -70,7 +371,7 @@
 </section>
 
 <section id="architecture">
-<h2><span class="n">04 / END-TO-END CHAIN</span>链路与组件边界</h2>
+<h2><span class="n">A04 / END-TO-END CHAIN</span>链路与组件边界</h2>
 <figure style="margin:0"><div class="flow">
 <div><em>01 · CONTROL</em><b>Scheduler / BlockPool</b><span>lookup、allocate、share、evict、release<br>产出 epoch 与调度映射</span></div>
 <div><em>02 · EXECUTION</em><b>Worker / Attention</b><span>接收映射、slot、KV 写、attention 读<br>区分 real / dummy / replay</span></div>
@@ -83,7 +384,7 @@
 </section>
 
 <section id="identity">
-<h2><span class="n">05 / IDENTITY</span>块身份、内容身份与映射</h2>
+<h2><span class="n">A05 / IDENTITY</span>块身份、内容身份与映射</h2>
 <div class="table-wrap"><table><thead><tr><th>对象</th><th>建议身份</th><th>含义</th></tr></thead><tbody>
 <tr><td>运行 / 引擎实例</td><td><code>run_id + engine_instance_id</code></td><td>run_id 由 P/D 共用；engine_instance_id 在每次启动生成，绑定配置中的 engine_id、host、DP rank，避免重启串线。</td></tr>
 <tr><td>分配身份</td><td><code>pool_instance_id + block_id + alloc_epoch</code></td><td>由实际 BlockPool 产生。新用途领取该物理槽时 epoch++；prefix touch 继续旧 epoch。group 是使用视图，不能凭 group 另造同一池的分配事实。</td></tr>
@@ -102,7 +403,7 @@
 </section>
 
 <section id="state">
-<h2><span class="n">06 / LIFECYCLE</span>生命周期与可验证不变量</h2>
+<h2><span class="n">A06 / LIFECYCLE</span>生命周期与可验证不变量</h2>
 <p>每个实际存储片段维护三类信息：<strong>归属</strong>（free / referenced / cached，以及传输中的持有关系）、<strong>有效内容</strong>（empty / partial / sealed / invalid）、<strong>在途操作</strong>（write / load / copy 的 issued、ready、failed）。对照表在 Scheduler、Worker 分别维护，通过事件比对，不由一个“全局可变对象”跨进程共享。</p>
 <div class="table-wrap"><table><thead><tr><th>事件</th><th>状态变化</th><th>允许条件 / 检查</th></tr></thead><tbody>
 <tr><td>ALLOC / ACQUIRE</td><td>新 epoch 从 empty 开始；请求取得引用。</td><td>ALLOC 与共享 ACQUIRE 分开。新用途分配不得与旧 epoch 的真实读写 / 传输持有重叠；trace 只报告，不替业务管理引用。</td></tr>
@@ -121,7 +422,7 @@
 </section>
 
 <section id="events">
-<h2><span class="n">07 / EVENT CONTRACT</span>事件契约、版本与因果顺序</h2>
+<h2><span class="n">A07 / EVENT CONTRACT</span>事件契约、版本与因果顺序</h2>
 <p>现有 JSONL 为 schema v1。扩展使用 <strong>schema v2</strong>，不改变已有事件的含义；reader 同时读取 v1/v2，将 v1 未知的 epoch、完成语义和覆盖范围保留为 unknown。示例与新增字段均为设计目标。</p>
 <div class="table-wrap"><table><thead><tr><th>字段组</th><th>内容</th><th>规则</th></tr></thead><tbody>
 <tr><td>公共信封</td><td><code>schema_version, run_id, writer_id, actor_id, sequence, wall_time_ns, monotonic_ns, event, config_generation</code></td><td>writer_id 对应单进程组件实例；sequence 单调且唯一。纳秒与 uint64 ID 在 JSON 中用十进制字符串，避免浏览器 Number 丢精度。</td></tr>
@@ -165,7 +466,7 @@
 </section>
 
 <section id="hooks">
-<h2><span class="n">08 / INSTRUMENTATION</span>代码埋点与责任边界</h2>
+<h2><span class="n">A08 / INSTRUMENTATION</span>代码埋点与责任边界</h2>
 <p>按事实产生的位置采集，集中调用 <code>KVTrace</code> 适配器。下表入口已在所列代码基线核对；“新增”是后续实现工作，本文不改运行时代码。</p>
 <div class="table-wrap"><table><thead><tr><th>代码入口</th><th>采集位置与数据</th><th>状态 / 注意点</th></tr></thead><tbody>
 <tr><td><code>debug/kv_trace_manager.py</code><br><code>ManagerTrace.update / wrap</code></td><td>manager 方法成功返回后记录 request→blocks、引用归属；异常前后的部分状态必须有单独结果。</td><td>现有。保留为请求视图；不再从 owners 空集合推断 allocator epoch。<a class="source" href="#s2">[S2]</a></td></tr>
@@ -183,7 +484,7 @@
 </section>
 
 <section id="transfer">
-<h2><span class="n">09 / TRANSFER INTEGRITY</span>PD 和外部存储的闭环</h2>
+<h2><span class="n">A09 / TRANSFER INTEGRITY</span>PD 和外部存储的闭环</h2>
 <h3>PD 检查点</h3>
 <ol>
 <li><strong>P 计算完成：</strong>按 layer / component 的设备完成依赖观察 KV，记 <code>produced</code> 摘要。源请求、token 区间、epoch 和 shard 固定。</li>
@@ -203,7 +504,7 @@
 </section>
 
 <section id="evidence">
-<h2><span class="n">10 / EVIDENCE</span>内容校验与现场保存</h2>
+<h2><span class="n">A10 / EVIDENCE</span>内容校验与现场保存</h2>
 <div class="table-wrap"><table><thead><tr><th>证据层</th><th>回答的问题</th><th>限制 / 成本</th></tr></thead><tbody>
 <tr><td>生命周期 / L1</td><td>谁拥有块？是否先写后读？是否读了旧 epoch 或无效范围？</td><td>依赖完整 hooks 与已适配状态语义；无法证明正确 offset 上的值正确。</td></tr>
 <tr><td>语义摘要 / L2</td><td>Scheduler 预期前缀、Worker 实际输入来源、PD/Store manifest 是否一致？</td><td>摘要必须来自可对照的独立边界。复制同一份错误 metadata 再比较属于自证；token 一致仍不证明执行结果正确。</td></tr>
@@ -229,7 +530,7 @@
 </section>
 
 <section id="coverage">
-<h2><span class="n">11 / COVERAGE</span>特性覆盖与降级</h2>
+<h2><span class="n">A11 / COVERAGE</span>特性覆盖与降级</h2>
 <div class="table-wrap"><table><thead><tr><th>场景</th><th>基线 a331676c</th><th>交付条件</th></tr></thead><tbody>
 <tr><td>v1 稠密 PA、普通 MLA、eager</td><td>forward 元数据；符合布局的选层快照。</td><td>第一阶段链路目标。还需 epoch / schedule 协议、完整读写集合与各层完成语义。</td></tr>
 <tr><td>ACL graph、dummy、DP 空批</td><td>外层 real / dummy replay span；warmup / capture 排除。</td><td>验证 replay 实际参数、图更新顺序；dummy 保留独立 span，不借用上一批 request IDs 作为实际 owners。</td></tr>
@@ -244,7 +545,7 @@
 </section>
 
 <section id="operations">
-<h2><span class="n">12 / OPERATION</span>开关、预算和失效处理</h2>
+<h2><span class="n">A12 / OPERATION</span>开关、预算和失效处理</h2>
 <h3>当前即可使用的入口</h3>
 <p>下面配置和命令来自基线实现，适用于已有 NPU/vLLM 环境。P、D 用同一个 run_id，独立实验换 run_id。现有配置在组件初始化时读取，修改后需重启。<a class="source" href="#s1">[S1]</a> <a class="source" href="#s7">[S7]</a></p>
 <pre><code>export VLLM_ASCEND_KV_TRACE='{"directory":"/tmp/kv-traces","run_id":"pd-case4-001","snapshots":true,"layers":[0,-1],"max_events":100000,"max_snapshot_bytes":8388608}'
@@ -274,7 +575,7 @@ python tools/kv_block_trace.py /tmp/kv-traces/pd-case4-001 --engine ENGINE_ID --
 </section>
 
 <section id="walkthrough">
-<h2><span class="n">13 / INVESTIGATION</span>交互式定位示例</h2>
+<h2><span class="n">A13 / INVESTIGATION</span>交互式定位示例</h2>
 <p>下面使用<strong>设计示意事件</strong>展示离线报告的判定方式，不是本次采集的数据，也不是现有 CLI 已实现的界面。A、B 表示可比布局和有效区间上的不同内容摘要。</p>
 <div class="toolbar" role="group" aria-label="选择定位场景">
 <button type="button" data-scenario="normal" aria-pressed="true">正常 PD 链路</button>
@@ -303,7 +604,7 @@ python tools/kv_block_trace.py /tmp/kv-traces/pd-case4-001 --engine ENGINE_ID --
 </section>
 
 <section id="delivery">
-<h2><span class="n">14 / DELIVERY &amp; VALIDATION</span>实施顺序与验收标准</h2>
+<h2><span class="n">A14 / DELIVERY &amp; VALIDATION</span>实施顺序与验收标准</h2>
 <div class="table-wrap"><table><thead><tr><th>阶段</th><th>最小交付</th><th>完成标准</th></tr></thead><tbody>
 <tr><td>P0 · 身份与可回放链路</td><td>schema v2、BlockPool epoch、调度 context、精确 P/D aliases、gap / checkpoint；保持原 JSONL 与 CLI 路径。</td><td>单请求、共享前缀、释放重用、异步调度和请求取消均能还原正确引用；v1 日志可读且未知字段不伪造。</td></tr>
 <tr><td>P1 · 首条内容闭环</td><td>v1 PA / MLA 适配布局的 actual mapping、PD segment manifest、完成边界、selected checksum / snapshot、dummy 证据。</td><td>正常 PD 通过；错块、少传、迟到完成、有效区改写可定位到第一条失败边；并发 / 缺证据有明确不确定结论。</td></tr>
@@ -335,7 +636,7 @@ python tools/kv_block_trace.py /tmp/kv-traces/pd-case4-001 --engine ENGINE_ID --
 </section>
 
 <section id="sources">
-<h2><span class="n">15 / SOURCES</span>证据索引与基线</h2>
+<h2><span class="n">A15 / SOURCES</span>证据索引与基线</h2>
 <p>链接固定到已读取的 commit，避免以后 main 变化导致设计依据漂移。PPT 通过 Open XML 提取了全部 24 页文字 / 表格，并检查了嵌入图示。这里只引用与设计相关的结论，没有复现 PPT 中的实验。</p>
 <p class="small">输入文件：<code>debug_trace.pptx</code><br>SHA256：<code>997f7fb26ec070fedfadf392c4c7ef5fd84284288abad8a97f0aa8f3474e4744</code></p>
 <div class="table-wrap"><table class="sources"><thead><tr><th>编号</th><th>固定版本源码</th><th>支持的事实</th></tr></thead><tbody>
@@ -356,8 +657,9 @@ python tools/kv_block_trace.py /tmp/kv-traces/pd-case4-001 --engine ENGINE_ID --
 </tbody></table></div>
 <p class="small">上游 pin 来自 <a href="https://github.com/Tjh-UKN/vllm-ascend/blob/a331676cbef9748403207d74e4d9f31924f016e1/.github/vllm-main-verified.commit">.github/vllm-main-verified.commit</a>；此文的新增接口 / 预算 / 状态规则属于设计建议，不是现有公开 API。</p>
 </section>
-<footer class="footer">KV Block 全链路 Trace · 设计草案 · 2026-09-28<br>单文件 HTML，无外部脚本、字体或图片依赖。源码链接需要网络；正文与示例离线可读。</footer>
-</main>
+</div></details>
+<footer class="footer">七张内嵌 SVG · 单文件 HTML · 无外部资源依赖<br>技术依据保持原设计基线；更新日期 2026-09-29。</footer></main>
+<dialog class="zoom-dialog" id="diagram-zoom" aria-labelledby="zoom-name"><div class="zoom-top"><strong id="zoom-name">图示</strong><button type="button" id="zoom-close" autofocus>关闭</button></div><div class="zoom-body"></div></dialog>
 <script>
 "use strict";
 const scenarios = {
@@ -433,6 +735,46 @@ for (const button of document.querySelectorAll("[data-scenario]")) {
   button.addEventListener("click", () => renderScenario(button.dataset.scenario));
 }
 document.getElementById("print").addEventListener("click", () => window.print());
-</script>
-</body>
-</html>
+
+
+function revealHash() {
+  const target=document.getElementById(decodeURIComponent(location.hash.slice(1)));
+  if(!target)return;
+  let node=target;
+  while(node){if(node.tagName==='DETAILS')node.open=true;node=node.parentElement;}
+  requestAnimationFrame(()=>target.scrollIntoView({block:'start'}));
+}
+addEventListener('hashchange',revealHash);
+if(location.hash)revealHash();
+const zoomDialog=document.getElementById('diagram-zoom');
+for(const button of document.querySelectorAll('[data-zoom]')){
+  button.addEventListener('click',()=>{
+    const source=document.getElementById('svg-'+button.dataset.zoom);
+    const clone=source.cloneNode(true);
+    const prefix='zoom-';
+    // Re-scope every ID/reference so inline SVG markers remain unambiguous.
+    for(const element of [clone,...clone.querySelectorAll('*')]){
+      for(const attr of [...element.attributes]){
+        if(attr.name==='id')element.setAttribute('id',prefix+attr.value);
+        else if(attr.name==='aria-labelledby')element.setAttribute(attr.name,attr.value.split(' ').map(v=>prefix+v).join(' '));
+        else if(attr.value.includes('url(#'))element.setAttribute(attr.name,attr.value.replace(/url\(#/g,'url(#'+prefix));
+      }
+    }
+    document.getElementById('zoom-name').textContent=source.querySelector('title').textContent;
+    document.querySelector('.zoom-body').replaceChildren(clone);
+    zoomDialog.showModal();
+  });
+}
+document.getElementById('zoom-close').addEventListener('click',()=>zoomDialog.close());
+zoomDialog.addEventListener('click',event=>{if(event.target===zoomDialog){const r=zoomDialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)zoomDialog.close();}});
+zoomDialog.addEventListener('close',()=>document.querySelector('.zoom-body').replaceChildren());
+for(const button of document.querySelectorAll('[data-download]')){
+  button.addEventListener('click',()=>{
+    const svg=document.getElementById('svg-'+button.dataset.download);
+    const blob=new Blob([new XMLSerializer().serializeToString(svg)],{type:'image/svg+xml;charset=utf-8'});
+    const url=URL.createObjectURL(blob),a=document.createElement('a');
+    a.href=url;a.download='kv-trace-'+button.dataset.download+'.svg';a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+  });
+}
+</script></body></html>
