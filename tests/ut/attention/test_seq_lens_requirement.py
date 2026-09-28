@@ -34,18 +34,24 @@ class _SubclassedExactBuilder(_ExactBuilder):
     """Subclasses inherit the declaration of their parent."""
 
 
+def _make_backend(builder_cls):
+    """A fake backend class exposing the real AttentionBackend API shape."""
+
+    class _FakeBackend:
+        @staticmethod
+        def get_builder_cls():
+            return builder_cls
+
+    return _FakeBackend
+
+
 def _make_group(builder_cls):
-    return SimpleNamespace(
-        backend=SimpleNamespace(get_builder_cls=staticmethod(lambda: builder_cls)),
-    )
+    return SimpleNamespace(backend=_make_backend(builder_cls))
 
 
 def _make_speculator(builder_clses):
     return SimpleNamespace(
-        attn_backends={
-            f"draft_{i}": SimpleNamespace(get_builder_cls=staticmethod(lambda cls=cls: cls))
-            for i, cls in enumerate(builder_clses)
-        }
+        attn_backends={f"draft_{i}": _make_backend(cls) for i, cls in enumerate(builder_clses)}
     )
 
 
@@ -147,11 +153,12 @@ def test_in_tree_builders_are_declared():
 
 
 def test_dsv4_stack_aggregates_to_exact():
-    """The DSv4 attention stack (all AscendDSABackend) resolves through the
-    real backend classes, exercising the aggregation path end to end."""
-    from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+    """The DSv4 attention stack (all AscendDSABackend) aggregates through the
+    real DSA metadata builder, exercising the aggregation path end to end
+    without touching global Ascend config."""
+    from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 
-    groups = [[_make_group(AscendDSABackend.get_builder_cls())]]
+    groups = [[_make_group(AscendDSAMetadataBuilder)]]
     result = resolve_host_seq_lens_requirements(groups)
     assert result.requirement is HostSeqLensRequirement.EXACT
     assert result.undeclared == []
