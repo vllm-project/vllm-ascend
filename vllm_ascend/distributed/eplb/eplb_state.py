@@ -444,13 +444,42 @@ class AscendEplbState(_eplb_state.EplbState):
                     time.sleep(0.001)
 
     def _all_ranks_result_ready(self, model_state: Any) -> bool:
-        """Defer incomplete transfers without blocking the foreground."""
+        """Pipeline readiness reduction behind one foreground iteration."""
         _raise_if_async_worker_stopped(self)
         model_state._eplb_migration_span_steps = getattr(model_state, "_eplb_migration_span_steps", 0) + 1
-        ready = super()._all_ranks_result_ready(model_state)
+        group = get_ep_group().cpu_group
+        if group.size() <= 1:
+            ready = model_state.pending_result is not None
+        else:
+            ready = self._poll_pipelined_readiness(model_state, group)
         if not ready:
             model_state._eplb_migration_deferred_steps = getattr(model_state, "_eplb_migration_deferred_steps", 0) + 1
         return ready
+
+    @staticmethod
+    def _poll_pipelined_readiness(model_state: Any, group: Any) -> bool:
+        previous_work = getattr(model_state, "_eplb_ready_work", None)
+        if previous_work is not None:
+            wait_started_at = time.perf_counter()
+            previous_work.wait()
+            ready = int(model_state._eplb_ready_flag.item()) == group.size()
+            model_state._eplb_foreground_wait_ms = (
+                getattr(model_state, "_eplb_foreground_wait_ms", 0.0) + (time.perf_counter() - wait_started_at) * 1000
+            )
+            del model_state._eplb_ready_work
+            del model_state._eplb_ready_flag
+            if ready:
+                return True
+
+        flag = torch.tensor(
+            (int(model_state.pending_result is not None),),
+            dtype=torch.int32,
+            device="cpu",
+        )
+        work = torch.distributed.all_reduce(flag, group=group, async_op=True)
+        model_state._eplb_ready_flag = flag
+        model_state._eplb_ready_work = work
+        return False
 
     @classmethod
     def from_mapping(

@@ -83,7 +83,7 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 
 Select MRv2 explicitly when the model or environment does not select it by
 default. Enable expert parallelism and upstream EPLB. Ascend selects STAIR
-as the upstream policy default and selects the Gloo communicator automatically;
+as the upstream policy default and selects the HIXL communicator automatically;
 movement is asynchronous only. The STAIR defaults do not require tuning.
 
 ```bash
@@ -115,12 +115,19 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | `policy` | `stair` on Ascend | Select `stair` for the Ascend policy or `default` for upstream-policy comparison experiments. |
 | `log_balancedness` | `false` | Log expert balancedness metrics. |
 | `log_balancedness_interval` | `1` | Interval between balancedness log entries. |
-| `communicator` | `None` | Leave unset for automatic Gloo selection, set `torch_gloo` for CPU staging, or set `hixl` for registered NPU-to-NPU transfers. |
+| `communicator` | `hixl` on Ascend | Leave unset for registered NPU-to-NPU transfers, or set `torch_gloo` for CPU staging. |
 
 These fields may also be passed together as JSON through `--eplb-config`.
 They must not be placed in `--additional-config` for MRv2.
-Selecting `hixl` requires the official `hixl` Python package distributed with
-CANN HIXL.
+The default HIXL backend requires the official `hixl` Python package distributed
+with CANN HIXL. Set `--eplb-config.communicator torch_gloo` to use CPU staging
+when HIXL is unavailable.
+
+STAIR leaves both per-rank and cross-node migration limits unrestricted by
+default (`-1`) so that HIXL can use the available bandwidth. When falling back
+to Gloo, benchmark the target topology and consider setting
+`rank_transfer_limit` and `cross_node_transfer_limit` to finite values under
+`additional_config.eplb_config.stair_config`.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;

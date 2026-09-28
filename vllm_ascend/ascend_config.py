@@ -219,8 +219,8 @@ class StairConfig:
     load_risk_quantile: float = 0.75
     relative_balance_threshold: float = 0.95
     absolute_balance_threshold: float = 0.90
-    rank_transfer_limit: int = 1
-    cross_node_transfer_limit: int = 1
+    rank_transfer_limit: int = -1
+    cross_node_transfer_limit: int = -1
     replica_search_num_stages: int = 4
     replica_search_radius: int = 8
     replica_search_beam_size: int = 64
