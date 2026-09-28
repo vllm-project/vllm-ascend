@@ -2006,19 +2006,3 @@ file(WRITE "{result}" "${{VLLM_ASCEND_BUILD_CACHE_DIR}}")
     build_script = (REPO_ROOT / "csrc" / "build.sh").read_text(encoding="utf-8")
     assert "VLLM_ASCEND_BUILD_CACHE_DIR:-${CURRENT_DIR}/build_cache" in build_script
     assert "VLLM_ASCEND_BUILD_CACHE_DIR:-${CURRENT_DIR}/../build_cache" not in build_script
-
-
-@pytest.mark.parametrize(
-    ("workflow", "container_source_root", "build_count"),
-    [
-        ("_schedule_image_build.yaml", "/vllm-workspace/vllm-ascend", 1),
-        ("schedule_release_code_and_wheel.yml", "/workspace/vllm-ascend", 4),
-    ],
-)
-def test_docker_l1_paths_match_csrc_default(workflow: str, container_source_root: str, build_count: int):
-    text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
-
-    # COPY . places the restored host directory under the image source root.
-    assert text.count("cache-dir: ${{ github.workspace }}/csrc/build_cache") == 2 * build_count
-    assert text.count('"$GITHUB_WORKSPACE/csrc/build_cache"') == build_count
-    assert text.count(f'"{container_source_root}/csrc/build_cache"') == build_count

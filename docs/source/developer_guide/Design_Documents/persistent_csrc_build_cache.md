@@ -77,12 +77,13 @@ and artifact contents before accepting an entry. An L1 hit therefore never
 overrides inner correctness, and an L1 miss never changes the correctness of a
 normal source build.
 
-The image-build L0 key currently uses architecture, base-image tag, and the
+The existing image-build L0 key uses architecture, base-image tag, and the
 tracked csrc hash. Because an L0 hit skips compilation and therefore skips L1
 entry validation, that key assumes a fixed compiler-image registry and
 immutable tags. Changing the registry or republishing a tag with different
 contents requires a new L0 key namespace or the full image identity in the
 key; an L1 identity check cannot make an already accepted L0 artifact safe.
+This PR does not change image-build L0 behavior or add L1 to Docker builds.
 
 ## Build flow
 
@@ -271,9 +272,7 @@ implementation from the workflow revision. The caller's repository and
 `source_ref` may therefore be a fork or historical snapshot without selecting
 an incompatible action implementation. Caller inputs still describe the
 tested checkout: `source-root`, cache directory, architecture, SOC, toolchain
-image, and optional csrc hash. Docker workflows retain a small workflow-code
-checkout for the exporter because it runs across the host/container boundary;
-the checkout contains only that exporter and its direct dependencies.
+image, and optional csrc hash.
 
 ## Entry and artifact lifecycle
 
@@ -323,11 +322,9 @@ require both `HW_OBS_AK` and `HW_OBS_SK`; possession of those secrets is the
 only write-authorization boundary. The save action receives the credentials
 explicitly from trusted callers and skips publication when either is absent.
 
-Only roles that create canonical reusable domains publish L1:
-
-- the central csrc producer;
-- release wheel builds for their container toolchains; and
-- image builds for their container toolchains.
+Only the central csrc producer publishes L1 in this integration. Image and
+release-wheel Docker builds retain their existing behavior and do not restore,
+export, or save persistent L1.
 
 Source-consuming jobs are read-only L1 consumers: they may restore a compatible
 snapshot before their existing source installation, but they do not publish.
@@ -391,27 +388,12 @@ Main2Main and bisect-style builds keep current workflow helpers separate from
 the selected source tree. A historical tree without `build_cache.py` reports
 `supported=false` and builds normally.
 
-### Docker consumers
+### Docker builds
 
-Wheel and image builds cross a container boundary:
-
-```text
-host restore
-  -> Docker build context
-  -> source compile in image
-  -> image-local L1
-  -> export to host
-  -> trusted save
-```
-
-For these path-context builds, the host restore and save directory is
-`csrc/build_cache`. `COPY .` places it at the same relative path in the image,
-where `csrc/build.sh` also writes by default. The export step must read that
-image path; otherwise it can return the restored snapshot without the entries
-created by the image build.
-
-Docker layer reuse is not an L1 action HIT; local entry validation remains the
-source of truth.
+Image and release-wheel workflows are not L1 consumers or writers in this PR.
+Their existing Docker build, source compilation, and image L0 behavior remain
+unchanged. A later integration must validate the Docker boundary without
+embedding persistent L1 in a published image.
 
 ## Validation summary
 
@@ -423,7 +405,6 @@ source of truth.
 | Selective invalidation | operator-local mutation with unrelated HITs |
 | Root-independent semantic identity | schema-4 CASE-C regression |
 | Persistent producer | cold/warm producer runs |
-| Docker boundary | wheel and image export/save/restore runs |
 
 Some exact production callers still require release credentials, caller
 registration, or multi-node allocation. Structural and component evidence does
@@ -434,8 +415,7 @@ not replace those caller-specific runtime gates.
 For an unexpected full MISS, compare schema, snapshot compatibility,
 `prepared_input_hash`, `recipe_hash`, and `compiler_environment_hash` in entry
 manifests. For broad selective invalidation, inspect the prepared-input set and
-operator namespace. For Docker reuse, verify host restore, image cache path,
-export, and host save. For historical source, check the restore action's
+operator namespace. For historical source, check the restore action's
 `supported` output.
 
 ## Implementation map
@@ -448,5 +428,4 @@ export, and host save. For historical source, check the restore action's
 | Third-party semantic inputs | `csrc/cmake/third_party/ascend_protobuf.cmake` |
 | Persistent restore and key orchestration | `.github/actions/csrc-l1-restore/action.yaml` |
 | Persistent changed-snapshot publication | `.github/actions/csrc-l1-save/action.yaml` |
-| Docker image-to-host export | `.github/workflows/scripts/export_csrc_l1_from_image.sh` |
 | Central producer | `.github/workflows/_build_csrc_cache.yaml` |
