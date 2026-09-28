@@ -76,6 +76,9 @@ ARG TRITON_ASCEND_VERSION
 ARG TRITON_ASCEND_PACKAGE_VERSION
 # DAILY_DEPS_MODE (optional): Daily deps install mode: 'full' or 'torch_npu_only'.
 ARG DAILY_DEPS_MODE="full"
+# flash-linear-attention-npu
+ARG FLA_VERSION="26.9.1+deva4a7958"
+ARG FLA_RELEASE_TAG="v26.9.1-beta2"
 
 WORKDIR /workspace
 
@@ -130,6 +133,25 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     python3 -m pip uninstall -y triton triton-ascend && \
     python3 -m pip install triton-ascend==3.2.2 --extra-index-url ${ASCEND_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler && \
+    python3 -m pip cache purge
+
+# Install flash-linear-attention-npu (v26.9.1-beta2, A2 ascend910b)
+ARG TARGETPLATFORM
+RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
+    case "$ARCH" in \
+        "linux/arm64"|"aarch64") \
+            FLA_WHL="flash_linear_attention_npu_a2-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"; \
+            FLA_SHA256="7c3d3d07419a9cb1a17ca0d683d4d5de82d69c6523ada96396c9d6d0317e583a" ;; \
+        "linux/amd64"|"x86_64") \
+            FLA_WHL="flash_linear_attention_npu_a2-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"; \
+            FLA_SHA256="c51b11871b5e8a66b6a0612ef95ea446fd96ba3d8d02b693d93a7b7b5f1b1d0f" ;; \
+        *) echo "Unsupported arch for flash-linear-attention-npu: $ARCH" && exit 1 ;; \
+    esac && \
+    FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}" && \
+    wget --quiet "$FLA_DOWNLOAD_URL" -O /tmp/${FLA_WHL} && \
+    echo "${FLA_SHA256}  /tmp/${FLA_WHL}" | sha256sum --check && \
+    python3 -m pip install --force-reinstall --no-deps /tmp/${FLA_WHL} && \
+    rm -f /tmp/${FLA_WHL} && \
     python3 -m pip cache purge
 
 # Install _rust_tool_parser for the Rust frontend.
