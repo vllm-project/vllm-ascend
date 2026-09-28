@@ -63,6 +63,17 @@ _ENV_SOURCE_FILES = (
 )
 
 
+def _multi_node_test_path(repo: Path, inp: BisectInput) -> str:
+    """Select the common dispatcher, with a fallback for legacy commits."""
+    if (repo / _MULTI_NODE_TEST).is_file():
+        return _MULTI_NODE_TEST
+
+    base = inp.config_base_path or ""
+    if "external_dp/config" in base or "external_dp/config" in inp.config_yaml:
+        return _EXTERNAL_DP_TEST
+    return _INTERNAL_DP_TEST
+
+
 def _safe_name(name: str) -> str:
     return name.replace("/", "_").replace(" ", "_")
 
@@ -221,13 +232,7 @@ class MultiNodeRunner(BaseRunner):
         self.coord.publish_done()
 
     def _test_path(self) -> str:
-        if (self.repo / _MULTI_NODE_TEST).is_file():
-            return _MULTI_NODE_TEST
-
-        base = self.inp.config_base_path or ""
-        if "external_dp/config" in base or "external_dp/config" in self.inp.config_yaml:
-            return _EXTERNAL_DP_TEST
-        return _INTERNAL_DP_TEST
+        return _multi_node_test_path(self.repo, self.inp)
 
     def _run_multi_pytest(self, log_path: Path, job: str) -> int:
         env = self._base_env()
