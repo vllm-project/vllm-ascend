@@ -14,6 +14,8 @@
  */
 #include "add_rms_norm_bias_tiling.h"
 #include "log/ops_log.h"
+#include <cmath>
+#include <cstdint>
 
 namespace optiling {
 constexpr uint32_t DTYPE_KEY_FP16 = 1;
@@ -231,10 +233,16 @@ static void CalculateRowAndColParameters(gert::TilingContext* context, uint32_t&
 
     const size_t x1DimNum = x1_shape.GetDimNum();
     const size_t gammaDimNum = gamma_shape.GetDimNum();
-    numRow = 1U;
+    // The kernel addresses GM with 32-bit element offsets; reject shapes
+    // whose element count cannot be represented (tiling data / ABI keep 32-bit).
+    uint64_t numRow64 = 1U;
     for (size_t i = 0; i < x1DimNum - gammaDimNum; ++i) {
-        numRow *= x1_shape.GetDim(i);
+        numRow64 *= x1_shape.GetDim(i);
     }
+    uint64_t totalNumel = numRow64 * gamma_shape.GetShapeSize();
+    OP_CHECK_IF(totalNumel > UINT32_MAX, OP_LOGE(context, "Input x1 has too many elements (max %u).",
+        UINT32_MAX), return);
+    numRow = static_cast<uint32_t>(numRow64);
 }
 
 static ge::graphStatus GetEpsilonParameter(gert::TilingContext* context, float& epsilon)
@@ -242,8 +250,12 @@ static ge::graphStatus GetEpsilonParameter(gert::TilingContext* context, float& 
     auto attrs = context->GetAttrs();
     OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
     epsilon = *attrs->GetFloat(0);
-    OP_CHECK_IF(
-        epsilon < 0, OP_LOGE(context, "Epsilon less than zero, please check."), return ge::GRAPH_FAILED);
+    // NaN compares false against any bound, so it must be rejected
+    // explicitly; +Inf would poison every output as well. Keep the legacy
+    // constraint aligned with the A5 path (finite and nonnegative).
+    OP_CHECK_IF(!std::isfinite(epsilon) || epsilon < 0,
+        OP_LOGE(context, "Epsilon must be finite and nonnegative, please check."),
+        return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -266,16 +278,13 @@ static ge::DataType SetDataTypeParameters(gert::TilingContext* context, uint32_t
 }
 
 static void DetermineModeParameters(
-    AddRMSNormBiasTilingData* tiling, 
-    uint32_t numCol, uint32_t& ubFactor, uint32_t& rowFactor, uint32_t blockFactor, 
+    AddRMSNormBiasTilingData* tiling,
+    uint32_t numCol, uint32_t& ubFactor, uint32_t& rowFactor, uint32_t blockFactor,
     uint32_t latsBlockFactor, ge::DataType dataType, uint32_t dtypKey, uint64_t ubSize,
     uint32_t dataPerBlock, uint32_t numColAlign, uint32_t& modeKey, uint32_t isPerformance)
 {
     if (numCol > ubFactor) {
         modeKey = MODE_SPLIT_D;
-        ubFactor = tiling->get_nullptr_beta() == 1 ? ((dataType == ge::DT_FLOAT) ? UB_FACTOR_B32_CUTD : UB_FACTOR_B16_CUTD) : ((dataType == ge::DT_FLOAT) ? UB_FACTOR_B32_CUTD_WITH_BETA : UB_FACTOR_B16_CUTD_WITH_BETA);
-        uint32_t colTileNum = CeilDiv(numCol, ubFactor);
-        ubFactor = CeilDiv(numCol, colTileNum * dataPerBlock) * dataPerBlock;
     } else if (blockFactor == 1 && addRmsNormBiasSocVersion != platform_ascendc::SocVersion::ASCEND310P) {
         modeKey = MODE_SINGLE_N;
     } else if (((tiling->get_nullptr_beta() == 1 && numColAlign <= SMALL_REDUCE_NUM) || (tiling->get_nullptr_beta() == 0 && numColAlign <= SMALL_REDUCE_NUM_WITH_BETA)) && addRmsNormBiasSocVersion != platform_ascendc::SocVersion::ASCEND310P) {
@@ -287,11 +296,11 @@ static void DetermineModeParameters(
 
         uint32_t mulLoopFp32 = numColAlign / 64;
         uint32_t mulTailFp32 = numColAlign - mulLoopFp32 * 64;
-        uint8_t dstRepStrideFp32 = numColAlign / 8; 
+        uint8_t dstRepStrideFp32 = numColAlign / 8;
 
         uint32_t mulLoopFp16 = numColAlign / 128;
         uint32_t mulTailFp16 = numColAlign - mulLoopFp16 * 128;
-        uint8_t dstRepStrideFp16 = numColAlign / 16; 
+        uint8_t dstRepStrideFp16 = numColAlign / 16;
 
         tiling->set_is_performance(isPerformance);
         tiling->set_mul_loop_fp32(mulLoopFp32);
@@ -313,12 +322,47 @@ static void DetermineModeParameters(
         }
     }
     if (modeKey == MODE_NORMAL) {
-        // NORMAL keeps whole rows in UB, so the kernel only ever touches
-        // numColAlign elements per row; size the buffers to that instead of
-        // the dtype's worst-case factor to keep per-core UB headroom for the
-        // hoisted gamma/beta fp32 buffers (e.g. hidden=7168 with beta used to
-        // allocate for 11264 columns and waste ~76KB of the 192KB UB).
-        ubFactor = numColAlign;
+        // Cost-model driven UB check: the kernel sizes every buffer from
+        // ub_factor, so the per-column cost of the layout that will run must
+        // fit UB for the actual numColAlign (the kernel does not re-check).
+        //  - bf16 runs the row-pipelined layout: 24B/col with beta, 20B/col
+        //    without (4 fp32 workspaces + 2x double-buffered bf16 slot pairs)
+        //    plus ~3.2KB fixed (rstd accumulator/compaction, reduce work).
+        //  - fp16/fp32 keep the queue-based serial layout: 16/14B and 20/16B
+        //    per column plus ~0.6KB fixed (their legacy ub_factor constants
+        //    already guarantee fit, the check is kept for robustness).
+        uint64_t perColBytes;
+        uint64_t fixedBytes;
+        if (dataType == ge::DT_BF16) {
+            perColBytes = tiling->get_nullptr_beta() == 1 ? 20 : 24;
+            fixedBytes = 3200;
+        } else if (dataType == ge::DT_FLOAT16) {
+            perColBytes = tiling->get_nullptr_beta() == 1 ? 14 : 16;
+            fixedBytes = 640;
+        } else {
+            perColBytes = tiling->get_nullptr_beta() == 1 ? 16 : 20;
+            fixedBytes = 640;
+        }
+        if (static_cast<uint64_t>(numColAlign) * perColBytes + fixedBytes > ubSize) {
+            // Fall back to SPLIT_D, which chunks the columns and fits any
+            // width (e.g. bf16 hidden=8192 with beta needs 24*8192B > UB).
+            modeKey = MODE_SPLIT_D;
+        } else {
+            ubFactor = numColAlign;
+        }
+    }
+    if (modeKey == MODE_SPLIT_D) {
+        // Column-chunked layout; reached both when numCol exceeds the initial
+        // ub_factor and when the NORMAL UB cost model above rejects the shape.
+        // Keep at least two column chunks: SPLIT_D was shipped and validated
+        // only with colTileNum >= 2 (single-chunk configs were unreachable
+        // before the NORMAL fallback existed).
+        ubFactor = tiling->get_nullptr_beta() == 1 ? ((dataType == ge::DT_FLOAT) ? UB_FACTOR_B32_CUTD : UB_FACTOR_B16_CUTD) : ((dataType == ge::DT_FLOAT) ? UB_FACTOR_B32_CUTD_WITH_BETA : UB_FACTOR_B16_CUTD_WITH_BETA);
+        if (static_cast<uint64_t>(ubFactor) > numCol / 2) {
+            ubFactor = CeilDiv(numCol / 2, dataPerBlock) * dataPerBlock;
+        }
+        uint32_t colTileNum = CeilDiv(numCol, ubFactor);
+        ubFactor = CeilDiv(numCol, colTileNum * dataPerBlock) * dataPerBlock;
     }
     uint32_t rowLoop = CeilDiv(blockFactor, rowFactor);
     uint32_t lastBlockRowLoop = CeilDiv(latsBlockFactor, rowFactor);
@@ -402,7 +446,32 @@ static ge::graphStatus Tiling4AddRmsNormBias(gert::TilingContext* context)
 
     AddRMSNormBiasTilingData tiling;
 
+    // The kernel template reads x1/x2/gamma/beta as one dtype; the adapter
+    // derives outputs from x1, so only the inputs need checking here.
+    auto x1Desc = context->GetInputDesc(INPUT_X1_INDEX);
+    auto x2Desc = context->GetInputDesc(INPUT_X2_INDEX);
+    auto gammaDesc = context->GetInputDesc(INPUT_GAMMA_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, x1Desc);
+    OP_CHECK_NULL_WITH_CONTEXT(context, x2Desc);
+    OP_CHECK_NULL_WITH_CONTEXT(context, gammaDesc);
+    OP_CHECK_IF(x2Desc->GetDataType() != x1Desc->GetDataType(),
+        OP_LOGE(context, "X2 dtype must equal x1 dtype."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(gammaDesc->GetDataType() != x1Desc->GetDataType(),
+        OP_LOGE(context, "Gamma dtype must equal x1 dtype."), return ge::GRAPH_FAILED);
+
     auto betaDesc = context->GetOptionalInputDesc(INPUT_BETA_INDEX);
+    if (betaDesc != nullptr) {
+        // The kernel reads beta as a contiguous gamma-length array of x1's
+        // dtype; a mismatched or broadcast-but-not-materialized beta would
+        // read out of bounds. Align the legacy path with the A5 tiling,
+        // which enforces the same contract.
+        auto betaShape = context->GetInputShape(INPUT_BETA_INDEX)->GetStorageShape();
+        auto gammaShape = context->GetInputShape(INPUT_GAMMA_INDEX)->GetStorageShape();
+        OP_CHECK_IF(betaShape != gammaShape,
+            OP_LOGE(context, "Beta shape must equal gamma shape."), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(betaDesc->GetDataType() != x1Desc->GetDataType(),
+            OP_LOGE(context, "Beta dtype must equal x1 dtype."), return ge::GRAPH_FAILED);
+    }
     tiling.set_nullptr_beta(betaDesc == nullptr ? 1 : 0);
 
     uint32_t num_core;
@@ -412,8 +481,7 @@ static ge::graphStatus Tiling4AddRmsNormBias(gert::TilingContext* context)
     uint32_t num_col;
     CalculateRowAndColParameters(context, num_row, num_col);
     float epsilon = 0;
-    GetEpsilonParameter(context, epsilon);
-    if (epsilon < 0) {
+    if (GetEpsilonParameter(context, epsilon) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
     uint32_t block_factor;

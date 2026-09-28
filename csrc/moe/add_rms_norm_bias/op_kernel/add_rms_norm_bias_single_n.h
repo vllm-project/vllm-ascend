@@ -110,8 +110,9 @@ private:
         PipeBarrier<PIPE_V>();
         ReduceSumCustom(sqxLocal, sqxLocal, tmpLocal, numCol);
         PipeBarrier<PIPE_V>();
-        // Scale the 1-element sum instead of the whole row of squares before
-        // the reduction: mean = rawsum * (1/N).
+        // fp16 keeps the post-reduce scaling: max(x)^2 ~ 4.3e9 and
+        // numCol <= 12288 keep the raw sum of squares below 5.3e13, far from
+        // the fp32 overflow domain - the fold cannot change overflow behavior.
         Muls(sqxLocal, sqxLocal, avgFactor, 1);
         PipeBarrier<PIPE_V>();
         Adds(sqxLocal, sqxLocal, epsilon, 1);
@@ -209,13 +210,14 @@ private:
 
         Mul(sqxLocal, x1Local, x1Local, numCol);
         PipeBarrier<PIPE_V>();
+        // Scale per element BEFORE the reduction (fp32 overflow domain: the
+        // raw sum of squares can overflow where the scaled sum cannot).
+        Muls(sqxLocal, sqxLocal, avgFactor, numCol);
+        PipeBarrier<PIPE_V>();
         ReduceSumCustom(sqxLocal, sqxLocal, tmpLocal, numCol);
         PipeBarrier<PIPE_V>();
-        // Scale the 1-element sum instead of the whole row of squares before
-        // the reduction: mean = rawsum * (1/N).
-        Muls(sqxLocal, sqxLocal, avgFactor, 1);
-        PipeBarrier<PIPE_V>();
         Adds(sqxLocal, sqxLocal, epsilon, 1);
+        PipeBarrier<PIPE_V>();
         PipeBarrier<PIPE_V>();
         Sqrt(sqxLocal, sqxLocal, 1);
         Duplicate(tmpLocal, ONE, 1);
@@ -314,13 +316,14 @@ private:
         PipeBarrier<PIPE_V>();
         Mul(sqxLocal, xFp32Local, xFp32Local, numCol);
         PipeBarrier<PIPE_V>();
+        // Scale per element BEFORE the reduction (bf16 math runs in the fp32
+        // domain - same overflow reasoning as the fp32 path).
+        Muls(sqxLocal, sqxLocal, avgFactor, numCol);
+        PipeBarrier<PIPE_V>();
         ReduceSumCustom(sqxLocal, sqxLocal, tmpLocal, numCol);
         PipeBarrier<PIPE_V>();
-        // Scale the 1-element sum instead of the whole row of squares before
-        // the reduction: mean = rawsum * (1/N).
-        Muls(sqxLocal, sqxLocal, avgFactor, 1);
-        PipeBarrier<PIPE_V>();
         Adds(sqxLocal, sqxLocal, epsilon, 1);
+        PipeBarrier<PIPE_V>();
         PipeBarrier<PIPE_V>();
         Sqrt(sqxLocal, sqxLocal, 1);
         Duplicate(tmpLocal, ONE, 1);

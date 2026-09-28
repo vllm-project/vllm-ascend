@@ -85,7 +85,9 @@ public:
             Ppipe->InitBuffer(x2PipeBuf[1], ubFactor * sizeof(T));
             Ppipe->InitBuffer(oneBuf, NUM_PER_BLK_FP32 * sizeof(float));
             Ppipe->InitBuffer(rstdAccBuf, rowFactor * NUM_PER_BLK_FP32 * sizeof(float));
-            Ppipe->InitBuffer(iotaBuf, rowFactor * NUM_PER_BLK_FP32 * sizeof(uint32_t));
+            // One uint32 byte-offset per row: the rstd compaction Gather
+            // consumes one offset per output element.
+            Ppipe->InitBuffer(iotaBuf, rowFactor * sizeof(uint32_t));
             Ppipe->InitBuffer(compBuf, rowFactor * sizeof(float));
         } else {
             Ppipe->InitBuffer(inQueueX, BUFFER_NUM, ubFactor * sizeof(T));
@@ -183,9 +185,18 @@ private:
         LocalTensor<uint32_t> iota = iotaBuf.Get<uint32_t>();
         Duplicate(zeroOff, ZERO_UINT, NUM_PER_BLK_FP32);
         Duplicate(one8, ONE, NUM_PER_BLK_FP32);
+        // Byte offsets of each row's rstd (lane 0 of its 32B block): the
+        // compaction Gather consumes one offset per output element, so the
+        // sequence must be contiguous 0, 32, 64, ... (a [b*32]*8 layout would
+        // repeat every row value 8 times). Scalar writes: per-element V-pipe
+        // stores would be 4B-unaligned.
         for (uint32_t b = 0; b < rowFactor; b++) {
-            Duplicate(iota[b * NUM_PER_BLK_FP32], b * ONE_BLK_SIZE, NUM_PER_BLK_FP32);
+            iota.SetValue(b, b * ONE_BLK_SIZE);
         }
+        TEventID evtIota = GetTPipePtr()->AllocEventID<HardEvent::S_V>();
+        SetFlag<HardEvent::S_V>(evtIota);
+        WaitFlag<HardEvent::S_V>(evtIota); // runs on the V pipe: iota visible
+        GetTPipePtr()->ReleaseEventID<HardEvent::S_V>(evtIota);
         PipeBarrier<PIPE_V>();
 
         // Widen once per core, then free the slots for row 0's loads behind
@@ -257,9 +268,12 @@ private:
         PipeBarrier<PIPE_V>();
         Mul(sqx, xf, xf, numCol);
         PipeBarrier<PIPE_V>();
-        ReduceSumCustom(sqx, sqx, reduce, numCol);
+        // Scale per element BEFORE the reduction, like the reference: the
+        // sum of N raw squares can overflow fp32 for large-magnitude inputs
+        // where sum(x^2 * 1/N) stays finite.
+        Muls(sqx, sqx, avgFactor, numCol);
         PipeBarrier<PIPE_V>();
-        Muls(sqx, sqx, avgFactor, 1);
+        ReduceSumCustom(sqx, sqx, reduce, numCol);
         PipeBarrier<PIPE_V>();
         Adds(sqx, sqx, epsilon, 1);
         PipeBarrier<PIPE_V>();
@@ -417,9 +431,11 @@ private:
         Mul(sqx, xLocal, xLocal, numCol);
         PipeBarrier<PIPE_V>();
 
-        ReduceSumCustom(sqx, sqx, reduce_buf_local, numCol);
+        // Scale per element BEFORE the reduction (fp32: the raw sum of
+        // squares can overflow where the scaled sum cannot).
+        Muls(sqx, sqx, avgFactor, numCol);
         PipeBarrier<PIPE_V>();
-        Muls(sqx, sqx, avgFactor, 1);
+        ReduceSumCustom(sqx, sqx, reduce_buf_local, numCol);
         PipeBarrier<PIPE_V>();
         Adds(sqx, sqx, epsilon, 1);
         PipeBarrier<PIPE_V>();
@@ -460,9 +476,11 @@ private:
         Mul(sqx, x_fp32, x_fp32, numCol);
         PipeBarrier<PIPE_V>();
 
-        ReduceSumCustom(sqx, sqx, reduce_buf_local, numCol);
+        // Scale per element BEFORE the reduction (fp32 overflow domain, same
+        // as the fp32 branch; bf16 math runs in the fp32 domain).
+        Muls(sqx, sqx, avgFactor, numCol);
         PipeBarrier<PIPE_V>();
-        Muls(sqx, sqx, avgFactor, 1);
+        ReduceSumCustom(sqx, sqx, reduce_buf_local, numCol);
         PipeBarrier<PIPE_V>();
         Adds(sqx, sqx, epsilon, 1);
         PipeBarrier<PIPE_V>();
@@ -514,6 +532,10 @@ private:
         Mul(sqx, x_fp32, x_fp32, numCol);
         PipeBarrier<PIPE_V>();
 
+        // fp16 keeps the post-reduce scaling: max(x)^2 = 65504^2 ~ 4.3e9 and
+        // numCol <= 12288, so the raw sum of squares stays below 5.3e13 -
+        // far from the fp32 overflow domain, the fold cannot change overflow
+        // behavior for fp16 inputs.
         ReduceSumCustom(sqx, sqx, reduce_buf_local, numCol);
         PipeBarrier<PIPE_V>();
         Muls(sqx, sqx, avgFactor, 1);

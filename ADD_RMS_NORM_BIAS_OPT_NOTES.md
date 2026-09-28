@@ -407,3 +407,48 @@ MTE2/MTE3 全隐藏（指令级三线并行度 2.27→2.87）；精度 126/126 �
 
 **方法论文档**：traces/README.md（流水图采集条件 + InstrTimeline→
 TimelineDetail 差异）、本文件各轮详设/结果/负结果。
+
+## 检视修复轮（2026-09-28）：外部检视 7 条 + 验证中发现的 2 个连带问题 — ✅ 完成
+
+外部检视（ADD_RMS_NORM_BIAS_CODE_REVIEW.md，静态审查）7 条全部采纳：
+
+| # | 级别 | 问题 | 处置 |
+|---|---|---|---|
+| 1 | 严重 | rstd 压缩 Gather 索引按 `[b×32]×8` 布局生成，count=n>8 时行值重复 8 份（偏移张量按字节逐元素消费，头文件 srcBaseOffset 校验证实） | iota 改为连续 `[0,32,64,...]`，**标量 SetValue 写入**（逐元素 V-store 4B 非对齐会触发 vector core exception——修复时引入又当场修复），iotaBuf 2KB→256B；一次性 S_V 同步保证可见性 |
+| 2 | 严重 | bf16 NORMAL 流水布局 24B/列（有 β），hidden=8192 时 UB 197KB > 191KB（原 11264 常量是 16B/列×11264=180KB 的全宽安全设计，收紧 ubFactor 后缓冲随 numCol 比例增长） | tiling 改成本驱动：按 dtype/β 的每列字节成本 + 固定开销实测预算，超限回退 SPLIT_D |
+| 3 | 严重 | 1/N 后移扩大溢出域：sum(x²) 在 x≳3e17 时 Inf，golden（逐元素 ×1/N 再求和）恒有限 | fp32/bf16 **回退折叠**（bf16 @2048 +4.5% 为正确性代价）；fp16 保留并注释证明（max sum = 12288×65504² ≈ 5.3e13 ≪ fp32 max） |
+| 4 | 严重 | legacy tiling 未校验 beta shape/dtype（kernel 按 gamma 长度直读） | 补 beta shape==gamma、beta/x2/gamma dtype==x1 校验 |
+| 5 | 严重 | epsilon 校验放过 NaN/+Inf（NaN<0 为 false） | `!std::isfinite \|\| <0` 拒绝；**并修复调用点丢弃返回值的死代码**（原 `GetEpsilonParameter(...)` 返回值被忽略） |
+| 6 | 一般 | 原 126 用例断言 rtol/atol=100 形同虚设 | 新增 `test_add_rms_norm_bias_strict.py`（**未动原文件**）：y=3 ulp、rstd=1e-3、x 位级相等；新增尾块 rows=313/2064/2600、UB 边界 col=8192、无 β、epsilon/beta 拒绝路径 |
+| 7 | 一般 | shape 乘积/GM 偏移 uint32 溢出 | tiling 以 uint64 计算并拒绝 numel > UINT32_MAX |
+
+**验证中发现的连带问题**：col=8192 走 SPLIT_D 回退后 y 出现 1.5% 元素错误
+（绝对差 17，≈每核 1 整行）——**SPLIT_D 的 j_max=1 单 chunk 路径是潜在缺陷**
+（colTileNum=1 在原设计中不可达，从未被验证）。回退配置强制 colTileNum≥2
+（ubFactor 上限 numCol/2 对齐）规避；原生路径（col>11264 → colTileNum≥2）不受影响。
+
+**验证**：原 126/126 ✓ + 严格 150/150 ✓（含 8192 边界、尾块、无 β、拒绝路径）。
+
+**修正后的记分板**（NPUGraph µs，hidden=7168；当日宿主 load≈144，4096 档噪声偏大）：
+
+| tokens | bf16 base→终值 | Δ | fp16 base→终值 | Δ |
+|---|---|---|---|---|
+| 512 | 33.16→29.37 | **-11.4%** | 21.50→21.52 | ~0% |
+| 1024 | 59.04→49.46 | **-16.2%** | 35.36→34.41 | -2.7% |
+| 2048 | 119.41→89.81 | **-24.8%** | 62.95→60.36 | **-4.1%** |
+| 4096 | 250.89→183.65 | **-26.8%** | 171.68→157.11 | -8.5%（噪声带内波动大） |
+
+（#3 回退使 bf16 @2048 从 85.9 回到 89.8——溢出域正确性的代价；fp16 折叠
+保留故收益不变。vs ref：bf16 @2048 快 29%。）
+
+**遗留候选（Round 5+，静态分析）**：
+1. **Reduce 树重构**（最大杠杆）：`ReduceSumFP32` 的 `dstRepStride=0` 使
+   numCol=7168 时 112 个 repeat 形成单依赖链（估 0.3-0.6µs/行）；改 8 路轮转
+   累加（链深 112→14）或多级 WholeReduceSum，估 @2048 -10~15µs；全变体受益
+   （SPLIT_D 的 ReduceSumFP32ToBlock 同款）。
+2. **HBM 墙**：@2048 搬运 117MB ÷ 86.4µs ≈ 1.36TB/s ≈ 峰值 85%，理论地板
+   ~73µs——上限校准。
+3. **SINGLE_N 装载并行预取**（gamma/beta 提前发，需 ubFactor 收紧腾 flat
+   buffer）：decode -10% 级。
+4. MERGE_N avgFactor 折叠（卫生学）/ fp16-fp32 NORMAL 流水化 / SPLIT_D
+   现代化（休眠）。
