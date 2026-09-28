@@ -90,7 +90,7 @@ def test_lmhead_tp_pads_to_capacity_then_trims(at_capacity):
     else:
         runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # capacity 16
         indices = torch.tensor([0, 3, 5])
-    capacity = runner._lmhead_tp_max_num_logits()
+    capacity = runner.max_num_reqs * runner.decode_query_len
     num_logits = indices.shape[0]
     hidden_dim = 4
     hidden_states = torch.randn(10, hidden_dim)

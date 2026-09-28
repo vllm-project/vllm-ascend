@@ -690,35 +690,29 @@ class NPUModelRunner(GPUModelRunner):
                 block_table[:, 0].copy_(state_slots)
         return block_tables, slot_mappings
 
-    def _lmhead_tp_max_num_logits(self) -> int:
-        """Logits row capacity shared by every rank of the lmhead-TP group.
-
-        Derived purely from global config so all ranks compute the identical
-        value, matching upstream's own logits capacity bound
-        (``max_num_reqs * decode_query_len``, see StructuredOutputsWorker init).
-        """
-        return self.max_num_reqs * self.decode_query_len
-
     def _lmhead_tp_dynamic_capacity(self) -> int:
         """Group-agreed lmhead-TP capacity for this step.
 
         Reads the dynamic value captured by the lm-head forward from the
         DP-synced ``num_tokens_across_dp`` (cached on the head), falling back
         to the static group-agreed bound when no forward ran or the head does
-        not carry a cached value.
+        not carry a cached value. The static bound is derived purely from
+        global config so all ranks compute the identical value, matching
+        upstream's own logits capacity bound
+        (``max_num_reqs * decode_query_len``, see StructuredOutputsWorker init).
         """
         lm_head = getattr(self.model, "lm_head", None)
-        dynamic = getattr(lm_head, "_lmhead_tp_dynamic_capacity", None)
-        if isinstance(dynamic, int):
-            return dynamic
-        return self._lmhead_tp_max_num_logits()
+        dynamic_capacity = getattr(lm_head, "_lmhead_tp_dynamic_capacity", None)
+        if isinstance(dynamic_capacity, int):
+            return dynamic_capacity
+        return self.max_num_reqs * self.decode_query_len
 
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP.
 
         The LM-head collectives span the whole group, so every rank must feed
         compute_logits the same number of rows: pad hidden states up to
-        ``_lmhead_tp_max_num_logits()`` and trim the logits back before
+        ``max_num_reqs * decode_query_len`` and trim the logits back before
         sampling. ``logits_indices`` stays real (the V2 sampler gathers
         penalties by it). prompt_logprobs is not supported with lmhead TP
         (same as V1).
@@ -727,7 +721,7 @@ class NPUModelRunner(GPUModelRunner):
             return super().sample(hidden_states, input_batch, grammar_output)
 
         num_logits = input_batch.logits_indices.shape[0]
-        capacity = self._lmhead_tp_max_num_logits()
+        capacity = self.max_num_reqs * self.decode_query_len
         # A mismatch would desync the LM-head all_gather/all_to_all across the
         # group and hang the collectives. Fail fast instead.
         assert num_logits <= capacity, (
