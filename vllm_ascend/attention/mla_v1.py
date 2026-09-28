@@ -76,13 +76,6 @@ BUILD_METADATA_STEP_DECODE = 1
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
 
-def _npu_mla_prolog_v3_k3(**kwargs):
-    """Call the isolated K3 MLA prolog with optional RoPE inputs omitted."""
-    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
-
-    return torch.ops._C_ascend.npu_mla_prolog_v3_k3(**kwargs)
-
-
 class AscendMLABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -1888,6 +1881,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         return decode_q_nope, decode_q_pe
 
     def mla_preprocess_only_decode(self, hidden_states, kv_cache, attn_metadata):
+        from cann_ops_transformer import mla_prolog  # type: ignore[import-not-found,import-untyped]  # noqa: PLC0415
+
         bsz = attn_metadata.num_decode_tokens
         cache_index = attn_metadata.slot_mapping[:bsz].to(torch.int64)
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
@@ -1916,32 +1911,33 @@ class AscendMLAImpl(MLAAttentionImpl):
                 )
                 cos = attn_metadata.decode.cos.view(rope_shape)
                 sin = attn_metadata.decode.sin.view(rope_shape)
-                prolog_op = torch_npu.npu_mla_prolog_v3
             else:
                 cos = None
                 sin = None
-                prolog_op = _npu_mla_prolog_v3_k3
             cache_index = cache_index.view(bsz, -1) if quantized_x.dim() == 3 else cache_index.view(-1)
             cache_mode = "PA_BSND"
             weight_quant_mode = self.mlapo_weight_quant_mode
             quant_scale_ckv = self.fak_descale_reciprocal if self.fa_quant_layer else None
         else:
-            cos_shape = attn_metadata.decode.cos.shape
             quantized_x, dynamic_scale = torch_npu.npu_dynamic_quant(hidden_states)
             dequant_scale_x = dynamic_scale.view(-1, 1)
             dequant_scale_w_dq = self.dequant_scale_w_dq
             dequant_scale_w_uq_qr = self.dequant_scale_w_uq_qr
             dequant_scale_w_dkv_kr = self.dequant_scale_w_dkv_kr
-            cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
-            sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
-            prolog_op = torch_npu.npu_mla_prolog_v3
+            if self.use_mla_rope:
+                cos_shape = attn_metadata.decode.cos.shape
+                cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
+                sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
+            else:
+                cos = None
+                sin = None
             cache_mode = "PA_NZ" if (self.fa_quant_layer or self.enable_kv_nz) else "PA_BSND"
             weight_quant_mode = 2
             # v3 full-quant uses a per-tensor kv scale; quant_kscale is one scalar
             # broadcast to (1, Hckv), so slice out the single per-tensor value.
             quant_scale_ckv = self.quant_kscale[:, :1] if self.fa_quant_layer else None
 
-        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = prolog_op(
+        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = mla_prolog(
             kv_cache=decode_k_nope,
             kr_cache=decode_k_pe,
             token_x=quantized_x,
@@ -2162,12 +2158,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             gate = self.g_proj(hidden_states.contiguous())[0]
 
         # MLA Preprocess
-        can_use_decode_prolog = self.use_mla_rope or get_current_hardware_profile().supports(
-            HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE
-        )
         if (
             (self.fa_quant_layer or self.enable_mlapo)
-            and can_use_decode_prolog
             # The fused prolog does not return the replicated current KV.
             and not self._decode_requires_current_kv(attn_metadata)
             and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
