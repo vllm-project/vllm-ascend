@@ -12,8 +12,8 @@ from vllm.model_executor.models.interfaces import (
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
 from vllm_ascend.ascend_config import EplbConfig
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.eplb.policy.factory import create_eplb_policy
-from vllm_ascend.distributed.eplb.state import AscendEplbState
 
 
 def is_eplb_load_collection_phase_matched(

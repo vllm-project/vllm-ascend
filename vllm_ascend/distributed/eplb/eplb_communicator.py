@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-"""HIXL-backed expert-weight transfers for asynchronous EPLB."""
+"""Ascend communicators for asynchronous EPLB."""
 
 import contextlib
 import time
@@ -12,10 +12,15 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.distributed import ProcessGroup
-from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
+import torch.distributed as dist
+from torch.distributed import P2POp, ProcessGroup, batch_isend_irecv
+from vllm.distributed.eplb.eplb_communicator import (
+    EplbCommunicator,
+    TorchDistGlooStagedEplbCommunicator,
+)
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import get_ip, get_open_port, join_host_port
 
 _HIXL_MEMORY_ALIGNMENT = 2 * 1024 * 1024
@@ -33,6 +38,90 @@ class _HixlTransferTiming:
     transfer_bytes: int
 
 
+class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
+    """Gloo CPU-staging EPLB communicator for async mode on Ascend.
+
+    Gloo uses CPU-side P2P and does not require the NCCL/HCCL buffer
+    reservation collective that the upstream profile path runs. Disabling
+    it also avoids passing Ascend's EplbExpertTensorList to all_gather,
+    which does not implement the __torch_function__ protocol for
+    distributed collectives.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._stream: torch.Stream | None = None
+        self._pinned_staging_buffers: dict[tuple[torch.dtype, tuple[int, ...]], list[torch.Tensor]] = {}
+
+    def set_stream(self, stream: torch.Stream | None) -> None:
+        self._stream = stream
+
+    def _acquire_staging_buffer(
+        self,
+        tensor: torch.Tensor,
+        buffer_indices: dict[tuple[torch.dtype, tuple[int, ...]], int],
+    ) -> torch.Tensor:
+        key = tensor.dtype, tuple(tensor.shape)
+        buffer_index = buffer_indices.get(key, 0)
+        buffers = self._pinned_staging_buffers.setdefault(key, [])
+        if buffer_index == len(buffers):
+            buffers.append(torch.empty_like(tensor, device="cpu", pin_memory=True))
+        buffer_indices[key] = buffer_index + 1
+        return buffers[buffer_index]
+
+    def execute(self) -> None:
+        if not self._ops:
+            return
+
+        stream = self._stream
+        p2p_ops: list[P2POp] = []
+        recv_staging: list[tuple[torch.Tensor, torch.Tensor]] = []
+        buffer_indices: dict[tuple[torch.dtype, tuple[int, ...]], int] = {}
+        try:
+            with stream if stream is not None else contextlib.nullcontext():
+                for operation, tensor, peer_rank in self._ops:
+                    cpu_tensor = self._acquire_staging_buffer(tensor, buffer_indices)
+                    if operation == "send":
+                        cpu_tensor.copy_(tensor, non_blocking=True)
+                        p2p_ops.append(
+                            P2POp(
+                                dist.isend,
+                                cpu_tensor,
+                                group=self._cpu_group,
+                                group_peer=peer_rank,
+                            )
+                        )
+                    else:
+                        p2p_ops.append(
+                            P2POp(
+                                dist.irecv,
+                                cpu_tensor,
+                                group=self._cpu_group,
+                                group_peer=peer_rank,
+                            )
+                        )
+                        recv_staging.append((tensor, cpu_tensor))
+        finally:
+            self._ops.clear()
+
+        with gpu_sync_allowed():
+            if stream is not None:
+                stream.synchronize()
+            else:
+                torch.accelerator.current_stream().synchronize()
+
+        for request in batch_isend_irecv(p2p_ops):
+            request.wait()
+
+        with stream if stream is not None else contextlib.nullcontext():
+            for dst_tensor, cpu_tensor in recv_staging:
+                dst_tensor.copy_(cpu_tensor, non_blocking=True)
+
+    @property
+    def needs_profile_buffer_reservation(self) -> bool:
+        return False
+
+
 class AscendHixlEplbCommunicator(EplbCommunicator):
     """Read expert weights directly between registered NPU allocations."""
 
@@ -45,10 +134,10 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         expert_buffer: Sequence[Any],
     ) -> None:
         try:
-            from vllm_ascend import _hixl as hixl  # type: ignore[attr-defined]
+            import hixl  # type: ignore[import-not-found]
         except ImportError as error:
             raise RuntimeError(
-                "HIXL EPLB requires vLLM Ascend to be built with the CANN HIXL development package"
+                "HIXL EPLB requires the HIXL Python package from the CANN HIXL distribution"
             ) from error
 
         if not all_expert_weights or not all_expert_weights[0] or not expert_buffer:
@@ -133,14 +222,14 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
                 tensor for layer_views in all_expert_weights for tensor in self._iter_storage_tensors(layer_views)
             ]
             tensors.extend(self._iter_storage_tensors(expert_buffer))
-            self._register_allocator_segments(tensors)
+            self._register_tensor_ranges(tensors)
             self._exchange_remote_state(local_engine, all_expert_weights)
             self._connect_peers()
         except Exception:
             self._close()
             raise
 
-    def _register_allocator_segments(self, tensors: Sequence[torch.Tensor]) -> None:
+    def _register_tensor_ranges(self, tensors: Sequence[torch.Tensor]) -> None:
         segments = sorted(
             {
                 (int(segment["address"]), int(segment["total_size"]))
@@ -148,9 +237,9 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
                 if segment.get("device") == self._device.index
             }
         )
-        regions: set[tuple[int, int]] = set()
+        ranges: list[tuple[int, int]] = []
         for tensor in tensors:
-            region = next(
+            segment = next(
                 (
                     (address, size)
                     for address, size in segments
@@ -158,20 +247,39 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
                 ),
                 None,
             )
-            if region is None:
+            if segment is None:
                 raise RuntimeError("HIXL EPLB could not resolve an allocator segment for every expert tensor")
-            regions.add(region)
+            segment_address, segment_size = segment
+            if segment_address % _HIXL_MEMORY_ALIGNMENT or segment_size % _HIXL_MEMORY_ALIGNMENT:
+                raise RuntimeError("HIXL EPLB allocator segments must be 2 MiB aligned")
+            tensor_start = tensor.data_ptr() // _HIXL_MEMORY_ALIGNMENT * _HIXL_MEMORY_ALIGNMENT
+            tensor_end = (
+                (tensor.data_ptr() + tensor.nbytes + _HIXL_MEMORY_ALIGNMENT - 1)
+                // _HIXL_MEMORY_ALIGNMENT
+                * _HIXL_MEMORY_ALIGNMENT
+            )
+            ranges.append((tensor_start, tensor_end))
+
+        regions: list[tuple[int, int]] = []
+        for start, end in sorted(ranges):
+            if regions and start <= regions[-1][1]:
+                regions[-1] = (regions[-1][0], max(end, regions[-1][1]))
+            else:
+                regions.append((start, end))
         if len(regions) > _HIXL_MAX_REGISTERED_REGIONS:
             raise RuntimeError(
                 f"HIXL EPLB requires {len(regions)} memory registrations; "
                 f"the HIXL limit is {_HIXL_MAX_REGISTERED_REGIONS}"
             )
         if self._rank == 0:
-            logger.info("Registering %d NPU allocator regions for HIXL EPLB.", len(regions))
-        for address, size in sorted(regions):
-            if address % _HIXL_MEMORY_ALIGNMENT or size % _HIXL_MEMORY_ALIGNMENT:
-                raise RuntimeError("HIXL EPLB allocator segments must be 2 MiB aligned")
-            self._register_region(address, size)
+            registered_bytes = sum(end - start for start, end in regions)
+            logger.info(
+                "Registering %d NPU memory regions (%.2f GiB) for HIXL EPLB.",
+                len(regions),
+                registered_bytes / 1024**3,
+            )
+        for start, end in regions:
+            self._register_region(start, end - start)
 
     def _register_region(self, address: int, size: int) -> None:
         assert self._engine is not None
@@ -336,12 +444,21 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
 
     def _start_transfers(self) -> list[int]:
         assert self._engine is not None
-        batches = [
-            (self._remote_engines[src_rank], descriptors) for src_rank, descriptors in self._pending_reads.items()
-        ]
-        results = self._engine.read_async_batch(batches)
         requests = []
-        for src_rank, (status, request) in zip(self._pending_reads, results, strict=True):
+        for src_rank, descriptors in self._pending_reads.items():
+            operations = [
+                self._hixl.TransferOpDesc(
+                    local_addr=local_addr,
+                    remote_addr=remote_addr,
+                    len=length,
+                )
+                for local_addr, remote_addr, length in descriptors
+            ]
+            status, request = self._engine.transfer_async(
+                self._remote_engines[src_rank],
+                self._hixl.TransferOp.READ,
+                operations,
+            )
             self._check_status(status, f"read from rank {src_rank}")
             requests.append(request)
         return requests

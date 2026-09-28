@@ -21,16 +21,18 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import routed_experts as _routed_experts
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
-from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
-from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
-from vllm_ascend.distributed.eplb.hixl_communicator import AscendHixlEplbCommunicator
-from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
-from vllm_ascend.distributed.eplb.state import (
+from vllm_ascend.distributed.eplb.eplb_communicator import (
+    AscendGlooEplbCommunicator,
+    AscendHixlEplbCommunicator,
+)
+from vllm_ascend.distributed.eplb.eplb_state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,
     EXPERT_MAPPING_EP_SIZE,
     AscendEplbState,
     refresh_model_routing_tables,
 )
+from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
+from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 # Old async APIs pass one target layer at a time. Preserve the augmented full

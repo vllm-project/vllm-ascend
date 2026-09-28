@@ -9,12 +9,12 @@ import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
 from vllm_ascend.ascend_config import StairConfig
-from vllm_ascend.distributed.eplb import state as eplb_state
-from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
-from vllm_ascend.distributed.eplb.state import (
+from vllm_ascend.distributed.eplb import eplb_state
+from vllm_ascend.distributed.eplb.eplb_state import (
     AscendEplbLayerState,
     AscendEplbState,
 )
+from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 
 
 def test_uses_upstream_policy_and_async_worker_lifecycle():

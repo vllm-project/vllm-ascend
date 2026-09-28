@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm_ascend.distributed.eplb import hixl_communicator
+from vllm_ascend.distributed.eplb import eplb_communicator
 
 
 class _Tensor:
@@ -48,16 +48,6 @@ class _Engine:
     def transfer_async(self, remote_engine, operation, descriptors):
         self.transfers.append((remote_engine, operation, descriptors))
         return 0, 100 + len(self.transfers)
-
-    def read_async_batch(self, batches):
-        results = []
-        for remote_engine, raw_descriptors in batches:
-            descriptors = [
-                SimpleNamespace(local_addr=local, remote_addr=remote, len=length)
-                for local, remote, length in raw_descriptors
-            ]
-            results.append(self.transfer_async(remote_engine, 0, descriptors))
-        return results
 
     def get_transfer_status(self, _request):
         return 0, 1
@@ -98,15 +88,15 @@ def _fake_hixl(engine):
 
 def test_hixl_reads_registered_remote_expert(monkeypatch):
     engine = _Engine()
-    monkeypatch.setitem(sys.modules, "vllm_ascend._hixl", _fake_hixl(engine))
-    monkeypatch.setattr(hixl_communicator, "is_weak_contiguous", lambda _tensor: True)
+    monkeypatch.setitem(sys.modules, "hixl", _fake_hixl(engine))
+    monkeypatch.setattr(eplb_communicator, "is_weak_contiguous", lambda _tensor: True)
     set_device = MagicMock()
     memory_snapshot = MagicMock(
         return_value=[
             {
                 "device": 0,
                 "address": 0,
-                "total_size": 2_097_152,
+                "total_size": 8_388_608,
             }
         ]
     )
@@ -116,8 +106,8 @@ def test_hixl_reads_registered_remote_expert(monkeypatch):
         SimpleNamespace(set_device=set_device, memory_snapshot=memory_snapshot),
         raising=False,
     )
-    monkeypatch.setattr(hixl_communicator, "get_ip", lambda: "192.0.2.1")
-    monkeypatch.setattr(hixl_communicator, "get_open_port", lambda: 12345)
+    monkeypatch.setattr(eplb_communicator, "get_ip", lambda: "192.0.2.1")
+    monkeypatch.setattr(eplb_communicator, "get_open_port", lambda: 12345)
 
     group = MagicMock()
     group.rank.return_value = 0
@@ -152,7 +142,7 @@ def test_hixl_reads_registered_remote_expert(monkeypatch):
         _Tensor(5000, device),
         buffer_tensor_list,
     ]
-    communicator = hixl_communicator.AscendHixlEplbCommunicator(group, weights, buffers)
+    communicator = eplb_communicator.AscendHixlEplbCommunicator(group, weights, buffers)
 
     communicator.set_stream(None)
     communicator.set_transfer_context(np.array([0, 1, 2, 3]), layer_idx=1)
@@ -174,7 +164,7 @@ def test_hixl_reads_registered_remote_expert(monkeypatch):
     assert engine.options == {}
     assert engine.connected == [("192.0.2.2:12346", 300_000)]
     assert len(engine.registered) == 1
-    assert all(descriptor.addr % 2_097_152 == 0 for descriptor in engine.registered)
+    assert (engine.registered[0].addr, engine.registered[0].len) == (0, 2_097_152)
     assert len(engine.transfers) == 1
     remote_engine, operation, descriptors = engine.transfers[0]
     assert remote_engine == "192.0.2.2:12346"
