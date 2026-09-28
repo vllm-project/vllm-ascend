@@ -1,25 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU checks for Markov-corrected, vocabulary-sharded greedy drafting."""
 
-import importlib.util
 from datetime import timedelta
-from pathlib import Path
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-# Load the pure-Torch helper without initializing the NPU plugin. This also
-# lets the Gloo checks run independently of the full vLLM test environment.
-_HELPER_PATH = Path(__file__).resolve().parents[3] / "vllm_ascend/spec_decode/dspark_local_argmax.py"
-
-
-def _load_sampler():
-    spec = importlib.util.spec_from_file_location("dspark_local_argmax_under_test", _HELPER_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.sample_local_draft_tokens
+from vllm_ascend.spec_decode.dspark_local_argmax import sample_local_draft_tokens
 
 
 def _check_case(rank, world_size, dtype, steps, mode, vocab_size):
@@ -68,7 +57,7 @@ def _check_case(rank, world_size, dtype, steps, mode, vocab_size):
         dist.all_gather(outputs, pairs)
         return torch.cat(outputs, dim=-1)
 
-    actual = _load_sampler()(local, seed, bias, start, vocab_size, world_size, gather)
+    actual = sample_local_draft_tokens(local, seed, bias, start, vocab_size, world_size, gather)
     torch.testing.assert_close(actual, reference, rtol=0, atol=0)
     assert calls == ([(batch, 2)] * steps if world_size > 1 else [])
 
@@ -92,7 +81,7 @@ def _distributed_worker(rank, world_size, rendezvous):
 
 @pytest.mark.parametrize("world_size", [1, 2, 8])
 def test_distributed_markov_argmax(world_size, tmp_path):
-    rendezvous = "file://" + str(Path(tmp_path) / "store")
+    rendezvous = (tmp_path / "store").as_uri()
     mp.spawn(_distributed_worker, args=(world_size, rendezvous), nprocs=world_size, join=True)
 
 
@@ -101,7 +90,7 @@ def test_reject_inexact_packed_token_ids():
         raise AssertionError("No projection or collective should run for an unsupported vocabulary")
 
     with pytest.raises(ValueError, match="exact FP32"):
-        _load_sampler()(
+        sample_local_draft_tokens(
             torch.zeros(1, 1, 1),
             torch.zeros(1, dtype=torch.int64),
             unexpected_call,

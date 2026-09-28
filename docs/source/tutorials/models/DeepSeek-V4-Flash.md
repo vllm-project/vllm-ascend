@@ -1196,7 +1196,7 @@ is unchanged. The existing draft buffer and dynamic verification-length update
 are preserved.
 
 This path supports the DeepSeek-V4 full-vocabulary drafter on Model Runner V1.
-Other draft models, reduced-vocabulary mappings, and a separate LMHead TP group
+Other draft models, PCP-sharded LM heads, and a separate LMHead TP group
 retain their existing sampling path. The existing configuration validation
 rejects combining local argmax with probabilistic drafting. This change does
 not add support to Model Runner V2.

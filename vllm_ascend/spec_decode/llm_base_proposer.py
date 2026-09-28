@@ -60,7 +60,7 @@ from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
+from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode, lmhead_all_to_all
 from vllm_ascend.spec_decode.dspark_local_argmax import sample_local_draft_tokens
 from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
@@ -1379,13 +1379,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return draft_token_ids
 
     def _can_use_dspark_local_argmax(self) -> bool:
-        """Keep other draft models and vocabulary layouts on their existing path."""
+        """Use TP-only candidate exchange only for a standard TP-sharded head.
+
+        PCP_X_TP also shards the vocabulary across PCP ranks, so it must use
+        the full-logit path that gathers both PCP and TP vocabulary shards.
+        """
         return (
             self.use_local_argmax_reduction
-            and not self._enable_probabilistic_draft_probs
             and isinstance(self.model, DSparkDeepseekV4ForCausalLM)
-            and getattr(self.model, "draft_id_to_target_id", None) is None
-            and not lmhead_tp_enable()
+            and self.model.lm_head.parallel_mode is VocabParallelMode.STANDARD
         )
 
     def _sample_draft_from_logits(
