@@ -527,6 +527,10 @@ class KVTransferThread(threading.Thread):
         self.token_database = token_database
         self.num_addrs_per_block = len(token_database.group_block_len[0])
         self.done_task_lock = threading.Lock()
+        # Serialize request submission with the transition to a fatal state.
+        # Otherwise a producer can enqueue immediately after the failed
+        # consumer has drained the queue, leaving work with no live consumer.
+        self._request_submit_lock = threading.Lock()
         self.request_queue: queue.Queue[Any] = queue.Queue()
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
         self.finished_requests: set[str] = set()
@@ -542,7 +546,9 @@ class KVTransferThread(threading.Thread):
         return self.block_size
 
     def add_request(self, request: Any) -> None:
-        self.request_queue.put(request)
+        with self._request_submit_lock:
+            self.raise_if_failed()
+            self.request_queue.put(request)
 
     def get_and_clear_finished_requests(
         self,
@@ -767,7 +773,12 @@ class KVTransferThread(threading.Thread):
                     continue
                 self._handle_request(request_data)
             except Exception as e:
-                self._fatal_error = e
+                with self._request_submit_lock:
+                    self._fatal_error = e
+                    try:
+                        self._handle_request_exception(request_data)
+                    except Exception:
+                        logger.exception("Failed to clean up KV transfer request after an unexpected dispatch error")
                 logger.error(
                     "Error in KVCacheTransferThread(%s). type=%s, error=%s. Check thread state and request processing.",
                     self.name,
@@ -973,13 +984,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
     def add_save_batch(self, requests: list[ReqMeta]) -> KVCacheStoreBatch:
         """Queue requests followed by a fence that completes after the batch."""
         save_batch = KVCacheStoreBatch()
-        # Register every duplicate request id before exposing the batch so its
-        # count cannot transiently reach zero between chunks.
-        for request in requests:
-            self.add_stored_request(request)
-        for request in requests:
-            self.request_queue.put(request)
-        self.request_queue.put(save_batch)
+        # The lock makes registration, queue publication, and the transition
+        # to a fatal state mutually exclusive. A failed consumer therefore
+        # either drains this complete batch or rejects it before registration.
+        with self._request_submit_lock:
+            self.raise_if_failed()
+            for request in requests:
+                self.add_stored_request(request)
+            for request in requests:
+                self.request_queue.put(request)
+            self.request_queue.put(save_batch)
         return save_batch
 
     def is_live_store_job(self, req_meta: ReqMeta) -> bool:
@@ -1077,16 +1091,37 @@ class KVCacheStoreSendingThread(KVTransferThread):
         return completed_events
 
     def _handle_request_exception(self, request_data: Any):
-        if isinstance(request_data, ReqMeta):
-            remaining = self.finish_store_job(request_data)
-            if remaining == 0:
-                self.set_finished_request(request_data.req_id)
-            if request_data.event_id is not None:
-                with self.completed_events_lock:
-                    self.completed_events[request_data.event_id] = (
-                        self.completed_events.get(request_data.event_id, 0) + 1
-                    )
-        self.request_queue.task_done()
+        def finish_failed_request(failed_request: Any) -> None:
+            if isinstance(failed_request, ReqMeta):
+                remaining = self.finish_store_job(failed_request)
+                if remaining == 0:
+                    self.set_finished_request(failed_request.req_id)
+                if remaining is not None and failed_request.event_id is not None:
+                    with self.completed_events_lock:
+                        self.completed_events[failed_request.event_id] = (
+                            self.completed_events.get(failed_request.event_id, 0) + 1
+                        )
+            elif isinstance(failed_request, KVCacheStoreBatch):
+                # Wake wait_for_previous_save(); it will observe _fatal_error
+                # and raise instead of blocking forever on the batch fence.
+                failed_request.done.set()
+            # Dispatch can fail after a subclass has already acknowledged the
+            # current queue item. Emergency cleanup must remain idempotent so
+            # it does not hide the original failure with a second task_done().
+            # This thread is the queue's only consumer; producers may increase
+            # unfinished_tasks, but cannot make this positive check stale in
+            # the unsafe direction.
+            if self.request_queue.unfinished_tasks > 0:
+                self.request_queue.task_done()
+
+        if request_data is not None:
+            finish_failed_request(request_data)
+        while True:
+            try:
+                queued_request = self.request_queue.get_nowait()
+            except queue.Empty:
+                break
+            finish_failed_request(queued_request)
 
     def _handle_request(self, req_meta: ReqMeta | KVCacheStoreBatch):
         if isinstance(req_meta, KVCacheStoreBatch):

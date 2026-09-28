@@ -684,15 +684,47 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
     def test_unexpected_dispatch_error_releases_pinned_job(self):
         t, _ = self._make_thread([0])
+        first = ReqMeta("r1", event_id=7, store_job_id=7)
+        second = ReqMeta("r2", event_id=8, store_job_id=8)
+        save_batch = t.add_save_batch([first, second])
+
+        t._handle_request = MagicMock(side_effect=RuntimeError("dispatch failed"))
+        t.run()
+
+        self.assertIsInstance(t._fatal_error, RuntimeError)
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+        self.assertFalse(t.is_stored_request("r1"))
+        self.assertFalse(t.is_stored_request("r2"))
+        self.assertEqual(t.get_completed_events(), {7: 1, 8: 1})
+        self.assertTrue(save_batch.done.is_set())
+
+    def test_dispatch_cleanup_does_not_acknowledge_request_twice(self):
+        t, _ = self._make_thread([0])
         req = ReqMeta("r1", event_id=7, store_job_id=7)
         t.add_stored_request(req)
         t.request_queue.put(req)
+        self.assertIs(t.request_queue.get_nowait(), req)
+        self.assertEqual(t.finish_store_job(req), 0)
+        t.completed_events[7] = 1
+        t.request_queue.task_done()
 
         t._handle_request_exception(req)
 
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
         self.assertFalse(t.is_stored_request("r1"))
         self.assertEqual(t.get_completed_events(), {7: 1})
+
+    def test_add_save_batch_rejects_job_after_fatal_error(self):
+        t, _ = self._make_thread([0])
+        req = ReqMeta("r1", event_id=7, store_job_id=7)
+        t._fatal_error = RuntimeError("dispatch failed")
+
+        with self.assertRaisesRegex(RuntimeError, "failed during asynchronous transfer"):
+            t.add_save_batch([req])
+
+        self.assertFalse(t.is_stored_request("r1"))
+        self.assertTrue(t.request_queue.empty())
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
 
     def test_handle_request_sync_and_dcp(self):
         t, store = self._make_thread([0])

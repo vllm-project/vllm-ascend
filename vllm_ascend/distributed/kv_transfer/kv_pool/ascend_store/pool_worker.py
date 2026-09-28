@@ -2763,6 +2763,7 @@ class KVPoolWorker:
         while True:
             send_thread.raise_if_failed()
             if save_batch.done.wait(timeout=SAVE_BATCH_FAILURE_POLL_INTERVAL_S):
+                send_thread.raise_if_failed()
                 break
         elapsed = time.perf_counter() - wait_start
         logger.debug(
@@ -2776,6 +2777,11 @@ class KVPoolWorker:
         current_event = None
         assert self.kv_send_thread is not None
         send_thread = self.kv_send_thread
+        if not isinstance(send_thread, KVCacheStoreSendingThread):
+            raise TypeError(
+                f"Non-layerwise KV save requires KVCacheStoreSendingThread, but got {type(send_thread).__name__}"
+            )
+        send_thread.raise_if_failed()
         requests: list[ReqMeta] = []
 
         for request in connector_metadata.requests:
@@ -2792,10 +2798,6 @@ class KVPoolWorker:
         if not requests:
             return
 
-        if not isinstance(send_thread, KVCacheStoreSendingThread):
-            raise TypeError(
-                f"Non-layerwise KV save requires KVCacheStoreSendingThread, but got {type(send_thread).__name__}"
-            )
         self._previous_save_batch = send_thread.add_save_batch(requests)
 
     def retrieve_layer(
