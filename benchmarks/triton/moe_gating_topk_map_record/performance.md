@@ -269,7 +269,7 @@ the three decision cases below also have balanced repeat controls.
 
 `fallback` means the PR's production dispatch retains the baseline, not that
 its raw kernel was assigned zero duration. #17579's guard is T≤4096;
-#17574's is T≤512. PR #17574's raw kernel passed 72 of the 96 direct
+PR #17574's is T≤512. PR #17574's raw kernel passed 72 of the 96 direct
 business accuracy cases through T=131072, including all 48 eligible decode
 cases. Direct T=262144 reached grid/coreDim 65536 and failed the device's
 65535 maximum. Production T>512 falls back, so this is a raw-kernel limit,
@@ -295,7 +295,7 @@ medians, so a small margin still needs more samples for a stability claim.
 The T=512/E=32 reversal between the two fused kernels is informative:
 our kernel launches 256 programs versus #17574's 128. In this control,
 our per-program median AIV Scalar/Vector times were 5.08/4.65 µs, versus
-#17574's 9.35/5.87 µs. Thus #17574 does *more* work per program but schedules
+PR #17574's 9.35/5.87 µs. Thus PR #17574 does *more* work per program but schedules
 half as many programs; its lower total Task Duration is consistent with
 program-count/wave overhead dominating. At T=256/E=16, both launch 128
 programs and our lower median Scalar/Vector times (4.92/4.52 µs versus

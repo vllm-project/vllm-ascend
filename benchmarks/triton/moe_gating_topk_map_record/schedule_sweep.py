@@ -11,8 +11,9 @@ import statistics
 
 import torch
 
-from case_generator import Case, load_candidate, make_inputs
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+
+from case_generator import Case, load_candidate, make_inputs
 
 
 def main():
@@ -53,7 +54,7 @@ def main():
     for num_grids, block_t in configurations:
         records = torch.empty((num_grids, args.e), dtype=torch.int32, device="npu")
 
-        def launch():
+        def launch(num_grids=num_grids, block_t=block_t, records=records):
             route[(num_grids,)](
                 logits,
                 logits,

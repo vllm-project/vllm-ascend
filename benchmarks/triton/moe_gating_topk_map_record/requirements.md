@@ -98,14 +98,14 @@ tiling class requires ASCEND950 (A5), so it is deferred by user direction.
 
 ## Observed
 
-#17579 passed its prior 96/96 business accuracy cases and 18 NPU integration
+PR #17579 passed its prior 96/96 business accuracy cases and 18 NPU integration
 tests; earlier same-910B4 profiles are in `performance.md`. The current
-#17574 direct-kernel sweep passed 72 cases through T=131072, including all
+The PR #17574 direct-kernel sweep passed 72 cases through T=131072, including all
 48 production-eligible decode cases; T=262144 failed at grid/coreDim 65536.
 Three additional supported FP32 controls passed: T=65 masked tail with
 duplicate mapping, T=128 ties/bias/padding, and recording disabled. The
 existing edge-suite case with host-integer valid-token count is outside
-#17574's ABI, which explicitly requires a device scalar.
+PR #17574's ABI, which explicitly requires a device scalar.
 The standalone **timing** baseline supplies a stable representative
 `expert_tokens` vector to isolate the record kernel's cost. Accuracy now uses
 the actual `npu_moe_init_routing_v2` count-mode output and applies the existing
