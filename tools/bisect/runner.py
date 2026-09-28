@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 _MULTI_NODE_TEST = "tests/e2e/nightly/multi_node/scripts/test_multi_node.py"
 _INTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py"
 _EXTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py"
+_EXTERNAL_DP_CONFIG_DIR = "tests/e2e/nightly/multi_node/external_dp/config"
 
 # Ascend toolkit env files sourced before launching multi-node pytest.
 _ENV_SOURCE_FILES = (
@@ -69,7 +70,12 @@ def _multi_node_test_path(repo: Path, inp: BisectInput) -> str:
         return _MULTI_NODE_TEST
 
     base = inp.config_base_path or ""
-    if "external_dp/config" in base or "external_dp/config" in inp.config_yaml:
+    legacy_external_config = repo / _EXTERNAL_DP_CONFIG_DIR / inp.config_yaml
+    if (
+        "external_dp/config" in base
+        or "external_dp/config" in inp.config_yaml
+        or legacy_external_config.is_file()
+    ):
         return _EXTERNAL_DP_TEST
     return _INTERNAL_DP_TEST
 
