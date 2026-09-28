@@ -32,11 +32,13 @@ from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
 
 
 def test_patch_swaps_upstream_selector_walk_kernel():
+    import vllm.v1.worker.gpu.spec_decode.dflash.utils as dflash_utils
     import vllm.v1.worker.gpu.spec_decode.dflash2.speculator as upstream
 
-    import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa: F401
+    import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator as ascend_patch
 
     assert upstream._selector_walk_kernel is _selector_walk_kernel_ascend
+    assert dflash_utils.replace is ascend_patch.replace_or_copy_vllm_config
 
 
 def _spec_config(arch: str) -> SimpleNamespace:

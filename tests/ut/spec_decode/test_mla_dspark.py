@@ -31,7 +31,11 @@ def make_speculator():
     spec.use_dcp = False
     spec.requires_non_causal = True
     spec.vllm_config = SimpleNamespace(
-        attention_config=AttentionConfig(), parallel_config=SimpleNamespace(decode_context_parallel_size=1)
+        attention_config=AttentionConfig(),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            pipeline_parallel_size=1,
+        ),
     )
     spec.draft_model_config = SimpleNamespace(
         hf_config=SimpleNamespace(target_layer_ids=[0, 2], target_hidden_size=4, num_target_layers=2)
