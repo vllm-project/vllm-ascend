@@ -16,26 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Ascend Gemma4 MTP speculator for Model Runner V2.
-
-Beyond the wiring inherited from the upstream ``Gemma4Speculator``, this
-subclass restores two pieces of the v1 ``Gemma4Proposer`` execution
-semantics that the V2 port dropped. Together they lift draft acceptance
-on Ascend from 89.3% to 94.8%, matching MRv1's greedy output text:
-
-1. The draft prefill window reused the target's ``PrefillNoCache``
-   metadata, running pure in-batch attention with no KV-cache reads while
-   MRv1's draft reads the target's int8 KV cache — a different numeric
-   path that changes the window sample. Pure-prefill batches now rebuild
-   cache-based draft attention metadata at the committed boundary and run
-   the draft steps under a constant, pinned KV view.
-2. The decode-continue window rows carry EAGLE-shaped positions and
-   hiddens. They are retimed to the Gemma4 MTP contract: true positions,
-   hiddens right-shifted one row, and the pre-window target hidden (a
-   cross-propose stash) as the head row. Window ids and the decode-round
-   attention metadata intentionally stay on the stock path, which measures
-   at parity with MRv1.
-"""
+"""Ascend Gemma4 MTP speculator for Model Runner V2."""
 
 import importlib
 from collections.abc import Mapping
@@ -69,15 +50,7 @@ _vllm_draft_speculator = importlib.import_module("vllm.v1.worker.gpu.spec_decode
 
 @contextmanager
 def _gemma4_prefill_inputs(spec, input_batch, num_sampled, num_rejected):
-    """Route the upstream ``prepare_prefill_inputs`` through the Gemma4
-    window rebuild for the duration of one ``propose`` call.
-
-    The upstream autoregressive loop builds its draft window with EAGLE
-    semantics. Gemma4 MTP rows must pair (token_t, h_{t-1}) at true
-    positions, so the retiming rewrites positions and hiddens right after
-    the stock kernel, keeping every other bookkeeping write (ids,
-    query_start_loc, last_token_indices, padding) intact.
-    """
+    """Run the Gemma4 window retiming right after the stock prepare_prefill_inputs."""
     orig = _vllm_ar_speculator.prepare_prefill_inputs  # type: ignore[attr-defined]
 
     def patched(*args, **kwargs):
@@ -93,20 +66,12 @@ def _gemma4_prefill_inputs(spec, input_batch, num_sampled, num_rejected):
 
 
 def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
-    """Retime the Gemma4 MTP draft windows in the speculator buffers.
-
-    Decode-continue rounds get true positions, right-shifted hiddens and
-    a stashed head row (ids and metadata stay stock — measured at parity
-    with MRv1). True (chunked) prefill rounds keep the stock window
-    byte-for-byte and only report the committed boundary so `_prefill`
-    can rebuild cache-based draft attention metadata.
-    """
+    """Retime the decode-continue windows; pure-prefill batches report the committed boundary."""
     num_reqs = input_batch.num_reqs
     if num_reqs == 0:
         return
     try:
-        # Dummy/warmup proposes carry all-zero positions and fake sampling
-        # parameters; leave the stock window untouched for them.
+        # Dummy/warmup proposes carry all-zero positions; keep the stock window.
         if int(input_batch.positions.max()) == 0:
             return
         qsl = input_batch.query_start_loc_np
@@ -128,14 +93,10 @@ def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
                 continue
             slot = idx_slots[i]
             if num_sampled_h[i] > 0 and not is_prefilling[i]:
-                # Decode-continue: keep the stock window ids and attention
-                # metadata (measured at parity with the v1 path) and only
-                # retime the window rows — stash head + right-shifted
-                # hiddens + true positions.
+                # Decode-continue: retime rows only; ids and metadata stay stock.
                 saw_decode_continue = True
                 head_hidden = stash[slot].clone()
-                # The stash for the NEXT round = the target's hidden at the
-                # last committed position = the pre-shift hidden[qs].
+                # Stash for the next round = the pre-shift hidden[qs].
                 stash[slot].copy_(hidden[qs])
                 shifted = hidden[qs : qe - 1].clone()
                 hidden[qs].copy_(head_hidden)
@@ -144,40 +105,28 @@ def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
             else:
                 # True (chunked) prefill: the stock window matches MRv1.
                 committed.append(int(input_batch.positions[qe - 1].item()) + 1)
-                # Seed the stash with the target hidden at the last committed
-                # position (the prompt tail), so the first decode-continue
-                # window's head row does not read an all-zero buffer.
+                # Seed the stash with the prompt-tail hidden.
                 stash[slot].copy_(hidden[qe - 1])
         if not saw_decode_continue:
-            # Pure-prefill batch: hand `_prefill` the committed boundary so
-            # it rebuilds cache-based draft attention metadata (the stock
-            # path reuses the target's PrefillNoCache metadata) and pins the
-            # draft-step KV view. Decode-continue batches leave it unset and
-            # run the stock metadata path.
+            # Pure-prefill batch: report the boundary so `_prefill` rebuilds metadata.
             spec._g4_committed = np.asarray(committed, dtype=np.int32)
     except Exception:
         logger.exception("[gemma4] window rebuild failed; keeping stock window")
 
 
 class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
-    """``_create_draft_vllm_config`` and ``load_draft_model`` are the only
-    methods defined by both bases, so this subclass recombines them."""
+    """Recombines the two methods both bases define (draft config, draft load)."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
-        # Gemma4 MTP decode-continue windows need the target hidden of the
-        # position right before the window head, which is not part of the
-        # current verify batch. Stash each request's last target hidden row
-        # (indexed by req-state slot) across propose calls.
+        # Per-request stash of the pre-window target hidden, kept across propose calls.
         self._g4_stash = torch.zeros(
             self.max_num_reqs,
             self.hidden_states.shape[1],
             dtype=self.hidden_states.dtype,
             device=device,
         )
-        # Committed boundary of the latest pure-prefill batch; set only
-        # there so `_prefill` rebuilds the draft attention metadata and the
-        # decode-continue rounds keep the stock metadata path.
+        # Committed boundary of the latest pure-prefill batch.
         self._g4_committed = None
 
     def propose(  # type: ignore[override]
@@ -185,21 +134,13 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         input_batch: InputBatch,
         attn_metadata: dict[str, Any],
         slot_mappings: dict[str, torch.Tensor],
-        # [num_tokens, hidden_size]
         last_hidden_states: torch.Tensor,
-        # num_layers x [num_tokens, hidden_size]
         aux_hidden_states: list[torch.Tensor] | None,
-        # [num_reqs]
         num_sampled: torch.Tensor,
-        # [num_reqs]
         num_rejected: torch.Tensor,
-        # [max_num_reqs]
         last_sampled: torch.Tensor,
-        # [max_num_reqs]
         next_prefill_tokens: torch.Tensor,
-        # [max_num_reqs]
         temperature: torch.Tensor,
-        # [max_num_reqs]
         seeds: torch.Tensor,
         dp_sync: Any = None,
         dummy_run: bool = False,
@@ -240,14 +181,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         mm_inputs=None,
     ):
         if self._g4_committed is not None:
-            # Build the draft window's own attention metadata instead of
-            # reusing the target's. For prefill rounds the target metadata is
-            # PrefillNoCache (no KV-cache reads — a different numeric path
-            # from MRv1's cache-based draft); for decode rounds its seq_lens
-            # already counts the unverified bonus and the next drafts.
-            # Shrinking the target metadata after the fact violates the FIA
-            # tiling invariants, so rebuild from scratch at the committed
-            # boundary (same recipe as the replicated-PCP prefill path).
+            # Rebuild cache-based window metadata instead of reusing the target's.
             attn_metadata, slot_mappings = self._build_gemma4_prefill_attn(
                 num_reqs, num_tokens, input_batch=self.input_batch
             )
@@ -274,17 +208,9 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
             num_tokens_padded=num_tokens,
         )
         slot_mappings = build_slot_mappings_by_layer(slot_mappings_tensor, self.kv_cache_config)
-        # `_g4_committed` is the committed boundary the window rebuild
-        # computed for this pure-prefill batch; use it directly for the CPU
-        # upper bound (and via _inject_seq_lens_np the Ascend seq_lens_np
-        # that would otherwise default to max_seq_len) instead of syncing
-        # input_buffers.seq_lens back to the host.
+        # Use the committed boundary directly; no host sync of seq_lens.
         seq_lens_upper = torch.from_numpy(self._g4_committed)
-        # The window is a multi-row query per request, so it must run as a
-        # Prefill-state batch like the target verify metadata it replaces;
-        # the Ascend hooks force DecodeOnly (single-row query assumption),
-        # so call the upstream builder directly under the Ascend wrapper +
-        # factory with is_prefilling=True and the committed seq_lens.
+        # Multi-row window needs Prefill state; bypass the DecodeOnly-forcing hooks.
         batch_desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.NONE, num_tokens=num_tokens, num_reqs=num_reqs)
         is_prefilling_true = torch.ones(num_reqs, dtype=torch.bool)
         with (
@@ -317,14 +243,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
     ):
-        """Pin the decode-step KV view at the committed boundary.
-
-        The stock step metadata sizes its KV from the target's post-update
-        seq_lens and advances it per step — for Gemma4 MTP (constant
-        positions, shared target KV) that reads stale KV entries left by
-        the previous verify pass. MRv1 keeps the KV view constant at the
-        window's committed boundary instead.
-        """
+        """Pin the decode-step KV view at the committed boundary."""
         committed = self._g4_committed
         if committed is not None and step >= 1:
             committed_t = torch.from_numpy(committed)
@@ -349,8 +268,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
                     dcp_local_seq_lens=dcp_local_seq_lens,
                 )
             if metadata:
-                # MRv1 runs its step rows through the same fused-FIA
-                # kernel as the window rather than a DecodeOnly path.
+                # Same fused kernel as the window, not DecodeOnly.
                 for md in metadata.values():
                     if md is not None:
                         md.attn_state = AscendAttentionState.SpecDecoding
@@ -366,12 +284,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         )
 
     def _update_decode_attn_metadata(self, attn_metadata, step, num_reqs=None):
-        """Keep the per-step KV view constant for Gemma4 MTP.
-
-        The Ascend base advances ``seq_lens_cpu``/``seq_lens_list`` by the
-        draft step; with positions fixed, that would grow the KV view into
-        stale entries. MRv1 keeps both at the committed boundary.
-        """
+        """Keep the per-step KV view constant at the committed boundary."""
         committed = self._g4_committed
         if committed is not None and attn_metadata:
             attn_meta = next(iter(attn_metadata.values()))
@@ -392,8 +305,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         draft_vllm_config = super()._create_draft_vllm_config()
-        # The draft is dense even for a MoE target, and Gemma4's heterogeneous
-        # head dimensions require the target's forced attention backend.
+        # Dense draft even for a MoE target; keep the target's forced backend.
         draft_vllm_config = replace(
             draft_vllm_config,
             parallel_config=replace(
@@ -425,13 +337,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         return draft_model
 
     def _sync_kv_sharing_target_to_impl(self, draft_model: nn.Module) -> None:
-        """Copy the late-bound KV-sharing target onto the Ascend attention impls.
-
-        ``AscendAttentionBackendImpl`` snapshots ``kv_sharing_target_layer_name``
-        when it is constructed and uses it to skip writing its own KV, but
-        ``_setup_gemma4_kv_sharing`` sets that attribute afterwards, on the vLLM
-        ``Attention`` wrapper.
-        """
+        """Propagate the late-bound KV-sharing target onto the Ascend attention impls."""
         synced = 0
         total = 0
         for layer in getattr(draft_model.model, "layers", []):
