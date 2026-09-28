@@ -119,6 +119,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.debug.kv_trace import KVTrace
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -278,6 +279,13 @@ class NPUModelRunner(GPUModelRunner):
 
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+
+        self._kv_trace = KVTrace.from_env(
+            "worker", vllm_config, tp_rank=get_tp_group().rank_in_group, pp_rank=get_pp_group().rank_in_group
+        )
+        self._kv_trace_caches = {}
+        if self._kv_trace is not None:
+            self._model_forward = self._kv_trace.observe_forward(self, self._model_forward, get_forward_context)
 
         # Replace the CUDA PrefetchOffloader set by parent __init__ with NPU version.
         offload_cfg = vllm_config.offload_config
@@ -2821,6 +2829,7 @@ class NPUModelRunner(GPUModelRunner):
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        _kv_trace_phase: str = "forward",
         **model_kwargs: dict[str, Any],
     ):
         assert self.model is not None
@@ -3590,7 +3599,8 @@ class NPUModelRunner(GPUModelRunner):
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ):
                 outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds,
+                    _kv_trace_phase="warmup" if is_profile or is_graph_capturing else "dummy",
                 )
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
@@ -3890,6 +3900,8 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
+        if self._kv_trace is not None:
+            self._kv_trace_caches = kv_caches
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():

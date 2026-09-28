@@ -21,7 +21,13 @@ import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
+from vllm_ascend import envs
 from vllm_ascend.utils import is_310p, vllm_version_is
+
+if envs.VLLM_ASCEND_KV_TRACE:
+    from vllm_ascend.patch.platform.patch_kv_trace import apply_patch as apply_kv_trace_patch
+
+    apply_kv_trace_patch()
 
 if not is_310p():
     import vllm_ascend.patch.platform.patch_mamba_config  # noqa

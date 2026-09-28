@@ -28,6 +28,11 @@ from typing import Any
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Opt-in KV block lifecycle tracing. Empty (default) disables all hooks.
+    # Otherwise a JSON object: directory (required), run_id, snapshots (bool),
+    # layers (integer indices), max_events and max_snapshot_bytes (positive ints).
+    # Not a credential; generated records contain request IDs and cache metadata.
+    "VLLM_ASCEND_KV_TRACE": lambda: os.getenv("VLLM_ASCEND_KV_TRACE", ""),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
