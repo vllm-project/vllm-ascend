@@ -235,24 +235,24 @@ and use the `main` branch with the matching vLLM revision recorded in
 
 Key parameters:
 
-  - `--max-model-len 150000` limits the total input and output length of one
+- `--max-model-len 150000` limits the total input and output length of one
     request. `--max-num-batched-tokens 8192` limits the tokens scheduled in one
     iteration, while `--max-num-seqs 32` limits the sequences scheduled by each
     DP engine. Increasing either scheduler limit can improve throughput but also
     increases memory usage.
-  - `VLLM_ENGINE_READY_TIMEOUT_S=36000` allows up to 36,000 seconds for engine
+- `VLLM_ENGINE_READY_TIMEOUT_S=36000` allows up to 36,000 seconds for engine
     processes to finish initialization, including weight loading and graph
     preparation.
-  - `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
+- `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
     Engram table in host memory and lets local DP ranks share the host-memory
     allocation. This reduces duplicate host-memory copies. The A3 container
     example uses `--ipc=host` so all four local DP ranks share the host IPC
     namespace.
-  - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` captures the
+- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` captures the
     Decode path while Prefill remains outside the captured graph.
-  - `--safetensors-load-strategy lazy` avoids eagerly materializing the whole
+- `--safetensors-load-strategy lazy` avoids eagerly materializing the whole
     checkpoint during loading.
-  - `enable_fused_mc2`, `enable_dsa_cp`, `enable_flashcomm1`, and
+- `enable_fused_mc2`, `enable_dsa_cp`, `enable_flashcomm1`, and
     `enable_shared_expert_dp` enable the A3 MoE and communication optimizations
     used by this configuration. `enable_cpu_binding` pins worker processes to
     CPUs, while `enable_npugraph_ex` enables the enhanced ACL Graph path.
