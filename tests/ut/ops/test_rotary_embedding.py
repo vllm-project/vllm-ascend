@@ -108,6 +108,21 @@ class TestRopeForwardOOT:
         assert query_out.dtype == torch.float8_e4m3fn
         assert key_out.dtype == torch.float8_e4m3fn
 
+    @pytest.mark.parametrize("is_neox_style, expected_mode", [(True, "half"), (False, "interleave")])
+    @patch("torch_npu.npu_mrope")
+    def test_non_triton_path_rotary_mode(self, mock_npu_mrope, is_neox_style, expected_mode):
+        """Without Triton, rope_forward_oot must pass a rotary_mode that
+        torch_npu.npu_mrope accepts ("half" or "interleave")."""
+        positions, query, key = _make_tensors()
+        cos_sin_cache = torch.empty(MAX_POS, ROTARY_DIM, dtype=torch.bfloat16)
+        mock_npu_mrope.return_value = (query.clone(), key.clone())
+
+        with patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False):
+            rope_forward_oot(positions, query, key, cos_sin_cache, HEAD_SIZE, ROTARY_DIM, is_neox_style)
+
+        mock_npu_mrope.assert_called_once()
+        assert mock_npu_mrope.call_args.kwargs["rotary_mode"] == expected_mode
+
 
 @pytest.fixture(autouse=True)
 def patch_init_side_effects():
