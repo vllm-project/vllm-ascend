@@ -219,3 +219,99 @@ to the fixture made all eight forward-flow parameterizations pass. The
 kernel and production dispatch are unchanged; the 18-case NPU suite also
 passed. A ten-sample wrapper screen at T/E/K=64/16/8 measured main
 573.29 µs versus fused 381.43 µs (1.50×), consistent with prior rounds.
+
+## Cross-implementation re-evaluation — no kernel tuning round
+
+The user clarified that **`msprof op` Task Duration is the primary performance
+metric and includes the NPU task's head/startup overhead**. The earlier
+stream-event and host-dispatch screens above remain historical wrapper-level
+observations, but do not rank device task performance and do not estimate a
+separate per-task head cost. The `stream-event - task-duration` residual
+includes host enqueue gaps and must not be called the task head.
+
+The new same-host comparison used an isolated validation container on
+Ascend 910B4-1, CANN 9.1.0, Triton-Ascend 3.2.2, and `bishengir-compile`
+1.2.0 (SHA256 above). The branch source was `b7c2fb716` and its copied kernel
+SHA256 was `5d5ae2b9aceac315c7e716832168c4352bd8575d82fdbf061d374a715a863ab7`.
+The independent PR #17574 head was `3bdd2d7577d6d8d45ac79fd513f19490a0fa7d2b`;
+the exact extracted Triton file SHA256 was
+`0b19253667f411b9529877e56a7356244bdbfd30529f019e32c8a1301a4121fd`.
+All compared inputs were FP32, one group, renormalized, no bias, recording on,
+with identical seeded logits and periodic EPLB table. Each `msprof op`
+invocation ran the case script once and used profiler-owned warmup. Cases
+were parallelized over physical NPU 0–4 with
+`ASCEND_RT_VISIBLE_DEVICES=<physical-id>`; **all implementations of one case
+ran serially on the same card**. Profiles have separate output directories
+and Triton caches. `npu-smi` confirmed the processes on the requested cards.
+The primary profiles and raw logs remain in the isolated validation task
+directory; the manifest is
+`msprof_results.jsonl` plus `msprof_results_d*.jsonl`. The control captures
+with `--aic-metrics=PipeUtilization` are in `msprof_controls_d*.jsonl`, with
+per-core summaries in `pipe_components.jsonl`.
+
+The baseline is CANN TopK + Triton map + Triton record. Its component sum is
+a cost model: record follows downstream MoE in production. `main / candidate`
+below is a device-task-cost ratio, **not** contiguous serving latency. One
+default `msprof op` capture was made per target/case in this broad screen;
+the three decision cases below also have balanced repeat controls.
+
+| T | E | K | Scoring | Physical NPU | CANN TopK µs | Map µs | Record µs | Main sum µs | Our #17579 µs | #17574 µs | Main/ours | Main/#17574 |
+|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 64 | 8 | 6 | softmax | 0 | 6.40 | 26.48 | 1.82 | 34.70 | 16.64 | 24.68 | 2.09× | 1.41× |
+| 64 | 16 | 8 | sigmoid | 0 | 5.46 | 27.38 | 1.72 | 34.56 | 24.52 | 28.50 | 1.41× | 1.21× |
+| 128 | 32 | 8 | softmax | 0 | 7.96 | 30.18 | 1.74 | 39.88 | 38.74 | 44.18 | 1.03× | 0.90× |
+| 256 | 8 | 8 | sigmoid | 0 | 8.68 | 25.52 | 1.82 | 36.02 | 55.68 | 65.88 | 0.65× | 0.55× |
+| 256 | 16 | 8 | softmax | 0 | 10.60 | 27.42 | 1.76 | 39.78 | 58.42 | 65.26 | 0.68× | 0.61× |
+| 512 | 16 | 6 | sigmoid | 1 | 13.28 | 28.98 | 1.80 | 44.06 | 57.22 | 69.00 | 0.77× | 0.64× |
+| 512 | 32 | 8 | softmax | 2 | 16.02 | 31.54 | 1.80 | 49.36 | 95.66 | 84.68 | 0.52× | 0.58× |
+| 4096 | 32 | 8 | softmax | 3 | 82.76 | 116.92 | 1.88 | 201.56 | 214.42 | fallback | 0.94× | — |
+| 65536 | 16 | 8 | softmax | 4 | 1230.94 | 1304.52 | 1.58 | 2537.04 | fallback | fallback | — | — |
+
+`fallback` means the PR's production dispatch retains the baseline, not that
+its raw kernel was assigned zero duration. #17579's guard is T≤4096;
+#17574's is T≤512. PR #17574's raw kernel passed 72 of the 96 direct
+business accuracy cases through T=131072, including all 48 eligible decode
+cases. Direct T=262144 reached grid/coreDim 65536 and failed the device's
+65535 maximum. Production T>512 falls back, so this is a raw-kernel limit,
+not a demonstrated production failure. Whether T=256K occurs as one local
+MoE call under chunking/parallelism is not yet established.
+Three additional supported FP32 controls passed: T=65 masked tail with
+duplicate mapping, T=128 ties with bias and padding, and recording disabled.
+The original edge-suite host-integer valid-token case is outside #17574's
+device-scalar ABI; it was not counted as a numerical mismatch.
+
+Three representative cases were recaptured with balanced candidate order
+and `PipeUtilization`; all reported `Current Freq = Rated Freq = 1650 MHz`
+and the requested physical Device Id. The baseline components were captured
+once per case in this control mode; the candidate numbers are two-capture
+medians, so a small margin still needs more samples for a stability claim.
+
+| T/E/K, scoring | Card | Baseline component sum µs | Ours µs (two runs) | #17574 µs (two runs) | Main/ours | Main/#17574 |
+|---|---:|---:|---:|---:|---:|---:|
+| 64/8/6, softmax | 1 | 34.40 | 15.75 (15.76, 15.74) | 25.13 (24.90, 25.36) | 2.18× | 1.37× |
+| 256/16/8, softmax | 0 | 39.38 | 56.94 (56.32, 57.56) | 64.54 (63.98, 65.10) | 0.69× | 0.61× |
+| 512/32/8, softmax | 2 | 48.78 | 94.29 (95.42, 93.16) | 83.05 (83.00, 83.10) | 0.52× | 0.59× |
+
+The T=512/E=32 reversal between the two fused kernels is informative:
+our kernel launches 256 programs versus #17574's 128. In this control,
+our per-program median AIV Scalar/Vector times were 5.08/4.65 µs, versus
+#17574's 9.35/5.87 µs. Thus #17574 does *more* work per program but schedules
+half as many programs; its lower total Task Duration is consistent with
+program-count/wave overhead dominating. At T=256/E=16, both launch 128
+programs and our lower median Scalar/Vector times (4.92/4.52 µs versus
+5.39/5.22 µs) align with its lower Task Duration. These are supported
+associations, not proof that one instruction alone causes the difference;
+MTE/Scalar/Vector active times can overlap and must not be added mechanically.
+
+The task-level result changes the optimization decision: this branch's
+T≤4096 guard was chosen from eager wrapper event screens, whereas `msprof op`
+shows device-cost regressions already at sampled T=256/512 and near parity
+at T=128. A narrower guard may be appropriate **if device Task Duration is
+the acceptance metric**, but changing production dispatch requires an
+explicit decision about eager versus graph/serving latency and a broader
+same-metric shape scan. No kernel or dispatch change was made in this
+comparison-only pass.
+
+Private PR #3 is not in this table: its AscendC tiling accepts only
+`ASCEND950` (A5), while this machine is 910B4, and it fuses only TopK + a
+one-dimensional map, not record. The user asked to defer A5 validation.
