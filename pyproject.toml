@@ -53,6 +53,7 @@ plugins.md029.enabled = false # ol-prefix
 line-length = 120
 # Folder to be modified
 exclude = []
+extend-exclude = ["vllm_ascend/ops/pythondsl"]  # Preserve the delivered PythonDSL source verbatim.
 
 [tool.ruff.lint]
 select = [

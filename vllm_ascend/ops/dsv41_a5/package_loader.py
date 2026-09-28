@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Targeted loader for the prebuilt A5 operator wheel.
+"""Targeted loader for the A5 operator wrappers and local PythonDSL sources.
 
-The wheel's public package initializer eagerly discovers every bundled
-operator.  Most of those operators own C++ glue sources, so importing one
-Python-DSL A5 operator unexpectedly JIT-builds unrelated extensions.  The A5
-adapters need only the explicitly named DSL modules; create lightweight
-package namespaces and let Python execute that leaf module directly.
+The transformer wheel's public initializer eagerly discovers every bundled
+operator and JIT-builds unrelated extensions.  We load only the requested
+wrapper.  Its ``ops.*`` imports resolve to the 0923 DSL sources vendored under
+``vllm_ascend.ops.pythondsl`` rather than the arena operator wheel.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ import os
 import sys
 import threading
 import types
-from importlib import metadata
 
 _import_lock = threading.Lock()
 _opapi_handle = None
@@ -72,41 +70,27 @@ def _namespace_package(name: str, path: str, origin: str | None = None):
     return module
 
 
-def _load_payload_package(package_path: str):
-    payload_path = os.path.join(os.path.dirname(package_path), "ops")
-    payload_init = os.path.join(payload_path, "__init__.py")
-    if not os.path.isfile(payload_init):
-        # The transformer wheel can live in CANN's Python directory while the
-        # DSL payload is provided by a regular site-packages distribution.
-        # Resolve the distribution that owns ``ops`` instead of accepting an
-        # unrelated module with the same generic top-level name.
-        for distribution_name in metadata.packages_distributions().get("ops", ()):
-            candidate = metadata.distribution(distribution_name).locate_file("ops")
-            candidate_path = os.fspath(candidate)
-            candidate_init = os.path.join(candidate_path, "__init__.py")
-            if os.path.isfile(candidate_init):
-                payload_path = candidate_path
-                payload_init = candidate_init
-                break
-    if not os.path.isfile(payload_init):
-        raise ModuleNotFoundError(f"A5 operator payload package is absent: {payload_init}")
+def _load_payload_package():
+    payload = importlib.import_module("vllm_ascend.ops.pythondsl")
+    payload_path = os.path.dirname(payload.__file__)
     current = sys.modules.get("ops")
     if current is not None and payload_path in tuple(getattr(current, "__path__", ())):
         return current
-    spec = importlib.util.spec_from_file_location("ops", payload_init, submodule_search_locations=[payload_path])
-    if spec is None or spec.loader is None:
-        raise ModuleNotFoundError(f"A5 operator payload package is absent: {payload_init}")
-    module = importlib.util.module_from_spec(spec)
-    previous = sys.modules.get("ops")
+
+    # cann_ops_transformer wrappers import ``ops.<dsl_module>`` at call time.
+    # Point that namespace at our local sources without executing the arena
+    # wheel's initializer or registering its precompiled native resources.
+    for name in (
+        "ops.mixed_quant_sparse_flash_mla",
+        "ops.mixed_quant_sparse_flash_mla_metadata",
+        "ops.quant_lightning_indexer_dsl",
+        "ops.quant_lightning_indexer_metadata_dsl",
+        "ops.quant_sparse_lightning_indexer_dsl",
+        "ops.quant_sparse_lightning_indexer_metadata_dsl",
+    ):
+        sys.modules.pop(name, None)
+    module = _namespace_package("ops", payload_path, payload.__file__)
     sys.modules["ops"] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        if previous is None:
-            sys.modules.pop("ops", None)
-        else:
-            sys.modules["ops"] = previous
-        raise
     return module
 
 
@@ -132,9 +116,5 @@ def import_packaged_a5_module(module_name: str):
             ops_path = os.path.join(package_path, "ops")
             sys.modules[ops_name] = _namespace_package(ops_name, ops_path)
 
-        # The .run package installs the AOT/DSL payload as a separate top-level
-        # ``ops`` resource package.  Load it explicitly from the wheel sibling
-        # path: test runners and applications can themselves own a module named
-        # ``ops``, which must not silently shadow this ABI dependency.
-        _load_payload_package(package_path)
+        _load_payload_package()
         return importlib.import_module(module_name)
