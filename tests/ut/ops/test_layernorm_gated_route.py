@@ -91,7 +91,8 @@ def _load_layernorm_with_fakes():
 
     fake_vllm: Any = types.ModuleType("vllm")
     fake_vllm_triton: Any = types.ModuleType("vllm.triton_utils")
-    fake_vllm_triton.tl = types.SimpleNamespace(float32="float32")
+    # Python 3.12 evaluates the kernel's tl.constexpr annotations at import time.
+    fake_vllm_triton.tl = types.SimpleNamespace(float32="float32", constexpr=object)
 
     class _Triton:
         @staticmethod
