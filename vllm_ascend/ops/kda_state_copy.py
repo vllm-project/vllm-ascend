@@ -9,8 +9,11 @@ by preparation, and neither tensors nor stream handles are retained by a plan.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import nullcontext
+from copy import copy
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.forward_context import get_forward_context
@@ -24,6 +27,9 @@ from vllm_ascend.ops.triton.kda_state_copy import (
     _validate_inputs,
 )
 from vllm_ascend.utils import is_950
+
+if TYPE_CHECKING:
+    from vllm_ascend.ops.triton.kda_state_copy import _CompiledKernel
 
 
 def supports_kda_state_copy(state: torch.Tensor) -> bool:
@@ -80,6 +86,17 @@ class KDAStateCopyPlan:
     selected counts from zero through scheduler.max_num_seqs are supported.
     The plan is request-stateless and has no eviction or serving-time JIT path.
     """
+
+    # Preparation initializes layout/launch metadata; publication binds the name.
+    _sealed: bool
+    _signature: tuple
+    _max_selected: int
+    _configuration: tuple[str, str, tuple[tuple[str, str], ...]]
+    _payload: int
+    _scalars: tuple[int, int, int, int]
+    _tiles: int
+    _compiled: Mapping[tuple[torch.dtype, bool], _CompiledKernel]
+    _layer_name: str
 
     @classmethod
     def prepare(cls, state: torch.Tensor, max_selected: int) -> KDAStateCopyPlan:
@@ -224,8 +241,17 @@ class StridedKDAFallbackPlan:
     warmup contract on unsupported devices. This is not the optimized A5 path.
     """
 
+    # The compiled byte-copy kernel is shared, but each layer owns its binding.
+    _sealed: bool
+    _signature: tuple
+    _max_selected: int
+    _state_bytes: int
+    _configuration: tuple[str, str, tuple[tuple[str, str], ...]]
+    _compiled: _CompiledKernel
+    _layer_name: str
+
     @classmethod
-    def prepare(cls, state: torch.Tensor, max_selected: int):
+    def prepare(cls, state: torch.Tensor, max_selected: int) -> StridedKDAFallbackPlan:
         """Validate pages and warm one byte-copy variant without live pointers."""
         if type(max_selected) is not int or max_selected <= 0:
             raise ValueError("max_selected must be a positive scheduler limit")
@@ -322,7 +348,7 @@ def initialize_kda_state_copy(static_forward_context: dict, max_selected: int) -
     request shapes or an arbitrary LRU cap. Exactly four variants per unique
     layout cover every admitted selected count and both source index dtypes.
     """
-    plans = {}
+    plans: dict[tuple, KDAStateCopyPlan | StridedKDAFallbackPlan] = {}
     bindings = []
     for layer_name, layer in static_forward_context.items():
         backend = getattr(layer, "_kda_state_copy_backend", "torch")
@@ -331,7 +357,8 @@ def initialize_kda_state_copy(static_forward_context: dict, max_selected: int) -
         layer._ascend_kda_state_copy = None
         layer._kda_state_copy_ready = False
         bindings.append((layer_name, layer))
-    selected_plans = []
+    selected_plans: list[KDAStateCopyPlan | StridedKDAFallbackPlan | None] = []
+    plan_type: type[KDAStateCopyPlan] | type[StridedKDAFallbackPlan]
     for _, layer in bindings:
         if len(layer.kv_cache) != 2:
             raise RuntimeError("Kimi KDA cache must be bound before strict state-copy preparation")
@@ -347,14 +374,15 @@ def initialize_kda_state_copy(static_forward_context: dict, max_selected: int) -
         if key not in plans:
             plans[key] = plan_type.prepare(state, max_selected)
         selected_plans.append(plans[key])
-    for plan in plans.values():
-        plan.seal()
+    for prepared_plan in plans.values():
+        prepared_plan.seal()
     # Publish only after every layer has prepared and sealed successfully.
     for (layer_name, layer), plan in zip(bindings, selected_plans):
         if plan is not None:
             # Resolve compiled execution through the existing worker context,
-            # not a process-global plan registry. Shared layouts may use any
-            # one of their bound layers; all are published in this same pass.
+            # not a process-global plan registry. Keep each binding independent
+            # while sharing the sealed launch table and immutable metadata.
+            plan = copy(plan)
             plan._layer_name = layer_name
         layer._ascend_kda_state_copy = plan
         layer._kda_state_copy_ready = True

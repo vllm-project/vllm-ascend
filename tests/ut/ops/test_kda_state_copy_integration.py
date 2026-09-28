@@ -7,7 +7,7 @@ real and the production module/methods are imported normally from the checkout.
 
 import ast
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -32,6 +32,7 @@ def test_startup_deduplicates_and_publishes_after_all_seals(monkeypatch):
     """No layer can observe a partly prepared or unsealed startup plan."""
     events = []
     shared = torch.zeros((8, 1, 2, 3))
+    compiled = MappingProxyType({"kernel": object()})
     layers = [
         SimpleNamespace(_kda_state_copy_backend="triton", kv_cache=(None, shared.clone()), _ascend_kda_state_copy=None)
         for _ in range(3)
@@ -40,16 +41,20 @@ def test_startup_deduplicates_and_publishes_after_all_seals(monkeypatch):
     def prepare(state, maximum):
         assert maximum == 128
         events.append("prepare")
-        return SimpleNamespace(seal=seal)
+        return SimpleNamespace(seal=seal, _compiled=compiled)
 
     def seal():
         assert all(layer._ascend_kda_state_copy is None for layer in layers)
         events.append("seal")
 
     monkeypatch.setattr(production.KDAStateCopyPlan, "prepare", prepare)
-    production.initialize_kda_state_copy(dict(enumerate(layers)), 128)
+    context = {f"layer_{i}": layer for i, layer in enumerate(layers)}
+    production.initialize_kda_state_copy(context, 128)
     assert events == ["prepare", "seal"]
-    assert all(layer._ascend_kda_state_copy is layers[0]._ascend_kda_state_copy for layer in layers)
+    bound = [layer._ascend_kda_state_copy for layer in layers]
+    assert len({id(plan) for plan in bound}) == len(layers)
+    assert all(plan._compiled is compiled for plan in bound)
+    assert [plan._layer_name for plan in bound] == list(context)
 
 
 @pytest.mark.parametrize("failure", ["prepare", "seal", "unbound"])
@@ -189,7 +194,9 @@ def test_auto_eligible_cache_selects_prepared_triton(monkeypatch):
     monkeypatch.setattr(production.KDAStateCopyPlan, "prepare", lambda *args: plan)
     production.initialize_kda_state_copy({"layer": layer}, 8)
     plan.seal.assert_called_once()
-    assert layer._ascend_kda_state_copy is plan
+    assert layer._ascend_kda_state_copy is not plan
+    assert layer._ascend_kda_state_copy._layer_name == "layer"
+    assert not hasattr(plan, "_layer_name")
     assert layer._kda_state_copy_ready
 
 
@@ -232,3 +239,43 @@ def test_compiled_dispatch_requires_current_ready_layer(monkeypatch):
         production._context_plan("layer")
     layer._kda_state_copy_ready = True
     assert production._context_plan("layer") is layer._ascend_kda_state_copy
+
+
+@pytest.mark.parametrize("plan_type", [production.KDAStateCopyPlan, production.StridedKDAFallbackPlan])
+def test_same_layout_layers_trace_their_own_binding(monkeypatch, plan_type):
+    """Shared kernels must not alias layer names in either compiled copy path."""
+    state = torch.empty_strided((8, 1, 2, 3), (12, 6, 3, 1))
+    layers = {
+        name: SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=(None, state))
+        for name in ("layer_0", "layer_31")
+    }
+    template = plan_type()
+    template._compiled = MappingProxyType({"kernel": object()})
+    template.seal = Mock()
+    prepare = Mock(return_value=template)
+    monkeypatch.setattr(plan_type, "prepare", prepare)
+    monkeypatch.setattr(production, "supports_kda_state_copy", lambda state: plan_type is production.KDAStateCopyPlan)
+    production.initialize_kda_state_copy(layers, 8)
+    prepare.assert_called_once()
+    template.seal.assert_called_once()
+    assert not hasattr(template, "_layer_name")
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    gather = Mock(return_value=torch.empty((1, 1, 2, 3)))
+    scatter = Mock()
+    monkeypatch.setattr(torch.ops.vllm, "kda_state_gather", gather)
+    monkeypatch.setattr(torch.ops.vllm, "kda_state_scatter", scatter)
+    indices, flags = torch.tensor([0]), torch.tensor([True])
+    for name, layer in layers.items():
+        plan = layer._ascend_kda_state_copy
+        assert plan._compiled is template._compiled
+        # Simulate a context exposing only this layer, not its layout siblings.
+        monkeypatch.setattr(
+            production,
+            "get_forward_context",
+            lambda name=name, layer=layer: SimpleNamespace(no_compile_layers={name: layer}),
+        )
+        assert production._context_plan(plan._layer_name) is plan
+        packed = plan.gather(state, indices, flags)
+        plan.scatter(state, packed, indices)
+        assert gather.call_args.args[-1] == name
+        assert scatter.call_args.args[-1] == name

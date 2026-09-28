@@ -7,6 +7,7 @@ are operator/integration tests, not model-serving or performance benchmarks.
 
 import importlib
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -79,11 +80,13 @@ def test_dynamic_grid_and_metadata_use_only_four_compiled_variants(dtype, shape,
 
 @torch.inference_mode()
 def test_worker_plan_deduplication_and_failed_reinitialization(monkeypatch):
-    """Actual startup helper shares plans and publishes nothing after failure."""
+    """Startup shares compiled kernels and publishes nothing after failure."""
     state = torch.full((8, 1, 2, 3), 7, dtype=torch.float32, device="npu")
     layers = [SimpleNamespace(_kda_state_copy_backend="triton", kv_cache=(None, state.clone())) for _ in range(3)]
     initialize_kda_state_copy(dict(enumerate(layers)), 8)
-    assert layers[0]._ascend_kda_state_copy is layers[1]._ascend_kda_state_copy
+    plans = [layer._ascend_kda_state_copy for layer in layers]
+    assert len({id(plan) for plan in plans}) == len(layers)
+    assert all(plan._compiled is plans[0]._compiled for plan in plans)
     for layer in layers:
         torch.testing.assert_close(layer.kv_cache[1], state, rtol=0, atol=0)
     layers[-1].kv_cache = ()
@@ -438,3 +441,55 @@ def test_fullgraph_state_copy_uses_sealed_context_plan(dtype, monkeypatch):
     layer._kda_state_copy_ready = False
     with pytest.raises(RuntimeError, match="prepared worker layer"):
         compiled(state, indices, flags)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_fullgraph_same_layout_layers_keep_distinct_bindings(dtype, monkeypatch):
+    """Trace each layer's name while sharing sealed kernels, including fallback."""
+    from vllm_ascend.ops import kda_state_copy as production
+
+    states = [torch.empty_strided((8, 2, 3, 4), (64, 12, 4, 1), dtype=dtype, device="npu") for _ in range(2)]
+    layers = {
+        name: SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=(None, state))
+        for name, state in zip(("layer_0", "layer_31"), states)
+    }
+    initialize_kda_state_copy(layers, 8)
+    plans = [layer._ascend_kda_state_copy for layer in layers.values()]
+    assert plans[0] is not plans[1]
+    assert plans[0]._compiled is plans[1]._compiled
+    _forbid_compilation(monkeypatch)
+    monkeypatch.setattr(production.batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
+    indices = torch.tensor([0, 2], dtype=torch.int32, device="npu")
+    flags = torch.tensor([True, False], device="npu")
+    for value, (name, layer) in enumerate(layers.items(), 3):
+        # A layer-local context makes accidentally tracing a sibling fail closed.
+        context = SimpleNamespace(no_compile_layers={name: layer})
+        monkeypatch.setattr(production, "get_forward_context", lambda context=context: context)
+        plan = layer._ascend_kda_state_copy
+        state = layer.kv_cache[1]
+        state.fill_(value)
+        traced_names: list[str] = []
+
+        def capture(graph, example_inputs, traced_names=traced_names):
+            traced_names.extend(
+                node.args[-1]
+                for node in graph.graph.nodes
+                if node.op == "call_function"
+                and node.target in (torch.ops.vllm.kda_state_gather, torch.ops.vllm.kda_state_scatter)
+            )
+            return graph.forward
+
+        def roundtrip(cache, ids, keep, plan=plan):
+            packed = plan.gather(cache, ids, keep)
+            plan.scatter(cache, packed + 1, ids)
+            return packed
+
+        torch._dynamo.reset()
+        compiled = torch.compile(roundtrip, backend=capture, fullgraph=True)
+        result = compiled(state, indices, flags)
+        assert traced_names == [name, name]
+        expected = torch.zeros_like(result)
+        expected[0].fill_(value)
+        torch.testing.assert_close(result, expected, rtol=0, atol=0)
+        torch.testing.assert_close(state[indices], expected + 1, rtol=0, atol=0)

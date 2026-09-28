@@ -23,12 +23,22 @@ Cache and packed storage must not overlap. Concurrent writers are unsupported.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from contextlib import nullcontext
 from threading import RLock
 from types import MappingProxyType
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 from vllm.triton_utils import tl, triton
+
+if TYPE_CHECKING:
+
+    class _CompiledKernel(Protocol):
+        """Structural launch interface for vendor Triton kernels without stubs."""
+
+        def __getitem__(self, grid: tuple[int, int, int]) -> Callable[..., object]: ...
+
 
 DEFAULT_KDA_BLOCK_SIZE = 8192
 
@@ -184,8 +194,8 @@ def _copy_kda_states_triton(
 
     has_flags = flags is not None and not to_cache
     # A valid dummy pointer avoids passing None; HAS_FLAGS removes its load.
-    flags_arg = flags if has_flags else indices
-    flag_stride = flags.stride(0) if has_flags else 0
+    flags_arg = flags if flags is not None and has_flags else indices
+    flag_stride = flags.stride(0) if flags is not None and has_flags else 0
     grid = (selected, triton.cdiv(payload, block_size))
 
     # Exact scalar values prevent reusing implicit equal-to-one specializations.
@@ -216,6 +226,9 @@ def _copy_kda_states_triton(
             # No eviction: exceeding the budget fails BEFORE entering JIT.
             if len(_LAUNCHERS) >= _MAX_SIGNATURES:
                 raise RuntimeError("preparation signature budget exhausted; no eviction")
+            # Only startup owns a mutable registry; seal replaces it with a proxy.
+            if not isinstance(_LAUNCHERS, dict):
+                raise RuntimeError("sealed KDA registry cannot accept new launchers")
             compiled = _kda_state_copy_kernel[grid](
                 *tensors, *scalars, TO_CACHE=to_cache, HAS_FLAGS=has_flags, BLOCK_SIZE=block_size
             )
@@ -228,11 +241,11 @@ def _copy_kda_states_triton(
 
 # Lifecycle is process-local and irreversible. Private state is not a security
 # boundary against monkey-patching; restarting requires a new prepare/seal pass.
-_LAUNCHERS = {}
+_LAUNCHERS: dict[tuple, _CompiledKernel] | MappingProxyType[tuple, _CompiledKernel] = {}
 _MAX_SIGNATURES = 128
 _SEALED = False
 _CONFIGURATION = None
-_PREPARED_DEVICES = set()
+_PREPARED_DEVICES: set[torch.device] = set()
 _LOCK = RLock()
 _NO_DEVICE_SWITCH = nullcontext()
 
