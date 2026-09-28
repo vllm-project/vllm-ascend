@@ -341,10 +341,10 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             )
         else:
             return MoEWeights(
-                w1=layer.w13_weight_list,
-                w2=layer.w2_weight_list,
-                w1_scale=layer.w13_weight_scale_list,
-                w2_scale=layer.w2_weight_scale_list,
+                w1=self._get_weights(layer, "w13_weight"),
+                w2=self._get_weights(layer, "w2_weight"),
+                w1_scale=self._get_weights(layer, "w13_weight_scale"),
+                w2_scale=self._get_weights(layer, "w2_weight_scale"),
                 w1_scale_bias=None,
                 w2_scale_bias=None,
             )
@@ -534,6 +534,11 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         # Mark as not transformed (ready for weight loading)
         layer._mxfp8_transformed = False
 
+    def _get_weights(self, layer, name):
+        """Return per-expert list if EPLB created it, else [block_tensor]."""
+        list_name = f"{name}_list"
+        return getattr(layer, list_name) if hasattr(layer, list_name) else [getattr(layer, name)]
+        
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
@@ -542,9 +547,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
         hidden_states, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
             x=hidden_states,
-            weight=layer.w13_weight_list,
+            weight=self._get_weights(layer, "w13_weight"),
             group_list=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 0),
-            weight_scale=layer.w13_weight_scale_list,
+            weight_scale=self._get_weights(layer, "w13_weight_scale"),
             x_scale=pertoken_scale,
             dequant_mode=2,
             quant_mode=2,
@@ -565,8 +570,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         assert layer is not None
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=layer.w13_weight_list,
-            scale=layer.w13_weight_scale_list,
+            weight=self._get_weights(layer, "w13_weight"),
+            scale=self._get_weights(layer, "w13_weight_scale"),
             per_token_scale=[pertoken_scale],
             bias=None,
             split_item=2,
@@ -598,8 +603,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         )
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=layer.w2_weight_list,
-            scale=layer.w2_weight_scale_list,
+            weight=self._get_weights(layer, "w2_weight"),
+            scale=self._get_weights(layer, "w2_weight_scale"),
             bias=None,
             per_token_scale=[act_out_scale],
             split_item=2,
