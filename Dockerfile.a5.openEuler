@@ -130,6 +130,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install setuptools_scm pybind11 nanobind grpcio-tools ninja cmake wheel && \
+    python3 -m pip install torch-npu==2.10.0.post4 --extra-index-url ${ASCEND_INDEX_URL} --no-deps && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --no-build-isolation --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend && \
     python3 -m pip install triton-ascend==3.2.2 --extra-index-url ${ASCEND_INDEX_URL} && \
