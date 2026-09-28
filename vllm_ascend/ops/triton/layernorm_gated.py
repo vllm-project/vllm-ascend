@@ -7,7 +7,6 @@
 # mypy: ignore-errors
 
 import torch
-
 from vllm.triton_utils import tl, triton
 
 
@@ -105,15 +104,32 @@ def _layer_norm_fwd_1pass_kernel_npu(
 @triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
 @triton.jit(
     do_not_specialize=[
-        "stride_x_row", "stride_y_row", "stride_z_row", "M", "N", "eps",
-        "num_m_blocks", "ngroups",
+        "stride_x_row",
+        "stride_y_row",
+        "stride_z_row",
+        "M",
+        "N",
+        "eps",
+        "num_m_blocks",
+        "ngroups",
     ]
 )
 def _layer_norm_fwd_persistent_kernel_npu(
-    X, Y, W, B, Z, Mean, Rstd,
-    stride_x_row, stride_y_row, stride_z_row,
-    M, N, eps,
-    num_m_blocks, ngroups,
+    X,
+    Y,
+    W,
+    B,
+    Z,
+    Mean,
+    Rstd,
+    stride_x_row,
+    stride_y_row,
+    stride_z_row,
+    M,
+    N,
+    eps,
+    num_m_blocks,
+    ngroups,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     HAS_BIAS: tl.constexpr,
@@ -181,14 +197,29 @@ def _layer_norm_fwd_persistent_kernel_npu(
 @triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
 @triton.jit(
     do_not_specialize=[
-        "stride_x_row", "stride_y_row", "stride_z_row", "M", "N", "eps",
+        "stride_x_row",
+        "stride_y_row",
+        "stride_z_row",
+        "M",
+        "N",
+        "eps",
         "num_m_blocks",
     ]
 )
 def _layer_norm_fwd_persistent_hoist_kernel_npu(
-    X, Y, W, B, Z, Mean, Rstd,
-    stride_x_row, stride_y_row, stride_z_row,
-    M, N, eps,
+    X,
+    Y,
+    W,
+    B,
+    Z,
+    Mean,
+    Rstd,
+    stride_x_row,
+    stride_y_row,
+    stride_z_row,
+    M,
+    N,
+    eps,
     num_m_blocks,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -278,6 +309,7 @@ def layer_norm_fwd_npu(
         DispatchConfigError,
         _select_layernorm_launch,
     )
+
     runtime_p = None
     if getattr(getattr(x, "device", None), "type", None) == "npu":
         from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -299,8 +331,7 @@ def layer_norm_fwd_npu(
         block_n = min(max_fused_size, triton.next_power_of_2(group_size))
         if group_size > block_n:
             raise RuntimeError(
-                f"layer_norm_fwd_npu: Feature dim too large, got {group_size}, "
-                f"max supported is {block_n}."
+                f"layer_norm_fwd_npu: Feature dim too large, got {group_size}, max supported is {block_n}."
             )
         grid = (triton.cdiv(M, spec.block_m), ngroups)
         _layer_norm_fwd_1pass_kernel_npu[grid](

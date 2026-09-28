@@ -122,9 +122,10 @@ def _select_layernorm_launch(
     # A persistent launch is considered once its tile count reaches a
     # calibrated fraction of the initialized vector-core count.
     persist_tiles = _ceil_div(M, bm_persist) * ngroups
-    if persist_tiles * _need(params.k_persist_den, "k_persist_den") < _need(
-        params.k_persist_num, "k_persist_num"
-    ) * runtime_p:
+    if (
+        persist_tiles * _need(params.k_persist_den, "k_persist_den")
+        < _need(params.k_persist_num, "k_persist_num") * runtime_p
+    ):
         return LaunchSpec("FT_BASE", _need(params.bm_small, "bm_small"))
 
     if ngroups == 1:

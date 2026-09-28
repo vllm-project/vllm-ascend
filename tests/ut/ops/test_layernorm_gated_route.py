@@ -7,7 +7,6 @@ import types
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[3]
 LAYER_NORM = ROOT / "vllm_ascend" / "ops" / "triton" / "layernorm_gated.py"
 DISPATCH = ROOT / "vllm_ascend" / "ops" / "triton" / "layernorm_gated_dispatch.py"
@@ -86,12 +85,8 @@ def _load_layernorm_with_fakes():
             return state["device_name"]
 
     fake_torch.npu = _Npu()
-    fake_torch.empty_like = lambda x: _FakeTensor(
-        x.shape, x.dtype, x.device.type, x.device.index
-    )
-    fake_torch.empty = lambda shape, dtype, device: _FakeTensor(
-        shape, dtype, device.type, device.index
-    )
+    fake_torch.empty_like = lambda x: _FakeTensor(x.shape, x.dtype, x.device.type, x.device.index)
+    fake_torch.empty = lambda shape, dtype, device: _FakeTensor(shape, dtype, device.type, device.index)
 
     fake_vllm = types.ModuleType("vllm")
     fake_vllm_triton = types.ModuleType("vllm.triton_utils")
@@ -124,6 +119,7 @@ def _load_layernorm_with_fakes():
     fake_triton_pkg = types.ModuleType("vllm_ascend.ops.triton")
     fake_triton_pkg.__path__ = []
     fake_utils = types.ModuleType("vllm_ascend.ops.triton.triton_utils")
+
     def get_vectorcore_num():
         state["getter_calls"] += 1
         assert state["vector_cores"] is not None, "Device properties not initialized."
@@ -140,22 +136,33 @@ def _load_layernorm_with_fakes():
     layer_name = "vllm_ascend.ops.triton.layernorm_gated"
     layer_spec = importlib.util.spec_from_file_location(layer_name, LAYER_NORM)
     layer = importlib.util.module_from_spec(layer_spec)
-    saved = {name: sys.modules.get(name) for name in (
-        "torch", "vllm", "vllm.triton_utils", "vllm_ascend", "vllm_ascend.ops",
-        "vllm_ascend.ops.triton", "vllm_ascend.ops.triton.triton_utils",
-        dispatch_name, layer_name,
-    )}
-    sys.modules.update({
-        "torch": fake_torch,
-        "vllm": fake_vllm,
-        "vllm.triton_utils": fake_vllm_triton,
-        "vllm_ascend": fake_ascend,
-        "vllm_ascend.ops": fake_ops,
-        "vllm_ascend.ops.triton": fake_triton_pkg,
-        "vllm_ascend.ops.triton.triton_utils": fake_utils,
-        dispatch_name: dispatch,
-        layer_name: layer,
-    })
+    saved = {
+        name: sys.modules.get(name)
+        for name in (
+            "torch",
+            "vllm",
+            "vllm.triton_utils",
+            "vllm_ascend",
+            "vllm_ascend.ops",
+            "vllm_ascend.ops.triton",
+            "vllm_ascend.ops.triton.triton_utils",
+            dispatch_name,
+            layer_name,
+        )
+    }
+    sys.modules.update(
+        {
+            "torch": fake_torch,
+            "vllm": fake_vllm,
+            "vllm.triton_utils": fake_vllm_triton,
+            "vllm_ascend": fake_ascend,
+            "vllm_ascend.ops": fake_ops,
+            "vllm_ascend.ops.triton": fake_triton_pkg,
+            "vllm_ascend.ops.triton.triton_utils": fake_utils,
+            dispatch_name: dispatch,
+            layer_name: layer,
+        }
+    )
     try:
         dispatch_spec.loader.exec_module(dispatch)
         layer_spec.loader.exec_module(layer)
@@ -181,6 +188,7 @@ class WrapperRouteTests(unittest.TestCase):
     def test_public_wrapper_launch_contract_and_fallbacks(self):
         layer, state, launches, saved = _load_layernorm_with_fakes()
         try:
+
             def call(
                 rows,
                 columns=128,
@@ -278,27 +286,21 @@ class WrapperRouteTests(unittest.TestCase):
             before_name_calls = state["name_calls"]
             before_getter_calls = state["getter_calls"]
             call(20449, dtype="float32")
-            self.assertEqual(
-                launches[-1][0], "_layer_norm_fwd_persistent_hoist_kernel_npu"
-            )
+            self.assertEqual(launches[-1][0], "_layer_norm_fwd_persistent_hoist_kernel_npu")
             self.assertEqual(launches[-1][3]["BLOCK_M"], 32)
             self.assertEqual(state["name_calls"], before_name_calls)
             self.assertEqual(state["getter_calls"], before_getter_calls + 1)
 
             state["device_name"] = "AnotherUnknownAscendModel"
             call(20449)
-            self.assertEqual(
-                launches[-1][0], "_layer_norm_fwd_persistent_hoist_kernel_npu"
-            )
+            self.assertEqual(launches[-1][0], "_layer_norm_fwd_persistent_hoist_kernel_npu")
             self.assertEqual(state["name_calls"], before_name_calls)
 
             call(64, columns=256)
             self.assertEqual(launches[-1][3]["BLOCK_M"], 64)
 
             state["vector_cores"] = None
-            with self.assertRaisesRegex(
-                AssertionError, "Device properties not initialized"
-            ):
+            with self.assertRaisesRegex(AssertionError, "Device properties not initialized"):
                 call(289)
 
             for device_type in ("cpu", "cuda"):

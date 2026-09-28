@@ -5,7 +5,6 @@ import sys
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[3]
 PATH = ROOT / "vllm_ascend" / "ops" / "triton" / "layernorm_gated_dispatch.py"
 
@@ -56,9 +55,7 @@ class SelectorTests(unittest.TestCase):
             20449: m.LaunchSpec("FT_PERSIST_HOIST", 32),
         }
         for rows, spec in expected.items():
-            self.assertEqual(
-                m._select_layernorm_launch(rows, 128, 1, 40, self.params), spec
-            )
+            self.assertEqual(m._select_layernorm_launch(rows, 128, 1, 40, self.params), spec)
 
     def test_multi_group_and_wide_n_are_base_fallbacks(self):
         m = self.mod

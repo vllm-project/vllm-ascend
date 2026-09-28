@@ -153,15 +153,21 @@ class _KernelLaunchRecorder:
     ("kernel_name", "fixed_rows", "seed"),
     [
         pytest.param(
-            "_layer_norm_fwd_persistent_kernel_npu", None, 0x1F3A5C8,
+            "_layer_norm_fwd_persistent_kernel_npu",
+            None,
+            0x1F3A5C8,
             id="persistent-rmsnorm-post-gate-boundary",
         ),
         pytest.param(
-            "_layer_norm_fwd_persistent_hoist_kernel_npu", None, 0x1F3A5C8,
+            "_layer_norm_fwd_persistent_hoist_kernel_npu",
+            None,
+            0x1F3A5C8,
             id="hoist-rmsnorm-post-gate-boundary",
         ),
         pytest.param(
-            "_layer_norm_fwd_persistent_hoist_kernel_npu", 65536, 42,
+            "_layer_norm_fwd_persistent_hoist_kernel_npu",
+            65536,
+            42,
             id="hoist-rmsnorm-post-gate-large-m",
         ),
     ],
@@ -176,9 +182,7 @@ def test_layer_norm_fwd_npu_persistent_routes(
     vector_cores = get_vectorcore_num()
     # Pick the first row of the qualifying tile, rather than assuming P=40.
     first_tile = (
-        (vector_cores + 3) // 4
-        if kernel_name == "_layer_norm_fwd_persistent_kernel_npu"
-        else 16 * vector_cores
+        (vector_cores + 3) // 4 if kernel_name == "_layer_norm_fwd_persistent_kernel_npu" else 16 * vector_cores
     )
     rows = fixed_rows if fixed_rows is not None else (first_tile - 1) * 32 + 1
     if fixed_rows is not None and (rows + 31) // 32 < first_tile:
@@ -206,9 +210,7 @@ def test_layer_norm_fwd_npu_persistent_routes(
         norm_before_gate=True,
         is_rms_norm=True,
     )
-    expected, expected_mean, expected_rstd = layer_norm_gated_ref(
-        x, weight, None, eps, z, 128, True, True
-    )
+    expected, expected_mean, expected_rstd = layer_norm_gated_ref(x, weight, None, eps, z, 128, True, True)
 
     assert recorder.grids == [(min(vector_cores, (rows + 31) // 32),)]
     rtol, atol = TOLERANCES[torch.bfloat16]

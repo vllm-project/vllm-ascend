@@ -38,9 +38,9 @@
 
 - **Origin**: The existing `layernorm_gated.py` implementation is adapted from Flash Linear Attention's gated LayerNorm and the Triton LayerNorm tutorial. PR1 reuses the original BASE kernel's normalization and gating math.
 - **Differences**:
-  - NPU execution can use a smaller BASE row tile or a capped persistent M-axis grid instead of always launching one BASE64 program per row tile.
-  - HOIST32 moves single-group weight and optional bias loads outside each program's M-tile loop. This describes source-level work placement, not an isolated measured speedup claim.
-  - The selector retains BASE64 for wide `N_group`; N-chunk/C2 dispatch is not part of PR1.
+    - NPU execution can use a smaller BASE row tile or a capped persistent M-axis grid instead of always launching one BASE64 program per row tile.
+    - HOIST32 moves single-group weight and optional bias loads outside each program's M-tile loop. This describes source-level work placement, not an isolated measured speedup claim.
+    - The selector retains BASE64 for wide `N_group`; N-chunk/C2 dispatch is not part of PR1.
 
 ## Test Cases
 
