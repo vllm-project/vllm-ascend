@@ -6,21 +6,34 @@ from vllm.triton_utils import tl, triton
 from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, get_vectorcore_num, init_device_properties_triton
 
 
-@triton.jit
+# Tile sizes and RoPE presence change the static IR. Keep default specialization
+# for innermost strides: Ascend needs unit-stride information to lower multi-row
+# loads within UB. Other scalars only affect bounds, masks, or addresses.
+@triton.jit(
+    do_not_specialize=[
+        "num_tokens",
+        "cache_block_size",
+        "k_stride_block",
+        "k_stride_offset",
+        "rope_stride_block",
+        "rope_stride_offset",
+        "k_dim",
+    ]
+)
 def _copy_pcp_kv_cache_kernel(
     key_cache,
     rope_cache,
     slots,
     packed,
     num_tokens,
-    cache_block_size: tl.constexpr,
+    cache_block_size,
     k_stride_block,
     k_stride_offset,
     k_stride_d,
     rope_stride_block,
     rope_stride_offset,
     rope_stride_d,
-    k_dim: tl.constexpr,
+    k_dim,
     rope_dim: tl.constexpr,
     BLOCK_COLS: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
