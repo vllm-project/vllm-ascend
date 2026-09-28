@@ -370,3 +370,84 @@ their times are not additive. Fewer programs and no atomic reduced the old
 91.44 µs task to 61.96 µs, yet the long per-program token loop left it above
 the 46.80 µs three-task mainline cost. This motivated the next round's
 single-factor token-tile experiment, not a TopK algorithm change.
+
+## Round 7 — bound one grid's routing work to fewer token tiles
+
+Only the token-tile schedule changed; the two kernels, TopK, mapping, record
+math, grid ownership, and public ABI did not. The selected rule takes the
+next power of two of `ceil(T / num_grids)`, bounded to `[8,64]` for non-tiny
+cases; T≤64 retains two tokens/grid. This generally lets a program process
+its owned decode tokens in one tile without making the live tensor unbounded.
+The vector-core count comes from Triton's device-property helper, not a
+hard-coded 910B4 constant.
+
+The one-factor `msprof op` screens narrowed the schedule:
+
+| Case | Variant | Kernel-1 Task Duration µs | Interpretation |
+|---|---|---:|---|
+| T=8, E=16, K=8 | 2 / 4 / 8 tokens per grid | 18.48 / 23.90 / 28.58 | 2 wins among compilable variants |
+| T=8, E=16, K=8 | 1 token per grid | unavailable | Triton-Ascend compiler assertion in `BlockPtrAnalysis::parseSelect`; not a timing result |
+| T=512, E=32, K=8, sigmoid | Grid factor 1 / 2 / 4, tile 8 | 62.36 / 64.36 / 100.78 | more programs do not fix per-program work |
+| T=512, E=32, K=8, sigmoid | tile 8 / 16 / 32, 40 grids | 62.36 / 44.32 / 57.64 | one 16-row tile avoids a second loop; 32 increases live work |
+| T=65536, E=16, K=8 | Grid factor 1 / 2 / 4, tile 32 | 2482.70 / 2475.92 / 2479.10 | differences below 1% |
+| T=65536, E=16, K=8 | tile 32 / 64, 40 grids | 2482.70 / 2305.16 | 64-row tile reduces loop overhead |
+| T=262144, E=32, K=8 | tile 64, grid factor 1 / 2 / 4 | 9740.52 / 9818.98 / 9808.58 | factor 1 remains best |
+
+The T=512 `PipeUtilization` control shows median per-program AIV/Scalar/
+Vector times change from 57.59/27.98/12.65 µs at tile 8 to
+40.27/21.32/9.09 µs at tile 16. The component captures are on the same
+910B4 SKU but different physical cards; the independent same-card Task
+Duration screen gives the stronger evidence for the schedule choice. Active
+unit times overlap and must not be summed. Tile 32 raised median Scalar to
+34.21 µs, consistent with excess live/masked work. No global atomic was
+introduced: final-source TTIR and NPU IR both scan clean for the two kernels.
+
+Final-source correctness in the isolated container: NPU UT **22/22**, smoke
+**14/14**, edge **6/6**, graph replay passed, and the complete business
+accuracy matrix **96/96** passed. Each all-valid case compared physical IDs,
+weights and nonzero-initialized cumulative load with CANN TopK, EPLB mapping,
+actual MoE-returned counts, and existing EPLB record. A copied current CPU
+forward-flow test could not be collected against the older container checkout
+because it lacks `vllm_ascend.ops.fused_moe.dataclass.shared_experts`; its
+older in-image version lacks the current config fixture and fails before this
+kernel path. Neither is claimed as a CPU test pass; upstream CI remains the
+applicable integration check.
+
+Same-card `msprof op` results follow. The old atomic and
+PR #17574 columns are for context only; PR #17574 is **not** the correctness
+gold. The PR #17574 direct Triton source was its pinned `3bdd2d7577d6d8d45ac79fd513f19490a0fa7d2b` version.
+
+| T/E/K, scoring | Card | Mainline sum µs | Old atomic µs | New routing + reduce µs | New sum µs | PR #17574 µs | Main/new |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 64/8/6, softmax | 5 | 35.26 | 16.62 | 20.18 + 2.40 | 22.58 | 25.34 | 1.56× |
+| 512/32/8, sigmoid | 1 | 46.80 | 91.44 | 44.80 + 2.14 | 46.94 | 82.46 | 1.00× |
+| 4096/32/8, softmax | 3 | 200.36 | 216.78 | 197.84 + 2.14 | 199.98 | fallback | 1.00× |
+| 65536/16/8, softmax | 3 | 2536.22 | 2538.00 | 2309.60 + 2.14 | 2311.74 | fallback | 1.10× |
+| 262144/32/8, sigmoid | 4 | 9562.12 | unavailable | 9726.78 + 2.06 | 9728.84 | fallback | 0.98× |
+| 524288/32/8, sigmoid | 6 | 19054.96 | not run | 19315.36 + 2.06 | 19317.42 | fallback | 0.99× |
+
+Unchanged-schedule T=128/E=32 and T=256/E=8 results remain in Round 6.
+`fallback` for PR #17574 means its production route is T≤512. The new
+branch's production guard remains T≤4096: all 64K–512K entries here are raw
+operator measurements, **not** claimed serving-path wins. In particular the
+E=32 large-prefill regressions are not dispatched by this branch.
+
+At T=512/E=32 on card 7, record-on routing/reduce took 45.48/2.12 µs and
+record-off took 44.74/1.82 µs. The device flag remains graph-safe and
+record-off leaves load unchanged, but it still launches both kernels. That
+approximately 1 µs difference is an observed single-capture effect, not a
+repeatable performance claim or reason to specialize on a host-read flag.
+
+Artifacts are under `/home/shy/moe-gating-topk-map-record/grid-record-v1/`:
+`round7_matrix96.log`, `round7_npu_ut.log`, `round7_edge.log`,
+`round7_graph.log`, `round7_ir/`, `round7_msprof/`, and the schedule/tile
+profile directories. The first measured source was SHA256
+`b771531a762488e53facae6c7fb166b2129f63fff0cd98e61bbcc03890643660`.
+A formatting-only wrap produced the final source SHA256
+`c53364198c3d48f14d43b6af5182cd40560bb709dbca50793f794e9a7e6dfb69`;
+their Python ASTs are identical. The final source again passed 22/22 NPU UT,
+its TTIR/NPU IR had no atomic, and T=64, T=512 and T=65536 in the table use
+its exact-source profiler captures. The final recaptures give 46.94 µs
+versus 46.80 µs at T=512 (parity within a single-capture margin), and
+2311.74 µs versus 2536.22 µs at T=65536 (8.9% lower task cost). Do not
+interpret the smaller margin as a repeatable win.

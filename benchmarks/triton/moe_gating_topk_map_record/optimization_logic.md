@@ -214,6 +214,20 @@ The internal token tile controls register/live-set size, not record count.
 This is a hypothesis until the same-case `msprof op` task summaries and
 per-component pipeline metrics establish the useful schedule.
 
+The first two-kernel profile falsified the idea that simply removing atomics
+would win at every shape. At T=512/E=32, 40 programs replaced 256, yet
+Kernel 1 still took 61.96 µs because each program processed its ~13 tokens
+in two eight-row iterations. `PipeUtilization` showed long per-program Scalar
+and Vector active times. Holding grid count and math fixed while increasing
+the tile to 16 reduced Kernel 1 to 44.32 µs; tile 32 raised it to 57.64 µs.
+Thus the adopted heuristic sizes a bounded token tile to cover a grid's
+owned tokens in one iteration when feasible, rather than increasing program
+count or splitting a token's experts. At T=64K/E=16, tile 64 improved the
+raw two-kernel cost by about 9% versus the previous schedule; at E=32 and
+T≥256K the raw operator remains behind mainline and production continues to
+fall back. These observations are shape-specific, not a universal claim that
+larger tiles are better.
+
 ## Validation and measurement boundary
 
 Compare IDs exactly with mainline mapping; compare weights within the stated

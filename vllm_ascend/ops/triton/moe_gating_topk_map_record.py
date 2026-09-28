@@ -12,6 +12,11 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
+TINY_DECODE_MAX_TOKENS = 64
+TINY_DECODE_TOKENS_PER_GRID = 2
+MIN_GRID_TOKEN_TILE = 8
+MAX_GRID_TOKEN_TILE = 64
+
 
 @triton.jit
 def _moe_gating_topk_map_record_kernel(
@@ -210,12 +215,17 @@ def moe_gating_topk_map_record(
     if tokens == 0:
         return weights, physical_ids
     init_device_properties_triton()
-    if tokens <= 64:
-        block_t = 2
+    if tokens <= TINY_DECODE_MAX_TOKENS:
+        block_t = TINY_DECODE_TOKENS_PER_GRID
         num_grids = triton.cdiv(tokens, block_t)
     else:
-        block_t = 8 if tokens <= 512 else 32
         num_grids = min(tokens, get_vectorcore_num())
+        tokens_per_grid = triton.cdiv(tokens, num_grids)
+        # Prefer one token tile per grid where possible, with a bounded live set.
+        block_t = min(
+            MAX_GRID_TOKEN_TILE,
+            max(MIN_GRID_TOKEN_TILE, triton.next_power_of_2(tokens_per_grid)),
+        )
     grid_records = torch.empty((num_grids, local_expert_count), dtype=torch.int32, device=logits.device)
     _moe_gating_topk_map_record_kernel[(num_grids,)](
         logits,
