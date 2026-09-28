@@ -409,7 +409,10 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         outcomes = {rank_status.get("outcome") for rank_status in gathered if rank_status}
         if len(outcomes) != 1:
             self._state = _NPUIPCTrainerState.FAILED
-            raise RuntimeError(f"NPU IPC {operation} completed inconsistently across trainer ranks: {sorted(outcomes)}")
+            raise RuntimeError(
+                f"NPU IPC {operation} completed inconsistently across trainer ranks: "
+                f"{sorted(str(outcome) for outcome in outcomes)}"
+            )
         return outcome == "done", value
 
     def shutdown(self) -> None:
