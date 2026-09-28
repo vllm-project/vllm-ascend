@@ -2,6 +2,7 @@ test_name: "GLM-5.2-w8a8c8-128k-1k-90-50-PD"
 model: "Eco-Tech/GLM-5.2-w8a8c8"
 num_nodes: 4
 npu_per_node: 16
+dp_load_balancing: external
 
 
 routing:
