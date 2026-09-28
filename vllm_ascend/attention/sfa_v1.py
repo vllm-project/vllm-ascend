@@ -326,6 +326,25 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.enable_dsa_cp = enable_dsa_cp()
 
+    def reset_runtime_cache(self) -> None:
+        """[snapshot] Restore cold-start contents of reusable SFA metadata.
+
+        These tensors are plain builder attributes rather than module buffers,
+        so ``state_dict`` restore does not refresh them.  In particular, DSA-CP
+        and speculative decoding reuse the same length storage across steps.
+        Clear the complete allocations (not just the previous active prefix) so
+        the first post-resume request cannot observe snapshot-time tail values.
+        """
+        self.actual_seq_lengths_query.zero_()
+        self.actual_seq_lengths_key.zero_()
+        for buffers in (
+            self.spec_actual_seq_lengths_query,
+            self.spec_actual_seq_lengths_key,
+        ):
+            if buffers is not None:
+                for buffer in buffers:
+                    buffer.zero_()
+
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
         return ascend_chunked_prefill_workspace_size(vllm_config)
@@ -842,6 +861,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
+        # Persist absorbed weights AFTER final reshape/NZ transform. SFA always
+        # disposes ``kv_b_proj`` above, so these tensors cannot be re-derived from
+        # ``kv_b_proj.weight`` on snapshot resume (unlike MLA). Register them as
+        # persistent buffers so ``dump_model``/``restore_model`` round-trip them.
+        self._persist_absorbed_weights()
+
         if self.has_indexer and self.enable_sparse_li_c8 and AscendSFAImpl.q_hadamard is None:
             AscendSFAImpl.q_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu") / (
                 128**0.5
@@ -850,6 +875,169 @@ class AscendSFAImpl(MLAAttentionImpl):
             AscendSFAImpl.k_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu") / (
                 128**0.5
             )
+
+    # Buffer names for absorbed decode weights that replace disposed kv_b_proj.
+    _ABSORBED_WEIGHT_BUFFERS = (
+        ("W_UV", "sfa_w_uv"),
+        ("W_UK_T", "sfa_w_uk_t"),
+    )
+
+    @staticmethod
+    def _set_persistent_buffer(module: torch.nn.Module, name: str, tensor: torch.Tensor) -> torch.Tensor:
+        # (Re)bind ``name`` on ``module`` as a *persistent* buffer so it is part
+        # of ``module.state_dict()`` and therefore saved/restored by the
+        # snapshot dump/restore path. Mirrors AscendMLAImpl._set_persistent_buffer.
+        if name in module._buffers:
+            module._buffers[name] = tensor
+        else:
+            module.register_buffer(name, tensor, persistent=True)
+        return module._buffers[name]
+
+    def _persist_absorbed_weights(self) -> None:
+        host = self.q_proj
+        if host is None:
+            return
+        for attr_name, buf_name in self._ABSORBED_WEIGHT_BUFFERS:
+            tensor = getattr(self, attr_name, None)
+            if tensor is None:
+                continue
+            if buf_name in host._buffers and host._buffers[buf_name] is not tensor:
+                # Keep the registered buffer address stable (graph / RL).
+                host._buffers[buf_name].copy_(tensor)
+                setattr(self, attr_name, host._buffers[buf_name])
+            else:
+                setattr(self, attr_name, self._set_persistent_buffer(host, buf_name, tensor))
+
+    def _rebind_absorbed_weight_buffers(self) -> bool:
+        host = self.q_proj
+        if host is None:
+            return False
+        for attr_name, buf_name in self._ABSORBED_WEIGHT_BUFFERS:
+            if buf_name not in host._buffers:
+                return False
+            setattr(self, attr_name, host._buffers[buf_name])
+        return True
+
+    def _mlapo_should_persist_derived(self) -> bool:
+        # The transformed MLAPO tensors below are derived from the
+        # ``fused_qkv_a_proj`` / ``q_proj`` weight, deq_scale and quant_bias.
+        # KV consumers release those sources after cold-start derivation, so
+        # persist the derived tensors in ``state_dict`` for snapshot restore.
+        # Other roles retain the sources and can re-derive without duplicating
+        # them in the snapshot.
+        return (
+            self.is_kv_consumer
+            and self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+        )
+
+    # (host attribute name, implementation attribute name, buffer name)
+    _MLAPO_PERSISTED_BUFFERS = (
+        ("fused_qkv_a_proj", "wd_qkv", "mlapo_wd_qkv"),
+        ("fused_qkv_a_proj", "deq_scale_qkv", "mlapo_deq_scale_qkv"),
+        ("fused_qkv_a_proj", "quant_bias_qkv", "mlapo_quant_bias_qkv"),
+        ("q_proj", "wu_q", "mlapo_wu_q"),
+        ("q_proj", "qb_deq_scl", "mlapo_qb_deq_scl"),
+        ("q_proj", "qb_qt_bias", "mlapo_qb_qt_bias"),
+    )
+
+    def _rebind_persistent_mlapo_buffers(self) -> None:
+        for host_name, attr_name, buf_name in self._MLAPO_PERSISTED_BUFFERS:
+            host = getattr(self, host_name)
+            if host is None or buf_name not in host._buffers:
+                raise RuntimeError(f"SFA layer {self.layer_name}: missing persistent MLAPO buffer {buf_name}")
+            setattr(self, attr_name, host._buffers[buf_name])
+
+    def _derive_mlapo_rebuildable(self, act_dtype: torch.dtype) -> None:
+        # Keep the cold-start device selection identical to the baseline. On
+        # resume the source weight may have been released, so use input_scale.
+        weight = self.q_proj.weight
+        device = weight.device if weight is not None else self.q_proj.input_scale.device
+        self.gamma1 = self.q_a_layernorm.weight.data  # type: ignore[union-attr]
+        bias = self.q_a_layernorm.bias  # type: ignore[union-attr]
+        self.beta1 = torch.zeros_like(self.gamma1) if bias is None else bias.data
+        self.gamma2 = self.kv_a_layernorm.weight.data  # type: ignore[union-attr]
+        self.quant_scale0 = self.fused_qkv_a_proj.input_scale.data
+        self.quant_offset0 = self.fused_qkv_a_proj.input_offset.data
+        self.quant_scale1 = self.q_proj.input_scale.data
+        self.quant_offset1 = self.q_proj.input_offset.data
+        self.ctkv_scale = torch.tensor([1], dtype=act_dtype, device=device)
+        self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
+
+    def reload_derived_weights_after_restore(self, act_dtype: torch.dtype) -> None:
+        """[snapshot] Rebind/rebuild SFA non-persistent decode-path weights.
+
+        SFA always disposes ``kv_b_proj`` after building ``W_UV`` / ``W_UK_T``,
+        so those tensors are restored from persistent buffers rather than
+        re-derived. KV-consumer MLAPO tensors are also restored from persistent
+        buffers; cheap state is rebuilt, while roles that retain their source
+        parameters re-derive normally.
+        """
+        if not self._rebind_absorbed_weight_buffers():
+            raise RuntimeError(
+                f"SFA layer {self.layer_name}: absorbed weight buffers are missing after restore"
+            )
+
+        if self.enable_sfa_prolog_v3:
+            raise RuntimeError("SFA prolog-v3 snapshot restore is not supported")
+
+        if self.enable_mlapo:
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                if getattr(self, "mlapo_is_quantized", True):
+                    self._process_weights_for_fused_mlapo_a5(act_dtype)
+                else:
+                    self._process_weights_for_fused_mlapo_a5_float(act_dtype)
+            elif self._mlapo_should_persist_derived():
+                self._rebind_persistent_mlapo_buffers()
+                self._derive_mlapo_rebuildable(act_dtype)
+            else:
+                self._process_weights_for_fused_mlapo(act_dtype)
+            return
+
+        # Non-mlapo path may have NZ-transformed W_UK_T; buffer already holds the
+        # post-transform value from cold start, so nothing else to rebuild here.
+
+    def get_derived_weight_sanity_tensors(self) -> dict[str, torch.Tensor]:
+        """Return SFA-derived tensors that must be non-zero after restore."""
+        attrs = (
+            # Absorbed weights restored from persistent buffers.
+            "W_UV",
+            "W_UK_T",
+            # A2/A3 MLAPO weights/scales.
+            "wd_qkv",
+            "deq_scale_qkv",
+            "wu_q",
+            "qb_deq_scl",
+            "ctkv_scale",
+            "q_nope_scale",
+            # A5 MLAPO/prolog weights/scales.
+            "weight_dq",
+            "weight_uq_qr",
+            "weight_uq_qr_scale",
+            "weight_dkv_kr",
+            "weight_dq_scale",
+            "weight_dkv_kr_scale",
+            "dequant_scale_w_uq_qr",
+            "dequant_scale_w_dq",
+            "dequant_scale_w_dkv_kr",
+        )
+        return {
+            attr: tensor
+            for attr in attrs
+            if isinstance((tensor := getattr(self, attr, None)), torch.Tensor)
+        }
+
+    @classmethod
+    def reload_hadamard_after_restore(cls, device) -> bool:
+        """[snapshot] Rebuild class-level SFA C8 indexer hadamards (zeroed by NPU restore).
+
+        The class attributes are outside ``state_dict`` and must be recreated
+        even though their Python objects remain non-None after restore.
+        """
+        if cls.q_hadamard is None and cls.k_hadamard is None:
+            return False
+        cls.q_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device=device) / (128**0.5)
+        cls.k_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device=device) / (128**0.5)
+        return True
 
     @staticmethod
     def _is_w8a8_dynamic_linear(layer: torch.nn.Module | None) -> bool:
@@ -929,14 +1117,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         wd_qkv = torch.cat((kv_a_proj_wt, q_a_proj_wt), dim=-1)
         wd_qkv = wd_qkv.t().contiguous()
         wd_qkv = transdata(wd_qkv, block_size=(16, 32)).unsqueeze(0).contiguous()
-        self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
+        wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
 
         kv_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[self.q_lora_rank :].contiguous()
         q_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[: self.q_lora_rank].contiguous()
         kv_a_proj_deq_scl = kv_a_proj_deq_scl.reshape(self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
         kv_a_proj_deq_scl = trans_rope_weight(kv_a_proj_deq_scl, self.qk_rope_head_dim)
         kv_a_proj_deq_scl = kv_a_proj_deq_scl.view(self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
-        self.deq_scale_qkv = torch.cat((kv_a_proj_deq_scl, q_a_proj_deq_scl), dim=-1).contiguous()
+        deq_scale_qkv = torch.cat((kv_a_proj_deq_scl, q_a_proj_deq_scl), dim=-1).contiguous()
 
         kv_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[self.q_lora_rank :].contiguous()
         q_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[: self.q_lora_rank].contiguous()
@@ -944,44 +1132,47 @@ class AscendSFAImpl(MLAAttentionImpl):
         kv_a_proj_qt_bias = kv_a_proj_qt_bias.reshape(self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
         kv_a_proj_qt_bias = trans_rope_weight(kv_a_proj_qt_bias, self.qk_rope_head_dim)
         kv_a_proj_qt_bias = kv_a_proj_qt_bias.view(self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
-        self.quant_bias_qkv = torch.cat((kv_a_proj_qt_bias, q_a_proj_qt_bias), dim=-1).contiguous()
+        quant_bias_qkv = torch.cat((kv_a_proj_qt_bias, q_a_proj_qt_bias), dim=-1).contiguous()
 
         wu_q = self.q_proj.weight.data
         wu_q = wu_q.t().reshape(self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1)
         wu_q = trans_rope_weight(wu_q, self.qk_rope_head_dim)
         wu_q = wu_q.reshape(self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim), -1)
         wu_q = transdata(wu_q, block_size=(16, 32)).unsqueeze(0).contiguous()
-        self.wu_q = torch_npu.npu_format_cast(wu_q, 29)
+        wu_q = torch_npu.npu_format_cast(wu_q, 29)
 
         qb_deq_scl = self.q_proj.deq_scale.data
         qb_deq_scl = qb_deq_scl.reshape(self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1)
         qb_deq_scl = trans_rope_weight(qb_deq_scl, self.qk_rope_head_dim)
-        self.qb_deq_scl = qb_deq_scl.reshape(self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
+        qb_deq_scl = qb_deq_scl.reshape(self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
 
         qb_qt_bias = self.q_proj.quant_bias.data
         qb_qt_bias = qb_qt_bias.reshape(self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1)
         qb_qt_bias = trans_rope_weight(qb_qt_bias, self.qk_rope_head_dim)
-        self.qb_qt_bias = qb_qt_bias.reshape(self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
+        qb_qt_bias = qb_qt_bias.reshape(self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
 
-        device = self.q_proj.weight.device
-        self.gamma1 = self.q_a_layernorm.weight.data  # type: ignore[union-attr]
-        self.beta1 = self.q_a_layernorm.bias.data  # type: ignore[union-attr]
-        self.gamma2 = self.kv_a_layernorm.weight.data  # type: ignore[union-attr]
-        self.quant_scale0 = self.fused_qkv_a_proj.input_scale.data
-        self.quant_offset0 = self.fused_qkv_a_proj.input_offset.data
-        self.quant_scale1 = self.q_proj.input_scale.data
-        self.quant_offset1 = self.q_proj.input_offset.data
-        self.ctkv_scale = torch.tensor([1], dtype=act_dtype, device=device)
-        self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
+        derived = {
+            "wd_qkv": wd_qkv,
+            "deq_scale_qkv": deq_scale_qkv,
+            "quant_bias_qkv": quant_bias_qkv,
+            "wu_q": wu_q,
+            "qb_deq_scl": qb_deq_scl,
+            "qb_qt_bias": qb_qt_bias,
+        }
+        persist = self._mlapo_should_persist_derived()
+        if persist:
+            for host_name, attr_name, buf_name in self._MLAPO_PERSISTED_BUFFERS:
+                host = getattr(self, host_name)
+                setattr(self, attr_name, self._set_persistent_buffer(host, buf_name, derived[attr_name]))
+        else:
+            for _, attr_name, _ in self._MLAPO_PERSISTED_BUFFERS:
+                setattr(self, attr_name, derived[attr_name])
 
-        # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
-        # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
-        # referenced, so drop them to save memory.
-        if (
-            self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.is_kv_consumer
-            and self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
-        ):
+        self._derive_mlapo_rebuildable(act_dtype)
+
+        if persist:
+            # Preserve the baseline KV-consumer memory optimization. The
+            # transformed tensors above are persistent snapshot buffers.
             self.fused_qkv_a_proj.weight = None
             self.fused_qkv_a_proj.deq_scale = None
             self.fused_qkv_a_proj.quant_bias = None
