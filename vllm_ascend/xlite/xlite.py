@@ -16,6 +16,7 @@
 #
 """Xlite integration module for vLLM-Ascend."""
 
+import json
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
@@ -1230,11 +1231,35 @@ class XliteWrapper:
         slots = self._hybrid_slots(tuple(b for b in key_ids if b))
         first_log = not self._xlite_import_log_done
         imported = 0
+        # PERF: materialize ALL layers' state indices with ONE device->host
+        # sync. Previously each layer called _gdn_layer_indices() (its own
+        # .cpu()) — 48 stream syncs per import; under KV-preemption storms
+        # the import runs constantly and those syncs shattered the pipeline
+        # (2048/2048-b96 TPOT 2.2x native). Stack on-device, sync once,
+        # slice per layer.
+        layer_map: dict[int, list[int]] = {}
+        _stacked: list[torch.Tensor] = []
+        _stacked_li: list[int] = []
+        for li in range(len(self._xlite_native_gdn_groups)):
+            key = self._xlite_gdn_meta_keys[li] if li < len(self._xlite_gdn_meta_keys) else None
+            if key is None:
+                continue
+            try:
+                meta = attn_metadata_raw[key]
+            except (KeyError, TypeError, IndexError):
+                continue
+            idx = getattr(meta, "non_spec_state_indices_tensor", None)
+            if idx is None or idx.numel() < num_reqs:
+                continue
+            _stacked.append(idx[:num_reqs].to(torch.long))
+            _stacked_li.append(li)
+        if _stacked:
+            _all = torch.stack(_stacked, dim=0).detach().cpu().tolist()   # ONE sync
+            layer_map = {li: _all[j] for j, li in enumerate(_stacked_li)}
         for li, ((conv_p, ssm_p), group) in enumerate(
             zip(self._xlite_hybrid_persistent, self._xlite_native_gdn_groups)
         ):
-            key = self._xlite_gdn_meta_keys[li] if li < len(self._xlite_gdn_meta_keys) else None
-            layer_ids = self._gdn_layer_indices(attn_metadata_raw, key, num_reqs)
+            layer_ids = layer_map.get(li)
             if layer_ids is None:
                 continue
             nconv, nssm = self._pick_native_conv_ssm(
@@ -1455,6 +1480,16 @@ class XliteWrapper:
         """
         forward_context = get_forward_context()
         is_hybrid = self.adapter_xlite_model.xlite_config.attn_type == AttnHybrid
+
+        def _ensure_output(out: Any, path: str) -> XliteForwardResult:
+            if out is None:
+                raise RuntimeError(
+                    f"XliteWrapper got None from {path} "
+                    f"(full_mode={self.full_mode}, hybrid={is_hybrid}, "
+                    f"runnable={type(self.npu_runnable).__name__})"
+                )
+            return out
+
         if getattr(forward_context, "in_profile_run", False) or (
             is_hybrid and getattr(forward_context, "capturing", False)
         ):
