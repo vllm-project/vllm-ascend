@@ -23,9 +23,9 @@ if [ "$DAILY_DEPS_MODE" = "torch_npu_only" ]; then
     mkdir -p /tmp/torch_npu
     wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \
         -O /tmp/torch_npu/torch_npu.tar.gz \
-        "https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.10.0-${TORCH_NPU_VERSION}/${TORCH_NPU_DATE}/pytorch_v2.10.0-${TORCH_NPU_VERSION}_py312.tar.gz"
+        "https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.10.0/${TORCH_NPU_DATE}/pytorch_v2.10.0_py312.tar.gz"
     tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu
-    python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH}".whl --force-reinstall --extra-index-url https://download.pytorch.org/whl/cpu/
+    python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH}".whl --force-reinstall --no-deps --extra-index-url https://download.pytorch.org/whl/cpu/
     echo "Clean up temporary files..."
     rm -rf /tmp/torch_npu
     echo "Daily packages installation complete (torch_npu_only)."
@@ -76,7 +76,7 @@ esac
 # Set INSTALL_TRITON_ASCEND=true to enable triton-ascend daily installation.
 if [ "${INSTALL_TRITON_ASCEND:-false}" = "true" ]; then
     echo "Install triton-ascend..."
-    TRITON_ASCEND_URL="https://ascend-cann-open.obs.cn-north-4.myhuaweicloud.com/Triton_Innersource/B_Version/Triton%20Performance%20Optimization%20${TRITON_ASCEND_VERSION}/triton_ascend-${TRITON_ASCEND_PACKAGE_VERSION}-cp312-cp312-manylinux_2_27_${ARCH}.manylinux_2_28_${ARCH}.whl"
+    "https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/Triton_Innersource/B_Version/${TRITON_ASCEND_VERSION}/triton_ascend-${TRITON_ASCEND_PACKAGE_VERSION}-cp312-cp312-manylinux_2_27_${ARCH}.manylinux_2_28_${ARCH}.whl"
     python3 -m pip install "$TRITON_ASCEND_URL" --force-reinstall
 else
     echo "Skipping triton-ascend (set INSTALL_TRITON_ASCEND=true to enable)"
