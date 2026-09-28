@@ -49,12 +49,18 @@ from vllm_ascend.worker.v2.utils import communicator_switch
 class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
     """310P draft FULL: SpecDecoding prefill + per-step decode graphs."""
 
-    def _updatable_graph_replay(self, desc: BatchExecutionDescriptor):
-        """Skip empty update↔compute handshake on 310P draft FULL prefill."""
+    def _updatable_graph_replay(self, desc: BatchExecutionDescriptor, draft_attn_metadatas):
+        """Skip empty update↔compute handshake on 310P draft FULL prefill.
+
+        Parent ``AutoRegressiveAclGraphManager.run_fullgraph`` always passes
+        ``draft_attn_metadatas``. Dropping that argument raises TypeError on
+        the first MTP draft-prefill FULL replay.
+        """
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
         fia_params = self.speculator.build_fia_params(
             desc.num_reqs,
+            draft_attn_metadatas[0],
             self.is_draft_model_prefill,
         )
         resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
