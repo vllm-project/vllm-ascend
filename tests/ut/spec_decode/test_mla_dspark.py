@@ -261,7 +261,7 @@ def test_propose_uses_draft_decode_flags_for_dcp(monkeypatch, use_dcp):
     spec.max_num_reqs = 4
     spec.max_num_tokens = 20
     input_batch = SimpleNamespace(num_reqs=1, is_prefilling_np=np.array([True, True, True, True]))
-    captured = {}
+    captured: dict[str, Any] = {}
     prepared_lengths = torch.tensor([12, 0, 0, 0], dtype=torch.int32)
     prepared_flags = torch.zeros(4, dtype=torch.bool)
     prepare = MagicMock(return_value=(prepared_lengths, prepared_flags))
