@@ -1514,6 +1514,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             return False
         if nope.shape[:-1] != rope.shape[:-1]:
             return False
+        if nope.shape[-2] != self.num_kv_heads:
+            return False
         if nope.shape[-1] != self.kv_lora_rank or rope.shape[-1] != self.qk_rope_head_dim:
             return False
         if nope.stride(-2) != self.kv_lora_rank + self.qk_rope_head_dim:
@@ -1629,13 +1631,19 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        kv_cache: tuple,
+        kv_cache: torch.Tensor | tuple,
         slots: torch.Tensor,
         *,
         attn_metadata: AscendMLAMetadata | None = None,
     ):
-        if self._is_fused_mla_cache_views(kv_cache):
-            return self._exec_kv_fused_cache(kv_no_split, cos, sin, kv_cache, slots)
+        # DSpark context precomputation calls this writer without forward(),
+        # so it may receive the runner's fused BBND tensor rather than the
+        # nope/rope views constructed by forward().
+        if isinstance(kv_cache, torch.Tensor):
+            kv_cache = (
+                kv_cache[..., : self.kv_lora_rank],
+                kv_cache[..., self.kv_lora_rank :],
+            )
 
         if not self.use_mla_rope:
             return self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
@@ -1674,6 +1682,14 @@ class AscendMLAImpl(MLAAttentionImpl):
                 num_decode_tokens=0,
             )
             pcp_prefill_range = (local_prefill_start, local_prefill_end)
+
+        if self._is_fused_mla_cache_views(kv_cache):
+            k_pe, k_nope = self._exec_kv_fused_cache(kv_no_split, cos, sin, kv_cache, slots)
+            if pcp_prefill_range is not None:
+                local_start, local_end = pcp_prefill_range
+                k_pe = k_pe[local_start:local_end]
+                k_nope = k_nope[local_start:local_end]
+            return k_pe, k_nope
 
         assert self.kv_a_layernorm is not None
         B = kv_no_split.shape[0]
