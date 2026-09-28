@@ -5,7 +5,6 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm_ascend import ascend_forward_context
 from vllm_ascend.ops.fused_moe import force_eplb
 
 
@@ -64,7 +63,7 @@ def test_get_force_eplb_topk_reuses_cached_table():
     topk_ids = torch.empty((2, 2), dtype=torch.int32)
 
     extras = SimpleNamespace(moe_comm_method=moe_comm_method)
-    with patch.object(ascend_forward_context, "_EXTRA_CTX", extras):
+    with patch.object(force_eplb, "_EXTRA_CTX", extras):
         first = force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
         second = force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
 
@@ -78,7 +77,7 @@ def test_get_force_eplb_topk_passthrough_without_comm_method():
     topk_ids = torch.empty((2, 2))
 
     extras = SimpleNamespace(moe_comm_method=None)
-    with patch.object(ascend_forward_context, "_EXTRA_CTX", extras):
+    with patch.object(force_eplb, "_EXTRA_CTX", extras):
         result = force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
 
     assert result is topk_ids

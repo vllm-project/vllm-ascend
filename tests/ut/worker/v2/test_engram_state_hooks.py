@@ -60,7 +60,10 @@ def _batch(num_tokens=8, num_reqs=2):
 def _v41_model():
     model = SimpleNamespace()
     model.engram_cache_layer_name = "model.layers.0.attn"
-    model.prepare_engram_inputs = create_autospec(_prepare_engram_inputs_stub)
+    model.prepare_engram_inputs = create_autospec(
+        _prepare_engram_inputs_stub,
+        return_value={"engram_lookups": {}, "engram_mask": torch.empty(0)},
+    )
     model.prepare_engram_graph_inputs = Mock(return_value={"engram_lookups": {}, "engram_mask": torch.empty(0)})
     return model
 
