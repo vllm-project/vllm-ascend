@@ -178,7 +178,11 @@ class MooncakeBaseConnectorScheduler:
         params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:
-        raise NotImplementedError
+        # Truncate before local prefix-cache lookup so its hit count stays
+        # consistent with the prompt length used by the scheduler.
+        params = request.kv_transfer_params
+        if params is not None and params.get("do_remote_decode") and self.need_truncate:
+            self._truncate_request_for_prefill(request)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         raise NotImplementedError
