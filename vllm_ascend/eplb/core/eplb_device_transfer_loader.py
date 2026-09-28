@@ -101,7 +101,7 @@ class D2DExpertWeightLoader:
 
         # Waiting for send/recv tasks finish
         if reqs:
-            with record_function_or_nullcontext("EPLB weight D2D wait"):
+            with record_function_or_nullcontext("EPLB_weight_D2D_wait"):
                 for req in reqs:
                     req.wait()
 
