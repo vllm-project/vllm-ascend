@@ -98,7 +98,7 @@ on:
         description: 'Torch NPU version'
         required: false
         type: string
-        default: '26.1.0'
+        default: '26.2.0'
       torch_npu_date:
         description: 'Torch NPU date'
         required: false
