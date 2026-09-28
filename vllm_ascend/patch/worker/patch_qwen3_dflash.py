@@ -23,11 +23,35 @@ if lilicorr_module is not None:
     lilicorr_module.DFlash2Qwen3DecoderLayer = DFlash2Qwen3DecoderLayer
 
 
+def _project_context_kv(
+    self,
+    context_states: torch.Tensor,
+    num_ctx: int,
+    num_layers: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    normed_context_states = self.hidden_norm(context_states)
+    if self._fused_kv_weight is not None:
+        all_kv_flat = F.linear(normed_context_states, self._fused_kv_weight, self._fused_kv_bias)
+        all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
+    else:
+        # Packed quantized weights must run through their linear method.
+        layer_kv = []
+        for proj, q_size in zip(self._context_qkv_projs, self._context_q_sizes, strict=True):
+            qkv, _ = proj(normed_context_states)
+            layer_kv.append(qkv[:, q_size:].view(num_ctx, 2, num_kv_heads, head_dim))
+        all_kv = torch.stack(layer_kv, dim=1)
+
+    all_kv = all_kv.permute(2, 1, 0, 3, 4).contiguous()
+    return all_kv[0], all_kv[1]
+
+
 def precompute_and_store_context_kv(
     self,
     context_states: torch.Tensor,
     context_positions: torch.Tensor,
-    context_slot_mapping: torch.Tensor | None = None,
+    context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
 ) -> None:
     if not hasattr(self, "_num_attn_layers"):
         self._build_fused_kv_buffers()
@@ -38,15 +62,7 @@ def precompute_and_store_context_kv(
     hd = self._head_dim
     nkv = self._num_kv_heads
 
-    # --- Fused KV projection (one GEMM for all layers) ---
-    normed_context_states = self.hidden_norm(context_states)
-    all_kv_flat = F.linear(normed_context_states, self._fused_kv_weight, self._fused_kv_bias)
-    # Single contiguous copy that separates K/V and transposes to
-    # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
-    # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
-    all_kv = all_kv_flat.view(num_ctx, L, 2, nkv, hd).permute(2, 1, 0, 3, 4).contiguous()
-    all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
-    all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
+    all_k, all_v = self._project_context_kv(context_states, num_ctx, L, nkv, hd)
 
     # --- Per-layer RMSNorm K (3D: [num_ctx, nkv, hd] per layer) ---
     all_k_normed = torch.empty_like(all_k)
@@ -64,6 +80,10 @@ def precompute_and_store_context_kv(
 
     if context_slot_mapping is None:
         return
+
+    v_scale = getattr(self.layers[0].self_attn, "v_scale", None)
+    if v_scale is not None:
+        all_v.mul_(v_scale)
 
     # --- Per-layer cache insert ---
     all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
@@ -83,6 +103,7 @@ def precompute_and_store_context_kv(
         )
 
 
+DFlashQwen3Model._project_context_kv = _project_context_kv
 DFlashQwen3Model.precompute_and_store_context_kv = precompute_and_store_context_kv
 
 _orig_read_mask_embedding = DFlashQwen3ForCausalLM._read_mask_embedding
