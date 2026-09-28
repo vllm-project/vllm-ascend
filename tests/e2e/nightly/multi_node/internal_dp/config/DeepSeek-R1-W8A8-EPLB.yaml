@@ -56,8 +56,10 @@ deployment:
                     }
               }
           }'
+          --enable-eplb
+          --eplb-config '{"window_size":2048,"step_interval":200,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
           --additional-config
-          '{"weight_nz_mode":1}'
+          '{"weight_nz_mode":1,"eplb_config":{"load_collection_phase":"all"}}'
 
   -
     envs:
@@ -94,8 +96,10 @@ deployment:
                     }
               }
           }'
+          --enable-eplb
+          --eplb-config '{"window_size":2048,"step_interval":200,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
           --additional-config
-          '{"weight_nz_mode":1}'
+          '{"weight_nz_mode":1,"eplb_config":{"load_collection_phase":"all"}}'
   -
     envs:
       <<: *env_common
@@ -132,8 +136,10 @@ deployment:
                   }
             }
         }'
+        --enable-eplb
+        --eplb-config '{"window_size":2048,"step_interval":200,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
         --additional-config
-        '{"multistream_overlap_shared_expert":true}'
+        '{"multistream_overlap_shared_expert":true,"eplb_config":{"load_collection_phase":"all"}}'
   -
     envs:
       <<: *env_common
@@ -170,8 +176,10 @@ deployment:
                   }
             }
         }'
+        --enable-eplb
+        --eplb-config '{"window_size":2048,"step_interval":200,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
         --additional-config
-        '{"multistream_overlap_shared_expert":true}'
+        '{"multistream_overlap_shared_expert":true,"eplb_config":{"load_collection_phase":"all"}}'
 benchmarks:
   perf:
     case_type: performance
