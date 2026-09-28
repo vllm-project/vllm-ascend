@@ -51,7 +51,20 @@ states.apply_temperature = apply_temperature
 logprob.compute_token_logprobs = compute_token_logprobs
 rejection_sampler_utils.rejection_sample = npu_rejection_sample
 rejection_sampler.rejection_sample = npu_rejection_sample
-dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend
+
+
+# Upstream still passes BLOCK_SIZE, derived per step from the query length.
+# The Ascend kernel never reads it, so drop the kwarg and keep one cache entry.
+class _NoBlockSizeDFlashKernel:
+    def __getitem__(self, grid):
+        def launch(*args, **kwargs):
+            kwargs.pop("BLOCK_SIZE", None)
+            return _prepare_dflash_inputs_kernel_ascend[grid](*args, **kwargs)
+
+        return launch
+
+
+dflash_speculator._prepare_dflash_inputs_kernel = _NoBlockSizeDFlashKernel()
 # triton ops that filed in ops/triton
 gumbel.gumbel_sample = categorical_sample
 speculator.gumbel_sample = categorical_sample

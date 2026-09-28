@@ -54,7 +54,6 @@ def test_prepare_dflash_inputs_clamps_seq_len_to_max_model_len():
         "max_model_len": max_model_len,
         "SAMPLE_FROM_ANCHOR": False,
         "PAD_SLOT_ID": -1,
-        "BLOCK_SIZE": 1,
     }
     kwargs.update(cp_rank=0, CP_SIZE=1, CP_INTERLEAVE=1)
 
