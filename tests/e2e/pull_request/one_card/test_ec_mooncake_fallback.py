@@ -11,8 +11,8 @@ The two-card EPD test covers transfer between separate server processes.
 from __future__ import annotations
 
 import pytest
+import torch
 
-torch = pytest.importorskip("torch")
 pytest.importorskip("torch_npu")
 
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (  # noqa: E402
