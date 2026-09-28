@@ -677,4 +677,3 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
             self.client.update_weights(asdict(update_info))
 
         self._run_sender_rpc("update", send_update)
-

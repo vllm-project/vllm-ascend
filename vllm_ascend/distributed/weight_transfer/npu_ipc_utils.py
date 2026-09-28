@@ -126,4 +126,3 @@ class NpuPackedBufferImporter:
     def close(self) -> None:
         """Release the cached imported tensor reference."""
         self._entry = None
-

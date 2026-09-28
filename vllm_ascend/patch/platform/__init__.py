@@ -113,4 +113,3 @@ import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa
 #    Future Plan:
 #       Remove this patch when upstream supports per-group or backend-defined
 #       prefill boundaries.
-

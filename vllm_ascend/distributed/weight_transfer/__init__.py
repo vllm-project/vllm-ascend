@@ -43,4 +43,3 @@ def register_engine():
         "vllm_ascend.distributed.weight_transfer.hccl_engine",
         "HCCLTrainerWeightTransferEngine",
     )
-

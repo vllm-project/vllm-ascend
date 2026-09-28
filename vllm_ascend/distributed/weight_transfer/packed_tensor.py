@@ -458,4 +458,3 @@ def packed_npu_ipc_consumer(
             dtypes,
             tensor_sizes,
         )
-

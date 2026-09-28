@@ -155,4 +155,3 @@ def test_shutdown_is_idempotent_and_rejects_future_send():
 
 def test_trainer_does_not_expose_worker_update_method():
     assert "update_weights" not in HCCLTrainerWeightTransferEngine.__dict__
-

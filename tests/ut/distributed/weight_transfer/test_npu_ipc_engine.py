@@ -677,4 +677,3 @@ def test_receive_packed_weights_loads_model():
         device_index=0,
     )
     engine.model.load_weights.assert_called_once_with(packed_weights)
-

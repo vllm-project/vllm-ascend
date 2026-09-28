@@ -735,4 +735,3 @@ class HCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[HCCLTrainerIni
         group, self.group = self.group, None
         if group is not None:
             group.close()
-

@@ -182,13 +182,3 @@ class PyHcclCommunicator:
             self.comm,
             aclrtStream_t(stream.npu_stream),
         )
-
-    def close(self) -> None:
-        """Destroy only this communicator; safe to call more than once."""
-        if not self.available:
-            return
-        self.available = False
-        with torch.npu.device(self.device):
-            torch.npu.synchronize(self.device)
-            self.hccl.hcclCommDestroy(self.comm)
-
