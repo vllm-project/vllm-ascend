@@ -1866,7 +1866,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         return decode_q_nope, decode_q_pe
 
     def mla_preprocess_only_decode(self, hidden_states, kv_cache, attn_metadata):
-        from cann_ops_transformer import mla_prolog  # type: ignore[import-untyped]  # noqa: PLC0415
+        from cann_ops_transformer import mla_prolog  # type: ignore[import-not-found]  # noqa: PLC0415
 
         bsz = attn_metadata.num_decode_tokens
         cache_index = attn_metadata.slot_mapping[:bsz].to(torch.int64)
