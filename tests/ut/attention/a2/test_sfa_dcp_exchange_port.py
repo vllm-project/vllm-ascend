@@ -223,7 +223,9 @@ def test_nonuniform_large_batch_registered_graph_against_fp64(monkeypatch):
         outputs, lses = _nonuniform_inputs(tokens, 0)
         owner = outputs[rank].transpose(0, 1).contiguous().npu()
         output = owner.transpose(0, 1)
-        lse = lses[rank].npu()
+        head_major_lse = tokens != 191
+        lse_owner = (lses[rank].transpose(0, 1).contiguous() if head_major_lse else lses[rank]).npu()
+        lse = lse_owner.transpose(0, 1) if head_major_lse else lse_owner
 
         def invoke(output=output, lse=lse):
             fp32 = exchange(output, lse, group.device_group)
@@ -241,7 +243,7 @@ def test_nonuniform_large_batch_registered_graph_against_fp64(monkeypatch):
         for step in range(4):
             outputs, lses = _nonuniform_inputs(tokens, step)
             owner.copy_(outputs[rank].transpose(0, 1).contiguous())
-            lse.copy_(lses[rank])
+            lse_owner.copy_(lses[rank].transpose(0, 1).contiguous() if head_major_lse else lses[rank])
             graph.replay()
             reference, magnitude = _fp64_merge_reference(outputs, lses, rank)
             actual32, actual16 = fp32.cpu().double(), bf16.cpu().double()
@@ -254,7 +256,13 @@ def test_nonuniform_large_batch_registered_graph_against_fp64(monkeypatch):
             assert ((actual32 - reference).abs() <= roundoff).all()
             assert ((actual16 - reference).abs() <= half_ulp + roundoff).all()
             assert torch.count_nonzero(actual32[:, 0]) == torch.count_nonzero(actual16[:, 0]) == 0
-        retained.append((graph, fp32, bf16, owner, lse))
+        retained.append((graph, fp32, bf16, owner, lse, reference, roundoff, half_ulp))
+    # Revisit older buckets after later captures share the same runtime kernels.
+    for saved_graph, saved32, saved16, _owner, _lse, reference, roundoff, half_ulp in reversed(retained):
+        saved_graph.replay()
+        torch.npu.synchronize()
+        assert ((saved32.cpu().double() - reference).abs() <= roundoff).all()
+        assert ((saved16.cpu().double() - reference).abs() <= half_ulp + roundoff).all()
     dist.barrier()
     retained.clear()
     del graph, fp32, bf16, owner, output, lse

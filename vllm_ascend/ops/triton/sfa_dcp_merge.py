@@ -44,42 +44,43 @@ def torch_merge(out_recv: torch.Tensor, lse_recv: torch.Tensor, token_dim: int) 
 
 if triton is not None:
 
-    @triton.jit
+    @triton.jit(
+        do_not_specialize=[
+            "lse_s1",
+            "head_count",
+            "total_tiles",
+            "num_programs",
+        ]
+    )
     def _fused_merge_kernel(
         out_ptr,
         lse_ptr,
         result_ptr,
-        out_s0: tl.constexpr,
-        out_s1: tl.constexpr,
-        out_s2: tl.constexpr,
-        out_s3: tl.constexpr,
-        lse_s0: tl.constexpr,
-        lse_s1: tl.constexpr,
-        lse_s2: tl.constexpr,
-        result_s0: tl.constexpr,
-        result_s1: tl.constexpr,
-        result_s2: tl.constexpr,
-        rows: tl.constexpr,
-        head_count: tl.constexpr,
-        head_dim: tl.constexpr,
-        total_tiles: tl.constexpr,
-        num_programs: tl.constexpr,
-        ranks: tl.constexpr,
-        native_layout: tl.constexpr,
-        block_d: tl.constexpr,
+        out_s0,
+        out_s1,
+        out_s2,
+        LSE_RANK_STRIDE: tl.constexpr,
+        lse_s1,
+        head_count,
+        head_dim,
+        total_tiles,
+        num_programs,
+        RANKS: tl.constexpr,
+        NATIVE_LAYOUT: tl.constexpr,
+        BLOCK_D: tl.constexpr,
     ):
         pid = tl.program_id(0)
-        rank_ids = tl.arange(0, ranks)
+        rank_ids = tl.arange(0, RANKS)
         for tile in tl.range(pid, total_tiles, num_programs):
-            row = tile // tl.cdiv(head_dim, block_d)
-            dim = (tile % tl.cdiv(head_dim, block_d)) * block_d + tl.arange(0, block_d)
+            row = tile // tl.cdiv(head_dim, BLOCK_D)
+            dim = (tile % tl.cdiv(head_dim, BLOCK_D)) * BLOCK_D + tl.arange(0, BLOCK_D)
             mask = dim < head_dim
             token = row // head_count
             head = row % head_count
-            if native_layout:
-                lse_offsets = rank_ids * lse_s0 + head * lse_s1 + token * lse_s2
+            if NATIVE_LAYOUT:
+                lse_offsets = rank_ids * LSE_RANK_STRIDE + head * lse_s1 + token
             else:
-                lse_offsets = rank_ids * lse_s0 + token * lse_s1 + head * lse_s2
+                lse_offsets = rank_ids * LSE_RANK_STRIDE + token * lse_s1 + head
             raw_lse = tl.load(lse_ptr + lse_offsets).to(tl.float32)
             finite = (raw_lse == raw_lse) & (raw_lse > float("-inf")) & (raw_lse < float("inf"))
             safe_lse = tl.where(finite, raw_lse, float("-inf"))
@@ -92,19 +93,19 @@ if triton is not None:
             denominator = tl.sum(exponent, axis=0)
             safe_denominator = tl.where(denominator > 0.0, denominator, 1.0)
             weights = exponent / safe_denominator
-            result = tl.zeros((block_d,), dtype=tl.float32)
-            for rank in tl.static_range(0, ranks):
+            result = tl.zeros((BLOCK_D,), dtype=tl.float32)
+            for rank in tl.static_range(0, RANKS):
                 weight = get_element(weights, (rank,))
-                if native_layout:
-                    out_offsets = rank * out_s0 + head * out_s1 + token * out_s2 + dim * out_s3
+                if NATIVE_LAYOUT:
+                    out_offsets = rank * out_s0 + head * out_s1 + token * out_s2 + dim
                 else:
-                    out_offsets = rank * out_s0 + token * out_s1 + head * out_s2 + dim * out_s3
+                    out_offsets = rank * out_s0 + token * out_s1 + head * out_s2 + dim
                 values = tl.load(out_ptr + out_offsets, mask=mask, other=0.0).to(tl.float32)
                 # Match upstream: invalid-rank NaN/Inf outputs must not leak
                 # through a zero LSE weight (NaN * 0 is still NaN).
                 values = tl.where(get_element(finite, (rank,)), values, 0.0)
                 result += values * weight
-            tl.store(result_ptr + token * result_s0 + head * result_s1 + dim * result_s2, result, mask=mask)
+            tl.store(result_ptr + (token * head_count + head) * head_dim + dim, result, mask=mask)
 
 
 def _fast_path(out_recv: torch.Tensor, lse_recv: torch.Tensor, token_dim: int) -> bool:
@@ -147,16 +148,16 @@ def fused_merge(out_recv: torch.Tensor, lse_recv: torch.Tensor, token_dim: int) 
         out_recv,
         lse_recv,
         result,
-        *out_recv.stride(),
-        *lse_recv.stride(),
-        *result.stride(),
-        tokens * heads,
+        # Eligibility guarantees unit innermost strides. The result is always
+        # allocated contiguous, so those strides need no kernel arguments.
+        *out_recv.stride()[:3],
+        *lse_recv.stride()[:2],
         heads,
         head_dim,
         total_tiles=tiles,
         num_programs=programs,
-        ranks=ranks,
-        native_layout=native_layout,
-        block_d=block_d,
+        RANKS=ranks,
+        NATIVE_LAYOUT=native_layout,
+        BLOCK_D=block_d,
     )
     return result

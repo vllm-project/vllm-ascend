@@ -23,52 +23,52 @@ _MAX_DECODE_TOKENS = 12
 
 if triton is not None:
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["tokens", "programs", "heads"])
     def _prepare_query_head_major(
         qn,
         qr,
         out,
-        ns0: tl.constexpr,
-        ns1: tl.constexpr,
-        ns2: tl.constexpr,
-        rs0: tl.constexpr,
-        rs1: tl.constexpr,
-        rs2: tl.constexpr,
-        tokens: tl.constexpr,
-        programs: tl.constexpr,
-        heads: tl.constexpr,
-        nope_dim: tl.constexpr,
-        rope_dim: tl.constexpr,
+        ns0,
+        ns1,
+        ns2,
+        rs0,
+        rs1,
+        rs2,
+        tokens,
+        programs,
+        heads,
+        NOPE_DIM: tl.constexpr,
+        ROPE_DIM: tl.constexpr,
     ):
-        n = tl.arange(0, nope_dim)
-        r = tl.arange(0, rope_dim)
+        n = tl.arange(0, NOPE_DIM)
+        r = tl.arange(0, ROPE_DIM)
         for row in tl.range(tl.program_id(0), heads * tokens, programs):
             head, token = row // tokens, row % tokens
             a = tl.load(qn + token * ns0 + head * ns1 + n * ns2)
             b = tl.load(qr + token * rs0 + head * rs1 + r * rs2)
-            tl.store(out + row * (nope_dim + rope_dim) + n, a)
-            tl.store(out + row * (nope_dim + rope_dim) + nope_dim + r, b)
+            tl.store(out + row * (NOPE_DIM + ROPE_DIM) + n, a)
+            tl.store(out + row * (NOPE_DIM + ROPE_DIM) + NOPE_DIM + r, b)
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["tokens", "programs", "heads"])
     def _unpack_query_fragments(
         gathered,
         qn,
         qr,
-        tokens: tl.constexpr,
-        programs: tl.constexpr,
-        heads: tl.constexpr,
-        nope_dim: tl.constexpr,
-        rope_dim: tl.constexpr,
+        tokens,
+        programs,
+        heads,
+        NOPE_DIM: tl.constexpr,
+        ROPE_DIM: tl.constexpr,
     ):
-        n = tl.arange(0, nope_dim)
-        r = tl.arange(0, rope_dim)
+        n = tl.arange(0, NOPE_DIM)
+        r = tl.arange(0, ROPE_DIM)
         for row in tl.range(tl.program_id(0), tokens * heads, programs):
             token, head = row // heads, row % heads
-            base = (head * tokens + token) * (nope_dim + rope_dim)
+            base = (head * tokens + token) * (NOPE_DIM + ROPE_DIM)
             a = tl.load(gathered + base + n)
-            b = tl.load(gathered + base + nope_dim + r)
-            tl.store(qn + row * nope_dim + n, a)
-            tl.store(qr + row * rope_dim + r, b)
+            b = tl.load(gathered + base + NOPE_DIM + r)
+            tl.store(qn + row * NOPE_DIM + n, a)
+            tl.store(qr + row * ROPE_DIM + r, b)
 
 
 def can_prepare_query(qn: torch.Tensor, qr: torch.Tensor) -> bool:

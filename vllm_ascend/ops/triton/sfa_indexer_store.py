@@ -22,14 +22,14 @@ _MAX_DECODE_ROWS = 12
 
 if triton is not None:
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["capacity"])
     def _store_indexer_key_scale(
         quant,
         scales,
         slots,
         cache,
         scale_cache,
-        capacity: tl.constexpr,
+        capacity,
     ):
         row = tl.program_id(0)
         column = tl.arange(0, 128)

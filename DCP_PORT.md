@@ -168,9 +168,73 @@ The pack kernel body is unchanged by this review follow-up.
 These are host first-call costs including compilation/loading/launch, not
 kernel latency. The first cold call also includes Triton backend initialization.
 Specialization still occurs; this is a representative sweep, not all T1-192.
-No dynamic-token rewrite is made without evidence that it improves this tradeoff.
+This historical measurement is superseded by the complete-path audit below.
 Previous model/performance numbers above remain tied to their original revision;
 this follow-up does not claim a fresh full-model or SuperMem performance run.
+
+## Specialization review, 2026-09-28
+
+The four new Triton modules now distinguish static IR configuration from workload
+values. Of 44 original constexpr arguments, 10 are retained static configuration,
+26 become runtime arguments, seven are removed, and one measured exception remains.
+
+| Kernel | Static configuration | Runtime values / removals |
+|---|---|---|
+| T1 pack | Fixed literal vector tiles | Remove normalized unit LSE stride |
+| Token pack | `LOCAL_HEADS`, `HEAD_WORDS`, `STATS_TILE` | Token count and input strides become runtime |
+| Merge | `RANKS`, `NATIVE_LAYOUT`, `BLOCK_D` | Dimensions, work/program counts and other strides become runtime; remove unused rows and five guarded/derived strides |
+| Query prepare/unpack | `NOPE_DIM`, `ROPE_DIM` | Dimensions required by `tl.arange` stay static; workload counts and input strides become runtime |
+| Indexer store | Fixed literal key tile | Cache capacity becomes runtime |
+
+The one exception is merge's `LSE_RANK_STRIDE`, which addresses the rank-vector
+LSE load. Controlled single-NPU msprof measurements with identical packed T192
+inputs and four alternating-order blocks of 100 graph replays isolate its effect:
+
+| Merge stride specialization | Mean device time |
+|---|---:|
+| All five runtime | 85.59 us |
+| Only LSE rank stride static | 52.63 us |
+| All five static | 49.22 us |
+| All except LSE rank stride static | 85.62 us |
+
+Model dimensions alone did not recover performance. The retained exception is
+workload-shaped, not an `arange` requirement: it still creates token-dependent
+merge variants. Normal runtime input strides retain Triton's unit/divisibility
+metadata, not their exact values. `STATS_TILE` still creates vector-size buckets.
+This change does **not** eliminate specialization or make merge token-independent.
+
+Complete registered pack/AllToAll/FP32-merge/BF16-cast cold-cache sweep, same
+13 T values and layout sequence, eight ranks, baseline `5db959926` versus this
+change. Sum the slowest rank's synchronized first call at each T; prewarm HCCL
+but use fresh rank-local Triton caches. One sweep per revision, not pure compiler
+time or a variance estimate:
+
+| Metric | Baseline | Updated |
+|---|---:|---:|
+| Cold first-call sum | 54.713 s | 50.041 s |
+| New-process disk-cache reuse sum | 0.377 s | 0.390 s |
+| Rank0 NPU binaries | 26 | 21 |
+| Rank0 binary bytes | 123328 | 132296 |
+| Rank0 complete cache bytes | 1846715 | 2160178 |
+
+Fewer variants do not imply smaller binaries or a dramatically cheaper cold start.
+For contiguous LSE, complete graph replay intervals measured by msprof (200
+replays, maximum of eight ranks per replay, then mean) are T48 99.51 -> 99.01 us
+and T192 218.50 -> 218.62 us. These are operator-path measurements, not HTTP TPOT.
+The rejected all-runtime candidate regressed T192 by 14.4%.
+
+A fresh same-session pair with the native attention caller's head-major LSE
+layout also passes: T48 96.77 -> 89.50 us, T192 208.85 -> 210.21 us (+0.65%).
+This is one pair, not a confidence interval; both layouts remain within the
+predeclared 10% regression investigation threshold.
+
+Fresh final-runtime validation: 119 focused CPU tests; eight-rank nonuniform
+T13/191/192 and uniform T48/192 registered graph tests; two query input-stride
+cases per rank, with distinct row tags and old-bucket replay; 48 single-card
+merge cases (rank2/8, both layouts, FP16/BF16/FP32, D127/496/512/513); two indexer
+capacity cases including out-of-range slots. All pass with changing graph inputs.
+Single-card precision tests remain under the requested nightly Triton directory.
+Changed-file pre-commit passes; full-model and SuperMem figures are not rerun.
 
 ## Reused release evidence, not a new main benchmark
 
