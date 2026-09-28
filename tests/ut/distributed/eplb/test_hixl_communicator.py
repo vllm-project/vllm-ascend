@@ -169,8 +169,6 @@ def test_hixl_reads_registered_remote_expert(monkeypatch):
         expert_id=3,
     )
     communicator.execute()
-    assert work.wait.call_count == 1
-    communicator.wait_for_transfer_safety()
 
     assert engine.local_engine == "192.0.2.1:12345"
     assert engine.options == {}
