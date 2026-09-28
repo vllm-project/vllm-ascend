@@ -861,10 +861,14 @@ class BaseDeviceAdaptor:
         scale: float,
         prebuilt_meta,
         fused_fwd,
+        qk_pre_normalized: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A2/A3 Phase6 FLA NPU GDN prefill kernel."""
-        q = l2norm_fwd(q).contiguous()
-        k = l2norm_fwd(k).contiguous()
+        q = q.contiguous()
+        k = k.contiguous()
+        if not qk_pre_normalized:
+            q = l2norm_fwd(q)
+            k = l2norm_fwd(k)
         v = v.contiguous()
         g = g.to(torch.float32).contiguous()
         beta = beta.to(v.dtype).contiguous()
@@ -1865,6 +1869,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         scale: float,
         prebuilt_meta,
         fused_fwd,
+        qk_pre_normalized: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A5 arch35 FLA NPU GDN prefill kernel."""
         q = q.contiguous()
@@ -1896,7 +1901,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             scale=scale,
             layout="BSND",
             use_exp2=True,
-            use_qk_l2norm_in_kernel=True,
+            # Skip the in-kernel normalization when q/k arrive pre-normalized
+            # (fused prepare path), saving per-element work inside the kernel.
+            use_qk_l2norm_in_kernel=not qk_pre_normalized,
             allow_neg_eigval=False,
             disable_recompute=True,
             state_v_first=True,
