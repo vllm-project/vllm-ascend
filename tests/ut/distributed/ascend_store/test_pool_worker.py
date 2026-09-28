@@ -1432,6 +1432,20 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.hash_block_size = 16
         worker.page_size_bytes = 64
         worker.head_or_tp_rank = 0
+        if num_groups > 1:
+            # Re-bind the key layout so multi-group keys embed group_id
+            # (model@group@hash@rank) exactly as production hybrid models
+            # get at init. The worker was constructed with a single-group
+            # config, so without this the overridden groups would share the
+            # legacy single-group key format and collide, which the store
+            # never sees in production.
+            worker.layerwise_keys = worker.layerwise_protocol.bind_layerwise_keys(
+                vllm_config=worker.vllm_config,
+                kv_cache_config=worker.kv_cache_config,
+                model_name=worker.model_name,
+                use_hybrid=True,
+                grouped_block_size=worker.grouped_block_size,
+            )
         worker.m_store = MagicMock()
         return worker
 

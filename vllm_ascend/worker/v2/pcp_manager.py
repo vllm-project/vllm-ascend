@@ -27,6 +27,7 @@ from vllm.distributed import get_pcp_group, get_pp_group
 # vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
 # torch_utils.async_tensor_h2d (gaining out=/device=None support).
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -55,6 +56,7 @@ class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
     vllm_config: VllmConfig
+    kv_cache_config: KVCacheConfig | None = None
     _global_batch_slot_mappings: torch.Tensor | None
     _gathered_kv_slot_mappings: torch.Tensor | None
     _pad_slot_id: torch.Tensor
@@ -374,6 +376,7 @@ class AscendPCPManager(PCPManager):
             local_batch.num_reqs,
             local_batch.num_scheduled_tokens,
             num_valid_tokens,
+            kv_cache_config=self.kv_cache_config,
         )
         return local_batch
 

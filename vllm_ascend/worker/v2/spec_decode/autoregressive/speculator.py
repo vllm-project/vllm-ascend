@@ -61,6 +61,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def ensure_draft_hf_overrides(draft_model_config: Any) -> Any:
+    """Fill ``hf_overrides`` so ``VllmConfig.replace`` accepts the draft copy.
+
+    ModelSlim ``get_quant_config`` requires ``hf_overrides`` to be a dict.
+    Draft ``ModelConfig`` often leaves it ``None`` while the target uses ``{}``.
+    Normalize in place before ``replace`` so pydantic does not reject the
+    draft worker config (DSv4 MTP nightly on default MRv2).
+    """
+    if not isinstance(getattr(draft_model_config, "hf_overrides", None), dict):
+        draft_model_config.hf_overrides = {}
+    return draft_model_config
+
+
 class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
 
@@ -130,6 +143,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Build the runtime config used while executing the draft model."""
+        ensure_draft_hf_overrides(self.draft_model_config)
         source_parallel_config = self.vllm_config.parallel_config
         dcp_size = source_parallel_config.decode_context_parallel_size
         parallel_config = replace(
@@ -596,6 +610,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             self.input_buffers.positions,
             batch_desc.num_tokens,
             torch.from_numpy(self.input_batch.is_prefilling_np),
+            parallel_config=self.draft_vllm_config.parallel_config,
         ):
             attn_metadata = super()._build_uniform_attn_metadata(
                 batch_desc,
@@ -629,6 +644,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             self.input_buffers.positions,
             batch_desc.num_tokens,
             torch.from_numpy(self.input_batch.is_prefilling_np),
+            parallel_config=self.draft_vllm_config.parallel_config,
         ):
             attn_metadata = super()._build_attn_metadata(
                 num_reqs,
