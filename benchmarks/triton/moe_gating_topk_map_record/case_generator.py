@@ -418,6 +418,11 @@ def main():
             if args.profile_implementation == "candidate":
                 if candidate is None:
                     raise ValueError("--candidate is required for candidate profiling")
+                # Candidate profiling starts a fresh process and must register
+                # the same CANN custom op used by the integrated router.
+                from vllm_ascend.utils import enable_custom_op
+
+                enable_custom_op()
                 candidate(*tensors[:6], k=case.top_k, scoring=case.scoring)
             else:
                 baseline(case, tensors, baseline_ops)
