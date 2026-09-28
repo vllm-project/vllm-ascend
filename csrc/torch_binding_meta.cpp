@@ -2046,7 +2046,6 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     return {y, mxscale};
 }
 
-#ifdef VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE
 std::tuple<at::Tensor, at::Tensor> make_grouped_matmul_situ_quant_meta_output(
     const at::Tensor &x, const c10::SymInt &n)
 {
@@ -2112,7 +2111,6 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_list_meta(
     (void)linear_beta;
     return make_grouped_matmul_situ_quant_meta_output(x, n);
 }
-#endif
 
 } // namespace meta
 } // namespace vllm_ascend
@@ -2153,13 +2151,11 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
 
-#ifdef VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE
     ops.impl("grouped_matmul_situ_quant", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
     ops.impl("grouped_matmul_situ_quant.list", &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
     ops.impl("grouped_matmul_situ_quant_weight_nz", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
     ops.impl("grouped_matmul_situ_quant_weight_nz.list",
              &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
-#endif
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors
