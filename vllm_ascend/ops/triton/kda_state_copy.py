@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Explicit-lifecycle Triton implementation of KDA state gather/clear/scatter.
 
-Production Kimi prefill integration uses the automatic kda_state_copy_backend.
+Production Kimi prefill integration selects the prepared plan by device and cache layout.
 The worker-owned plan in ops/kda_state_copy.py shares this kernel, not the
 standalone process-global prepare/seal registry below.
 

@@ -22,7 +22,6 @@ def _make_runner(need_timing: bool = True):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing)),
-        kda_state_copy_backend="auto",
     )
     runner.vllm_config = SimpleNamespace()
     runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
@@ -595,9 +594,8 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler.broadcast_drafts.assert_called_once_with()
 
 
-@pytest.mark.parametrize("backend", ["auto", "triton", "torch"])
-def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(backend):
-    """Cache binding precedes KDA preparation; the diagnostic backend opts out."""
+def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
+    """Cache binding precedes unconditional KDA preparation."""
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.vllm_config = SimpleNamespace(
@@ -609,7 +607,6 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(backend):
     runner.model_config = SimpleNamespace(enable_return_routed_experts=True)
     runner.init_routed_experts_capturer = MagicMock()
     kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
-    runner.ascend_config.kda_state_copy_backend = backend
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
     kv_cache_config = KVCacheConfig(
@@ -642,10 +639,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(backend):
         runner.initialize_kv_cache(kv_cache_config)
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
 
-    if backend in ("auto", "triton"):
-        prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
-    else:
-        prepare_kda.assert_not_called()
+    prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
     assert seen["cfg"] == kv_cache_config
     assert vllm_model_runner.ModelCudaGraphManager is original
     acl_cls.assert_called_once()

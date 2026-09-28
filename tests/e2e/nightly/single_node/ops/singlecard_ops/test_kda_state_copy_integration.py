@@ -82,7 +82,7 @@ def test_dynamic_grid_and_metadata_use_only_four_compiled_variants(dtype, shape,
 def test_worker_plan_deduplication_and_failed_reinitialization(monkeypatch):
     """Startup shares compiled kernels and publishes nothing after failure."""
     state = torch.full((8, 1, 2, 3), 7, dtype=torch.float32, device="npu")
-    layers = [SimpleNamespace(_kda_state_copy_backend="triton", kv_cache=(None, state.clone())) for _ in range(3)]
+    layers = [SimpleNamespace(_requires_kda_state_copy=True, kv_cache=(None, state.clone())) for _ in range(3)]
     initialize_kda_state_copy(dict(enumerate(layers)), 8)
     plans = [layer._ascend_kda_state_copy for layer in layers]
     assert len({id(plan) for plan in plans}) == len(layers)
@@ -121,9 +121,8 @@ def test_worker_plan_graph_replay_and_rejections(monkeypatch):
         plan.gather(state, indices, flags[:1])
 
 
-@pytest.mark.parametrize("backend", ["triton", "auto"])
 @torch.inference_mode()
-def test_real_prefill_with_native_chunk_matches_existing_path(monkeypatch, backend):
+def test_real_prefill_with_native_chunk_matches_existing_path(monkeypatch):
     """Run the actual prefill method and installed native chunk (no model load).
 
     The existing native binary is exercised, not rebuilt or attested here.
@@ -141,7 +140,6 @@ def test_real_prefill_with_native_chunk_matches_existing_path(monkeypatch, backe
     attention.dt_bias = torch.nn.Parameter(torch.zeros(12 * 128, dtype=torch.float32, device="npu"))
     state = torch.randn((8, 12, 128, 128), dtype=torch.float32, device="npu")
     attention.kv_cache = (None, state)
-    attention._kda_state_copy_backend = backend
     initialize_kda_state_copy({"layer": attention}, 8)
     q = torch.randn((1, 16, 12, 128), dtype=torch.bfloat16, device="npu") * 0.01
     k, v = torch.randn_like(q) * 0.01, torch.randn_like(q) * 0.01
@@ -153,9 +151,23 @@ def test_real_prefill_with_native_chunk_matches_existing_path(monkeypatch, backe
         cu_seqlens_host=(0, 8, 16), cu_seqlens_kern=None, keep_meta=None, chunk_indices_chunk64_host=(0, 0, 1, 0)
     )
     reference = state.clone()
-    attention._kda_state_copy_backend = "torch"
+    from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
+
+    class ReferencePlan:
+        """Exercise the previous indexing/clearing path on valid indices."""
+
+        def gather(self, cache, selected, initial_flags):
+            packed = cache[selected].contiguous()
+            clear_ssm_states(packed, initial_flags)
+            return packed
+
+        def scatter(self, cache, packed, selected):
+            cache[selected] = packed.to(cache.dtype)
+
+    prepared_plan = attention._ascend_kda_state_copy
+    attention._ascend_kda_state_copy = ReferencePlan()
     expected = attention._run_prefill(q, k, v, gate, beta, reference, indices, flags, metadata)
-    attention._kda_state_copy_backend = backend
+    attention._ascend_kda_state_copy = prepared_plan
     _forbid_compilation(monkeypatch)
     actual = attention._run_prefill(q, k, v, gate, beta, state, indices, flags, metadata)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
@@ -236,7 +248,7 @@ def test_auto_fp16_fallback_is_precompiled(monkeypatch, index_dtype, page_stride
     state = backing.as_strided((8, 2, 3, 4), (page_stride, 12, 4, 1), 1)
     state.copy_(torch.arange(8, device="npu")[:, None, None, None])
     initial = backing.cpu()
-    layer = SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=(None, state))
+    layer = SimpleNamespace(_requires_kda_state_copy=True, kv_cache=(None, state))
     initialize_kda_state_copy({"layer": layer}, 16)
     plan = layer._ascend_kda_state_copy
     assert isinstance(plan, production.StridedKDAFallbackPlan)
@@ -327,7 +339,7 @@ def test_automatic_startup_uses_fused_plan(monkeypatch):
     from vllm_ascend.ops import kda_state_copy as production
 
     state = torch.zeros((4, 2, 3, 4), device="npu")
-    layer = SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=(None, state))
+    layer = SimpleNamespace(_requires_kda_state_copy=True, kv_cache=(None, state))
     assert production.supports_kda_state_copy(state)
     initialize_kda_state_copy({"layer": layer}, 8)
     assert isinstance(layer._ascend_kda_state_copy, KDAStateCopyPlan)
@@ -399,7 +411,7 @@ def test_fullgraph_state_copy_uses_sealed_context_plan(dtype, page_stride, monke
     backing = torch.full((8, page_stride), -23, dtype=dtype, device="npu")
     state = backing.as_strided((8, 2, 3, 4), (page_stride, 12, 4, 1))
     state.copy_(torch.randn_like(state))
-    layer = SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=(None, state))
+    layer = SimpleNamespace(_requires_kda_state_copy=True, kv_cache=(None, state))
     initialize_kda_state_copy({"layer": layer}, 8)
     plan = layer._ascend_kda_state_copy
     monkeypatch.setattr(production, "get_forward_context", lambda: SimpleNamespace(no_compile_layers={"layer": layer}))
@@ -461,7 +473,7 @@ def test_fullgraph_same_layout_layers_keep_distinct_bindings(dtype, monkeypatch)
 
     states = [torch.empty_strided((8, 2, 3, 4), (64, 12, 4, 1), dtype=dtype, device="npu") for _ in range(2)]
     layers = {
-        name: SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=(None, state))
+        name: SimpleNamespace(_requires_kda_state_copy=True, kv_cache=(None, state))
         for name, state in zip(("layer_0", "layer_31"), states)
     }
     initialize_kda_state_copy(layers, 8)
@@ -554,7 +566,6 @@ def test_auto_contiguous_prefill_masks_invalid_rows(monkeypatch, index_dtype):
 
     attention = kimi.AscendKimiK3DeltaAttention.__new__(kimi.AscendKimiK3DeltaAttention)
     torch.nn.Module.__init__(attention)
-    attention._kda_state_copy_backend = "auto"
     attention.gate_lower_bound = None
     attention.A_log, attention.dt_bias = torch.zeros(1), torch.zeros(1)
     state = torch.arange(8 * 24, dtype=torch.float16, device="npu").reshape(8, 2, 3, 4)
@@ -570,7 +581,6 @@ def test_auto_contiguous_prefill_masks_invalid_rows(monkeypatch, index_dtype):
     final = torch.full((6, 2, 3, 4), 17, dtype=torch.float32, device="npu")
     chunk = Mock(return_value=("output", final))
     monkeypatch.setattr(kimi, "run_chunk_kda", chunk)
-    monkeypatch.setattr(kimi, "clear_ssm_states", Mock(side_effect=AssertionError("legacy clear")))
     _forbid_compilation(monkeypatch)
     monkeypatch.setattr(production.batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
     metadata = SimpleNamespace(

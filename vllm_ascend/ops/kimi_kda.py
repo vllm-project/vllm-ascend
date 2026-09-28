@@ -35,7 +35,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 )
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
-from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
 )
@@ -170,6 +169,9 @@ def _prepare_beta(
 class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     """Kimi K3 KDA using AscendC prefill and recurrent kernels."""
 
+    # Worker startup prepares this layer after KV-cache binding.
+    _requires_kda_state_copy = True
+
     def __init__(self, config, vllm_config, prefix: str = "") -> None:
         quant_config = getattr(vllm_config, "quant_config", None)
         uses_mixed_projection = bool(
@@ -182,15 +184,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         )
         super().__init__(config, vllm_config, prefix)
         self.uses_mixed_projection = uses_mixed_projection
-        # AscendConfig validates this enum before model construction. Retain the
-        # requested backend even before cache binding, so a missed startup hook
-        # cannot silently bypass preparation for an automatic/explicit request.
-        additional_config = getattr(vllm_config, "additional_config", None)
-        self._kda_state_copy_backend = (
-            additional_config.get("kda_state_copy_backend", "auto")
-            if isinstance(additional_config, dict)
-            else getattr(additional_config, "kda_state_copy_backend", "auto")
-        )
         self._ascend_kda_state_copy = None
         if uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
@@ -481,17 +474,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         # The recurrent cache uses [H,V,K]. The fused prefill operator accepts
         # that state layout directly through state_v_first.
-        state_copy = None
-        backend = getattr(self, "_kda_state_copy_backend", "torch")
-        if backend in ("auto", "triton"):
-            state_copy = self._ascend_kda_state_copy
-            if state_copy is None or not getattr(self, "_kda_state_copy_ready", False):
-                raise RuntimeError("strict KDA state copy requires worker cache initialization before prefill")
-        if state_copy is not None:
-            initial_state_vk = state_copy.gather(recurrent_state, state_indices, has_initial_state)
-        else:
-            initial_state_vk = recurrent_state[state_indices].contiguous()
-            clear_ssm_states(initial_state_vk, has_initial_state)
+        state_copy = getattr(self, "_ascend_kda_state_copy", None)
+        if state_copy is None or not getattr(self, "_kda_state_copy_ready", False):
+            raise RuntimeError("KDA state copy requires worker cache initialization before prefill")
+        initial_state_vk = state_copy.gather(recurrent_state, state_indices, has_initial_state)
 
         output, final_state = run_chunk_kda(
             q,
@@ -506,10 +492,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self.dt_bias,
             lower_bound=self.gate_lower_bound,
         )
-        if state_copy is not None:
-            state_copy.scatter(recurrent_state, final_state, state_indices)
-        else:
-            recurrent_state[state_indices] = final_state.to(recurrent_state.dtype)
+        state_copy.scatter(recurrent_state, final_state, state_indices)
         return output
 
     @eager_break_during_capture

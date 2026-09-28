@@ -2,24 +2,21 @@
 
 ## Scope and dispatch
 
-The default `kda_state_copy_backend="auto"` follows the PR #17301 capability
-policy: A5/950, FP32/BF16, positive `[N,H,V,K]`, dense inner payload and
-nonoverlapping cache pages. Triton replaces the native gather/clear and scatter
-kernels, not chunk math, recurrent decode, GLM KDA or unrelated Triton kernels.
-
-`AscendConfig` also accepts `triton` to explicitly require a prepared fused plan
-and `torch` for the prior diagnostic baseline. No option is required for the
-automatic production path. The legacy `torch` override is not the automatic
-strided fallback and is not included in the zero-serving-JIT guarantee.
+The worker selects by device and cache layout without an additional configuration
+or environment switch. A5/950 with FP32/BF16, positive `[N,H,V,K]`, dense inner
+payload and nonoverlapping cache pages uses the fused plan. A3/non-950 and
+unsupported layouts use a masked byte-copy plan prepared during startup.
+Triton replaces the native gather/clear and scatter kernels on eligible A5
+caches, not chunk math, recurrent decode, GLM KDA or unrelated kernels.
 
 Flow: worker binds cache -> choose fused / masked byte-copy fallback
 -> prepare disposable samples -> seal all plans -> publish -> prefill gather ->
 unchanged chunk math -> scatter. Preparation failure aborts startup; it must not
-silently downgrade a requested fused path or publish a partially ready worker.
+silently publish a partially ready worker.
 
-Both V1 and V2 runners invoke initialization after cache binding. An automatic
-layer cannot serve until initialization has completed. Unsupported contiguous and strided
-caches both use the PR's byte-pointer copy algorithm with a startup-precompiled
+Both V1 and V2 runners invoke initialization after cache binding. A Kimi layer
+cannot serve until initialization has completed. Unsupported contiguous and
+strided caches both use the PR's byte-pointer copy algorithm with a startup-precompiled
 batch-memcpy launcher. The fallback uses Torch clearing to avoid a second lazy Triton kernel.
 Invalid inner layouts remain rejected by the strided fallback, as in the PR.
 
@@ -37,9 +34,8 @@ Invalid inner layouts remain rejected by the strided fallback, as in the PR.
 - Empty selections validate metadata and do not launch a copy kernel.
 - Cache/packed storage must not overlap. Concurrent writers require upstream
   coordination. These are caller preconditions, not synchronizing host scans.
-- Automatic fallback also gathers invalid indices as zero and skips invalid
-  scatter destinations, including contiguous unsupported caches. The explicit
-  `torch` diagnostic override retains the original indexing semantics.
+- The fallback gathers invalid indices as zero and skips invalid scatter
+  destinations, including contiguous unsupported caches.
 
 ## Startup preparation and no serving recompilation
 
@@ -100,7 +96,7 @@ full-model compilation or every compilation backend.
 
 ## Validation
 
-CPU tests cover enum defaults, automatic routing, startup deduplication,
+CPU tests cover device/layout routing, startup deduplication,
 all-or-nothing publication and actual prefill dispatch. NPU integration tests
 cover optional exact FP32/BF16 comparisons with a separately built PR17301 native operator,
 INT32/INT64, dynamic selected counts, gaps/offsets, invalid indices, graph replay,
@@ -137,7 +133,7 @@ substitute for production-wrapper timing.
 
 Local tests are not full model-server, TP/PP, concurrency, sleep/wake or generation
 quality acceptance. The native comparison reuses the installed extension and is
-not a clean Ascend C build. Non-950 automatic fallback is code-routed but requires
+not a clean Ascend C build. Non-950 fallback is code-routed but requires
 additional hardware validation. Full-model compilation/Inductor acceptance is
 not established by operator tracing tests. The no-JIT guarantee here covers
 prepared state-copy routes, not unrelated model kernels.

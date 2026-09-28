@@ -318,15 +318,14 @@ class NPUModelRunner(GPUModelRunner):
                     module.prepare_ring_compressor(self.max_num_tokens, self.device)
         prepare_v41_source_rope(self)
 
-        if self.ascend_config.kda_state_copy_backend in ("auto", "triton"):
-            # Upstream has bound every local cache; publish sealed plans before
-            # the worker can warm up, capture graphs or execute prefill requests.
-            from vllm_ascend.ops.kda_state_copy import initialize_kda_state_copy
+        # Upstream has bound every local cache; publish sealed plans before
+        # the worker can warm up, capture graphs or execute prefill requests.
+        from vllm_ascend.ops.kda_state_copy import initialize_kda_state_copy
 
-            initialize_kda_state_copy(
-                self.vllm_config.compilation_config.static_forward_context,
-                self.vllm_config.scheduler_config.max_num_seqs,
-            )
+        initialize_kda_state_copy(
+            self.vllm_config.compilation_config.static_forward_context,
+            self.vllm_config.scheduler_config.max_num_seqs,
+        )
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.

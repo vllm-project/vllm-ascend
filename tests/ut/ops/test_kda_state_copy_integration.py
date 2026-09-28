@@ -13,19 +13,27 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm_ascend.ascend_config import AscendConfig
 from vllm_ascend.ops import kda_state_copy as production
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
 
 
-@pytest.mark.parametrize("backend", ["auto", "torch", "triton"])
-def test_backend_config_is_typed_and_defaults_to_auto(backend):
-    """The central enum admits only explicit supported backend names."""
-    config_args = {"sparse_kv_offload_config": SimpleNamespace(enabled=False)}
-    assert AscendConfig(**config_args).kda_state_copy_backend == "auto"
-    assert AscendConfig(**config_args, kda_state_copy_backend=backend).kda_state_copy_backend == backend
-    with pytest.raises(ValueError):
-        AscendConfig(**config_args, kda_state_copy_backend="automatic-fallback")
+def test_kimi_layer_marks_automatic_state_copy():
+    """Only Kimi KDA layers require automatic startup preparation."""
+    assert AscendKimiK3DeltaAttention._requires_kda_state_copy is True
+
+
+@pytest.mark.parametrize("a5", [True, False])
+def test_device_capability_selects_fused_only_on_a5(monkeypatch, a5):
+    """A3 never enters the A5 fused plan, even for an otherwise eligible layout."""
+    state = SimpleNamespace(
+        device=SimpleNamespace(type="npu"),
+        dtype=torch.float32,
+        ndim=4,
+        shape=(8, 1, 2, 3),
+        stride=lambda axis=None: (6, 6, 3, 1) if axis is None else (6, 6, 3, 1)[axis],
+    )
+    monkeypatch.setattr(production, "is_950", lambda: a5)
+    assert production.supports_kda_state_copy(state) is a5
 
 
 def test_startup_deduplicates_and_publishes_after_all_seals(monkeypatch):
@@ -34,7 +42,7 @@ def test_startup_deduplicates_and_publishes_after_all_seals(monkeypatch):
     shared = torch.zeros((8, 1, 2, 3))
     compiled = MappingProxyType({"kernel": object()})
     layers = [
-        SimpleNamespace(_kda_state_copy_backend="triton", kv_cache=(None, shared.clone()), _ascend_kda_state_copy=None)
+        SimpleNamespace(_requires_kda_state_copy=True, kv_cache=(None, shared.clone()), _ascend_kda_state_copy=None)
         for _ in range(3)
     ]
 
@@ -47,6 +55,7 @@ def test_startup_deduplicates_and_publishes_after_all_seals(monkeypatch):
         assert all(layer._ascend_kda_state_copy is None for layer in layers)
         events.append("seal")
 
+    monkeypatch.setattr(production, "supports_kda_state_copy", lambda state: True)
     monkeypatch.setattr(production.KDAStateCopyPlan, "prepare", prepare)
     context = {f"layer_{i}": layer for i, layer in enumerate(layers)}
     production.initialize_kda_state_copy(context, 128)
@@ -62,7 +71,7 @@ def test_startup_failure_clears_old_plans_and_cannot_fallback(monkeypatch, failu
     """A startup error leaves every opted-in layer unready, including reinit."""
     layers = [
         SimpleNamespace(
-            _kda_state_copy_backend="triton",
+            _requires_kda_state_copy=True,
             kv_cache=(None, torch.zeros((8, 1, 2, 3))),
             _ascend_kda_state_copy=object(),
         )
@@ -74,6 +83,7 @@ def test_startup_failure_clears_old_plans_and_cannot_fallback(monkeypatch, failu
     def fail(*args):
         raise RuntimeError("deliberate startup failure")
 
+    monkeypatch.setattr(production, "supports_kda_state_copy", lambda state: True)
     monkeypatch.setattr(
         production.KDAStateCopyPlan,
         "prepare",
@@ -89,7 +99,7 @@ def test_non_kda_and_non_opted_in_layers_do_not_compile(monkeypatch):
     prepare = Mock(side_effect=AssertionError("unexpected preparation"))
     monkeypatch.setattr(production.KDAStateCopyPlan, "prepare", prepare)
     production.initialize_kda_state_copy(
-        {"other": SimpleNamespace(), "default": SimpleNamespace(_kda_state_copy_backend="torch")}, 128
+        {"other": SimpleNamespace(), "default": SimpleNamespace(_requires_kda_state_copy=False)}, 128
     )
     prepare.assert_not_called()
 
@@ -101,7 +111,6 @@ def test_actual_prefill_calls_plan_and_preserves_keep_metadata(monkeypatch, keep
 
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     torch.nn.Module.__init__(attention)
-    attention._kda_state_copy_backend = "triton"
     attention.gate_lower_bound = None
     attention.A_log = torch.zeros(1)
     attention.dt_bias = torch.zeros(2)
@@ -113,7 +122,6 @@ def test_actual_prefill_calls_plan_and_preserves_keep_metadata(monkeypatch, keep
     attention._kda_state_copy_ready = True
     chunk = Mock(return_value=("output", final_state))
     monkeypatch.setattr(kimi, "run_chunk_kda", chunk)
-    monkeypatch.setattr(kimi, "clear_ssm_states", Mock(side_effect=AssertionError("Torch fallback")))
     state = torch.zeros((4, 1, 2, 2))
     indices, flags = torch.tensor([1, 3], dtype=torch.int32), torch.tensor([True, False])
     metadata = SimpleNamespace(
@@ -133,7 +141,6 @@ def test_opted_in_prefill_without_startup_fails_closed():
     """An omitted worker hook cannot silently run the default implementation."""
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     torch.nn.Module.__init__(attention)
-    attention._kda_state_copy_backend = "triton"
     attention._ascend_kda_state_copy = None
     metadata = SimpleNamespace(cu_seqlens_host=(0, 1), cu_seqlens_kern=None, keep_meta=None)
     with pytest.raises(RuntimeError, match="worker cache initialization"):
@@ -165,22 +172,13 @@ def test_worker_hook_is_inside_cache_initialization(relative):
         and node.func.attr == ("initialize_kv_cache_tensors" if "v1" in relative else "initialize_kv_cache")
     )
     assert startup.lineno > bind.lineno
-    guard = next(
-        node
-        for node in ast.walk(method)
-        if isinstance(node, ast.If)
-        and any(child is startup for child in ast.walk(node))
-        and "kda_state_copy_backend" in ast.unparse(node.test)
-    )
-    assert '"auto"' in ast.unparse(guard.test) or "'auto'" in ast.unparse(guard.test)
-    assert '"triton"' in ast.unparse(guard.test) or "'triton'" in ast.unparse(guard.test)
 
 
 @pytest.mark.parametrize("contiguous", [True, False])
 def test_auto_unsupported_cache_prepares_masked_fallback(monkeypatch, contiguous):
     """All unsupported layouts use masked copies, never raw Torch indexing."""
     state = torch.zeros((4, 1, 2, 2)) if contiguous else torch.empty_strided((4, 1, 2, 2), (8, 4, 2, 1))
-    layer = SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=(None, state))
+    layer = SimpleNamespace(_requires_kda_state_copy=True, kv_cache=(None, state))
     plan = SimpleNamespace(seal=Mock())
     prepare = Mock(return_value=plan)
     monkeypatch.setattr(production, "supports_kda_state_copy", lambda state: False)
@@ -197,7 +195,7 @@ def test_auto_unsupported_cache_prepares_masked_fallback(monkeypatch, contiguous
 def test_auto_eligible_cache_selects_prepared_triton(monkeypatch):
     """Automatic capability routing publishes a sealed plan without opt-in."""
     state = torch.zeros((4, 1, 2, 2))
-    layer = SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=(None, state))
+    layer = SimpleNamespace(_requires_kda_state_copy=True, kv_cache=(None, state))
     plan = SimpleNamespace(seal=Mock())
     monkeypatch.setattr(production, "supports_kda_state_copy", lambda state: True)
     monkeypatch.setattr(production.KDAStateCopyPlan, "prepare", lambda *args: plan)
@@ -255,8 +253,7 @@ def test_same_layout_layers_trace_their_own_binding(monkeypatch, plan_type):
     """Shared kernels must not alias layer names in either compiled copy path."""
     state = torch.empty_strided((8, 1, 2, 3), (12, 6, 3, 1))
     layers = {
-        name: SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=(None, state))
-        for name in ("layer_0", "layer_31")
+        name: SimpleNamespace(_requires_kda_state_copy=True, kv_cache=(None, state)) for name in ("layer_0", "layer_31")
     }
     template = plan_type()
     template._compiled = MappingProxyType({"kernel": object()})
@@ -293,7 +290,7 @@ def test_same_layout_layers_trace_their_own_binding(monkeypatch, plan_type):
 @pytest.mark.parametrize("cache", [None, (), 3, (None, None), (None, object())])
 def test_startup_rejects_unbound_or_non_tensor_cache(monkeypatch, cache):
     """Invalid cache binding fails before compilation and leaves layers unready."""
-    layer = SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=cache)
+    layer = SimpleNamespace(_requires_kda_state_copy=True, kv_cache=cache)
     prepare = Mock(side_effect=AssertionError("invalid cache reached preparation"))
     monkeypatch.setattr(production.KDAStateCopyPlan, "prepare", prepare)
     with pytest.raises(RuntimeError, match="cache.*(bound|torch.Tensor)"):
@@ -305,19 +302,17 @@ def test_startup_rejects_unbound_or_non_tensor_cache(monkeypatch, cache):
 
 def test_startup_rejects_missing_cache_attribute():
     """Absent bindings use the same explicit lifecycle error as empty caches."""
-    layer = SimpleNamespace(_kda_state_copy_backend="auto")
+    layer = SimpleNamespace(_requires_kda_state_copy=True)
     with pytest.raises(RuntimeError, match="cache must be bound"):
         production.initialize_kda_state_copy({"layer": layer}, 8)
     assert not layer._kda_state_copy_ready
 
 
-@pytest.mark.parametrize("backend", ["auto", "triton", "torch"])
 @pytest.mark.parametrize("keep", [None, torch.tensor([0])])
-def test_prefill_rejects_missing_flags_before_cache_access(backend, keep):
-    """Missing prefill metadata must not preserve stale states on any backend."""
+def test_prefill_rejects_missing_flags_before_cache_access(keep):
+    """Missing prefill metadata must not preserve stale states before state copy."""
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     torch.nn.Module.__init__(attention)
-    attention._kda_state_copy_backend = backend
     metadata = SimpleNamespace(cu_seqlens_host=(0, 1), cu_seqlens_kern=None, keep_meta=keep)
     state = torch.full((2, 1, 2, 2), 7.0)
     with pytest.raises(ValueError, match="requires has_initial_state"):

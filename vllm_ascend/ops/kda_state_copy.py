@@ -345,7 +345,7 @@ class StridedKDAFallbackPlan:
 def initialize_kda_state_copy(static_forward_context: dict, max_selected: int) -> None:
     """Prepare then atomically attach plans after worker cache binding.
 
-    The model records automatic or explicit selection before initialization.
+    Kimi layers are identified by an internal class marker, not a user setting.
     Non-KDA layers and empty pipeline stages require no state-copy plans.
     The finite support set comes from actual local cache layouts, not guessed
     request shapes or an arbitrary LRU cap. Exactly four variants per unique
@@ -354,8 +354,7 @@ def initialize_kda_state_copy(static_forward_context: dict, max_selected: int) -
     plans: dict[tuple, KDAStateCopyPlan | StridedKDAFallbackPlan] = {}
     bindings = []
     for layer_name, layer in static_forward_context.items():
-        backend = getattr(layer, "_kda_state_copy_backend", "torch")
-        if backend not in ("auto", "triton"):
+        if not getattr(layer, "_requires_kda_state_copy", False):
             continue
         layer._ascend_kda_state_copy = None
         layer._kda_state_copy_ready = False
@@ -369,12 +368,13 @@ def initialize_kda_state_copy(static_forward_context: dict, max_selected: int) -
         state = kv_cache[1]
         if not isinstance(state, torch.Tensor):
             raise RuntimeError("Kimi KDA cache state must be a torch.Tensor")
-        if layer._kda_state_copy_backend == "triton" or supports_kda_state_copy(state):
+        # A5 with a supported layout uses the fused plan; A3 and all other
+        # unsupported layouts use the masked, precompiled byte-copy plan.
+        if supports_kda_state_copy(state):
             plan_type = KDAStateCopyPlan
         else:
-            # Raw indexing accepts negative rows and rejects upper outliers.
-            # Use the masked byte-copy plan for every unsupported layout so
-            # auto keeps gather-zero/scatter-skip semantics without host sync.
+            # Use the masked byte-copy plan for unsupported layouts so invalid
+            # gather indices read zero and invalid scatter destinations are skipped.
             plan_type = StridedKDAFallbackPlan
         key = (plan_type, cache_signature(state))
         if key not in plans:
