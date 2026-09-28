@@ -6,7 +6,7 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
@@ -434,6 +434,8 @@ class AscendSFAMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
     pcp_slot_mapping: torch.Tensor | None = None
+    pcp_prolog_local_slots: torch.Tensor | None = None
+    pcp_prolog_global_slots: torch.Tensor | None = None
     # All PCP ranks must join prefill KV gathers even when a rank has only padding.
     pcp_has_global_prefill: bool = False
     # The dimension of the attention heads
@@ -597,10 +599,28 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         **kwargs,
     ) -> AscendSFAMetadata:
         # common_prefix_len / fast_build are unused; kept for API compatibility.
-        return self._build_with_metadata_view(
+        metadata = self._build_with_metadata_view(
             common_attn_metadata,
             lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=kwargs.get("pcp_context")),
         )
+        if (
+            self.use_pcp
+            and kwargs.get("pcp_context") is not None
+            and (metadata.num_prefills or metadata.pcp_has_global_prefill)
+        ):
+            assert metadata.pcp_slot_mapping is not None
+            group = get_pcp_group()
+            num_tokens = metadata.num_input_tokens
+            rank_slots = metadata.pcp_slot_mapping[: group.world_size * num_tokens].view(group.world_size, num_tokens)
+            num_decode_tokens = metadata.num_decode_tokens
+            local_slots = rank_slots[group.rank_in_group].contiguous()
+            if num_decode_tokens and group.rank_in_group != 0:
+                # Replicated decode slots are masked outside rank 0, but each
+                # rank still writes its locally computed decode KV.
+                local_slots = torch.cat((rank_slots[0, :num_decode_tokens], local_slots[num_decode_tokens:]))
+            metadata.pcp_prolog_local_slots = local_slots
+            metadata.pcp_prolog_global_slots = rank_slots[:, num_decode_tokens:].reshape(-1)
+        return metadata
 
     def build_for_drafting(
         self,
@@ -683,7 +703,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
             pcp_slot_mapping=pcp_slot_mapping,
-            pcp_has_global_prefill=bool(pcp_context is not None and pcp_context.global_batch.is_prefilling_np.any()),
+            pcp_has_global_prefill=bool(
+                pcp_context is not None and pcp_context.global_batch.is_prefilling_np.any()
+            ),
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,

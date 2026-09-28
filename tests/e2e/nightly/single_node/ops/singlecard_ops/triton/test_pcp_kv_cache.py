@@ -43,13 +43,17 @@ def test_c8_cache_preserves_packed_bytes(dtype, case, strided):
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("num_slots", [5, 257, 513])
-def test_separate_latent_and_rope_cache(dtype, num_slots):
-    k = torch.arange(4 * 8 * 512, dtype=torch.float32).reshape(4, 8, 1, 512).to(dtype).to("npu")
-    r = torch.arange(4 * 8 * 64, dtype=torch.float32).reshape(4, 8, 1, 64).to(dtype).to("npu")
-    indices = (torch.arange(num_slots, dtype=torch.int64) * 7) % 32
+@pytest.mark.parametrize("strided", [False, True])
+def test_separate_latent_and_rope_cache(dtype, num_slots, strided):
+    k = torch.arange(4 * 8 * 512, dtype=torch.float32).reshape(4, 8, 1, 512)
+    r = torch.arange(4 * 8 * 64, dtype=torch.float32).reshape(4, 8, 1, 64)
+    k, r = k.to(dtype).to("npu"), r.to(dtype).to("npu")
+    if strided:
+        k, r = k[::2], r[::2]
+    indices = (torch.arange(num_slots, dtype=torch.int64) * 7) % (k.shape[0] * k.shape[1])
     indices[1::5] = -1
     slots = indices.to("npu")
     packed = copy_pcp_kv_cache((k, r), slots)
-    expected = torch.cat((k.cpu().reshape(32, 512), r.cpu().reshape(32, 64)), dim=-1)[indices.clamp_min(0)]
+    expected = torch.cat((k.cpu().reshape(-1, 512), r.cpu().reshape(-1, 64)), dim=-1)[indices.clamp_min(0)]
     expected[indices < 0] = 0
     assert torch.equal(packed.cpu(), expected)
