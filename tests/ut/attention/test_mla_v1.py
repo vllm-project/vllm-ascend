@@ -3347,3 +3347,82 @@ def test_mla_nope_decode_preserves_current_kv_contract():
         if return_current_kv:
             assert result[2].shape == (2, 1, 1, 0)
             torch.testing.assert_close(result[3].reshape(2, 4), tokens)
+
+
+def test_fused_bbnd_cache_views_are_detected_without_component_major_views():
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.kv_lora_rank = 4
+    impl.qk_rope_head_dim = 2
+
+    pages, block_size, heads, fused_dim = 2, 3, 1, 6
+    page_stride = block_size * heads * fused_dim + 2
+    backing = torch.empty(pages * page_stride + 4)
+    fused = backing.as_strided(
+        (pages, block_size, heads, fused_dim),
+        (page_stride, heads * fused_dim, fused_dim, 1),
+        storage_offset=3,
+    )
+    nope, rope = fused[..., :4], fused[..., 4:]
+
+    assert impl._is_fused_mla_cache_views((nope, rope))
+    assert nope.stride() == rope.stride()
+    assert rope.storage_offset() - nope.storage_offset() == impl.kv_lora_rank
+
+    component_nope = backing.as_strided(
+        (pages, block_size, heads, impl.kv_lora_rank),
+        (page_stride, heads * impl.kv_lora_rank, impl.kv_lora_rank, 1),
+        storage_offset=3,
+    )
+    component_rope = backing.as_strided(
+        (pages, block_size, heads, impl.qk_rope_head_dim),
+        (page_stride, heads * impl.qk_rope_head_dim, impl.qk_rope_head_dim, 1),
+        storage_offset=3 + block_size * heads * impl.kv_lora_rank,
+    )
+    assert not impl._is_fused_mla_cache_views((component_nope, component_rope))
+    assert not impl._is_fused_mla_cache_views((component_nope, torch.empty_like(component_rope)))
+
+
+@patch("vllm_ascend.attention.mla_v1.torch_npu.npu_kv_rmsnorm_rope_cache")
+@patch("vllm_ascend.attention.mla_v1.torch_npu.npu_scatter_pa_kv_cache")
+def test_fused_bbnd_cache_uses_scatter_writer_and_preserves_decode_contract(mock_scatter, mock_legacy):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_mla_rope = True
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = 4
+    impl.qk_rope_head_dim = 2
+    impl.fa_quant_layer = False
+    impl.enable_kv_nz = False
+    impl.kv_a_layernorm = MagicMock(side_effect=lambda value: value)
+    impl.rope_single = MagicMock(side_effect=lambda value, cos, sin: value)
+
+    pages, block_size, heads, fused_dim = 2, 3, 1, 6
+    page_stride = block_size * heads * fused_dim + 2
+    backing = torch.empty(pages * page_stride + 4)
+    fused = backing.as_strided(
+        (pages, block_size, heads, fused_dim),
+        (page_stride, heads * fused_dim, fused_dim, 1),
+        storage_offset=3,
+    )
+    nope, rope = fused[..., :4], fused[..., 4:]
+    tokens = torch.randn(2, impl.num_kv_heads, fused_dim)
+    cos = torch.randn(2, impl.qk_rope_head_dim)
+    sin = torch.randn(2, impl.qk_rope_head_dim)
+    slots = torch.tensor([0, 4], dtype=torch.int64)
+
+    prefill_k_pe, prefill_k_nope = impl.exec_kv_prefill(tokens, cos, sin, (nope, rope), slots)
+    assert prefill_k_pe.shape == (2, impl.num_kv_heads, impl.qk_rope_head_dim)
+    assert prefill_k_nope.shape == (2, impl.num_kv_heads, impl.kv_lora_rank)
+
+    decode_result = impl.exec_kv_decode(tokens, cos, sin, (nope, rope), slots, return_current_kv=True)
+    assert decode_result[0] is rope
+    assert decode_result[1] is nope
+    assert decode_result[2].shape == (2, impl.num_kv_heads, impl.qk_rope_head_dim)
+    assert decode_result[3].shape == (2, impl.num_kv_heads, impl.kv_lora_rank)
+
+    assert mock_scatter.call_count == 2
+    scatter_kwargs = mock_scatter.call_args.kwargs
+    assert scatter_kwargs["key_cache"] is nope
+    assert scatter_kwargs["value_cache"] is rope
+    assert scatter_kwargs["slot_mapping"].tolist() == slots.tolist()
+    assert scatter_kwargs["cache_mode"] == "Norm"
+    mock_legacy.assert_not_called()
