@@ -573,6 +573,104 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         )[0]
 
 
+# Online checkpoint weights use a separate scheme. Offline schemes above keep
+# their existing checkpoint loading and inference behavior.
+_MXFP8_GROUP_SIZE = 32
+_ONLINE_WEIGHT_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _validate_online_weight(shape: tuple[int, ...], dtype: torch.dtype) -> None:
+    if dtype not in _ONLINE_WEIGHT_DTYPES:
+        raise ValueError("Online MXFP8 checkpoint weights must be FP16 or BF16.")
+    if shape[-1] <= 0 or shape[-1] % _MXFP8_GROUP_SIZE:
+        raise ValueError("Online MXFP8 reduction dimensions must be positive multiples of 32.")
+
+
+def _quantize_online_weight(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize checkpoint rows to the raw layout consumed by MXFP8 postprocessing."""
+    _validate_online_weight(tuple(weight.shape), weight.dtype)
+    rows = weight.reshape(-1, weight.shape[-1]).contiguous()
+    quantized, scales = torch_npu.npu_dynamic_mx_quant(rows, dst_type=torch.float8_e4m3fn)
+    if quantized.shape != rows.shape or quantized.dtype != torch.float8_e4m3fn:
+        raise ValueError("npu_dynamic_mx_quant returned an unexpected weight shape or dtype.")
+    if scales.element_size() != 1:
+        raise ValueError("Online MXFP8 requires one-byte E8M0 scale storage.")
+    scales = scales.contiguous().view(torch.uint8)
+    groups = rows.shape[-1] // _MXFP8_GROUP_SIZE
+    padded_groups = cdiv(groups, 2) * 2
+    if scales.numel() not in (rows.shape[0] * groups, rows.shape[0] * padded_groups):
+        raise ValueError("npu_dynamic_mx_quant returned an unexpected scale shape.")
+    scales = scales.reshape(rows.shape[0], -1)[:, :groups].contiguous()
+    return quantized.reshape(weight.shape), scales.reshape(*weight.shape[:-1], groups)
+
+
+class AscendMXFP8OnlineLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
+    """Quantize FP16/BF16 linear weights during ordinary model loading."""
+
+    online_quantization = True
+
+    def __init__(self):
+        super().__init__()
+        self.group_size = _MXFP8_GROUP_SIZE
+
+    def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
+        shape = (output_size, input_size)
+        _validate_online_weight(shape, params_dtype)
+        return {"weight": torch.empty(shape, dtype=params_dtype)}
+
+    def get_computed_params(self) -> set[str]:
+        return {"weight_scale"}
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if layer.weight.dtype == torch.float8_e4m3fn:
+            return
+        weight, scales = _quantize_online_weight(layer.weight.data)
+        layer.weight.data = weight
+        layer.weight_scale.data = scales
+        # A native layerwise reload restores the floating-point checkpoint
+        # tensor; the inherited offline transform must run again in that case.
+        layer._mxfp8_transformed = False
+        super().process_weights_after_loading(layer)
+
+
+class AscendMXFP8OnlineMoEMethod(AscendW8A8MXFP8DynamicFusedMoEMethod):
+    """Quantize FP16/BF16 expert weights without an offline checkpoint."""
+
+    online_quantization = True
+
+    def __init__(self):
+        super().__init__()
+        self.group_size = _MXFP8_GROUP_SIZE
+
+    @staticmethod
+    def get_weight(
+        num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
+    ) -> dict[str, Any]:
+        shapes = {
+            "w13_weight": (num_experts, 2 * intermediate_size_per_partition, hidden_sizes),
+            "w2_weight": (num_experts, hidden_sizes, intermediate_size_per_partition),
+        }
+        for shape in shapes.values():
+            _validate_online_weight(shape, params_dtype)
+        return {name: torch.empty(shape, dtype=params_dtype) for name, shape in shapes.items()}
+
+    def get_computed_params(self) -> set[str]:
+        return {"w13_weight_scale", "w2_weight_scale"}
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if layer.w13_weight.dtype == torch.float8_e4m3fn and layer.w2_weight.dtype == torch.float8_e4m3fn:
+            return
+        # Validate both results before publishing either transformed weight.
+        w13, w13_scale = _quantize_online_weight(layer.w13_weight.data)
+        w2, w2_scale = _quantize_online_weight(layer.w2_weight.data)
+        layer.w13_weight.data = w13
+        layer.w13_weight_scale.data = w13_scale
+        layer.w2_weight.data = w2
+        layer.w2_weight_scale.data = w2_scale
+        layer._mxfp8_transformed = False
+        super().process_weights_after_loading(layer)
+
+
 @register_scheme(FP8_METHOD, "ds_linear")
 class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     """Linear method for DS original W8A8 mxfp(blocksize: 128 * 128) quantization.

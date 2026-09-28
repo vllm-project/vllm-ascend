@@ -172,6 +172,32 @@ python -m vllm.entrypoints.api_server \
     --trust-remote-code 
 ```
 
+## Online MXFP8 from float checkpoints
+
+The `ascend` quantization method can convert original BF16/FP16 weights to
+W8A8 MXFP8 while loading on Ascend 950. It uses the existing
+`quantization_config_dict_json` override and requires no separate ModelSlim
+configuration file.
+
+```bash
+vllm serve Qwen/Qwen3-0.6B --dtype bfloat16 \
+    --quantization ascend \
+    --hf-overrides '{"quantization_config_dict_json":{"online_quantization":true,"model_quant_type":"W8A8_MXFP8","group_size":32,"ignore":["lm_head"]}}'
+```
+
+`online_quantization` is an explicit boolean opt-in. The quantization type must
+be `W8A8_MXFP8`, with group size 32. Linear and fused MoE weights are quantized
+after loading. Optional `ignore` accepts layer names or `re:` patterns; all
+shards of a fused projection must use the same scheme. Embeddings, attention,
+KV cache and ignored layers retain their normal float implementation.
+
+Use a float checkpoint without embedded quantization metadata. This mode
+cannot be mixed with offline per-layer `.weight` entries or KV-cache
+quantization. It initially allocates float weights, so peak loading memory is
+not reduced. For training updates, retain BF16/FP16 source weights and use
+the native layerwise reload lifecycle. Validate accuracy and graph replay on
+Ascend 950 before production use.
+
 ## References
 
 - [ModelSlim GitCode](https://gitcode.com/Ascend/msmodelslim)
