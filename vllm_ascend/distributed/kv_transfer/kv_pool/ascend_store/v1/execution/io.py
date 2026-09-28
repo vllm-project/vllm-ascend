@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
 from ..backend import BackendAdapter, BackendStoreEvidence
 from ..graph.elements import BindingBatch, KVBinding, RemoteKVObject, RemoteObjectBatch
+
+ObjectPresenceObserver = Callable[[list[str]], tuple[int, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,28 +41,37 @@ class StoreEvidence:
 class MissingFilter(Protocol):
     """Select Store bindings that still require a Backend write."""
 
-    def select_missing(self, batches: tuple[BindingBatch, ...]) -> tuple[BindingBatch, ...]: ...
+    def select_missing(
+        self,
+        batches: tuple[BindingBatch, ...],
+        observe_presence: ObjectPresenceObserver,
+    ) -> tuple[BindingBatch, ...]: ...
 
 
 class IdentityMissingFilter:
     """Preserve every Store binding when the Backend overwrites existing keys safely."""
 
     @staticmethod
-    def select_missing(batches: tuple[BindingBatch, ...]) -> tuple[BindingBatch, ...]:
+    def select_missing(
+        batches: tuple[BindingBatch, ...],
+        observe_presence: ObjectPresenceObserver,
+    ) -> tuple[BindingBatch, ...]:
+        del observe_presence
         return batches
 
 
 class BackendExistenceMissingFilter:
     """Remove Store bindings whose remote keys already exist in the Backend."""
 
-    def __init__(self, backend: BackendAdapter) -> None:
-        self._backend = backend
-
-    def select_missing(self, batches: tuple[BindingBatch, ...]) -> tuple[BindingBatch, ...]:
+    def select_missing(
+        self,
+        batches: tuple[BindingBatch, ...],
+        observe_presence: ObjectPresenceObserver,
+    ) -> tuple[BindingBatch, ...]:
         bindings = tuple(binding for batch in batches for binding in batch.bindings)
         if not bindings:
             return batches
-        presence = tuple(self._backend.exists([binding.remote_object.key for binding in bindings]))
+        presence = observe_presence([binding.remote_object.key for binding in bindings])
         if len(presence) != len(bindings):
             raise RuntimeError(f"Store exists returned {len(presence)} results for {len(bindings)} bindings")
         if any(value not in (0, 1) for value in presence):
@@ -94,6 +106,9 @@ class BackendIO:
             RemoteObjectObservation(remote_object, value == 1)
             for remote_object, value in zip(batch.remote_objects, presence, strict=True)
         )
+
+    def observe_presence(self, keys: list[str]) -> tuple[int, ...]:
+        return tuple(self.backend.exists(keys))
 
     def load(self, bindings: tuple[KVBinding, ...]) -> tuple[BindingEvidence, ...]:
         if not bindings:

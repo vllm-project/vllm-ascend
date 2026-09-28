@@ -1,28 +1,27 @@
-"""Execute the fixed KV Pool dataflow over request-local values."""
+"""Define the fixed KV Pool dataflow over request-local values."""
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import Any
 
-import torch
 from vllm.logger import logger
 
-from .execution.io import BackendIO, MissingFilter, StoreEvidence
-from .execution.resources import KVResources
-from .execution.timeline import (
-    LoadCompletion,
-    LoadTimeline,
-    LoadTransfer,
-    StoreBatch,
-    StoreCompletion,
-    StoreTimeline,
-    StoreTransfer,
-)
+from .execution.io import BindingEvidence, MissingFilter, RemoteObjectObservation, StoreEvidence
+from .execution.timeline import LoadCompletion, LoadTransfer, StoreCompletion, StoreTransfer
+from .graph.elements import BindingBatch, KVBinding, RemoteObjectBatch
+from .graph.evaluation import KVPoolStepEvaluation
 from .graph.projection import ConsumerProjection, KVProjection
 from .graph.reachability import ChunkAvailability, GroupAvailability, KVReachability
 from .graph.topology import KVTopology
 from .protocol.lookup import LookupRequest, LookupResult
-from .protocol.transfer import LoadCommand, LoadCommandBatch, StoreCommand, StoreCommandBatch
+from .protocol.transfer import KVTransferStep, LoadCommand, StoreCommand
+
+ReadabilityObserver = Callable[[RemoteObjectBatch], tuple[RemoteObjectObservation, ...]]
+PresenceObserver = Callable[[list[str]], tuple[int, ...]]
+LoadBindings = Callable[[tuple[KVBinding, ...]], tuple[BindingEvidence, ...]]
+StoreBindings = Callable[[tuple[BindingBatch, ...]], StoreEvidence]
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,46 +38,27 @@ class KVPoolGraph:
 
     def __init__(
         self,
-        resources: KVResources,
         topology: KVTopology,
         reachability: KVReachability,
         projection: KVProjection,
         consumer_projection: ConsumerProjection,
         missing_filter: MissingFilter,
-        backend_io: BackendIO,
-        load_timeline: LoadTimeline,
-        store_timeline: StoreTimeline | None,
     ) -> None:
-        self._resources = resources
         self._topology = topology
         self._reachability = reachability
         self._projection = projection
         self._consumer_projection = consumer_projection
         self._missing_filter = missing_filter
-        self._backend_io = backend_io
-        self._load_timeline = load_timeline
-        self._store_timeline = store_timeline
-        self._load_timeline.attach_operation(self._execute_load)
-        if self._store_timeline is not None:
-            self._store_timeline.attach_operation(self._execute_store)
-        self._pending_store: StoreBatch | None = None
-        self._store_error: Exception | None = None
-        self._failed_request_ids: set[str] = set()
-        self._failed_block_ids: set[int] = set()
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        try:
-            self._resources.register_kv_caches(kv_caches)
-            self._projection.compile_memory_mapping()
-            self._consumer_projection.compile_memory_mapping()
-            if self._store_timeline is not None:
-                self._store_timeline.start()
-            self._load_timeline.start()
-        except BaseException:
-            self.close()
-            raise
+    @staticmethod
+    def begin_step(step: KVTransferStep) -> KVPoolStepEvaluation:
+        return KVPoolStepEvaluation(step)
 
-    def lookup(self, request: LookupRequest) -> LookupResult:
+    def compile_memory_mapping(self) -> None:
+        self._projection.compile_memory_mapping()
+        self._consumer_projection.compile_memory_mapping()
+
+    def lookup(self, request: LookupRequest, observe_readability: ReadabilityObserver) -> LookupResult:
         if request.transfer_group_ids != self._reachability.group_ids:
             raise ValueError(
                 f"Lookup groups {request.transfer_group_ids} do not match configured groups "
@@ -89,7 +69,7 @@ class KVPoolGraph:
         availability = []
         for batch in self._projection.project_remote_objects(chunk_projections):
             try:
-                observations = self._backend_io.observe_readability(batch)
+                observations = observe_readability(batch)
             except Exception as error:
                 logger.error("Remote Lookup failed. type=%s, error=%s", type(error).__name__, error)
                 return LookupResult(0)
@@ -107,78 +87,55 @@ class KVPoolGraph:
             )
         return LookupResult(self._reachability.resolve_available_end(selection, availability))
 
-    def load(self, command_batch: LoadCommandBatch) -> None:
-        transfers = [self._build_load_transfer(command) for command in command_batch.commands]
-        completions = tuple(self._load_timeline.submit(transfers))
-        self._record_load_failures(completions)
-        if completions and self._failed_request_ids:
-            raise RuntimeError(f"Hybrid KV Load failed for requests: {sorted(self._failed_request_ids)}")
+    def build_load_transfers(self, evaluation: KVPoolStepEvaluation) -> list[LoadTransfer]:
+        return [self._build_load_transfer(command) for command in evaluation.step.load.commands]
 
-    def collect_load_result(self) -> LoadResult:
-        completions = tuple(self._load_timeline.collect())
-        self._record_load_failures(completions)
-        result = LoadResult(
-            frozenset(completion.request_id for completion in completions),
-            frozenset(self._failed_request_ids),
-            frozenset(self._failed_block_ids),
+    def execute_load(self, transfer: LoadTransfer, load_bindings: LoadBindings) -> LoadCompletion:
+        return LoadCompletion(transfer.request_id, load_bindings(transfer.traversal))
+
+    def record_load_completion(self, evaluation: KVPoolStepEvaluation, completion: LoadCompletion) -> None:
+        failed_block_ids = {
+            evidence.binding.local_slice.block_id
+            for evidence in completion.binding_evidence
+            if evidence.result_code != 0
+        }
+        if not failed_block_ids:
+            return
+        if len(self._topology.transfer_group_ids) > 1:
+            evaluation.failed_request_ids.add(completion.request_id)
+        else:
+            evaluation.failed_block_ids.update(failed_block_ids)
+
+    @staticmethod
+    def consume_load_result(
+        evaluations: Iterable[KVPoolStepEvaluation],
+        completed_request_ids: Iterable[str],
+    ) -> LoadResult:
+        evaluations_by_identity = {id(evaluation): evaluation for evaluation in evaluations}
+        failed_request_ids = frozenset(
+            request_id
+            for evaluation in evaluations_by_identity.values()
+            for request_id in evaluation.failed_request_ids
         )
-        self._failed_request_ids.clear()
-        self._failed_block_ids.clear()
+        failed_block_ids = frozenset(
+            block_id for evaluation in evaluations_by_identity.values() for block_id in evaluation.failed_block_ids
+        )
+        result = LoadResult(
+            frozenset(completed_request_ids),
+            failed_request_ids,
+            failed_block_ids,
+        )
+        for evaluation in evaluations_by_identity.values():
+            evaluation.failed_request_ids.clear()
+            evaluation.failed_block_ids.clear()
         return result
 
-    def submit_store(self, command_batch: StoreCommandBatch) -> None:
-        self._raise_store_error()
-        if self._store_timeline is None or not command_batch.commands:
-            return
-        if self._pending_store is not None:
-            raise RuntimeError("Previous Store batch has not reached its fence")
-        try:
-            source_ready_event = torch.npu.Event()
-            source_ready_event.record()
-            transfers = [self._build_store_transfer(command, source_ready_event) for command in command_batch.commands]
-            self._pending_store = self._store_timeline.submit(transfers)
-        except Exception as error:
-            self._store_error = error
-            raise
-
-    def wait_for_previous_store(self) -> tuple[StoreCompletion, ...]:
-        self._raise_store_error()
-        if self._store_timeline is None or self._pending_store is None:
-            return ()
-        try:
-            completions = self._store_timeline.wait(self._pending_store)
-        except Exception as error:
-            self._store_error = error
-            raise
-        if all(completion.evidence.source_release_confirmed for completion in completions):
-            self._pending_store = None
-        for completion in completions:
-            try:
-                self._validate_store_completion(completion)
-            except Exception as error:
-                self._store_error = error
-                raise
-        return completions
-
-    def close(self) -> None:
-        store_error: BaseException | None = None
-        try:
-            self.wait_for_previous_store()
-        except BaseException as error:
-            store_error = error
-        if self._store_timeline is not None:
-            try:
-                self._store_timeline.close()
-            except BaseException as error:
-                if store_error is None:
-                    store_error = error
-        try:
-            self._load_timeline.close()
-        finally:
-            if self._pending_store is None:
-                self._resources.close()
-        if store_error is not None:
-            raise store_error
+    def build_store_transfers(
+        self,
+        evaluation: KVPoolStepEvaluation,
+        source_ready_event: Any,
+    ) -> list[StoreTransfer]:
+        return [self._build_store_transfer(command, source_ready_event) for command in evaluation.step.store.commands]
 
     def _build_load_transfer(self, command: LoadCommand) -> LoadTransfer:
         selection = self._reachability.select_for_load(command.block_hashes, command.load_range)
@@ -204,12 +161,14 @@ class KVPoolGraph:
         batches = self._consumer_projection.project(batches)
         return StoreTransfer(command.request_id, batches, source_ready_event)
 
-    def _execute_load(self, transfer: LoadTransfer) -> LoadCompletion:
-        return LoadCompletion(transfer.request_id, self._backend_io.load(transfer.traversal))
-
-    def _execute_store(self, transfer: StoreTransfer) -> StoreCompletion:
+    def execute_store(
+        self,
+        transfer: StoreTransfer,
+        observe_presence: PresenceObserver,
+        store_bindings: StoreBindings,
+    ) -> StoreCompletion:
         try:
-            batches = self._missing_filter.select_missing(transfer.batches)
+            batches = self._missing_filter.select_missing(transfer.batches, observe_presence)
         except Exception as error:
             return StoreCompletion(transfer.request_id, StoreEvidence((), False, True, error))
         if not any(batch.bindings for batch in batches):
@@ -220,31 +179,13 @@ class KVPoolGraph:
             return StoreCompletion(transfer.request_id, StoreEvidence((), False, True, error))
 
         try:
-            evidence = self._backend_io.store(batches)
+            evidence = store_bindings(batches)
         except Exception as error:
             evidence = StoreEvidence((), False, False, error)
         return StoreCompletion(transfer.request_id, evidence)
 
-    def _record_load_failures(self, completions: tuple[LoadCompletion, ...]) -> None:
-        for completion in completions:
-            failed_block_ids = {
-                evidence.binding.local_slice.block_id
-                for evidence in completion.binding_evidence
-                if evidence.result_code != 0
-            }
-            if not failed_block_ids:
-                continue
-            if len(self._topology.transfer_group_ids) > 1:
-                self._failed_request_ids.add(completion.request_id)
-            else:
-                self._failed_block_ids.update(failed_block_ids)
-
-    def _raise_store_error(self) -> None:
-        if self._store_error is not None:
-            raise RuntimeError("KVPoolGraph cannot continue after a previous Store failure") from self._store_error
-
     @staticmethod
-    def _validate_store_completion(completion: StoreCompletion) -> None:
+    def validate_store_completion(completion: StoreCompletion) -> None:
         evidence = completion.evidence
         if evidence.error is not None:
             raise RuntimeError(f"Store failed for request {completion.request_id}") from evidence.error
