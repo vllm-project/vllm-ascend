@@ -599,6 +599,10 @@ class AscendConfig:
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
+    # Derived from enable_fused_mc2=3: MegaMoE runs the shared expert inside
+    # the operator instead of the separate shared-expert forward. enable_fused_mc2=2
+    # keeps the shared expert separate. Internal flag, not user-settable.
+    megamoe_shared_expert_fusion: bool = False
     enable_mlapo: bool = True
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
@@ -660,9 +664,22 @@ class AscendConfig:
         if self.enable_fused_mc2 in (0, 1):
             # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
             _MEGA_MOE_SUPPORTED = False
-        elif self.enable_fused_mc2 == 2:
+        elif self.enable_fused_mc2 in (2, 3):
+            # =2: MegaMoe with the shared expert kept separate; =3: MegaMoe
+            # with the shared expert fused into the operator.
+            self.megamoe_shared_expert_fusion = self.enable_fused_mc2 == 3
             _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+            if self.enable_fused_mc2 == 3 and not _MEGA_MOE_SUPPORTED:
+                logger.warning_once(
+                    "enable_fused_mc2=3 requires the cann_ops_transformer package; "
+                    "MegaMoe (and its shared-expert fusion) will be disabled."
+                )
             self.enable_fused_mc2 = 1
+        else:
+            raise ValueError(
+                "enable_fused_mc2 must be one of 0, 1, 2 (MegaMoE) or 3 "
+                f"(MegaMoE + shared-expert fusion); got {self.enable_fused_mc2}"
+            )
         return self
 
     # ---- derivations + cross-config downgrades/mutex ----
