@@ -77,6 +77,8 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices_bt=chunk_indices_chunk64,
         output_dtype=k.dtype,
     )
+    is_pcp = get_pcp_group().world_size > 1
+    head_first_output = (not is_pcp) and (SUPPRESS_LEVEL < 3)
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
@@ -85,11 +87,12 @@ def chunk_gated_delta_rule_fwd(
         g_cumsum=g,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices_chunk64,
+        head_first_output=head_first_output,
     )
 
     k_ascendc = k.to(torch.bfloat16).transpose(1, 2).contiguous()
-    w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
-    u_ascendc = u.to(torch.bfloat16).transpose(1, 2).contiguous()
+    w_ascendc = w.to(torch.bfloat16) if head_first_output else w.to(torch.bfloat16).transpose(1, 2).contiguous()
+    u_ascendc = u.to(torch.bfloat16) if head_first_output else u.to(torch.bfloat16).transpose(1, 2).contiguous()
     g_ascendc = g.transpose(1, 2).contiguous()
     q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
@@ -209,12 +212,12 @@ def chunk_gated_delta_rule_fwd(
     )
 
     o = o_ascendc.to(torch.bfloat16).transpose(1, 2).contiguous()
-    v_new = v_new.to(torch.bfloat16).transpose(1, 2).contiguous()
-    h = h.to(torch.bfloat16).transpose(1, 2).contiguous()
 
     if SUPPRESS_LEVEL < 3:
         return g, o, A, final_state, None, None, None
     elif SUPPRESS_LEVEL >= 3:
+        v_new = v_new.to(torch.bfloat16).transpose(1, 2).contiguous()
+        h = h.to(torch.bfloat16).transpose(1, 2).contiguous()
         return g, o, A, final_state, w, h, v_new
 
 
