@@ -302,6 +302,7 @@ def _make_vllm_config(
     dcp: int,
     block_size: int = 16,
     prefix_match_unit: int | None = None,
+    kv_transfer_config: object | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -313,7 +314,7 @@ def _make_vllm_config(
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
         ),
-        kv_transfer_config=None,
+        kv_transfer_config=kv_transfer_config,
     )
 
 
@@ -395,6 +396,54 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     expected_scheduler_block_size = math.lcm(16, 32) * 2
     assert scheduler_block_size == expected_scheduler_block_size
     assert hash_block_size == expected_hash_block_size
+
+
+def test_resolve_dcp_hybrid_groups_honors_prefix_match_unit() -> None:
+    """DCP>1 multi-group path must honor ``prefix_match_unit`` like upstream.
+
+    Regression: the DCP branch hardcoded ``hash_block_size = gcd(...)``, so a
+    user-configured ``--prefix-match-unit`` was silently ignored and hybrid
+    prefix hashing stayed at the coarse group-GCD granularity.
+    """
+    kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=32)
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=2,
+        prefix_match_unit=8,
+    )
+
+    _, hash_block_size = _ascend_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+
+    assert hash_block_size == 8
+
+
+def test_resolve_dcp_hybrid_groups_hash_with_connector_only() -> None:
+    """Block hashes feed KV connectors too: with a connector active and prefix
+    caching off, hashing must stay fine (GCD), not collapse to the scheduler
+    block size. Upstream gates on ``enable_prefix_caching or connector_enabled``.
+    """
+    kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=32)
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=False,
+        dcp=2,
+        kv_transfer_config=SimpleNamespace(),
+    )
+
+    _, hash_block_size = _ascend_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+
+    assert hash_block_size == math.gcd(16, 32)
+
+
+def test_resolve_dcp_hybrid_groups_rejects_indivisible_prefix_match_unit() -> None:
+    kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=32)
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=2,
+        prefix_match_unit=5,
+    )
+
+    with pytest.raises(ValueError, match="prefix_match_unit"):
+        _ascend_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
 
 
 @pytest.mark.parametrize(

@@ -79,6 +79,60 @@ def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
     return {s.page_size_bytes for s in spec.kv_cache_specs.values()}
 
 
+def _iter_layer_specs(spec: KVCacheSpec):
+    """Yield the per-layer specs behind a (possibly uniform) group spec."""
+    nested = getattr(spec, "kv_cache_specs", None)
+    if isinstance(nested, dict):
+        yield from nested.values()
+    else:
+        yield spec
+
+
+def _resolve_dcp_hash_block_size(
+    vllm_config: VllmConfig,
+    cache_config,
+    hashing_groups: list[KVCacheGroupSpec],
+    scheduler_block_size: int,
+) -> int:
+    """Hash granularity for multi-group caches under DCP > 1.
+
+    Mirrors upstream ``resolve_kv_cache_block_sizes``: fine hashing is active
+    for prefix caching *or* KV connectors (P/D, offloading); ``prefix_match_unit``
+    overrides the GCD; prefix-cacheable group block sizes must be divisible by
+    it, and prefix-cache boundaries must align with each spec's
+    ``tokens_per_state`` compression when the running vLLM exposes the attribute.
+    """
+    connector_enabled = getattr(vllm_config, "kv_transfer_config", None) is not None
+    if not (cache_config.enable_prefix_caching or connector_enabled):
+        return scheduler_block_size
+
+    hashing_sizes = [group.kv_cache_spec.block_size for group in hashing_groups]
+    requested = getattr(cache_config, "prefix_match_unit", None)
+    hash_block_size = requested if requested is not None else math.gcd(*hashing_sizes)
+    if any(size % hash_block_size != 0 for size in hashing_sizes):
+        raise ValueError(
+            f"Invalid prefix_match_unit={hash_block_size}; prefix-cacheable "
+            "KV cache group block sizes must be divisible by prefix_match_unit. "
+            f"Got group block sizes={hashing_sizes}."
+        )
+
+    prefix_alignments = {
+        spec.tokens_per_state
+        for group in hashing_groups
+        for spec in _iter_layer_specs(group.kv_cache_spec)
+        if getattr(spec, "prefix_cacheable", True)
+        and isinstance(getattr(spec, "tokens_per_state", None), int)
+        and spec.tokens_per_state > 1
+    }
+    if any(hash_block_size % alignment for alignment in prefix_alignments):
+        raise ValueError(
+            f"Invalid prefix_match_unit={hash_block_size}; prefix-cache boundaries "
+            "must align with each spec's per-state compression. "
+            f"Got alignments={sorted(prefix_alignments)}."
+        )
+    return hash_block_size
+
+
 def _ascend_resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
@@ -107,13 +161,15 @@ def _ascend_resolve_kv_cache_block_sizes(
     cacheable_groups = [g for g in groups if is_prefix_cacheable(g.kv_cache_spec)]
     if len(cacheable_groups) != len(groups):
         scheduler_block_size = math.lcm(*(g.kv_cache_spec.block_size for g in groups)) * dcp
-        if not cache_config.enable_prefix_caching or not cacheable_groups:
+        if not cacheable_groups:
             return scheduler_block_size, scheduler_block_size
         filtered = replace(kv_cache_config, kv_cache_groups=cacheable_groups)
         if dcp == 1:
             _, hash_block_size = _orig_resolve_kv_cache_block_sizes(filtered, vllm_config)
         else:
-            hash_block_size = math.gcd(*(g.kv_cache_spec.block_size for g in cacheable_groups))
+            hash_block_size = _resolve_dcp_hash_block_size(
+                vllm_config, cache_config, cacheable_groups, scheduler_block_size
+            )
         return scheduler_block_size, hash_block_size
 
     if len(groups) <= 1:
@@ -130,9 +186,7 @@ def _ascend_resolve_kv_cache_block_sizes(
         # scheduler_block_size using the LCM of all group block sizes
         # multiplied by DCP for proper alignment.
         scheduler_block_size = math.lcm(*group_block_sizes) * dcp
-        if not cache_config.enable_prefix_caching:
-            return scheduler_block_size, scheduler_block_size
-        hash_block_size = math.gcd(*group_block_sizes)
+        hash_block_size = _resolve_dcp_hash_block_size(vllm_config, cache_config, groups, scheduler_block_size)
         return scheduler_block_size, hash_block_size
 
     return _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
