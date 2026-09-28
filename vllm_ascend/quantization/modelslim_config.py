@@ -545,6 +545,11 @@ class AscendModelSlimConfig(QuantizationConfig):
             if isinstance(layer, VocabParallelEmbedding):
                 return UnquantizedEmbeddingMethod()
             return None
+        if not getattr(self, "packed_modules_mapping", None):
+            vllm_config = get_current_vllm_config_or_none()
+            if vllm_config is not None:
+                model_type = vllm_config.model_config.hf_config.model_type
+                self.packed_modules_mapping = packed_modules_model_mapping.get(model_type, {})
         ignored = should_ignore_layer(
             prefix, ignore=self._online_ignored_layers, fused_mapping=self.packed_modules_mapping
         )

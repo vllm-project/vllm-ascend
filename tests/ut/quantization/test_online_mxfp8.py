@@ -231,11 +231,20 @@ class TestOnlineMXFP8(unittest.TestCase):
         torch.nn.Module.__init__(layer)
         prefix = "model.layers.0.self_attn.qkv_proj"
         config = self.online_config(ignore=["re:.*[qkv]_proj"])
-        config.packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
-        self.assertIsInstance(config.get_quant_method(layer, prefix), AscendUnquantizedLinearMethod)
-        config._online_ignored_layers = ["model.layers.0.self_attn.q_proj"]
-        with self.assertRaisesRegex(ValueError, "different quantization schemes"):
-            config.get_quant_method(layer, prefix)
+        vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_5")))
+        with patch(
+            "vllm_ascend.quantization.modelslim_config.get_current_vllm_config_or_none", return_value=vllm_config
+        ):
+            self.assertIsInstance(config.get_quant_method(layer, prefix), AscendUnquantizedLinearMethod)
+            self.assertEqual(config.packed_modules_mapping["qkv_proj"], ["q_proj", "k_proj", "v_proj"])
+            config._online_ignored_layers = ["model.layers.0.self_attn.q_proj"]
+            with self.assertRaisesRegex(ValueError, "different quantization schemes"):
+                config.get_quant_method(layer, prefix)
+
+            gate_config = self.online_config(ignore=["model.layers.0.mlp.gate_proj", "model.layers.0.mlp.up_proj"])
+            self.assertIsInstance(
+                gate_config.get_quant_method(layer, "model.layers.0.mlp.gate_up_proj"), AscendUnquantizedLinearMethod
+            )
 
     def test_attention_and_embedding_keep_unquantized_behavior(self):
         from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
