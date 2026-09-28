@@ -34,13 +34,16 @@ def test_temporal_copy_preserves_bytes_and_guards(size, offsets, tiles):
 @pytest.mark.parametrize(
     "state_shape,dtype",
     [
+        pytest.param((48, 128, 128), torch.float32, id="kimi-k3-kda-tp2"),
         pytest.param((24, 128, 128), torch.float32, id="kimi-k3-kda-tp4"),
+        pytest.param((12, 128, 128), torch.float32, id="kimi-k3-kda-tp8"),
+        pytest.param((6, 128, 128), torch.float32, id="kimi-k3-kda-tp16"),
         pytest.param((8, 128, 128), torch.bfloat16, id="qwen3-next-gdn-tp4"),
     ],
 )
 @pytest.mark.parametrize("tiles", [1, 4])
 def test_temporal_copy_config_derived_sizes(state_shape, dtype, tiles):
-    # Project e2e Kimi K3 config and Qwen3-Next TP4 config; no weights loaded.
+    # Kimi K3's 96-head config and Qwen3-Next's TP4 config; no weights loaded.
     size = torch.Size(state_shape).numel() * torch.empty((), dtype=dtype).element_size()
     source = torch.randint(0, 256, (size + 64,), dtype=torch.uint8, device="npu")
     destination = torch.full_like(source, 123)
@@ -53,17 +56,23 @@ def test_temporal_copy_config_derived_sizes(state_shape, dtype, tiles):
 @pytest.mark.parametrize("precomputed", [False, True])
 @pytest.mark.parametrize("graph_mode", [False, True])
 @pytest.mark.parametrize(
-    "state_types,state_bytes",
+    "state_types,state_bytes,conv_width,conv_inner",
     [
-        pytest.param(("conv", "temporal"), 1027, id="mixed-unaligned-tail"),
-        pytest.param(("conv", "temporal"), 262144, id="qwen3-next-gdn-tp4"),
-        pytest.param(("conv", "temporal"), 1572864, id="kimi-k3-kda-tp4"),
+        pytest.param(("conv", "temporal"), 1027, 7, 12, id="mixed-unaligned-tail"),
+        pytest.param(("conv", "temporal"), 262144, 7, 12, id="qwen3-next-gdn-tp4"),
+        pytest.param(("conv", "temporal"), 3145728, 10, 18432, id="kimi-k3-dspark7-tp2"),
+        pytest.param(("conv", "temporal"), 1572864, 10, 9216, id="kimi-k3-dspark7-tp4"),
+        pytest.param(("conv", "temporal"), 1572864, 8, 9216, id="kimi-k3-dspark5-tp4"),
+        pytest.param(("conv", "temporal"), 1572864, 4, 9216, id="kimi-k3-mtp1-tp4"),
+        pytest.param(("conv", "temporal"), 786432, 10, 4608, id="kimi-k3-dspark7-tp8"),
+        pytest.param(("conv", "temporal"), 393216, 10, 2304, id="kimi-k3-dspark7-tp16"),
     ],
 )
-def test_mixed_postprocess_replay_uses_updated_metadata(precomputed, graph_mode, state_types, state_bytes):
+def test_mixed_postprocess_replay_uses_updated_metadata(
+    precomputed, graph_mode, state_types, state_bytes, conv_width, conv_inner
+):
     """Check mixed state types, padded pages and changed decisions in one graph."""
     num_requests, num_blocks, num_layers = 4, 8, 2
-    conv_width, conv_inner = 7, 12
     conv_bytes = conv_width * conv_inner * 2
     state_kinds = state_types * num_layers
     sizes = [conv_bytes if kind == "conv" else state_bytes for kind in state_kinds]
@@ -173,3 +182,61 @@ def test_mixed_postprocess_replay_uses_updated_metadata(precomputed, graph_mode,
         for actual, reference in zip(storage, expected):
             assert torch.equal(actual.cpu(), reference)
         assert torch.equal(accepted_out.cpu(), expected_out)
+
+
+@pytest.mark.parametrize("tp", [pytest.param(8, id="tp8"), pytest.param(16, id="tp16")])
+def test_kimi_k3_full_recurrent_layer_grid(tp):
+    """Exercise the 69 KDA layers / 138 state programs of the full K3 layout."""
+    num_recurrent_layers = 69
+    num_heads, head_dim = 96, 128
+    conv_width = 10  # Short conv 4 plus seven draft tokens.
+    conv_inner = 3 * num_heads * head_dim // tp
+    conv_bytes = conv_width * conv_inner * 2
+    temporal_bytes = num_heads // tp * head_dim * head_dim * 4
+    state_specs = ((conv_bytes, 2, conv_inner, conv_width), (temporal_bytes, 4, temporal_bytes // 4, 0))
+    storage = []
+    expected = []
+    for _ in range(num_recurrent_layers):
+        for size, _, _, _ in state_specs:
+            data = torch.randint(0, 256, (2, size + 64), dtype=torch.uint8, device="npu")
+            storage.append(data)
+            expected.append((data[1, :size].cpu(), data[0, size:].cpu()))
+
+    def tensor(values, dtype=torch.int64):
+        return torch.tensor(values, dtype=dtype, device="npu")
+
+    block_table = tensor([[0, 1]], torch.int32)
+    state_specs_per_layer = state_specs * num_recurrent_layers
+    args = (
+        tensor([1], torch.int32),  # Accepted tokens.
+        tensor([1], torch.int32),  # Running state is in source block column 1.
+        None,
+        tensor([128], torch.int32),  # New count aligns at block column 0.
+        None,
+        tensor([block_table.data_ptr()]),
+        block_table.stride(0),
+        tensor([data.data_ptr() for data in storage]),
+        tensor([data.stride(0) for data in storage]),
+        tensor([spec[1] for spec in state_specs_per_layer]),
+        tensor([spec[2] for spec in state_specs_per_layer]),
+        tensor([spec[3] for spec in state_specs_per_layer], torch.int32),
+        tensor([0] * len(storage), torch.int32),
+        tensor([0] * len(storage), torch.int32),
+        tensor([0] * len(storage)),
+        tensor([1], torch.int32),
+        None,
+        1,
+    )
+    postprocess_mamba_fused_kernel[(1, len(storage), 1)](
+        *args,
+        block_size=128,
+        COPY_BLOCK_SIZE=1024,
+        CONV_STATE_DIM_FIRST=False,
+        HAS_IDX_MAPPING=False,
+        PRECOMPUTED_NEW_COMPUTED=True,
+        TEMPORAL_TILES=1,
+    )
+    torch.npu.synchronize()
+    for data, (size, _, _, _), (source, guard) in zip(storage, state_specs_per_layer, expected):
+        assert torch.equal(data[0, :size].cpu(), source)
+        assert torch.equal(data[0, size:].cpu(), guard)
