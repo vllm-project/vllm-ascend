@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
@@ -2241,6 +2242,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         )
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         self._pcp_rank = get_pcp_group().rank_in_group
+        self._shard_decode_requests = is_pcp_decode_sharding_enabled(vllm_config)
         self._hidden_restore_idx_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.int64,
@@ -2455,9 +2457,13 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             global_common_attn_metadata,
             pcp_context.global_batch.num_reqs,
         )
-        # num_prefills can miss short prefills; prevent local PCP RoPE from
-        # overwriting the global RoPE buffer whenever a request is prefilling.
-        can_use_rope_cache = not bool(pcp_context.global_batch.is_prefilling_np.any())
+        # Owner-local decode positions differ from the global cache-update
+        # positions. The local builder must not overwrite the global RoPE
+        # tensors through the shared runtime buffer. Short prefills also
+        # require separate storage, even when num_prefills reports zero.
+        can_use_rope_cache = not self._shard_decode_requests and not bool(
+            pcp_context.global_batch.is_prefilling_np.any()
+        )
         global_dsa_metadata = self._global_metadata_builder.build(
             common_prefix_len,
             global_common_attn_metadata,

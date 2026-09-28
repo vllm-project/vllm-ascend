@@ -24,6 +24,7 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -829,6 +830,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.vllm_config = get_current_vllm_config()
+        self.pcp_shard_decode_requests = is_pcp_decode_sharding_enabled(self.vllm_config)
         # SFA absorbs kv_b_proj (and, for KV consumers on PROLOG_V3, the fused
         # qkv/q projections) and disposes the source parameters. A disposed
         # parameter is no longer a valid destination for the in-place weight
@@ -1944,6 +1946,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 parallel_context.gather_full_o_proj,
             )
 
+        has_query = attn_metadata.num_actual_tokens > 0
         if self.runtime_has_indexer:
             # One unified indexer call: k path -> cache write -> top-k
             # selection (the selection kernel reads the freshly written
@@ -1960,18 +1963,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 q_c,
                 k_hidden_states,
                 indexer_attn_metadata,
-                compute_topk=not self.skip_topk,
+                compute_topk=not self.skip_topk and has_query,
             )
-            if self.skip_topk:
-                topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
-            elif self.use_index_cache:
-                self._update_indexcache_topk_indices(topk_indices)
-        elif self.skip_topk:
-            # Static shared-index layers keep no runtime indexer cache and
-            # only reuse the shared top-k indices.
-            topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
-        else:
-            raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
 
         # Notify for every layer that wrote the cache, not just indexer layers:
         # by this point all of the layer's KV (main + indexer) has been
@@ -1982,18 +1975,31 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
         # reuse cached top-k indices and have no indexer, so recording this
         # inside the indexer's forward would leave their gate closed.
-        with attention_transfer_window():
-            attn_output = self._execute_sparse_flash_attention_process(
-                ql_nope,
-                q_pe,
-                kv_cache,
-                topk_indices,
-                attn_metadata,
-                actual_seq_lengths_query,
-                actual_seq_lengths_key,
-            )
+        if has_query:
+            if self.skip_topk:
+                topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
+            elif not self.runtime_has_indexer:
+                raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
+            elif self.use_index_cache:
+                self._update_indexcache_topk_indices(topk_indices)
 
-        attn_output = self._v_up_proj(attn_output)
+            with attention_transfer_window():
+                attn_output = self._execute_sparse_flash_attention_process(
+                    ql_nope,
+                    q_pe,
+                    kv_cache,
+                    topk_indices,
+                    attn_metadata,
+                    actual_seq_lengths_query,
+                    actual_seq_lengths_key,
+                )
+
+            attn_output = self._v_up_proj(attn_output)
+        else:
+            # Empty ranks still open the prefetch gate and join output collectives.
+            output.zero_()
+            with attention_transfer_window():
+                attn_output = hidden_states.new_zeros((hidden_states.shape[0], self.local_num_heads * self.v_head_dim))
         if gate_hidden_states is not None:
             assert self.g_proj is not None
             attn_output.mul_(torch.sigmoid(self.g_proj(gate_hidden_states.contiguous())[0]))
