@@ -7,7 +7,7 @@ from typing import Protocol
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 
-from ..graph.coordinates import TokenRange
+from ..coordinates import TokenRange
 
 
 @dataclass(frozen=True, slots=True)

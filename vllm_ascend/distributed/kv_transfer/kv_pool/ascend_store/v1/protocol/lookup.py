@@ -9,7 +9,7 @@ from typing import TypeAlias
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
-from ..graph.coordinates import TokenRange
+from ..coordinates import TokenRange
 
 WireFrame: TypeAlias = bytes | bytearray | memoryview
 _TOKEN_COUNT_BYTES = 4

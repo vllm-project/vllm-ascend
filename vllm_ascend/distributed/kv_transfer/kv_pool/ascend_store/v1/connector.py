@@ -40,8 +40,6 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig) -> None:
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        if extra_config.get("use_layerwise", False):
-            raise ValueError("AscendStore v1 currently requires non-Layerwise Load")
         backend_name = extra_config.get("backend", "mooncake").strip().lower()
         if backend_name not in BACKEND_IMPORTS:
             raise ValueError(f"Unsupported AscendStore v1 backend: {backend_name}")
@@ -130,10 +128,13 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         self.runtime.start_load(self._require_step_evaluation())
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        return
+        assert self.runtime is not None
+        self.runtime.wait_for_layer_load(self._require_step_evaluation(), layer_name)
 
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: Any, **kwargs: Any) -> None:
-        return
+        del kv_layer, attn_metadata, kwargs
+        assert self.runtime is not None
+        self.runtime.save_layer(self._require_step_evaluation(), layer_name)
 
     def wait_for_save(self) -> None:
         assert self.runtime is not None
