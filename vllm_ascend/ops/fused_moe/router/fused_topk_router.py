@@ -20,11 +20,31 @@ import torch
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, AscendAttentionState, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 from vllm_ascend.ops.triton.gating_top_k_map_and_record import GATING_TOP_K_MAP_RECORD_MAX_TOKENS
+
+
+def _is_decode_step() -> bool:
+    """Whether the current step is a decode step (pure-decode batch).
+
+    Both model runners classify every step into ``AscendAttentionState``
+    and publish it on the forward context. Prefill and chunked-prefill
+    tokens are exactly where the fused kernel loses to the CANN stack, so
+    those phases keep the unfused route. ``SpecDecoding`` counts as decode
+    (MTP decode steps run ``1 + num_spec_tokens`` queries per request) —
+    the same "decode regime" grouping the attention backends use. A missing
+    classification (dummy/profile runs) also keeps the unfused route; that
+    is a phase boundary, not a swallowed error.
+    """
+    attn_state = _EXTRA_CTX.attn_state
+    return attn_state in (
+        AscendAttentionState.DecodeOnly,
+        AscendAttentionState.SpecDecoding,
+    )
+
 
 DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
 DEEPSEEK_V4_IMAGE_SENTINEL_COUNT = 5
@@ -157,6 +177,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         state = getattr(self, "eplb_state", None)
         if state is None or not state.fused_record_allowed:
             return None  # EPLB not attached, or this path rewrites topk_ids.
+        if not _is_decode_step():
+            return None  # phase boundary: prefill/mixed batches keep the CANN route.
         if router_logits.shape[0] > GATING_TOP_K_MAP_RECORD_MAX_TOKENS:
             return None  # batch bucket: the unfused CANN route is faster here.
         if state.expert_replica_routing_table is None:
@@ -198,6 +220,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         state = getattr(self, "eplb_state", None)
         if state is None or not state.fused_record_allowed:
             return None  # EPLB not attached, or this path rewrites topk_ids.
+        if not _is_decode_step():
+            return None  # phase boundary: prefill/mixed batches keep the CANN route.
         if router_logits.shape[0] > GATING_TOP_K_MAP_RECORD_MAX_TOKENS:
             return None  # batch bucket: the unfused CANN route is faster here.
         if state.expert_replica_routing_table is None:

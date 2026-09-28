@@ -2551,6 +2551,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                attn_state=getattr(self, "attn_state", None),
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
@@ -4340,6 +4341,7 @@ class NPUModelRunner(GPUModelRunner):
                 device_metadata_executor=active_device_metadata_executor,
                 has_sinks = self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                attn_state=getattr(self, "attn_state", None),
             ):
                 if not is_graph_capturing and self.ascend_config.enable_force_eplb \
                     and self.vllm_config.model_config.is_moe:

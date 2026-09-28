@@ -637,7 +637,25 @@ class NPUPlatform(Platform):
             "padded_num_tokens": padded_num_tokens,
             "sinks": sinks,
             "dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg,
+            # Batch phase of the current step, copied from the common
+            # attention state every per-layer metadata entry carries; None
+            # when no attention metadata was built (dummy/profile runs).
+            "attn_state": cls._extract_attn_state(attn_metadata),
         }
+
+    @classmethod
+    def _extract_attn_state(cls, attn_metadata: dict[str, Any]):
+        """Pull the shared batch phase out of the per-layer metadata dict.
+
+        Every Ascend attention backend copies ``attn_state`` from the common
+        metadata onto its per-layer entry, so any entry carries the step's
+        ``AscendAttentionState``. Returns None when the dict is empty or an
+        entry lacks the field (e.g. non-Ascend metadata in mixed stacks).
+        """
+        if not attn_metadata:
+            return None
+        first = next(iter(attn_metadata.values()), None)
+        return getattr(first, "attn_state", None)
 
 
 def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
