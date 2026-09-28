@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.dcp import sfa_cp
-from vllm_ascend.ops.triton.dcp.sfa_cp import (
+from vllm_ascend.ops.triton.dcp import dcp_a2a
+from vllm_ascend.ops.triton.dcp.dcp_a2a import (
     fused_dcp_lse_combine,
     pack_dcp_output_lse,
 )
@@ -70,10 +70,10 @@ def _check_a5_batching_case(
     run_combine: bool,
 ) -> None:
     """Compare one A5 shape with scalar kernels and check its dispatch."""
-    if not sfa_cp.is_950():
-        pytest.skip("The batched SFA kernels are enabled only on A5")
-    sfa_cp.init_device_properties_triton()
-    vector_cores = sfa_cp.get_vectorcore_num()
+    if not dcp_a2a.is_950():
+        pytest.skip("The batched DCP kernels are enabled only on A5")
+    dcp_a2a.init_device_properties_triton()
+    vector_cores = dcp_a2a.get_vectorcore_num()
     torch.manual_seed(2026 + num_tokens + dcp_size)
     output = torch.randn(num_tokens, num_heads, head_dim * output_stride, device="npu", dtype=torch.bfloat16)[
         ..., ::output_stride
@@ -85,7 +85,7 @@ def _check_a5_batching_case(
     ]
     local_lse = torch.randn(num_tokens, local_heads, 1, device="npu", dtype=torch.float32)
 
-    monkeypatch.setattr(sfa_cp, "is_950", lambda: False)
+    monkeypatch.setattr(dcp_a2a, "is_950", lambda: False)
     scalar_send = pack_dcp_output_lse(output, lse, dcp_size, 1)
     if run_combine:
         scalar_combined = fused_dcp_lse_combine(
@@ -106,11 +106,11 @@ def _check_a5_batching_case(
 
             return tracked_launch
 
-    pack_spy = LaunchSpy(sfa_cp._pack_dcp_output_lse_batched_kernel)
-    combine_spy = LaunchSpy(sfa_cp._fused_dcp_lse_combine_batched_kernel)
-    monkeypatch.setattr(sfa_cp, "_pack_dcp_output_lse_batched_kernel", pack_spy)
-    monkeypatch.setattr(sfa_cp, "_fused_dcp_lse_combine_batched_kernel", combine_spy)
-    monkeypatch.setattr(sfa_cp, "is_950", lambda: True)
+    pack_spy = LaunchSpy(dcp_a2a._pack_dcp_output_lse_batched_kernel)
+    combine_spy = LaunchSpy(dcp_a2a._fused_dcp_lse_combine_batched_kernel)
+    monkeypatch.setattr(dcp_a2a, "_pack_dcp_output_lse_batched_kernel", pack_spy)
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_batched_kernel", combine_spy)
+    monkeypatch.setattr(dcp_a2a, "is_950", lambda: True)
     batched_send = pack_dcp_output_lse(output, lse, dcp_size, 1)
     if run_combine:
         batched_combined = fused_dcp_lse_combine(
@@ -180,10 +180,10 @@ def test_a5_generalized_batching_matches_scalar_path(
 )
 @torch.inference_mode()
 def test_a5_core_relative_batching_boundaries(monkeypatch: pytest.MonkeyPatch, case: str) -> None:
-    if not sfa_cp.is_950():
-        pytest.skip("The batched SFA kernels are enabled only on A5")
-    sfa_cp.init_device_properties_triton()
-    vector_cores = sfa_cp.get_vectorcore_num()
+    if not dcp_a2a.is_950():
+        pytest.skip("The batched DCP kernels are enabled only on A5")
+    dcp_a2a.init_device_properties_triton()
+    vector_cores = dcp_a2a.get_vectorcore_num()
     if case.startswith("pack-"):
         num_tokens = (8 * vector_cores + 11) // 12
         if case == "pack-below-threshold":

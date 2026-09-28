@@ -9,7 +9,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.device_config import is_950
-from vllm_ascend.ops.triton.dcp.sfa_cp_batched import (
+from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     _fused_dcp_lse_combine_batched_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
@@ -380,21 +380,21 @@ def fused_dcp_lse_combine(
     if return_lse and recv.dtype != torch.float32:
         raise TypeError("Returning merged LSE requires an FP32 receive buffer.")
     if recv.ndim != 4:
-        raise RuntimeError(f"SFA DCP fused combine expects a 4D receive buffer, got {tuple(recv.shape)}.")
+        raise RuntimeError(f"DCP fused combine expects a 4D receive buffer, got {tuple(recv.shape)}.")
     if not recv.is_contiguous():
-        raise RuntimeError("SFA DCP fused combine requires a contiguous HCCL receive buffer.")
+        raise RuntimeError("DCP fused combine requires a contiguous HCCL receive buffer.")
     if recv.device.type != "npu":
-        raise RuntimeError(f"SFA DCP fused combine requires an NPU tensor, got {recv.device}.")
+        raise RuntimeError(f"DCP fused combine requires an NPU tensor, got {recv.device}.")
     if scatter_dim not in (0, 1):
-        raise ValueError(f"SFA DCP fused combine scatter_dim must be 0 or 1, got {scatter_dim}.")
+        raise ValueError(f"DCP fused combine scatter_dim must be 0 or 1, got {scatter_dim}.")
     if not isinstance(head_dim, int) or isinstance(head_dim, bool) or head_dim <= 0:
-        raise ValueError(f"SFA DCP fused combine requires a positive integer head_dim, got {head_dim}.")
+        raise ValueError(f"DCP fused combine requires a positive integer head_dim, got {head_dim}.")
 
     dcp_size, local_scatter_size, replicated_size, packed_dim = recv.shape
     lse_pack_dim = _lse_pack_dim(recv.dtype)
     if packed_dim != head_dim + lse_pack_dim:
         raise RuntimeError(
-            "SFA DCP fused combine received an invalid packed dimension: "
+            "DCP fused combine received an invalid packed dimension: "
             f"expected {head_dim + lse_pack_dim}, got {packed_dim}."
         )
     num_tokens, num_heads = (
@@ -472,8 +472,8 @@ def fused_dcp_lse_combine(
     return output
 
 
-def sfa_dcp_a2a_fused_combine(
-    sfa_output: torch.Tensor,
+def dcp_a2a_fused_combine(
+    partial_output: torch.Tensor,
     softmax_lse: torch.Tensor,
     scatter_size: int,
     scatter_dim: int,
@@ -488,14 +488,14 @@ def sfa_dcp_a2a_fused_combine(
     stacking PCP and DCP. Use 1 when Q heads were not gathered over TP.
     """
     send = pack_dcp_output_lse(
-        sfa_output,
+        partial_output,
         softmax_lse,
         scatter_size,
         scatter_dim=scatter_dim,
     )
     if scatter_size > 1:
         if scatter_group is None:
-            raise ValueError("SFA output scatter requires an explicit All2All group.")
+            raise ValueError("DCP output scatter requires an explicit All2All group.")
         recv = torch.empty_like(send)
         dist.all_to_all_single(recv, send, group=scatter_group)
     else:
@@ -510,11 +510,11 @@ def sfa_dcp_a2a_fused_combine(
         recv = pcp_group.all_gather(recv, dim=0)
     if defer_combine:
         return recv
-    return fused_dcp_lse_combine(recv, sfa_output.shape[-1], scatter_dim=scatter_dim, return_lse=return_lse)
+    return fused_dcp_lse_combine(recv, partial_output.shape[-1], scatter_dim=scatter_dim, return_lse=return_lse)
 
 
-def sfa_dcp_a2a_fused(
-    sfa_output: torch.Tensor,
+def dcp_a2a_fused(
+    partial_output: torch.Tensor,
     softmax_lse: torch.Tensor,
     dcp_size: int,
     scatter_dim: int,
@@ -523,11 +523,10 @@ def sfa_dcp_a2a_fused(
     return_lse: bool = False,
     defer_combine: bool = False,
 ) -> torch.Tensor:
-    """Fused SFA output merge, optionally gathering contributions across PCP.
+    """Fused DCP output merge, optionally gathering contributions across PCP.
 
-    Keep the original argument names for existing callers. With PCP enabled,
-    dcp_size/group_name describe the TP scatter group, not the unified DCP
-    group. A size of 1 skips scatter-group lookup and All2All.
+    With PCP enabled, dcp_size/group_name describe the TP scatter group,
+    not the unified DCP group. A size of 1 skips scatter-group lookup and All2All.
     With defer_combine=True, return the packed rank contributions after communication.
     With return_lse=True, require FP32 input and return [..., head_dim + 1],
     with the merged LSE in the last element for a subsequent local merge.
@@ -535,19 +534,19 @@ def sfa_dcp_a2a_fused(
     if defer_combine and return_lse:
         raise ValueError("defer_combine and return_lse are mutually exclusive.")
     # In return_lse mode the last output element stores the merged FP32 LSE.
-    if return_lse and sfa_output.dtype != torch.float32:
+    if return_lse and partial_output.dtype != torch.float32:
         raise TypeError("Returning merged LSE requires FP32 attention output.")
     scatter_group = None
     if dcp_size > 1:
         group_ref = _groups.get(group_name)
         if group_ref is None:
-            raise RuntimeError(f"SFA DCP fused A2A group {group_name!r} is not registered.")
+            raise RuntimeError(f"DCP fused A2A group {group_name!r} is not registered.")
         group = group_ref()
         if group is None or group.device_group is None:
-            raise RuntimeError(f"SFA DCP fused A2A group {group_name!r} is unavailable.")
+            raise RuntimeError(f"DCP fused A2A group {group_name!r} is unavailable.")
         if group.world_size != dcp_size:
             raise RuntimeError(
-                f"SFA DCP fused A2A group size does not match dcp_size: group={group.world_size}, dcp_size={dcp_size}."
+                f"DCP fused A2A group size does not match dcp_size: group={group.world_size}, dcp_size={dcp_size}."
             )
         scatter_group = group.device_group
 
@@ -556,9 +555,9 @@ def sfa_dcp_a2a_fused(
         pcp_group_ref = _groups.get(pcp_group_name)
         pcp_group = pcp_group_ref() if pcp_group_ref is not None else None
         if pcp_group is None or pcp_group.device_group is None:
-            raise RuntimeError(f"SFA PCP+DCP group {pcp_group_name!r} is unavailable.")
-    return sfa_dcp_a2a_fused_combine(
-        sfa_output,
+            raise RuntimeError(f"PCP+DCP group {pcp_group_name!r} is unavailable.")
+    return dcp_a2a_fused_combine(
+        partial_output,
         softmax_lse,
         dcp_size,
         scatter_dim,
@@ -569,8 +568,8 @@ def sfa_dcp_a2a_fused(
     )
 
 
-def sfa_dcp_a2a_fused_fake(
-    sfa_output: torch.Tensor,
+def dcp_a2a_fused_fake(
+    partial_output: torch.Tensor,
     softmax_lse: torch.Tensor,
     dcp_size: int,
     scatter_dim: int,
@@ -594,30 +593,30 @@ def sfa_dcp_a2a_fused_fake(
             group_ref = _groups.get(pcp_group_name)
             group = group_ref() if group_ref is not None else None
             if group is None:
-                raise RuntimeError(f"SFA PCP+DCP group {pcp_group_name!r} is unavailable.")
+                raise RuntimeError(f"PCP+DCP group {pcp_group_name!r} is unavailable.")
             rank_count *= group.world_size
         return torch.empty(
             (
                 rank_count,
-                sfa_output.shape[scatter_dim] // dcp_size,
-                sfa_output.shape[1 - scatter_dim],
-                sfa_output.shape[-1] + _lse_pack_dim(sfa_output.dtype),
+                partial_output.shape[scatter_dim] // dcp_size,
+                partial_output.shape[1 - scatter_dim],
+                partial_output.shape[-1] + _lse_pack_dim(partial_output.dtype),
             ),
-            dtype=sfa_output.dtype,
-            device=sfa_output.device,
+            dtype=partial_output.dtype,
+            device=partial_output.device,
         )
-    if return_lse and sfa_output.dtype != torch.float32:
+    if return_lse and partial_output.dtype != torch.float32:
         raise TypeError("Returning merged LSE requires FP32 attention output.")
-    output_shape = list(sfa_output.shape)
+    output_shape = list(partial_output.shape)
     output_shape[scatter_dim] //= dcp_size
     output_shape[-1] += int(return_lse)
-    return torch.empty(output_shape, dtype=sfa_output.dtype, device=sfa_output.device)
+    return torch.empty(output_shape, dtype=partial_output.dtype, device=partial_output.device)
 
 
 direct_register_custom_op(
-    op_name="sfa_dcp_a2a_fused",
-    op_func=sfa_dcp_a2a_fused,
-    fake_impl=sfa_dcp_a2a_fused_fake,
+    op_name="dcp_a2a_fused",
+    op_func=dcp_a2a_fused,
+    fake_impl=dcp_a2a_fused_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

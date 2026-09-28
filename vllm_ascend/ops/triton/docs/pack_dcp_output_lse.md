@@ -1,17 +1,17 @@
 # pack_dcp_output_lse
 
-> Source: `vllm_ascend/ops/triton/dcp/sfa_cp.py` and `sfa_cp_batched.py`.
+> Source: `vllm_ascend/ops/triton/dcp/dcp_a2a.py` and `dcp_a2a_batched.py`.
 
 ## Description
 
-- **Function**: Packs one rank's partial attention output and FP32 log-sum-exp (LSE) into a single contiguous payload for DCP All-to-All. SFA DCP and split MLA use this layout. The payload keeps the input dtype, while the LSE encoding carries FP32 values through BF16 and FP16 payloads.
+- **Function**: Packs one rank's partial attention output and FP32 log-sum-exp (LSE) into a single contiguous payload for DCP All-to-All. The payload keeps the input dtype, while the LSE encoding carries FP32 values through BF16 and FP16 payloads.
 - **Formula**: For each input row `(t, h)`, `r = t // (T / P)` and `s = t % (T / P)` when `scatter_dim=0`; `r = h // (H / P)` and `s = h % (H / P)` when `scatter_dim=1`. The output vector is stored at `send[r, s, h]` or `send[r, s, t]`, respectively. Its first `D` values equal `partial_output[t, h, :]`. FP32 payloads append the LSE directly. BF16/FP16 payloads append a signed exponent code and three base-256 digits of the FP32 significand. An exponent code of zero denotes a non-finite LSE.
 - **Algorithm flow** (processed row by row, independently):
   1. Validate the NPU input shapes, dtype, scatter axis, and divisibility by `dcp_size`; allocate the contiguous payload `[P, local_scatter_size, replicated_size, D + lse_pack_dim]`.
   2. Flatten `(token, head)` into `total_rows = T * H` and launch `min(total_rows, get_vectorcore_num())` Triton programs. Each program walks its rows with a grid-stride loop.
   3. Read output and LSE through their explicit strides, calculate the destination rank and local scatter index, encode the LSE, and write one packed row. The feature tail beyond `D` is masked.
   4. On eligible A5 BF16 head-scatter shapes, process eight rows per tile in `_pack_dcp_output_lse_batched_kernel`; `row_mask` protects the last partial tile.
-- **Supported modes**: Atlas A2 and A3 use the scalar-row kernel. A5 uses the same kernel outside the batched dispatch range and the eight-row kernel inside it. The wrapper participates in eager execution and the registered `sfa_dcp_a2a_fused` custom op's FakeTensor shape propagation.
+- **Supported modes**: Atlas A2 and A3 use the scalar-row kernel. A5 uses the same kernel outside the batched dispatch range and the eight-row kernel inside it. The wrapper participates in eager execution and the registered `dcp_a2a_fused` custom op's FakeTensor shape propagation.
 
 ## Parameters
 
@@ -42,6 +42,6 @@
 The single-card nightly test compares packed output bit-exactly with the expected rank permutation and checks decoded LSE against FP32 input. It covers both scatter axes, non-contiguous inputs, BF16/FP16/FP32 payloads, A5 dispatch boundaries, and a partial eight-row tile. The multi-card A3 test exercises the payload through HCCL All-to-All. The output-data comparison uses `atol=0, rtol=0`; decoded LSE uses the tolerances in the test.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_cp_a2a.py
-pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_sfa_cp_a2a.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
+pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py
 ```

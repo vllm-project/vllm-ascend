@@ -1,10 +1,10 @@
 # fused_dcp_lse_combine
 
-> Source: `vllm_ascend/ops/triton/dcp/sfa_cp.py` and `sfa_cp_batched.py`.
+> Source: `vllm_ascend/ops/triton/dcp/dcp_a2a.py` and `dcp_a2a_batched.py`.
 
 ## Description
 
-- **Function**: Merges packed partial attention outputs received from DCP ranks and, when supplied, one local FIA contribution. SFA DCP and split MLA use this reduction. It reconstructs the packed LSE and performs a numerically stable weighted reduction in FP32 before casting to the receive-buffer dtype.
+- **Function**: Merges packed partial attention outputs received from DCP ranks and, when supplied, one local contribution. It reconstructs the packed LSE and performs a numerically stable weighted reduction in FP32 before casting to the receive-buffer dtype.
 - **Formula**: For each output row, let valid contributions be `i` with finite `lse_i`, including the optional local contribution. With `m = max_i(lse_i)`, `w_i = exp(lse_i - m)`, the output is `sum_i(w_i * output_i) / sum_i(w_i)`. When `return_lse=True`, append `m + log(sum_i(w_i))`. If every contribution is invalid, output zero and, when requested, negative-infinite LSE.
 - **Algorithm flow** (processed row by row, independently):
   1. Validate a contiguous receive buffer `[P, local_scatter_size, replicated_size, D + lse_pack_dim]`, infer the output's token/head shape from `scatter_dim`, and optionally validate the local tensors.
@@ -37,13 +37,13 @@
 - **Origin**: Developed for the vllm-ascend DCP path to merge the payload produced by [`pack_dcp_output_lse`](pack_dcp_output_lse.md) after HCCL exchange.
 - **Differences**:
     - NPU adaptation for performance: the A5 kernel batches eight rows while streaming rank contributions, limiting live FP32 accumulator storage. The scalar path retains the broader shape and dtype support.
-    - Modified for vllm-ascend split MLA: an optional local FIA contribution is included exactly once after the received history ranks; the wrapper can return a merged FP32 LSE for a later merge.
+    - Modified for vllm-ascend DCP flows: an optional local contribution is included exactly once after the received ranks; the wrapper can return a merged FP32 LSE for a later merge.
 
 ## Test Cases
 
 The single-card nightly test compares the result against an independent FP32 softmax-weighted reference and the scalar kernel. It covers DCP sizes 1/2/8 and wider values for pack-only fallback, head dimensions 96/256/512, both scatter axes, strided local tensors, invalid LSE, A5 dispatch boundaries, and a partial eight-row tile. The combine comparison uses the per-dtype tolerances declared in the test (BF16 up to `atol=2e-2, rtol=2e-2`). The multi-card A3 test runs the registered operator with a real HCCL exchange.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_cp_a2a.py
-pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_sfa_cp_a2a.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
+pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py
 ```

@@ -36,7 +36,7 @@ from vllm_ascend.compilation.acl_graph import (
     get_graph_params,
     update_graph_params_workspaces,
 )
-from vllm_ascend.ops.triton.dcp.sfa_cp import fused_dcp_lse_combine
+from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
 from vllm_ascend.utils import weak_ref_tensors
 
 
@@ -619,7 +619,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         current_output.record_stream(main_stream)
         current_lse.record_stream(main_stream)
 
-        history_recv = torch.ops.vllm.sfa_dcp_a2a_fused(
+        history_recv = torch.ops.vllm.dcp_a2a_fused(
             history_output,
             history_lse,
             self.dcp_size,

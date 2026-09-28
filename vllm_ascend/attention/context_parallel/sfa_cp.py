@@ -12,7 +12,7 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-import vllm_ascend.ops.triton.dcp.sfa_cp  # noqa: F401
+import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -1287,7 +1287,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             scatter_dim = 0
 
         assert self.dcp_group is not None, "DCP output All2All requires dcp_group when dcp_size > 1."
-        return torch.ops.vllm.sfa_dcp_a2a_fused(
+        return torch.ops.vllm.dcp_a2a_fused(
             sfa_output,
             softmax_lse,
             self.dcp_size,
@@ -1532,7 +1532,7 @@ class AscendSFAPCPDCPImpl(AscendSFADCPImpl, AscendSFAPCPImpl):
         # Only scatter heads that were gathered by _start_dcp_query_gather.
         # DCP == PCP already has TP-local heads; DCP == PCP * TP has full heads.
         tp_size = tp_group.world_size if self.dcp_size > pcp_group.world_size else 1
-        return torch.ops.vllm.sfa_dcp_a2a_fused(
+        return torch.ops.vllm.dcp_a2a_fused(
             sfa_output, softmax_lse, tp_size, 1, tp_group.unique_name, pcp_group.unique_name
         )
 
