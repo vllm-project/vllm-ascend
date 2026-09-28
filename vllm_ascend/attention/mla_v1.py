@@ -48,6 +48,7 @@ from vllm_ascend.attention.utils import (
     MLA_FLASH_SUPPORTED_Q_HEADS,
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
+    HostSeqLensRequirement,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
     enabling_mlapo,
@@ -290,6 +291,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    # RFC #17479: MLA decode/chunked-prefill metadata derives host-side
+    # seq_lens_list and chunk splits from rejection-corrected exact seq lens.
+    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
 
     decode_metadata_cls: type[AscendMLADecodeMetadata] = AscendMLADecodeMetadata
 

@@ -31,6 +31,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    HostSeqLensRequirement,
     get_or_register_attention_buffer,
     is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
@@ -757,6 +758,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    # RFC #17479 stage 1: declared EXACT to stay behavior-equivalent while
+    # the contract lands. DSA kernels consume device seq_lens; staged for
+    # downgrade during the stage-2 audit.
+    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
 
     _request_capacity_factor: ClassVar[int] = 1
 

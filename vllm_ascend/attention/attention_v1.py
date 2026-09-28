@@ -50,6 +50,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    HostSeqLensRequirement,
     _select_seq_lens,
     is_dcp_enabled,
     needs_layer_aware_fia_graph_replay,
@@ -245,6 +246,11 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     Handles attention mask generation and metadata preparation for
     Ascend FlashAttention backend.
     """
+
+    # RFC #17479: legacy FIA kernels take host-side actual_seq_lengths_kv
+    # lists built from rejection-corrected exact seq lens. Inherited by the
+    # FA3/PCP/DCP/C8/310 variants that reuse or subclass this builder.
+    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
 
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query

@@ -33,6 +33,7 @@ from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
+    HostSeqLensRequirement,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
     get_sfa_qsfa_packed_head_dim,
@@ -509,6 +510,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    # RFC #17479 stage 1: declared EXACT to stay behavior-equivalent while
+    # the contract lands. SFA kernels consume device seq_lens; staged for
+    # downgrade during the stage-2 audit.
+    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
 
     def __init__(
         self,
