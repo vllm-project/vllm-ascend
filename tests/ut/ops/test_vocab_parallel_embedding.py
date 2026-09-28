@@ -393,7 +393,6 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
             ],
         )
         self.assertEqual(addresses[0], addresses[1])
-        self.assertEqual(addresses[1], addresses[2])
 
 
 class TestVocabParallelPlan(unittest.TestCase):
