@@ -568,10 +568,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             from vllm_ascend.utils import is_c8_mxfp_kv_quant
 
-            # C8-MXFP8 is switched on by --kv-cache-dtype mxfp8 itself; the
-            # ModelSlim recipe only routes the static V-scale weight there,
-            # so the recipe-derived C8 flag must not gate it. The legacy
-            # int8 C8 path still requires the recipe's kv_cache_type entry.
+            # MXFP8 is switched on by --kv-cache-dtype itself, so it must
+            # not be gated by the recipe-derived C8 flag.
             if not self.enable_c8_quant and not is_c8_mxfp_kv_quant(self.vllm_config):
                 raise ValueError(
                     "The current GQA‑related models adopt static quantization. "

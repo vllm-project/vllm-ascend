@@ -491,11 +491,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             # per-channel scale stored in the ModelSlim checkpoint
             # (fa_v.scale, reusing FAKQuant's key for a different recipe).
             suffix_map[".fa_v.scale"] = ".attn.v_cache_scale"
-            # The FAKQuant legacy tensors have no MXFP8 consumer, and the
-            # loader's ignore-unexpected check only matches leaf names under
-            # existing modules -- it never reaches a leaf under the missing
-            # fa_q/fa_k/fa_v modules. Drop them here instead: a suffix
-            # mapped to None makes WeightsMapper skip the weight.
+            # The remaining FAKQuant legacy tensors have no MXFP8 consumer.
             suffix_map[".fa_v.offset"] = None
             suffix_map.update(dict.fromkeys(_MXFP_C8_UNUSED_FA_SUFFIXES, None))
         if self.enable_fa_quant:
