@@ -1593,7 +1593,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             packed_head_dim = self.sfa_qsfa_packed_kv_head_dim
             assert packed_kv.shape[-1] == packed_head_dim
             assert kv_cache is not None
-            DeviceOperator.scatter_cache(packed_kv, kv_cache[0], slot_mapping_sfa, attn_metadata.num_actual_tokens)
+            DeviceOperator.scatter_cache(packed_kv, kv_cache[0], slot_mapping_sfa)
 
         return k_pe, k_nope
 
@@ -1859,7 +1859,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 attn_metadata,
             )
             k_pe, k_nope = kv_outputs[:2]
-            knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
+            knope_scale = kv_outputs[2] if len(kv_outputs) >= 3 else None
             # k_li no longer exists at this point: it is computed by
             # indexer.forward_k below and gathered at cache-write time, so
             # the fused gather below only carries the main KV.
@@ -1889,7 +1889,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 fused_kv_no_split,
                 kv_ag_handles,
                 kv_cache,
-                self._get_sfa_kv_slot_mapping(attn_metadata),
+                # PCP returns the mapping aligned with its gathered KV rows.
+                kv_outputs[3] if len(kv_outputs) == 4 else self._get_sfa_kv_slot_mapping(attn_metadata),
                 attn_metadata,
                 parallel_context.gather_full_o_proj,
             )

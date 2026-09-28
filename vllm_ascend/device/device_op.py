@@ -40,11 +40,11 @@ else:
 
 class BaseDeviceAdaptor:
     @classmethod
-    def scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> None:
+    def scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor) -> None:
         """Write cache rows in place, falling back to the generic scatter.
 
-        Slot handling is delegated to the selected operator; this helper does
-        not filter negative slots from the actual-token prefix.
+        Callers supply matching key rows and slots in cache-write order. Both
+        paths receive all rows; invalid-slot handling belongs to the operator.
         Layout checks inspect strides only; no device-to-host synchronization is
         introduced. Never make a contiguous copy of the destination cache.
         """
@@ -53,21 +53,20 @@ class BaseDeviceAdaptor:
             and cache.ndim == 4
             and cache.shape[2] == 1
             and (key.ndim == 2 or key.shape[1] == 1)
-            and key.shape[0] >= tokens
             and slots.ndim == 1
-            and slots.numel() >= tokens
+            and key.shape[0] == slots.numel()
             and slots.dtype in (torch.int32, torch.int64)
             and key.dtype == cache.dtype
             and key.shape[-1] == cache.shape[-1]
         ):
-            stored = cls._scatter_cache(key[:tokens].reshape(tokens, key.shape[-1]), cache, slots[:tokens])
+            stored = cls._scatter_cache(key.reshape(key.shape[0], key.shape[-1]), cache, slots)
             if stored:
                 return
 
         torch_npu.npu_scatter_nd_update_(
             cache.view(-1, key.shape[-1]),
-            slots[:tokens].view(-1, 1),
-            key[:tokens],
+            slots.view(-1, 1),
+            key.view(-1, key.shape[-1]),
         )
 
     @staticmethod

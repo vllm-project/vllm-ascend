@@ -284,11 +284,11 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertEqual(k_call.args[0].data_ptr(), k_li.data_ptr())
         self.assertIs(k_call.args[1], indexer_k_cache)
         self.assertIs(k_call.args[2], slot_mapping)
-        self.assertEqual(k_call.args[3], 2)
+        self.assertEqual(len(k_call.args), 3)
         self.assertEqual(scale_call.args[0].data_ptr(), k_li_scale.data_ptr())
         self.assertIs(scale_call.args[1], indexer_scale_cache)
         self.assertIs(scale_call.args[2], slot_mapping)
-        self.assertEqual(scale_call.args[3], 2)
+        self.assertEqual(len(scale_call.args), 3)
 
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
     @patch("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache")
@@ -308,7 +308,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertEqual(mock_scatter.call_args.args[0].data_ptr(), k_li.data_ptr())
         self.assertIs(mock_scatter.call_args.args[1], indexer_k_cache)
         self.assertIs(mock_scatter.call_args.args[2], slot_mapping)
-        self.assertEqual(mock_scatter.call_args.args[3], 2)
+        self.assertEqual(len(mock_scatter.call_args.args), 3)
 
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
     @patch("vllm_ascend.attention.indexer.torch.ops._C_ascend.store_kv_block", create=True)

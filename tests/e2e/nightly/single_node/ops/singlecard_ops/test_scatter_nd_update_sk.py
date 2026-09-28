@@ -172,7 +172,7 @@ def test_cache_adaptor_uses_sk_and_preserves_backing_storage(dtype, index_dtype,
         patch.object(torch_npu, "npu_scatter_pa_cache") as pa,
         patch.object(torch_npu, "npu_scatter_nd_update_") as generic,
     ):
-        assert DeviceOperator.scatter_cache(key, cache, slots, tokens) is None
+        assert DeviceOperator.scatter_cache(key, cache, slots) is None
         torch.npu.synchronize()
         sk.assert_called_once()
         pa.assert_not_called()
