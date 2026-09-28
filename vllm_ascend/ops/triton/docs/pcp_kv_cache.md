@@ -5,10 +5,10 @@
 - **Location**: `vllm_ascend/ops/triton/pcp_kv_cache.py` — wrapper `copy_pcp_kv_cache`, Triton kernel `_copy_pcp_kv_cache_kernel`.
 - **Function**: Packs the KV cache rows selected by `slots` into a contiguous tensor. `AscendSFAPCPImpl._sfa_preprocess_prolog_v3` uses it to gather newly written prefill KV across PCP ranks before scattering the gathered rows back to their cache slots.
 - **Formula** (for output row `t` and slot `s = slots[t]`):
-  - If `s < 0`, `packed[t, :] = 0`.
-  - Otherwise, `block = s // cache_block_size` and `offset = s % cache_block_size`.
-  - With separate caches, `packed[t] = concat(key_cache[block, offset, 0, :], rope_cache[block, offset, 0, :])`.
-  - With one C8 cache, `packed[t]` is the entire stored row, copied as raw `int8` bytes. This preserves the K, RoPE, and scale payload, including FP8 bit patterns.
+    - If `s < 0`, `packed[t, :] = 0`.
+    - Otherwise, `block = s // cache_block_size` and `offset = s % cache_block_size`.
+    - With separate caches, `packed[t] = concat(key_cache[block, offset, 0, :], rope_cache[block, offset, 0, :])`.
+    - With one C8 cache, `packed[t]` is the entire stored row, copied as raw `int8` bytes. This preserves the K, RoPE, and scale payload, including FP8 bit patterns.
 - **Algorithm flow**:
   1. The wrapper accepts one packed C8 cache or separate K and RoPE caches, makes `slots` contiguous, and allocates `[slots.numel(), k_dim + rope_dim]` output. An empty `slots` tensor returns an empty output without launching the kernel.
   2. It sets `BLOCK_COLS` to the next power of two of `max(k_dim, rope_dim)` and selects `BLOCK_ROWS` from the vector-core count and a conservative UB budget. The launch grid is bounded by the vector-core count.
