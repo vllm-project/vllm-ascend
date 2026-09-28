@@ -109,7 +109,7 @@ class TestRopeForwardOOT:
         assert key_out.dtype == torch.float8_e4m3fn
 
     @pytest.mark.parametrize("is_neox_style, expected_mode", [(True, "half"), (False, "interleave")])
-    @patch("torch_npu.npu_mrope")
+    @patch("torch_npu.npu_mrope", create=True)
     def test_non_triton_path_rotary_mode(self, mock_npu_mrope, is_neox_style, expected_mode):
         """Without Triton, rope_forward_oot must pass a rotary_mode that
         torch_npu.npu_mrope accepts ("half" or "interleave")."""
