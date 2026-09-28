@@ -266,6 +266,21 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # resident LRU (adler32-hashed request ids and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
+    # CPU views of runner-owned CpuGpuBuffers; never exact sequence lengths.
+    req_topk_buffer_slots: torch.Tensor | None = None
+    req_topk_buffer_generations: torch.Tensor | None = None
+    copy_sfa_draft_index: int | None = None
+    copy_sfa_restore_tails: bool = False
+    offload_dummy: bool = False
+
+    # vLLM main (#55353) removed the deprecated
+    # CommonAttentionMetadata._seq_lens_cpu / _num_computed_tokens_cpu
+    # fields and (#56157) renamed dcp_local_seq_lens_cpu to
+    # dcp_local_seq_lens_cpu_upper_bound. Ascend keeps its own copies so
+    # NPU attention backends get CPU seq_lens without a GPU->CPU sync.
+    _seq_lens_cpu: torch.Tensor | None = None
+    _num_computed_tokens_cpu: torch.Tensor | None = None
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -321,6 +336,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             group_len=self.group_len,
             group_key_idx=self.group_key_idx,
             group_key_cache_idx=self.group_key_cache_idx,
+            req_topk_buffer_slots=_slice_reqs(self.req_topk_buffer_slots),
+            req_topk_buffer_generations=_slice_reqs(self.req_topk_buffer_generations),
+            copy_sfa_draft_index=self.copy_sfa_draft_index,
+            offload_dummy=self.offload_dummy,
             req_ids_tensor=_slice_reqs(self.req_ids_tensor),
             token_to_req=(self.token_to_req[:num_actual_tokens] if self.token_to_req is not None else None),
         )

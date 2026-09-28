@@ -1,5 +1,6 @@
 import importlib
 import math
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -49,6 +50,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_block_size,
     get_group_cache_family,
     infer_cache_transfer_granularity,
+    infer_cacheable_group_ids,
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
@@ -119,19 +121,24 @@ class KVPoolScheduler:
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
+        self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
+        cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
+        if self.use_layerwise and len(cacheable_block_sizes) != len(self.original_block_size):
+            raise ValueError("AscendStore private KV state requires non-layerwise transfer")
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
-            requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
+            requested_hash_block_size if requested_hash_block_size is not None else min(cacheable_block_sizes)
         ) * self.dcp_size
-        for group_block_size in self.grouped_block_size:
+        for group_id in self.cacheable_group_ids:
+            group_block_size = self.grouped_block_size[group_id]
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self._block_size = self.grouped_block_size[0]
-        self.lcm_block_size = math.lcm(*self.grouped_block_size)
+        self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
-            self.grouped_block_size, self.lcm_block_size, self.kv_cache_group_ids
+            self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
         )
         self.cache_coordinator = self._build_cache_coordinator()
         # request_id -> full_token_ids
@@ -243,6 +250,24 @@ class KVPoolScheduler:
         self.model_name = model_config.model.split("/")[-1]
 
         self.client: LookupKeyClient | None = None
+        # PERF-TUNE(3): cross-request block hit cache for the scheduler-side
+        # layerwise lookup. A block's all-rank presence only changes on save
+        # or eviction; cache it briefly so concurrent requests sharing a
+        # prefix skip the repeated batch_get_key_info RPCs. A cached False
+        # (miss) short-circuits the whole group.
+        #
+        # Asymmetry is deliberate: a stale miss only costs one extra RPC
+        # (the block was saved after we cached its absence), so miss
+        # entries may live for the full TTL. A stale hit is dangerous: an
+        # eviction after the entry was cached makes the scheduler report a
+        # prefix hit the worker can no longer load, and the forward pass
+        # already skipped recomputation. Hit entries therefore use a much
+        # shorter TTL so they only cover the same-step concurrent requests
+        # and cannot outlive an eviction by a meaningful margin.
+        self._lw_block_hit_cache: dict[tuple[int, str], tuple[bool, float]] = {}
+        self._lw_hit_cache_ttl = 30.0
+        self._lw_hit_cache_hit_ttl = 0.5
+        self._lw_hit_cache_max = 200_000
 
     def _get_or_create_request_tracker(self, req_id: str) -> RequestTracker:
         tracker = self._request_trackers.get(req_id)
@@ -455,21 +480,64 @@ class KVPoolScheduler:
                 0 if self.use_layerwise else min(num_computed_tokens // effective_block_size, len(group_block_hashes))
             )
             group_block_hashes = group_block_hashes[query_start_block:]
-            # Generate all-rank keys for each block hash
+            if not group_block_hashes:
+                continue
+
+            # PERF-TUNE(3): consume the cached prefix first. The hit check is
+            # a sequential prefix scan (stop at first miss), so blocks whose
+            # (group, hash) state is cached are resolved without any RPC.
+            hit_cache = self._lw_block_hit_cache
+            now = time.monotonic()
+            if len(hit_cache) > self._lw_hit_cache_max:
+                hit_cache.clear()
+            cached_hits = 0
+            first_uncached = len(group_block_hashes)
+            cached_miss = False
+            for i, bh in enumerate(group_block_hashes):
+                entry = hit_cache.get((group_id, block_hash_to_str(bh)))
+                if entry is None or entry[1] < now:
+                    first_uncached = i
+                    break
+                if entry[0]:
+                    cached_hits += 1
+                else:
+                    first_uncached = i
+                    cached_miss = True
+                    break
+
+            if cached_miss:
+                # Known-miss prefix block: the whole group resolves to the
+                # cached hit count with zero RPC.
+                hits_per_group.append((query_start_block + cached_hits) * effective_block_size)
+                continue
+
+            uncached_hashes = group_block_hashes[first_uncached:]
+            if not uncached_hashes:
+                hits_per_group.append((query_start_block + cached_hits) * effective_block_size)
+                continue
+
             keys_by_block = [
-                self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(bh)) for bh in group_block_hashes
+                self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(bh)) for bh in uncached_hashes
             ]
             if not keys_by_block:
                 continue
             block_hits = self._query_layerwise_block_hits(keys_by_block)
-            num_hit_blocks = 0
+            # PERF-TUNE(3): record every resolved block in the cache (True on
+            # hit, False on the first miss) so later requests skip these RPCs
+            # entirely. Misses keep the long TTL (stale miss == wasted RPC
+            # only); hits get the short TTL so an eviction cannot serve a
+            # stale hit beyond the same-step window.
+            for bh, hit in zip(uncached_hashes, block_hits):
+                ttl = self._lw_hit_cache_ttl if not hit else self._lw_hit_cache_hit_ttl
+                hit_cache[(group_id, block_hash_to_str(bh))] = (hit, now + ttl)
+            uncached_hit_blocks = 0
             for hit in block_hits:
                 if hit:
-                    num_hit_blocks += 1
+                    uncached_hit_blocks += 1
                 else:
                     break
 
-            hits_per_group.append((query_start_block + num_hit_blocks) * effective_block_size)
+            hits_per_group.append((query_start_block + cached_hits + uncached_hit_blocks) * effective_block_size)
 
         if not hits_per_group:
             logger.debug(
@@ -634,6 +702,10 @@ class KVPoolScheduler:
                 )
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
+        if len(self.cacheable_group_ids) != len(self.original_block_size):
+            # Private compressor state is rebuilt locally. Recompute the last
+            # whole token page rather than resume inside a compressed block.
+            num_external_hit_tokens = self._floor_to_cache_transfer_granularity(num_external_hit_tokens)
 
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0
@@ -862,11 +934,12 @@ class KVPoolScheduler:
         num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
         if req_tuple:
             request = req_tuple[0]
-            num_current_tokens = request_tracker.token_len
+            # The scheduler rolls this back when speculative tokens are rejected.
+            num_current_tokens = request.num_computed_tokens
             new_token_ids = request.all_token_ids[num_current_tokens : num_current_tokens + num_new_tokens]
             if request_tracker.token_ids is not None and new_token_ids:
                 request_tracker.token_ids.extend(new_token_ids)
-            request_tracker.token_len += num_new_tokens
+            request_tracker.token_len = num_current_tokens + num_new_tokens
         else:
             raise ValueError(f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached")
         if new_block_ids is not None:
@@ -961,7 +1034,12 @@ class KVPoolScheduler:
         if not force_skip_save:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
-                if not new_block_ids and not self.tp_mismatch and not self.layerwise_offload:
+                if (
+                    not new_block_ids
+                    and not self.tp_mismatch
+                    and not self.layerwise_offload
+                    and not self.save_decode_cache
+                ):
                     continue
                 if req_id in self._preempted_req_ids:
                     if not new_block_ids:

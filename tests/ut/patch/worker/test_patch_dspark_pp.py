@@ -8,11 +8,10 @@ from vllm_ascend.patch.worker.patch_v2 import patch_dspark
 from vllm_ascend.worker.v2 import pp_utils
 
 
-@pytest.mark.parametrize("version", ["0.29.0", "0.1.dev1+g84030bbe3.empty"])
+@pytest.mark.parametrize("legacy", [True, False])
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("fail", [True, False])
-def test_dspark_draft_partition_isolation(monkeypatch, version, pp_size, fail):
-    legacy = version == "0.29.0"
+def test_dspark_draft_partition_isolation(monkeypatch, legacy, pp_size, fail):
     bypass_pp_guard = legacy and pp_size > 1
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),

@@ -113,6 +113,7 @@ def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, con
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.adaptive_verification = adaptive_verification
     runner.ascend_config = SimpleNamespace(xlite_graph_config=SimpleNamespace(enabled=False))
+    runner.eplb = Mock()
     observed = []
 
     def fake_dummy_run(*args, **kwargs):
@@ -126,6 +127,7 @@ def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, con
         runner._dummy_run(256, context_len=context_len)
 
     assert observed == [expected]
+    runner.eplb.step.assert_called_once_with(is_dummy=True, is_profile=False)
     assert get_mrv2_in_profile_run() is False
 
 

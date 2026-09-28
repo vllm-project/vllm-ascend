@@ -63,7 +63,8 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
     draft_model_config = speculative_config.draft_model_config
     inherits_target_quant = draft_model_config.model == vllm_config.model_config.model
     spec_pp_support = resolve_spec_pp_support(vllm_config)
-    # Only v0.29.0 needs the legacy Spec+PP loader bypass.
+    # Legacy Spec+PP loader bypass, retained behind the release selector; the
+    # supported release uses the native protocol so this is currently inactive.
     bypass_pp_guard = spec_pp_support is not None and use_legacy_spec_pp()
     if bypass_pp_guard:
         # Release binds get_pp_group globally and imports _should_share locally.

@@ -1631,6 +1631,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler Side Methods
     ############################################################
 
+    def on_new_request(self, request: "Request") -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.on_new_request(request)
+
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
@@ -1900,6 +1904,13 @@ class MooncakeConnectorScheduler:
             request.max_tokens = 1
             params["_p_side_truncated"] = True
 
+    def on_new_request(self, request: "Request") -> None:
+        # Truncate before local prefix-cache lookup so its hit count stays
+        # consistent with the prompt length used by the scheduler.
+        params = request.kv_transfer_params
+        if params is not None and params.get("do_remote_decode") and self.need_truncate:
+            self._truncate_request_for_prefill(request)
+
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
         For remote prefill, pull all prompt blocks from remote
@@ -1931,9 +1942,6 @@ class MooncakeConnectorScheduler:
             count = max(actual - num_computed_tokens, 0)
             if count > 0:
                 return count, True
-
-        if params is not None and params.get("do_remote_decode") and self.need_truncate:
-            self._truncate_request_for_prefill(request)
 
         # No remote prefill for this request.
         return 0, False

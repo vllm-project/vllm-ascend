@@ -975,7 +975,7 @@ def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:
     coordinator = get_kv_cache_coordinator(
         single_group_config,
         max_model_len=1024,
-        max_num_batched_tokens=1024,
+        max_in_flight_tokens=1024,
         use_eagle=False,
         enable_caching=True,
         enable_kv_cache_events=False,
@@ -1002,7 +1002,7 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
     coordinator = get_kv_cache_coordinator(
         kv_cache_config,
         max_model_len=1024,
-        max_num_batched_tokens=1024,
+        max_in_flight_tokens=1024,
         use_eagle=False,
         enable_caching=False,
         enable_kv_cache_events=False,
@@ -1036,7 +1036,7 @@ def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> No
     coordinator = get_kv_cache_coordinator(
         kv_cache_config,
         max_model_len=1024,
-        max_num_batched_tokens=1024,
+        max_in_flight_tokens=1024,
         use_eagle=False,
         enable_caching=True,
         enable_kv_cache_events=False,

@@ -30,8 +30,10 @@ def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
     assert x.ndim == 2
     tp_size = get_tensor_model_parallel_world_size()
     sp_pad = (-x.shape[0]) % tp_size
-    pad_shape = [sp_pad, x.shape[1]]
-    x = torch.cat([x, x.new_zeros(pad_shape)], dim=0)
+    # Avoid copying the full input when its token count is already aligned.
+    if sp_pad > 0:
+        pad_shape = [sp_pad, x.shape[1]]
+        x = torch.cat([x, x.new_zeros(pad_shape)], dim=0)
     output = _custom_collective("custom_reduce_scatter", x)
     if output is not None:
         return output

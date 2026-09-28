@@ -220,11 +220,11 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl.o_proj = MagicMock()
         impl._prepare_native_hidden_states = MagicMock(side_effect=lambda hidden_states, _: hidden_states)
 
-        output = MagicMock()
-        finalized_output = MagicMock()
+        hidden_states = torch.empty(2, 1)
+        output = torch.full((2, 1), 123.0)
         kv_cache = (MagicMock(), MagicMock())
         impl._compose_sfa_kv_cache = MagicMock(return_value=kv_cache)
-        impl._finalize_o_proj = MagicMock(return_value=finalized_output)
+        impl._finalize_o_proj = MagicMock(side_effect=lambda attn_output, output, gather: output.fill_(1.0))
 
         attn_metadata = MagicMock()
         attn_metadata.dcp_context = None
@@ -248,14 +248,23 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         ):
             result = impl.forward(
                 layer_name=impl.layer_name,
-                hidden_states=MagicMock(),
+                hidden_states=hidden_states,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
                 output=output,
             )
 
-        self.assertIs(result, finalized_output)
-        impl._finalize_o_proj.assert_called_once_with(attn_output, output, True)
+        self.assertIs(result, output)
+        impl._finalize_o_proj.assert_called_once()
+        finalize_args = impl._finalize_o_proj.call_args.args
+        self.assertIs(finalize_args[0], attn_output)
+        self.assertEqual(finalize_args[1].shape, (1, 1))
+        self.assertEqual(finalize_args[1].data_ptr(), output.data_ptr())
+        self.assertTrue(finalize_args[2])
+        torch.testing.assert_close(result, torch.tensor([[1.0], [123.0]]))
+        projected_input = impl.fused_qkv_a_proj.call_args.args[0]
+        self.assertEqual(projected_input.shape, (1, 1))
+        self.assertEqual(projected_input.data_ptr(), hidden_states.data_ptr())
         notify_cache_written.assert_called_once_with(impl.layer_name)
         transfer_window.assert_called_once_with()
         save_layer.assert_called_once_with(impl.layer_name, list(kv_cache))

@@ -1,6 +1,7 @@
 import unittest
 from collections import deque
 from contextlib import nullcontext
+from dataclasses import fields
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -26,6 +27,8 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+from vllm_ascend.ascend_config import FinegrainedTPConfig
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import (
@@ -34,6 +37,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
 )
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextTailCache,
@@ -42,7 +46,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
-from vllm_ascend.utils import AscendDeviceType, vllm_version_is
+from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
@@ -144,6 +148,219 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
                         use_cascade_attn=False,
                     )
                 self.assertEqual(runner.cudagraph_dispatcher.dispatch.call_args.kwargs["uniform_decode"], expected)
+
+
+class TestDPPaddingPolicy(unittest.TestCase):
+    @staticmethod
+    def _make_runner(dp_rank=0):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.dp_size = 2
+        runner.dp_rank = dp_rank
+        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(enable_return_routed_experts=False))
+        runner.ascend_config = SimpleNamespace(finegrained_tp_config=FinegrainedTPConfig())
+        return runner
+
+    @staticmethod
+    def _run_sync(
+        runner,
+        tokens=(8, 32),
+        modes=(CUDAGraphMode.NONE, CUDAGraphMode.NONE),
+        comm_method=MoECommType.ALLTOALL,
+        is_draft=False,
+        mega_moe=False,
+    ):
+        module = "vllm_ascend.worker.model_runner_v1"
+
+        def all_reduce(packed_tensor, group):
+            remote_rank = 1 - runner.dp_rank
+            packed_tensor[0, remote_rank] = tokens[remote_rank]
+            packed_tensor[1, remote_rank] = modes[remote_rank].value
+
+        with (
+            patch(f"{module}.should_skip_allreduce_across_dp_group", return_value=False),
+            patch(f"{module}.get_dp_group", return_value=SimpleNamespace(cpu_group=None)),
+            patch(f"{module}.dist.all_reduce", side_effect=all_reduce),
+            patch(f"{module}.select_moe_comm_method", return_value=comm_method),
+            patch(f"{module}.use_cann_megamoe", return_value=mega_moe),
+        ):
+            return runner._sync_metadata_across_dp(
+                num_tokens=tokens[runner.dp_rank],
+                is_draft_model=is_draft,
+                cudagraph_mode=modes[runner.dp_rank],
+            )
+
+    def test_skip_dp_sync_keeps_local_token_count(self):
+        runner = self._make_runner()
+        module = "vllm_ascend.worker.model_runner_v1"
+        with (
+            patch(f"{module}.should_skip_allreduce_across_dp_group", return_value=True),
+            patch(f"{module}.dist.all_reduce") as all_reduce,
+            patch(f"{module}.select_moe_comm_method") as select_comm,
+        ):
+            maximum, across_dp, mode = runner._sync_metadata_across_dp(num_tokens=8)
+
+        self.assertEqual(maximum, 8)
+        self.assertEqual(mode, CUDAGraphMode.NONE)
+        self.assertEqual(across_dp.tolist(), [8, 8])
+        all_reduce.assert_not_called()
+        select_comm.assert_not_called()
+
+    def test_single_dp_does_not_synchronize(self):
+        runner = self._make_runner()
+        runner.dp_size = 1
+        with patch("vllm_ascend.worker.model_runner_v1.dist.all_reduce") as all_reduce:
+            self.assertEqual(runner._sync_metadata_across_dp(8), (8, None, CUDAGraphMode.NONE))
+        all_reduce.assert_not_called()
+
+    def test_sync_only_pads_for_uniform_input_consumers(self):
+        cases = (
+            ("dense_eager", None, CUDAGraphMode.NONE, False, False, False),
+            ("dense_graph", None, CUDAGraphMode.FULL, False, False, True),
+            ("allgather", MoECommType.ALLGATHER, CUDAGraphMode.NONE, False, False, True),
+            ("mc2", MoECommType.MC2, CUDAGraphMode.NONE, False, False, True),
+            ("alltoall", MoECommType.ALLTOALL, CUDAGraphMode.NONE, False, False, False),
+            ("fused_mc2", MoECommType.FUSED_MC2, CUDAGraphMode.NONE, False, False, False),
+            ("mega_moe", MoECommType.FUSED_MC2, CUDAGraphMode.NONE, False, True, True),
+            ("draft", None, CUDAGraphMode.NONE, True, False, True),
+        )
+        for name, comm_method, graph_mode, is_draft, mega_moe, should_pad in cases:
+            for dp_rank in range(2):
+                with self.subTest(name=name, dp_rank=dp_rank):
+                    maximum, across_dp, synced_mode = self._run_sync(
+                        self._make_runner(dp_rank),
+                        modes=(graph_mode, graph_mode),
+                        comm_method=comm_method,
+                        is_draft=is_draft,
+                        mega_moe=mega_moe,
+                    )
+                    self.assertEqual(maximum, 32)
+                    self.assertEqual(synced_mode, graph_mode)
+                    self.assertEqual(across_dp.tolist(), [32, 32] if should_pad else [8, 32])
+
+    def test_each_finegrained_tp_field_requires_uniform_inputs(self):
+        for field in fields(FinegrainedTPConfig):
+            for size in (0, 1, 2):
+                for comm_method in (MoECommType.ALLTOALL, MoECommType.FUSED_MC2):
+                    for tokens in ((0, 31), (8, 31)):
+                        for dp_rank in range(2):
+                            with self.subTest(
+                                field=field.name, size=size, comm_method=comm_method, tokens=tokens, dp_rank=dp_rank
+                            ):
+                                runner = self._make_runner(dp_rank)
+                                runner.ascend_config.finegrained_tp_config = FinegrainedTPConfig(**{field.name: size})
+                                maximum, across_dp, mode = self._run_sync(
+                                    runner, tokens=tokens, comm_method=comm_method
+                                )
+                                self.assertEqual(maximum, 31)
+                                self.assertEqual(mode, CUDAGraphMode.NONE)
+                                self.assertEqual(across_dp.tolist(), [31, 31] if size > 1 else list(tokens))
+
+    def test_routing_capture_keeps_uniform_eager_inputs(self):
+        for dp_rank in range(2):
+            with self.subTest(dp_rank=dp_rank):
+                runner = self._make_runner(dp_rank)
+                runner.vllm_config.model_config.enable_return_routed_experts = True
+                _, across_dp, mode = self._run_sync(runner, comm_method=MoECommType.FUSED_MC2)
+                self.assertEqual(mode, CUDAGraphMode.NONE)
+                self.assertEqual(across_dp.tolist(), [32, 32])
+
+    def test_imbalanced_and_idle_metadata_use_agreed_graph_mode(self):
+        for tokens in ((0, 32), (1, 32), (8, 32)):
+            for modes, expected_mode, should_pad in (
+                ((CUDAGraphMode.NONE, CUDAGraphMode.NONE), CUDAGraphMode.NONE, False),
+                ((CUDAGraphMode.FULL, CUDAGraphMode.NONE), CUDAGraphMode.NONE, False),
+                ((CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE), CUDAGraphMode.PIECEWISE, True),
+            ):
+                for dp_rank in range(2):
+                    with self.subTest(tokens=tokens, modes=modes, dp_rank=dp_rank):
+                        maximum, across_dp, mode = self._run_sync(self._make_runner(dp_rank), tokens, modes)
+                        self.assertEqual(maximum, 32)
+                        self.assertEqual(mode, expected_mode)
+                        self.assertEqual(across_dp.tolist(), [32, 32] if should_pad else list(tokens))
+
+
+class TestDPPaddingEplb(unittest.TestCase):
+    def test_dummy_padding_preserves_remote_metadata_for_eplb(self):
+        for dp_rank in range(2):
+            with self.subTest(dp_rank=dp_rank):
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.dp_rank = dp_rank
+                runner.uniform_decode_query_len = 1
+                runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=32, max_num_seqs=32)
+                runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
+                runner.dynamic_eplb = True
+                runner.eplb_updator = MagicMock()
+                runner.eplb_heat_collection_stage = "prefill"
+                runner.eplb_pd_thresholds = 16
+                expected_tokens = [32, 32]
+                expected_tokens[dp_rank] = 4
+                metadata = torch.tensor(expected_tokens, dtype=torch.int32)
+                runner._determine_batch_execution_and_padding = MagicMock(
+                    return_value=(CUDAGraphMode.NONE, SimpleNamespace(num_tokens=4, num_reqs=1), False, metadata, None)
+                )
+                update_status = runner.update_eplb_heat_collection_status
+
+                def stop_after_stage_selection(num_tokens, num_tokens_across_dp=None, *, update_status=update_status):
+                    update_status(num_tokens, num_tokens_across_dp)
+                    raise RuntimeError("stop before model execution")
+
+                runner.update_eplb_heat_collection_status = MagicMock(side_effect=stop_after_stage_selection)
+                with self.assertRaisesRegex(RuntimeError, "stop before model execution"):
+                    runner._dummy_run(1)
+
+                runner.update_eplb_heat_collection_status.assert_called_once_with(4, metadata)
+                self.assertEqual(metadata.tolist(), expected_tokens)
+                self.assertTrue(runner.eplb_heat_collection_status)
+
+    def test_stage_selection_uses_common_dp_maximum(self):
+        for stage in ("prefill", "decode", "all"):
+            for tokens in ((1, 32), (8, 32), (8, 16)):
+                statuses = []
+                metadata = torch.tensor(tokens, dtype=torch.int32)
+                for local_tokens in tokens:
+                    runner = NPUModelRunner.__new__(NPUModelRunner)
+                    runner.eplb_heat_collection_stage = stage
+                    runner.eplb_pd_thresholds = 16
+                    runner.update_eplb_heat_collection_status(local_tokens, metadata)
+                    statuses.append(runner.eplb_heat_collection_status)
+                expected = stage == "all" or (max(tokens) > 16 if stage == "prefill" else max(tokens) <= 16)
+                self.assertEqual(statuses, [expected, expected])
+                self.assertEqual(metadata.tolist(), list(tokens))
+
+    def test_without_dp_metadata_preserves_local_stage_selection(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.eplb_heat_collection_stage = "prefill"
+        runner.eplb_pd_thresholds = 16
+        runner.update_eplb_heat_collection_status(8)
+        self.assertFalse(runner.eplb_heat_collection_status)
+        runner.update_eplb_heat_collection_status(32)
+        self.assertTrue(runner.eplb_heat_collection_status)
+
+    def test_imbalanced_dp_ranks_enter_eplb_collectives_together(self):
+        for stage in ("prefill", "decode"):
+            for tokens in ((1, 32), (8, 16)):
+                with self.subTest(stage=stage, tokens=tokens):
+                    runners = [NPUModelRunner.__new__(NPUModelRunner) for _ in tokens]
+                    updators = [EplbUpdator.__new__(EplbUpdator) for _ in tokens]
+                    for runner, updator in zip(runners, updators):
+                        runner.eplb_heat_collection_stage = stage
+                        runner.eplb_pd_thresholds = 16
+                        updator.cur_iterations = 0
+                        updator.expert_heat_collection_interval = 3
+                        updator.algorithm_execution_interval = 1
+                        updator.num_moe_layers = 2
+                        updator.compute_and_set_moe_load = MagicMock()
+                        updator.wakeup_eplb_worker = MagicMock()
+                    for _ in range(3):
+                        for local_tokens, runner, updator in zip(tokens, runners, updators):
+                            runner.update_eplb_heat_collection_status(
+                                local_tokens, torch.tensor(tokens, dtype=torch.int32)
+                            )
+                            updator.forward_end(runner.eplb_heat_collection_status)
+                        self.assertEqual(updators[0].cur_iterations, updators[1].cur_iterations)
+                    expected_gathers = int(runners[0].eplb_heat_collection_status)
+                    for updator in updators:
+                        self.assertEqual(updator.compute_and_set_moe_load.call_count, expected_gathers)
 
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):
@@ -302,7 +519,6 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "metadata checked"):
             runner._dummy_run(1)
 
-    @unittest.skipIf(vllm_version_is("0.29.0"), "DeepSeek V4.1 is unavailable on vLLM 0.29")
     def test_graph_capture_invalidates_only_v41_active_slots(self):
         from tests.deepseek_v41_utils import make_cache_config
 
@@ -573,6 +789,8 @@ class TestDrafterMaxModelLen(unittest.TestCase):
             drafter.num_query_per_req = query_width
         drafter.dummy_run = MagicMock()
         runner.drafter = drafter
+        runner.device = torch.device("cpu")
+        runner._copy_draft_token_ids_to_cpu = MagicMock()
         return runner
 
     def test_dspark_fit_check_uses_its_exact_query_group(self):
@@ -599,22 +817,22 @@ class TestDrafterMaxModelLen(unittest.TestCase):
         runner.drafter = None
 
         self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1024)))
-        runner._skip_drafting()
-        self.assertEqual(runner._draft_token_ids, [[], []])
+        scheduler_output = SimpleNamespace()
+        runner._skip_drafting(scheduler_output)
+        self.assertTrue(torch.equal(runner._draft_token_ids, torch.zeros(2, 5, dtype=torch.int32)))
+        runner._copy_draft_token_ids_to_cpu.assert_called_once_with(scheduler_output, zeros_only=True)
 
     def test_dspark_overflow_rank_runs_complete_dp_dummy(self):
         runner = self._build_runner(dp_size=2, query_width=6)
 
-        runner._skip_drafting()
+        scheduler_output = SimpleNamespace()
+        runner._skip_drafting(scheduler_output)
 
         runner.drafter.dummy_run.assert_called_once_with(num_tokens=6, num_reqs=1)
-        self.assertEqual(runner._draft_token_ids, [[], []])
-        self.assertEqual(runner._draft_token_req_ids, ["req-0", "req-1"])
+        self.assertTrue(torch.equal(runner._draft_token_ids, torch.zeros(2, 5, dtype=torch.int32)))
         self.assertIsNone(runner._draft_probs)
         self.assertIsNone(runner._draft_prob_req_ids)
-        draft_token_ids = runner.take_draft_token_ids()
-        self.assertEqual(draft_token_ids.req_ids, ["req-0", "req-1"])
-        self.assertEqual(draft_token_ids.draft_token_ids, [[], []])
+        runner._copy_draft_token_ids_to_cpu.assert_called_once_with(scheduler_output, zeros_only=True)
 
     def test_padded_overflow_preserves_sampled_token_state(self):
         runner = self._build_runner(dp_size=2)
@@ -631,7 +849,8 @@ class TestDrafterMaxModelLen(unittest.TestCase):
         )
         runner._copy_valid_sampled_token_count = MagicMock()
 
-        runner._skip_drafting(sampled_token_ids)
+        scheduler_output = SimpleNamespace()
+        runner._skip_drafting(scheduler_output, sampled_token_ids)
 
         runner.drafter.prepare_next_token_ids_padded.assert_called_once_with(
             sampled_token_ids,
@@ -642,38 +861,119 @@ class TestDrafterMaxModelLen(unittest.TestCase):
         )
         runner._copy_valid_sampled_token_count.assert_called_once_with(next_token_ids, valid_sampled_tokens_count)
         runner.drafter.dummy_run.assert_called_once_with(num_tokens=1)
+        runner._copy_draft_token_ids_to_cpu.assert_called_once_with(scheduler_output, zeros_only=True)
 
     def test_padded_overflow_avoids_state_work_without_count_event(self):
         runner = self._build_runner(dp_size=1)
         runner.valid_sampled_token_count_event = None
         runner.drafter.prepare_next_token_ids_padded = MagicMock()
 
-        runner._skip_drafting(torch.tensor([[11]]))
+        runner._skip_drafting(SimpleNamespace(), torch.tensor([[11]]))
 
         runner.drafter.prepare_next_token_ids_padded.assert_not_called()
 
     def test_model_backed_overflow_rank_runs_upstream_style_dp_dummy(self):
         runner = self._build_runner(dp_size=2)
 
-        runner._skip_drafting()
+        runner._skip_drafting(SimpleNamespace())
 
         runner.drafter.dummy_run.assert_called_once_with(num_tokens=1)
 
     def test_non_model_proposer_does_not_run_dp_dummy(self):
         runner = self._build_runner(dp_size=2, model_backed=False)
 
-        runner._skip_drafting()
+        runner._skip_drafting(SimpleNamespace())
 
         runner.drafter.dummy_run.assert_not_called()
-        self.assertEqual(runner._draft_token_ids, [[], []])
+        self.assertTrue(torch.equal(runner._draft_token_ids, torch.zeros(2, 5, dtype=torch.int32)))
 
     def test_overflow_rank_skips_dummy_without_dp(self):
         runner = self._build_runner(dp_size=1)
 
-        runner._skip_drafting()
+        runner._skip_drafting(SimpleNamespace())
 
         runner.drafter.dummy_run.assert_not_called()
-        self.assertEqual(runner._draft_token_ids, [[], []])
+        self.assertTrue(torch.equal(runner._draft_token_ids, torch.zeros(2, 5, dtype=torch.int32)))
+
+    def _build_skip_transition_runner(self):
+        runner = self._build_runner()
+        # Use the real publication method; only NPU stream/event APIs are mocked.
+        del runner._copy_draft_token_ids_to_cpu
+        runner.use_async_scheduling = True
+        runner.input_batch.sampling_metadata = SimpleNamespace(output_token_ids=[])
+        runner.input_batch.prev_sampled_token_ids = torch.tensor([[11], [22]], dtype=torch.int32)
+        runner._draft_token_ids = torch.full((2, 2), 99, dtype=torch.int32)
+        runner.prev_num_spec_tokens = 2
+        runner._draft_token_req_ids = None
+        runner._draft_probs = object()
+        runner._draft_prob_req_ids = ["stale"]
+        runner.draft_token_ids_cpu = torch.full((3, 5), 99, dtype=torch.int32)
+        runner.draft_token_ids_event = MagicMock()
+        runner.draft_token_ids_copy_stream = MagicMock()
+        return runner
+
+    def test_skipped_drafts_prepare_next_async_inputs(self):
+        for draft_width in (1, 3, 5):
+            with self.subTest(draft_width=draft_width):
+                runner = self._build_skip_transition_runner()
+                scheduler_output = SimpleNamespace(
+                    has_structured_output_requests=False,
+                    num_spec_tokens_to_schedule=draft_width,
+                )
+                self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1020)))
+                with patch("vllm_ascend.worker.model_runner_v1.get_pp_group") as pp:
+                    pp.return_value.world_size = 1
+                    runner._skip_drafting(scheduler_output)
+                runner.draft_token_ids_event.record.assert_not_called()
+                self.assertEqual(runner.prev_num_spec_tokens, runner.num_spec_tokens)
+
+                # Next async step still has reserved speculative slots. Reorder
+                # requests to also exercise the previous-row draft tensor stride.
+                runner.input_batch.req_ids = ["req-1", "req-0"]
+                runner.prev_positions = SimpleNamespace(np=np.array([1, 0], dtype=np.int32))
+                runner._pp_recv_work = None
+                runner.enable_prompt_embeds = False
+                num_tokens = 2 * (draft_width + 1)
+                runner.input_ids = SimpleNamespace(
+                    gpu=torch.full((num_tokens,), -1, dtype=torch.int32),
+                    copy_to_gpu=MagicMock(),
+                )
+                next_output = SimpleNamespace(
+                    scheduled_spec_decode_tokens={req: [-1] * draft_width for req in runner.input_batch.req_ids}
+                )
+                with patch("vllm.v1.worker.gpu_model_runner.PIN_MEMORY", False):
+                    runner._prepare_input_ids(
+                        next_output,
+                        2,
+                        num_tokens,
+                        np.array([draft_width + 1, num_tokens], dtype=np.int32),
+                    )
+                expected = torch.tensor([22] + [0] * draft_width + [11] + [0] * draft_width, dtype=torch.int32)
+                torch.testing.assert_close(runner.input_ids.gpu, expected)
+                runner.input_ids.copy_to_gpu.assert_not_called()
+                self.assertIsNone(runner._draft_probs)
+                self.assertIsNone(runner._draft_prob_req_ids)
+
+    def test_skipped_drafts_publish_zero_cpu_buffer_when_required(self):
+        for mode in ("sync", "structured", "penalties", "pp"):
+            with self.subTest(mode=mode):
+                runner = self._build_skip_transition_runner()
+                runner.use_async_scheduling = mode != "sync"
+                runner.input_batch.sampling_metadata.output_token_ids = [[1]] if mode == "penalties" else []
+                scheduler_output = SimpleNamespace(has_structured_output_requests=mode == "structured")
+                with (
+                    patch("vllm_ascend.worker.model_runner_v1.get_pp_group") as pp,
+                    patch("torch.npu.current_stream"),
+                    patch("torch.npu.stream", return_value=nullcontext()),
+                ):
+                    pp.return_value.world_size = 2 if mode == "pp" else 1
+                    runner._skip_drafting(scheduler_output)
+                torch.testing.assert_close(runner._draft_token_ids, torch.zeros(2, 5, dtype=torch.int32))
+                torch.testing.assert_close(runner.draft_token_ids_cpu[:2], torch.zeros(2, 5, dtype=torch.int32))
+                torch.testing.assert_close(runner.draft_token_ids_cpu[2], torch.full((5,), 99, dtype=torch.int32))
+                self.assertEqual(runner._draft_token_req_ids, ["req-0", "req-1"])
+                runner.draft_token_ids_event.record.assert_called_once_with()
+                runner.draft_token_ids_copy_stream.wait_stream.assert_not_called()
 
 
 class TestAcceptedTokenSnapshot(unittest.TestCase):
@@ -876,6 +1176,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 runner.model_config = config.model_config
                 runner.use_sparse = packed
                 runner.c8_k_cache_dtype = torch.int8
+                runner.c8_cache_dtype = torch.int8
                 runner._kv_cache_spec_attn_group_iterator = lambda specs=specs, layers=layers: [
                     SimpleNamespace(kv_cache_spec=spec, layer_names=[name], backend=layers[name].get_attn_backend())
                     for name, spec in specs.items()
@@ -893,7 +1194,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     caches = runner._reshape_kv_cache_tensors(cache_config, raw)
                 assert_attention_cache_views(caches, raw, packed)
 
-    @unittest.skipIf(vllm_version_is("0.29.0"), "DeepSeek V4.1 is unavailable on vLLM 0.29")
     def test_v41_layer_outer_buffers_allocate_and_reshape(self):
         from tests.deepseek_v41_utils import make_cache_config
         from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
@@ -933,7 +1233,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         assert caches[prefix + "0.self_attn.swa_cache"].is_contiguous()
         assert not caches[prefix + "3.self_attn.swa_cache"].is_contiguous()
 
-    @unittest.skipIf(vllm_version_is("0.29.0"), "DeepSeek V4.1 is unavailable on vLLM 0.29")
     def test_v41_dspark_shares_four_backings_after_rank_shrink(self):
         from tests.deepseek_v41_utils import make_cache_config
         from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
@@ -1599,8 +1898,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ]
         raw = torch.zeros(spec.page_size_bytes * 2, dtype=torch.int8)
 
-        with patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=False):
-            cache = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: raw})[layer_name]
+        cache = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: raw})[layer_name]
 
         self.assertEqual(cache.shape, (2, 2, 4, 3))
 
@@ -1649,10 +1947,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         for layout, raw_cache, hybrid_flag in raw_caches:
             runner.hybrid_with_attn_and_mamba = hybrid_flag
-            with (
-                self.subTest(layout=layout),
-                patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=False),
-            ):
+            with self.subTest(layout=layout):
                 k_cache, v_cache = runner._reshape_kv_cache_tensors(
                     kv_cache_config,
                     {layer_name: raw_cache},
@@ -1905,6 +2200,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.use_sparse = True
         runner.block_size = 16
         runner.c8_k_cache_dtype = torch.int8
+        runner.c8_cache_dtype = torch.int8
         runner.c8_k_scale_cache_dtype = torch.float16
         runner._get_attention_kv_cache_dims = lambda _layer_name, _spec: (512, 64)
         runner.sparse_kv_offload_enabled = False
@@ -2033,6 +2329,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.block_size = 16
         runner.kv_cache_dtype = torch.bfloat16
         runner.c8_k_cache_dtype = torch.float8_e4m3fn
+        runner.c8_cache_dtype = torch.float8_e4m3fn
         runner.c8_k_scale_cache_dtype = torch.float32
         runner.shared_kv_cache_layers = {}
         runner.ascend_config = MagicMock()
