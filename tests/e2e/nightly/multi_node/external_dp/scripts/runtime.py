@@ -472,9 +472,17 @@ class ExternalDPServerManager:
         )
         self.rank_processes: list[RankProcess] = []
 
+
+##修改点2
     def start_current_node(self) -> None:
-        local_ranks = [rank for rank in self.ranks if rank.node_index == self.current_node_index]
-        logger.info("Starting %d external DP ranks on node %d", len(local_ranks), self.current_node_index)
+        local_ranks = [
+            rank for rank in self.ranks if rank.node_index == self.current_node_index
+        ]
+        logger.info(
+            "Starting %d external DP ranks on node %d",
+            len(local_ranks),
+            self.current_node_index,
+        )
         try:
             for rank in local_ranks:
                 template = self.config.launch_templates[rank.node_index]
@@ -487,11 +495,26 @@ class ExternalDPServerManager:
                 process = start_logged_process(server_cmd.cmd, server_cmd.env, log_file)
                 self.rank_processes.append((process, rank, log_file))
 
-            wait_ranks_ready(
-                local_ranks,
-                timeout=SERVER_READY_TIMEOUT_SECONDS,
-                rank_processes=self.rank_processes,
-            )
+            # Engine master ranks expose an HTTP /health endpoint; non-engine-master
+            # ranks (e.g. PP worker nodes) do not — we only need their process to stay alive.
+            engine_master_ranks = [rank for rank in local_ranks if rank.is_engine_master]
+            non_engine_master_ranks = [
+                rank for rank in local_ranks if not rank.is_engine_master
+            ]
+
+            if non_engine_master_ranks:
+                _wait_processes_alive(
+                    self.rank_processes,
+                    ranks_to_watch=non_engine_master_ranks,
+                    timeout=SERVER_READY_TIMEOUT_SECONDS,
+                )
+
+            if engine_master_ranks:
+                wait_ranks_ready(
+                    engine_master_ranks,
+                    timeout=SERVER_READY_TIMEOUT_SECONDS,
+                    rank_processes=self.rank_processes,
+                )
         except Exception:
             self.cleanup()
             raise
@@ -635,6 +658,61 @@ def _format_rank_statuses(
         status = "ready" if rank_ready[rank] else "waiting"
         parts.append(f"  {rank_label(rank)} status={status}")
     return "\n".join(parts)
+
+###修改点1
+def _wait_processes_alive(
+    rank_processes: list[RankProcess],
+    ranks_to_watch: Iterable[RankInfo],
+    timeout: int,
+    poll_interval: float = 5.0,
+) -> None:
+    """Wait until the watched rank processes are all alive within timeout.
+
+    This is used for non-engine-master ranks (e.g. PP worker nodes) that do not
+    expose an HTTP /health endpoint. We simply verify their processes have not
+    exited and log progress.
+    """
+    watch_set = set(ranks_to_watch)
+    process_map = {rank: proc for proc, rank, _ in rank_processes}
+    deadline = time.monotonic() + timeout
+    last_log_time = 0.0
+
+    while True:
+        now = time.monotonic()
+        exited = []
+        still_alive = []
+        for rank in watch_set:
+            proc = process_map.get(rank)
+            if proc is None:
+                exited.append(f"{rank_label(rank)} process was not tracked")
+                continue
+            rc = proc.poll()
+            if rc is not None:
+                exited.append(f"{rank_label(rank)} pid={proc.pid} returncode={rc}")
+            else:
+                still_alive.append(rank)
+
+        if exited:
+            raise RuntimeError(
+                "Non-engine-master rank process exited:" + ";".join(exited)
+            )
+
+        if now - last_log_time >= 30:
+            logger.info(
+                "Non-engine-master ranks alive: %d/%d: %s",
+                len(still_alive),
+                len(watch_set),
+                ",".join(rank_label(r) for r in still_alive),
+            )
+            last_log_time = now
+
+        if now >= deadline:
+            raise TimeoutError(
+                "Timed out waiting for non-engine-master ranks to stay alive:"
+                + ";".join(rank_label(r) for r in watch_set)
+            )
+
+        time.sleep(poll_interval)
 
 
 def _raise_if_rank_process_exited(rank_processes: list[RankProcess] | None) -> None:
