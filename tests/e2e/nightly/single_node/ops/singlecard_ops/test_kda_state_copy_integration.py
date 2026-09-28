@@ -493,3 +493,43 @@ def test_fullgraph_same_layout_layers_keep_distinct_bindings(dtype, monkeypatch)
         expected[0].fill_(value)
         torch.testing.assert_close(result, expected, rtol=0, atol=0)
         torch.testing.assert_close(state[indices], expected + 1, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("state_offset", [0, 1])
+@torch.inference_mode()
+def test_prepare_matches_alignment_of_unaligned_scratch_backing(dtype, state_offset, monkeypatch):
+    """Scratch alignment follows both actual pointers, not an allocator assumption."""
+    payload = 6
+    source = torch.full((8 * payload + state_offset,), 7, dtype=dtype, device="npu")
+    state = source.narrow(0, state_offset, 8 * payload).view(8, 1, 2, 3)
+    scratch_size = payload + 16 // state.element_size()
+    zeros = torch.zeros
+    allocations = []
+
+    def unaligned_zeros(size, *args, **kwargs):
+        """Offset only the scratch allocation; index metadata stays aligned."""
+        if size == scratch_size and kwargs.get("dtype") == dtype:
+            offset = 8 // state.element_size()
+            backing = zeros(size + offset, *args, **kwargs).narrow(0, offset, size)
+            assert backing.data_ptr() % 16 == 8
+            allocations.append(backing)
+            return backing
+        return zeros(size, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "zeros", unaligned_zeros)
+    plan = KDAStateCopyPlan.prepare(state, 8)
+    plan.seal()
+    assert len(allocations) == 1
+    assert len(plan._compiled) == 4
+    # Startup must only mutate its disposable storage, never the bound cache.
+    torch.testing.assert_close(state, torch.full_like(state, 7), rtol=0, atol=0)
+    _forbid_compilation(monkeypatch)
+    indices = torch.tensor([0, 7], dtype=torch.int32, device="npu")
+    flags = torch.tensor([True, False], device="npu")
+    packed = plan.gather(state, indices, flags)
+    expected = torch.zeros_like(packed)
+    expected[0].fill_(7)
+    torch.testing.assert_close(packed, expected, rtol=0, atol=0)
+    plan.scatter(state, packed + 1, indices)
+    torch.testing.assert_close(state[indices], expected + 1, rtol=0, atol=0)

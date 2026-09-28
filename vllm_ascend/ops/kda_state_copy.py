@@ -121,10 +121,13 @@ class KDAStateCopyPlan:
             indices = torch.zeros(1, dtype=torch.int64, device=state.device)
             flags = torch.ones(1, dtype=torch.bool, device=state.device)
             payload, _, _, _, _, rows, page_stride, _ = _validate_inputs(state, packed, indices)
-            offset = (state.data_ptr() % 16) // state.element_size()
             backing = torch.zeros(payload + 16 // state.element_size(), dtype=state.dtype, device=state.device)
+            # Preserve the cache's alignment class even with a custom allocator
+            # whose scratch backing does not itself start on a 16-byte boundary.
+            state_alignment = state.data_ptr() % 16
+            offset = ((state_alignment - backing.data_ptr() % 16) % 16) // state.element_size()
             scratch = backing.narrow(0, offset, payload)
-            if scratch.data_ptr() % 16 != state.data_ptr() % 16:
+            if scratch.data_ptr() % 16 != state_alignment:
                 raise RuntimeError("unsupported cache alignment during strict KDA preparation")
             if any(t.data_ptr() % 16 for t in (packed, indices, flags)):
                 raise RuntimeError("strict KDA requires aligned allocator outputs")
