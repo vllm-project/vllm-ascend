@@ -518,9 +518,12 @@ def test_indexer_orders_cache_gathers_after_query_dependency(with_dependency, qu
         patch("vllm_ascend.attention.indexer.get_tp_group", return_value=object()),
         patch("vllm_ascend.attention.indexer.all_gather_async", side_effect=gather),
     ):
-        assert AscendSFAIndexerBackend.forward(
-            indexer, k, k, k, metadata, compute_topk=False, attn_q_gather_handle=dependency
-        ) is None
+        assert (
+            AscendSFAIndexerBackend.forward(
+                indexer, k, k, k, metadata, compute_topk=False, attn_q_gather_handle=dependency
+            )
+            is None
+        )
     expected = ["forward_k"] + (["wait_q"] if with_dependency else []) + ["gather_k"]
     if quantized:
         expected += ["gather_scale", "wait_k", "wait_scale"]

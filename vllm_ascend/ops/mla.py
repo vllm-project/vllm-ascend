@@ -107,7 +107,12 @@ class IndexerWrapper(nn.Module):
         attn_q_gather_handle: torch.distributed.Work | None = None,
     ) -> torch.Tensor | None:
         return self.impl(
-            hidden_states, q_c, k_hidden_states, indexer_metadata, compute_topk, attn_q_gather_handle=attn_q_gather_handle
+            hidden_states,
+            q_c,
+            k_hidden_states,
+            indexer_metadata,
+            compute_topk,
+            attn_q_gather_handle=attn_q_gather_handle,
         )
 
 

@@ -1389,6 +1389,7 @@ def test_sfa_pcp_padded_decode_skips_kv_gather():
     gather.assert_not_called()
     torch.testing.assert_close(base_write.call_args.args[4], slots)
 
+
 @pytest.mark.parametrize("dcp_size", [8, 16])
 def test_sfa_pcp_dcp_builder_preserves_causal_multi_token_support(dcp_size):
     config = SimpleNamespace(
