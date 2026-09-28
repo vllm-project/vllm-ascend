@@ -101,6 +101,30 @@ class TestBackendDeviceBinding(unittest.TestCase):
         npu.current_device.assert_not_called()
         npu.set_device.assert_not_called()
 
+    def test_memcache_scheduler_data_factory_initializes_data_plane(self):
+        npu = MagicMock()
+        parallel_config = SimpleNamespace(assigned_physical_gpu_ids=[5])
+        store = MagicMock()
+        store.init.return_value = 0
+        with (
+            patch.object(memcache_module.torch, "npu", npu),
+            patch.object(backend_base, "set_assigned_physical_gpu_ids"),
+            patch.object(
+                backend_base.current_platform,
+                "logical_device_id_to_visible_device_id",
+                return_value=2,
+            ),
+            patch.object(memcache_module, "_validate_device_ub_qos"),
+            patch.object(sys.modules["memcache_hybrid"], "DistributedObjectStore", return_value=store, create=True),
+            patch.object(memcache_module.time, "sleep"),
+        ):
+            backend = MemcacheBackend.create_scheduler_data_client(parallel_config)
+
+        self.assertEqual(backend.device_id, 2)
+        self.assertIs(backend.store, store)
+        store.init.assert_called_once_with(2, init_bm=True)
+        npu.set_device.assert_called_once_with(2)
+
     def test_scheduler_device_id_does_not_bind_assigned_device(self):
         npu = MagicMock()
         parallel_config = SimpleNamespace(assigned_physical_gpu_ids=[5])
