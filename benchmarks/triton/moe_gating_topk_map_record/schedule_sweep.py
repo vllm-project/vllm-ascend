@@ -11,9 +11,11 @@ import statistics
 
 import torch
 
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
-
+# Keep the adjacent standalone case-generator import stable across CI contexts.
+# isort: off
 from case_generator import Case, load_candidate, make_inputs
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+# isort: on
 
 
 def main():
