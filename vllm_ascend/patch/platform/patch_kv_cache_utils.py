@@ -139,10 +139,7 @@ def _resolve_dcp_hash_block_size(
     has_partial_mamba_group = any(
         isinstance(spec, MambaSpec)
         and spec.mamba_cache_mode == "align"
-        and (
-            (dcp == 1 and block_size > hash_block_size)
-            or (dcp > 1 and block_size >= hash_block_size)
-        )
+        and ((dcp == 1 and block_size > hash_block_size) or (dcp > 1 and block_size >= hash_block_size))
         for group, block_size in zip(hashing_groups, hashing_sizes)
         for spec in _iter_layer_specs(group.kv_cache_spec)
     )

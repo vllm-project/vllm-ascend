@@ -225,8 +225,7 @@ def test_partial_hash_hits_downgrade_for_unsupported_manager() -> None:
         num_blocks=64,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=[str(index)], kv_cache_spec=spec)
-            for index, spec in enumerate(specs)
+            KVCacheGroupSpec(layer_names=[str(index)], kv_cache_spec=spec) for index, spec in enumerate(specs)
         ],
     )
 
@@ -576,8 +575,7 @@ def test_resolve_dcp_checks_state_alignment_at_actual_hit_granularity() -> None:
         num_blocks=10,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=[str(index)], kv_cache_spec=spec)
-            for index, spec in enumerate(specs)
+            KVCacheGroupSpec(layer_names=[str(index)], kv_cache_spec=spec) for index, spec in enumerate(specs)
         ],
     )
     vllm_config = _make_vllm_config(
