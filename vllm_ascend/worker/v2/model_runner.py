@@ -136,11 +136,10 @@ class NPUModelRunner(GPUModelRunner):
             )
             and not self.model_config.enforce_eager
         )
-        load_collection_phase = self.ascend_config.eplb_config.load_collection_phase
         self.eplb = AscendEPLBController(
             parallel_config,
             device,
-            load_collection_phase=(load_collection_phase if parallel_config.enable_eplb else "all"),
+            self.ascend_config.eplb_config if parallel_config.enable_eplb else None,
         )
 
         self.update_stream = None
