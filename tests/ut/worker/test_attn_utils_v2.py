@@ -635,6 +635,32 @@ def _make_dsa_metadata_groups(builder_cls=_RecordingDSAMetadataBuilder):
     return layer_names, specs, calls, attn_groups, kv_cache_config
 
 
+def test_draft_metadata_uses_per_request_cpu_upper_bounds():
+    _, _, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
+    upper_bounds = torch.tensor([13, 27], dtype=torch.int32)
+
+    attn_utils.build_attn_metadata(
+        attn_groups=attn_groups,
+        num_reqs=2,
+        num_tokens=2,
+        query_start_loc_gpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([11, 25], dtype=torch.int32),
+        max_seq_len=27,
+        block_tables=(torch.zeros((2, 1), dtype=torch.int32),) * 2,
+        slot_mappings=(torch.zeros(2, dtype=torch.int32),) * 2,
+        kv_cache_config=kv_cache_config,
+        seq_lens_cpu_upper_bound=upper_bounds,
+    )
+
+    assert len(calls) == 2
+    for call in calls:
+        common_metadata = call["common_attn_metadata"]
+        torch.testing.assert_close(common_metadata.seq_lens_cpu, upper_bounds)
+        torch.testing.assert_close(common_metadata.seq_lens, torch.tensor([11, 25], dtype=torch.int32))
+
+
 def test_prepare_kernel_block_sizes_uses_logical_size_for_dsv4():
     spec = _make_dsv4_mla_spec(128, 4)
     attn_groups = [

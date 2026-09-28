@@ -211,7 +211,7 @@ def test_mtp_common_dcp_preparation(monkeypatch, architecture, padded, step):
 
 @pytest.mark.parametrize("kind,full_rebuild", [("mtp", False), ("dspark", False), ("dspark", True)])
 @pytest.mark.parametrize("architecture", ["MLA", "SFA"])
-def test_non_dcp_preserves_existing_length_fallback(monkeypatch, kind, architecture, full_rebuild):
+def test_non_dcp_uses_per_request_length_bounds(monkeypatch, kind, architecture, full_rebuild):
     width = 3 if kind == "dspark" else 1
     spec, original_target, device_lengths = _speculator(monkeypatch, kind, architecture, width, 2, width, use_dcp=False)
 
@@ -248,7 +248,9 @@ def test_non_dcp_preserves_existing_length_fallback(monkeypatch, kind, architect
         # seq_lens_cpu property was removed in vLLM main.
         torch.testing.assert_close(common.seq_lens, device_lengths[:2])
     else:
-        assert common.seq_lens_cpu.tolist() == [128, 128]
+        # The first request uses its own bound after advancing the draft step;
+        # only the second request reaches the model-length cap.
+        assert common.seq_lens_cpu.tolist() == [31 + width, 128]
     assert torch.equal(common.seq_lens, device_lengths[:2])
     assert torch.equal(spec.target_input_buffers.seq_lens_cpu, original_target)
 

@@ -252,14 +252,20 @@ def build_attn_metadata(
     causal: bool | Mapping[int, bool] = True,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
-    # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
-    # seq_lens_np is used for ascend npus, it maybe None in spec_decode case,
-    # we fill it with max_seq_len in case `attn_metadata_builder.build` raise
-    # an error.
     if seq_lens_np is None:
-        seq_lens_np = np.full(num_reqs, max_seq_len, dtype=np.int32)
+        if seq_lens_cpu_upper_bound is not None:
+            # FIA needs a CPU-side seq_lens upper bound for each request when
+            # speculative decoding does not provide exact CPU sequence lengths.
+            seq_lens_np = seq_lens_cpu_upper_bound[:num_reqs].numpy()
+        else:
+            # The batch maximum is a looser bound and can further reduce
+            # FIA accuracy by overstating individual KV sequence lengths.
+            seq_lens_np = np.full(num_reqs, max_seq_len, dtype=np.int32)
+
     seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
     if seq_lens_cpu_upper_bound is None:
+        # seq_lens_cpu is already an upper bound (possibly exact), so reuse it
+        # when no separate CPU upper bound was supplied.
         seq_lens_cpu_upper_bound = seq_lens_cpu
 
     # Upstream prepares device-local lengths before building attention metadata.
