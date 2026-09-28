@@ -10,6 +10,7 @@ from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMetho
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 from vllm_ascend.attention.mla_v1 import (
     AscendMLABackend,
     AscendMLADecodeMetadata,
@@ -77,7 +78,8 @@ def test_v_up_proj_batch_major_matches_weight_dtype(kv_lora_rank):
 
 @pytest.mark.parametrize("use_rope", [False, True])
 @pytest.mark.parametrize("support_fp8_attention,weight_quant_mode", [(False, 2), (True, 0), (True, 3)])
-def test_mla_prolog_uses_cann_for_a3_and_a5(use_rope, support_fp8_attention, weight_quant_mode):
+@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
+def test_mla_prolog_uses_cann_for_a3_and_a5(use_rope, support_fp8_attention, weight_quant_mode, slot_dtype):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.support_fp8_attention = support_fp8_attention
     impl.use_mla_rope = use_rope
@@ -93,7 +95,7 @@ def test_mla_prolog_uses_cann_for_a3_and_a5(use_rope, support_fp8_attention, wei
     impl.q_a_layernorm = impl.kv_a_layernorm = SimpleNamespace(weight=torch.ones(1))
     metadata = SimpleNamespace(
         num_decode_tokens=2,
-        slot_mapping=torch.arange(2),
+        slot_mapping=torch.arange(2, dtype=slot_dtype),
         decode=SimpleNamespace(
             cos=torch.ones(2, 2) if use_rope else None,
             sin=torch.zeros(2, 2) if use_rope else None,
@@ -121,8 +123,123 @@ def test_mla_prolog_uses_cann_for_a3_and_a5(use_rope, support_fp8_attention, wei
     kwargs = cann_op.call_args.kwargs
     assert kwargs["weight_quant_mode"] == weight_quant_mode
     assert kwargs["kv_cache"] is kv_cache[0]
+    assert kwargs["cache_index"].dtype == torch.int64
+    torch.testing.assert_close(kwargs["cache_index"].flatten(), metadata.slot_mapping.to(torch.int64))
     assert (kwargs["rope_cos"] is None) == (not use_rope)
     assert (kwargs["rope_sin"] is None) == (not use_rope)
+
+
+@pytest.mark.parametrize("support_fp8_attention,weight_quant_mode", [(False, 2), (True, 0), (True, 3)])
+@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
+def test_mla_prolog_dcp_keeps_current_kv_and_scatters_history(support_fp8_attention, weight_quant_mode, slot_dtype):
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.dcp_size = 1
+    impl.support_fp8_attention = support_fp8_attention
+    impl.use_mla_rope = False
+    impl.mlapo_weight_quant_mode = weight_quant_mode
+    impl.fa_quant_layer = False
+    impl.enable_kv_nz = False
+    impl.mlapo_num_heads = impl.num_heads = 2
+    impl.kv_lora_rank = 4
+    impl.qk_rope_head_dim = 2
+    impl.num_kv_heads = 1
+    impl.dtype = torch.float32
+    impl.vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+        cache_config=SimpleNamespace(block_size=2),
+    )
+    impl._decode_requires_current_kv = lambda _: True
+    for name in ("weight_dq", "weight_uq_qr", "mlapo_W_UK_T", "weight_dkv_kr"):
+        setattr(impl, name, torch.empty(1))
+    for name in ("dequant_scale_w_dq", "dequant_scale_w_uq_qr", "dequant_scale_w_dkv_kr"):
+        setattr(impl, name, torch.ones(1, dtype=torch.uint8))
+    impl.q_a_layernorm = impl.kv_a_layernorm = SimpleNamespace(weight=torch.ones(1))
+    slots = torch.tensor([0, -1, 3, -1], dtype=slot_dtype)
+    metadata = SimpleNamespace(num_decode_tokens=3, slot_mapping=slots)
+    kv_cache = (torch.zeros(2, 2, 1, 4), torch.zeros(2, 2, 1, 2))
+    impl._prepare_dcp_current_kv_buffers()
+    current_nope_cache, current_pe_cache, current_indices = impl._dcp_current_kv_buffers
+    assert current_nope_cache.shape == kv_cache[0].shape
+    assert current_pe_cache.shape == kv_cache[1].shape
+    torch.testing.assert_close(current_indices, torch.arange(4))
+    current_k = torch.randn(3, 1, 4)
+    current_pe = torch.randn(3, 1, 2)
+    outputs = (torch.randn(3, 2, 4), torch.randn(3, 2, 2), torch.empty(0), None, None)
+
+    def prolog(**kwargs):
+        assert kwargs["weight_quant_mode"] == weight_quant_mode
+        assert kwargs["cache_mode"] == "PA_BSND"
+        assert kwargs["rope_cos"] is kwargs["rope_sin"] is None
+        assert kwargs["kv_cache"].data_ptr() == current_nope_cache.data_ptr()
+        assert kwargs["kr_cache"].data_ptr() == current_pe_cache.data_ptr()
+        assert kwargs["cache_index"].data_ptr() == current_indices.data_ptr()
+        assert kwargs["kv_cache"] is not kv_cache[0]
+        assert kwargs["kr_cache"] is not kv_cache[1]
+        torch.testing.assert_close(kwargs["cache_index"].flatten(), torch.arange(3))
+        kwargs["kv_cache"].flatten(0, 1)[:3].copy_(current_k)
+        kwargs["kr_cache"].flatten(0, 1)[:3].copy_(current_pe)
+        return outputs
+
+    with (
+        patch.dict("sys.modules", {"cann_ops_transformer": SimpleNamespace(mla_prolog=prolog)}),
+        patch(
+            "torch_npu.npu_dynamic_mx_quant",
+            return_value=(torch.empty(3, 1, 8), torch.ones(3, 1, 1, dtype=torch.uint8)),
+        ),
+        patch(
+            "torch_npu.npu_dynamic_quant",
+            return_value=(torch.empty(3, 8, dtype=torch.int8), torch.ones(3, 1)),
+        ),
+        patch("vllm_ascend.attention.mla_v1.DeviceOperator.reshape_and_cache") as scatter,
+    ):
+        result, _ = impl.mla_preprocess_only_decode(torch.randn(3, 8), kv_cache, metadata)
+
+    assert result.k_nope is kv_cache[0]
+    assert result.k_pe is kv_cache[1]
+    torch.testing.assert_close(result.current_k_nope, current_k)
+    torch.testing.assert_close(result.current_k_pe, current_pe)
+    scatter.assert_called_once()
+    assert scatter.call_args.kwargs["key"] is result.current_k_nope
+    assert scatter.call_args.kwargs["value"] is result.current_k_pe
+    assert scatter.call_args.kwargs["key_cache"] is kv_cache[0]
+    assert scatter.call_args.kwargs["value_cache"] is kv_cache[1]
+    history_slots = scatter.call_args.kwargs["slot_mapping"]
+    assert history_slots.dtype == slot_dtype
+    assert history_slots.data_ptr() == slots.data_ptr()
+    torch.testing.assert_close(history_slots, slots[:3])
+
+
+@pytest.mark.parametrize("support_fp8_attention", [False, True])
+@pytest.mark.parametrize("enable_kv_nz", [False, True])
+def test_mla_dcp_decode_prolog_dispatch(support_fp8_attention, enable_kv_nz):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.support_fp8_attention = support_fp8_attention
+    impl.enable_mlapo = True
+    impl.fa_quant_layer = False
+    impl.use_mla_rope = False
+    impl.enable_kv_nz = enable_kv_nz
+    impl.use_output_gate = False
+    impl.layerwise_kv_cache_hook = None
+    impl.num_heads = 1
+    impl.v_head_dim = 2
+    impl._decode_requires_current_kv = lambda _: True
+    decode_result = object()
+    impl.mla_preprocess_only_decode = MagicMock(return_value=(decode_result, None))
+    impl._mla_preprocess = MagicMock(return_value=(decode_result, None))
+    impl._forward_decode = MagicMock(return_value=torch.ones(2, 2))
+    impl.o_proj = MagicMock(side_effect=lambda x, **_: (x,))
+    metadata = SimpleNamespace(num_actual_tokens=2, num_decodes=2, num_prefills=0, num_decode_tokens=2)
+    kv_cache = (torch.empty(1, 2, 1, 4), torch.empty(1, 2, 1, 2))
+    output = torch.empty(2, 2)
+
+    with (
+        patch("vllm_ascend.attention.mla_v1._EXTRA_CTX", SimpleNamespace(num_tokens=2)),
+        patch("vllm_ascend.attention.mla_v1.maybe_save_kv_layer_to_connector"),
+    ):
+        assert impl.forward("layer", torch.empty(2, 4), kv_cache, metadata, output) is output
+
+    assert impl.mla_preprocess_only_decode.called is not enable_kv_nz
+    assert impl._mla_preprocess.called is enable_kv_nz
 
 
 @pytest.mark.parametrize(

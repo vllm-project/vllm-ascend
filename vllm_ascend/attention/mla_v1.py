@@ -815,6 +815,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     # `Cannot determine type of "W_UK_T"  [has-type]`.
     W_UV: torch.Tensor
     W_UK_T: torch.Tensor
+    _dcp_current_kv_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
 
     def __init__(
         self,
@@ -1884,8 +1885,25 @@ class AscendMLAImpl(MLAAttentionImpl):
         from cann_ops_transformer import mla_prolog  # type: ignore[import-not-found,import-untyped]  # noqa: PLC0415
 
         bsz = attn_metadata.num_decode_tokens
-        cache_index = attn_metadata.slot_mapping[:bsz].to(torch.int64)
-        decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
+        history_slots = attn_metadata.slot_mapping[:bsz]
+        return_current_kv = self._decode_requires_current_kv(attn_metadata)
+        if return_current_kv:
+            # DCP attention needs every current row, while the paged cache keeps
+            # only this rank's history. Use the existing prolog cache outputs for
+            # the current chunk, then scatter its rank-owned rows to history.
+            assert self._dcp_current_kv_buffers is not None
+            current_nope_cache, current_pe_cache, current_indices = self._dcp_current_kv_buffers
+            assert bsz <= current_indices.numel()
+            block_size = kv_cache[0].shape[1]
+            num_blocks = cdiv(bsz, block_size)
+            current_nope_cache = current_nope_cache[:num_blocks]
+            current_pe_cache = current_pe_cache[:num_blocks]
+            decode_k_nope, decode_k_pe = current_nope_cache, current_pe_cache
+            cache_index = current_indices[:bsz]
+        else:
+            # Only the direct prolog needs int64; DCP scatters the original slots.
+            cache_index = history_slots.to(torch.int64)
+            decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         hidden_states = hidden_states[:bsz]
 
         if self.support_fp8_attention:
@@ -1965,8 +1983,26 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_q_pe = decode_q_pe.view(bsz, self.mlapo_num_heads, -1)
 
         decode_q_nope, decode_q_pe = self.reorg_decode_q(decode_q_nope, decode_q_pe)
+        current_k_nope = current_k_pe = None
+        if return_current_kv:
+            current_k_nope = current_nope_cache.flatten(0, 1)[:bsz]
+            current_k_pe = current_pe_cache.flatten(0, 1)[:bsz]
+            DeviceOperator.reshape_and_cache(
+                key=current_k_nope,
+                value=current_k_pe,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_mapping=history_slots,
+            )
+            decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         decode_preprocess_res = DecodeMLAPreprocessResult(
-            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
+            decode_q_nope,
+            decode_q_pe,
+            decode_k_nope,
+            decode_k_pe,
+            dequant_scale_q_nope=dequant_scale_q_nope,
+            current_k_nope=current_k_nope,
+            current_k_pe=current_k_pe,
         )
         return decode_preprocess_res, None
 
@@ -2158,10 +2194,17 @@ class AscendMLAImpl(MLAAttentionImpl):
             gate = self.g_proj(hidden_states.contiguous())[0]
 
         # MLA Preprocess
+        requires_current_kv = self._decode_requires_current_kv(attn_metadata)
+        can_use_dcp_prolog = (
+            self.enable_mlapo
+            and not self.fa_quant_layer
+            and not self.use_mla_rope
+            and not self.enable_kv_nz
+            and attn_metadata.num_decode_tokens > 0
+        )
         if (
             (self.fa_quant_layer or self.enable_mlapo)
-            # The fused prolog does not return the replicated current KV.
-            and not self._decode_requires_current_kv(attn_metadata)
+            and (not requires_current_kv or can_use_dcp_prolog)
             and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
             and attn_metadata.num_prefills == 0
         ):
