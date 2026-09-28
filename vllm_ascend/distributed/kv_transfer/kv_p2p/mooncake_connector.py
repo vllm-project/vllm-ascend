@@ -1894,11 +1894,27 @@ class MooncakeConnectorScheduler:
             "MooncakeConnector request_finished, request_status=%s, kv_transfer_params=%s", request.status, params
         )
 
-        if (
-            params is None
-            or not params.get("do_remote_decode")
-            or request.status != RequestStatus.FINISHED_LENGTH_CAPPED
-        ):
+        if params is None:
+            return False, None
+
+        # A remote-prefill request can be rejected before scheduler admission
+        # (for example, when prompt + max_tokens exceeds max_model_len). In
+        # that case update_state_after_alloc() never gets a chance to schedule
+        # the receive, so explicitly enqueue an empty receive. The worker skips
+        # the data transfer for empty block IDs but still sends the completion
+        # signal to the P node, allowing it to release the stranded KV blocks.
+        if params.get("do_remote_prefill"):
+            empty_block_ids: BlockIds = tuple([] for _ in self.kv_cache_groups)
+            self._reqs_need_recv[request.request_id] = (
+                request,
+                empty_block_ids,
+                empty_block_ids,
+                0,
+            )
+            params["do_remote_prefill"] = False
+            return False, None
+
+        if not params.get("do_remote_decode") or request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
             return False, None
 
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
