@@ -103,6 +103,9 @@ class _BounceLeaseManager:
 class AscendContiguousAllocator(ContiguousAllocator):
     """Allocate a 2 MiB-aligned registered-memory slab on NPU."""
 
+    tensor: torch.Tensor | None
+    _disabled: bool
+
     def prepare(self, device: torch.device, transfer: MooncakeTransfer) -> None:
         """Prepare an aligned NPU slab without relying on upstream hooks."""
         if self.tensor is not None or self._disabled:
