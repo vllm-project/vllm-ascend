@@ -452,3 +452,43 @@ TimelineDetail 差异）、本文件各轮详设/结果/负结果。
    buffer）：decode -10% 级。
 4. MERGE_N avgFactor 折叠（卫生学）/ fp16-fp32 NORMAL 流水化 / SPLIT_D
    现代化（休眠）。
+
+## Round 5（2026-09-28）：Reduce 树重构 —— ⛔ 负结果，已回退
+
+**假设**：legacy `ReduceSumFP32` 的单指令多 repeat `Add(..., dstRepStride=0)`
+在同一 64-float 累加块上形成 repeat 间 RAW 依赖链（numCol=7168 → 112 深），
+顺序 V 管线会完整暴露该延迟（估 0.3-0.6µs/行）；8 链交错发射可消除。
+
+**实验**（新增 `ReduceSumFP32Parallel`，8×64-float 累加器，交错发射 +
+显式两两折叠 + WRS；仅切换流水化 bf16 路径）：
+
+| 实验 | 结果 |
+|---|---|
+| V1 交错发射，acc 在 src1（dst==src1） | **vector core exception**（col=7168 无尾也崩 → 与尾路径无关） |
+| V2a 链主体顺序发射（其余同 V1） | 通过 → 故障定位于"交错"本身 |
+| V2b 交错发射，acc 在 src0（dst==src0） | **通过** → 可用形式 |
+| V2b 最终版（150 严格 + 126 原始全绿） | NPUGraph @2048 89.09/88.94µs vs 检视修复版 89.81µs（**-0.8%，噪声级**）；msprof vec busy 77.4µs 与"加了 avgFactor pass 的预期值"完全一致 |
+
+**结论**：
+1. **延迟链假设证伪**——硬件对单指令多 repeat 的 dst 累加有内部转发，
+   legacy 形式并不慢；vec busy 未降说明收益为零，-0.8% 是噪声。
+   （此前静态分析给出的 0.44µs/行"未解释缺口"应归属 cast 半吞吐等其他因素。）
+2. **两条 c220 硬件事实（新知识，已留档）**：
+   a. 交错发射的单 repeat `Add`，dst 轮转且 dst==src1（累加器在 src1 位）时
+      **触发 vector core exception**；同一模式把累加器放 **src0 位（dst==src0）
+      则安全**。顺序发射时 dst==src1 无恙（legacy 即此形式）。
+   b. 单指令多 repeat 的累加（dstRepStride=0）硬件内部按吞吐执行，
+      **不暴露 repeat 间依赖延迟**——"拆依赖链"这类经典 CPU 优化在
+      该指令形态上无收益。
+3. **已回退**到检视修复版（d7132b0d5）；`ReduceSumFP32Parallel` 不保留
+   （112 条标量发射/行 vs legacy 1 条，issue 侧反而更重，且 +1.75KB UB）。
+
+**⚠️ 待办**：回退后设备上安装的二进制仍是 R5 实验版——下次设备工作前
+必须清树重建 + 安装 + md5 自检（干净源即 d7132b0d5）。
+
+**更新后的剩余杠杆清单**（reduce 重构证伪后）：
+1. HBM 墙为当前主约束（@2048 已达峰值 85%），V 侧微优化收益有限；
+2. SINGLE_N decode 装载并行预取（-10% 级，issue/延迟瓶颈方向）；
+3. MERGE_N 折叠 / fp16-fp32 NORMAL 流水化 / SPLIT_D 现代化——休眠；
+4. 若未来 shift 到更大的 shape/更高的 HBM 利用率，考虑 x 输出的写组合
+   （y 与 x 同行连续布局等 GM 侧手段，需调用方契约配合）——未评估。
