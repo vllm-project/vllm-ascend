@@ -1,7 +1,9 @@
 # ruff: noqa: E501
 import inspect
 import unittest
+from contextlib import nullcontext
 from dataclasses import dataclass
+from itertools import permutations
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -9,17 +11,27 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
-from vllm.config import CacheConfig, CompilationMode, CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMultiTokenPredictor
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
+import vllm_ascend.ascend_forward_context as ascend_forward_context
 import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
@@ -34,6 +46,16 @@ enable_custom_op()
 _CPU_GPU_BUFFER_TARGET = "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
 
 BLOCK_SIZE = 16
+
+
+@pytest.fixture(autouse=True)
+def use_v1_forward_context(monkeypatch):
+    """Keep legacy proposer fixtures on the V1 forward-context layout."""
+    monkeypatch.setattr(
+        "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
+        False,
+    )
+    monkeypatch.setattr(ascend_forward_context, "_USE_V2_EXTRA_KWARGS", False)
 
 
 @dataclass
@@ -140,6 +162,116 @@ def assert_attr_equal(attr: str | tuple[str, Any, Any], expect: Any, actual: Any
         assert torch.equal(expect_value, actual_value), f"{attr_name} tensor mismatch"
     else:
         assert expect_value == actual_value, f"{attr_name} value mismatch"
+
+
+def test_load_model_retains_split_indexer_metadata_dependency():
+    proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+    proposer.method = "mtp"
+    proposer.vllm_config = MagicMock()
+    proposer.maybe_eager_context = nullcontext()
+    proposer._get_model = MagicMock(return_value=MagicMock())
+    proposer.supports_mm_inputs = False
+    proposer.parallel_drafting = False
+    proposer.draft_window_size = None
+    proposer.sliding_window = None
+    proposer._maybe_share_embeddings = MagicMock()
+    proposer._maybe_share_topk_indices = MagicMock()
+    proposer._maybe_share_lm_head = MagicMock()
+
+    target_name = "model.layers.0.self_attn.attn"
+    draft_name = "model.layers.1.self_attn.attn"
+    indexer_name = "model.layers.1.self_attn.indexer.k_cache"
+    target_layer = MagicMock()
+    draft_layer = MagicMock()
+    indexer_layer = MagicMock()
+    draft_layer.get_kv_cache_spec.return_value = MagicMock()
+    indexer_layer.get_kv_cache_spec.return_value = MagicMock()
+    draft_layer.get_attn_backend.return_value.get_supported_kernel_block_sizes.return_value = [128]
+
+    target_model = MagicMock()
+    with (
+        patch.object(llm_base_proposer, "get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+        patch.object(llm_base_proposer, "supports_multimodal", return_value=False),
+        patch.object(
+            llm_base_proposer,
+            "get_layers_from_vllm_config",
+            side_effect=[
+                {target_name: target_layer},
+                {
+                    target_name: target_layer,
+                    draft_name: draft_layer,
+                    indexer_name: indexer_layer,
+                },
+                {
+                    target_name: target_layer,
+                    draft_name: draft_layer,
+                    indexer_name: indexer_layer,
+                },
+            ],
+        ),
+        patch("vllm_ascend.ascend_config.get_ascend_config", return_value=SimpleNamespace(draft_window_size=None)),
+    ):
+        proposer.load_model(target_model)
+
+    assert proposer._draft_attn_layer_names == {draft_name, indexer_name}
+    assert proposer.attn_layer_names == [draft_name, indexer_name]
+
+
+@pytest.mark.parametrize("method", ["mtp", "eagle3"])
+@pytest.mark.parametrize("group_order", list(permutations(("main", "indexer", "tail"))))
+def test_cache_only_groups_use_main_backend_and_metadata(group_order, method):
+    proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+    proposer.method = method
+    proposer.use_compress = False
+    proposer.dcp_size = 1
+    proposer.runner = MagicMock()
+    proposer.vllm_config = MagicMock()
+    proposer.update_stream = MagicMock()
+
+    main_name = "model.layers.1.self_attn.attn"
+    indexer_name = "model.layers.1.self_attn.indexer.k_cache"
+    tail_name = "model.layers.1.self_attn.indexer.tail_cache"
+    main_metadata = object()
+    indexer_metadata = object()
+    tail_metadata = object()
+
+    def get_main_impl():
+        assert get_current_vllm_config() is proposer.vllm_config
+        return object
+
+    main_group = MagicMock()
+    main_group.layer_names = [main_name]
+    main_group.kv_cache_spec = MagicMock()
+    main_group.backend.get_impl_cls.side_effect = get_main_impl
+    main_group.get_metadata_builder.return_value.build.return_value = main_metadata
+    indexer_group = MagicMock()
+    indexer_group.layer_names = [indexer_name]
+    indexer_group.kv_cache_spec = MagicMock(spec=AscendSFAIndexerCacheSpec)
+    indexer_group.backend.get_impl_cls.return_value = None
+    indexer_group.get_metadata_builder.return_value.build.return_value = indexer_metadata
+    tail_group = MagicMock()
+    tail_group.layer_names = [tail_name]
+    # KpoolTailSpec derives from SlidingWindowSpec, not the SFA indexer spec.
+    tail_group.kv_cache_spec = MagicMock(spec=SlidingWindowSpec)
+    tail_group.backend.get_impl_cls.return_value = None
+    tail_group.get_metadata_builder.return_value.build.return_value = tail_metadata
+    groups = {"main": main_group, "indexer": indexer_group, "tail": tail_group}
+    proposer.draft_attn_groups = [groups[name] for name in group_order]
+
+    assert proposer._is_cache_only_draft_attn_group(indexer_group)
+    assert proposer._is_cache_only_draft_attn_group(tail_group)
+
+    with patch.object(llm_base_proposer, "update_full_graph_params") as mock_update_graph:
+        proposer._update_full_graph_params(None, 1)
+    assert mock_update_graph.call_args.args[0] is main_group.backend
+
+    metadata_steps, primary_metadata = proposer.build_draft_attn_metadata(MagicMock(), 1, 1)
+    assert metadata_steps == [{indexer_name: indexer_metadata, tail_name: tail_metadata, main_name: main_metadata}]
+    assert primary_metadata is main_metadata
+
+    proposer.draft_attn_groups = [indexer_group, tail_group]
+    with pytest.raises(ValueError, match="no executable attention backend"):
+        proposer._get_primary_draft_attn_group()
 
 
 def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
@@ -293,10 +425,11 @@ class TestEagleProposerInitialization(TestBase):
             self.assertTrue(proposer.use_cuda_graph)
 
             expected_max_num_tokens = proposer.max_num_tokens
+            expected_arange_size = max(proposer.max_batch_size, expected_max_num_tokens) + 1
             self.assertEqual(proposer.input_ids.shape, (expected_max_num_tokens,))
             self.assertEqual(proposer.positions.shape, (expected_max_num_tokens,))
             self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 4096))
-            self.assertEqual(proposer.arange.shape, (expected_max_num_tokens,))
+            self.assertEqual(proposer.arange.shape, (expected_arange_size,))
 
     def test_initialization_eagle3_enforce_eager(self):
         self.vllm_config.speculative_config.method = "eagle3"
@@ -966,14 +1099,33 @@ class TestEagleProposerPropose:
             self.proposer.hidden_states = torch.zeros(8192, 7168, device=self.device, dtype=torch.bfloat16)
         else:
             self.proposer.hidden_states = torch.zeros(8192, 4096, device=self.device, dtype=torch.bfloat16)
+        main_layer_name = 'model.layers.36.self_attn.attn'
+        indexer_layer_name = 'model.layers.36.self_attn.indexer.k_cache'
         mock_attn_group = MagicMock()
         mock_builder = MagicMock()
         mock_attn_metadata = MagicMock()
         mock_builder.build.return_value = mock_attn_metadata
         mock_attn_group.get_metadata_builder.return_value = mock_builder
-        mock_attn_group.layer_names = ['model.layers.36.self_attn.attn']
+        mock_attn_group.layer_names = [main_layer_name]
         self.proposer.draft_attn_groups = [mock_attn_group]
-        self.proposer.attn_layer_names = ['model.layers.36.self_attn.attn']
+        self.proposer.attn_layer_names = [main_layer_name]
+        mock_indexer_builder = None
+        mock_indexer_metadata = None
+        mock_indexer_draft_metadata = None
+        if model_type == 'deepseek':
+            mock_indexer_group = MagicMock()
+            mock_indexer_builder = MagicMock()
+            mock_indexer_metadata = object()
+            mock_indexer_draft_metadata = object()
+            mock_indexer_builder.build.return_value = mock_indexer_metadata
+            mock_indexer_builder.build_for_drafting.return_value = mock_indexer_draft_metadata
+            mock_indexer_group.get_metadata_builder.return_value = mock_indexer_builder
+            mock_indexer_group.layer_names = [indexer_layer_name]
+            mock_indexer_group.kv_cache_spec = MagicMock(spec=AscendSFAIndexerCacheSpec)
+            mock_indexer_group.backend.get_impl_cls.return_value = None
+            mock_indexer_group.kv_cache_spec.block_size = 128
+            self.proposer.draft_attn_groups.append(mock_indexer_group)
+            self.proposer.attn_layer_names.append(indexer_layer_name)
         self.proposer.kernel_block_size = 128
         self.proposer.block_size = 128
         self.proposer._runnable = MagicMock()
@@ -1122,7 +1274,11 @@ class TestEagleProposerPropose:
 
         #run
         with (
-            patch.object(self.proposer, 'attn_update_stack_num_spec_norm', side_effect=side_effect),
+            patch.object(
+                self.proposer,
+                'attn_update_stack_num_spec_norm',
+                side_effect=side_effect,
+            ) as mock_update_metadata,
             set_current_vllm_config(self.vllm_config),
         ):
             self.proposer._propose(self.proposer.num_speculative_tokens,
@@ -1132,6 +1288,23 @@ class TestEagleProposerPropose:
                                 scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
                                 )
             self.assert_value_common_attn_metadata(captured_common_attn_metadata, flag_prefill_decode, model_type, graphmode)
+            if model_type == 'deepseek':
+                expected_followup_steps = self.proposer.num_speculative_tokens - 1
+                assert mock_update_metadata.call_count == expected_followup_steps
+                assert all(call.kwargs['attn_group'] is mock_attn_group for call in mock_update_metadata.call_args_list)
+                assert mock_indexer_builder is not None
+                assert mock_indexer_builder.build_for_drafting.call_count == expected_followup_steps
+
+                multi_steps_attn_metadata = self.proposer._runnable.call_args.kwargs['multi_steps_attn_metadata']
+                assert len(multi_steps_attn_metadata) == self.proposer.num_speculative_tokens
+                assert multi_steps_attn_metadata[0] == {
+                    main_layer_name: mock_attn_metadata,
+                    indexer_layer_name: mock_indexer_metadata,
+                }
+                for per_layer_metadata in multi_steps_attn_metadata[1:]:
+                    assert set(per_layer_metadata) == {main_layer_name, indexer_layer_name}
+                    assert per_layer_metadata[indexer_layer_name] is mock_indexer_draft_metadata
+                    assert per_layer_metadata[main_layer_name] is not mock_indexer_draft_metadata
 
     # give common_attn_metadata value
     def value_mock_common_attn_metadata(self, mock_common_attn_metadata, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
@@ -1241,29 +1414,32 @@ class TestEagleProposerPropose:
             assert captured_common_attn_metadata.max_query_len == 1
             assert captured_common_attn_metadata.max_seq_len == 0
             assert captured_common_attn_metadata._seq_lens_cpu is None
+            # Later draft steps consume the exact NPU seq_lens with rejected
+            # tokens removed. The CPU mirror intentionally remains an
+            # optimistic upper bound to avoid an NPU-to-CPU synchronization.
             if model_type == 'qwen_dense':
                 if graphmode == 'full':
-                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([23, 19, 19] + [0]*13))
+                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([21, 19, 19] + [0]*13))
                     assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([23, 19, 19] + [0]*13))
                     assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([19, 15, 15] + [0]*13))
                     assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([20, 18, 18, 20, 13, 14, 15, 16, 13, 14, 15, 16, 0, 0, 0, 0, 12, 0, 1,
                                                                                             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
                 else:
-                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([23, 19, 19]))
+                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([21, 19, 19]))
                     assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([23, 19, 19]))
                     assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([19, 15, 15]))
                     assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([20, 18, 18, 20, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1,
                                                                                             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
                 assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([148, 274, 402]), torch.full((8701,), -1)]))
             if model_type == 'qwen_moe':
-                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([21, 19, 19]))
+                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([18, 17, 17]))
                 assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([145, 272, 400]), torch.full((8701,), -1)]))
                 assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([21, 19, 19]))
                 assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([17, 15, 15]))
                 assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([17, 16, 16, 18, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1,
                                                                                           2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
             if model_type == 'deepseek':
-                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([16, 15, 16]))
+                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([15, 13, 13]))
                 assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([142, 268, 396]), torch.full((8701,), -1)]))
                 assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([16, 15, 16]))
                 assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([12, 11, 12]))
@@ -1363,7 +1539,10 @@ class TestEagleProposerPropose:
             property
         )
         assert isinstance(
-            inspect.getattr_static(vllm.config.ModelConfig, "uses_xdrope_dim"),
+            inspect.getattr_static(
+                vllm.config.ModelConfig,
+                "mrope_num_dims",
+            ),
             property
         )
         assert isinstance(
@@ -1403,7 +1582,7 @@ class TestEagleProposerPropose:
         assert hasattr(RunnerCls, "_sync_metadata_across_dp")
         sig = inspect.signature(RunnerCls._sync_metadata_across_dp)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'num_tokens', 'is_draft_model', 'cudagraph_mode', 'allow_dp_padding']
+        assert sig_name == ['self', 'num_tokens', 'is_draft_model', 'cudagraph_mode']
 
         assert hasattr(RunnerCls, "_pad_query_start_loc_for_fia")
         sig = inspect.signature(RunnerCls._pad_query_start_loc_for_fia)
@@ -1479,7 +1658,6 @@ class TestEagleProposerPropose:
             'num_actual_tokens', 'max_query_len', 'max_seq_len', 'block_table_tensor', \
             'slot_mapping', 'causal', 'logits_indices_padded', 'num_logits_indices', \
             'encoder_seq_lens', 'encoder_seq_lens_cpu', 'dcp_local_seq_lens', \
-            'dcp_local_seq_lens_cpu', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
             '_num_computed_tokens_cache'
         }
 
@@ -1495,7 +1673,8 @@ class TestEagleProposerPropose:
             'positions', 'seq_lens_cpu', 'decode_token_per_req', \
             'context_parallel_metadata', 'actual_seq_lengths_q', \
             'attn_state', 'num_computed_tokens_cpu', 'num_input_tokens', \
-            'graph_pad_size'
+            'graph_pad_size', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
+            'dcp_local_seq_lens_cpu'
         }
 
         actual = set(vllm_ascend.attention.utils.AscendCommonAttentionMetadata.__dataclass_fields__)
@@ -2173,7 +2352,8 @@ class TestRunMergedDraft(TestBase):
         actual = set(vllm.config.ModelConfig.__dataclass_fields__)
         missing = fields - actual
         assert not missing, f"Missing dataclass fields: {missing}"
-        for field in ("uses_mrope", "uses_xdrope_dim", "use_mla", "is_multimodal_model"):
+        rope_dims_field = "mrope_num_dims"
+        for field in ("uses_mrope", rope_dims_field, "use_mla", "is_multimodal_model"):
             assert isinstance(inspect.getattr_static(vllm.config.ModelConfig, field), property)
         for method in ("get_hidden_size", "get_inputs_embeds_size"):
             assert hasattr(vllm.config.ModelConfig, method)
@@ -4078,13 +4258,16 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         # Construct several submodules: some have topk_indices_buffer, some don't
         mod1 = MagicMock()
         mod1.topk_indices_buffer = MagicMock()  # This should be replaced
+        mod1.uses_lim_topk_metadata = False
         mod2 = MagicMock()
         del mod2.topk_indices_buffer  # This doesn't have the attribute, shouldn't throw an error
+        mod2.uses_lim_topk_metadata = False
         mod3 = MagicMock()
         mod3.topk_indices_buffer = MagicMock()  # This should also be replaced
+        mod3.uses_lim_topk_metadata = True
 
-        # Mock the return value of named_modules
-        draft_model_mock.model.named_modules.return_value = [("layer.0", mod1), ("layer.1", mod2), ("layer.2", mod3)]
+        # Mock the module traversal used for buffer sharing and fused_copy_sfa discovery.
+        draft_model_mock.model.modules.return_value = [mod1, mod2, mod3]
         proposer.model = draft_model_mock
 
         # Execute the target method
@@ -4097,6 +4280,19 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         self.assertEqual(mod1.topk_indices_buffer, target_buffer_mock, "Module 1 buffer should be updated.")
         self.assertEqual(mod3.topk_indices_buffer, target_buffer_mock, "Module 3 buffer should be updated.")
         self.assertFalse(hasattr(mod2, "topk_indices_buffer"), "Module 2 should not have a buffer added.")
+        self.assertEqual(proposer._lim_topk_compactors, [mod3])
+
+    def test_maybe_collects_lim_compactor_without_target_buffer(self):
+        proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+        copy_sfa_attention = SimpleNamespace(uses_lim_topk_metadata=True)
+        draft_model = MagicMock()
+        draft_model.modules.return_value = [copy_sfa_attention]
+        proposer.model = SimpleNamespace(model=draft_model)
+        target_model = SimpleNamespace(model=SimpleNamespace())
+
+        proposer._maybe_share_topk_indices(target_model)
+
+        self.assertEqual(proposer._lim_topk_compactors, [copy_sfa_attention])
 
     def _run_index_sharing_draft(self, share=True, supports_compact=True, dsa_cp=False):
         """Run the real proposer and MLA hooks with known rows in place of model compute."""
@@ -4125,6 +4321,8 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
 
         buffer = torch.full((8, 4), -1, dtype=torch.int32)
         impl = SimpleNamespace(skip_topk=False, topk_indices_buffer=buffer)
+        impl.use_fused_copy_sfa = True
+        impl.compact_lim_topk_metadata = MagicMock()
         attention = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
         torch.nn.Module.__init__(attention)
         attention.mla_attn = SimpleNamespace(impl=impl)
@@ -4136,6 +4334,7 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         layer.mtp_block.self_attn = torch.nn.Module()
         layer.mtp_block.self_attn.mla_attn = attention
         predictor.layers = torch.nn.ModuleDict({"80": layer})
+        proposer._lim_topk_compactors = [attention]
         if not supports_compact:
             predictor = SimpleNamespace(set_skip_topk=predictor.set_skip_topk)
 
@@ -4184,24 +4383,27 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         self.assertEqual(len(observed), 2)
         if dsa_cp:
             group.all_reduce.assert_called_once()
-        return observed, step0_rows, indices
+        return observed, step0_rows, indices, impl
 
     def test_run_merge_draft_mtp_skip_topk(self):
-        observed, original, indices = self._run_index_sharing_draft()
+        observed, original, indices, impl = self._run_index_sharing_draft()
         self.assertEqual([skip for skip, _ in observed], [False, True])
         torch.testing.assert_close(observed[1][1][:2], original[indices])
+        impl.compact_lim_topk_metadata.assert_called_once_with(indices)
 
     def test_run_merge_draft_mtp_skip_topk_without_compact(self):
-        observed, original, _ = self._run_index_sharing_draft(supports_compact=False)
+        observed, original, _, _ = self._run_index_sharing_draft(supports_compact=False)
         self.assertEqual([skip for skip, _ in observed], [False, True])
         torch.testing.assert_close(observed[1][1], original)
 
     def test_run_merge_draft_mtp_dsa_cp_compacts_remote_rows(self):
-        observed, original, indices = self._run_index_sharing_draft(dsa_cp=True)
+        observed, original, indices, impl = self._run_index_sharing_draft(dsa_cp=True)
         self.assertEqual([skip for skip, _ in observed], [False, True])
         torch.testing.assert_close(observed[1][1][:2], original[indices])
+        impl.compact_lim_topk_metadata.assert_not_called()
 
     def test_run_merge_draft_mtp_sharing_disabled(self):
-        observed, original, _ = self._run_index_sharing_draft(share=False)
+        observed, original, _, impl = self._run_index_sharing_draft(share=False)
         self.assertEqual([skip for skip, _ in observed], [False, False])
         torch.testing.assert_close(observed[1][1], original)
+        impl.compact_lim_topk_metadata.assert_not_called()

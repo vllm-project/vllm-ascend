@@ -38,7 +38,7 @@ class _FakeStore:
 class TestKVTransferMissingKeyPut(unittest.TestCase):
     def test_sending_thread_only_puts_missing_keys(self):
         store = _FakeStore(exists_result=[1, 0, 1, 0])
-        token_db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0, 0)], [16], None)
+        token_db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)], [16], None)
         token_db.set_group_buffers({0: [1000]}, {0: [16]}, {0: [1]})
         thread = KVCacheStoreSendingThread(
             m_store=store,

@@ -24,11 +24,12 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.utils import is_rot_weight_used
+
 from .model import (
     Glm5NextDecoderLayer,
     Glm5NextMLAAttention,
     Glm5NextMoE,
-    _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
@@ -202,6 +203,9 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.model = Glm5NextMultiTokenPredictor(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
+        self.is_rot_weight_used = is_rot_weight_used(vllm_config)
+        if self.is_rot_weight_used:
+            self.rot = nn.Linear(self.config.hidden_size, self.config.hidden_size, bias=False)
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
@@ -230,6 +234,10 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        # Apply the checkpoint-exported correction before MTP's hnorm,
+        # matching the quantized AscendDeepSeekMTP input path.
+        if self.is_rot_weight_used:
+            hidden_states = self.rot(hidden_states)
         return self.model(input_ids, positions, hidden_states, inputs_embeds, spec_step_idx)
 
     def compute_logits(
@@ -303,13 +311,15 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         _pending_wk_fp8: dict = {}
-        # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
-        # ``kv_a_proj_with_mqa``; the FP8-to-BF16 path pads them for the model.
-        kv_a_pad_size = 0
-        if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
-            kv_a_pad_size = self.config.qk_rope_head_dim
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+            # This is an MTP input transform, not a decoder-layer weight.
+            # Handle it before filtering out weights outside the MTP layers.
+            if name == "rot.weight":
+                if self.is_rot_weight_used:
+                    default_weight_loader(self.rot.weight, loaded_weight)
+                    loaded_params.add(name)
                 continue
             # Multimodal (Glm5NextForConditionalGeneration) checkpoints prefix
             # the text-tower weights with "model.language_model."; the MTP head
@@ -328,21 +338,6 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                 _pending_wk_fp8,
                 params_dict,
                 loaded_params,
-            ):
-                continue
-
-            # FP8 checkpoint: dequantize the BF16-kept MLA projections
-            # (q_a_proj / kv_a_proj_with_mqa / o_proj) to BF16, mirroring the
-            # target model. The model holds fused_qkv_a_proj / o_proj in BF16,
-            # so the checkpoint's block-FP8 weight + weight_scale_inv for these
-            # has no param home and would KeyError without this dequant.
-            if _try_load_fp8_attn_proj(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                kv_a_pad_size,
             ):
                 continue
 
@@ -409,5 +404,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         ):
             if layer_idx not in loaded_layers:
                 raise ValueError(f"MTP speculative decoding layer {layer_idx} weights missing from checkpoint.")
+        if self.is_rot_weight_used and "rot.weight" not in loaded_params:
+            raise ValueError("GLM5-Next MTP requires rot.weight when the quantization config sets is_rot_used.")
         self._maybe_set_own_lm_head(loaded_params)
         return loaded_params

@@ -41,6 +41,8 @@ def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
             OffloadingGroupConfig(
                 tokens_per_block=16,
                 layer_names=("model.layers.0.self_attn",),
+                # vLLM main added the originating KV cache group index.
+                group_id=0,
             ),
         ),
         worker_kv_bytes_per_block=64,
@@ -78,7 +80,7 @@ def test_npu_offloading_spec_uses_upstream_cpu_manager() -> None:
     )
     spec = NPUOffloadingSpec(_make_config({"cpu_bytes_to_use": 10 * aligned_bytes_per_chunk}))
 
-    assert spec.num_blocks == 10
+    assert spec.num_chunks == 10
     assert isinstance(spec.get_manager(), CPUOffloadingManager)
 
 

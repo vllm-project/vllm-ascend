@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
     MooncakeTransferMetadata,
@@ -97,7 +98,6 @@ class MooncakeBaseConnectorWorker:
         pcp_group = get_pcp_group()
         self.pcp_rank = pcp_group.rank_in_group
         self.pcp_size = pcp_group.world_size
-        assert self.pcp_size == 1, f"Mooncake temporarily requires prefill context parallel size 1, got {self.pcp_size}"
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
 
@@ -211,6 +211,12 @@ class MooncakeBaseConnectorWorker:
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
         self._build_kv_cache_spec_mappings()
+        owners = (
+            map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
+            if self.ascend_config.kvpp_config.size > 1
+            else {}
+        )
+        kvpp_rank = self.pcp_rank * self.tp_size + self.tp_rank
         layer_names: list[str] = []
         layer_block_sizes: list[int] = []
         group_indices: list[int] = []
@@ -231,6 +237,13 @@ class MooncakeBaseConnectorWorker:
                 cache_or_caches = kv_caches.get(layer_name)
                 if cache_or_caches is None:
                     raise ValueError(f"No KV cache was registered for configured layer {layer_name!r}.")
+
+                configured_layer_names.add(layer_name)
+                # Foreign target layers alias scratch. Publish persistent owners
+                # only; MTP caches are absent from owners and remain replicated.
+                owner = owners.get(layer_name)
+                if owner is not None and owner != kvpp_rank:
+                    continue
 
                 base_addrs: list[int] = []
                 block_strides: list[int] = []
@@ -264,15 +277,13 @@ class MooncakeBaseConnectorWorker:
                         block_shapes.append(block_shape)
                         block_size_scales.append(tensor_num_blocks // self.num_blocks)
 
-                configured_layer_names.add(layer_name)
                 layer_names.append(layer_name)
                 layer_block_size = spec.block_size
                 if isinstance(spec, AscendSFAIndexerCacheSpec):
-                    # The cache manager treats one SFA indexer block as a DCP
-                    # virtual block, while every worker physically stores all
-                    # replicated indexer blocks. Publish the virtual token span
-                    # so dividing it by the tensor block scale recovers the
-                    # physical kernel block size.
+                    # A replicated SFA indexer stores one physical kernel block
+                    # per DCP rank behind each scheduler block. Publish their
+                    # aggregate token span; replication size 1 deliberately
+                    # remains an ordinary DCP-sharded FA block.
                     layer_block_size *= spec.sfa_dcp_replicated_indexer_size
                 layer_block_sizes.append(layer_block_size)
                 group_indices.append(self.layer_name_to_group_index[layer_name])

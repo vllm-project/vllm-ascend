@@ -214,7 +214,7 @@ public:
 
     __aicore__ inline void InitGlobalBuffers(GM_ADDR x, GM_ADDR hcScale,
         GM_ADDR hcBase, GM_ADDR y, GM_ADDR post, GM_ADDR combFrag,
-        GM_ADDR workspace)
+        GM_ADDR preMix, GM_ADDR pre, GM_ADDR workspace)
     {
         xGm.SetGlobalBuffer((__gm__ T *)x);
         hcScaleGm.SetGlobalBuffer((__gm__ float *)hcScale);
@@ -222,6 +222,8 @@ public:
         yGm.SetGlobalBuffer((__gm__ T *)y);
         postGm.SetGlobalBuffer((__gm__ float *)post);
         combFragGm.SetGlobalBuffer((__gm__ float *)combFrag);
+        preMixGm.SetGlobalBuffer((__gm__ float *)preMix);
+        preGm.SetGlobalBuffer((__gm__ float *)pre);
         workspaceGm.SetGlobalBuffer((__gm__ float *)workspace);
     }
 
@@ -275,6 +277,8 @@ public:
         pipe->InitBuffer(maskPatternBuf,
             RoundUp<uint32_t>(MASK_PATTERN_BASE_SIZE * MASK_PATTERN_REPEAT_SIZE) *
             sizeof(uint32_t));
+        pipe->InitBuffer(preMixBuf,
+            tilingData->stage2RowFactor * tilingData->hcMultAlign * sizeof(float));
     }
 
     __aicore__ inline void GetLocalTensors()
@@ -292,16 +296,17 @@ public:
         yCastLocal = yCastBuf.Get<float>();
         rsqrtLocal = rsqrtBuf.Get<float>();
         maskPatternLocal = maskPatternBuf.Get<uint32_t>();
+        preMixLocal = preMixBuf.Get<float>();
         SetGatherMaskPattern(maskPatternLocal);
     }
 
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR hcScale, GM_ADDR hcBase,
-        GM_ADDR y, GM_ADDR post, GM_ADDR combFrag, GM_ADDR workspace,
-        const HcPreTilingData *tilingDataPtr, TPipe *pipePtr)
+        GM_ADDR y, GM_ADDR post, GM_ADDR combFrag, GM_ADDR preMix, GM_ADDR pre,
+        GM_ADDR workspace, const HcPreTilingData *tilingDataPtr, TPipe *pipePtr)
     {
         pipe = pipePtr;
         tilingData = tilingDataPtr;
-        InitGlobalBuffers(x, hcScale, hcBase, y, post, combFrag, workspace);
+        InitGlobalBuffers(x, hcScale, hcBase, y, post, combFrag, preMix, pre, workspace);
         int64_t stage1UsedCoreNum = tilingData->cubeBlockDimK;
         int64_t xQueNum2 = tilingData->stage2RowFactor * tilingData->hcMult *
         RoundUp<T>(tilingData->dFactor);
@@ -393,6 +398,23 @@ int64_t curBsIdxForAll = (stage2BlockIdx * tilingData->rowLoopOfFormerBlock +
                 ProcessPre(mixes01ReduceLocal, mixes01ReduceLocal, hcBase0Local, rsqrtLocal,
                 rowBrcbLocal0, hcBrcbLocal1, hcScaleGm.GetValue(0), tilingData->hcEps,
                 curRowFactor, tilingData->hcMult);
+                if (tilingData->hasPreOut != 0) {
+                    event_t eventIdPreOut = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+                    SetFlag<HardEvent::V_MTE3>(eventIdPreOut);
+                    WaitFlag<HardEvent::V_MTE3>(eventIdPreOut);
+                    CopyOut(mixes01ReduceLocal,
+                        preGm[stage2BlockIdx * tilingData->rowOfFormerBlock * tilingData->hcMult +
+                        rowOuterIdx * tilingData->stage2RowFactor * tilingData->hcMult],
+                        1, curRowFactor * tilingData->hcMult);
+                }
+                if (tilingData->hasPreMix != 0) {
+                    CopyIn(preMixGm[stage2BlockIdx * tilingData->rowOfFormerBlock * tilingData->hcMult +
+                        rowOuterIdx * tilingData->stage2RowFactor * tilingData->hcMult],
+                        preMixLocal, 1, curRowFactor * tilingData->hcMult);
+                    event_t eventIdPreMix = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+                    SetFlag<HardEvent::MTE2_V>(eventIdPreMix);
+                    WaitFlag<HardEvent::MTE2_V>(eventIdPreMix);
+                }
                 for (int64_t dLoopIdx = 0; dLoopIdx < tilingData->dLoop; dLoopIdx++) {
                     int64_t curDFactor =
                         (dLoopIdx == tilingData->dLoop - 1) ? tilingData->tailDFactor : tilingData->dFactor;
@@ -404,7 +426,8 @@ int64_t curBsIdxForAll = (stage2BlockIdx * tilingData->rowLoopOfFormerBlock +
                     xQue.template EnQue(xLocal);
                     xLocal = xQue.template DeQue<T>();
                     yLocal = yQue.template AllocTensor<T>();
-                    ProcessY(yLocal, xLocal, mixes01ReduceLocal, hcBrcbLocal1, xCastLocal, yCastLocal, curRowFactor,
+                    ProcessY(yLocal, xLocal, tilingData->hasPreMix != 0 ? preMixLocal : mixes01ReduceLocal,
+                                hcBrcbLocal1, xCastLocal, yCastLocal, curRowFactor,
                                 tilingData->hcMult, curDFactor);
                     xQue.template FreeTensor(xLocal);
                     yQue.template EnQue(yLocal);
@@ -510,6 +533,8 @@ private:
     GlobalTensor<T> yGm;
     GlobalTensor<float> postGm;
     GlobalTensor<float> combFragGm;
+    GlobalTensor<float> preMixGm;
+    GlobalTensor<float> preGm;
 
     TQue<QuePosition::VECIN, 1> mixesQue01;
     TQue<QuePosition::VECIN, 1> mixesQue2;
@@ -536,6 +561,7 @@ private:
     TBuf<QuePosition::VECCALC> xCastBuf;
     TBuf<QuePosition::VECCALC> yCastBuf;
     TBuf<QuePosition::VECCALC> maskPatternBuf;
+    TBuf<QuePosition::VECCALC> preMixBuf;
 
     LocalTensor<float> mixes01Local;
     LocalTensor<float> mixes2Local;
@@ -557,6 +583,7 @@ private:
     LocalTensor<float> yCastLocal;
     LocalTensor<float> squareSumOutLocal;
     LocalTensor<uint32_t> maskPatternLocal;
+    LocalTensor<float> preMixLocal;
 };
 
 } // namespace HcPreSinkhorn

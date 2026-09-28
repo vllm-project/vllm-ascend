@@ -21,11 +21,12 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
+    get_layerwise_data_plane,
     get_layerwise_protocol,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import base as backend_base
@@ -37,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
+    MmcDirect,
     _inject_device_ub_qos,
     _validate_device_ub_qos,
     extract_layout_config,
@@ -150,20 +152,22 @@ class TestLayerwiseProtocolRegistry(unittest.TestCase):
     protocol functions (registered under the normalized backend name), or
     None when the entry carries no protocol marker."""
 
-    def test_get_layerwise_protocol_resolves_module(self):
-        protocol = get_layerwise_protocol("memcache")
-        self.assertIsNotNone(protocol)
-        for func_name in ("make_full_key", "make_partial_key", "make_hit_check_keys", "extract_layout_config"):
-            with self.subTest(func=func_name):
-                self.assertTrue(callable(getattr(protocol, func_name, None)))
+    def test_get_layerwise_protocol_resolves_modules(self):
+        expected = {"memcache": "gva", "mooncake": "block_key"}
+        for backend_name, data_plane in expected.items():
+            with self.subTest(backend=backend_name):
+                protocol = get_layerwise_protocol(backend_name)
+                self.assertIsNotNone(protocol)
+                self.assertEqual(get_layerwise_data_plane(protocol), data_plane)
+                self.assertTrue(callable(getattr(protocol, "extract_layout_config", None)))
 
     def test_get_layerwise_protocol_normalizes_name(self):
-        for backend_name in ("MEMCACHE", " Memcache "):
+        for backend_name in ("MEMCACHE", " Memcache ", "MOONCAKE", " Mooncake "):
             with self.subTest(backend=backend_name):
                 self.assertIsNotNone(get_layerwise_protocol(backend_name))
 
     def test_get_layerwise_protocol_returns_none_without_protocol(self):
-        for backend_name in ("mooncake", "yuanrong", "nonexistent"):
+        for backend_name in ("yuanrong", "nonexistent"):
             with self.subTest(backend=backend_name):
                 self.assertIsNone(get_layerwise_protocol(backend_name))
 
@@ -513,6 +517,19 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         b.store.batch_is_exist.return_value = [1, 0]
         result = b.exists(["k1", "k2"])
         self.assertEqual(result, [1, 0])
+
+    def test_batch_is_readable_uses_committed_object_state(self):
+        b = self._make_backend()
+        b.store.batch_is_exist.return_value = [1, 0]
+
+        self.assertEqual(b.batch_is_readable(["k1", "k2"]), [True, False])
+
+    def test_batch_is_readable_rejects_invalid_object_state(self):
+        b = self._make_backend()
+        b.store.batch_is_exist.return_value = [1, -1]
+
+        with self.assertRaises(backend_base.BatchResultShapeError):
+            b.batch_is_readable(["k1", "k2"])
 
     def test_transfers(self):
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.logger"
@@ -1074,15 +1091,8 @@ _LAYERWISE_STORE_METHODS = (
 )
 
 
-class TestLayerwiseProtocolMemcacheExclusivity(unittest.TestCase):
-    """The memcache backend is the only layerwise protocol carrier.
-
-    Three views of the same fact must agree for every registered backend:
-    the module exposes the protocol functions, the class overrides the
-    five layerwise store calls (python's MRO: an override wins over the
-    inherited NotImplementedError stub), and the registry entry carries
-    the ``layerwise_protocol`` marker.
-    """
+class TestLayerwiseProtocolRegistration(unittest.TestCase):
+    """Protocol adapters and backend store implementations stay aligned."""
 
     def _backend_entries(self):
         import importlib
@@ -1091,7 +1101,7 @@ class TestLayerwiseProtocolMemcacheExclusivity(unittest.TestCase):
             module = importlib.import_module(entry["path"])
             yield name, entry, module, getattr(module, entry["name"])
 
-    def test_protocol_functions_store_overrides_and_registry_marker_agree(self):
+    def test_protocol_registration_and_store_overrides(self):
         for name, entry, module, backend_class in self._backend_entries():
             with self.subTest(backend=name):
                 exposes_protocol = all(callable(getattr(module, func, None)) for func in _PROTOCOL_FUNCTIONS)
@@ -1101,7 +1111,9 @@ class TestLayerwiseProtocolMemcacheExclusivity(unittest.TestCase):
                 )
                 self.assertEqual(exposes_protocol, name == "memcache")
                 self.assertEqual(owns_overrides, name == "memcache")
-                self.assertEqual(exposes_protocol, bool(entry.get("layerwise_protocol")))
+                self.assertEqual(bool(entry.get("layerwise_protocol")), name in ("memcache", "mooncake"))
+                protocol = get_layerwise_protocol(name)
+                self.assertEqual(protocol is not None, name in ("memcache", "mooncake"))
                 self.assertEqual(owns_overrides, exposes_protocol)
 
 
@@ -1142,6 +1154,25 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
         self.assertEqual(
             make_partial_key("model", "r1", 0, 1, 20, 3),
             "model@partial@r1@0@1@20@3",
+        )
+
+    def test_pipeline_parallel_keys_include_stage(self):
+        self.assertEqual(
+            make_full_key("model", 2, "hash0", 3, 4, 1, 2),
+            "model@2@pp1@hash0@3",
+        )
+        self.assertEqual(
+            make_partial_key("model", "r1", 0, 1, 20, 3, 1, 2),
+            "model@partial@r1@0@1@20@pp1@3",
+        )
+        self.assertEqual(
+            make_hit_check_keys("model", 0, "hash0", 2, 1, 2),
+            [
+                "model@pp0@hash0@0",
+                "model@pp0@hash0@1",
+                "model@pp1@hash0@0",
+                "model@pp1@hash0@1",
+            ],
         )
 
     def test_hit_check_keys_single_group_one_key_per_rank(self):
@@ -1191,6 +1222,28 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b = self._make_backend()
         b.store.batch_is_exist.return_value = [1]
         self.assertEqual(b.exists(["k1"]), [1])
+
+    def test_batch_is_readable_uses_valid_gva_metadata(self):
+        b = self._make_backend()
+        readable = MagicMock()
+        readable.size.return_value = 64
+        readable.gva_list.return_value = [0x1000]
+        missing = MagicMock()
+        missing.size.return_value = 0
+        missing.gva_list.return_value = []
+        no_gva = MagicMock()
+        no_gva.size.return_value = 64
+        no_gva.gva_list.return_value = []
+        b.store.batch_get_key_info.return_value = [readable, missing, no_gva]
+
+        self.assertEqual(b.batch_is_readable(["k1", "k2", "k3"]), [True, False, False])
+
+    def test_batch_is_readable_rejects_misaligned_metadata(self):
+        b = self._make_backend()
+        b.store.batch_get_key_info.return_value = []
+
+        with self.assertRaises(backend_base.BatchResultShapeError):
+            b.batch_is_readable(["k1"])
 
     def test_setup_uses_captured_device(self):
         b = self._make_backend()
@@ -1243,6 +1296,32 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.register_buffer([100], [200])
         b.store.register_buffer.assert_called_once()
 
+    def test_unregister_buffer(self):
+        b = self._make_backend()
+
+        b.unregister_buffer([100, 200], [300, 400])
+
+        self.assertEqual(
+            b.store.unregister_buffer.call_args_list,
+            [call(100, 300), call(200, 400)],
+        )
+
+    def test_unregister_buffer_rejects_mismatched_ptrs_and_sizes(self):
+        b = self._make_backend()
+
+        with self.assertRaisesRegex(ValueError, "same length"):
+            b.unregister_buffer([100, 200], [300])
+
+        b.store.unregister_buffer.assert_not_called()
+
+    def test_unregister_buffer_before_store_initialization_is_noop(self):
+        b = self._make_backend()
+        b._store_initialized = False
+
+        b.unregister_buffer([100], [200])
+
+        b.store.unregister_buffer.assert_not_called()
+
     def test_batch_write_finish(self):
         b = self._make_backend()
         b.store.batch_write_finish.return_value = [0]
@@ -1261,6 +1340,32 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.store.batch_get_into_layers.return_value = [0]
         b.get(["k1"], [[100]], [[10]])
         b.store.batch_get_into_layers.assert_called_once()
+
+    def test_batch_get_into_buffers(self):
+        b = self._make_backend()
+        b.store.batch_get_into.return_value = [0]
+
+        result = b.batch_get_into_buffers(["k1"], [100], [10])
+
+        self.assertEqual(result, [0])
+        b.store.batch_get_into.assert_called_once_with(["k1"], [100], [10], MmcDirect.COPY_G2L.value)
+
+    def test_batch_get_into_buffers_error(self):
+        b = self._make_backend()
+        b.store.batch_get_into.return_value = [1]
+
+        self.assertEqual(b.batch_get_into_buffers(["k1"], [100], [10]), [1])
+
+    def test_batch_get_into_buffers_exception(self):
+        b = self._make_backend()
+        b.store.batch_get_into.side_effect = RuntimeError("backend fail")
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
+        ) as mock_logger:
+            self.assertIsNone(b.batch_get_into_buffers(["k1"], [100], [10]))
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("RuntimeError", error_log)
+        self.assertIn("backend fail", error_log)
 
     def test_get_error(self):
         b = self._make_backend()
@@ -1296,6 +1401,39 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
         ) as mock_logger:
             b.put(["k1"], [[100]], [[10]])
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("RuntimeError", error_log)
+        self.assertIn("backend fail", error_log)
+
+    def test_put_from(self):
+        b = self._make_backend()
+        b.store.put_from.return_value = 0
+
+        self.assertEqual(b.put_from("k1", 100, 10), 0)
+        b.store.put_from.assert_called_once_with("k1", 100, 10, MmcDirect.COPY_L2G.value)
+
+    def test_put_from_error(self):
+        b = self._make_backend()
+        b.store.put_from.return_value = -1
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
+        ) as mock_logger:
+            self.assertEqual(b.put_from("k1", 100, 10), -1)
+
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("k1", error_log)
+        self.assertIn("-1", error_log)
+
+    def test_put_from_exception(self):
+        b = self._make_backend()
+        b.store.put_from.side_effect = RuntimeError("backend fail")
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
+        ) as mock_logger:
+            self.assertIsNone(b.put_from("k1", 100, 10))
+
         error_log = _format_log_call(mock_logger.error.call_args)
         self.assertIn("RuntimeError", error_log)
         self.assertIn("backend fail", error_log)

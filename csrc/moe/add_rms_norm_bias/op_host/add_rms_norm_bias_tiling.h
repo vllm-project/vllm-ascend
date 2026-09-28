@@ -41,13 +41,49 @@ TILING_DATA_FIELD_DEF(uint32_t, is_performance);
 TILING_DATA_FIELD_DEF(uint32_t, nullptr_beta);
 END_TILING_DATA_DEF;
 
+// A5 structures are separate: the legacy A2/A3 layout and keys stay unchanged.
+// Adapted from cann/ops-nn v9.2.0-beta.2 @ 30ef7dd563c8a4b74c3161835c8e47d1d96f87b6.
+BEGIN_TILING_DATA_DEF(AddRMSNormBiasRegbaseTilingData)
+TILING_DATA_FIELD_DEF(uint32_t, numRow);
+TILING_DATA_FIELD_DEF(uint32_t, numCol);
+TILING_DATA_FIELD_DEF(uint32_t, numColAlign);
+TILING_DATA_FIELD_DEF(uint32_t, blockFactor);
+TILING_DATA_FIELD_DEF(uint32_t, rowFactor);
+TILING_DATA_FIELD_DEF(uint32_t, ubFactor);
+TILING_DATA_FIELD_DEF(float, epsilon);
+TILING_DATA_FIELD_DEF(float, avgFactor);
+TILING_DATA_FIELD_DEF(uint32_t, ubLoop);
+TILING_DATA_FIELD_DEF(uint32_t, colBuferLength);
+TILING_DATA_FIELD_DEF(uint32_t, multiNNum);
+TILING_DATA_FIELD_DEF(uint32_t, isNddma);
+TILING_DATA_FIELD_DEF(uint32_t, nullptr_beta);
+END_TILING_DATA_DEF;
+
+BEGIN_TILING_DATA_DEF(AddRMSNormBiasRegbaseRFullLoadTilingData)
+TILING_DATA_FIELD_DEF(uint64_t, numRow);
+TILING_DATA_FIELD_DEF(uint64_t, numCol);
+TILING_DATA_FIELD_DEF(uint64_t, numColAlign);
+TILING_DATA_FIELD_DEF(uint64_t, blockFactor);
+TILING_DATA_FIELD_DEF(uint64_t, rowFactor);
+TILING_DATA_FIELD_DEF(uint64_t, binAddQuotient);
+TILING_DATA_FIELD_DEF(float, epsilon);
+TILING_DATA_FIELD_DEF(float, avgFactor);
+TILING_DATA_FIELD_DEF(uint32_t, nullptr_beta);
+END_TILING_DATA_DEF;
+
 struct AddRmsNormBiasCompileInfo {
     uint32_t totalCoreNum = 0;
     uint64_t totalUbSize = 0;
     platform_ascendc::SocVersion socVersion = platform_ascendc::SocVersion::ASCEND950;
 };
 
+namespace addRmsNormBiasRegbase {
+ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context);
+}
+
 REGISTER_TILING_DATA_CLASS(AddRmsNormBias, AddRMSNormBiasTilingData)
+REGISTER_TILING_DATA_CLASS(AddRmsNormBias_1000, AddRMSNormBiasRegbaseRFullLoadTilingData)
+REGISTER_TILING_DATA_CLASS(AddRmsNormBias_2000, AddRMSNormBiasRegbaseTilingData)
 } // namespace optiling
 
 #endif // OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_BIAS_H_

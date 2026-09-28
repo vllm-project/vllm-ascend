@@ -36,7 +36,7 @@ traffic before production deployment.
 
 !!!IMPORTANT
 
-    Ascend 950 Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16MXFP4".
+    950PR&950DT Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16MXFP4".
     A2 does not support redundant experts.
 
 ### Model Runner V2 Weight Formats
@@ -50,8 +50,8 @@ validation on the target hardware before production use.
 | BF16 / FP16 | Enabled | Uses the unquantized expert weights and biases. |
 | W8A8 / W8A8 Dynamic | Enabled | Uses persistent per-expert weight and scale tensors. |
 | W4A8 | Enabled | Uses persistent per-expert weight, scale, and scale-bias tensors. |
-| W4A4 MXFP | Enabled | Ascend 950 products; keeps native ND expert tensors. |
-| W8A8 MXFP | Enabled | Ascend 950 products; keeps native ND expert tensors. |
+| W4A4 MXFP | Enabled | 950PR&950DT Products; keeps native ND expert tensors. |
+| W8A8 MXFP | Enabled | 950PR&950DT Products; keeps native ND expert tensors. |
 | W4A16 | Rejected | The expert-weight layout has not completed independent EPLB validation. |
 | W4A16 MXFP | Rejected | The expert-weight layout has not completed independent EPLB validation. |
 | W4A8 MXFP | Rejected | The expert-weight layout has not completed independent EPLB validation. |
@@ -62,15 +62,15 @@ validation on the target hardware before production use.
 | ------------------------------- | --------------------------- |
 | W8A8 / W8A8-Dynamic             | A2, A3 |
 | W4A8 (with fused MC2 enabled)   | A2, A3 |
-| MXFP4                           | Ascend 950 Products         |
-| MXFP8                           | Ascend 950 Products         |
+| MXFP4                           | 950PR&950DT Products         |
+| MXFP8                           | 950PR&950DT Products         |
 
 ### Usage Recommendations
 
 EPLB is not recommended in the following scenarios because the load-balancing benefit may not offset its runtime overhead:
 
 - P node workloads with input sequences shorter than `1024` tokens.
-- D node workloads where the number of experts per die is `> 8` (`> 16` on 950DT), or where the per-die load is below `128` tokens.
+- D node workloads where the number of experts per die is `> 8` (`> 16` on 950DT Products), or where the per-die load is below `128` tokens.
 
 !!!WARNING
 
@@ -82,9 +82,9 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 ### Model Runner V2: Asynchronous EPLB
 
 Select MRv2 explicitly when the model or environment does not select it by
-default. Enable expert parallelism and upstream EPLB. Ascend uses the upstream
-default policy, selects the Gloo communicator automatically, and supports
-asynchronous movement only.
+default. Enable expert parallelism and upstream EPLB. Ascend selects STAIR
+as the upstream policy default and selects the Gloo communicator automatically;
+movement is asynchronous only. The STAIR defaults do not require tuning.
 
 ```bash
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -112,13 +112,17 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | `step_interval` | `3000` | Interval between expert rearrangements. |
 | `num_redundant_experts` | `0` | Number of redundant physical experts. |
 | `use_async` | `true` | Ascend MRv2 always runs asynchronously. `false` is normalized to `true` with a warning. |
-| `policy` | `default` | Upstream EPLB placement policy. |
+| `policy` | `stair` on Ascend | Select `stair` for the Ascend policy or `default` for upstream-policy comparison experiments. |
 | `log_balancedness` | `false` | Log expert balancedness metrics. |
 | `log_balancedness_interval` | `1` | Interval between balancedness log entries. |
 | `communicator` | `None` | Leave unset for automatic Gloo selection, or set `torch_gloo`. |
 
 These fields may also be passed together as JSON through `--eplb-config`.
 They must not be placed in `--additional-config` for MRv2.
+
+Ascend extends the upstream `policy` field without adding a second selector.
+For example, use `--eplb-config.policy default` to run the upstream policy;
+omit it or set it to `stair` to run STAIR.
 
 #### MRv2 Load Collection Phase
 

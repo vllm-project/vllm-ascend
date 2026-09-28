@@ -102,6 +102,12 @@ UPDATED_PACKED_MODULES_MAPPING: dict[str, dict[str, list[str]]] = {
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
         "fused_qkvbfg_a_proj": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"],
     },
+    "glm5_next_mtp": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        "fused_qkvbfg_a_proj": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"],
+    },
     "deepseek_mtp": {
         "gate_up_proj": ["gate_proj", "up_proj"],
     },
@@ -156,6 +162,21 @@ QUANT_MODEL_PREFIX_MAPPINGS = {
         "embed.": "model.embed_tokens.",
         "head.": "lm_head.",
     },
+    "deepseek_v41": {
+        # V4.1 ModelSlim descriptions keep the original checkpoint names,
+        # while the runtime uses Ascend module names. Map runtime prefixes
+        # back to the checkpoint namespace for quant-scheme lookup.
+        "language_model.model.layers.": "layers.",
+        "language_model.model.embed_tokens.": "embed.",
+        "language_model.model.embed_tokens": "embed",
+        "language_model.lm_head.": "head.",
+        "language_model.lm_head": "head",
+        "model.layers.": "layers.",
+        "model.embed_tokens.": "embed.",
+        "model.embed_tokens": "embed",
+        "lm_head.": "head.",
+        "lm_head": "head",
+    },
 }
 
 
@@ -169,11 +190,30 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
         ".ffn_norm.": ".post_attention_layernorm.",
         ".attn_norm.": ".input_layernorm.",
     },
+    "deepseek_v41": {
+        ".self_attn.": ".attn.",
+        ".gate_proj.": ".w1.",
+        ".gate_proj": ".w1",
+        ".down_proj.": ".w2.",
+        ".down_proj": ".w2",
+        ".up_proj.": ".w3.",
+        ".up_proj": ".w3",
+        ".mlp.": ".ffn.",
+        ".post_attention_layernorm.": ".ffn_norm.",
+        ".post_attention_layernorm": ".ffn_norm",
+        ".input_layernorm.": ".attn_norm.",
+        ".input_layernorm": ".attn_norm",
+    },
     # The step3.5 MTP draft nests its decoder block under ".mtp_block.", but the
     # checkpoint's quant_model_description.json keys it without that infix
     # (e.g. "model.layers.45.self_attn.q_proj.weight"). Strip it so the quant
     # lookup matches the on-disk naming.
     "step3p5_mtp": {
+        ".mtp_block.": ".",
+    },
+    # GLM-5 MTP nests the decoder under ``mtp_block`` while the ModelSlim
+    # description retains checkpoint-style names.
+    "glm5_next_mtp": {
         ".mtp_block.": ".",
     },
     # Gemma4 MoE renames ".experts." to ".moe.experts." in the vLLM module tree
@@ -206,6 +246,7 @@ def get_quant_type_for_layer(
     quant_description: dict[str, Any],
     prefix: str,
     packed_modules_mapping: dict[str, Any] | None = None,
+    prefix_mapper: Callable[[str], str] | None = None,
 ) -> str | None:
     """Determine the quantization type for a layer.
 
@@ -213,6 +254,7 @@ def get_quant_type_for_layer(
         quant_description: The quantization description dictionary.
         prefix: The layer prefix.
         packed_modules_mapping: Mapping for packed/fused modules.
+        prefix_mapper: Map expanded module names to quantization description keys.
 
     Returns:
         The quantization type string (e.g., "W8A8_DYNAMIC").
@@ -230,6 +272,8 @@ def get_quant_type_for_layer(
             prefix.removesuffix(proj_name) + shard_proj_name for shard_proj_name in packed_modules_mapping[proj_name]
         ]
         for shard_prefix in shard_prefixes:
+            if prefix_mapper is not None:
+                shard_prefix = prefix_mapper(shard_prefix)
             shard_key = shard_prefix + ".weight"
             # Only Gemma4 k_eq_v is allowed to omit v_proj; other missing
             # shards fall through to the original dictionary lookup below.
@@ -248,6 +292,8 @@ def get_quant_type_for_layer(
                 logger.error(err_msg)
                 raise ValueError(err_msg)
     else:
+        if prefix_mapper is not None:
+            prefix = prefix_mapper(prefix)
         quant_type = quant_description.get(prefix + ".weight")
     return quant_type if quant_type != "FLOAT" else None
 
@@ -301,6 +347,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         # This will be updated by upstream vLLM with model-specific mappings.
         self.packed_modules_mapping: dict[str, list[str]] = {}
         self.quant_description = quant_config if quant_config is not None else {}
+        self._format_metadata: dict[str, Any] = {}
         self._apply_extra_quant_adaptations()
         self.model_type: str | None = None
         self.hf_to_vllm_mapper: WeightsMapper | None = None
@@ -334,6 +381,12 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "AscendModelSlimConfig":
+        # Format-only HF metadata is not a per-parameter quantization description.
+        metadata_keys = {"quant_method", "model_quant_type"}
+        if config.get("quant_method") == ASCEND_QUANTIZATION_METHOD and set(config) <= metadata_keys:
+            result = cls()
+            result._format_metadata = dict(config)
+            return result
         return cls(config)
 
     @classmethod
@@ -460,6 +513,35 @@ class AscendModelSlimConfig(QuantizationConfig):
             )
             prefix = hf_to_vllm_mapper._map_name(prefix)
 
+        if model_type in ("glm5_next", "glm5_next_text"):
+            candidate = None
+            if prefix.startswith("language_model.model."):
+                candidate = prefix.replace(
+                    "language_model.model.",
+                    "model.language_model.",
+                    1,
+                )
+            elif prefix.startswith("language_model.lm_head"):
+                candidate = prefix.replace("language_model.lm_head", "lm_head", 1)
+            elif prefix.startswith("model.layers."):
+                candidate = prefix.replace(
+                    "model.layers.",
+                    "language_model.model.layers.",
+                    1,
+                )
+            if candidate and not self._has_quant_weight(prefix):
+                if self._has_quant_weight(candidate):
+                    return candidate
+
+        if model_type == "glm5_next_mtp" and prefix.startswith("model.layers."):
+            candidate = prefix.replace(
+                "model.layers.",
+                "model.language_model.layers.",
+                1,
+            )
+            if not self._has_quant_weight(prefix) and self._has_quant_weight(candidate):
+                return candidate
+
         if model_type == "step3p5_mtp" and prefix.startswith("model.layers."):
             # Step3P5 MTP and newly generated Step3P7 W8A8 MTP checkpoints use
             # ``model.layers.*``.  The Step3P7 vLLM wrapper mapper rewrites
@@ -486,8 +568,9 @@ class AscendModelSlimConfig(QuantizationConfig):
           all expert shards (gate/up/down or w1/w2/w3).
         """
         # Only update packed_modules_mapping if the upstream model definition not satisfies our scenario.
-        if model_type in UPDATED_PACKED_MODULES_MAPPING:
-            self.packed_modules_mapping.update(UPDATED_PACKED_MODULES_MAPPING[model_type])
+        mapping_model_type = "glm5_next" if model_type == "glm5_next_text" else model_type
+        if mapping_model_type in UPDATED_PACKED_MODULES_MAPPING:
+            self.packed_modules_mapping.update(UPDATED_PACKED_MODULES_MAPPING[mapping_model_type])
         if model_type in ("kimi_k3", "kimi_linear"):
             from vllm.models.kimi_k3.nvidia.model import KimiLinearModel
 
@@ -542,6 +625,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             prefix = prefix.replace("linear_attn", "attention")
             prefix = prefix.replace("self_attn", "attention")
         self._update_packed_modules_mapping(model_type)
+        runtime_prefix = prefix
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
         # Kimi K3's mixed-precision packed KDA projection is split by the model
@@ -549,7 +633,12 @@ class AscendModelSlimConfig(QuantizationConfig):
         if model_type in ("kimi_k3", "kimi_linear") and self.uses_kimi_k3_mixed_kda_projection(prefix):
             quant_type = None
         else:
-            quant_type = get_quant_type_for_layer(self.quant_description, prefix, self.packed_modules_mapping)
+            quant_type = get_quant_type_for_layer(
+                self.quant_description,
+                runtime_prefix,
+                self.packed_modules_mapping,
+                prefix_mapper=lambda name: self.quant_prefix_mapper(model_type, name),
+            )
 
         if isinstance(layer, LinearBase):
             if quant_type is None:
@@ -699,7 +788,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         if config_path is not None:
             with open(config_path) as f:
-                self.quant_description = json.load(f)
+                self.quant_description = {**self._format_metadata, **json.load(f)}
             self._apply_extra_quant_adaptations()
             self._add_kvcache_quant_metadata()
             return

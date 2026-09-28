@@ -135,3 +135,13 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             deq_scale = layer.input_scale.data * layer.weight_scale.data
             layer.deq_scale = torch.nn.Parameter(deq_scale, requires_grad=False)
+        else:
+            # Static ModelSlim checkpoints need not store weight_scale. The
+            # regular quantized matmul uses deq_scale, but MLAPO consumes the
+            # per-channel weight scale directly. Recover it from the loaded
+            # activation/weight product instead of reading an empty parameter.
+            deq_scale = layer.deq_scale.data
+            if deq_scale.dtype == torch.int64:
+                # FP16 quant_matmul scales encode FP32 bits in the low 32 bits.
+                deq_scale = deq_scale.to(torch.int32).view(torch.float32)
+            layer.weight_scale.data = deq_scale.float() / layer.input_scale.data.float()

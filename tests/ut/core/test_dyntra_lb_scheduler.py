@@ -31,7 +31,6 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     get_dyntra_lb_request_block_num,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import vllm_version_is
 
 SchedulerT = TypeVar("SchedulerT", bound=Scheduler)
 
@@ -84,7 +83,7 @@ def create_dyntra_lb_scheduler(
     scheduler_cls: type[SchedulerT],
     num_blocks: int = 10000,
 ) -> SchedulerT:
-    """Create a scheduler subclass for DyntraLB unit tests."""
+    """Create a V1 scheduler subclass for DyntraLB unit tests."""
     block_size = vllm_config.cache_config.block_size
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -103,13 +102,17 @@ def create_dyntra_lb_scheduler(
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
 
-    return scheduler_cls(
+    scheduler = scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         log_stats=True,
         block_size=block_size,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
+    # These fixtures assert legacy V1 scheduler output structures. Tests that
+    # exercise V2 opt in explicitly after construction.
+    scheduler.use_v2_model_runner = False
+    return scheduler
 
 
 def test_dyntra_lb_scheduler_uses_policy_mixin():
@@ -549,12 +552,11 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
         "SchedulerOutput",
         RecordingSchedulerOutput,
     )
-    if not vllm_version_is("0.28.0"):
-        monkeypatch.setattr(
-            scheduler.kv_cache_manager,
-            "take_boundary_state_offloads",
-            lambda: boundary_state_offloads,
-        )
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager,
+        "take_boundary_state_offloads",
+        lambda: boundary_state_offloads,
+    )
     monkeypatch.setattr(
         scheduler.encoder_cache_manager,
         "get_manager_metadata",
@@ -564,11 +566,7 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
 
     def build_metadata(connector, output):
         assert connector is scheduler.connector
-        if vllm_version_is("0.28.0"):
-            assert "kv_connector_block_state" not in vars(output)
-            block_states.append(None)
-        else:
-            block_states.append(output.kv_connector_block_state)
+        block_states.append(output.kv_connector_block_state)
         return connector_metadata
 
     monkeypatch.setattr(scheduler, "_build_kv_connector_meta", build_metadata)
@@ -576,13 +574,9 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
     scheduler_output = scheduler.schedule()
 
     assert len(block_states) == 1
-    if vllm_version_is("0.28.0"):
-        assert block_states == [None]
-        assert "kv_connector_block_state" not in vars(scheduler_output)
-    else:
-        assert block_states[0].boundary_state_offloads is boundary_state_offloads
-        assert block_states[0].block_ids == {}
-        assert scheduler_output.kv_connector_block_state is None
+    assert block_states[0].boundary_state_offloads is boundary_state_offloads
+    assert block_states[0].req_ids == set()
+    assert scheduler_output.kv_connector_block_state is None
     assert scheduler_output.kv_connector_metadata is connector_metadata
     assert scheduler_output.ec_manager_metadata is encoder_cache_metadata
 

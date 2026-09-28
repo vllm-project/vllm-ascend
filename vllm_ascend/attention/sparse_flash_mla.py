@@ -33,6 +33,16 @@ def _add_compressed_kv_lengths(kwargs: dict[str, Any]) -> None:
         kwargs["max_seqlen_cmp_kv"] = kwargs["max_seqlen_ori_kv"] // cmp_ratio
 
 
+def _drop_paged_kv_cu_seqlens(kwargs: dict[str, Any]) -> None:
+    """Drop KV cu_seqlens; SparseFlashMla only accepts them when layout_kv is TND.
+
+    This adapter always uses PA_BBND paged cache. Passing cu_seqlens_ori_kv or
+    cu_seqlens_cmp_kv raises EZ0037 from aclnnSparseFlashMla.
+    """
+    kwargs.pop("cu_seqlens_ori_kv", None)
+    kwargs.pop("cu_seqlens_cmp_kv", None)
+
+
 def sparse_flash_mla_metadata(**kwargs):
     """Adapt existing DSA metadata kwargs to SparseFlashMla BF16 KV."""
     kwargs.pop("device", None)
@@ -44,9 +54,28 @@ def sparse_flash_mla_metadata(**kwargs):
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     if "max_seqlen_kv" in kwargs:
         kwargs["max_seqlen_ori_kv"] = kwargs.pop("max_seqlen_kv")
+    _drop_paged_kv_cu_seqlens(kwargs)
     _add_compressed_kv_lengths(kwargs)
     _, metadata_op = _get_sparse_flash_mla_ops()
     return metadata_op(**kwargs)
+
+
+def _ensure_sinks(kwargs: dict[str, Any]) -> None:
+    """Reject calls that omit the required per-head sinks tensor.
+
+    SparseFlashMla needs a per-head float32 sinks tensor and the caller must
+    own it. A tensor allocated here would only be referenced by these kwargs,
+    so ACL Graph capture bakes in an address that the allocator reuses as soon
+    as the call returns; replaying that graph then reads freed memory and traps
+    inside the kernel (507011). Device errors are reported asynchronously, so
+    the failure surfaces at an unrelated synchronize() rather than at the
+    operator that caused it, which makes it very hard to attribute.
+    """
+    if kwargs.get("sinks") is None:
+        raise ValueError(
+            "SparseFlashMla requires a caller-owned per-head sinks tensor; "
+            "allocating one here would not survive ACL Graph capture."
+        )
 
 
 def sparse_flash_mla(q: torch.Tensor, **kwargs):
@@ -57,6 +86,8 @@ def sparse_flash_mla(q: torch.Tensor, **kwargs):
     kwargs["layout_kv"] = "PA_BBND"
     if "seqused_kv" in kwargs:
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
+    _drop_paged_kv_cu_seqlens(kwargs)
     _add_compressed_kv_lengths(kwargs)
+    _ensure_sinks(kwargs)
     attention_op, _ = _get_sparse_flash_mla_ops()
     return attention_op(q, **kwargs)

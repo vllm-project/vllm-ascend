@@ -39,6 +39,7 @@ inline constexpr int64_t QLI_V2_CMP_RATIO_LOWER_BOUND = 1;
 inline constexpr int64_t QLI_V2_CMP_RATIO_UPPER_BOUND = 128;
 inline constexpr int64_t QLI_V2_NUM_HEADS_Q_LOWER_BOUND = 1;
 inline constexpr int64_t QLI_V2_NUM_HEADS_Q_UPPER_BOUND = 64;
+inline constexpr int64_t QLI_V2_NUM_HEADS_Q_G32 = 32; // g=32 支持 (A1 对齐 v1 推导)
 inline constexpr int64_t QLI_V2_TOPK_LOWER_BOUND = 1;
 inline constexpr int64_t QLI_V2_A5_TOPK_UPPER_BOUND = 8192;
 inline constexpr int64_t QLI_V2_A3_TOPK_UPPER_BOUND = 2048;
@@ -66,7 +67,10 @@ aclDataType GetDataTypeQliV2(const aclTensor *tensor)
     return dataType;
 }
 
-inline bool IsTensorSourceQLiV2(const std::string &source) { return source != "batch_size"; }
+inline bool IsTensorSourceQLiV2(const std::string &source)
+{
+    return source != "batch_size";
+}
 
 inline int64_t GetRawShapeSizeQLiV2(const std::string &source, int64_t batchValue)
 {
@@ -185,9 +189,11 @@ aclnnStatus CheckSingleParamQliV2(int64_t numHeadsQ, int64_t numHeadsK, int64_t 
     }
     // 校验 A2/A3 参数
     if (socVersion.find("Ascend950") == std::string::npos) {
-        // num_heads_q 校验
-        CHECK_COND(numHeadsQ == QLI_V2_NUM_HEADS_Q_UPPER_BOUND, ACLNN_ERR_PARAM_INVALID,
-                   "num_heads_q should be %lld, but got %lld", QLI_V2_NUM_HEADS_Q_UPPER_BOUND, numHeadsQ);
+        // num_heads_q 校验 (g=64/32, 32 参照 v1 对齐 mBaseSize=4*g 推导)
+        CHECK_COND((numHeadsQ == QLI_V2_NUM_HEADS_Q_UPPER_BOUND) || (numHeadsQ == QLI_V2_NUM_HEADS_Q_G32),
+                   ACLNN_ERR_PARAM_INVALID,
+                   "num_heads_q should be %lld or %lld, but got %lld", QLI_V2_NUM_HEADS_Q_UPPER_BOUND,
+                   QLI_V2_NUM_HEADS_Q_G32, numHeadsQ);
         // topk 校验
         CHECK_COND(topk >= QLI_V2_TOPK_LOWER_BOUND && topk <= QLI_V2_A3_TOPK_UPPER_BOUND, ACLNN_ERR_PARAM_INVALID,
                    "topk should be [%lld, %lld], but got %lld", QLI_V2_TOPK_LOWER_BOUND, QLI_V2_A3_TOPK_UPPER_BOUND,

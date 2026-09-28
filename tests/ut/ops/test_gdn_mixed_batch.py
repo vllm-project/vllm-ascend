@@ -8,7 +8,11 @@ from torch import nn
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.ops.gdn import (
+    AscendGatedDeltaNetAttention,
+    _pack_conv_weights,
+    initialize_packed_conv_weight,
+)
 from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNDecodeMetadata,
@@ -96,6 +100,9 @@ def _make_layer() -> SimpleNamespace:
             torch.zeros(2, 1, 2, 2),
         ),
     )
+    layer.model_config = SimpleNamespace(dtype=layer.conv1d.weight.dtype)
+    initialize_packed_conv_weight(layer)
+    _pack_conv_weights(layer.conv1d)
     layer.rearrange_mixed_qkv = Mock(
         name="rearrange_mixed_qkv",
         side_effect=rearrange_mixed_qkv,
@@ -156,6 +163,10 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
         patch(
             "vllm_ascend.ops.gdn.get_pcp_group",
             return_value=SimpleNamespace(world_size=1),
+        ),
+        patch(
+            "vllm_ascend.ops.gdn.get_current_hardware_profile",
+            return_value=SimpleNamespace(supports=lambda _: False),
         ),
         patch(
             "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",

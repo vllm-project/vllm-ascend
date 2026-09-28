@@ -98,6 +98,14 @@ class Backend(ABC):
     def batch_is_exist(self, keys: list[str]) -> list[int]:
         return self.exists(keys)
 
+    def batch_is_readable(self, keys: list[str]) -> list[bool]:
+        """Return whether each key is committed and readable.
+
+        Layerwise backends may use different metadata and data planes to
+        determine readiness, so each supporting backend owns this mapping.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support batch_is_readable")
+
     def batch_get_key_info(self, keys: list[str]):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_key_info")
 

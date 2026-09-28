@@ -48,6 +48,18 @@ _server_cmd: &server_cmd
   - "data"
 
 _benchmarks: &benchmarks
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_kimi
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 4
+    trust_remote_code: true
+    request_rate: 0
+    baseline: 34.1937
+    threshold: 0.95
   acc_aime2025:
     case_type: accuracy
     dataset_path: vllm-ascend/aime2025
@@ -61,18 +73,6 @@ _benchmarks: &benchmarks
     batch_size: 32
     baseline: 95
     threshold: 10
-  perf:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_kimi
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 8
-    max_out_len: 1024
-    batch_size: 2
-    trust_remote_code: true
-    request_rate: 0
-    baseline: 34.2463
-    threshold: 0.97
 
 # ==========================================
 # ACTUAL TEST CASES

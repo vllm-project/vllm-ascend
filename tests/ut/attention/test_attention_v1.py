@@ -97,9 +97,16 @@ class TestAscendAttentionBackend(TestBase):
                 AscendAttentionDCPMetadataBuilder,
             )
 
-    def test_get_kv_cache_shape_not(self):
-        result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
+    def test_get_kv_cache_shape(self):
+        with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", None):
+            result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
         self.assertEqual(result, (2, 10, 20, 30, 40))
+
+    def test_get_kv_cache_shape_uses_bnsd_for_hnd_layouts(self):
+        for layout in ("LBHNC", "HND"):
+            with self.subTest(layout=layout), patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", layout):
+                result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
+            self.assertEqual(result, (2, 10, 30, 20, 40))
 
     def test_swap_blocks(self):
         src_kv_cache = [torch.zeros((10, 20)), torch.zeros((10, 20))]
@@ -228,6 +235,7 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
     impl.value_cache = None
     impl.kv_sharing_target_layer_name = None
     impl.is_kv_producer = True
+    impl.use_bnsd_kv_cache = False
 
     query = torch.empty((4, 2, 1))
     output = torch.empty((4, 2, 1))
@@ -328,6 +336,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.layer_no_quant._v_scale_float = 1.0
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
+        self.mock_vllm_config.cache_config.cache_dtype = "float16"
+
         self.config_patcher = patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
@@ -445,6 +455,104 @@ class TestAscendAttentionBackendImpl(TestBase):
             attn_type=self.attention_type.DECODER,
             kv_sharing_target_layer_name="producer_layer",
         )
+
+    def test_hnd_layout_is_recorded_during_initialization(self):
+        with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "HND"):
+            impl = AscendAttentionBackendImpl(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                num_kv_heads=8,
+                alibi_slopes=None,
+                sliding_window=None,
+                kv_cache_dtype="float16",
+                logits_soft_cap=None,
+                attn_type=self.attention_type.DECODER,
+                kv_sharing_target_layer_name=None,
+            )
+
+        self.assertEqual(impl.kv_cache_layout, "HND")
+        self.assertTrue(impl.use_bnsd_kv_cache)
+
+    def test_hnd_reshape_and_cache_passes_bnsd_to_device_operator(self):
+        self.impl.use_bnsd_kv_cache = True
+        query = torch.empty(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        key_cache = torch.empty(4, 8, 128, 64)
+        value_cache = torch.empty_like(key_cache)
+        output = torch.empty_like(query)
+        metadata = MagicMock()
+        metadata.slot_mapping = torch.arange(2)
+        metadata.num_actual_tokens = 2
+
+        with (
+            patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache,
+            patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written"),
+        ):
+            self.impl.reshape_and_cache(
+                query,
+                key,
+                value,
+                (key_cache, value_cache),
+                metadata,
+                output,
+            )
+
+        reshape_and_cache.assert_called_once()
+        call_kwargs = reshape_and_cache.call_args.kwargs
+        self.assertIs(call_kwargs["key_cache"], key_cache)
+        self.assertIs(call_kwargs["value_cache"], value_cache)
+        self.assertTrue(call_kwargs["use_bnsd"])
+
+    def test_hnd_do_kv_cache_update_passes_bnsd_to_device_operator(self):
+        self.impl.use_bnsd_kv_cache = True
+        self.impl.key_cache = None
+        self.impl.value_cache = None
+        key = torch.randn(2, 8, 64)
+        value = torch.randn_like(key)
+        key_cache = torch.empty(4, 8, 128, 64)
+        value_cache = torch.empty_like(key_cache)
+        slot_mapping = torch.arange(2)
+
+        with patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache:
+            self.impl.do_kv_cache_update(
+                MagicMock(),
+                key,
+                value,
+                [key_cache, value_cache],
+                slot_mapping,
+            )
+
+        reshape_and_cache.assert_called_once()
+        call_kwargs = reshape_and_cache.call_args.kwargs
+        self.assertIs(call_kwargs["key_cache"], key_cache)
+        self.assertIs(call_kwargs["value_cache"], value_cache)
+        self.assertTrue(call_kwargs["use_bnsd"])
+
+    def test_get_fia_params_uses_layout_specific_cache_view(self):
+        metadata = MagicMock()
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.block_tables = torch.zeros(1, 1)
+        metadata.seq_lens_list = [1]
+        current_key = torch.empty(1, 8, 64)
+        current_value = torch.empty_like(current_key)
+
+        self.impl.use_bnsd_kv_cache = False
+        self.impl.key_cache = torch.empty(4, 128, 8, 64)
+        self.impl.value_cache = torch.empty_like(self.impl.key_cache)
+        key, value, block_size, _, _ = self.impl._get_fia_params(current_key, current_value, metadata)
+        self.assertEqual(key.shape, (4, 128, 512))
+        self.assertEqual(value.shape, (4, 128, 512))
+        self.assertEqual(block_size, 128)
+
+        self.impl.use_bnsd_kv_cache = True
+        self.impl.key_cache = torch.empty(4, 8, 128, 64)
+        self.impl.value_cache = torch.empty_like(self.impl.key_cache)
+        key, value, block_size, _, _ = self.impl._get_fia_params(current_key, current_value, metadata)
+        self.assertEqual(key.shape, (4, 8, 128, 64))
+        self.assertEqual(value.shape, (4, 8, 128, 64))
+        self.assertEqual(block_size, 128)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_large_head_prefill_uses_device_operator_fallback(self, mock_get_forward_context):

@@ -2,6 +2,7 @@
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import MLAAttention
@@ -44,14 +45,20 @@ class KVPPPhysicalCachePlan:
         return available_bytes // bytes_per_block if bytes_per_block else 0
 
 
-def build_layer_cache_bundles(cache_spec: dict[str, KVCacheSpec]) -> dict[str, tuple[str, ...]]:
+def build_layer_cache_bundles(
+    cache_spec: dict[str, KVCacheSpec], draft_layers: set[str] | None = None
+) -> dict[str, tuple[str, ...]]:
+    draft_layers = draft_layers or set()
     by_index: dict[int, list[str]] = defaultdict(list)
     for name in sorted(
-        cache_spec,
+        (name for name in cache_spec if name not in draft_layers),
         key=lambda name: (extract_layer_index(name), isinstance(cache_spec[name], AscendSFAIndexerCacheSpec), name),
     ):
         by_index[extract_layer_index(name)].append(name)
-    return {names[0]: tuple(names) for names in by_index.values()}
+    bundles = {names[0]: tuple(names) for names in by_index.values()}
+    # Draft names may reuse target indices or have no numeric index at all.
+    bundles.update({name: (name,) for name in sorted(draft_layers)})
+    return bundles
 
 
 def get_kvpp_attention_kv_dims(vllm_config: VllmConfig, layer_name: str, spec: KVCacheSpec) -> tuple[int, int]:
@@ -104,46 +111,70 @@ def build_kvpp_layer_layout(
     return layout, cursor
 
 
-def find_mtp_layers(
-    vllm_config: VllmConfig,
-    local_layer_names: Iterable[str],
-) -> set[str]:
-    """Find MTP KV-cache layers among this worker's PP-local cache names.
+def register_kvpp_draft_layers(
+    vllm_config: VllmConfig, model_runner: Any, cache_names: Iterable[str], *, is_last_pp_rank: bool
+) -> None:
+    """Record loader-discovered ownership on this worker's cache modules."""
+    spec = vllm_config.speculative_config
+    if spec is None or spec.method not in ("mtp", "dspark"):
+        return
+    if not is_last_pp_rank:
+        draft_names = set()
+    else:
+        if vllm_config.use_v2_model_runner:
+            proposer = getattr(model_runner, "speculator", None)
+            names = getattr(proposer, "draft_attn_layer_names", None)
+        else:
+            proposer = getattr(model_runner, "drafter", None)
+            names = getattr(proposer, "_draft_attn_layer_names", None)
+        if names is None:
+            raise ValueError("KVPP requires draft cache layer names from the loaded proposer.")
+        draft_names = set(names)
+    context = vllm_config.compilation_config.static_forward_context
+    shared = getattr(model_runner, "shared_kv_cache_layers", {})
+    for name in draft_names:
+        source = shared.get(name) or getattr(context.get(name), "kv_sharing_target_layer_name", None)
+        if source is not None and source not in draft_names:
+            raise ValueError("KVPP does not support draft layers sharing target KV caches.")
+    for name in cache_names:
+        context[name]._kvpp_is_draft = name in draft_names
 
-    Only names present in ``local_layer_names`` are returned. A PP stage
-    without MTP caches yields an empty set; KVPP does not assume MTP lives
-    on the last pipeline rank.
-    """
-    speculative_config = vllm_config.speculative_config
-    if speculative_config is None or speculative_config.method != "mtp":
+
+def find_draft_layers(vllm_config: VllmConfig, local_layer_names: Iterable[str]) -> set[str]:
+    """Read exact worker-local ownership, never infer it from layer indices."""
+    spec = vllm_config.speculative_config
+    if spec is None or spec.method not in ("mtp", "dspark"):
         return set()
-
-    hf_config = vllm_config.model_config.hf_config
-    mtp_start = hf_config.num_hidden_layers
-    num_mtp_layers = hf_config.num_nextn_predict_layers
-    mtp_end = mtp_start + num_mtp_layers
-    return {layer_name for layer_name in local_layer_names if mtp_start <= extract_layer_index(layer_name) < mtp_end}
+    context = vllm_config.compilation_config.static_forward_context
+    result = set()
+    for name in local_layer_names:
+        layer = context.get(name)
+        if layer is None or not hasattr(layer, "_kvpp_is_draft"):
+            raise ValueError(f"KVPP draft ownership has not been initialized for {name}.")
+        if layer._kvpp_is_draft:
+            result.add(name)
+    return result
 
 
 def map_kvpp_layers_to_owners(vllm_config: VllmConfig, local_layer_names: Iterable[str]) -> dict[str, int]:
     """Partition PP-local Target KV layers across KVPP ranks.
 
     ``local_layer_names`` must already be PP-local (typically the keys of the
-    current worker's cache spec). MTP layers remain fully allocated on every
-    KVPP rank and are therefore absent from the returned owner mapping.
+    current worker's cache spec). Draft layers retain their original TP-local
+    allocation and are therefore absent from the returned owner mapping.
     """
     kvpp_size = KVPPConfig.from_vllm_config(vllm_config).size
     # Workers are separate Python processes and may receive layer names from
     # sets or differently ordered dictionaries. Keep both owner insertion
     # order and per-layer cache-bundle order identical on every rank.
-    local_layer_names = tuple(sorted(local_layer_names, key=lambda name: (extract_layer_index(name), name)))
-    mtp_layers = find_mtp_layers(
+    local_layer_names = tuple(local_layer_names)
+    draft_layers = find_draft_layers(
         vllm_config,
         local_layer_names,
     )
     layers_by_index: dict[int, list[str]] = defaultdict(list)
-    for layer_name in local_layer_names:
-        if layer_name not in mtp_layers:
+    for layer_name in sorted(local_layer_names):
+        if layer_name not in draft_layers:
             layers_by_index[extract_layer_index(layer_name)].append(layer_name)
 
     layer_indices = sorted(layers_by_index)
@@ -174,7 +205,7 @@ def create_kvpp_cache_allocation_plan(
     return KVPPPhysicalCachePlan(
         logical_cache_spec=logical_spec,
         layer_owner_ranks=map_kvpp_layers_to_owners(vllm_config, logical_spec),
-        layer_bundles=build_layer_cache_bundles(logical_spec),
+        layer_bundles=build_layer_cache_bundles(logical_spec, find_draft_layers(vllm_config, logical_spec)),
         tensor_sizes=build_kvpp_buffer_sizes(vllm_config, logical_spec),
         kvpp_rank=kvpp_rank,
     )

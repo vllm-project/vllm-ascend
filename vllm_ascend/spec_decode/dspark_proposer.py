@@ -187,6 +187,11 @@ class AscendDSparkProposer(AscendDflashProposer):
                 builder = attn_group.get_metadata_builder()
                 if isinstance(builder, AscendDSAMetadataBuilder):
                     builder.enable_dspark_device_metadata(self.max_query_tokens)
+                else:
+                    from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
+
+                    if isinstance(builder, AscendDSAV41MetadataBuilder):
+                        builder.enable_device_metadata()
 
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
         self.kernel_block_size = self._per_group_kernel_block_sizes[self.kv_cache_gid]
@@ -344,15 +349,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
         if dcp_size > 1:
-            if cad.is_prefilling is not None:
-                cad.is_prefilling.fill_(False)
             assert self.runner is not None
             dcp_manager = getattr(self.runner, "dcp_manager", None)
             assert dcp_manager is not None
-            long_seq_args = dcp_manager.prepare_dspark_first_pass_cp_metadata(
-                common_attn_metadata=cad,
-                num_query_per_req=self.num_query_per_req,
-            )
+            dcp_manager.prepare_parallel_draft_metadata(cad, self.draft_attn_groups)
 
         return num_query_total, token_indices_to_sample, cad, long_seq_args
 
@@ -396,6 +396,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             batch_descriptor=batch_descriptor,
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
+            model_instance=self.model,
             draft_attn_metadatas=[],
             eplb_heat_collection_status=(
                 self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False

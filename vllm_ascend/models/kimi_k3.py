@@ -78,6 +78,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.utils import get_rotation_path
 
@@ -123,6 +124,44 @@ def _apply_ascend_attn_res(
     scores = (normalized_without_gamma * score_weight).sum(-1)
     probabilities = scores.softmax(-1).unsqueeze(1)
     return torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
+
+
+class AscendKimiMLP(KimiMLP):
+    """Keep TP-sharded dense weights compatible with sequence-sharded tokens."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
+        prefix: str = "",
+        activation_situ_beta: float | None = None,
+        activation_situ_linear_beta: float | None = None,
+        use_sequence_parallel: bool = False,
+    ) -> None:
+        super().__init__(
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            hidden_act=hidden_act,
+            quant_config=quant_config,
+            reduce_results=False if use_sequence_parallel else reduce_results,
+            prefix=prefix,
+            activation_situ_beta=activation_situ_beta,
+            activation_situ_linear_beta=activation_situ_linear_beta,
+        )
+        self.use_sequence_parallel = use_sequence_parallel
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.use_sequence_parallel:
+            # All weight shards must operate on the same tokens. Reducing
+            # different sequence shards would mix live and padding rows.
+            x = sp_all_gather(x)
+        x = super().forward(x)
+        if self.use_sequence_parallel:
+            x = sp_reduce_scatter(x)
+        return x
 
 
 class AscendKimiMoE(nn.Module):
@@ -280,6 +319,7 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         attention_layer = self._attention_layer
         if disable_mlapo:
             attention_layer.impl.enable_mlapo = False
+            mark_fused_preprocess_weights(attention_layer.impl)
         if not use_rope and not non_causal_multi_token_decode:
             return
 
@@ -416,12 +456,13 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             )
             self.mlp = self.block_sparse_moe
         else:
-            self.mlp = KimiMLP(
+            self.mlp = AscendKimiMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                use_sequence_parallel=use_sequence_parallel,
                 activation_situ_beta=config.activation_situ_beta,
                 activation_situ_linear_beta=config.activation_situ_linear_beta,
             )

@@ -56,6 +56,10 @@ A2: quay.io/ascend/vllm-ascend:deepseekv4-flash-vision-exp
 Do not replace either package inside the container independently. Mixing other
 vLLM and vLLM Ascend revisions is not supported.
 
+### 3.3 Verify Multi-node Communication (Optional)
+
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
+
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
@@ -206,7 +210,7 @@ vllm serve "$MODEL_PATH" \
   --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":32}' \
   --block-size 32 \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --port 8900
+  --port 8000
 ```
 
 Key parameters:
@@ -266,7 +270,7 @@ interface associated with `LOCAL_IP`, and make sure Node 1 can reach Node 0 at
 
     vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
-      --port 8900 \
+      --port 8000 \
       --served-model-name dsv4-vision \
       --max-model-len 130000 \
       --max-num-batched-tokens 4096 \
@@ -308,7 +312,7 @@ interface associated with `LOCAL_IP`, and make sure Node 1 can reach Node 0 at
     vllm serve "$MODEL_PATH" \
       --headless \
       --host 0.0.0.0 \
-      --port 8900 \
+      --port 8000 \
       --served-model-name dsv4-vision \
       --max-model-len 130000 \
       --max-num-batched-tokens 4096 \
@@ -352,7 +356,7 @@ Verify the health endpoint:
 
 ```shell
 curl -sS -o /dev/null -w 'HTTP %{http_code}\n' \
-  http://127.0.0.1:8900/health
+  http://127.0.0.1:8000/health
 ```
 
 Expected output:
@@ -364,7 +368,7 @@ HTTP 200
 Verify that the configured model is available:
 
 ```shell
-curl -sS http://127.0.0.1:8900/v1/models | \
+curl -sS http://127.0.0.1:8000/v1/models | \
   jq '{object, models: [.data[] | {id, object}]}'
 ```
 
@@ -401,7 +405,7 @@ replace `127.0.0.1` with the Node 0 IP address if the request is sent remotely.
 export IMAGE_URL="<YOUR_IMAGE_URL>"
 
 curl -sS -o response.json -w '%{http_code}\n' \
-  http://127.0.0.1:8900/v1/chat/completions \
+  http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d "{
     \"model\": \"dsv4-vision\",

@@ -84,7 +84,7 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
     CUSTOM_OPS_ARRAY=(
         "causal_conv1d_v310"
         "recurrent_gated_delta_rule_v310"
-        "chunk_fwd_o"
+        "chunk_fwd_o_vllm"
         "chunk_gated_delta_rule_fwd_h"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -111,10 +111,10 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "lightning_indexer_quant"
         "compressor"
         "compressor_metadata"
-        "vllm_quant_lightning_indexer"
-        "vllm_quant_lightning_indexer_metadata"
         "quant_lightning_indexer_v2"
         "quant_lightning_indexer_v2_metadata"
+        "sparse_flash_mla"
+        "sparse_flash_mla_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
         "hc_pre"
@@ -127,7 +127,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "grouped_matmul_swiglu_quant_v2"
         "recurrent_gated_delta_rule"
         "recurrent_kda"
-        "chunk_fwd_o"
+        "chunk_fwd_o_vllm"
         "chunk_gated_delta_rule_fwd_h"
         "chunk_kda_fwd"
         "kda_gate_cumsum"
@@ -138,6 +138,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "k2q_csr"
         "msa_index_score"
         "fused_sparse_attention_overlap"
+        "fused_lightning_indexer_manage"
+        "fused_scatter_copy_sparse_flash_attention"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -167,10 +169,10 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "lightning_indexer_quant"
         "compressor"
         "compressor_metadata"
-        "vllm_quant_lightning_indexer"
-        "vllm_quant_lightning_indexer_metadata"
         "quant_lightning_indexer_v2"
         "quant_lightning_indexer_v2_metadata"
+        "sparse_flash_mla"
+        "sparse_flash_mla_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
         "hc_pre"
@@ -183,7 +185,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "grouped_matmul_swiglu_quant_v2"
         "recurrent_gated_delta_rule"
         "recurrent_kda"
-        "chunk_fwd_o"
+        "chunk_fwd_o_vllm"
         "chunk_gated_delta_rule_fwd_h"
         "chunk_kda_fwd"
         "kda_gate_cumsum"
@@ -194,6 +196,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "k2q_csr"
         "msa_index_score"
         "fused_sparse_attention_overlap"
+        "fused_lightning_indexer_manage"
+        "fused_scatter_copy_sparse_flash_attention"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
@@ -204,13 +208,13 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "scatter_nd_update_sk"
+        "add_rms_norm_bias"
         "moe_gating_top_k_hash"
         "inplace_partial_rotary_mul"
         "kv_compress_epilog"
         "compressor"
         "compressor_metadata"
-        "vllm_quant_lightning_indexer"
-        "vllm_quant_lightning_indexer_metadata"
         "quant_lightning_indexer_v2"
         "quant_lightning_indexer_v2_metadata"
         "kv_quant_sparse_attn_sharedkv"
@@ -223,7 +227,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "causal_conv1d"
         "recurrent_gated_delta_rule"
         "recurrent_kda"
-        "chunk_fwd_o"
+        "chunk_fwd_o_vllm"
         "chunk_gated_delta_rule_fwd_h"
         "chunk_kda_fwd"
         "kda_gate_cumsum"
@@ -232,7 +236,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "store_kv_block_metadata"
         "k2q_csr"
         "sparse_attention_score"
-        "mla_prolog_v3"
+        "mla_prolog_v3_k3"
+        "msa_index_score"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

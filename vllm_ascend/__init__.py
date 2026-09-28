@@ -21,16 +21,20 @@ from types import ModuleType
 
 _triton_available = importlib.util.find_spec("triton") is not None
 
-if "triton.experimental" not in sys.modules:
-    _experimental = ModuleType("triton.experimental")
-    _experimental.__path__ = []
-    sys.modules["triton.experimental"] = _experimental
-for _gluon_stub in (
-    "triton.experimental.gluon",
-    "triton.experimental.gluon.language",
-):
-    if _gluon_stub not in sys.modules:
-        sys.modules[_gluon_stub] = ModuleType(_gluon_stub)
+try:
+    import triton.experimental.gluon  # type: ignore[import-untyped]  # noqa: F401
+except (ImportError, ModuleNotFoundError):
+    # fallback: create stubs for old triton-ascend
+    if "triton.experimental" not in sys.modules:
+        _experimental = ModuleType("triton.experimental")
+        _experimental.__path__ = []
+        sys.modules["triton.experimental"] = _experimental
+    for _gluon_stub in (
+        "triton.experimental.gluon",
+        "triton.experimental.gluon.language",
+    ):
+        if _gluon_stub not in sys.modules:
+            sys.modules[_gluon_stub] = ModuleType(_gluon_stub)
 
 # main2main compat: `_aggregate` was added to triton.language.core in
 # vllm main post-0.26.0. Stub it here so vllm.triton_utils can import it
@@ -59,8 +63,10 @@ def _ensure_global_patch():
     if _GLOBAL_PATCH_APPLIED:
         return
 
+    from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
     from vllm_ascend.utils import adapt_patch
 
+    apply_v2_model_runner_config_patch()
     adapt_patch(is_global_patch=True)
     _GLOBAL_PATCH_APPLIED = True
 

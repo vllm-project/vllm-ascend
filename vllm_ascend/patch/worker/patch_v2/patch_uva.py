@@ -145,9 +145,7 @@ class UvaBufferWrapper:
     def np(self):
         return self._np if is_uva_available() else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
 
-    @property
-    def uva(self):
-        """Get the device data of the buffer."""
+    def _sync_dirty_rows(self) -> None:
         if not is_uva_available() and self._modified_indices:
             dirty_rows = sorted(self._modified_indices)
             n_dirty = len(dirty_rows)
@@ -165,7 +163,15 @@ class UvaBufferWrapper:
                 src = self._cpu[dirty_rows].pin_memory()
                 self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
             self._modified_indices.clear()
-        return self._uva
+
+    def uva(self, n: int | None = None) -> torch.Tensor:
+        """Get the device data of the buffer.
+
+        vLLM main (#56908) turned UvaBuffer.uva into a method taking an
+        optional row count; the pool and StagedWriteTensor call it.
+        """
+        self._sync_dirty_rows()
+        return self._uva if n is None else self._uva[:n]
 
 
 vllm.v1.worker.gpu.buffer_utils.UvaBuffer = UvaBufferWrapper

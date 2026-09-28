@@ -7,9 +7,12 @@ import torch_npu  # noqa: F401 -- registers torch.npu used by the module under t
 
 from vllm_ascend.ops.fused_moe.moe_utils import (
     _custom_gmm_swiglu_enabled,
+    _get_cann_mega_moe_quant_settings,
     _prepare_dequant_swiglu_weight_scale,
     cumsum_group_list,
+    select_mega_moe_activation_kwargs,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 class TestCumsumGroupList(unittest.TestCase):
@@ -53,6 +56,22 @@ class TestFusionFlags(unittest.TestCase):
             self.assertTrue(_custom_gmm_swiglu_enabled(True, True, activation="silu"))
 
 
+class TestMegaMoeQuantSettings(unittest.TestCase):
+    def test_mxfp8_uses_e4m3_dispatch_and_weights(self):
+        self.assertEqual(_get_cann_mega_moe_quant_settings(QuantType.W8A8MXFP), (4, 24, 24))
+
+    def test_preserves_other_megamoe_quant_layouts(self):
+        for quant_type, expected in (
+            (QuantType.W8A8, (2, 258, 258)),
+            (QuantType.W4A8, (2, 258, 285)),
+            (QuantType.NONE, (0, None, None)),
+            (QuantType.W4A8MXFP, (4, 24, 296)),
+            (QuantType.W4A4MXFP, (4, 296, 296)),
+        ):
+            with self.subTest(quant_type=quant_type):
+                self.assertEqual(_get_cann_mega_moe_quant_settings(quant_type), expected)
+
+
 class TestSwigluScaleHelpers(unittest.TestCase):
     def test_prepare_dequant_swiglu_weight_scale_stacks_and_casts(self):
         scales = [torch.randn(4, dtype=torch.float16) for _ in range(2)]
@@ -70,6 +89,155 @@ class TestSwigluScaleHelpers(unittest.TestCase):
         out = _prepare_dequant_swiglu_weight_scale([single], False)
         self.assertEqual(out.dtype, torch.float32)
         self.assertEqual(out.shape, (4,))
+
+
+class TestMegaMoeActivationKwargs(unittest.TestCase):
+    def test_select_mega_moe_activation_kwargs_binds_swiglu_aliases(self):
+        def mega_moe(*args, activation_clamp=None, swiglu_alpha=1.0, swiglu_beta=0.0):
+            return args, activation_clamp, swiglu_alpha, swiglu_beta
+
+        kwargs = select_mega_moe_activation_kwargs(
+            mega_moe,
+            activation="swigluoai",
+            activation_clamp=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        self.assertEqual(kwargs, {"activation_clamp": 7.0, "swiglu_alpha": 1.702, "swiglu_beta": 1.0})
+
+    def test_select_mega_moe_activation_kwargs_keeps_clamp_only_for_legacy_op(self):
+        def mega_moe(*args, activation_clamp=None, **kwargs):
+            return args, activation_clamp, kwargs
+
+        kwargs = select_mega_moe_activation_kwargs(
+            mega_moe,
+            activation="silu",
+            activation_clamp=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        self.assertEqual(kwargs, {"activation_clamp": 7.0})
+
+    def test_select_mega_moe_activation_kwargs_binds_oai_when_supported(self):
+        def mega_moe(*args, activation_clamp=None, glu_alpha=1.0, glu_bias=0.0, **kwargs):
+            return args, activation_clamp, glu_alpha, glu_bias, kwargs
+
+        kwargs = select_mega_moe_activation_kwargs(
+            mega_moe,
+            activation="swigluoai_uninterleave",
+            activation_clamp=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        self.assertEqual(kwargs["activation_clamp"], 7.0)
+        self.assertEqual(kwargs["glu_alpha"], 1.702)
+        self.assertEqual(kwargs["glu_bias"], 1.0)
+        self.assertNotIn("swiglu_alpha", kwargs)
+
+    def test_select_mega_moe_activation_kwargs_binds_current_cann_api(self):
+        def mega_moe(*args, activation="swiglu", activation_clamp=None, activation_params=None, **kwargs):
+            return args, activation, activation_clamp, activation_params, kwargs
+
+        kwargs = select_mega_moe_activation_kwargs(
+            mega_moe,
+            activation="swigluoai_uninterleave",
+            activation_clamp=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        self.assertEqual(
+            kwargs,
+            {
+                "activation": "swigluoai",
+                "activation_clamp": 7.0,
+                "activation_params": {"alpha": 1.702, "beta": 1.0},
+            },
+        )
+
+    def test_select_mega_moe_activation_kwargs_reads_schema_fallback(self):
+        class CompiledMegaMoe:
+            __signature__ = "not inspectable"
+            _schema = "mega_moe(..., str activation='swiglu', Dict(str, float)? activation_params=None)"
+
+            def __call__(self, *args, **kwargs):
+                return args, kwargs
+
+        kwargs = select_mega_moe_activation_kwargs(
+            CompiledMegaMoe(),
+            activation="swigluoai_uninterleave",
+            activation_clamp=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        self.assertEqual(kwargs["activation"], "swigluoai")
+        self.assertEqual(kwargs["activation_params"], {"alpha": 1.702, "beta": 1.0})
+
+    def test_select_mega_moe_activation_kwargs_rejects_legacy_oai(self):
+        def mega_moe(*args, activation_clamp=None):
+            return args, activation_clamp
+
+        with self.assertRaisesRegex(RuntimeError, "does not expose SwiGLU-OAI"):
+            select_mega_moe_activation_kwargs(
+                mega_moe,
+                activation="swigluoai_uninterleave",
+                activation_clamp=7.0,
+                swiglu_alpha=1.702,
+                swiglu_beta=1.0,
+            )
+
+    def test_select_mega_moe_activation_kwargs_reads_generic_wrapper_metadata(self):
+        for metadata in ("_schema", "__doc__"):
+            for names, expected in (
+                (
+                    "activation, activation_params",
+                    {"activation": "swigluoai", "activation_params": {"alpha": 1.702, "beta": 1.0}},
+                ),
+                ("glu_alpha, glu_bias", {"glu_alpha": 1.702, "glu_bias": 1.0}),
+                ("swiglu_alpha, swiglu_beta", {"swiglu_alpha": 1.702, "swiglu_beta": 1.0}),
+            ):
+                with self.subTest(metadata=metadata, names=names):
+
+                    def mega_moe(*args, **kwargs):
+                        return kwargs
+
+                    setattr(mega_moe, metadata, f"mega_moe(..., activation_clamp, {names})")
+                    kwargs = select_mega_moe_activation_kwargs(
+                        mega_moe,
+                        activation="swigluoai",
+                        activation_clamp=7.0,
+                        swiglu_alpha=1.702,
+                        swiglu_beta=1.0,
+                    )
+                    self.assertEqual(mega_moe(**kwargs), {"activation_clamp": 7.0, **expected})
+
+    def test_select_mega_moe_activation_kwargs_preserves_explicit_signature(self):
+        def mega_moe(*, activation_clamp=None, glu_alpha=1.0, glu_bias=0.0, **kwargs):
+            """Unlike another API with activation and activation_params, use direct scalars."""
+            self.assertFalse(kwargs)
+            return activation_clamp, glu_alpha, glu_bias
+
+        kwargs = select_mega_moe_activation_kwargs(
+            mega_moe,
+            activation="swigluoai",
+            activation_clamp=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        self.assertEqual(mega_moe(**kwargs), (7.0, 1.702, 1.0))
+
+    def test_select_mega_moe_activation_kwargs_rejects_metadata_for_closed_signature(self):
+        def mega_moe(*, activation_clamp=None):
+            """This legacy wrapper does not support activation or activation_params."""
+            return activation_clamp
+
+        with self.assertRaisesRegex(RuntimeError, "does not expose SwiGLU-OAI"):
+            select_mega_moe_activation_kwargs(
+                mega_moe,
+                activation="swigluoai",
+                activation_clamp=7.0,
+                swiglu_alpha=1.702,
+                swiglu_beta=1.0,
+            )
 
 
 if __name__ == "__main__":
