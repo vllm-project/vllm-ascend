@@ -77,7 +77,6 @@ ARG TRITON_ASCEND_VERSION
 ARG TRITON_ASCEND_PACKAGE_VERSION
 # DAILY_DEPS_MODE (optional): Daily deps install mode: 'full' or 'torch_npu_only'.
 ARG DAILY_DEPS_MODE="full"
-
 WORKDIR /workspace
 
 SHELL ["/bin/bash", "-c"]
