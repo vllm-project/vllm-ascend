@@ -453,11 +453,11 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     in-graph from the runner's persistent query_start_loc / seq_lens buffers.
     Speculative decoding (MTP) uses the same derivation chain.
 
-    NOTE: the QFA wrapper's signature (verified on-device) differs from the
-    requirement doc's torch_npu example: positional
+    NOTE: the QFA wrapper's signature (verified on-device, CANN 9.2.0)
+    differs from the requirement doc's torch_npu example: positional
     q_descale/k_descale/v_descale/quant_mode, p_scale instead of
-    quant_scale_p, an extra layout_q_descale, no pa_block_size, and a
-    required v_descale placeholder on the metadata call for quant_mode=1.
+    quant_scale_p, an extra layout_q_descale, and no pa_block_size. The
+    metadata op takes no v_descale (removed from the delivered signature).
     """
 
     # Installed via ``layer.impl.__class__`` assignment, which does not call
@@ -526,29 +526,12 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             cache["k_scale_slots"] = slot_index
         return slot_index
 
-    @staticmethod
-    def _qfa_v_descale_placeholder(value_scale_cache: torch.Tensor) -> torch.Tensor:
-        """The v_descale the metadata op insists on, without allocating one.
-
-        quant_mode=1 refuses a null v_descale at the aclnn entry, but under
-        PA_NZ nothing reads it. An allocation inside the captured region
-        would record its zero-fill as a graph node replayed every step; a
-        view of the layer's own V scale cache launches nothing and has an
-        address that predates every capture.
-
-        NOTE: torch_npu.float8_e8m0fnu is the integer dtype ID (293) on this
-        torch_npu build, not a torch.dtype; bitcast with the stock torch
-        dtype instead.
-        """
-        return value_scale_cache.view(-1)[:2].view(1, 1, 1, 1, 1, 2).view(torch.float8_e8m0fnu)
-
     def _get_qfa_metadata(
         self,
         attn_metadata: AscendMetadata,
         *,
         cu_seqlens_q: torch.Tensor,
         seqused_kv: torch.Tensor,
-        value_scale_cache: torch.Tensor,
         max_seqlen_q: int,
         mask_mode: int,
         layout_q_descale: str,
@@ -587,7 +570,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
                 cu_seqlens_kv=None,
                 seqused_q=None,
                 seqused_kv=seqused_kv,
-                v_descale=self._qfa_v_descale_placeholder(value_scale_cache),
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=-1,
                 mask_mode=mask_mode,
@@ -775,7 +757,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             attn_metadata,
             cu_seqlens_q=cu_seqlens_q,
             seqused_kv=seqused_kv,
-            value_scale_cache=kv_cache[3],
             max_seqlen_q=max_seqlen_q,
             mask_mode=mask_mode,
             layout_q_descale=layout_q_descale,
