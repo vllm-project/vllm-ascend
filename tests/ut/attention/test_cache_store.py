@@ -26,6 +26,15 @@ def metadata(**kwargs):
     return SimpleNamespace(**(values | kwargs))
 
 
+def pa_writer(write):
+    def wrapped(key, slots, *, key_cache):
+        assert key.ndim == 3 and key_cache.ndim == 4 and slots.ndim == 1
+        assert key.is_contiguous() and slots.is_contiguous() and key_cache.is_contiguous()
+        return write(key_cache.view(-1, key.shape[-1]), slots.view(-1, 1), key.view(-1, key.shape[-1]))
+
+    return wrapped
+
+
 @pytest.mark.parametrize("family", list(AscendDeviceType))
 @pytest.mark.parametrize("dtype", [torch.int8, torch.float16, torch.bfloat16, torch.float32, torch.float64])
 @pytest.mark.parametrize("layout", ["contiguous", "row_gap", "column_gap", "block_gap", "offset"])
@@ -56,15 +65,16 @@ def test_platform_dispatch_keeps_destination_storage(monkeypatch, family, dtype,
         target[indices[valid]] = updates[valid]
 
     sk.side_effect = scatter.side_effect = write_sk
+    pa.side_effect = pa_writer(write_sk)
     monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", sk, raising=False)
     monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", pa, raising=False)
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
     expected_sk = (
-        family in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5)
+        family in (AscendDeviceType.A2, AscendDeviceType.A3)
         and dtype != torch.float64
         and layout not in ("column_gap", "block_gap")
-        and not (family == AscendDeviceType.A5 and layout == "row_gap")
     )
+    expected_pa = family == AscendDeviceType.A5 and dtype != torch.float64 and layout in ("contiguous", "offset")
     if layout == "block_gap":
         with pytest.raises(RuntimeError, match="view size is not compatible"):
             device_op.get_device_adaptor().scatter_cache(cache.view(-1, key.shape[-1]), slots.view(-1, 1), key)
@@ -76,8 +86,8 @@ def test_platform_dispatch_keeps_destination_storage(monkeypatch, family, dtype,
         reference.view(-1, 128)[slots[:2049].long()] = key[:2049]
     torch.testing.assert_close(backing, before, rtol=0, atol=0)
     assert sk.call_count == int(expected_sk)
-    pa.assert_not_called()
-    assert scatter.call_count == int(not expected_sk and layout != "block_gap")
+    assert pa.call_count == int(expected_pa)
+    assert scatter.call_count == int(not (expected_sk or expected_pa) and layout != "block_gap")
 
 
 @pytest.mark.parametrize("family", [AscendDeviceType.A3, AscendDeviceType.A5])
@@ -87,7 +97,7 @@ def test_missing_operator_falls_back(monkeypatch, family):
     slots = torch.arange(2049, dtype=torch.int32)
     monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None, raising=False)
     pa = Mock()
-    monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", pa, raising=False)
+    monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", None, raising=False)
     scatter = Mock(
         side_effect=lambda target, indices, updates: target.index_copy_(0, indices.flatten().long(), updates)
     )
@@ -100,8 +110,9 @@ def test_missing_operator_falls_back(monkeypatch, family):
 
 
 @pytest.mark.parametrize("unsupported", ["target_rank", "index_rank", "update_rank", "row_count", "dtype"])
-def test_fast_shape_guard_preserves_generic_arguments(monkeypatch, unsupported):
-    monkeypatch.setattr(device_op, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
+@pytest.mark.parametrize("family", [AscendDeviceType.A3, AscendDeviceType.A5])
+def test_fast_shape_guard_preserves_generic_arguments(monkeypatch, unsupported, family):
+    monkeypatch.setattr(device_op, "get_current_hardware_profile", lambda: get_hardware_profile(family))
     var = torch.zeros(8, 16)
     indices = torch.tensor([[2], [4], [6]], dtype=torch.int32)
     updates = torch.ones(3, 16)
@@ -117,8 +128,9 @@ def test_fast_shape_guard_preserves_generic_arguments(monkeypatch, unsupported):
         updates = updates.to(torch.float16)
     fast, generic = Mock(), Mock()
     monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", fast, raising=False)
+    monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", fast, raising=False)
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", generic, raising=False)
-    device_op.BaseDeviceAdaptor.scatter_cache(var, indices, updates)
+    device_op.get_device_adaptor().scatter_cache(var, indices, updates)
     fast.assert_not_called()
     generic.assert_called_once()
     assert all(actual is original for actual, original in zip(generic.call_args.args, (var, indices, updates)))
@@ -149,7 +161,7 @@ def test_fast_operator_error_is_not_retried(monkeypatch, family):
     fast = Mock(side_effect=RuntimeError("operator failed"))
     scatter, pa = Mock(), Mock()
     monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", fast, raising=False)
-    monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", pa, raising=False)
+    monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", fast if family == AscendDeviceType.A5 else pa, raising=False)
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
     with pytest.raises(RuntimeError, match="operator failed"):
         device_op.get_device_adaptor().scatter_cache(
@@ -191,16 +203,17 @@ def test_fp8_cache_dispatch_preserves_bytes(monkeypatch, family, dtype, layout):
         target.view(torch.uint8)[indices[valid]] = updates.view(torch.uint8)[valid]
 
     sk.side_effect = scatter.side_effect = write
+    pa.side_effect = pa_writer(write)
     monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", sk, raising=False)
     monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", pa, raising=False)
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
 
     assert device_op.get_device_adaptor().scatter_cache(cache.view(-1, key.shape[-1]), slots.view(-1, 1), key) is None
 
-    expected_sk = family == AscendDeviceType.A5 and layout != "row_gap"
-    assert sk.call_count == int(expected_sk)
-    assert scatter.call_count == int(not expected_sk)
-    pa.assert_not_called()
+    expected_pa = family == AscendDeviceType.A5 and layout != "row_gap"
+    sk.assert_not_called()
+    assert scatter.call_count == int(not expected_pa)
+    assert pa.call_count == int(expected_pa)
     torch.testing.assert_close(backing.view(torch.uint8), expected, rtol=0, atol=0)
 
 
@@ -305,9 +318,10 @@ def test_indexer_cache_writes_all_gathered_rows(monkeypatch, family, key_dtype, 
         target.view(torch.uint8)[indices[valid]] = updates.view(torch.uint8)[valid]
 
     sk, generic, pa = Mock(side_effect=write), Mock(side_effect=write), Mock()
+    pa.side_effect = pa_writer(write)
     monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", sk if fast_available else None, raising=False)
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", generic, raising=False)
-    monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", pa, raising=False)
+    monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", pa if fast_available else None, raising=False)
     indexer = SimpleNamespace(
         enable_sparse_li_c8=scale_dtype is not None,
         k_cache=SimpleNamespace(kv_cache=tuple(caches)),
@@ -319,10 +333,11 @@ def test_indexer_cache_writes_all_gathered_rows(monkeypatch, family, key_dtype, 
     AscendSFAIndexerBackend.write_cache(
         indexer, k_li, keys[1] if scale_dtype else None, slots, SimpleNamespace(num_actual_tokens=2)
     )
-    expected_sk = fast_available and not (family == AscendDeviceType.A5 and row_gap)
+    expected_sk = fast_available and family == AscendDeviceType.A3
+    expected_pa = fast_available and family == AscendDeviceType.A5 and not row_gap
     assert sk.call_count == (len(caches) if expected_sk else 0)
-    assert generic.call_count == (0 if expected_sk else len(caches))
-    pa.assert_not_called()
+    assert generic.call_count == (0 if expected_sk or expected_pa else len(caches))
+    assert pa.call_count == (len(caches) if expected_pa else 0)
     for backing, reference in zip(backings, expected):
         torch.testing.assert_close(backing.view(torch.uint8), reference, rtol=0, atol=0)
 

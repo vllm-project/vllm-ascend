@@ -11,7 +11,7 @@ import torch_npu  # noqa: F401
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.device.device_config import check_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import bootstrap_custom_op_env
 
 # A5 的 hardware profile 未启用 RUNTIME_CUSTOM_OPS，enable_custom_op() 会直接
@@ -51,7 +51,7 @@ def test_a5_cache_destination_layout(dtype, width, count, row_gap):
     backing = torch.full((8192, width * (2 if row_gap else 1)), 7.0, device="npu").to(dtype)
     cache = backing[:, :width]
     indices = (torch.arange(count, device="npu", dtype=torch.int64) + 37).view(-1, 1)
-    updates = torch.arange(count * width, device="npu").remainder(17).reshape(count, width).to(dtype)
+    updates = torch.arange(count * width, device="npu").remainder(17).reshape(count, width).float().to(dtype)
     expected = backing.cpu()
     expected[37 : 37 + count, :width] = updates.cpu()
     assert cache.is_contiguous() == (not row_gap)
@@ -62,12 +62,16 @@ def test_a5_cache_destination_layout(dtype, width, count, row_gap):
             torch.ops._C_ascend, "npu_scatter_nd_update_sk", wraps=torch.ops._C_ascend.npu_scatter_nd_update_sk
         ) as sk,
         patch.object(torch_npu, "npu_scatter_nd_update_", wraps=torch_npu.npu_scatter_nd_update_) as generic,
+        patch.object(torch_npu, "npu_scatter_pa_cache", wraps=torch_npu.npu_scatter_pa_cache) as pa,
     ):
         DeviceOperator.scatter_cache(cache, indices, updates)
-    assert sk.call_count == int(not row_gap)
+    sk.assert_not_called()
+    assert pa.call_count == int(not row_gap)
     assert generic.call_count == int(row_gap)
-    selected = generic if row_gap else sk
-    assert all(actual is original for actual, original in zip(selected.call_args.args, (cache, indices, updates)))
+    if row_gap:
+        assert all(actual is original for actual, original in zip(generic.call_args.args, (cache, indices, updates)))
+    else:
+        assert pa.call_args.kwargs["key_cache"].data_ptr() == cache.data_ptr()
     # Check the entire allocation, including row gaps and untouched cache rows.
     assert torch.equal(backing.view(torch.uint8).cpu(), expected.view(torch.uint8))
 
@@ -201,17 +205,19 @@ def test_cache_adaptor_dispatch_preserves_backing_storage(dtype, index_dtype, to
         patch.object(
             torch.ops._C_ascend, "npu_scatter_nd_update_sk", wraps=torch.ops._C_ascend.npu_scatter_nd_update_sk
         ) as sk,
-        patch.object(torch_npu, "npu_scatter_pa_cache") as pa,
+        patch.object(
+            torch_npu, "npu_scatter_pa_cache", wraps=getattr(torch_npu, "npu_scatter_pa_cache", None), create=True
+        ) as pa,
         patch.object(torch_npu, "npu_scatter_nd_update_", wraps=torch_npu.npu_scatter_nd_update_) as generic,
     ):
         assert DeviceOperator.scatter_cache(cache.view(-1, key.shape[-1]), slots.view(-1, 1), key) is None
         torch.npu.synchronize()
-        expected_sk = layout != "row_gap" or get_current_hardware_profile().supports(
-            HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE
-        )
+        a5 = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        expected_sk = not a5
+        expected_pa = a5 and layout != "row_gap"
         assert sk.call_count == int(expected_sk)
-        pa.assert_not_called()
-        assert generic.call_count == int(not expected_sk)
+        assert pa.call_count == int(expected_pa)
+        assert generic.call_count == int(not (expected_sk or expected_pa))
 
     assert cache.data_ptr() == pointer
     torch.testing.assert_close(backing.view(torch.uint8).cpu(), expected, rtol=0, atol=0)
@@ -265,7 +271,9 @@ def test_indexer_cache_dispatch_for_keys_and_scales(key_dtype, scale_dtype, row_
             torch.ops._C_ascend, "npu_scatter_nd_update_sk", wraps=torch.ops._C_ascend.npu_scatter_nd_update_sk
         ) as sk,
         patch.object(torch_npu, "npu_scatter_nd_update_", wraps=torch_npu.npu_scatter_nd_update_) as generic,
-        patch.object(torch_npu, "npu_scatter_pa_cache") as pa,
+        patch.object(
+            torch_npu, "npu_scatter_pa_cache", wraps=getattr(torch_npu, "npu_scatter_pa_cache", None), create=True
+        ) as pa,
     ):
         AscendSFAIndexerBackend.write_cache(
             indexer,
@@ -275,11 +283,11 @@ def test_indexer_cache_dispatch_for_keys_and_scales(key_dtype, scale_dtype, row_
             SimpleNamespace(num_actual_tokens=tokens // 2),
         )
         torch.npu.synchronize()
-        expected_sk = not row_gap or get_current_hardware_profile().supports(
-            HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE
-        )
+        a5 = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        expected_sk = not a5
+        expected_pa = a5 and not row_gap
         assert sk.call_count == (len(caches) if expected_sk else 0)
-        assert generic.call_count == (0 if expected_sk else len(caches))
-        pa.assert_not_called()
+        assert generic.call_count == (0 if expected_sk or expected_pa else len(caches))
+        assert pa.call_count == (len(caches) if expected_pa else 0)
     for backing, reference in zip(backings, expected):
         torch.testing.assert_close(backing.view(torch.uint8).cpu(), reference, rtol=0, atol=0)

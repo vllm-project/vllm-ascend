@@ -43,17 +43,29 @@ class BaseDeviceAdaptor:
     def scatter_cache(cls, var: torch.Tensor, indices: torch.Tensor, updates: torch.Tensor) -> None:
         """Dispatch a cache scatter with the original operator's arguments.
 
-        Callers retain their existing views and slices. Both operators receive
-        the same tensors without reshaping, truncation, or slot filtering.
+        Callers retain their existing views and slices. SK and generic scatter
+        receive the original tensors; A5 adapts their layout for PA without
+        copying the destination, truncating updates, or filtering slots.
         """
-        if cls._scatter_cache(var, indices, updates):
+        if cls._is_row_cache(var, indices, updates) and cls._scatter_cache(var, indices, updates):
             return
         torch_npu.npu_scatter_nd_update_(var, indices, updates)
 
     @staticmethod
+    def _is_row_cache(var, indices, updates) -> bool:
+        # This adaptor optimizes row writes: var[N, D], indices[T, 1],
+        # updates[T, D]. These checks bound the cache optimization, not SK's
+        # full shape support. Other inputs retain the original scatter path.
+        if var.ndim != 2 or indices.ndim != 2 or updates.ndim != 2:
+            return False
+        if indices.shape[1] != 1 or updates.shape != (indices.shape[0], var.shape[1]):
+            return False
+        return updates.dtype == var.dtype and indices.dtype in (torch.int32, torch.int64)
+
+    @staticmethod
     def _scatter_cache(var, indices, updates) -> bool:
         # Select only available kernels and supported cache dtypes. FP32 is
-        # used by indexer scales; FP8 additionally requires the A5 kernel ABI.
+        # used by indexer scales; FP8 requires a matching kernel ABI.
         profile = get_current_hardware_profile()
         if not profile.supports(HardwareCapability.SCATTER_ND_CACHE_STORE):
             return False
@@ -64,15 +76,6 @@ class BaseDeviceAdaptor:
             if not profile.supports(HardwareCapability.SCATTER_ND_FP8_CACHE_STORE):
                 return False
         elif updates.dtype not in (torch.int8, torch.float16, torch.bfloat16, torch.float32):
-            return False
-        # This adaptor optimizes row writes: var[N, D], indices[T, 1],
-        # updates[T, D]. These checks bound the cache optimization, not SK's
-        # full shape support. Other inputs retain the original scatter path.
-        if var.ndim != 2 or indices.ndim != 2 or updates.ndim != 2:
-            return False
-        if indices.shape[1] != 1 or updates.shape != (indices.shape[0], var.shape[1]):
-            return False
-        if updates.dtype != var.dtype or indices.dtype not in (torch.int32, torch.int64):
             return False
 
         # Write the destination in place: rows must be internally contiguous
@@ -904,6 +907,31 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
+    @staticmethod
+    def _scatter_cache(var, indices, updates) -> bool:
+        operation = getattr(torch_npu, "npu_scatter_pa_cache", None)
+        if operation is None or not var.is_contiguous():
+            return False
+        if updates.dtype not in (
+            torch.int8,
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+            torch.float8_e4m3fn,
+            torch.float8_e5m2,
+        ):
+            return False
+        # PA expects [T, H, D] keys and [blocks, block_size, H, D] cache.
+        # With one row per block, flattened slot indices keep their original
+        # offsets. This is a view of the same destination, including its offset.
+        width = var.shape[1]
+        operation(
+            updates.reshape(-1, 1, width).contiguous(),
+            indices.reshape(-1).contiguous(),
+            key_cache=var.view(var.shape[0], 1, 1, width),
+        )
+        return True
+
     @classmethod
     def reshape_and_cache(
         cls,
