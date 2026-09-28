@@ -1210,35 +1210,42 @@ def _reshape_kv_cache_v2(
                     getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size),
                 )
 
-            k_dtype = v_dtype = kv_cache_spec.dtype
-            if enable_fa_quant(vllm_config):
-                k_dtype, v_dtype = vllm_config.quant_config.get_kv_quant_dtype(
-                    layer_name,
-                    kv_cache_spec.dtype,
+            # Sparse C8 already selects its dtype from --kv-cache-dtype. V1
+            # skips enable_fa_quant on that path. Calling it here raises for a
+            # kv consumer that has no FA quant weights, which is how
+            # GLM-5.1-W8A8C8 decode fails on Model Runner V2.
+            if sparse_sfa_c8:
+                k_dtype = kv_cache_dtype_str_to_dtype(
+                    vllm_config.cache_config.cache_dtype,
                     vllm_config.model_config,
                 )
-
-            if sparse_sfa_c8:
-                raw_k_tensor = raw_cache
-                k_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+                raw_k_tensor = raw_cache[0] if isinstance(raw_cache, tuple) else raw_cache
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
-            elif isinstance(raw_cache, tuple):
-                raw_k_tensor, raw_v_tensor = raw_cache
-                k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
-                v_cache = raw_v_tensor.view(v_dtype).view(v_shape)
-                kv_caches[layer_name] = (k_cache, v_cache)
             else:
-                # Keep Attention K/V contiguous across the tail of the hybrid
-                # allocation, matching the model_runner_v1 storage contract.
-                k_size = torch.empty(k_shape, device="meta").numel() * get_dtype_size(k_dtype)
-                v_size = torch.empty(v_shape, device="meta").numel() * get_dtype_size(v_dtype)
-                kv_start = raw_cache.numel() - k_size - v_size
-                if kv_start < 0:
-                    raise ValueError(f"Attention cache views exceed the allocation for {layer_name}.")
-                k_cache = raw_cache[kv_start : kv_start + k_size].view(k_dtype).view(k_shape)
-                v_cache = raw_cache[kv_start + k_size :].view(v_dtype).view(v_shape)
-                kv_caches[layer_name] = (k_cache, v_cache)
+                k_dtype = v_dtype = kv_cache_spec.dtype
+                if enable_fa_quant(vllm_config):
+                    k_dtype, v_dtype = vllm_config.quant_config.get_kv_quant_dtype(
+                        layer_name,
+                        kv_cache_spec.dtype,
+                        vllm_config.model_config,
+                    )
+                if isinstance(raw_cache, tuple):
+                    raw_k_tensor, raw_v_tensor = raw_cache
+                    k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
+                    v_cache = raw_v_tensor.view(v_dtype).view(v_shape)
+                    kv_caches[layer_name] = (k_cache, v_cache)
+                else:
+                    # Keep Attention K/V contiguous across the tail of the hybrid
+                    # allocation, matching the model_runner_v1 storage contract.
+                    k_size = torch.empty(k_shape, device="meta").numel() * get_dtype_size(k_dtype)
+                    v_size = torch.empty(v_shape, device="meta").numel() * get_dtype_size(v_dtype)
+                    kv_start = raw_cache.numel() - k_size - v_size
+                    if kv_start < 0:
+                        raise ValueError(f"Attention cache views exceed the allocation for {layer_name}.")
+                    k_cache = raw_cache[kv_start : kv_start + k_size].view(k_dtype).view(k_shape)
+                    v_cache = raw_cache[kv_start + k_size :].view(v_dtype).view(v_shape)
+                    kv_caches[layer_name] = (k_cache, v_cache)
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
