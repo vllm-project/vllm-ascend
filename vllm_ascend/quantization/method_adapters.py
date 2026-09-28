@@ -16,6 +16,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from typing import TYPE_CHECKING, cast
+
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase, FusedMoeWeightScaleSupported
@@ -29,6 +31,9 @@ from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_otp_gro
 from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
 
 from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
+
+if TYPE_CHECKING:
+    from .methods.w8a8.w8a8_mxfp8 import AscendMXFP8OnlineMoEMethod
 
 # vLLM's typed parameter classes take these through their constructor and expose
 # them as read-only properties, so replaying them via set_weight_attrs raises.
@@ -354,7 +359,7 @@ class AscendOnlineFusedMoEMethod(AscendFusedMoEMethod):
     """Expose online-computed MoE scales without changing offline methods."""
 
     def get_computed_params(self) -> set[str]:
-        return self.quant_method.get_computed_params()
+        return cast("AscendMXFP8OnlineMoEMethod", self.quant_method).get_computed_params()
 
 
 class AscendEmbeddingMethod(AscendLinearMethod):
