@@ -6,7 +6,7 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
@@ -34,6 +34,7 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
+    split_decodes_and_prefills,
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
@@ -433,6 +434,10 @@ class AscendSFAMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
     pcp_slot_mapping: torch.Tensor | None = None
+    pcp_prolog_local_slots: torch.Tensor | None = None
+    pcp_prolog_global_slots: torch.Tensor | None = None
+    # All PCP ranks must join prefill KV gathers even when a rank has only padding.
+    pcp_has_global_prefill: bool = False
     # The dimension of the attention heads
     head_dim: int | None = None
     attn_mask: torch.Tensor = None
@@ -525,6 +530,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         if self.nope:
             self.nope_indexer = layer.impl.indexer
 
+        self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         if self.speculative_config:
@@ -593,10 +599,28 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         **kwargs,
     ) -> AscendSFAMetadata:
         # common_prefix_len / fast_build are unused; kept for API compatibility.
-        return self._build_with_metadata_view(
+        metadata = self._build_with_metadata_view(
             common_attn_metadata,
-            lambda: self._build(common_attn_metadata, draft_index=None),
+            lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=kwargs.get("pcp_context")),
         )
+        if (
+            self.use_pcp
+            and kwargs.get("pcp_context") is not None
+            and (metadata.num_prefills or metadata.pcp_has_global_prefill)
+        ):
+            assert metadata.pcp_slot_mapping is not None
+            group = get_pcp_group()
+            num_tokens = metadata.num_input_tokens
+            rank_slots = metadata.pcp_slot_mapping[: group.world_size * num_tokens].view(group.world_size, num_tokens)
+            num_decode_tokens = metadata.num_decode_tokens
+            local_slots = rank_slots[group.rank_in_group].contiguous()
+            if num_decode_tokens and group.rank_in_group != 0:
+                # Replicated decode slots are masked outside rank 0, but each
+                # rank still writes its locally computed decode KV.
+                local_slots = torch.cat((rank_slots[0, :num_decode_tokens], local_slots[num_decode_tokens:]))
+            metadata.pcp_prolog_local_slots = local_slots
+            metadata.pcp_prolog_global_slots = rank_slots[:, num_decode_tokens:].reshape(-1)
+        return metadata
 
     def build_for_drafting(
         self,
@@ -628,6 +652,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         draft_index: int | None = None,
+        pcp_context: Any | None = None,
     ) -> AscendSFAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -686,6 +711,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
             pcp_slot_mapping=pcp_slot_mapping,
+            pcp_has_global_prefill=bool(pcp_context is not None and pcp_context.global_batch.is_prefilling_np.any()),
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,
@@ -699,15 +725,17 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             block_size=block_size,
             **parallel_metadata,
         )
+        (
+            metadata.num_decodes,
+            metadata.num_prefills,
+            metadata.num_decode_tokens,
+            _,
+        ) = split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+            treat_short_extends_as_decodes=not self.use_pcp,
+        )
         if self.nope:
-            query_lens = (
-                common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
-                - common_attn_metadata.query_start_loc_cpu[:num_reqs]
-            )
-            is_prefilling = query_lens > getattr(common_attn_metadata, "decode_token_per_req", 1)
-            metadata.num_prefills = int(is_prefilling.sum())
-            metadata.num_decodes = num_reqs - metadata.num_prefills
-            metadata.num_decode_tokens = int(query_lens[~is_prefilling].sum())
             if draft_index not in self.nope_states:
                 self.nope_states[draft_index] = SparseMLAMetadataState(
                     self.kv_cache_spec, self.vllm_config, self.device, self.nope_indexer, self.kernel_block_size
@@ -1341,12 +1369,18 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos: torch.Tensor,
         sin: torch.Tensor,
         slot_mapping: torch.Tensor,
+        *,
+        attn_metadata: M | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
         torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
     ]:
+        assert slot_mapping.numel() == hidden_states.shape[0], (
+            "SFA Prolog V3 requires one cache index per input token, "
+            f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping.numel()}."
+        )
         assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized for PROLOG_V3"
         assert self.kv_a_layernorm is not None, "kv_a_layernorm must be initialized for PROLOG_V3"
 
@@ -1826,11 +1860,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             gate_hidden_states = gate_hidden_states[:num_input_tokens]
 
         if fused_type != PreprocessType.NATIVE:
-            if fused_type == PreprocessType.PROLOG_V3:
-                assert slot_mapping_sfa.numel() == hidden_states.shape[0], (
-                    "SFA Prolog V3 requires one cache index per input token, "
-                    f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping_sfa.numel()}."
-                )
             # Keep the raw hidden states for the indexer's k path: the fused
             # preprocess below returns new tensors and does not modify this
             # one in place.
@@ -1851,6 +1880,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     # the per-step conversion so all layers of a step share
                     # one Cast kernel (the .to() inside is a no-op on int64).
                     slot_mapping=_int64_kv_slots(slot_mapping_sfa, attn_metadata),
+                    attn_metadata=attn_metadata,
                 )
             else:
                 hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_mlapo(

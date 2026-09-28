@@ -60,12 +60,15 @@ def test_sfa_metadata_uses_reallocated_adaptive_token_shape(
         method="dspark", enable_adaptive_verification=enable_adaptive_verification
     )
     builder.kernel_block_size = 128
+    builder.decode_threshold = 1
+    builder.use_pcp = False
     builder.nope = False
     builder._prepare_parallel_metadata = Mock(side_effect=lambda _, cos, sin, slot, *args: (cos, sin, slot, {}))
     builder.metadata_cls = Mock(return_value=Mock())
     builder.model_config = Mock(get_head_size=Mock(return_value=128))
     builder.attn_mask_builder = Mock()
     common = SimpleNamespace(
+        context_parallel_metadata=None,
         num_reqs=2,
         num_actual_tokens=6,
         num_input_tokens=8,
@@ -73,6 +76,7 @@ def test_sfa_metadata_uses_reallocated_adaptive_token_shape(
         slot_mapping=torch.arange(8),
         block_table_tensor=torch.zeros((2, 1), dtype=torch.int32),
         query_start_loc=torch.tensor([0, 3, 6], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 3, 6], dtype=torch.int32),
         seq_lens=torch.tensor([8, 9], dtype=torch.int32),
         _seq_lens_cpu=torch.tensor([8, 9], dtype=torch.int32),
         seq_lens_cpu=None,
