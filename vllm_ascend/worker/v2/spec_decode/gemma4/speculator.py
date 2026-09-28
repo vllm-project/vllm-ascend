@@ -38,6 +38,7 @@ on Ascend from 89.3% to 94.8%, matching MRv1's greedy output text:
 """
 
 import importlib
+from collections.abc import Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -48,6 +49,7 @@ from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import logger
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import Gemma4Speculator
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
@@ -63,30 +65,6 @@ from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
 
 _vllm_ar_speculator = importlib.import_module("vllm.v1.worker.gpu.spec_decode.autoregressive.speculator")
 _vllm_draft_speculator = importlib.import_module("vllm.v1.worker.gpu.spec_decode.speculator")
-
-
-@contextmanager
-def _inject_seq_lens_np(seq_lens_np):
-    """Inject the real per-request seq_lens into the Ascend metadata build.
-
-    The Ascend ``build_attn_metadata`` takes ``seq_lens_np`` for its CPU-side
-    seq_lens, but the upstream draft base does not pass it, so it falls back
-    to ``max_seq_len`` — an upper bound that breaks the committed-boundary KV
-    view. Inject it the same way ``build_draft_attn_metadata_factory``
-    injects ``positions``: wrap the module symbol for the duration of one
-    build, so every tiling decision is made from the real values.
-    """
-    raw = _vllm_draft_speculator.build_attn_metadata  # type: ignore[attr-defined]
-
-    def wrapped(*args, **kwargs):
-        kwargs["seq_lens_np"] = seq_lens_np
-        return raw(*args, **kwargs)
-
-    _vllm_draft_speculator.build_attn_metadata = wrapped  # type: ignore[attr-defined]
-    try:
-        yield
-    finally:
-        _vllm_draft_speculator.build_attn_metadata = raw  # type: ignore[attr-defined]
 
 
 @contextmanager
@@ -223,12 +201,11 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync: Any = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: Any = None,
-        dp_sync: Any = None,
     ):
         self._g4_committed = None
         with _gemma4_prefill_inputs(self, input_batch, num_sampled, num_rejected):
@@ -245,12 +222,11 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
                 next_prefill_tokens=next_prefill_tokens,
                 temperature=temperature,
                 seeds=seeds,
-                num_tokens_across_dp=num_tokens_across_dp,
+                dp_sync=dp_sync,
                 dummy_run=dummy_run,
                 skip_attn_for_dummy_run=skip_attn_for_dummy_run,
                 mm_inputs=mm_inputs,
                 is_profile=is_profile,
-                dp_sync=dp_sync,
             )
 
     def _prefill(
@@ -306,36 +282,40 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         seq_lens_upper = torch.from_numpy(self._g4_committed)
         # The window is a multi-row query per request, so it must run as a
         # Prefill-state batch like the target verify metadata it replaces;
-        # the Ascend draft override forces DecodeOnly (single-row query
-        # assumption), so call the upstream base builder directly under the
-        # Ascend wrapper + factory with is_prefilling=True.
+        # the Ascend hooks force DecodeOnly (single-row query assumption),
+        # so call the upstream builder directly under the Ascend wrapper +
+        # factory with is_prefilling=True and the committed seq_lens.
+        batch_desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.NONE, num_tokens=num_tokens, num_reqs=num_reqs)
         is_prefilling_true = torch.ones(num_reqs, dtype=torch.bool)
         with (
             build_attn_metadata_wrapper(),
-            build_draft_attn_metadata_factory(self.input_buffers.positions, num_tokens, is_prefilling_true),
-            _inject_seq_lens_np(seq_lens_upper.numpy()),
+            build_draft_attn_metadata_factory(
+                self.input_buffers.positions,
+                num_tokens,
+                is_prefilling_true,
+                seq_lens_cpu=seq_lens_upper,
+                parallel_config=self.draft_vllm_config.parallel_config,
+            ),
         ):
-            attn_metadata = DraftModelSpeculator._build_draft_attn_metadata(
+            attn_metadata = DraftModelSpeculator._build_attn_metadata(
                 self,
                 num_reqs=num_reqs,
-                num_reqs_padded=num_reqs,
-                num_tokens_padded=num_tokens,
+                batch_desc=batch_desc,
+                query_start_loc_np=input_batch.query_start_loc_np,
                 seq_lens_cpu_upper_bound=seq_lens_upper,
                 step=0,
-                query_start_loc_np=input_batch.query_start_loc_np,
             )
         return attn_metadata, slot_mappings
 
-    def _build_draft_attn_metadata(  # type: ignore[override]
+    def _build_attn_metadata(  # type: ignore[override]
         self,
         num_reqs: int,
-        num_reqs_padded: int,
-        num_tokens_padded: int,
+        batch_desc: BatchExecutionDescriptor,
+        query_start_loc_np: np.ndarray,
         seq_lens_cpu_upper_bound: torch.Tensor,
         step: int,
-        num_query_per_req: int = 1,
-        causal: bool = True,
-        query_start_loc_np=None,
+        causal: bool | Mapping[int, bool] = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
     ):
         """Pin the decode-step KV view at the committed boundary.
 
@@ -351,36 +331,38 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
             self.input_buffers.seq_lens[:num_reqs] = committed_t.to(self.input_buffers.seq_lens.dtype).to(
                 self.input_buffers.seq_lens.device
             )
-            with _inject_seq_lens_np(committed):
-                metadata = super()._build_draft_attn_metadata(
+            with build_draft_attn_metadata_factory(
+                self.input_buffers.positions,
+                batch_desc.num_tokens,
+                torch.from_numpy(self.input_batch.is_prefilling_np),
+                seq_lens_cpu=committed_t,
+                parallel_config=self.draft_vllm_config.parallel_config,
+            ):
+                metadata = DraftModelSpeculator._build_attn_metadata(
+                    self,
                     num_reqs=num_reqs,
-                    num_reqs_padded=num_reqs_padded,
-                    num_tokens_padded=num_tokens_padded,
+                    batch_desc=batch_desc,
+                    query_start_loc_np=query_start_loc_np,
                     seq_lens_cpu_upper_bound=committed_t,
                     step=0,
-                    num_query_per_req=num_query_per_req,
                     causal=causal,
-                    query_start_loc_np=query_start_loc_np,
+                    dcp_local_seq_lens=dcp_local_seq_lens,
                 )
-                if metadata:
-                    # The Ascend override this super() chain goes through
-                    # forces DecodeOnly, dispatching the step rows to a
-                    # different attention kernel; MRv1 runs its step rows
-                    # through the same fused-FIA kernel as the window.
-                    # Match it.
-                    for md in metadata.values():
-                        if md is not None:
-                            md.attn_state = AscendAttentionState.SpecDecoding
-                return metadata
-        return super()._build_draft_attn_metadata(
+            if metadata:
+                # MRv1 runs its step rows through the same fused-FIA
+                # kernel as the window rather than a DecodeOnly path.
+                for md in metadata.values():
+                    if md is not None:
+                        md.attn_state = AscendAttentionState.SpecDecoding
+            return metadata
+        return super()._build_attn_metadata(
             num_reqs=num_reqs,
-            num_reqs_padded=num_reqs_padded,
-            num_tokens_padded=num_tokens_padded,
+            batch_desc=batch_desc,
+            query_start_loc_np=query_start_loc_np,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             step=step,
-            num_query_per_req=num_query_per_req,
             causal=causal,
-            query_start_loc_np=query_start_loc_np,
+            dcp_local_seq_lens=dcp_local_seq_lens,
         )
 
     def _update_decode_attn_metadata(self, attn_metadata, step, num_reqs=None):
