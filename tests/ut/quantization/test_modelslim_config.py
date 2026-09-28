@@ -8,6 +8,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
@@ -320,6 +321,59 @@ class TestAscendModelSlimConfig(TestBase):
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
             self.assertIs(method, mock_ascend_linear.return_value)
             mock_ascend_linear.assert_called_once_with(mock_scheme)
+
+    def test_float_moe_forwards_tid2eid_to_select_experts(self):
+        """FLOAT skip must keep the hash table that apply() passes to select_experts."""
+        tid2eid = torch.tensor([[3, 1]], dtype=torch.int32)
+        layer = RoutedExperts.__new__(RoutedExperts)
+        torch.nn.Module.__init__(layer)
+        layer.moe_config = MagicMock()
+        mock_config = MagicMock()
+        mock_config.model_config.hf_config.model_type = "deepseek_v4"
+        mock_config.model_config.hf_text_config.linear_attn_config = None
+
+        def parent_init(self, moe=None):
+            return None
+
+        ascend_config = MagicMock()
+        ascend_config.eplb_config.dynamic_eplb = False
+
+        with (
+            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
+            patch.object(UnquantizedFusedMoEMethod, "__init__", parent_init),
+            patch("vllm_ascend.ops.fused_moe.fused_moe.get_ascend_config", return_value=ascend_config),
+        ):
+            method = self.ascend_config.get_quant_method(layer, "model.layers.0.mlp.experts", tid2eid=tid2eid)
+
+        captured = {}
+
+        class _ExpertSelectionReached(Exception):
+            pass
+
+        def fake_select_experts(*args, **kwargs):
+            captured["tid2eid"] = kwargs["tid2eid"]
+            raise _ExpertSelectionReached
+
+        forward_context = MagicMock()
+        forward_context.input_ids = None
+        with (
+            patch("vllm_ascend.ops.fused_moe.fused_moe.get_forward_context", return_value=forward_context),
+            patch("vllm_ascend.ops.fused_moe.fused_moe.get_moe_num_logical_experts", return_value=8),
+            patch("vllm_ascend.ops.fused_moe.fused_moe.select_experts", side_effect=fake_select_experts),
+        ):
+            with self.assertRaises(_ExpertSelectionReached):
+                method.apply(
+                    layer=layer,
+                    x=torch.empty(1, 4),
+                    use_grouped_topk=False,
+                    top_k=2,
+                    router_logits=torch.empty(1, 8),
+                    renormalize=False,
+                    scoring_func="sqrtsoftplus",
+                )
+
+        self.assertIs(captured["tid2eid"], tid2eid)
 
     def test_get_quant_method_for_attention(self):
         attention_layer = MagicMock(spec=Attention)
