@@ -1,5 +1,17 @@
 # MoE gating TopK + EPLB mapping/recording performance
 
+## Current source status — CANN TopK + two Triton kernels
+
+The current branch now uses CANN `moe_gating_top_k` for scoring/TopK, followed
+by a grid-owned Triton map/record kernel and a single-writer Triton reduction.
+Neither Triton kernel uses global atomics. The isolated Ascend 910B4 target
+passed all 96 business-shape accuracy cases, 14 smoke cases, six edge cases,
+routing-table graph replay, and 24/24 NPU tests (including the large-prefill
+router dispatch) with this exact source. The historical rounds
+below describe earlier implementations and **are not performance claims for
+the current source**. Exact-source `msprof op` timings will be added in a
+follow-up after the call chain is committed.
+
 Environment: Ascend 910B4-1, CANN 9.1.0, PyTorch 2.10.0, torch-npu
 2.10.0.post4, Triton-Ascend 3.2.2, one otherwise idle NPU. Upstream main
 base: `8d4409d6256d8a6729140ddcc0d1889e3f96cdd6`. The isolated test

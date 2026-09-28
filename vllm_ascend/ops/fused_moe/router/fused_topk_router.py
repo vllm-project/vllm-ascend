@@ -30,7 +30,7 @@ DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
 DEEPSEEK_V4_IMAGE_SENTINEL_COUNT = 5
 MAX_FUSED_ROUTING_EXPERTS = 32
 MAX_FUSED_ROUTING_TOP_K = 8
-MAX_FUSED_ROUTING_TOKENS = 4096
+MAX_FUSED_ROUTING_TOKENS = 524288
 
 
 def select_deepseek_v4_vision_experts(
@@ -149,7 +149,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         num_expert_group: int,
         renorm: int,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Fuse the ungrouped EPLB route when load can be counted at routing."""
+        """Use CANN TopK and grid-owned EPLB counting when IDs are final."""
         state = self.eplb_state
         if (
             state is None

@@ -54,7 +54,7 @@ def test_gating_topk_map_record_matches_cann(tokens, experts, top_k, scoring, wi
     torch.testing.assert_close(load, expected_load, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("tokens,experts,top_k", [(64, 8, 6), (128, 16, 8), (256, 32, 8)])
+@pytest.mark.parametrize("tokens,experts,top_k", [(64, 8, 6), (128, 16, 8), (256, 32, 8), (65536, 16, 8)])
 def test_grid_record_matches_moe_returned_counts(tokens, experts, top_k):
     enable_custom_op()
     logits = torch.randn(tokens, experts, dtype=torch.float32, device="npu")
@@ -216,3 +216,36 @@ def test_fused_router_falls_back_for_noncontiguous_inputs(monkeypatch):
     router.eplb_state.local_expert_count = 32
     context.moe_comm_type = MoECommType.ALLTOALL
     assert router._try_small_expert_fused_routing(contiguous_logits, None, 1, 1, 1) is None
+
+
+def test_fused_router_dispatches_large_prefill_and_marks_record_active(monkeypatch):
+    class RecordingState:
+        fused_record_allowed = True
+        fused_map_record_active = False
+        local_expert_start = 0
+        local_expert_count = 16
+        expert_replica_routing_table = torch.zeros((1, 16), dtype=torch.int32)
+        expert_load_view = torch.zeros(16, dtype=torch.int32)
+        should_record_tensor = torch.tensor(True)
+
+    state = RecordingState()
+    router = AscendFusedTopKRouter(top_k=8, global_num_experts=16, eplb_state=state)
+    context = SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER)
+    monkeypatch.setattr("vllm_ascend.ops.fused_moe.router.fused_topk_router._EXTRA_CTX", context)
+    calls = []
+
+    def fake_map_record(logits, bias, table, load, record_enabled, valid_tokens, **kwargs):
+        calls.append((logits.shape, valid_tokens, kwargs["k"]))
+        return torch.empty((valid_tokens, 8)), torch.empty((valid_tokens, 8), dtype=torch.int32)
+
+    monkeypatch.setattr(
+        "vllm_ascend.ops.fused_moe.router.fused_topk_router.moe_gating_topk_map_record",
+        fake_map_record,
+    )
+    logits = torch.empty((65536, 16))
+    result = router._try_small_expert_fused_routing(logits, None, 1, 1, 1)
+    assert result is not None
+    assert result[0].shape == (65536, 8)
+    assert result[1].shape == (65536, 8)
+    assert state.fused_map_record_active
+    assert calls == [((65536, 16), 65536, 8)]

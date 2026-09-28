@@ -1,5 +1,20 @@
 # MoE TopK + map + record: comparison and optimization logic
 
+## Current implementation
+
+The active implementation retains CANN's scoring, correction-bias selection,
+stable TopK, weight renormalization and scaling. Triton kernel 1 maps the
+logical TopK IDs through the runtime EPLB table and accumulates one
+grid-owned physical-expert record over a contiguous token range; it writes a
+distinct `[E]` row per grid. Triton kernel 2 reduces those rows and adds the
+result to the cumulative expert load with one writer. This keeps the proven
+CANN TopK path while removing both the separate map/record launch and global
+atomic contention. The router enables it only for the verified ungrouped,
+single-card/ALLGATHER EPLB path with matching logical and local physical
+expert domains; other modes retain the mainline path. Performance data below
+predates this implementation; exact-source `msprof op` measurements are
+pending and will be added separately.
+
 ## Scope and evidence rules
 
 The four requested implementations are (1) upstream CANN TopK followed by
