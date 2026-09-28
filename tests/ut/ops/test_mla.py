@@ -281,13 +281,13 @@ class TestAscendSFAIndexerBackend(TestBase):
 
         self.assertEqual(mock_scatter.call_count, 2)
         k_call, scale_call = mock_scatter.call_args_list
-        self.assertEqual(k_call.args[0].data_ptr(), k_li.data_ptr())
-        self.assertIs(k_call.args[1], indexer_k_cache)
-        self.assertIs(k_call.args[2], slot_mapping)
+        self.assertEqual(k_call.args[0].data_ptr(), indexer_k_cache.data_ptr())
+        self.assertEqual(k_call.args[1].data_ptr(), slot_mapping.data_ptr())
+        self.assertEqual(k_call.args[2].data_ptr(), k_li.data_ptr())
         self.assertEqual(len(k_call.args), 3)
-        self.assertEqual(scale_call.args[0].data_ptr(), k_li_scale.data_ptr())
-        self.assertIs(scale_call.args[1], indexer_scale_cache)
-        self.assertIs(scale_call.args[2], slot_mapping)
+        self.assertEqual(scale_call.args[0].data_ptr(), indexer_scale_cache.data_ptr())
+        self.assertEqual(scale_call.args[1].data_ptr(), slot_mapping.data_ptr())
+        self.assertEqual(scale_call.args[2].data_ptr(), k_li_scale.data_ptr())
         self.assertEqual(len(scale_call.args), 3)
 
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
@@ -305,9 +305,9 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.write_cache(k_li, None, slot_mapping, MagicMock())
 
         mock_scatter.assert_called_once()
-        self.assertEqual(mock_scatter.call_args.args[0].data_ptr(), k_li.data_ptr())
-        self.assertIs(mock_scatter.call_args.args[1], indexer_k_cache)
-        self.assertIs(mock_scatter.call_args.args[2], slot_mapping)
+        self.assertEqual(mock_scatter.call_args.args[0].data_ptr(), indexer_k_cache.data_ptr())
+        self.assertEqual(mock_scatter.call_args.args[1].data_ptr(), slot_mapping.data_ptr())
+        self.assertEqual(mock_scatter.call_args.args[2].data_ptr(), k_li.data_ptr())
         self.assertEqual(len(mock_scatter.call_args.args), 3)
 
     @patch("vllm_ascend.attention.indexer.get_ascend_config")

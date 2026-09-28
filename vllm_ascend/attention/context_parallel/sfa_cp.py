@@ -184,13 +184,7 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
         )
 
-        kv_outputs = super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
-        if self.enable_sparse_sfa_c8:
-            # C8 defers the cache write until after query projection. Carry
-            # the gathered mapping with its KV, including decode deduplication
-            # in mixed batches, rather than reading the original mapping again.
-            return (*kv_outputs, slots)
-        return kv_outputs
+        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
 
 @dataclass
@@ -526,7 +520,11 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         if kv_cache is not None:
             assert fused_kv_no_split is not None
             if self.enable_sparse_sfa_c8:
-                DeviceOperator.scatter_cache(fused_kv_no_split, kv_cache[0], slot_mapping_sfa)
+                DeviceOperator.scatter_cache(
+                    kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
+                    slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
+                    fused_kv_no_split[: attn_metadata.num_actual_tokens],
+                )
                 k_pe = k_nope = None
             else:
                 k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)

@@ -265,9 +265,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 indexer_attn_metadata.block_size,
             )
         else:
-            # PCP/DSA-CP has already aligned these rows and their slot mapping.
-            k_rows = k_li.view(-1, k_li.shape[-1])
-            DeviceOperator.scatter_cache(k_rows, indexer_k_cache, slot_mapping)
+            DeviceOperator.scatter_cache(
+                indexer_k_cache.view(-1, k_li.shape[-1]),
+                slot_mapping.view(-1, 1),
+                k_li.view(-1, k_li.shape[-1]),
+            )
         if self.enable_sparse_li_c8:
             assert k_li_scale is not None
             indexer_scale_cache = self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT]
@@ -282,8 +284,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     indexer_attn_metadata.block_size,
                 )
             else:
-                scale_rows = k_li_scale.view(-1, k_li_scale.shape[-1])
-                DeviceOperator.scatter_cache(scale_rows, indexer_scale_cache, slot_mapping)
+                DeviceOperator.scatter_cache(
+                    indexer_scale_cache.view(-1, k_li_scale.shape[-1]),
+                    slot_mapping.view(-1, 1),
+                    k_li_scale.view(-1, k_li_scale.shape[-1]),
+                )
 
     def _use_c8_reshape_optim(self) -> bool:
         """Whether this indexer can use the LI C8 cache-write operator."""

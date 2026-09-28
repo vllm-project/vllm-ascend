@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
 import torch_npu
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl, AscendSFAPCPImpl
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, PreprocessType
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.device import device_op
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -66,9 +66,11 @@ def test_platform_dispatch_keeps_destination_storage(monkeypatch, family, dtype,
     )
     if layout == "block_gap":
         with pytest.raises(RuntimeError, match="view size is not compatible"):
-            device_op.get_device_adaptor().scatter_cache(key, cache, slots)
+            device_op.get_device_adaptor().scatter_cache(cache.view(-1, key.shape[-1]), slots.view(-1, 1), key)
     else:
-        assert device_op.get_device_adaptor().scatter_cache(key, cache, slots) is None
+        assert (
+            device_op.get_device_adaptor().scatter_cache(cache.view(-1, key.shape[-1]), slots.view(-1, 1), key) is None
+        )
         reference = torch.as_strided(before, cache.shape, cache.stride(), cache.storage_offset())
         reference.view(-1, 128)[slots[:2049].long()] = key[:2049]
     torch.testing.assert_close(backing, before, rtol=0, atol=0)
@@ -89,33 +91,54 @@ def test_missing_operator_falls_back(monkeypatch, family):
         side_effect=lambda target, indices, updates: target.index_copy_(0, indices.flatten().long(), updates)
     )
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
-    assert device_op.get_device_adaptor().scatter_cache(key, cache, slots) is None
+    assert device_op.get_device_adaptor().scatter_cache(cache.view(-1, key.shape[-1]), slots.view(-1, 1), key) is None
     scatter.assert_called_once()
     pa.assert_not_called()
     torch.testing.assert_close(cache.view(-1, 128)[:2049], key)
     assert not cache.view(-1, 128)[2049:].count_nonzero()
 
 
-@pytest.mark.parametrize("flat_cache,column_slots", [(True, False), (False, True)])
-def test_fast_shape_guard_uses_generic_scatter(monkeypatch, flat_cache, column_slots):
-    cache = torch.zeros(2, 4, 1, 16)
-    if flat_cache:
-        cache = cache.view(-1, 16)
-    key = torch.arange(3 * 16, dtype=cache.dtype).view(3, 16)
-    slots = torch.tensor([2, 4, 6], dtype=torch.int32)
-    if column_slots:
-        slots = slots.view(-1, 1)
-    fast = Mock()
-    scatter = Mock(
-        side_effect=lambda target, indices, updates: target.index_copy_(0, indices.flatten().long(), updates)
-    )
-    monkeypatch.setattr(device_op.BaseDeviceAdaptor, "_scatter_cache", fast)
-    monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
-    assert device_op.BaseDeviceAdaptor.scatter_cache(key, cache, slots) is None
+@pytest.mark.parametrize("unsupported", ["target_rank", "index_rank", "update_rank", "row_count", "dtype"])
+def test_fast_shape_guard_preserves_generic_arguments(monkeypatch, unsupported):
+    monkeypatch.setattr(device_op, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
+    var = torch.zeros(8, 16)
+    indices = torch.tensor([[2], [4], [6]], dtype=torch.int32)
+    updates = torch.ones(3, 16)
+    if unsupported == "target_rank":
+        var = var.view(2, 4, 16)
+    elif unsupported == "index_rank":
+        indices = indices.flatten()
+    elif unsupported == "update_rank":
+        updates = updates.unsqueeze(1)
+    elif unsupported == "row_count":
+        updates = updates[:2]
+    else:
+        updates = updates.to(torch.float16)
+    fast, generic = Mock(), Mock()
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", fast, raising=False)
+    monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", generic, raising=False)
+    device_op.BaseDeviceAdaptor.scatter_cache(var, indices, updates)
     fast.assert_not_called()
-    scatter.assert_called_once()
-    torch.testing.assert_close(cache.view(-1, 16)[[2, 4, 6]], key[:3])
-    assert not cache.view(-1, 16)[[0, 1, 3, 5, 7]].count_nonzero()
+    generic.assert_called_once()
+    assert all(actual is original for actual, original in zip(generic.call_args.args, (var, indices, updates)))
+
+
+@pytest.mark.parametrize("fast_available", [False, True])
+def test_scatter_passes_exact_tensor_objects_to_selected_operator(monkeypatch, fast_available):
+    monkeypatch.setattr(device_op, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5))
+    var = torch.zeros(9, 32)[1:, :16]
+    indices = torch.tensor([2, -1, 4, 6], dtype=torch.int32).view(-1, 1)
+    updates = torch.arange(128).float().view(4, 32)[:, ::2]
+    fast, generic = Mock(), Mock()
+    monkeypatch.setattr(
+        torch.ops._C_ascend, "npu_scatter_nd_update_sk", fast if fast_available else None, raising=False
+    )
+    monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", generic, raising=False)
+    device_op.BaseDeviceAdaptor.scatter_cache(var, indices, updates)
+    selected, unused = (fast, generic) if fast_available else (generic, fast)
+    selected.assert_called_once()
+    unused.assert_not_called()
+    assert all(actual is original for actual, original in zip(selected.call_args.args, (var, indices, updates)))
 
 
 @pytest.mark.parametrize("family", [AscendDeviceType.A3, AscendDeviceType.A5])
@@ -128,9 +151,9 @@ def test_fast_operator_error_is_not_retried(monkeypatch, family):
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
     with pytest.raises(RuntimeError, match="operator failed"):
         device_op.get_device_adaptor().scatter_cache(
+            torch.zeros(4, 16, dtype=torch.int8),
+            torch.zeros(1, 1, dtype=torch.int32),
             torch.ones(1, 16, dtype=torch.int8),
-            torch.zeros(1, 4, 1, 16, dtype=torch.int8),
-            torch.zeros(1, dtype=torch.int32),
         )
     fast.assert_called_once()
     scatter.assert_not_called()
@@ -170,7 +193,7 @@ def test_fp8_cache_dispatch_preserves_bytes(monkeypatch, family, dtype, layout):
     monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", pa, raising=False)
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
 
-    assert device_op.get_device_adaptor().scatter_cache(key, cache, slots) is None
+    assert device_op.get_device_adaptor().scatter_cache(cache.view(-1, key.shape[-1]), slots.view(-1, 1), key) is None
 
     assert sk.call_count == int(family == AscendDeviceType.A5)
     assert scatter.call_count == int(family != AscendDeviceType.A5)
@@ -200,9 +223,10 @@ def test_main_cache_write_delegates_with_own_slots(tokens, state, producer, cons
     ):
         impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)
     store.assert_called_once()
-    assert store.call_args.args[1] is cache and store.call_args.args[2] is slots
-    assert len(store.call_args.args) == 3
-    assert store.call_args.args[0] is key
+    target, indices, updates = store.call_args.args
+    assert target.data_ptr() == cache.data_ptr() and target.shape == (32 * 128, 656)
+    assert indices.data_ptr() == slots.data_ptr() and indices.shape == (tokens, 1)
+    assert updates.data_ptr() == key.data_ptr() and updates.shape == (tokens, 656)
     scatter.assert_not_called()
 
 
@@ -224,9 +248,9 @@ def test_native_main_c8_cache_packs_all_rows_and_preserves_padding(monkeypatch, 
         valid = indices >= 0
         target.index_copy_(0, indices[valid], updates[valid])
 
-    def try_fast(key, target, indices):
+    def try_fast(target, indices, updates):
         if fast_available:
-            write(target.view(-1, 656), indices, key)
+            write(target, indices, updates)
         return fast_available
 
     fast = Mock(side_effect=try_fast)
@@ -242,113 +266,6 @@ def test_native_main_c8_cache_packs_all_rows_and_preserves_padding(monkeypatch, 
     reference.view(-1, 656)[slots[:tokens].long()] = packed[:tokens]
     torch.testing.assert_close(cache, reference, rtol=0, atol=0)
     fast.assert_called_once()
-    assert generic.call_count == int(not fast_available)
-
-
-@pytest.mark.parametrize("fast_available", [False, True])
-@pytest.mark.parametrize(
-    "num_decode,raw_slots,gathered_slots",
-    [
-        (0, [0, 1, 2, 3], [0, 1, 2, 3]),
-        (1, [0, 1, 0, 2], [0, 1, 2]),
-        (1, [0, 1, -1, 0, 2, -1], [0, 1, -1, 2, -1]),
-        (2, [0, 1, 0, 1], [0, 1]),
-    ],
-    ids=["prefill", "mixed", "mixed-padding", "decode"],
-)
-def test_pcp_c8_forward_writes_gathered_rows_with_their_slots(
-    monkeypatch, fast_available, num_decode, raw_slots, gathered_slots
-):
-    # Exercise forward -> PCP exec_kv -> base exec_kv -> packing -> adaptor.
-    # Model the upstream PCP gather boundary, including replicated decode
-    # slots removed from the mixed-batch mapping. Only kernels/collectives
-    # and unrelated projections/attention are mocked.
-    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
-    impl.has_indexer = False
-    impl.skip_topk = True
-    impl.layer_name = "model.layers.2.self_attn.attn"
-    impl.layerwise_kv_cache_hook = impl.g_proj = None
-    impl.enable_sparse_sfa_c8 = True
-    impl.preprocess_type = PreprocessType.NATIVE
-    impl.q_lora_rank, impl.kv_lora_rank, impl.qk_rope_head_dim = 2, 4, 2
-    impl.num_kv_heads = 1
-    impl.c8_cache_dtype = torch.int8
-    impl.sfa_qsfa_tile_size = 128
-    impl.sfa_qsfa_packed_kv_head_dim = 8
-    impl.kv_a_layernorm = SimpleNamespace(weight=torch.ones(4), variance_epsilon=1e-5)
-    slots = torch.tensor(raw_slots, dtype=torch.int32)
-    aligned_slots = torch.tensor(gathered_slots, dtype=torch.int32)
-    local_rows = len(raw_slots) // 2
-    hidden = torch.zeros(local_rows, 4)
-    meta = metadata(
-        num_actual_tokens=2,
-        num_input_tokens=local_rows,
-        num_decode_tokens=num_decode,
-        cos=hidden,
-        sin=hidden,
-        pcp_slot_mapping=slots,
-    )
-    gathered = torch.arange(len(gathered_slots) * 6).reshape(-1, 6).float()
-    packed = torch.arange(len(gathered_slots) * 8).reshape(-1, 8).to(torch.int8)
-    k_nope, k_pe, scale = packed.split([4, 2, 2], dim=-1)
-    cache = torch.full((2, 4, 1, 8), -7, dtype=torch.int8)
-    impl._compose_sfa_kv_cache = Mock(return_value=(cache,))
-    impl._get_indexer_attn_metadata = Mock(return_value=None)
-    impl._get_parallel_forward_context = Mock(
-        return_value=SimpleNamespace(
-            actual_seq_lengths_query=torch.tensor([local_rows]),
-            actual_seq_lengths_key=torch.tensor([4]),
-            kv_slot_mapping=slots,
-            gather_full_o_proj=False,
-            topk_num_tokens=local_rows,
-        )
-    )
-    impl._prepare_native_hidden_states = Mock(return_value=hidden)
-    impl.fused_qkv_a_proj = Mock(return_value=(torch.zeros(local_rows, 8),))
-    impl.q_a_layernorm = Mock(side_effect=lambda x: x)
-    impl._q_proj_and_k_up_proj = Mock(return_value=(hidden, hidden))
-    impl.rope_single = Mock(return_value=hidden)
-    impl._record_query_gather_context = Mock()
-    impl._get_indexcache_topk_indices = Mock(return_value=torch.zeros(local_rows, 1, dtype=torch.int32))
-    impl._execute_sparse_flash_attention_process = Mock(return_value=hidden)
-    impl._v_up_proj = Mock(return_value=hidden)
-    impl._finalize_o_proj = Mock()
-
-    def write(target, indices, updates):
-        torch.testing.assert_close(indices.flatten(), aligned_slots)
-        torch.testing.assert_close(updates, packed)
-        valid = indices.flatten() >= 0
-        target[indices.flatten()[valid].long()] = updates[valid]
-
-    def try_fast(key, target, indices):
-        if fast_available:
-            write(target.view(-1, 8), indices, key)
-        return fast_available
-
-    generic = Mock(side_effect=write)
-    monkeypatch.setattr("vllm_ascend.attention.sfa_v1.DeviceOperator", device_op.BaseDeviceAdaptor)
-    monkeypatch.setattr(device_op.BaseDeviceAdaptor, "_scatter_cache", Mock(side_effect=try_fast))
-    monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", generic, raising=False)
-    with (
-        patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp._gather_prefill_cache_inputs",
-            return_value=((gathered, hidden, hidden), aligned_slots),
-        ) as gather,
-        patch("vllm_ascend.attention.sfa_v1.custom_kv_rmsnorm_rope", return_value=(k_pe, k_nope, scale)) as quantize,
-        patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector"),
-        patch("vllm_ascend.attention.sfa_v1.notify_kv_cache_written"),
-        patch("vllm_ascend.attention.sfa_v1.attention_transfer_window", MagicMock()),
-        patch("vllm_ascend.attention.sfa_v1.maybe_save_kv_layer_to_connector"),
-    ):
-        impl.forward(impl.layer_name, hidden, (cache,), meta, output=torch.empty_like(hidden))
-
-    assert gather.call_args.args[1] is slots
-    assert gather.call_args.args[2] == num_decode
-    torch.testing.assert_close(quantize.call_args.args[0].reshape(-1, 6), gathered)
-    reference = torch.full_like(cache, -7)
-    valid = aligned_slots >= 0
-    reference.view(-1, 8)[aligned_slots[valid].long()] = packed[valid]
-    torch.testing.assert_close(cache, reference)
     assert generic.call_count == int(not fast_available)
 
 
