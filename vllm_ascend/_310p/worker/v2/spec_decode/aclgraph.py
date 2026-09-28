@@ -37,6 +37,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
+from vllm_ascend.compilation.updatable_graph import SharedSource, UpdatableGraph
 from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
@@ -47,6 +48,30 @@ from vllm_ascend.worker.v2.utils import communicator_switch
 
 class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
     """310P draft FULL: SpecDecoding prefill + per-step decode graphs."""
+
+    def _updatable_graph_replay(self, desc: BatchExecutionDescriptor, draft_attn_metadatas):
+        """Skip empty update↔compute handshake on 310P draft FULL prefill.
+
+        Parent ``AutoRegressiveAclGraphManager.run_fullgraph`` always passes
+        ``draft_attn_metadatas``. Dropping that argument raises TypeError on
+        the first MTP draft-prefill FULL replay.
+        """
+        graph = self.graphs[desc]
+        assert isinstance(graph, UpdatableGraph)
+        fia_params = self.speculator.build_fia_params(
+            desc.num_reqs,
+            draft_attn_metadatas[0],
+            self.is_draft_model_prefill,
+        )
+        resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
+        # Empty tasks (typical on 310P): no host-side graph update work.
+        if resolved_tasks:
+            self.update_stream.wait_stream(torch.npu.current_stream())
+        # Skip AutoRegressiveAclGraphManager.run_fullgraph (would recurse).
+        ret = super(AutoRegressiveAclGraphManager, self).run_fullgraph(desc)
+        if resolved_tasks:
+            graph.update(self.update_stream, resolved_tasks)
+        return ret
 
     def capture(
         self,
@@ -217,8 +242,8 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
             "ACL graph replay is active for the 310P draft model (%s, logged once).",
             "prefill" if self.is_draft_model_prefill else "per-step decode",
         )
-        # Ensure H2D into capture-stable buffers is visible before replay.
-        torch.npu.current_stream().synchronize()
+        # Refresh capture-stable seq_lens on the compute stream; same-stream
+        # ordering makes a full synchronize() before replay unnecessary.
         ms = self.speculator.model_state
         runtime_seq_lens = self.speculator.input_buffers.seq_lens
         refresh = getattr(ms, "_refresh_capture_seq_lens", None)

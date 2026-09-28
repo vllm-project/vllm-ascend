@@ -94,9 +94,14 @@ test_cases:
     model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
     envs:
       <<: *envs
-      DYNAMIC_EPLB: "true"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--enable-eplb"
+      - "--eplb-config"
+      - '{"window_size":600,"step_interval":50,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
+      - "--additional-config"
+      - '{"eplb_config":{"load_collection_phase":"all"}}'
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     benchmarks:
