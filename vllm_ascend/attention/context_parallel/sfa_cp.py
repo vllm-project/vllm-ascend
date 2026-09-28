@@ -968,7 +968,7 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
         vllm_config: VllmConfig,
         device: torch.device,
         metadata_cls: type[AscendSFAMetadata] | None = None,
-        supports_dcp_with_varlen: bool = False,
+        supports_dcp_with_varlen: bool = True,
     ):
         super().__init__(
             kv_cache_spec,
@@ -1663,6 +1663,16 @@ class AscendSFADSADCPMetadataBuilder(
 
 class AscendSFADSADCPImpl(AscendSFADCPImpl, AscendSFADSACPImpl):
     """Composes DCP collectives around the DSA-CP SFA implementation."""
+
+    def _get_indexer_attn_q_gather_handle(
+        self, attn_metadata: AscendSFADCPMetadata
+    ) -> torch.distributed.Work | None:
+        if self._has_prefill(attn_metadata):
+            return None
+        assert attn_metadata.dcp_context is not None
+        gather_context = attn_metadata.dcp_context.gather_context
+        return gather_context.handle if gather_context is not None else None
+
 
 
 def resolve_sfa_metadata_builder(

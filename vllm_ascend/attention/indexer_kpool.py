@@ -454,6 +454,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         k_hidden_states: torch.Tensor,
         indexer_metadata: Any,
         compute_topk: bool = True,
+        attn_q_gather_handle: torch.distributed.Work | None = None,
     ) -> torch.Tensor | None:
         if not isinstance(indexer_metadata, AscendIndexerKPoolMetadata):
             raise TypeError("GLM KPool backend requires AscendIndexerKPoolMetadata.")

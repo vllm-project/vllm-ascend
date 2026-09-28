@@ -342,10 +342,21 @@ def build_attn_metadata(
     dcp_local_seq_lens_cpu = None
     if dcp_local_seq_lens is not None:
         if parallel_config is None:
-            vllm_config = get_current_vllm_config_or_none()
-            if vllm_config is not None:
-                parallel_config = vllm_config.parallel_config
-        assert parallel_config is not None, "DCP metadata requires a parallel config argument or current vLLM config."
+            # Draft graph capture has no current vLLM config, but its attention
+            # builders retain the draft config used to create their KV layout.
+            for groups in attn_groups:
+                for group in groups:
+                    builder_config = getattr(group.get_metadata_builder(0), "vllm_config", None)
+                    if builder_config is not None:
+                        parallel_config = builder_config.parallel_config
+                        break
+                if parallel_config is not None:
+                    break
+            if parallel_config is None:
+                vllm_config = get_current_vllm_config_or_none()
+                if vllm_config is not None:
+                    parallel_config = vllm_config.parallel_config
+        assert parallel_config is not None, "DCP metadata requires an attention builder or vLLM parallel config."
         dcp_local_seq_lens_cpu = get_dcp_local_seq_lens(
             seq_lens_cpu,
             dcp_size=parallel_config.decode_context_parallel_size,

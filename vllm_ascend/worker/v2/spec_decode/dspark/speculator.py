@@ -40,6 +40,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
@@ -95,12 +96,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         # It needs this speculator to update full-graph params, so set it here.
         self.query_cudagraph_manager.speculator = self
         self.query_cudagraph_manager.update_stream = self.update_stream
-
-    def capture(self) -> None:
-        # DFlash builds draft capture metadata outside its forward context.
-        # Ascend needs the draft's physical DCP layout for CPU local lengths.
-        with set_current_vllm_config(self.attn_vllm_config):
-            super().capture()
 
     def set_attn(
         self,
@@ -262,6 +257,25 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
             decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
+
+    @torch.inference_mode()
+    def _run_model(
+        self,
+        num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    ) -> torch.Tensor:
+        hidden_states = super()._run_model(
+            num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
+        )
+        # PCP replicas must propose identical tokens for the next joint target
+        # verification. Share the backbone output before sequential Markov sampling.
+        hidden_states, _ = AscendPCPManager.broadcast_replicated_hidden_states(
+            hidden_states, hidden_states, num_tokens, replicated_pcp=self.replicated_pcp
+        )
+        return hidden_states
 
     def propose(
         self,

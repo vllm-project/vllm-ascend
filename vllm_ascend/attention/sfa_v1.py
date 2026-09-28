@@ -1601,6 +1601,9 @@ class AscendSFAImpl(MLAAttentionImpl):
     ) -> None:
         return
 
+    def _get_indexer_attn_q_gather_handle(self, attn_metadata: M) -> torch.distributed.Work | None:
+        return None
+
     def _parallel_query_gather_dim(self) -> int:
         """Dimension restored by an outer DCP query gather."""
         return 1
@@ -1969,6 +1972,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_hidden_states,
                 indexer_attn_metadata,
                 compute_topk=not self.skip_topk,
+                attn_q_gather_handle=self._get_indexer_attn_q_gather_handle(attn_metadata),
             )
             if self.skip_topk:
                 topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
