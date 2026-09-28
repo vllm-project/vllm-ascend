@@ -5,10 +5,6 @@
 
 from __future__ import annotations
 
-import threading
-from collections import deque
-from dataclasses import dataclass
-
 import torch
 from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
     ConsumerMemoryPool,
@@ -22,84 +18,12 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
-ASCEND_DIRECT_MEMORY_ALIGNMENT = 2 * 1024 * 1024  # 2 MiB
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
+    ASCEND_DIRECT_MEMORY_ALIGNMENT,
+    AscendBounceArena,
+)
 
 logger = init_logger(__name__)
-
-
-@dataclass(frozen=True)
-class _BounceLease:
-    offset: int
-    nbytes: int
-    allocated_nbytes: int
-
-
-class _BounceLeaseManager:
-    """Manage complete wave leases over one existing bounce arena."""
-
-    def __init__(self, capacity: int, alignment: int = 256) -> None:
-        self.capacity = capacity
-        self.alignment = alignment
-        self._regions = ContiguousAllocator(capacity, alignment)
-        self._condition = threading.Condition()
-        self._waiters: deque[object] = deque()
-        self._active: dict[int, int] = {}
-
-    def acquire(self, nbytes: int) -> _BounceLease | None:
-        if nbytes == 0:
-            return None
-
-        allocated_nbytes = round_up(nbytes, self.alignment)
-        if allocated_nbytes > self.capacity:
-            raise ValueError(
-                f"bounce lease requires {allocated_nbytes} bytes but arena capacity is {self.capacity} bytes"
-            )
-
-        waiter = object()
-
-        with self._condition:
-            self._waiters.append(waiter)
-            queued = True
-
-            try:
-                while True:
-                    if self._waiters[0] is waiter:
-                        region = self._regions.allocate(nbytes)
-
-                        if region is not None:
-                            offset, size = region
-                            self._waiters.popleft()
-                            queued = False
-                            self._active[offset] = size
-                            self._condition.notify_all()
-
-                            return _BounceLease(
-                                offset=offset,
-                                nbytes=nbytes,
-                                allocated_nbytes=size,
-                            )
-                    self._condition.wait()
-            finally:
-                if queued:
-                    self._waiters.remove(waiter)
-                    self._condition.notify_all()
-
-    def release(self, lease: _BounceLease | None) -> None:
-        if lease is None:
-            return
-
-        with self._condition:
-            allocated_nbytes = self._active.get(lease.offset)
-
-            if allocated_nbytes != lease.allocated_nbytes:
-                raise ValueError("bounce lease is not active")
-
-            del self._active[lease.offset]
-            self._regions.free(
-                lease.offset,
-                lease.allocated_nbytes,
-            )
-            self._condition.notify_all()
 
 
 class AscendContiguousAllocator(ContiguousAllocator):
@@ -131,13 +55,6 @@ class AscendContiguousAllocator(ContiguousAllocator):
 class AscendProducerAllocator(AscendContiguousAllocator):
     """Own the single registered producer slab.
 
-    Ascend direct registration requires a 2 MiB-aligned start address. A source
-    tensor may begin before the first aligned address contained in its storage,
-    so registering the tensor in place could cover memory that the storage does
-    not own. The fallback path therefore splits such a source into an
-    unregistrable prefix and an aligned suffix. It copies the prefix into a
-    pre-registered bounce arena and registers the suffix directly.
-
     The producer normally allocates one registered slab containing both the
     primary staging pool and the shared bounce arena::
 
@@ -145,13 +62,6 @@ class AscendProducerAllocator(AscendContiguousAllocator):
         | staging pool         | alignment | shared bounce arena |
         |                      | padding   |                     |
         +----------------------+-----------+---------------------+
-
-    Requests use the staging pool first. If a batch does not fit, transfer
-    waves lease space from the shared bounce arena for their prefixes and use
-    direct registration for their suffixes. Each fragment retains its
-    destination offset, so Mooncake reconstructs the original tensor byte order
-    in the consumer pool. A wave releases its bounce lease only after all
-    writes using those bytes have finished.
 
     If allocating or registering the full slab fails, a producer with a
     nonzero bounce capacity retries once with the same allocator configured for
@@ -288,22 +198,20 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
         super().__init__(capacity, transfer)
         self._allocator = allocator
         self._producer_allocator = allocator
-        self._bounce_lease_manager = _BounceLeaseManager(allocator.bounce_capacity)
+        self._bounce_arena = AscendBounceArena(
+            allocator,
+            allocator.bounce_capacity,
+            self._local,
+        )
 
     @property
-    def bounce_tensor(self) -> torch.Tensor | None:
-        return self._producer_allocator.bounce_tensor
+    def bounce_arena(self) -> AscendBounceArena:
+        return self._bounce_arena
 
     def ensure_prepared(self, device: torch.device) -> None:
         """Ensure that the shared producer slab is allocated and registered."""
         with self._lock:
             self._producer_allocator.prepare(device, self._transfer)
-
-    def acquire_bounce(self, nbytes: int) -> _BounceLease | None:
-        return self._bounce_lease_manager.acquire(nbytes)
-
-    def release_bounce(self, lease: _BounceLease | None) -> None:
-        self._bounce_lease_manager.release(lease)
 
     def stage(self, tensors: list[torch.Tensor]) -> StagedSources | None:
         """Stage on an NPU stream without an upstream copy hook."""
@@ -338,41 +246,3 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
 
         stream.synchronize()
         return StagedSources(staged, regions)
-
-    def copy_to_bounce(
-        self,
-        lease: _BounceLease,
-        copies: list[tuple[torch.Tensor, int, int]],
-    ) -> int:
-        """Pack prefixes into a bounce lease and return its base address.
-
-        Each copy is ``(source, offset within the lease, nbytes)``.
-        """
-        bounce = self.bounce_tensor
-        if bounce is None:
-            raise RuntimeError("Mooncake bounce arena is not prepared")
-        assert copies
-
-        stream = getattr(self._local, "stream", None)
-        if stream is None:
-            stream = torch.npu.Stream(device=bounce.device)
-            self._local.stream = stream
-
-        # The same source-readiness event also guards this fallback copy.
-        with torch.npu.stream(stream):
-            for source, bounce_offset, nbytes in copies:
-                assert bounce_offset >= 0
-                assert 0 < nbytes <= source.nbytes
-                assert bounce_offset + nbytes <= lease.nbytes
-
-                source_prefix = source.view(torch.uint8).view(-1).narrow(0, 0, nbytes)
-                destination = bounce.narrow(
-                    0,
-                    lease.offset + bounce_offset,
-                    nbytes,
-                )
-                destination.copy_(source_prefix, non_blocking=True)
-
-        stream.synchronize()
-
-        return bounce.data_ptr() + lease.offset

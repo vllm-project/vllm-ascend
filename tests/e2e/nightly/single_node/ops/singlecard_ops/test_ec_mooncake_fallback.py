@@ -17,8 +17,10 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("torch_npu")
 
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (  # noqa: E402
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (  # noqa: E402
     ASCEND_DIRECT_MEMORY_ALIGNMENT,
+)
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (  # noqa: E402
     AscendContiguousAllocator,
     AscendProducerAllocator,
     AscendProducerMemoryPool,
@@ -55,16 +57,16 @@ def test_real_npu_bounce_copy_is_byte_tight_and_visible():
 
     try:
         allocator.prepare(device, transfer)
-        bounce = pool.bounce_tensor
+        bounce = pool.bounce_arena.tensor
         assert bounce is not None
         bounce.zero_()
 
         first = _byte_pattern(300, device)
         second = _byte_pattern(500, device).flip(0).contiguous()
-        lease = pool.acquire_bounce(800)
+        lease = pool.bounce_arena.acquire(800)
         assert lease is not None
 
-        address = pool.copy_to_bounce(
+        address = pool.bounce_arena.copy(
             lease,
             [(first, 0, first.nbytes), (second, first.nbytes, second.nbytes)],
         )
@@ -76,7 +78,7 @@ def test_real_npu_bounce_copy_is_byte_tight_and_visible():
         assert int(bounce[lease.offset + expected.nbytes].cpu()) == 0
     finally:
         if lease is not None:
-            pool.release_bounce(lease)
+            pool.bounce_arena.release(lease)
         allocator.close(transfer)
         transfer.close()
 
@@ -114,9 +116,9 @@ def test_real_mooncake_bounce_prefix_and_registered_interior_suffix():
         destination.zero_()
 
         prefix_nbytes = 300
-        lease = producer_pool.acquire_bounce(prefix_nbytes)
+        lease = producer_pool.bounce_arena.acquire(prefix_nbytes)
         assert lease is not None
-        bounce_address = producer_pool.copy_to_bounce(
+        bounce_address = producer_pool.bounce_arena.copy(
             lease,
             [(source, 0, prefix_nbytes)],
         )
@@ -132,7 +134,7 @@ def test_real_mooncake_bounce_prefix_and_registered_interior_suffix():
         assert torch.equal(destination.cpu(), source.cpu())
     finally:
         if lease is not None:
-            producer_pool.release_bounce(lease)
+            producer_pool.bounce_arena.release(lease)
         producer_allocator.close(producer_transfer)
         consumer_allocator.close(consumer_transfer)
         producer_transfer.close()

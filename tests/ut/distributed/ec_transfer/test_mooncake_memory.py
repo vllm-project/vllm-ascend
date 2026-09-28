@@ -1,3 +1,4 @@
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -9,13 +10,15 @@ import torch
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import (
     memory as memory_module,
 )
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
+    _BounceLease,
+    _BounceLeaseManager,
+)
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
     AscendConsumerMemoryPool,
     AscendContiguousAllocator,
     AscendProducerAllocator,
     AscendProducerMemoryPool,
-    _BounceLease,
-    _BounceLeaseManager,
 )
 
 _MIB = 1024 * 1024
@@ -106,7 +109,7 @@ def test_producer_copies_to_staging_on_npu_stream():
     producer = object.__new__(AscendProducerMemoryPool)
     producer._allocator = allocator
     producer._transfer = MagicMock()
-    producer._lock = memory_module.threading.Lock()
+    producer._lock = threading.Lock()
     producer._local = SimpleNamespace(stream=None)
     producer._free_regions = MagicMock()
 
@@ -376,16 +379,16 @@ def test_copy_to_bounce_packs_bytes_within_lease():
     source_b = torch.tensor([4, 5, 6], dtype=torch.uint8)
 
     with (
-        patch("vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory.torch.npu.Stream") as stream_cls,
-        patch("vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory.torch.npu.stream") as stream_context,
+        patch("vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce.torch.npu.Stream") as stream_cls,
+        patch("vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce.torch.npu.stream") as stream_context,
     ):
         stream = stream_cls.return_value
-        address = pool.copy_to_bounce(
+        address = pool.bounce_arena.copy(
             lease,
             [(source_a, 0, 2), (source_b, 2, 3)],
         )
 
-    bounce = pool.bounce_tensor
+    bounce = pool.bounce_arena.tensor
     assert bounce is not None
     assert address == bounce.data_ptr() + lease.offset
     assert bounce.tolist() == [0, 0, 0, 0, 1, 2, 4, 5, 6, 0, 0, 0, 0, 0, 0, 0]
@@ -499,15 +502,15 @@ def test_producer_pool_shares_one_bounce_arena():
         allocator,
     )
 
-    assert pool.bounce_tensor is None
+    assert pool.bounce_arena.tensor is None
 
-    first = pool.acquire_bounce(300)
-    second = pool.acquire_bounce(500)
+    first = pool.bounce_arena.acquire(300)
+    second = pool.bounce_arena.acquire(500)
 
     assert first is not None
     assert second is not None
     assert first.offset == 0
     assert second.offset == 512
 
-    pool.release_bounce(first)
-    pool.release_bounce(second)
+    pool.bounce_arena.release(first)
+    pool.bounce_arena.release(second)
