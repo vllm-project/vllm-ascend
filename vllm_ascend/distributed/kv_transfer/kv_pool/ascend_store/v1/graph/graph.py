@@ -3,34 +3,24 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
 from typing import Any
 
 from vllm.logger import logger
 
-from .execution.io import BindingEvidence, MissingFilter, RemoteObjectObservation, StoreEvidence
-from .execution.timeline import LoadCompletion, LoadTransfer, StoreCompletion, StoreTransfer
-from .graph.elements import BindingBatch, KVBinding, RemoteObjectBatch
-from .graph.evaluation import KVPoolStepEvaluation
-from .graph.projection import ConsumerProjection, KVProjection
-from .graph.reachability import ChunkAvailability, GroupAvailability, KVReachability
-from .graph.topology import KVTopology
-from .protocol.lookup import LookupRequest, LookupResult
-from .protocol.transfer import KVTransferStep, LoadCommand, StoreCommand
+from ..execution.io import BindingEvidence, MissingFilter, RemoteObjectObservation, StoreEvidence
+from ..execution.timeline import LoadCompletion, LoadTransfer, StoreCompletion, StoreTransfer
+from ..protocol.lookup import LookupRequest, LookupResult
+from ..protocol.transfer import KVTransferStep, LoadCommand, StoreCommand
+from .elements import BindingBatch, KVBinding, RemoteObjectBatch
+from .evaluation import KVPoolStepEvaluation, LoadResult
+from .projection import ConsumerProjection, KVProjection
+from .reachability import ChunkAvailability, GroupAvailability, KVReachability
+from .topology import KVTopology
 
 ReadabilityObserver = Callable[[RemoteObjectBatch], tuple[RemoteObjectObservation, ...]]
 PresenceObserver = Callable[[list[str]], tuple[int, ...]]
 LoadBindings = Callable[[tuple[KVBinding, ...]], tuple[BindingEvidence, ...]]
 StoreBindings = Callable[[tuple[BindingBatch, ...]], StoreEvidence]
-
-
-@dataclass(frozen=True, slots=True)
-class LoadResult:
-    """Terminal Load facts consumed through vLLM's split completion hooks."""
-
-    completed_request_ids: frozenset[str]
-    failed_request_ids: frozenset[str]
-    failed_block_ids: frozenset[int]
 
 
 class KVPoolGraph:
