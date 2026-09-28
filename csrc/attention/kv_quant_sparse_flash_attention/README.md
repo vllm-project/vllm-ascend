@@ -257,10 +257,10 @@ rope_head_dim=0表示输入中没有RoPE分支，不需要调用方补齐64维Ro
 
 ```bash
 python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention.py
-python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_rope0_a2a3.py
+python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_rope0.py
 ```
 
-原测试继续使用原有随机golden和精度阈值。新增[rope0测试](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_rope0_a2a3.py)
+原测试继续使用原有随机golden和精度阈值。新增[rope0测试](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_rope0.py)
 共53项，仅在A2/A3硬件配置上运行，覆盖FP16/BF16、rope0/64、PA与TND、batch与尾块、
 LSE开关、图捕获/修改KV后的重放，以及非法RoPE维度和输入shape。
 随机紧凑输入与显式补零输入做逐位对照；均匀attention用例以独立计算的选中V均值验证精度，
@@ -299,15 +299,3 @@ HiFloat8继续仅支持原有RoPE64路径。
 内核按实际输入维度读取GM数据和scale，保留原有672字节UB行跨距，
 并在缓冲区复用时清零缺失的RoPE区域。Q输入准备会先初始化内部NZ缓冲区，
 再拷贝512个有效列。576维QK计算、512维value/output计算和原有softmax路径保持不变。
-
-### 测试入口
-
-在仓库根目录、已编译并安装A5自定义OPP和native extension的环境中运行：
-
-```bash
-python -m pytest --noconftest -o addopts= -v tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_rope0_a5.py
-```
-
-测试覆盖INT8和FLOAT8_E4M3FN的紧凑RoPE0与显式补零RoPE64等价性、
-独立精度参考、原有非零RoPE回归、多种layout和head数、修改KV后的图重放以及非法输入校验。
-A5整模验证和性能优化不在本次算子改动范围内。
