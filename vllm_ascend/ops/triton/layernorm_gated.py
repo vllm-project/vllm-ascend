@@ -9,6 +9,13 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.layernorm_gated_dispatch import (
+    DispatchConfigError,
+    DispatchParams,
+    _select_layernorm_launch,
+)
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
 
 @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
 @triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
@@ -305,15 +312,8 @@ def layer_norm_fwd_npu(
     mean = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
 
-    from vllm_ascend.ops.triton.layernorm_gated_dispatch import (
-        DispatchConfigError,
-        _select_layernorm_launch,
-    )
-
     runtime_p = None
     if getattr(getattr(x, "device", None), "type", None) == "npu":
-        from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-
         runtime_p = get_vectorcore_num()
     spec = _select_layernorm_launch(
         M,
@@ -417,8 +417,6 @@ def layer_norm_fwd_npu(
 
 
 def _layer_norm_gated_experimental_params():
-    from vllm_ascend.ops.triton.layernorm_gated_dispatch import DispatchParams
-
     return DispatchParams(
         bm_small=16,
         bm_multi=32,
