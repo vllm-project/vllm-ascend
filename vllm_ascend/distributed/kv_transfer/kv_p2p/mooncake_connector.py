@@ -476,7 +476,8 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
         self.remote_metadata_lock = threading.Lock()
         # Reformat metadata keyed by request_id then CP shard index. Populated by the
-        # last TP-offset pull task for each shard; applied once all pull tasks finish.
+        # last TP-offset pull task for each attention group in a shard; applied
+        # once all pull tasks finish.
         self.pending_reformat: defaultdict[str, dict[int, list[tuple[int, list[list[int]], int, list[int]]]]] = (
             defaultdict(dict)
         )
@@ -1078,7 +1079,10 @@ class KVCacheRecvingThread(threading.Thread):
         ready_attention_group_reformat_block_ids: list[tuple[int, list[list[int]], int, list[int]]],
     ) -> None:
         with self.pending_reformat_lock:
-            self.pending_reformat[request_id][shard_idx] = ready_attention_group_reformat_block_ids
+            # Hybrid groups can finish on different TP-offset pulls (e.g. MLA
+            # needs one pull while draft GQA needs several). Keep every group's
+            # metadata, regardless of which pull completes last.
+            self.pending_reformat[request_id].setdefault(shard_idx, []).extend(ready_attention_group_reformat_block_ids)
 
     def _reformat_pending_kv_caches(self, request_id: str) -> None:
         with self.pending_reformat_lock:

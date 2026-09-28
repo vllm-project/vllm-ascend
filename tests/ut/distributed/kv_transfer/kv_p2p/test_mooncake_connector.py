@@ -799,6 +799,40 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         self.assertFalse(all(set(group_ids) == {0, 1} for group_ids in group_ids_by_port))
 
 
+class TestPendingKVCacheReformat(unittest.TestCase):
+    def setUp(self):
+        self.thread = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+        self.thread.pending_reformat = defaultdict(dict)
+        self.thread.pending_reformat_lock = threading.Lock()
+        self.thread._apply_kv_cache_reformat = MagicMock()
+
+    def test_preserves_hybrid_groups_in_both_completion_orders(self):
+        mla = (0, [[1, 2]], 1, [0, 1])
+        gqa = (1, [[3, 4]], 8, [2])
+        for first, second in ((mla, gqa), (gqa, mla)):
+            with self.subTest(first_group=first[0]):
+                self.thread._apply_kv_cache_reformat.reset_mock()
+                first_batch = [first]
+                self.thread._stash_pending_reformat("request", 0, first_batch)
+                self.thread._stash_pending_reformat("request", 0, [second])
+                self.assertEqual(first_batch, [first])
+                self.thread._reformat_pending_kv_caches("request")
+                self.thread._apply_kv_cache_reformat.assert_called_once_with([first, second])
+                self.assertNotIn("request", self.thread.pending_reformat)
+
+    def test_keeps_requests_and_shards_separate(self):
+        group = (1, [[3]], 8, [2])
+        self.thread._stash_pending_reformat("first", 1, [group])
+        self.thread._stash_pending_reformat("second", 0, [group])
+        self.thread._stash_pending_reformat("first", 0, [group])
+        self.thread._reformat_pending_kv_caches("first")
+        self.assertEqual(self.thread._apply_kv_cache_reformat.call_count, 2)
+        self.assertEqual(self.thread.pending_reformat["second"], {0: [group]})
+        self.thread._apply_kv_cache_reformat.reset_mock()
+        self.thread._reformat_pending_kv_caches("first")
+        self.thread._apply_kv_cache_reformat.assert_not_called()
+
+
 class TestKVCacheRecvingThreadBasic(unittest.TestCase):
     def setUp(self):
         set_device_patch = patch("torch.npu.set_device")
