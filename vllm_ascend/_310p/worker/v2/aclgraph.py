@@ -10,8 +10,9 @@ always tags DecodeOnly, so FULL capture would record the wrong attention path
 and replay would diverge from runtime SpecDecoding. Wrap capture only on 310P.
 
 MRv1 concurrent SpecDecoding FULL relies on buffer-address refresh (no FIA
-``graph_task`` on 310P). Mirror that: sync before replay so H2D into capture-
-stable seq_lens / slot_mapping / GDN pad buffers is visible to the graph.
+``graph_task`` on 310P). Capture-stable seq_lens / slot_mapping / GDN pad H2D
+runs on the compute stream before replay, so same-stream ordering is enough;
+do not insert a full ``synchronize()`` here (it regresses small-model MTP).
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.compilation.updatable_graph import ContextSource, UpdatableGraph
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -36,12 +38,20 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 class ModelAclGraphManager310(ModelAclGraphManager):
     """310P target ACLGraph manager: MTP capture uses SpecDecoding metadata."""
 
-    def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        # MRv1 ``_model_forward`` synchronizes before speculative FULL replay so
-        # CPU→NPU refreshes of capture-stable buffers land before the graph.
-        if self.vllm_config.speculative_config is not None:
-            torch.npu.current_stream().synchronize()
-        return super().run_fullgraph(desc)
+    def _updatable_graph_replay(self, desc: BatchExecutionDescriptor, attn_metadata):
+        """Skip empty update↔compute handshake (no FIA/PA graph_task on 310P)."""
+        graph = self.graphs[desc]
+        assert isinstance(graph, UpdatableGraph)
+        resolved_tasks = graph.resolve_tasks(ContextSource(attn_metadata))
+        # 310P SpecDecoding FULL refreshes capture-stable buffers on the compute
+        # stream and registers no FIA/PA graph_task. An empty task list means
+        # update_stream is idle — skip the handshake (major MTP tax on 2B).
+        if resolved_tasks:
+            self.update_stream.wait_stream(torch.npu.current_stream())
+        ret = super(ModelAclGraphManager, self).run_fullgraph(desc)
+        if resolved_tasks:
+            graph.update(self.update_stream, resolved_tasks)
+        return ret
 
     def capture(
         self,
