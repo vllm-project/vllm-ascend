@@ -580,7 +580,7 @@ class AscendLogitsProcessor(LogitsProcessor):
             logits = tp_group.all_gather(logits, dim=-1)
         return logits[..., : self.org_vocab_size]
 
-    def _resolve_lmhead_tp_capacity(self, lm_head: AscendParallelLMHead) -> int | None:
+    def _get_lmhead_tp_capacity(self, lm_head: AscendParallelLMHead) -> int | None:
         """Group-agreed row capacity for the lmhead-TP collectives.
 
         Prefers the DP-synced token count from the current forward context,
@@ -596,10 +596,10 @@ class AscendLogitsProcessor(LogitsProcessor):
             static_capacity = None
         num_tokens_across_dp = None
         try:
-            ctx = get_forward_context()
-            num_tokens_across_dp = getattr(ctx, "num_tokens_across_dp", None)
+            forward_context = get_forward_context()
+            num_tokens_across_dp = getattr(forward_context, "num_tokens_across_dp", None)
             if num_tokens_across_dp is None:
-                num_tokens_across_dp = ctx.additional_kwargs.get("num_tokens_across_dp")
+                num_tokens_across_dp = forward_context.additional_kwargs.get("num_tokens_across_dp")
         except Exception:
             num_tokens_across_dp = None
         if num_tokens_across_dp is not None and num_tokens_across_dp.numel() > 0:
@@ -628,7 +628,7 @@ class AscendLogitsProcessor(LogitsProcessor):
         # ``raw_logits[:num_indices]``). The capacity is taken from the
         # DP-synced ``num_tokens_across_dp`` when available (dynamic, identical
         # on every rank of the DP group), else the static ``lmhead_tp_capacity``.
-        capacity = self._resolve_lmhead_tp_capacity(lm_head)
+        capacity = self._get_lmhead_tp_capacity(lm_head)
         num_logits = hidden_states.shape[0]
         if capacity is not None:
             if num_logits > capacity:
