@@ -132,10 +132,10 @@ hidden[t, h]  = sum_n(probs[t, n] * v[t, n, h])
 
 - 扩展 `csrc/attention/attn_res_fwd/op_kernel/arch22/attn_res_fwd_reload.h` 和
   `attn_res_fwd_resident.h`：
-  - `AttnResFwdInitParams` 增加 `addend/prefixOut/outputNorm/materialized`。
-  - 模板增加 `FUSED_PREFIX` 与可选 `PREFILL_CACHE`。
-  - 复用 arch22 `reduce_common.h` 的 vector helper 实现 `PrepareFusedPrefix`、
-    bank write、output RMSNorm、materialized 分支。
+    - `AttnResFwdInitParams` 增加 `addend/prefixOut/outputNorm/materialized`。
+    - 模板增加 `FUSED_PREFIX` 与可选 `PREFILL_CACHE`。
+    - 复用 arch22 `reduce_common.h` 的 vector helper 实现 `PrepareFusedPrefix`、
+      bank write、output RMSNorm、materialized 分支。
 - 为三个 A5-only 目录增加 arch22 入口文件，或与 `attn_res_fwd.cpp` 相同的
   include 分流，确保 A3 构建走 arch22、A5 仍走 arch35。
 - 保持 host tiling 的 `fusedChain/fusedAdd` 逻辑不变；A3 只新增内核实现，不重写
