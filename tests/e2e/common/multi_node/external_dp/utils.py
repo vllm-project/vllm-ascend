@@ -92,13 +92,37 @@ def terminate_process_tree(pid: int, timeout: int = 30) -> None:
     for process in alive:
         process.kill()
 
-
+###修改点3
+# def is_http_ready(url: str, timeout: float = 5.0) -> bool:
+#     try:
+#         with urllib.request.urlopen(url, timeout=timeout) as response:
+#             return 200 <= response.status < 300
+#     except (urllib.error.URLError, TimeoutError, OSError):
+#         return False
 def is_http_ready(url: str, timeout: float = 5.0) -> bool:
+    ready, _ = is_http_ready_with_error(url, timeout)
+    return ready
+
+
+def is_http_ready_with_error(
+    url: str, timeout: float = 5.0
+) -> tuple[bool, str | None]:
+    """Check HTTP readiness, return (ready, error_detail).
+
+    error_detail is the exception class name on failure (e.g. 'ConnectionRefusedError',
+    'TimeoutError'), and None when the endpoint returns 2xx.
+    """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
-            return 200 <= response.status < 300
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return False
+            return 200 <= response.status < 300, None
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        reason_name = (
+            type(reason).__name__ if hasattr(reason, "__class__") else str(reason)
+        )
+        return False, reason_name
+    except (TimeoutError, OSError) as exc:
+        return False, type(exc).__name__
 
 
 def wait_http_ready(url: str, timeout: int, interval: float = 2.0) -> None:
