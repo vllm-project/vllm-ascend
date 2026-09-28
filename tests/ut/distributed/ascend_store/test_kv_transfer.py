@@ -630,6 +630,58 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         waiter.join(timeout=5)
         self.assertFalse(waiter.is_alive(), "fence must return once all released requests drained")
 
+    def test_released_fence_drains_all_jobs_without_waiting_for_active_request(self):
+        t, _ = self._make_thread()
+        first = ReqMeta("released", store_job_id=1)
+        second = ReqMeta("released", store_job_id=2)
+        active = ReqMeta("active", store_job_id=3)
+        for job in (first, second, active):
+            t.add_stored_request(job)
+        polled = threading.Event()
+        original_sleep = time.sleep
+
+        def poll(interval):
+            polled.set()
+            original_sleep(interval)
+
+        waiter = threading.Thread(target=t.wait_for_requests_saved, args=({"released"},), daemon=True)
+        try:
+            with patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.time.sleep",
+                side_effect=poll,
+            ):
+                waiter.start()
+                self.assertTrue(polled.wait(timeout=5))
+                t.finish_store_job(first)
+                polled.clear()
+                self.assertTrue(polled.wait(timeout=5))
+                self.assertTrue(waiter.is_alive(), "the second job still owns released blocks")
+                t.finish_store_job(second)
+                waiter.join(timeout=5)
+                self.assertFalse(waiter.is_alive(), "an active request must not hold up the released fence")
+                self.assertTrue(t.is_live_store_job(active))
+        finally:
+            for job in (first, second, active):
+                t.finish_store_job(job)
+            waiter.join(timeout=5)
+
+    def test_released_fence_observes_failure_while_waiting(self):
+        t, _ = self._make_thread()
+        t.add_stored_request(ReqMeta("released", store_job_id=1))
+
+        def fail_transfer(_interval):
+            t._fatal_error = RuntimeError("dispatch failed")
+            t._handle_request_exception(None)
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.time.sleep",
+                side_effect=fail_transfer,
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            t.wait_for_requests_saved({"released"})
+
     def test_wait_for_requests_saved_raises_when_transfer_failed(self):
         t, _ = self._make_thread()
         t.add_stored_request(ReqMeta("r1", store_job_id=1))
@@ -724,15 +776,47 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
     def test_unexpected_dispatch_error_releases_pinned_job(self):
         t, _ = self._make_thread([0])
+        first = ReqMeta("r1", event_id=7, store_job_id=7)
+        second = ReqMeta("r2", event_id=8, store_job_id=8)
+        save_batch = t.add_save_batch([first, second])
+
+        t._handle_request = MagicMock(side_effect=RuntimeError("dispatch failed"))
+        t.run()
+
+        self.assertIsInstance(t._fatal_error, RuntimeError)
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+        self.assertFalse(t.is_stored_request("r1"))
+        self.assertFalse(t.is_stored_request("r2"))
+        self.assertEqual(t.get_completed_events(), {7: 1, 8: 1})
+        self.assertTrue(save_batch.done.is_set())
+
+    def test_dispatch_cleanup_does_not_acknowledge_request_twice(self):
+        t, _ = self._make_thread([0])
         req = ReqMeta("r1", event_id=7, store_job_id=7)
         t.add_stored_request(req)
         t.request_queue.put(req)
+        self.assertIs(t.request_queue.get_nowait(), req)
+        self.assertEqual(t.finish_store_job(req), 0)
+        t.completed_events[7] = 1
+        t.request_queue.task_done()
 
         t._handle_request_exception(req)
 
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
         self.assertFalse(t.is_stored_request("r1"))
         self.assertEqual(t.get_completed_events(), {7: 1})
+
+    def test_add_save_batch_rejects_job_after_fatal_error(self):
+        t, _ = self._make_thread([0])
+        req = ReqMeta("r1", event_id=7, store_job_id=7)
+        t._fatal_error = RuntimeError("dispatch failed")
+
+        with self.assertRaisesRegex(RuntimeError, "failed during asynchronous transfer"):
+            t.add_save_batch([req])
+
+        self.assertFalse(t.is_stored_request("r1"))
+        self.assertTrue(t.request_queue.empty())
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
 
     def test_handle_request_sync_and_dcp(self):
         t, store = self._make_thread([0])
