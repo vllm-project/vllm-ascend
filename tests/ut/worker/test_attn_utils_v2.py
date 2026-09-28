@@ -187,9 +187,16 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     component_profile = SimpleNamespace(supports=lambda capability: False)
 
     def reshape():
-        # Build the group from the current spec each time. AttentionGroup may
-        # normalize its cache spec in a version-specific constructor, so
-        # mutating one group instance is not a reliable test primitive.
+        # Build both consumers from the current spec each time. The reshape
+        # path reads the group directly and resolves layer specs through
+        # KVCacheConfig, so mutating either object is not a reliable test
+        # primitive.
+        current_config = replace(
+            kv_cache_config,
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec),
+            ],
+        )
         return attn_utils._reshape_kv_cache_v2(
             attn_groups=[
                 AttentionGroup(
@@ -203,7 +210,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
             cache_dtype="auto",
             kernel_block_sizes=[128],
             shared_kv_cache_layers={},
-            kv_cache_config=kv_cache_config,
+            kv_cache_config=current_config,
         )[layer_name]
 
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: flash_profile)
