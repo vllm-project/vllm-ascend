@@ -39,6 +39,7 @@ on Ascend from 89.3% to 94.8%, matching MRv1's greedy output text:
 
 import importlib
 from contextlib import contextmanager
+from typing import Any
 
 import numpy as np
 import torch
@@ -47,6 +48,7 @@ from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import logger
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import Gemma4Speculator
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
@@ -74,17 +76,17 @@ def _inject_seq_lens_np(seq_lens_np):
     injects ``positions``: wrap the module symbol for the duration of one
     build, so every tiling decision is made from the real values.
     """
-    raw = _vllm_draft_speculator.build_attn_metadata
+    raw = getattr(_vllm_draft_speculator, "build_attn_metadata")
 
     def wrapped(*args, **kwargs):
         kwargs["seq_lens_np"] = seq_lens_np
         return raw(*args, **kwargs)
 
-    _vllm_draft_speculator.build_attn_metadata = wrapped
+    setattr(_vllm_draft_speculator, "build_attn_metadata", wrapped)
     try:
         yield
     finally:
-        _vllm_draft_speculator.build_attn_metadata = raw
+        setattr(_vllm_draft_speculator, "build_attn_metadata", raw)
 
 
 @contextmanager
@@ -98,18 +100,18 @@ def _gemma4_prefill_inputs(spec, input_batch, num_sampled, num_rejected):
     the stock kernel, keeping every other bookkeeping write (ids,
     query_start_loc, last_token_indices, padding) intact.
     """
-    orig = _vllm_ar_speculator.prepare_prefill_inputs
+    orig = getattr(_vllm_ar_speculator, "prepare_prefill_inputs")
 
     def patched(*args, **kwargs):
         result = orig(*args, **kwargs)
         _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected)
         return result
 
-    _vllm_ar_speculator.prepare_prefill_inputs = patched
+    setattr(_vllm_ar_speculator, "prepare_prefill_inputs", patched)
     try:
         yield
     finally:
-        _vllm_ar_speculator.prepare_prefill_inputs = orig
+        setattr(_vllm_ar_speculator, "prepare_prefill_inputs", orig)
 
 
 def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
@@ -202,23 +204,31 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
 
     def propose(
         self,
-        input_batch,
-        attn_metadata,
-        slot_mappings,
-        last_hidden_states,
-        aux_hidden_states=None,
-        num_sampled=None,
-        num_rejected=None,
-        last_sampled=None,
-        next_prefill_tokens=None,
-        temperature=None,
-        seeds=None,
-        num_tokens_across_dp=None,
-        dummy_run=False,
-        skip_attn_for_dummy_run=False,
-        mm_inputs=None,
-        is_profile=None,
-        dp_sync=None,
+        input_batch: InputBatch,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
+        # [num_tokens, hidden_size]
+        last_hidden_states: torch.Tensor,
+        # num_layers x [num_tokens, hidden_size]
+        aux_hidden_states: list[torch.Tensor] | None,
+        # [num_reqs]
+        num_sampled: torch.Tensor,
+        # [num_reqs]
+        num_rejected: torch.Tensor,
+        # [max_num_reqs]
+        last_sampled: torch.Tensor,
+        # [max_num_reqs]
+        next_prefill_tokens: torch.Tensor,
+        # [max_num_reqs]
+        temperature: torch.Tensor,
+        # [max_num_reqs]
+        seeds: torch.Tensor,
+        num_tokens_across_dp: torch.Tensor | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        is_profile: Any = None,
+        dp_sync: Any = None,
     ):
         self._g4_committed = None
         with _gemma4_prefill_inputs(self, input_batch, num_sampled, num_rejected):
