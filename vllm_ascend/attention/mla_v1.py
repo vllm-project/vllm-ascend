@@ -70,8 +70,10 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    dispose_layer,
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
+    is_rl_weight_update_enabled,
     maybe_trans_nz,
     weak_ref_tensors,
 )
@@ -1185,6 +1187,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         elif not getattr(self, "dcp_enabled", False):
             self._prepare_prolog_v3_weights_after_loading()
 
+        self._maybe_dispose_kv_b_proj()
+
     def _prepare_prolog_v3_weights_after_loading(self) -> None:
         """Create persistent writer projections inside the loader memory profile."""
         # Offloaded projections may alias staging buffers outside their onload
@@ -1207,6 +1211,24 @@ class AscendMLAImpl(MLAAttentionImpl):
         cache_spec = attn_module.get_kv_cache_spec(config)
         if supports_strided_mla_cache(config, attn_module, cache_spec):
             self._prepare_prolog_v3_weights()
+
+    def _maybe_dispose_kv_b_proj(self):
+        """Release ``kv_b_proj`` only on fully decode-only KV consumers.
+
+        Lightweight unit-test fixtures may omit the full runtime config; in
+        that case retaining the parameter is the safe fallback.
+        """
+        vllm_config = getattr(self, "vllm_config", None)
+        if vllm_config is None:
+            return
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        if (
+            kv_transfer_config is not None
+            and getattr(kv_transfer_config, "is_kv_consumer", False)
+            and not getattr(kv_transfer_config, "is_kv_producer", False)
+            and not is_rl_weight_update_enabled(vllm_config)
+        ):
+            dispose_layer(self.kv_b_proj)
 
     def _load_fa_quant_scales(self):
         layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
