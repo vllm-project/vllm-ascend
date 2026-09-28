@@ -41,6 +41,7 @@ env_common: &env_common
   VLLM_USE_V1: "1"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   VLLM_USE_MODELSCOPE: "true"
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
 env_prefill: &env_prefill
   <<: *env_common
   ASCEND_BUFFER_POOL: "4:8"
