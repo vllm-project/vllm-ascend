@@ -36,10 +36,6 @@ if HAS_TRITON:
 else:
     triton_q_rms = None  # type: ignore
 
-_GMM_SITU_DEQUANT_MODE_MX_JOINT = 1
-_GMM_SITU_DEQUANT_DTYPE_BF16 = 0
-_GMM_SITU_QUANT_MODE_DYNAMIC_MX = 1
-
 
 class BaseDeviceAdaptor:
     @classmethod
@@ -1160,21 +1156,21 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if is_list:
             op = op.list
         out, out_scale = op(
-            x,
-            weight,
-            weight_scale,
-            None,
-            None,
-            x_scale,
-            None,
-            group_list,
-            _GMM_SITU_DEQUANT_MODE_MX_JOINT,
-            _GMM_SITU_DEQUANT_DTYPE_BF16,
-            _GMM_SITU_QUANT_MODE_DYNAMIC_MX,
-            group_list_type,
-            None,
-            beta,
-            linear_beta,
+            x=x,
+            weight=weight,
+            weight_scale=weight_scale,
+            weight_assist_matrix=None,
+            bias=None,
+            x_scale=x_scale,
+            smooth_scale=None,
+            group_list=group_list,
+            dequant_mode=1,
+            dequant_dtype=0,
+            quant_mode=1,
+            group_list_type=group_list_type,
+            tuning_config=None,
+            beta=beta,
+            linear_beta=linear_beta,
         )
         return out, out_scale, None
 

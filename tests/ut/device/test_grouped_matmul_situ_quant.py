@@ -61,20 +61,26 @@ def test_a5_grouped_matmul_situ_quant_calls_registered_op(use_list):
     other_op = op if use_list else op.list
     called_op.assert_called_once()
     other_op.assert_not_called()
-    args = called_op.call_args.args
-    assert args[0] is x
+    kwargs = called_op.call_args.kwargs
+    assert kwargs["x"] is x
     if use_list:
-        assert args[1][0] is weight[0]
-        assert args[2][0].data_ptr() == weight_scale_base[0].data_ptr()
+        assert kwargs["weight"][0] is weight[0]
+        assert kwargs["weight_scale"][0].data_ptr() == weight_scale_base[0].data_ptr()
     else:
-        assert args[1].data_ptr() == weight_base.data_ptr()
-        assert args[2].data_ptr() == weight_scale_base.data_ptr()
-    assert args[3] is None
-    assert args[4] is None
-    assert args[5] is x_scale
-    assert args[6] is None
-    assert args[7] is group_list
-    assert args[8:] == (1, 0, 1, 0, None, 4.0, 25.0)
+        assert kwargs["weight"].data_ptr() == weight_base.data_ptr()
+        assert kwargs["weight_scale"].data_ptr() == weight_scale_base.data_ptr()
+    assert kwargs["weight_assist_matrix"] is None
+    assert kwargs["bias"] is None
+    assert kwargs["x_scale"] is x_scale
+    assert kwargs["smooth_scale"] is None
+    assert kwargs["group_list"] is group_list
+    assert kwargs["dequant_mode"] == 1
+    assert kwargs["dequant_dtype"] == 0
+    assert kwargs["quant_mode"] == 1
+    assert kwargs["group_list_type"] == 0
+    assert kwargs["tuning_config"] is None
+    assert kwargs["beta"] == 4.0
+    assert kwargs["linear_beta"] == 25.0
 
 
 def test_a5_grouped_matmul_situ_quant_rejects_other_quantization():
