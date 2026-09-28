@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Targeted loader for the A5 operator wrappers and local PythonDSL sources.
+"""Targeted loader for the A5 operator wrappers and PythonDSL payload.
 
 The transformer wheel's public initializer eagerly discovers every bundled
 operator and JIT-builds unrelated extensions.  We load only the requested
-wrapper.  Its ``ops.*`` imports resolve to the 0923 DSL sources vendored under
-``vllm_ascend.ops.pythondsl`` rather than the arena operator wheel.
+wrapper.  By default its ``ops.*`` imports use the 0923 arena wheel.  The
+vendored ``vllm_ascend.ops.pythondsl`` sources remain available for an
+explicit ``DSV41_A5_DSL_SOURCE=local`` experiment.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import os
 import sys
 import threading
 import types
+from importlib import metadata
 
 _import_lock = threading.Lock()
 _opapi_handle = None
@@ -71,15 +73,41 @@ def _namespace_package(name: str, path: str, origin: str | None = None):
 
 
 def _load_payload_package():
+    source = os.environ.get("DSV41_A5_DSL_SOURCE", "arena")
+    if source == "arena":
+        payload_path = os.fspath(metadata.distribution("cannbot-arena-net-ops").locate_file("ops"))
+        payload_init = os.path.join(payload_path, "__init__.py")
+        if not os.path.isfile(payload_init):
+            raise ModuleNotFoundError(f"A5 arena payload package is absent: {payload_init}")
+        current = sys.modules.get("ops")
+        if current is not None and payload_path in tuple(getattr(current, "__path__", ())):
+            return current
+        spec = importlib.util.spec_from_file_location("ops", payload_init, submodule_search_locations=[payload_path])
+        if spec is None or spec.loader is None:
+            raise ModuleNotFoundError(f"A5 arena payload package is absent: {payload_init}")
+        module = importlib.util.module_from_spec(spec)
+        previous = sys.modules.get("ops")
+        sys.modules["ops"] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            if previous is None:
+                sys.modules.pop("ops", None)
+            else:
+                sys.modules["ops"] = previous
+            raise
+        return module
+    if source != "local":
+        raise ValueError(f"Unsupported DSV41_A5_DSL_SOURCE: {source}")
+
     payload = importlib.import_module("vllm_ascend.ops.pythondsl")
     payload_path = os.path.dirname(payload.__file__)
     current = sys.modules.get("ops")
     if current is not None and payload_path in tuple(getattr(current, "__path__", ())):
         return current
 
-    # cann_ops_transformer wrappers import ``ops.<dsl_module>`` at call time.
-    # Point that namespace at our local sources without executing the arena
-    # wheel's initializer or registering its precompiled native resources.
+    # Point the wrappers at our retained sources only for an explicit local
+    # experiment, without registering the arena wheel's native resources.
     for name in (
         "ops.mixed_quant_sparse_flash_mla",
         "ops.mixed_quant_sparse_flash_mla_metadata",

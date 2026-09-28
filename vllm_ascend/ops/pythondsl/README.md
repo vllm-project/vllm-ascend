@@ -11,12 +11,13 @@ operator delivery used for the A5 QLI, QSLI, and MQSMLA integration:
   `quant_sparse_lightning_indexer_metadata_dsl.py` come from the matching
   installed 0923 CANN transformer payload.
 
-The transformer wrappers still provide the Torch operator schemas.  Their
-`ops.*` imports are redirected to this directory by the A5 package loader.
-Only the `cannbotdsl` compiler/runtime wheel is required for these kernels;
-the arena net-ops wheel's native variants and AICPU binary are not loaded.
-The AICPU metadata kernels compile from the included Python source when no
-precompiled binary is present.
+The transformer wrappers still provide the Torch operator schemas.  For the
+near-term A5 test, the package loader defaults to the installed arena net-ops
+wheel and `CANNBOTDSL_NATIVE_BINARY_MODE=prefer`.  These copies remain in the
+repository for a later source-only experiment: set
+`DSV41_A5_DSL_SOURCE=local` and `CANNBOTDSL_NATIVE_BINARY_MODE=off` to select
+them explicitly.  The source-only path was validated separately but is not
+the default in the `vllm_0300` image.
 
 Before changing these copies, compare against the operator team's delivery
 and preserve its licensing terms.

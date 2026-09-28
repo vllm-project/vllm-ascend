@@ -8,7 +8,8 @@ from pathlib import Path
 from vllm_ascend.ops.dsv41_a5.package_loader import _load_payload_package
 
 
-def test_a5_payload_uses_vllm_ascend_sources():
+def test_a5_payload_uses_vllm_ascend_sources(monkeypatch):
+    monkeypatch.setenv("DSV41_A5_DSL_SOURCE", "local")
     names = (
         "ops",
         "ops.mixed_quant_sparse_flash_mla",
