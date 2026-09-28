@@ -76,17 +76,17 @@ def _inject_seq_lens_np(seq_lens_np):
     injects ``positions``: wrap the module symbol for the duration of one
     build, so every tiling decision is made from the real values.
     """
-    raw = getattr(_vllm_draft_speculator, "build_attn_metadata")
+    raw = _vllm_draft_speculator.build_attn_metadata  # type: ignore[attr-defined]
 
     def wrapped(*args, **kwargs):
         kwargs["seq_lens_np"] = seq_lens_np
         return raw(*args, **kwargs)
 
-    setattr(_vllm_draft_speculator, "build_attn_metadata", wrapped)
+    _vllm_draft_speculator.build_attn_metadata = wrapped  # type: ignore[attr-defined]
     try:
         yield
     finally:
-        setattr(_vllm_draft_speculator, "build_attn_metadata", raw)
+        _vllm_draft_speculator.build_attn_metadata = raw  # type: ignore[attr-defined]
 
 
 @contextmanager
@@ -100,18 +100,18 @@ def _gemma4_prefill_inputs(spec, input_batch, num_sampled, num_rejected):
     the stock kernel, keeping every other bookkeeping write (ids,
     query_start_loc, last_token_indices, padding) intact.
     """
-    orig = getattr(_vllm_ar_speculator, "prepare_prefill_inputs")
+    orig = _vllm_ar_speculator.prepare_prefill_inputs  # type: ignore[attr-defined]
 
     def patched(*args, **kwargs):
         result = orig(*args, **kwargs)
         _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected)
         return result
 
-    setattr(_vllm_ar_speculator, "prepare_prefill_inputs", patched)
+    _vllm_ar_speculator.prepare_prefill_inputs = patched  # type: ignore[attr-defined]
     try:
         yield
     finally:
-        setattr(_vllm_ar_speculator, "prepare_prefill_inputs", orig)
+        _vllm_ar_speculator.prepare_prefill_inputs = orig  # type: ignore[attr-defined]
 
 
 def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
