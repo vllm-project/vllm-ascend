@@ -66,11 +66,18 @@ class PyHcclCommunicator:
             self.world_size = group.world_size
 
         self.group = group
+        if isinstance(device, int):
+            device = torch.device(f"npu:{device}")
+        elif isinstance(device, str):
+            device = torch.device(device)
+        assert isinstance(device, torch.device)
+        self.device = device
+        self.comm: hcclComm_t | None = None
+        self.available = False
+        self.disabled = True
 
         # if world_size == 1, no need to create communicator
         if self.world_size == 1:
-            self.available = False
-            self.disabled = True
             return
 
         try:
@@ -86,14 +93,6 @@ class PyHcclCommunicator:
         self.disabled = False
 
         logger.info("vLLM is using pyhccl")
-
-        if isinstance(device, int):
-            device = torch.device(f"npu:{device}")
-        elif isinstance(device, str):
-            device = torch.device(device)
-        # now `device` is a `torch.device` object
-        assert isinstance(device, torch.device)
-        self.device = device
 
         if self.rank == 0:
             # get the unique id from HCCL
@@ -118,7 +117,7 @@ class PyHcclCommunicator:
         # `torch.npu.device` is a context manager that changes the
         # current npu device to the specified one
         with torch.npu.device(device):
-            self.comm: hcclComm_t = self.hccl.hcclCommInitRank(self.world_size, self.unique_id, self.rank)
+            self.comm = self.hccl.hcclCommInitRank(self.world_size, self.unique_id, self.rank)
 
             stream = current_stream()
             # A small all_reduce for warmup.
@@ -183,3 +182,13 @@ class PyHcclCommunicator:
             self.comm,
             aclrtStream_t(stream.npu_stream),
         )
+
+    def close(self) -> None:
+        """Destroy only this communicator; safe to call more than once."""
+        if not self.available:
+            return
+        self.available = False
+        with torch.npu.device(self.device):
+            torch.npu.synchronize(self.device)
+            self.hccl.hcclCommDestroy(self.comm)
+

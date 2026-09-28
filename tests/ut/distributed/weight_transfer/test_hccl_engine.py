@@ -1,10 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLWeightTransferEngine, HCCLWeightTransferInitInfo
+import pytest
+import torch
+
+from vllm_ascend.distributed.weight_transfer.hccl_engine import (
+    HCCLTrainerWeightTransferEngine,
+    HCCLWeightTransferEngine,
+    HCCLWeightTransferInitInfo,
+)
 
 
 def _make_engine():
@@ -62,3 +70,89 @@ def test_reinit_closes_previous_session_before_creating_next(_mock_device):
 
     init.assert_called_once_with("127.0.0.1", 12345, 1, 2, device=0)
     assert engine.model_update_group is not old_group
+
+
+def _make_trainer(*, is_sender: bool):
+    engine = object.__new__(HCCLTrainerWeightTransferEngine)
+    engine.client = MagicMock()
+    engine.source = MagicMock()
+    engine.source.metadata.return_value = []
+    engine.is_sender = is_sender
+    engine.packed = False
+    engine.packed_buffer_size_bytes = 1024
+    engine.packed_num_buffers = 2
+    engine.device = torch.device("npu:0")
+    engine.group = MagicMock() if is_sender else None
+    engine._broadcast = MagicMock()
+    engine._post_send_sync = MagicMock()
+    return engine
+
+
+def test_non_sender_synchronizes_source_before_returning():
+    engine = _make_trainer(is_sender=False)
+
+    engine.send_weights()
+
+    engine._broadcast.assert_called_once_with([])
+    engine._post_send_sync.assert_called_once_with()
+    engine.client.start_weight_update.assert_not_called()
+
+
+def test_post_send_sync_synchronizes_trainer_device_stream():
+    engine = _make_trainer(is_sender=False)
+    stream = MagicMock()
+    fake_npu = SimpleNamespace(
+        device=MagicMock(return_value=nullcontext()),
+        current_stream=MagicMock(return_value=stream),
+    )
+
+    with patch.object(torch, "npu", fake_npu, create=True):
+        HCCLTrainerWeightTransferEngine._post_send_sync(engine)
+
+    fake_npu.device.assert_called_once_with(engine.device)
+    stream.synchronize.assert_called_once_with()
+
+
+def test_failed_trainer_rejects_retry_before_any_rpc():
+    engine = _make_trainer(is_sender=True)
+    group = engine.group
+    engine._broadcast.side_effect = RuntimeError("broadcast failed")
+
+    with pytest.raises(RuntimeError, match="broadcast failed"):
+        engine.send_weights()
+
+    group.close.assert_called_once_with()
+    engine.client.start_weight_update.assert_called_once_with()
+    with pytest.raises(RuntimeError, match="failed state"):
+        engine.send_weights()
+    engine.client.start_weight_update.assert_called_once_with()
+
+
+def test_update_rpc_failure_marks_trainer_failed():
+    engine = _make_trainer(is_sender=True)
+    engine.client.update_weights.side_effect = RuntimeError("update rejected")
+
+    with pytest.raises(RuntimeError, match="update rejected"):
+        engine.send_weights()
+
+    with pytest.raises(RuntimeError, match="failed state"):
+        engine.send_weights()
+    engine.client.start_weight_update.assert_called_once_with()
+
+
+def test_shutdown_is_idempotent_and_rejects_future_send():
+    engine = _make_trainer(is_sender=True)
+    group = engine.group
+
+    engine.shutdown()
+    engine.shutdown()
+
+    group.close.assert_called_once_with()
+    with pytest.raises(RuntimeError, match="closed"):
+        engine.send_weights()
+    engine.client.start_weight_update.assert_not_called()
+
+
+def test_trainer_does_not_expose_worker_update_method():
+    assert "update_weights" not in HCCLTrainerWeightTransferEngine.__dict__
+
