@@ -36,7 +36,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.worker import (
     _RESERVATION_REFRESH_SECONDS,
     ECMooncakeWorker,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.math_utils import round_up
 from vllm.utils.network_utils import get_ip
 
@@ -62,7 +62,6 @@ _DEFAULT_BOUNCE_LIMIT = 128
 _BOUNCE_ARENA_CONFIG_KEY = "ascend_mooncake_bounce_arena_size"
 _TRANSFER_WORKERS = 4
 _CONTROL_WORKERS = 8
-logger = init_logger(__name__)
 
 
 def _resolve_bounce_arena_size(vllm_config: VllmConfig) -> int:

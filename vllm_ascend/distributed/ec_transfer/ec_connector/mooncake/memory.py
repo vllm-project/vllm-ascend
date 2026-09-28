@@ -19,12 +19,10 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
 from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     MooncakeTransfer,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.math_utils import round_up
 
 ASCEND_DIRECT_MEMORY_ALIGNMENT = 2 * 1024 * 1024  # 2 MiB
-
-logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
