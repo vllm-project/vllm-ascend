@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -122,7 +123,26 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # Internal-router: precast weight_fp32 at load to avoid hot-path Cast.
         # Use ctor `gate` (not self.is_internal_router): Module.__getattr__ shadows during init.
         if gate is not None and not hasattr(gate, "weight_fp32"):
-            gate.precast_fp32_weight = True
+            vllm_config = get_current_vllm_config()
+            model_config = vllm_config.model_config
+            hf_config = model_config.hf_text_config if model_config is not None else None
+            # Limit native routing to the validated BF16 Qwen3-235B profile.
+            # Speculative decoding needs FP32 routing to retain draft acceptance;
+            # an explicit model request for FP32 must also survive this policy.
+            native_qwen3_router = (
+                vllm_config.speculative_config is None
+                and vllm_config.quant_config is None
+                and getattr(hf_config, "model_type", None) == "qwen3_moe"
+                and (
+                    hf_config.hidden_size,
+                    hf_config.num_hidden_layers,
+                    hf_config.num_experts,
+                )
+                == (4096, 94, 128)
+                and gate.weight.dtype == torch.bfloat16
+            )
+            if not native_qwen3_router:
+                gate.precast_fp32_weight = True
 
         self.ascend_shared_experts = None
         if shared_experts is not None:
@@ -388,8 +408,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # AscendUnquantizedLinearMethod to avoid a Cast in this hot path.
         gate = self.gate
         assert gate is not None
-        hidden_states_fp32 = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
         if hasattr(gate, "weight_fp32"):
+            hidden_states_fp32 = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
             return F.linear(hidden_states_fp32, gate.weight_fp32)
         gate_out = gate(hidden_states)
         return gate_out[0] if isinstance(gate_out, tuple) else gate_out
