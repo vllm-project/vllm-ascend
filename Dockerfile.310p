@@ -66,6 +66,15 @@ ARG DAILY_DEPS_MODE="torch_npu_only"
 
 WORKDIR /workspace
 
+# Install the 310P custom ops package built from CANN/ops-transformer.
+# Installs into the system CANN vendor dir ($ASCEND_OPP_PATH/vendors), which the
+# installer registers via load_priority in opp/vendors/config.ini.
+ARG OPS_TRANSFORMER_RUN="cann-ops-transformer-custom_linux-aarch64.run"
+COPY ${OPS_TRANSFORMER_RUN} /tmp/ops-transformer.run
+RUN chmod +x /tmp/ops-transformer.run && \
+    /tmp/ops-transformer.run --quiet --install-for-all --force && \
+    rm -f /tmp/ops-transformer.run
+
 RUN if [ -n "$APTMIRROR" ]; then \
         cp /etc/apt/sources.list /etc/apt/sources.list.bak && \
         sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list; \
