@@ -34,8 +34,8 @@ class ContextSource:
         self,
         provider: ParamProvider,
         _index: int,
-    ) -> Sequence[Params]:
-        return (provider.resolve(self.context),)
+    ) -> Params:
+        return provider.resolve(self.context)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +46,7 @@ class SharedSource:
         self,
         _provider: ParamProvider,
         index: int,
-    ) -> Sequence[Params]:
+    ) -> Params:
         # 草稿模型必须连续注册
         return self.params[index]
 
