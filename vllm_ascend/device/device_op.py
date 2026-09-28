@@ -52,6 +52,8 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def _scatter_cache(var, indices, updates) -> bool:
+        # Select only available kernels and supported cache dtypes. FP32 is
+        # used by indexer scales; FP8 additionally requires the A5 kernel ABI.
         profile = get_current_hardware_profile()
         if not profile.supports(HardwareCapability.SCATTER_ND_CACHE_STORE):
             return False
@@ -63,18 +65,24 @@ class BaseDeviceAdaptor:
                 return False
         elif updates.dtype not in (torch.int8, torch.float16, torch.bfloat16, torch.float32):
             return False
-        if not (
-            var.ndim == 2
-            and indices.ndim == 2
-            and indices.shape[1] == 1
-            and updates.ndim == 2
-            and updates.shape[0] == indices.shape[0]
-            and updates.shape[1] == var.shape[1]
-            and updates.dtype == var.dtype
-            and indices.dtype in (torch.int32, torch.int64)
-        ):
+        # This adaptor optimizes row writes: var[N, D], indices[T, 1],
+        # updates[T, D]. These checks bound the cache optimization, not SK's
+        # full shape support. Other inputs retain the original scatter path.
+        if var.ndim != 2 or indices.ndim != 2 or updates.ndim != 2:
             return False
+        if indices.shape[1] != 1 or updates.shape != (indices.shape[0], var.shape[1]):
+            return False
+        if updates.dtype != var.dtype or indices.dtype not in (torch.int32, torch.int64):
+            return False
+
+        # Write the destination in place: rows must be internally contiguous
+        # and non-overlapping. Never make a contiguous copy of the cache.
+        # Read-only indices/updates are made contiguous inside ACLNN as needed.
         if var.stride(1) != 1 or var.stride(0) < var.shape[1]:
+            return False
+        # arch35 can drop writes to row-strided destinations. Keep them on
+        # generic scatter until fixed; A2/A3 retain their stride-aware kernel.
+        if not var.is_contiguous() and not profile.supports(HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE):
             return False
         operation(var, indices, updates)
         return True

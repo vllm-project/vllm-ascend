@@ -40,6 +40,38 @@ def scatter_nd_update_golden(var, indices, update):
     return out
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float8_e4m3fn, torch.float8_e5m2])
+@pytest.mark.parametrize("width,count", [(1, 128), (128, 128), (656, 2049)])
+@pytest.mark.parametrize("row_gap", [False, True])
+def test_a5_cache_destination_layout(dtype, width, count, row_gap):
+    if not get_current_hardware_profile().supports(HardwareCapability.SCATTER_ND_FP8_CACHE_STORE):
+        pytest.skip("Requires A5 FP8 cache kernels")
+    # Keep indices and updates contiguous: only the destination can have gaps.
+    # Rows beyond `width` reproduce the arch35 non-contiguous storage-bound bug.
+    backing = torch.full((8192, width * (2 if row_gap else 1)), 7.0, device="npu").to(dtype)
+    cache = backing[:, :width]
+    indices = (torch.arange(count, device="npu", dtype=torch.int64) + 37).view(-1, 1)
+    updates = torch.arange(count * width, device="npu").remainder(17).reshape(count, width).to(dtype)
+    expected = backing.cpu()
+    expected[37 : 37 + count, :width] = updates.cpu()
+    assert cache.is_contiguous() == (not row_gap)
+    assert indices.is_contiguous() and updates.is_contiguous()
+
+    with (
+        patch.object(
+            torch.ops._C_ascend, "npu_scatter_nd_update_sk", wraps=torch.ops._C_ascend.npu_scatter_nd_update_sk
+        ) as sk,
+        patch.object(torch_npu, "npu_scatter_nd_update_", wraps=torch_npu.npu_scatter_nd_update_) as generic,
+    ):
+        DeviceOperator.scatter_cache(cache, indices, updates)
+    assert sk.call_count == int(not row_gap)
+    assert generic.call_count == int(row_gap)
+    selected = generic if row_gap else sk
+    assert all(actual is original for actual, original in zip(selected.call_args.args, (cache, indices, updates)))
+    # Check the entire allocation, including row gaps and untouched cache rows.
+    assert torch.equal(backing.view(torch.uint8).cpu(), expected.view(torch.uint8))
+
+
 @pytest.mark.parametrize(
     "a",
     [16, 77],
@@ -135,7 +167,7 @@ def test_scatter_nd_update_sk_duplicate_indices(var_dtype, idx_dtype, contiguous
 @pytest.mark.parametrize("tokens", [3, 2049])
 @pytest.mark.parametrize("layout", ["contiguous", "row_gap", "offset"])
 @torch.inference_mode()
-def test_cache_adaptor_uses_sk_and_preserves_backing_storage(dtype, index_dtype, tokens, layout):
+def test_cache_adaptor_dispatch_preserves_backing_storage(dtype, index_dtype, tokens, layout):
     # Run this same adaptor regression on A2/A3 and A5, including the packed
     # SFA C8 width and genuinely strided NPU views (do not clone the views).
     width, block_size, blocks = 656, 128, 32
@@ -170,13 +202,16 @@ def test_cache_adaptor_uses_sk_and_preserves_backing_storage(dtype, index_dtype,
             torch.ops._C_ascend, "npu_scatter_nd_update_sk", wraps=torch.ops._C_ascend.npu_scatter_nd_update_sk
         ) as sk,
         patch.object(torch_npu, "npu_scatter_pa_cache") as pa,
-        patch.object(torch_npu, "npu_scatter_nd_update_") as generic,
+        patch.object(torch_npu, "npu_scatter_nd_update_", wraps=torch_npu.npu_scatter_nd_update_) as generic,
     ):
         assert DeviceOperator.scatter_cache(cache.view(-1, key.shape[-1]), slots.view(-1, 1), key) is None
         torch.npu.synchronize()
-        sk.assert_called_once()
+        expected_sk = layout != "row_gap" or get_current_hardware_profile().supports(
+            HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE
+        )
+        assert sk.call_count == int(expected_sk)
         pa.assert_not_called()
-        generic.assert_not_called()
+        assert generic.call_count == int(not expected_sk)
 
     assert cache.data_ptr() == pointer
     torch.testing.assert_close(backing.view(torch.uint8).cpu(), expected, rtol=0, atol=0)
@@ -188,7 +223,7 @@ def test_cache_adaptor_uses_sk_and_preserves_backing_storage(dtype, index_dtype,
 @pytest.mark.parametrize("row_gap", [False, True])
 @pytest.mark.parametrize("tokens", [3, 2049])
 @torch.inference_mode()
-def test_indexer_cache_uses_sk_for_keys_and_scales(key_dtype, scale_dtype, row_gap, tokens):
+def test_indexer_cache_dispatch_for_keys_and_scales(key_dtype, scale_dtype, row_gap, tokens):
     if key_dtype == torch.float8_e4m3fn and not get_current_hardware_profile().supports(
         HardwareCapability.SCATTER_ND_FP8_CACHE_STORE
     ):
@@ -229,7 +264,7 @@ def test_indexer_cache_uses_sk_for_keys_and_scales(key_dtype, scale_dtype, row_g
         patch.object(
             torch.ops._C_ascend, "npu_scatter_nd_update_sk", wraps=torch.ops._C_ascend.npu_scatter_nd_update_sk
         ) as sk,
-        patch.object(torch_npu, "npu_scatter_nd_update_") as generic,
+        patch.object(torch_npu, "npu_scatter_nd_update_", wraps=torch_npu.npu_scatter_nd_update_) as generic,
         patch.object(torch_npu, "npu_scatter_pa_cache") as pa,
     ):
         AscendSFAIndexerBackend.write_cache(
@@ -240,8 +275,11 @@ def test_indexer_cache_uses_sk_for_keys_and_scales(key_dtype, scale_dtype, row_g
             SimpleNamespace(num_actual_tokens=tokens // 2),
         )
         torch.npu.synchronize()
-        assert sk.call_count == len(caches)
-        generic.assert_not_called()
+        expected_sk = not row_gap or get_current_hardware_profile().supports(
+            HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE
+        )
+        assert sk.call_count == (len(caches) if expected_sk else 0)
+        assert generic.call_count == (0 if expected_sk else len(caches))
         pa.assert_not_called()
     for backing, reference in zip(backings, expected):
         torch.testing.assert_close(backing.view(torch.uint8).cpu(), reference, rtol=0, atol=0)

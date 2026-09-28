@@ -63,6 +63,7 @@ def test_platform_dispatch_keeps_destination_storage(monkeypatch, family, dtype,
         family in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5)
         and dtype != torch.float64
         and layout not in ("column_gap", "block_gap")
+        and not (family == AscendDeviceType.A5 and layout == "row_gap")
     )
     if layout == "block_gap":
         with pytest.raises(RuntimeError, match="view size is not compatible"):
@@ -123,9 +124,10 @@ def test_fast_shape_guard_preserves_generic_arguments(monkeypatch, unsupported):
     assert all(actual is original for actual, original in zip(generic.call_args.args, (var, indices, updates)))
 
 
+@pytest.mark.parametrize("family", [AscendDeviceType.A3, AscendDeviceType.A5])
 @pytest.mark.parametrize("fast_available", [False, True])
-def test_scatter_passes_exact_tensor_objects_to_selected_operator(monkeypatch, fast_available):
-    monkeypatch.setattr(device_op, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5))
+def test_scatter_passes_exact_tensor_objects_to_selected_operator(monkeypatch, family, fast_available):
+    monkeypatch.setattr(device_op, "get_current_hardware_profile", lambda: get_hardware_profile(family))
     var = torch.zeros(9, 32)[1:, :16]
     indices = torch.tensor([2, -1, 4, 6], dtype=torch.int32).view(-1, 1)
     updates = torch.arange(128).float().view(4, 32)[:, ::2]
@@ -135,7 +137,7 @@ def test_scatter_passes_exact_tensor_objects_to_selected_operator(monkeypatch, f
     )
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", generic, raising=False)
     device_op.BaseDeviceAdaptor.scatter_cache(var, indices, updates)
-    selected, unused = (fast, generic) if fast_available else (generic, fast)
+    selected, unused = (fast, generic) if fast_available and family == AscendDeviceType.A3 else (generic, fast)
     selected.assert_called_once()
     unused.assert_not_called()
     assert all(actual is original for actual, original in zip(selected.call_args.args, (var, indices, updates)))
@@ -195,8 +197,9 @@ def test_fp8_cache_dispatch_preserves_bytes(monkeypatch, family, dtype, layout):
 
     assert device_op.get_device_adaptor().scatter_cache(cache.view(-1, key.shape[-1]), slots.view(-1, 1), key) is None
 
-    assert sk.call_count == int(family == AscendDeviceType.A5)
-    assert scatter.call_count == int(family != AscendDeviceType.A5)
+    expected_sk = family == AscendDeviceType.A5 and layout != "row_gap"
+    assert sk.call_count == int(expected_sk)
+    assert scatter.call_count == int(not expected_sk)
     pa.assert_not_called()
     torch.testing.assert_close(backing.view(torch.uint8), expected, rtol=0, atol=0)
 
@@ -316,8 +319,9 @@ def test_indexer_cache_writes_all_gathered_rows(monkeypatch, family, key_dtype, 
     AscendSFAIndexerBackend.write_cache(
         indexer, k_li, keys[1] if scale_dtype else None, slots, SimpleNamespace(num_actual_tokens=2)
     )
-    assert sk.call_count == (len(caches) if fast_available else 0)
-    assert generic.call_count == (0 if fast_available else len(caches))
+    expected_sk = fast_available and not (family == AscendDeviceType.A5 and row_gap)
+    assert sk.call_count == (len(caches) if expected_sk else 0)
+    assert generic.call_count == (0 if expected_sk else len(caches))
     pa.assert_not_called()
     for backing, reference in zip(backings, expected):
         torch.testing.assert_close(backing.view(torch.uint8), reference, rtol=0, atol=0)
