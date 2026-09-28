@@ -192,6 +192,8 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         if len(tensors) == 1:
             if tensors[0].shape[0] != self._num_local_experts:
                 raise ValueError("HIXL EPLB weight views must align their first dimension with local experts")
+            if not tensors[0].is_contiguous():
+                raise ValueError("HIXL EPLB stacked tensors must have contiguous expert rows")
         elif any(tensor.nbytes != tensors[0].nbytes for tensor in tensors[1:]):
             raise ValueError("HIXL EPLB per-expert tensors in one weight view must have equal sizes")
 
@@ -487,20 +489,31 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         if engine is None:
             return
         self._engine = None
-        with contextlib.suppress(Exception):
+        # contextlib may already be cleared during interpreter shutdown.
+        try:  # noqa: SIM105
             torch.npu.set_device(self._device)
+        except Exception:
+            pass
         for remote_engine in getattr(self, "_remote_engines", {}).values():
-            with contextlib.suppress(Exception):
+            try:  # noqa: SIM105
                 engine.disconnect(remote_engine)
+            except Exception:
+                pass
         for handle in reversed(getattr(self, "_registered_handles", [])):
-            with contextlib.suppress(Exception):
+            try:  # noqa: SIM105
                 engine.deregister_mem(handle)
-        with contextlib.suppress(Exception):
+            except Exception:
+                pass
+        try:  # noqa: SIM105
             engine.finalize()
+        except Exception:
+            pass
         self._registered_handles.clear()
         self._remote_engines.clear()
         self._remote_send_meta.clear()
 
     def __del__(self) -> None:
-        with contextlib.suppress(Exception):
+        try:  # noqa: SIM105
             self._close()
+        except Exception:
+            pass
