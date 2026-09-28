@@ -1,16 +1,14 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 # SPDX-License-Identifier: Apache-2.0
-"""Ascend hardware checks for Mooncake encoder-output fallback memory.
+"""One-card PR hardware checks for Mooncake encoder-output fallback.
 
-The NPU-only test runs wherever torch_npu is available. The real Mooncake
-transfer test additionally requires ``VLLM_ASCEND_MOONCAKE_TEST_HOST`` to name
-the local host address advertised by two in-process TransferEngine sessions.
+Both tests use the current NPU. The real transfer test writes to the local
+session of the process-wide Ascend TransferEngine over the loopback address.
+The two-card EPD test covers transfer between separate server processes.
 """
 
 from __future__ import annotations
-
-import os
 
 import pytest
 
@@ -82,14 +80,8 @@ def test_real_npu_bounce_copy_is_byte_tight_and_visible():
 
 
 def test_real_mooncake_bounce_prefix_and_registered_interior_suffix():
-    hostname = os.environ.get("VLLM_ASCEND_MOONCAKE_TEST_HOST")
-    if not hostname:
-        pytest.skip("set VLLM_ASCEND_MOONCAKE_TEST_HOST for Mooncake hardware test")
-    pytest.importorskip("mooncake.engine")
-
     device, device_index = _npu_device()
-    producer_transfer = AscendMooncakeTransfer(hostname, device_index)
-    consumer_transfer = AscendMooncakeTransfer(hostname, device_index)
+    transfer = AscendMooncakeTransfer("127.0.0.1", device_index)
     producer_allocator = AscendProducerAllocator(
         staging_capacity=ASCEND_DIRECT_MEMORY_ALIGNMENT,
         bounce_capacity=ASCEND_DIRECT_MEMORY_ALIGNMENT,
@@ -97,14 +89,14 @@ def test_real_mooncake_bounce_prefix_and_registered_interior_suffix():
     consumer_allocator = AscendContiguousAllocator(8192)
     producer_pool = AscendProducerMemoryPool(
         ASCEND_DIRECT_MEMORY_ALIGNMENT,
-        producer_transfer,
+        transfer,
         producer_allocator,
     )
     lease = None
 
     try:
-        producer_allocator.prepare(device, producer_transfer)
-        consumer_allocator.prepare(device, consumer_transfer)
+        producer_allocator.prepare(device, transfer)
+        consumer_allocator.prepare(device, transfer)
         assert producer_allocator.tensor is not None
         assert consumer_allocator.tensor is not None
 
@@ -121,8 +113,8 @@ def test_real_mooncake_bounce_prefix_and_registered_interior_suffix():
             [(source, 0, prefix_nbytes)],
         )
 
-        producer_transfer.write(
-            consumer_transfer.local_session(),
+        transfer.write(
+            transfer.local_session(),
             [bounce_address, source.data_ptr() + prefix_nbytes],
             [destination.data_ptr(), destination.data_ptr() + prefix_nbytes],
             [prefix_nbytes, source.nbytes - prefix_nbytes],
@@ -133,7 +125,6 @@ def test_real_mooncake_bounce_prefix_and_registered_interior_suffix():
     finally:
         if lease is not None:
             producer_pool.release_bounce(lease)
-        producer_allocator.close(producer_transfer)
-        consumer_allocator.close(consumer_transfer)
-        producer_transfer.close()
-        consumer_transfer.close()
+        producer_allocator.close(transfer)
+        consumer_allocator.close(transfer)
+        transfer.close()
