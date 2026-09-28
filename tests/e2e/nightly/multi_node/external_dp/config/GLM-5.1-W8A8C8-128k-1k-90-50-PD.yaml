@@ -17,7 +17,8 @@ config:
     dp_size: 4
     dp_size_local: 2
     dp_rank_start: 0
-    tp_size: 8
+    tp_size: 4
+    cp_size: 2
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
@@ -26,7 +27,8 @@ config:
     dp_size: 4
     dp_size_local: 2
     dp_rank_start: 2
-    tp_size: 8
+    tp_size: 4
+    cp_size: 2
     dp_address: "${NODE_0_IP}"
 
   - node_index: 2
@@ -48,6 +50,7 @@ config:
     dp_address: "${NODE_2_IP}"
 
 env_common: &env_common
+  VLLM_USE_V2_MODEL_RUNNER: "1"
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
@@ -79,6 +82,8 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --hf-overrides
       - '{"use_index_cache": true, "index_topk_freq": 4}'
@@ -93,7 +98,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_fused_mc2":1}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -118,7 +123,7 @@ templates:
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
-                            "tp_size": 8
+                            "tp_size": 4
                     },
                     "decode": {
                             "dp_size": 8,
@@ -146,6 +151,8 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --hf-overrides
       - '{"use_index_cache": true, "index_topk_freq": 4}'
@@ -160,7 +167,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_fused_mc2":1}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -185,7 +192,7 @@ templates:
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
-                            "tp_size": 8
+                            "tp_size": 4
                     },
                     "decode": {
                             "dp_size": 8,
@@ -254,7 +261,7 @@ templates:
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
-                            "tp_size": 8
+                            "tp_size": 4
                     },
                     "decode": {
                             "dp_size": 8,
@@ -323,7 +330,7 @@ templates:
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
-                            "tp_size": 8
+                            "tp_size": 4
                     },
                     "decode": {
                             "dp_size": 8,

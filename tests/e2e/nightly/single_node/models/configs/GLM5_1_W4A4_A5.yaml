@@ -26,7 +26,9 @@ _server_cmd: &server_cmd
   - "--distributed-executor-backend"
   - "mp"
   - "--tensor-parallel-size"
-  - "8"
+  - "2"
+  - "--prefill-context-parallel-size"
+  - "4"
   - "--data-parallel-size"
   - "1"
   - "--seed"
@@ -64,7 +66,7 @@ _server_cmd: &server_cmd
   - "--speculative-config"
   - '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}'
   - "--additional-config"
-  - '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True","enable_dsa_cp":true,"eplb_config":{"load_collection_phase":"all"}}'
+  - '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True","eplb_config":{"load_collection_phase":"all"}}'
 
 # ==========================================
 # ACTUAL TEST CASES
