@@ -13,8 +13,23 @@ test_cases:
       ASCEND_LAUNCH_BLOCKING: "0"
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+    # KV pooling (memcache backend): runner starts/stops pool services per case
+    # (meta 5000 / config-store 6000), same shape as the MTP3 nightly kv_pool.
+    kv_pool:
+      type: "memcache"
+      meta_service_port: 5000
+      config_store_port: 6000
+      config:
+        meta:
+          ock.mmc.log_level: "info"
+        local:
+          ock.mmc.log_level: "info"
+          ock.mmc.local_service.world_size: 256
+          ock.mmc.local_service.protocol: "device_sdma"
+          ock.mmc.local_service.dram.size: "10GB"
     server_cmd:
-      - "--enable-prefix-caching"
+      # prefix caching OFF: forces the pool to be the only KV hit path (read-path sentinel)
+      - "--no-enable-prefix-caching"
       - "--max-model-len"
       - "1048576"
       - "--max-num-batched-tokens"
@@ -54,6 +69,8 @@ test_cases:
       - "--async-scheduling"
       - "--additional-config"
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":"true","enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":0}'
+      - "--kv-transfer-config"
+      - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port": "0", "use_layerwise": true}}'
     benchmarks:
       acc-gpqa:
         case_type: accuracy
@@ -66,14 +83,35 @@ test_cases:
         threshold: 5
         thinking: true
         reasoning_effort: low
+      pool_warmup:
+        case_type: performance
+        # Populate the pool before the measured run. All samples in this
+        # dataset share the same long prefix, so any one sample warms it.
+        dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_qwen
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 1
+        max_out_len: 1
+        batch_size: 1
+        request_rate: 0
+        baseline: 0
+        threshold: 0.97
       perf:
         case_type: performance
-        dataset_path: vllm-ascend/GSM8K_prefix0_in32768_bs1000_deepseek
+        # The preceding warmup writes the shared prefix, so this measured run
+        # exercises pool lookup/load-back from its first request.
+        # In use on this runner pool by qwen_3_6_27b_w8a8_A3 nightly (dataset proven cached);
+        # qwen-tokenizer calibrated — token count drifts under the deepseek_v4 tokenizer,
+        # acceptable for a perf-only sentinel.
+        dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_qwen
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 64
         max_out_len: 1024
         batch_size: 16
         request_rate: 0
-        baseline: 181.8813
-        threshold: 0.97
+        # Recording placeholder: new load + pooling, old prefix0 baseline invalid.
+        # Backfill measured throughput and restore threshold 0.97 after first green run
+        # (same placeholder pattern as qwen_3_6_27b_w8a8_A3 perf_prefix_90).
+        baseline: 1
+        threshold: 0.1
