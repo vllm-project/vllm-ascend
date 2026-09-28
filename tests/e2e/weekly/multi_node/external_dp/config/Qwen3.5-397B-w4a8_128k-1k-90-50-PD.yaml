@@ -50,6 +50,7 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: "1"
   HCCL_BUFFSIZE: "1024"
   VLLM_USE_V1: "1"
+  DYNAMIC_EPLB: "true"
 templates:
   - node_index: 0
     envs:
@@ -92,7 +93,7 @@ templates:
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - --additional-config
-      - '{"enable_cpu_binding": true,"enable_fused_mc2":0}'
+      - '{"enable_cpu_binding": true, "enable_fused_mc2" : 0, "eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":50,"algorithm_execution_interval":20, "eplb_policy_type":2, "num_redundant_experts":32}}'
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
       - --mm-processor-cache-gb
@@ -161,7 +162,7 @@ templates:
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - --additional-config
-      - '{"enable_cpu_binding": true,"enable_fused_mc2":0}'
+      - '{"enable_cpu_binding": true, "enable_fused_mc2" : 0, "eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":50,"algorithm_execution_interval":20, "eplb_policy_type":2, "num_redundant_experts":32}}'
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
       - --mm-processor-cache-gb
@@ -231,7 +232,7 @@ templates:
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"enable_cpu_binding":true,"enable_fused_mc2":0}'
+      - '{"recompute_scheduler_enable": true, "enable_cpu_binding": true, "enable_fused_mc2" : 0, "eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":600,"algorithm_execution_interval":50, "eplb_policy_type":2, "num_redundant_experts":32}}'
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
       - --mm-processor-cache-gb
