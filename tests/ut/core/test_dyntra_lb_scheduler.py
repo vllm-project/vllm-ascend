@@ -31,7 +31,6 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     get_dyntra_lb_request_block_num,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import vllm_version_is
 
 SchedulerT = TypeVar("SchedulerT", bound=Scheduler)
 
@@ -84,7 +83,7 @@ def create_dyntra_lb_scheduler(
     scheduler_cls: type[SchedulerT],
     num_blocks: int = 10000,
 ) -> SchedulerT:
-    """Create a scheduler subclass for DyntraLB unit tests."""
+    """Create a V1 scheduler subclass for DyntraLB unit tests."""
     block_size = vllm_config.cache_config.block_size
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -103,13 +102,17 @@ def create_dyntra_lb_scheduler(
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
 
-    return scheduler_cls(
+    scheduler = scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         log_stats=True,
         block_size=block_size,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
+    # These fixtures assert legacy V1 scheduler output structures. Tests that
+    # exercise V2 opt in explicitly after construction.
+    scheduler.use_v2_model_runner = False
+    return scheduler
 
 
 def test_dyntra_lb_scheduler_uses_policy_mixin():
@@ -572,10 +575,7 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
 
     assert len(block_states) == 1
     assert block_states[0].boundary_state_offloads is boundary_state_offloads
-    if vllm_version_is("0.29.0"):
-        assert block_states[0].block_ids == {}
-    else:
-        assert block_states[0].req_ids == set()
+    assert block_states[0].req_ids == set()
     assert scheduler_output.kv_connector_block_state is None
     assert scheduler_output.kv_connector_metadata is connector_metadata
     assert scheduler_output.ec_manager_metadata is encoder_cache_metadata

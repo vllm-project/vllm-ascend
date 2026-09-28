@@ -12,9 +12,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
@@ -79,7 +79,7 @@ def _create_common_attn_metadata(
     batch_spec: BatchSpec,
     block_size: int,
     device: torch.device,
-) -> CommonAttentionMetadata:
+) -> AscendCommonAttentionMetadata:
     query_start_loc = torch.zeros(
         batch_spec.batch_size + 1,
         dtype=torch.int32,
@@ -106,7 +106,7 @@ def _create_common_attn_metadata(
     ).view(batch_spec.batch_size, max_blocks)
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
 
-    return CommonAttentionMetadata(
+    return AscendCommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
@@ -417,7 +417,7 @@ def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
     padded_query_start_loc[batch_size + 1] = common.query_start_loc[batch_size]
     padded_query_start_loc_cpu = padded_query_start_loc.cpu()
 
-    padded_common = CommonAttentionMetadata(
+    padded_common = AscendCommonAttentionMetadata(
         query_start_loc=padded_query_start_loc,
         query_start_loc_cpu=padded_query_start_loc_cpu,
         seq_lens=common.seq_lens,

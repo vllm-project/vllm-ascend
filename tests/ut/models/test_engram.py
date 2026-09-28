@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 """Focused tests for the Ascend Engram configuration and storage path."""
 
 import json
@@ -12,6 +13,11 @@ import numpy as np
 import pytest
 import torch
 from safetensors.torch import save_file
+
+pytest.importorskip(
+    "vllm.models.deepseek_v4_1",
+    reason="DeepSeek V4.1 is unavailable on this vLLM release",
+)
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
@@ -50,7 +56,9 @@ def test_dp_shared_memory_config_and_topologies(tp, dp, external):
     )
     assert not AscendEngramConfig().dp_shared_memory
     with pytest.raises(ValueError, match="cpu_offload"):
-        AscendEngramConfig(dp_shared_memory=True)
+        # vLLM main defaults VLLM_PLE_CPU_OFFLOAD to True, so force it off here
+        # to exercise the dp_shared_memory -> cpu_offload validation.
+        AscendEngramConfig(cpu_offload=False, dp_shared_memory=True)
     with pytest.raises(ValueError, match="single-node"):
         config.verify_parallel_config(_topology(tp, dp, nnodes=2))
 

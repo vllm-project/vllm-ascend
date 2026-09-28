@@ -121,6 +121,9 @@ def runtime(config):
         speculative_config=None,
         kv_transfer_config=None,
         use_v2_model_runner=False,
+        # vLLM main reads attention_config.hisparse_config in the KV cache
+        # config helpers; Ascend does not enable HiSparse.
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
 
 

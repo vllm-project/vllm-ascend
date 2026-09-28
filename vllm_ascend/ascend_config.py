@@ -18,10 +18,12 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import json
+import math
 import os
+from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, model_validator
+from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -181,6 +183,97 @@ class AscendFusionConfig:
     fusion_ops_gmmswigluquant: bool = True
 
 
+@config(config=ConfigDict(frozen=True))
+class StairConfig:
+    """Advanced tuning for the MRv2 STAIR policy.
+
+    Covariance-aware risk and hysteresis are mandatory policy behavior. Balance
+    is the reciprocal of the mean max-to-average rank-load ratio.
+
+    Attributes:
+        load_window_bins: Maximum chronological bins used to compress the
+            upstream EPLB load window. Bin means and weights represent all
+            samples in that window.
+        load_risk_quantile: One-sided standard-normal quantile converted to a
+            z-score for mean-plus-deviation expert and rank risk.
+        relative_balance_threshold: Rebalance when current balance divided by
+            the last committed balance is at or below this value.
+        absolute_balance_threshold: Rebalance when current balance is at or
+            below this value.
+        rank_transfer_limit: Maximum outgoing and incoming expert transfers
+            for each rank in one layer plan. Minus one removes this limit.
+        cross_node_transfer_limit: Maximum outgoing and incoming cross-node
+            expert transfers for each node in one layer plan. Minus one removes
+            this limit; zero disables cross-node transfers.
+        replica_search_num_stages: Number of risk-ordered expert groups handled
+            by the FlashTree-style replica search.
+        replica_search_radius: Maximum distance from the greedy extra-replica
+            budget explored at each search stage.
+        replica_search_beam_size: Maximum unique replica-count candidates kept
+            after each search stage.
+        placement_search_backtrack_limit: Maximum feasible-branch reversals
+            while constrained LPT places one candidate. Zero disables them.
+    """
+
+    load_window_bins: int = 64
+    load_risk_quantile: float = 0.75
+    relative_balance_threshold: float = 0.95
+    absolute_balance_threshold: float = 0.90
+    rank_transfer_limit: int = 1
+    cross_node_transfer_limit: int = 1
+    replica_search_num_stages: int = 4
+    replica_search_radius: int = 8
+    replica_search_beam_size: int = 64
+    placement_search_backtrack_limit: int = 32
+
+    @property
+    def z_score(self) -> float:
+        return NormalDist().inv_cdf(self.load_risk_quantile)
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _reject_bool(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("STAIR numeric fields must not be booleans")
+        return value
+
+    @model_validator(mode="after")
+    def _validate(self):
+        if not 2 <= self.load_window_bins <= 256:
+            raise ValueError("stair_config.load_window_bins must be between 2 and 256")
+        if not math.isfinite(self.load_risk_quantile) or not 0.5 < self.load_risk_quantile < 1:
+            raise ValueError("stair_config.load_risk_quantile must be between 0.5 and one")
+        for name in ("relative_balance_threshold", "absolute_balance_threshold"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or not 0 < value <= 1:
+                raise ValueError(f"stair_config.{name} must be between zero and one")
+        if self.rank_transfer_limit != -1 and self.rank_transfer_limit < 1:
+            raise ValueError("stair_config.rank_transfer_limit must be -1 or positive")
+        if self.cross_node_transfer_limit < -1:
+            raise ValueError("stair_config.cross_node_transfer_limit must be at least -1")
+        if not 1 <= self.replica_search_num_stages <= 8:
+            raise ValueError("stair_config.replica_search_num_stages must be between 1 and 8")
+        if not 0 <= self.replica_search_radius <= 32:
+            raise ValueError("stair_config.replica_search_radius must be between 0 and 32")
+        if not 1 <= self.replica_search_beam_size <= 128:
+            raise ValueError("stair_config.replica_search_beam_size must be between 1 and 128")
+        if not 0 <= self.placement_search_backtrack_limit <= 64:
+            raise ValueError("stair_config.placement_search_backtrack_limit must be between 0 and 64")
+        return self
+
+
+@config
+class AscendWarmupConfig:
+    """Configuration for startup warmup that overlaps weight loading.
+
+    Both threads are joined at the end of ``load_model``, before memory
+    profiling, so they never touch the KV cache budget.
+    """
+
+    enable_early_kernel_warmup: bool = False
+    enable_early_nz_warmup: bool = False
+
+
 @config
 class EplbConfig:
     """Configuration Object for ``additional_config["eplb_config"]``.
@@ -204,6 +297,7 @@ class EplbConfig:
     # upstream EPLB expert-load window; any prefill request marks the batch
     # as prefill.
     load_collection_phase: str = "all"
+    stair_config: StairConfig = dataclasses.field(default_factory=StairConfig)
 
     @model_validator(mode="after")
     def _validate_config(self):
@@ -365,6 +459,10 @@ class AscendConfig:
             "ascend_fusion_config": {
                 "fusion_ops_gmmswigluquant": true
             },
+            "ascend_warmup_config": {
+                "enable_early_kernel_warmup": false,
+                "enable_early_nz_warmup": false
+            },
             "eplb_config": {
                 "dynamic_eplb": false,
                 "expert_map_path": null,
@@ -374,7 +472,8 @@ class AscendConfig:
                 "num_redundant_experts": 0,
                 "eplb_policy_type": 2,
                 "eplb_heat_collection_stage": "all",
-                "load_collection_phase": "all"
+                "load_collection_phase": "all",
+                "stair_config": {}
             },
             "rejection_sampler_config": {
                 "enable_block_verify": false,
@@ -514,6 +613,7 @@ class AscendConfig:
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
+    ascend_warmup_config: AscendWarmupConfig = dataclasses.field(default_factory=AscendWarmupConfig)
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
@@ -693,11 +793,11 @@ class AscendConfig:
 
         finegrained_tp_enabled = (
             self.finegrained_tp_config.oproj_tensor_parallel_size > 0
-            or self.finegrained_tp_config.embedding_tensor_parallel_size > 0
+            or self.finegrained_tp_config.mlp_tensor_parallel_size > 0
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
-                "oproj_tensor_parallel_size / embedding_tensor_parallel_size require "
+                "oproj_tensor_parallel_size / mlp_tensor_parallel_size require "
                 "recompute_scheduler_enable=true: it keeps decode-node steps decode-shaped.",
             )
 
@@ -1191,26 +1291,29 @@ class FinegrainedTPConfig:
 
         vc = vllm_config
         enabled_configs = []
-        if self.oproj_tensor_parallel_size > 1:
-            # _forward_o_proj reshapes with n_local_groups = n_groups // tp_size (standard TP),
-            # which misaligns with the OTP weight shard (DP axis) when tp_size > 1.
+        if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1:
+            # o_proj's _forward_o_proj reshape misaligns under tp > 1; mlp is untested there.
             if vc.parallel_config.tensor_parallel_size > 1:
                 raise AssertionError(
-                    "oproj_tensor_parallel_size currently requires "
-                    "tensor_parallel_size == 1, got "
+                    "oproj_tensor_parallel_size / mlp_tensor_parallel_size currently "
+                    "require tensor_parallel_size == 1, got "
                     f"{vc.parallel_config.tensor_parallel_size}."
                 )
             # Graph dispatch is the only lane that aligns DP token counts (eager keeps per-rank counts).
             if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-                raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
+                raise AssertionError(
+                    "oproj_tensor_parallel_size / mlp_tensor_parallel_size are only supported in graph mode"
+                )
             if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
-                    "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
+                    "oproj_tensor_parallel_size / mlp_tensor_parallel_size are only supported "
+                    "in pd scenario and can only be used in D node."
                 )
             # PCP's dispatch recomputes num_tokens per rank, breaking the group-uniform step size.
             if vc.parallel_config.prefill_context_parallel_size > 1:
                 raise AssertionError(
-                    "oproj_tensor_parallel_size is not supported with prefill_context_parallel_size > 1."
+                    "oproj_tensor_parallel_size / mlp_tensor_parallel_size are not supported "
+                    "with prefill_context_parallel_size > 1."
                 )
             # decode_query_len mirrors _get_default_max_cudagraph_capture_size in platform.py.
             decode_query_len = 1
@@ -1228,23 +1331,27 @@ class FinegrainedTPConfig:
             # A step beyond the capture bound dispatches to eager and desyncs the cross-DP collectives.
             if capture_bound is None or capture_bound < max_step:
                 logger.warning(
-                    "Disabling oproj_tensor_parallel_size=%d: the largest cudagraph capture "
-                    "size (%s) does not cover the largest possible step (%d tokens); an "
-                    "oversized step would dispatch to eager and hang the cross-DP HCCL "
-                    "collectives. Raise max_cudagraph_capture_size to re-enable it.",
+                    "Disabling oproj_tensor_parallel_size=%d and mlp_tensor_parallel_size=%d: "
+                    "the largest cudagraph capture size (%s) does not cover the largest "
+                    "possible step (%d tokens); an oversized step would dispatch to eager "
+                    "and hang the cross-DP HCCL collectives. Raise max_cudagraph_capture_size "
+                    "to re-enable them.",
                     self.oproj_tensor_parallel_size,
+                    self.mlp_tensor_parallel_size,
                     str(capture_bound),
                     max_step,
                 )
                 self.oproj_tensor_parallel_size = 0
+                self.mlp_tensor_parallel_size = 0
             else:
-                enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
+                if self.oproj_tensor_parallel_size > 1:
+                    enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
+                if self.mlp_tensor_parallel_size > 1:
+                    enabled_configs.append(f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
         if self.lmhead_tensor_parallel_size > 0:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
         if self.embedding_tensor_parallel_size > 0:
             enabled_configs.append(f"embedding_tensor_parallel_size={self.embedding_tensor_parallel_size}")
-        if self.mlp_tensor_parallel_size > 0:
-            enabled_configs.append(f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
         module_tp_sizes = [
             self.oproj_tensor_parallel_size,
             self.lmhead_tensor_parallel_size,
@@ -1521,9 +1628,20 @@ class SparseKVOffloadConfig:
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
+    # Generalized Q1/MTP LIM + copy-SFA. The C8 operator is built separately
+    # but is not selected by this serving path.
+    fused_op_type: str = "none"
+
+    @property
+    def use_fused_copy_sfa(self) -> bool:
+        return self.fused_op_type == "fused_copy_sfa"
 
     @model_validator(mode="after")
     def _validate_values(self):
+        if self.fused_op_type not in ("none", "fused_copy_sfa"):
+            raise ValueError("sparse_kv_offload_config.fused_op_type must be none or fused_copy_sfa")
+        if self.use_fused_copy_sfa and self.use_fused_overlap:
+            raise ValueError("fused_copy_sfa and use_fused_overlap are mutually exclusive")
         if self.topk_buffer_size <= 0:
             raise ValueError("sparse_kv_offload_config.topk_buffer_size must be positive")
         if self.dram_size_per_dp_GB <= 0:
@@ -1571,6 +1689,18 @@ class SparseKVOffloadConfig:
             raise ValueError("Sparse KV offload doesn't support model_runner_v2 now.")
 
         self.topk = vllm_config.model_config.hf_text_config.index_topk
+        if self.use_fused_copy_sfa:
+            if vllm_config.speculative_config and vllm_config.speculative_config.method == "dspark":
+                raise ValueError("fused_copy_sfa does not support DSpark speculative decoding")
+            width = 1 + (vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0)
+            if self.topk != 2048 or not 1 <= width <= 7:
+                raise ValueError("fused_copy_sfa serving requires TopK=2048 and 1–7 query rows per request")
+            if not width * self.topk <= self.topk_buffer_size <= 16256 or self.topk_buffer_size % 256:
+                raise ValueError(
+                    "fused_copy_sfa hot budget must be 256-aligned in [Q_max*2048, 16128]: "
+                    "the dense short-sequence layout only lines up with the circular "
+                    "tail slots when topk_buffer_size is a multiple of 256"
+                )
         if self.topk_buffer_size < self.topk:
             raise ValueError(
                 "sparse_kv_offload_config.topk_buffer_size must be >= topk, "

@@ -622,7 +622,7 @@ class AscendSFADCPMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
         metadata_cls: type[AscendSFAMetadata] | None = None,
-        supports_dcp_with_varlen: bool = False,
+        supports_dcp_with_varlen: bool = True,
     ):
         metadata_cls = metadata_cls or AscendSFADCPMetadata
         super().__init__(

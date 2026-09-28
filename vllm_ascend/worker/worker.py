@@ -98,8 +98,10 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     check_ascend_device_type,
+    enable_custom_op,
     enable_sp,
     register_ascend_customop,
+    register_device_print,
     setup_ascend_local_comm_res,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -134,9 +136,16 @@ class NPUWorker(WorkerBase):
                 "In most scenarios, without custom kernels, vllm-ascend will not function correctly."
             )
 
-        # register patch for vllm
+        # Worker processes receive a pickled VllmConfig, so the platform config
+        # hook (NPUPlatform.check_and_update_config) never runs here. Re-apply the
+        # Ascend V2 model runner overrides so the worker resolves the same
+        # runner version as the engine. Idempotent.
+        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
+        from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
         from vllm_ascend.utils import adapt_patch
 
+        apply_v2_model_runner_config_patch()
+        sync_v2_extra_kwargs(vllm_config)
         adapt_patch()
 
         # Register ops when worker init.
@@ -428,6 +437,9 @@ class NPUWorker(WorkerBase):
         device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
 
         torch.npu.set_device(device)
+
+        if enable_custom_op():
+            register_device_print()
 
         # Import _inductor for graph mode execution with triton
         # This lazy import avoids torch_npu re-initialization in patch
@@ -779,6 +791,8 @@ class NPUWorker(WorkerBase):
             self.profiler.step()
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        if self.use_v2_model_runner and self.model_runner.is_pooling_model and output is None:
+            output = self.model_runner.pool()  # type: ignore
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
@@ -1115,7 +1129,10 @@ class NPUWorker(WorkerBase):
                 # the engine's cache groups. Attention compute stays windowed.
                 kv_cache_spec = dict(kv_cache_spec)
                 unify_hybrid_kv_cache_specs(kv_cache_spec)
-            kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
+            kvpp_rank = (
+                get_pcp_group().rank_in_group * self.vllm_config.parallel_config.tensor_parallel_size
+                + get_tp_group().rank_in_group
+            )
             self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
                 self.vllm_config,
                 kv_cache_spec,

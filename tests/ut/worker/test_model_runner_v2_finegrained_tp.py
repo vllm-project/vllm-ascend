@@ -243,12 +243,12 @@ def test_dummy_lmhead_collective_precedes_eplb(lmhead_enabled, is_profile, has_h
         runner.model.compute_logits.assert_not_called()
 
 
-def test_oproj_tp_guard_contract():
+def test_finegrained_tp_guard_contract():
     runner = object.__new__(NPUModelRunner)
-    runner._oproj_tp_requires_graph = False
-    NPUModelRunner._check_oproj_tp_graph_step(runner, CUDAGraphMode.NONE)
-    runner._oproj_tp_requires_graph = True
+    runner._finegrained_tp_requires_graph = False
+    NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.NONE)
+    runner._finegrained_tp_requires_graph = True
     with pytest.raises(RuntimeError, match="captured graph"):
-        NPUModelRunner._check_oproj_tp_graph_step(runner, CUDAGraphMode.NONE)
-    NPUModelRunner._check_oproj_tp_graph_step(runner, CUDAGraphMode.FULL_DECODE_ONLY)
-    NPUModelRunner._check_oproj_tp_graph_step(runner, CUDAGraphMode.FULL)
+        NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.NONE)
+    NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.FULL_DECODE_ONLY)
+    NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.FULL)

@@ -1,6 +1,6 @@
 from copy import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -10,9 +10,11 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_pcp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
     MLACommonMetadataBuilder,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
@@ -119,6 +121,20 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
+
+
+class AscendMLAAttention(MLAAttention):
+    """Ascend ``MLAAttention`` layer.
+
+    Upstream gates PCP+DCP on the layer ``supports_pcp_dcp`` ClassVar (default
+    False) inside ``__init__``, so the Ascend opt-in must live on the class
+    (mirroring upstream ``DeepseekV32Attention``) rather than being assigned
+    onto the shared upstream ``MLAAttention``. PCP+DCP is implemented by the
+    Ascend attention impls (AscendMlaDCPImpl / AscendSFAPCPDCPImpl) selected
+    by the Ascend backends.
+    """
+
+    supports_pcp_dcp: ClassVar[bool] = True
 
 
 @dataclass
@@ -798,6 +814,14 @@ class AscendMLAImpl(MLAAttentionImpl):
     understand this class
     """
 
+    # ``W_UV``/``W_UK_T`` are injected during ``process_weights_after_loading``
+    # through ``replace_parameter``, which is ``setattr``-based and therefore
+    # invisible to static analysis. These declarations are what let mypy resolve
+    # the attributes at every use site; without them ``pre-commit`` fails with
+    # `Cannot determine type of "W_UK_T"  [has-type]`.
+    W_UV: torch.Tensor
+    W_UK_T: torch.Tensor
+
     def __init__(
         self,
         num_heads: int,
@@ -1056,17 +1080,28 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         W_UK, W_UV = kv_b_proj_weight.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        # NOTE: When we make a incontiguous weight contiguous, a new address will be allocated for the weight,
-        # in graph + RL scenario, we only capture the graph once, and the weight address is expected to be the same
-        # across iterations, so we need to copy the weight to the original address after making it contiguous.
-        if not hasattr(self, "W_UV"):
-            # Convert from (L, N, V) to (N, L, V)
-            self.W_UV = W_UV.transpose(0, 1).contiguous()
-            # Convert from (L, N, P) to (N, P, L)
-            self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
-        else:
-            self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
-            self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
+        # NOTE: `W_UK`/`W_UV` must live at a stable address: in graph + RL
+        # scenario the graph is captured once, so every later weight update
+        # reload has to refresh the stored tensors in place instead of
+        # rebinding the attributes to freshly allocated tensors.
+        # `replace_parameter(..., prefer_copy=True)` does exactly that: it
+        # copies into the existing storage while the new value stays
+        # compatible, and rebinds only when shape/dtype/device actually
+        # changes. This mirrors how upstream vLLM refreshes
+        # `MLAAttention.W_UV`/`W_UK_T`, and unlike a plain `copy_` it cannot
+        # raise on a shape mismatch.
+        replace_parameter(
+            self,
+            "W_UV",
+            W_UV.transpose(0, 1).contiguous(),  # (L, N, V) -> (N, L, V)
+            prefer_copy=True,
+        )
+        replace_parameter(
+            self,
+            "W_UK_T",
+            W_UK.permute(1, 2, 0).contiguous(),  # (L, N, P) -> (N, P, L)
+            prefer_copy=True,
+        )
         self.mlapo_W_UK_T = self.W_UK_T
 
         if self.enable_mlapo:
@@ -1654,14 +1689,23 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         attn_output_shape: tuple | None = None
         if (
-            attn_metadata.attn_state
-            in [
-                AscendAttentionState.SpecDecoding,
-                AscendAttentionState.ChunkedPrefill,
-                AscendAttentionState.DecodeOnly,
-                AscendAttentionState.PrefillNoCache,  # for extremely short prefills
-            ]
-            and self.speculative_config is not None
+            (
+                attn_metadata.attn_state
+                in [
+                    AscendAttentionState.SpecDecoding,
+                    AscendAttentionState.ChunkedPrefill,
+                    AscendAttentionState.DecodeOnly,
+                    AscendAttentionState.PrefillNoCache,  # for extremely short prefills
+                ]
+                and self.speculative_config is not None
+            )
+            # vLLM main (#56181) restructured the draft decode metadata flow;
+            # the draft decode graph capture then records a non-TND layout,
+            # while replay still passes cumulative actual_seq_lengths_q. Force
+            # TND for the draft (its metadata uses cumulative lengths). Use the
+            # forward-context flag, not self.is_draft_model: the draft MLA impl
+            # shares the target's vllm_config, so runner_type is "generate".
+            or _EXTRA_CTX.is_draft_model
         ):
             # The right part layout indicates the layout of the attention
             # output. It is set to NTD to avoid the need for a transpose

@@ -46,7 +46,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import get_ascend_config, vllm_version_is
+from vllm_ascend.utils import get_ascend_config
 
 
 @dataclass
@@ -133,9 +133,10 @@ class RecomputeScheduler(Scheduler):
 
         if not offloaded:
             # Mirror the config gate: only a real split (size > 1) forbids the return to P.
-            if get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 1:
+            ftpc = get_ascend_config().finegrained_tp_config
+            if ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1:
                 logger.error(
-                    "KV offload failed with o_proj TP enabled; aborting the request instead "
+                    "KV offload failed with fine-grained TP enabled; aborting the request instead "
                     "of returning it to P for recomputation: request_id=%s, "
                     "num_computed_tokens=%d",
                     request.request_id,
@@ -865,7 +866,6 @@ class RecomputeScheduler(Scheduler):
         # Construct the scheduler output.
         new_request_kwargs = {
             "uses_mrope": self.model_uses_mrope,
-            **({"uses_xdrope": self.model_uses_xdrope} if vllm_version_is("0.29.0") else {}),
         }
         if self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
@@ -911,24 +911,11 @@ class RecomputeScheduler(Scheduler):
             # new blocks. Resolve its current table only when the connector reads it.
             block_state_req_ids = set(num_scheduled_tokens)
             block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
-            if vllm_version_is("0.29.0"):
-                snapshot_req_ids = {req.req_id for req in new_reqs_data}
-                snapshot_req_ids.update(
-                    req_id
-                    for req_id, block_ids in zip(cached_reqs_data.req_ids, cached_reqs_data.new_block_ids, strict=True)
-                    if block_ids
-                )
-                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
-                kv_connector_block_state = KVConnectorBlockState(
-                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
-                    boundary_state_offloads=boundary_state_offloads,
-                )
-            else:
-                kv_connector_block_state = KVConnectorBlockState(
-                    req_ids=block_state_req_ids,
-                    resolve_block_ids=self.kv_cache_manager.get_block_ids,
-                    boundary_state_offloads=boundary_state_offloads,
-                )
+            kv_connector_block_state = KVConnectorBlockState(
+                req_ids=block_state_req_ids,
+                resolve_block_ids=self.kv_cache_manager.get_block_ids,
+                boundary_state_offloads=boundary_state_offloads,
+            )
 
         kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
         if kv_cache_block_copies:

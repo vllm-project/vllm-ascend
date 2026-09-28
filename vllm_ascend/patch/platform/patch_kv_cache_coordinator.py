@@ -33,9 +33,6 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
-from vllm_ascend.utils import vllm_version_is
-
-USE_MULTI_GROUPS_KV_CACHE = True
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -62,13 +59,8 @@ def _skips_eagle_block_drop(kv_transfer_config) -> bool:
     )
 
 
-def _select_kv_token_budget(
-    max_model_len: int,
-    max_in_flight_tokens: int | None,
-    max_num_batched_tokens: int | None,
-) -> int:
-    token_budget = max_in_flight_tokens
-    return token_budget if token_budget is not None else max_model_len
+def _select_kv_token_budget(max_model_len: int, max_in_flight_tokens: int | None) -> int:
+    return max_in_flight_tokens if max_in_flight_tokens is not None else max_model_len
 
 
 def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
@@ -121,9 +113,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
         max_in_flight_tokens: int | None = None,
-        max_num_batched_tokens: int | None = None,
         scheduler_block_size: int | None = None,
         num_prefill_lookahead: int = 0,
+        allow_partial_hash_hits: bool = True,
     ):
         # Keep pcp_world_size in this patched constructor for compatibility
         # with the upstream coordinator interface. PCP is rejected by the platform.
@@ -135,12 +127,14 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
+        # vLLM main (#54736) added allow_partial_hash_hits to the upstream
+        # coordinator interface (fine-grained hybrid prefix hits).
+        self.allow_partial_hash_hits = allow_partial_hash_hits
         # Fall back to `max_model_len` when unset so the recycling-aware
         # admission cap (vLLM PR #40946) collapses to the prior uncapped
         # behavior. The scheduler always supplies the real value at runtime.
-        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
         self.max_in_flight_tokens = token_budget
-        self.max_num_batched_tokens = token_budget
         self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
         validate_retention_interval = getattr(
             vllm_kv_cache_coordinator,
@@ -193,7 +187,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
         # vLLM #53614 aligns exported Mamba checkpoints with EAGLE replay.
-        if use_eagle and not vllm_version_is("0.29.0"):
+        if use_eagle:
             for manager in self.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
@@ -511,30 +505,32 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     scheduler_block_size: int | None = None,
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
-    max_num_batched_tokens: int | None = None,
     num_prefill_lookahead: int = 0,
+    allow_partial_hash_hits: bool = True,
 ) -> KVCacheCoordinator:
     # Keep pcp_world_size in this patched function for upstream call
     # compatibility; platform validation guarantees that it is one.
     del pcp_world_size
-    token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+    token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
+    hybrid_kwargs = dict(
+        kv_cache_config=kv_cache_config,
+        max_model_len=max_model_len,
+        use_eagle=use_eagle,
+        enable_caching=enable_caching,
+        enable_kv_cache_events=enable_kv_cache_events,
+        dcp_world_size=dcp_world_size,
+        pcp_world_size=1,
+        hash_block_size=hash_block_size,
+        eagle_attn_layer_names=eagle_attn_layer_names,
+        metrics_collector=metrics_collector,
+        max_in_flight_tokens=token_budget,
+        scheduler_block_size=scheduler_block_size,
+        num_prefill_lookahead=num_prefill_lookahead,
+    )
+    # vLLM main (#54736) added allow_partial_hash_hits.
+    hybrid_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
     if _is_deepseek_v4_kv_cache_config(kv_cache_config):
-        return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
-            kv_cache_config,
-            max_model_len,
-            use_eagle,
-            enable_caching,
-            enable_kv_cache_events,
-            dcp_world_size=dcp_world_size,
-            pcp_world_size=1,
-            hash_block_size=hash_block_size,
-            eagle_attn_layer_names=eagle_attn_layer_names,
-            metrics_collector=metrics_collector,
-            max_in_flight_tokens=token_budget,
-            max_num_batched_tokens=token_budget,
-            scheduler_block_size=scheduler_block_size,
-            num_prefill_lookahead=num_prefill_lookahead,
-        )
+        return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
     if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
         orig_kwargs = dict(
@@ -551,24 +547,10 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         orig_kwargs["max_in_flight_tokens"] = token_budget
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
         orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
+        orig_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
 
-    return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
-        kv_cache_config,
-        max_model_len,
-        use_eagle,
-        enable_caching,
-        enable_kv_cache_events,
-        dcp_world_size=dcp_world_size,
-        pcp_world_size=1,
-        hash_block_size=hash_block_size,
-        eagle_attn_layer_names=eagle_attn_layer_names,
-        metrics_collector=metrics_collector,
-        max_in_flight_tokens=token_budget,
-        max_num_batched_tokens=token_budget,
-        scheduler_block_size=scheduler_block_size,
-        num_prefill_lookahead=num_prefill_lookahead,
-    )
+    return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
 
 vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]

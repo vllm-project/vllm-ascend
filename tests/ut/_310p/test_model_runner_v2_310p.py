@@ -93,20 +93,7 @@ def test_kv_zeroing_uses_narrow_310p_gate(
         kv_cache_groups=[SimpleNamespace(is_eagle_group=uses_eagle_block_drop)],
     )
 
-    with patch.object(model_runner_module, "vllm_version_is", return_value=False):
-        assert runner._needs_kv_cache_zeroing_310p(kv_cache_config) is expected
-
-
-def test_kv_zeroing_matches_v029_gate() -> None:
-    runner = object.__new__(NPUModelRunner310V2)
-    runner.speculative_config = SimpleNamespace(num_speculative_tokens=2)
-    kv_cache_config = SimpleNamespace(
-        has_mamba_layers=True,
-        kv_cache_groups=[SimpleNamespace(is_eagle_group=True)],
-    )
-
-    with patch.object(model_runner_module, "vllm_version_is", return_value=True):
-        assert runner._needs_kv_cache_zeroing_310p(kv_cache_config)
+    assert runner._needs_kv_cache_zeroing_310p(kv_cache_config) is expected
 
 
 def test_update_requests_filters_unneeded_upstream_zeroing() -> None:
@@ -437,9 +424,11 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
         num_computed_tokens_cpu=torch.zeros(2, dtype=torch.int32),
         last_sampled_tokens=torch.zeros((2, 1), dtype=torch.int64),
         last_sampled_tokens_cpu=torch.tensor([[20], [11]], dtype=torch.int64),
+        next_prefill_tokens=torch.zeros(2, dtype=torch.int64),
     )
     runner.model_state = MagicMock()
-    runner.speculator = object()
+    # Must allow attribute assignment for host-mirror publish in postprocess_sampled.
+    runner.speculator = SimpleNamespace()
     runner.rejection_sampler = MagicMock()
     runner._decode_req_indices = model_runner_module.CpuGpuBuffer(
         2, dtype=torch.int64, device=runner.device, pin_memory=False

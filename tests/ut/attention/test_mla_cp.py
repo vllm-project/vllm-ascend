@@ -7,8 +7,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel import mla_cp
 from vllm_ascend.attention.context_parallel.mla_cp import (
     AscendMLADCPDecodeMetadata,
     AscendMlaDCPImpl,
@@ -39,69 +41,97 @@ def test_mla_dcp_extends_v1_backend() -> None:
     assert {"cp_seq_len", "dcp_mtp_attn_mask"} <= dcp_fields
 
 
-def test_mla_dcp_builds_missing_metadata_for_mixed_batch() -> None:
-    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
-    builder.dcp_size = 2
-    builder.cp_local_block_size = 128
-    builder.num_decodes = 1
-    builder.seq_lens = torch.tensor([257, 400], dtype=torch.int32)
-    builder.query_lens = torch.tensor([1, 100], dtype=torch.int32)
-    common = SimpleNamespace(context_parallel_metadata=None, max_query_len=100)
-
-    metadata = builder._require_dcp_metadata(common)
-
-    assert metadata.num_computed_tokens_of_dcp.tolist() == [[129, 128], [172, 128]]
-    assert metadata.query_lens_cpu.tolist() == [1, 100]
-    assert metadata.max_query_len == 100
-    assert builder.seq_lens.tolist() == [257, 400]
-    assert common.context_parallel_metadata is metadata
-
-
-def test_mla_dcp_preserves_runner_metadata() -> None:
-    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
-    metadata = SimpleNamespace(num_computed_tokens_of_dcp=[[128, 128]])
-    common = SimpleNamespace(context_parallel_metadata=metadata)
-    assert builder._require_dcp_metadata(common) is metadata
+@pytest.mark.parametrize("dcp_size", [1, 8])
+def test_mla_dcp_passes_runner_v2_cp_compatibility(dcp_size) -> None:
+    group = SimpleNamespace(world_size=dcp_size, rank_in_group=0)
+    with patch("vllm.distributed.parallel_state.get_dcp_group", return_value=group):
+        impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    assert impl.need_to_return_lse_for_decode == (dcp_size > 1)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=dcp_size,
+            cp_kv_cache_interleave_size=1,
+        ),
+        speculative_config=None,
+    )
+    with patch(
+        "vllm.v1.worker.cp_utils.get_layers_from_vllm_config",
+        return_value={"attention": SimpleNamespace(impl=impl)},
+    ):
+        check_attention_cp_compatibility(config)
 
 
-def test_mla_dcp_decode_metadata_separates_history_and_preserves_padded_queries() -> None:
+@pytest.mark.parametrize("num_decodes", [1, 2], ids=["v1-padding", "v2-empty-row"])
+def test_mla_dcp_consumes_local_lengths_and_only_partitions_history(num_decodes) -> None:
+    lengths = torch.tensor([20, 0][:num_decodes], dtype=torch.int32)
     decode = AscendMLADCPDecodeMetadata(
-        input_positions=torch.arange(4),
-        block_table=torch.ones((1, 2), dtype=torch.int32),
-        seq_lens=torch.tensor([20]),
+        input_positions=torch.arange(4 * num_decodes),
+        block_table=torch.ones((num_decodes, 2), dtype=torch.int32),
+        seq_lens=lengths,
         max_seq_lens=20,
-        seq_lens_list=[20],
+        seq_lens_list=lengths.tolist(),
         actual_seq_lengths_q=[4, 8],
     )
-    mtp_mask = torch.zeros((2, 8, 32), dtype=torch.bool)
-    dcp_metadata = SimpleNamespace(
-        draft_cp_seq_len=torch.tensor([12, 11], dtype=torch.int32),
-        num_computed_tokens_of_dcp=[[12, 8]],
-        dcp_mtp_attn_mask=mtp_mask,
-    )
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
-    builder.num_decodes = 1
+    builder.num_decodes = num_decodes
     builder.dcp_size = 2
     builder.dcp_rank = 0
     builder.cp_local_block_size = 4
-    builder.query_lens = torch.tensor([4, 4])
-    builder._require_dcp_metadata = lambda _metadata: dcp_metadata
-
-    with patch.object(
-        AscendMLAMetadataBuilder,
-        "build_decode_metadata",
-        return_value=decode,
+    builder.seq_lens = lengths
+    builder.query_lens = torch.tensor([4, 4], dtype=torch.int32)
+    # A sentinel distinct from recomputing total lengths proves producer ownership.
+    common = SimpleNamespace(dcp_local_seq_lens_cpu=torch.tensor([11, 0], dtype=torch.int32))
+    with (
+        patch.object(AscendMLAMetadataBuilder, "build_decode_metadata", return_value=decode),
+        patch.object(mla_cp, "get_dcp_local_seq_lens", wraps=mla_cp.get_dcp_local_seq_lens) as partition,
     ):
-        result = builder.build_decode_metadata(
-            common_prefix_len=0,
-            common_attn_metadata=SimpleNamespace(),
-        )
-
+        result = builder.build_decode_metadata(0, common)
+    partition.assert_called_once()
+    assert partition.call_args.args[0].tolist() == [16, 0][:num_decodes]
     assert result is decode
-    assert result.cp_seq_len.tolist() == [12]
+    assert result.cp_seq_len == [11, 0][:num_decodes]
     assert result.cp_history_seq_len == [8, 0]
     assert result.actual_seq_lengths_q == [4, 8]
     assert result.dcp_mtp_attn_mask is None
+
+
+@pytest.mark.parametrize("num_prefills,dcp_size", [(1, 2), (31, 8)])
+def test_mla_dcp_v2_mixed_batch_survives_base_decode_length_slice(num_prefills, dcp_size) -> None:
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.num_decodes = 1
+    builder.num_decode_tokens = 1
+    builder.num_actual_tokens = 1 + 5 * num_prefills
+    builder.dcp_size = dcp_size
+    builder.dcp_rank = 0
+    builder.cp_local_block_size = 1
+    builder.seq_lens = torch.tensor([11] + [18] * num_prefills, dtype=torch.int32)
+    builder.query_lens = torch.tensor([1] + [5] * num_prefills, dtype=torch.int32)
+    builder.block_table = torch.ones((1 + num_prefills, 2), dtype=torch.int32)
+    builder.graph_pad_size = -1
+    builder.use_mla_rope = False
+    builder.attn_mask_builder = Mock()
+    builder.nope_zero_rope_cache = None
+    common = SimpleNamespace(
+        context_parallel_metadata=None,
+        num_reqs=1 + num_prefills,
+        dcp_local_seq_lens_cpu=torch.tensor(
+            [(length + dcp_size - 1) // dcp_size for length in [11] + [18] * num_prefills],
+            dtype=torch.int32,
+        ),
+        query_start_loc_cpu=torch.cat([torch.zeros(1, dtype=torch.int32), builder.query_lens.cumsum(0)]),
+        positions=torch.arange(builder.num_actual_tokens),
+    )
+
+    # Exercise the real base builder, which slices seq_lens to decodes but
+    # deliberately retains the complete mixed-batch query_lens tensor.
+    result = builder.build_decode_metadata(0, common)
+
+    assert result.cp_seq_len == [(11 + dcp_size - 1) // dcp_size]
+    assert result.cp_history_seq_len == [(10 + dcp_size - 1) // dcp_size]
+    assert result.actual_seq_lengths_q == [1]
+    assert builder.seq_lens.tolist() == [11]
+    assert builder.query_lens.tolist() == [1] + [5] * num_prefills
 
 
 def test_mla_dcp_reorg_decode_query_gathers_fused_query() -> None:

@@ -51,6 +51,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
+| `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
@@ -115,13 +116,26 @@ The details of each configuration option are as follows:
 | `fuse_qknorm_rope` | bool | `True` | Whether to enable fuse_qknorm_rope pass. If Triton is not in the environment, set it to False. |
 | `fuse_muls_add` | bool | `True` | Whether to enable fuse_muls_add pass.|
 
+**ascend_warmup_config**
+
+Both warmups run on a background thread during weight loading. The worker waits for them at the end of model loading, before memory profiling and KV cache allocation.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enable_early_kernel_warmup` | bool | `False` | Compile the rejection sampler, penalty, and RMS norm Triton warmup kernels while weights load, so the regular kernel warmup hits the Triton cache. |
+| `enable_early_nz_warmup` | bool | `False` | Pay the one-time lazy initialization of the first NZ format cast while weights load. Independent of the quantization scheme. |
+
 **eplb_config**
 
 The accepted fields depend on the model runner:
 
-- **Model Runner V2** accepts only `load_collection_phase` here. Configure
-  upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend uses the
-  upstream default policy and asynchronous Gloo movement.
+- **Model Runner V2** accepts `load_collection_phase` and `stair_config` here.
+  Configure upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend
+  uses the STAIR policy by default and asynchronous Gloo movement. Select
+  `default` or `stair` only through the upstream `--eplb-config.policy`
+  option. See the
+  [EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#advanced-stair-tuning)
+  for the advanced STAIR fields and their defaults.
 - **Model Runner V1** accepts the legacy fields below except
   `load_collection_phase`.
   MRv1 does not accept upstream `--enable-eplb` on Ascend.

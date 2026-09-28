@@ -1,4 +1,13 @@
+from vllm.config.vllm import VllmConfig
+
 from vllm_ascend.patch.platform import patch_use_v2_model_runner
+
+
+def test_use_v2_model_runner_is_driven_by_ascend_default():
+    assert isinstance(VllmConfig.use_v2_model_runner, property)
+    from vllm_ascend.mrv2_utils import use_v2_model_runner
+
+    assert VllmConfig.use_v2_model_runner.fget is use_v2_model_runner
 
 
 def test_ascend_v1_supported_features_are_not_rejected(monkeypatch):
@@ -18,7 +27,7 @@ def test_ascend_v1_supported_features_are_not_rejected(monkeypatch):
     assert unsupported == ["prefill context parallel", "diffusion models"]
 
 
-def test_upstream_pcp_unsupported_feature_is_preserved(monkeypatch):
+def test_release_pcp_is_not_rejected_as_v2_unsupported_feature(monkeypatch):
     monkeypatch.setattr(
         patch_use_v2_model_runner,
         "_original_get_unsupported_features",
