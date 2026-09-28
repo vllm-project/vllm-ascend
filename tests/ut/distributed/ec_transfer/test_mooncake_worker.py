@@ -3,20 +3,26 @@ from threading import Event
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding import (
+    backend as store_backend_module,
+)
 
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import (
+    store_client as store_client_module,
+)
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import (
     worker as worker_module,
 )
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
     _BounceLease,
+    _flatten_transfer_wave,
+    _resolve_bounce_arena_size,
+    _TransferFragmentPlan,
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.worker import (
     AscendECMooncakeWorker,
     _AcquiredTransferWave,
-    _flatten_transfer_wave,
     _resolve_ascend_config,
-    _resolve_bounce_arena_size,
-    _TransferFragmentPlan,
 )
 
 
@@ -55,6 +61,158 @@ def _make_writable_shard(
     }
 
 
+def _make_lifecycle_worker() -> AscendECMooncakeWorker:
+    worker = object.__new__(AscendECMooncakeWorker)
+    worker.is_producer = True
+    worker._store_config = ("namespace", 4, 1024, 256)
+    worker._output_store = None
+    worker._producer_memory = MagicMock()
+    worker._buffer_device = "npu"
+    worker._shutdown = False
+    return worker
+
+
+def test_start_services_prepares_ascend_store_before_upstream_startup():
+    worker = _make_lifecycle_worker()
+    store_client = MagicMock()
+    output_store = MagicMock()
+    device = MagicMock()
+
+    def start_upstream():
+        assert worker._output_store is output_store
+
+    with (
+        patch.object(worker_module.torch, "device", return_value=device),
+        patch.object(
+            store_client_module,
+            "create_ascend_mooncake_embedding_store_client",
+            return_value=store_client,
+        ) as create_store_client,
+        patch.object(
+            store_backend_module,
+            "MooncakeEmbeddingStoreBackend",
+            return_value=output_store,
+        ) as create_backend,
+        patch.object(
+            worker_module.ECMooncakeWorker,
+            "start_services",
+            side_effect=start_upstream,
+        ) as start_upstream_mock,
+    ):
+        lifecycle = MagicMock()
+        lifecycle.attach_mock(worker._producer_memory.ensure_prepared, "prepare")
+        lifecycle.attach_mock(create_store_client, "client")
+        lifecycle.attach_mock(create_backend, "backend")
+        lifecycle.attach_mock(start_upstream_mock, "upstream")
+        worker.start_services()
+        worker.start_services()
+
+    assert lifecycle.mock_calls == [
+        call.prepare(device),
+        call.client(worker._producer_memory.bounce_arena, read_buffer_bytes=256),
+        call.backend(
+            store_client,
+            "namespace",
+            max_pending_items=4,
+            max_pending_bytes=1024,
+        ),
+        call.upstream(),
+        call.upstream(),
+    ]
+    assert worker._output_store is output_store
+    worker._producer_memory.close.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_cleanup"),
+    [
+        ("factory", [call.producer()]),
+        ("backend", [call.client(), call.producer()]),
+        ("upstream", [call.store(), call.producer()]),
+    ],
+)
+def test_start_services_cleans_up_after_failure(failure_stage, expected_cleanup):
+    worker = _make_lifecycle_worker()
+    store_client = MagicMock()
+    output_store = MagicMock()
+    error = RuntimeError(f"{failure_stage} failed")
+    cleanup = MagicMock()
+    cleanup.attach_mock(store_client.close, "client")
+    cleanup.attach_mock(output_store.shutdown, "store")
+    cleanup.attach_mock(worker._producer_memory.close, "producer")
+
+    with (
+        patch.object(worker_module.torch, "device"),
+        patch.object(
+            store_client_module,
+            "create_ascend_mooncake_embedding_store_client",
+            return_value=store_client,
+            side_effect=error if failure_stage == "factory" else None,
+        ) as create_store_client,
+        patch.object(
+            store_backend_module,
+            "MooncakeEmbeddingStoreBackend",
+            return_value=output_store,
+            side_effect=error if failure_stage == "backend" else None,
+        ) as create_backend,
+        patch.object(
+            worker_module.ECMooncakeWorker,
+            "start_services",
+            side_effect=error if failure_stage == "upstream" else None,
+        ),
+        pytest.raises(RuntimeError, match=f"{failure_stage} failed"),
+    ):
+        worker.start_services()
+
+    assert cleanup.mock_calls == expected_cleanup
+    if failure_stage == "factory":
+        create_backend.assert_not_called()
+    else:
+        create_store_client.assert_called_once()
+    assert worker._output_store is None
+
+
+def test_close_shuts_down_store_before_upstream_resources():
+    worker = _make_lifecycle_worker()
+    output_store = MagicMock()
+    worker._output_store = output_store
+    events = []
+    output_store.shutdown.side_effect = lambda: events.append("store")
+
+    def close_upstream():
+        assert worker._output_store is None
+        events.append("upstream")
+
+    with patch.object(
+        worker_module.ECMooncakeWorker,
+        "close",
+        side_effect=close_upstream,
+    ):
+        worker.close()
+
+    assert events == ["store", "upstream"]
+
+
+def test_close_preserves_shared_memory_when_store_shutdown_fails():
+    worker = _make_lifecycle_worker()
+    output_store = MagicMock()
+    output_store.shutdown.side_effect = RuntimeError("shutdown failed")
+    worker._output_store = output_store
+
+    with (
+        patch.object(
+            worker_module.ECMooncakeWorker,
+            "close",
+        ) as close_upstream,
+        pytest.raises(RuntimeError, match="shutdown failed"),
+    ):
+        worker.close()
+
+    close_upstream.assert_not_called()
+    assert worker._output_store is output_store
+    assert worker._shutdown is False
+
+
 def test_flatten_transfer_wave_preserves_unified_fragment_order():
     direct = MagicMock(prefix_nbytes=0, direct_address=100, direct_nbytes=10)
     mixed = MagicMock(prefix_nbytes=3, direct_address=200, direct_nbytes=7)
@@ -87,7 +245,7 @@ def test_flatten_transfer_wave_allows_zero_bounce_wave():
 def test_acquire_transfer_wave_bypasses_bounce_for_direct_sources():
     worker = object.__new__(AscendECMooncakeWorker)
     producer_memory = MagicMock()
-    producer_memory.acquire_bounce.return_value = None
+    producer_memory.bounce_arena.acquire.return_value = None
     transfer = MagicMock()
     transfer.acquire_registration_ranges.return_value = [64]
     worker._producer_memory = producer_memory
@@ -103,8 +261,8 @@ def test_acquire_transfer_wave_bypasses_bounce_for_direct_sources():
 
     acquired = worker._acquire_transfer_wave(wave)
 
-    producer_memory.acquire_bounce.assert_called_once_with(0)
-    producer_memory.copy_to_bounce.assert_not_called()
+    producer_memory.bounce_arena.acquire.assert_called_once_with(0)
+    producer_memory.bounce_arena.copy.assert_not_called()
     transfer.acquire_registration_ranges.assert_called_once_with(registration_ranges)
     assert acquired == _AcquiredTransferWave(
         fragments=[_TransferFragmentPlan(0, 100, 0, 10)],
@@ -117,8 +275,8 @@ def test_acquire_transfer_wave_returns_fragments_and_resources():
     worker = object.__new__(AscendECMooncakeWorker)
     producer_memory = MagicMock()
     lease = _BounceLease(offset=256, nbytes=3, allocated_nbytes=256)
-    producer_memory.acquire_bounce.return_value = lease
-    producer_memory.copy_to_bounce.return_value = 1000
+    producer_memory.bounce_arena.acquire.return_value = lease
+    producer_memory.bounce_arena.copy.return_value = 1000
     transfer = MagicMock()
     transfer.acquire_registration_ranges.return_value = [128]
     worker._producer_memory = producer_memory
@@ -140,8 +298,8 @@ def test_acquire_transfer_wave_returns_fragments_and_resources():
 
     acquired = worker._acquire_transfer_wave(wave)
 
-    producer_memory.acquire_bounce.assert_called_once_with(3)
-    producer_memory.copy_to_bounce.assert_called_once_with(
+    producer_memory.bounce_arena.acquire.assert_called_once_with(3)
+    producer_memory.bounce_arena.copy.assert_called_once_with(
         lease,
         [(owner, 0, 3)],
     )
@@ -160,8 +318,8 @@ def test_acquire_transfer_wave_releases_bounce_on_registration_failure():
     worker = object.__new__(AscendECMooncakeWorker)
     producer_memory = MagicMock()
     lease = _BounceLease(offset=256, nbytes=3, allocated_nbytes=256)
-    producer_memory.acquire_bounce.return_value = lease
-    producer_memory.copy_to_bounce.return_value = 1000
+    producer_memory.bounce_arena.acquire.return_value = lease
+    producer_memory.bounce_arena.copy.return_value = 1000
     transfer = MagicMock()
     transfer.acquire_registration_ranges.side_effect = RuntimeError("registration failed")
     worker._producer_memory = producer_memory
@@ -183,7 +341,7 @@ def test_acquire_transfer_wave_releases_bounce_on_registration_failure():
         worker._acquire_transfer_wave(wave)
 
     transfer.release_registration_ranges.assert_not_called()
-    producer_memory.release_bounce.assert_called_once_with(lease)
+    producer_memory.bounce_arena.release.assert_called_once_with(lease)
 
 
 def test_release_transfer_wave_releases_bounce_when_registration_release_raises():
@@ -200,7 +358,7 @@ def test_release_transfer_wave_releases_bounce_when_registration_release_raises(
         worker._release_transfer_wave(acquired)
 
     transfer.release_registration_ranges.assert_called_once_with([128])
-    producer_memory.release_bounce.assert_called_once_with(lease)
+    producer_memory.bounce_arena.release.assert_called_once_with(lease)
 
 
 def test_write_transfer_wave_batches_fragments_once_per_session():

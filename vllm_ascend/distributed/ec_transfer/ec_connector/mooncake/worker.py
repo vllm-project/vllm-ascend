@@ -36,61 +36,40 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.worker import (
     _RESERVATION_REFRESH_SECONDS,
     ECMooncakeWorker,
 )
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
+    build_embedding_namespace,
+)
 from vllm.logger import logger
-from vllm.utils.math_utils import round_up
 from vllm.utils.network_utils import get_ip
 
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
+    _BOUNCE_ARENA_CONFIG_KEY,
+    _BounceLease,
+    _flatten_transfer_wave,
+    _plan_transfer_waves,
+    _resolve_bounce_arena_size,
+    _TransferFragmentPlan,
+    _TransferWavePlan,
+)
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
-    ASCEND_DIRECT_MEMORY_ALIGNMENT,
     AscendConsumerMemoryPool,
     AscendContiguousAllocator,
     AscendProducerAllocator,
     AscendProducerMemoryPool,
-    _BounceLease,
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     AscendMooncakeTransfer,
-    _plan_transfer_waves,
-    _TransferWavePlan,
 )
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.backend import (
+        MooncakeEmbeddingStoreBackend,
+    )
 
 
-_DEFAULT_BOUNCE_LIMIT = 128
-_BOUNCE_ARENA_CONFIG_KEY = "ascend_mooncake_bounce_arena_size"
 _TRANSFER_WORKERS = 4
 _CONTROL_WORKERS = 8
-
-
-def _resolve_bounce_arena_size(vllm_config: VllmConfig) -> int:
-    ec_config = vllm_config.ec_transfer_config
-    assert ec_config is not None
-
-    extra_config = ec_config.ec_connector_extra_config
-
-    if _BOUNCE_ARENA_CONFIG_KEY not in extra_config:
-        quantum_count = min(
-            _DEFAULT_BOUNCE_LIMIT,
-            vllm_config.scheduler_config.max_num_seqs,
-        )
-        return ASCEND_DIRECT_MEMORY_ALIGNMENT * quantum_count
-
-    value = extra_config[_BOUNCE_ARENA_CONFIG_KEY]
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{_BOUNCE_ARENA_CONFIG_KEY} must be an integer")
-    if value == 0:
-        return 0
-    if value < ASCEND_DIRECT_MEMORY_ALIGNMENT:
-        raise ValueError(
-            f"{_BOUNCE_ARENA_CONFIG_KEY} must be 0 to disable "
-            f"fallback or at least {ASCEND_DIRECT_MEMORY_ALIGNMENT} bytes"
-        )
-
-    return round_up(value, ASCEND_DIRECT_MEMORY_ALIGNMENT)
-
-
 def _resolve_ascend_config(vllm_config: VllmConfig) -> MooncakeECConfig:
     config = MooncakeECConfig.from_vllm_config(vllm_config)
     ec_config = vllm_config.ec_transfer_config
@@ -119,57 +98,10 @@ def _resolve_ascend_config(vllm_config: VllmConfig) -> MooncakeECConfig:
 
 
 @dataclass(frozen=True)
-class _TransferFragmentPlan:
-    """One physical Mooncake write fragment of a logical source."""
-
-    source_index: int
-    source_address: int
-    destination_offset: int
-    nbytes: int
-
-
-@dataclass(frozen=True)
 class _AcquiredTransferWave:
     fragments: list[_TransferFragmentPlan]
     registration_addresses: list[int]
     bounce_lease: _BounceLease | None
-
-
-def _flatten_transfer_wave(
-    wave: _TransferWavePlan,
-    bounce_address: int | None,
-) -> list[_TransferFragmentPlan]:
-    fragments: list[_TransferFragmentPlan] = []
-
-    for source_index, wave_source in enumerate(wave.sources):
-        source = wave_source.source
-
-        if source.prefix_nbytes > 0:
-            assert bounce_address is not None
-            assert wave_source.bounce_offset is not None
-
-            fragments.append(
-                _TransferFragmentPlan(
-                    source_index=source_index,
-                    source_address=bounce_address + wave_source.bounce_offset,
-                    destination_offset=0,
-                    nbytes=source.prefix_nbytes,
-                )
-            )
-
-        if source.direct_nbytes > 0:
-            assert source.direct_address is not None
-
-            fragments.append(
-                _TransferFragmentPlan(
-                    source_index=source_index,
-                    source_address=source.direct_address,
-                    destination_offset=source.prefix_nbytes,
-                    nbytes=source.direct_nbytes,
-                )
-            )
-
-    return fragments
 
 
 class AscendECMooncakeWorker(ECMooncakeWorker):
@@ -180,13 +112,18 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         assert ec_config is not None
 
         config = _resolve_ascend_config(vllm_config)
-        if getattr(config, "cross_encoder_cache", False):
-            logger.warning(
-                "cross_encoder_cache is not yet supported by the Ascend "
-                "ECMooncakeConnector; continuing with it disabled"
+
+        self._store_config = (
+            (
+                build_embedding_namespace(vllm_config),
+                config.store_max_pending_items,
+                config.store_max_pending_bytes,
+                config.store_read_buffer_bytes,
             )
-        self._store_config = None
-        self._output_store = None
+            if config.cross_encoder_cache
+            else None
+        )
+        self._output_store: MooncakeEmbeddingStoreBackend | None = None
 
         resolved_bounce_arena_size = _resolve_bounce_arena_size(vllm_config)
         self._bounce_arena_size = resolved_bounce_arena_size if ec_config.is_ec_producer else 0
@@ -239,10 +176,10 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         self._producer_pushes = ProducerPushManager(self._push_ready.set)
         self._dispatch_stop = threading.Event()
         self._dispatcher = None
-        self._failed_saves: set[str] = set()
+        self._failed_saves = set()
         self._collecting_sources = False
-        self._completed_loads: set[str] = set()
-        self._failed_loads: set[str] = set()
+        self._completed_loads = set()
+        self._failed_loads = set()
         self._shutdown = False
         self._control_thread = threading.local()
         if self.is_producer:
@@ -252,6 +189,57 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 daemon=True,
             )
             self._dispatcher.start()
+
+    def start_services(self) -> None:
+        if not self.is_producer or self._store_config is None or self._output_store is not None:
+            super().start_services()
+            return
+
+        from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.backend import (
+            MooncakeEmbeddingStoreBackend,
+        )
+
+        from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_client import (
+            create_ascend_mooncake_embedding_store_client,
+        )
+
+        producer_memory = cast(AscendProducerMemoryPool, self._producer_memory)
+        namespace, max_items, max_bytes, read_bytes = self._store_config
+        producer_memory.ensure_prepared(torch.device(self._buffer_device))
+        try:
+            store_client = create_ascend_mooncake_embedding_store_client(
+                producer_memory.bounce_arena,
+                read_buffer_bytes=read_bytes,
+            )
+            try:
+                output_store = MooncakeEmbeddingStoreBackend(
+                    store_client,
+                    namespace,
+                    max_pending_items=max_items,
+                    max_pending_bytes=max_bytes,
+                )
+            except BaseException:
+                store_client.close()
+                raise
+
+            self._output_store = output_store
+            try:
+                super().start_services()
+            except BaseException:
+                self._output_store = None
+                output_store.shutdown()
+                raise
+        except BaseException:
+            producer_memory.close()
+            raise
+
+    def close(self) -> None:
+        if self._shutdown:
+            return
+        if self._output_store is not None:
+            self._output_store.shutdown()
+            self._output_store = None
+        super().close()
 
     def _reserve_push_destination(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not getattr(self._control_thread, "device_set", False):
@@ -265,7 +253,8 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
     ) -> _AcquiredTransferWave:
         producer_memory = cast(AscendProducerMemoryPool, self._producer_memory)
         transfer = cast(AscendMooncakeTransfer, self._transfer)
-        lease = producer_memory.acquire_bounce(wave.bounce_nbytes)
+        bounce_arena = producer_memory.bounce_arena
+        lease = bounce_arena.acquire(wave.bounce_nbytes)
         registration_addresses: list[int] = []
 
         try:
@@ -285,7 +274,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                         )
                     )
 
-                bounce_address = producer_memory.copy_to_bounce(lease, copies)
+                bounce_address = bounce_arena.copy(lease, copies)
 
             fragments = _flatten_transfer_wave(wave, bounce_address)
             registration_addresses = transfer.acquire_registration_ranges(wave.registration_ranges)
@@ -297,7 +286,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         except Exception:
             if registration_addresses:
                 transfer.release_registration_ranges(registration_addresses)
-            producer_memory.release_bounce(lease)
+            bounce_arena.release(lease)
             raise
 
     def _release_transfer_wave(self, acquired: _AcquiredTransferWave) -> None:
@@ -307,7 +296,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         try:
             transfer.release_registration_ranges(acquired.registration_addresses)
         finally:
-            producer_memory.release_bounce(acquired.bounce_lease)
+            producer_memory.bounce_arena.release(acquired.bounce_lease)
 
     def _write_transfer_wave(
         self,

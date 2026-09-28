@@ -3,12 +3,14 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 import torch
 
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (
-    AscendMooncakeTransfer,
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
     _plan_registration_ranges,
     _plan_source,
     _plan_transfer_waves,
     _RegistrationRangePlan,
+)
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (
+    AscendMooncakeTransfer,
 )
 
 _MIB = 1024 * 1024
