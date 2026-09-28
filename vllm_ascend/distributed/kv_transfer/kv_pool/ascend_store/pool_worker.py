@@ -941,7 +941,7 @@ class KVPoolWorker:
         n_local = int(self.group_num_layers.get(group_id, 0))
         if n_local <= 0:
             return sum(gbl)
-        per_layer = sum(gbl) // n_local
+        per_layer = (sum(gbl) + n_local - 1) // n_local
         n_global = max(total_layers, int(self.num_layers), n_local)
         # DCP shard-major layout: ranks sharing head_or_tp_rank (put_step>1,
         # e.g. MLA) hold different context shards of the same logical block
@@ -1127,24 +1127,26 @@ class KVPoolWorker:
             self.m_store.validate_layerwise_support()
         self._start_kv_transfer_threads()
 
-    def start_load_kv(self, metadata: AscendConnectorMetadata):
+    def prepare_layerwise_step(self, metadata: AscendConnectorMetadata) -> None:
+        """Prepare per-step hook state when the runner binds metadata."""
+        assert self.use_layerwise
+        self._drain_deferred_last_save()
         self.current_layer = 0
         self.layerwise_retrievers: list[Any] = []
+        self.next_layer_to_submit = 0
+        reset_attention_compute_start_gate()
+        self._attention_saved_layers = set()
+        self.process_layer_data(metadata.requests)
+
+    def start_load_kv(self, metadata: AscendConnectorMetadata):
         if self.use_layerwise:
-            self._drain_deferred_last_save()
-            self.next_layer_to_submit = 0
-            # Transfer threads receive these lists by reference. Give every
-            # step fresh lists so a late clear of a previous step cannot drop
-            # newly prepared loads/saves and leave a reused buffer stale.
-            self.layer_save_tasks = [[] for _ in range(self.num_layers)]
-            self.layer_load_tasks = [[] for _ in range(self.num_layers)]
-            reset_attention_compute_start_gate()
-            self._attention_saved_layers = set()
+            # wait_for_layer_load submits loads from tasks prepared at bind.
+            # A deferred call must not reset state between target and MTP.
+            return
+        self.current_layer = 0
+        self.layerwise_retrievers = []
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
-            return
-        if self.use_layerwise:
-            self.process_layer_data(metadata.requests)
             return
         for request in metadata.requests:
             load_spec = request.load_spec
@@ -2465,28 +2467,22 @@ class KVPoolWorker:
         self._wait_for_final_layer_save(num_local, self.kv_send_thread)
 
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
+        # Keep this method safe for direct callers as well as metadata binding.
+        # Worker threads may still own the lists from the preceding step.
+        self.layer_save_tasks = [[] for _ in range(self.num_layers)]
+        self.layer_load_tasks = [[] for _ in range(self.num_layers)]
         if not requests:
             return
-        # PERF-TUNE(4): per-step RPC result caches. Concurrent requests with a
-        # shared prefix issue identical memcache queries; cache per step so each
-        # distinct key is queried/leased/existence-checked once.
-        # Plain (un-annotated) re-assignment keeps mypy happy (only the
-        # annotated definition in _init_state_vars counts as a definition)
-        # and stays safe on workers built via __new__ that never ran
-        # _init_state_vars (e.g. unit tests).
+        # PERF-TUNE(4): cache repeated memcache RPC results within this step.
         self._step_keyinfo_cache = {}
         self._step_lease_result = {}
         self._step_exist_cache = {}
-        # Keep this method safe for direct callers as well as start_load_kv().
-        # Worker threads may still own the lists from the preceding step.
         # Mooncake uses the projected stage-local cache layout, including any
         # draft layers. The GVA/key planes retain their existing PP key count.
         if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
             num_local = getattr(self, "layerwise_key_layers", 0) or self.num_layers
         else:
             num_local = self.num_layers
-        self.layer_save_tasks = [[] for _ in range(self.num_layers)]
-        self.layer_load_tasks = [[] for _ in range(self.num_layers)]
         for request in requests:
             request.store_masks = self._compute_reachable_store_masks(request)
         group_requests = {}
