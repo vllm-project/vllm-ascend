@@ -146,7 +146,7 @@ class UpdatableGraph(torch.npu.NPUGraph):
     ) -> tuple[GraphUpdateTask, ...]:
         """
         SharedSource
-        providers           [p0,p1,p2,p3,p0,p1,p2,p3]                               # 混合注意力 f1,f2,g1,f3  update_params: u1,u2,u3 草稿模型不是这种类型
+        providers           [p0,p1,p2,p3,p0,p1,p2,p3]                               # 混合注意力 f1,f2,g1,f3  update_params: u1,u2,u3 草稿模型不能是这种类型
         self.tasks          [t1,t2,t3,t4,t5,t6,t7,t8]
         source              update_params       [u0,u1,u2,u3,u4,u5,u6,u7]
 

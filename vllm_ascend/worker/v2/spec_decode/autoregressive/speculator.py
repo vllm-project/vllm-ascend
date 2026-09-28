@@ -820,7 +820,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             for layer_name in self.draft_attn_layer_names:
                 fia_params.append(
                     {
-                        "layer_name": layer_name,
                         "actual_seq_lengths": query_start_loc,
                         "actual_seq_lengths_kv": seq_lens,
                         "block_table": block_table,
