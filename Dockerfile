@@ -64,6 +64,21 @@ ARG FLA_RELEASE_TAG="v26.9.1-beta2"
 
 WORKDIR /workspace
 
+# Note: Install CANN 910B (A2) ops-transformer package
+ARG TARGETPLATFORM
+RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
+    case "$ARCH" in \
+        "linux/arm64"|"aarch64") \
+            OPS_TRANSFORMER_EXP_URL="https://ascend-cann-open.obs.cn-north-4.myhuaweicloud.com/CANN/temp_ops-transformer/260904/cann-ops-transformer-experimental_910b_linux-aarch64.run" ;; \
+        "linux/amd64"|"x86_64") \
+            OPS_TRANSFORMER_EXP_URL="https://ascend-cann-open.obs.cn-north-4.myhuaweicloud.com/CANN/temp_ops-transformer/260907/build_out/cann-ops-transformer-experimental_910b_linux-x86_64.run" ;; \
+        *) echo "Skipping unsupported architecture: $ARCH" && exit 0 ;; \
+    esac && \
+    wget --quiet "$OPS_TRANSFORMER_EXP_URL" -O /tmp/cann-ops-transformer-experimental_910b.run && \
+    chmod +x /tmp/cann-ops-transformer-experimental_910b.run && \
+    /tmp/cann-ops-transformer-experimental_910b.run --quiet --install-for-all --force && \
+    rm -f /tmp/cann-ops-transformer-experimental_910b.run
+
 # Install clang-15 (for triton-ascend) and Mooncake
 RUN apt-get update -y && \
     apt-get install -y git vim wget curl protobuf-compiler libprotobuf-dev net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libjemalloc2 libhiredis-dev clang-15 && \
@@ -89,6 +104,7 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
 
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
+    python3 -m pip install "torch==2.10.0+cpu" --extra-index-url ${PYTORCH_INDEX_URL} --force-reinstall --no-deps && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
@@ -103,9 +119,12 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
+    python3 -m pip install setuptools_scm pybind11 nanobind grpcio-tools ninja cmake wheel && \
+    python3 -m pip install torch-npu==2.10.0.post4 --extra-index-url ${ASCEND_INDEX_URL} --no-deps && \
+    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --no-build-isolation --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend && \
     python3 -m pip install triton-ascend==3.2.2 --extra-index-url ${ASCEND_INDEX_URL} && \
+    pip install flash-attn-npu==0.4.1  --no-build-isolation && \
     python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
 
