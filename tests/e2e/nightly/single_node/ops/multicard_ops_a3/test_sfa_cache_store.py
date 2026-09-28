@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -71,7 +72,7 @@ def test_platform_cache_store_preserves_all_backing_bytes(dtype, width, tokens, 
 
 
 @torch.inference_mode()
-def test_unsupported_fast_dtype_preserves_fallback_with_negative_slots():
+def test_missing_fast_operator_preserves_fallback_with_negative_slots():
     torch_npu.npu.set_device(0)
     assert enable_custom_op()
     key = torch.ones(2048, 128, dtype=torch.float32, device="npu")
@@ -82,7 +83,8 @@ def test_unsupported_fast_dtype_preserves_fallback_with_negative_slots():
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.enable_sparse_sfa_c8 = True
     impl.is_kv_producer, impl.is_kv_consumer = True, False
-    impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)
+    with patch.object(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None):
+        impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)
     torch.npu.synchronize()
     reference = torch.zeros_like(cache, device="cpu").view(-1, 128)
     reference[:2045] = 1

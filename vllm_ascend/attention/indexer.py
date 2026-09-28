@@ -265,10 +265,14 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 indexer_attn_metadata.block_size,
             )
         else:
-            torch_npu.npu_scatter_nd_update_(
-                indexer_k_cache.view(-1, k_li.shape[-1]),
-                slot_mapping.view(-1, 1),
-                k_li.view(-1, k_li.shape[-1]),
+            # PCP/DSA-CP has already gathered these rows and their slot mapping.
+            # Local num_actual_tokens must not truncate the gathered write.
+            k_rows = k_li.view(-1, k_li.shape[-1])
+            DeviceOperator.scatter_cache(
+                k_rows,
+                indexer_k_cache,
+                slot_mapping,
+                k_rows.shape[0],
             )
         if self.enable_sparse_li_c8:
             assert k_li_scale is not None
@@ -284,10 +288,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     indexer_attn_metadata.block_size,
                 )
             else:
-                torch_npu.npu_scatter_nd_update_(
-                    indexer_scale_cache.view(-1, k_li_scale.shape[-1]),
-                    slot_mapping.view(-1, 1),
-                    k_li_scale.view(-1, k_li_scale.shape[-1]),
+                scale_rows = k_li_scale.view(-1, k_li_scale.shape[-1])
+                DeviceOperator.scatter_cache(
+                    scale_rows,
+                    indexer_scale_cache,
+                    slot_mapping,
+                    scale_rows.shape[0],
                 )
 
     def _use_c8_reshape_optim(self) -> bool:

@@ -43,8 +43,8 @@ class BaseDeviceAdaptor:
     def scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> None:
         """Write cache rows in place, falling back to the generic scatter.
 
-        The actual-token prefix must contain valid slots: this helper does not
-        filter negative slots, and neither fast operator is assumed to skip them.
+        Slot handling is delegated to the selected operator; this helper does
+        not filter negative slots from the actual-token prefix.
         Layout checks inspect strides only; no device-to-host synchronization is
         introduced. Never make a contiguous copy of the destination cache.
         """
@@ -72,10 +72,16 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def _scatter_cache(key, cache, slots) -> bool:
-        if not get_current_hardware_profile().supports(HardwareCapability.SCATTER_ND_CACHE_STORE):
+        profile = get_current_hardware_profile()
+        if not profile.supports(HardwareCapability.SCATTER_ND_CACHE_STORE):
             return False
         operation = getattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None)
-        if operation is None or key.dtype not in (torch.int8, torch.float16, torch.bfloat16):
+        if operation is None:
+            return False
+        if key.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            if not profile.supports(HardwareCapability.SCATTER_ND_FP8_CACHE_STORE):
+                return False
+        elif key.dtype not in (torch.int8, torch.float16, torch.bfloat16, torch.float32):
             return False
         width = key.shape[-1]
         try:
@@ -904,16 +910,6 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
-    @staticmethod
-    def _scatter_cache(key, cache, slots) -> bool:
-        operation = getattr(torch_npu, "npu_scatter_pa_cache", None)
-        if operation is None or not cache.is_contiguous():
-            return False
-        if key.dtype not in (torch.int8, torch.float16, torch.bfloat16, torch.float32, torch.float8_e4m3fn):
-            return False
-        operation(key.reshape(-1, 1, key.shape[-1]).contiguous(), slots.contiguous(), key_cache=cache)
-        return True
-
     @classmethod
     def reshape_and_cache(
         cls,

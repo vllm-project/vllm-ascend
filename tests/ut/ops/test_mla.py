@@ -264,7 +264,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertIs(out_slots, indexer_metadata.slot_mapping)
 
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    @patch("vllm_ascend.attention.indexer.torch_npu.npu_scatter_nd_update_")
+    @patch("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache")
     def test_write_cache_scatter_path(self, mock_scatter, mock_get_ascend_config):
         mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
@@ -281,12 +281,17 @@ class TestAscendSFAIndexerBackend(TestBase):
 
         self.assertEqual(mock_scatter.call_count, 2)
         k_call, scale_call = mock_scatter.call_args_list
-        self.assertEqual(k_call.args[0].data_ptr(), indexer_k_cache.data_ptr())
-        self.assertTrue(torch.equal(k_call.args[1], slot_mapping.view(-1, 1)))
-        self.assertEqual(scale_call.args[0].data_ptr(), indexer_scale_cache.data_ptr())
+        self.assertEqual(k_call.args[0].data_ptr(), k_li.data_ptr())
+        self.assertIs(k_call.args[1], indexer_k_cache)
+        self.assertIs(k_call.args[2], slot_mapping)
+        self.assertEqual(k_call.args[3], 2)
+        self.assertEqual(scale_call.args[0].data_ptr(), k_li_scale.data_ptr())
+        self.assertIs(scale_call.args[1], indexer_scale_cache)
+        self.assertIs(scale_call.args[2], slot_mapping)
+        self.assertEqual(scale_call.args[3], 2)
 
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    @patch("vllm_ascend.attention.indexer.torch_npu.npu_scatter_nd_update_")
+    @patch("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache")
     def test_write_cache_without_li_c8_writes_k_only(self, mock_scatter, mock_get_ascend_config):
         mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
@@ -300,7 +305,10 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.write_cache(k_li, None, slot_mapping, MagicMock())
 
         mock_scatter.assert_called_once()
-        self.assertEqual(mock_scatter.call_args.args[0].data_ptr(), indexer_k_cache.data_ptr())
+        self.assertEqual(mock_scatter.call_args.args[0].data_ptr(), k_li.data_ptr())
+        self.assertIs(mock_scatter.call_args.args[1], indexer_k_cache)
+        self.assertIs(mock_scatter.call_args.args[2], slot_mapping)
+        self.assertEqual(mock_scatter.call_args.args[3], 2)
 
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
     @patch("vllm_ascend.attention.indexer.torch.ops._C_ascend.store_kv_block", create=True)
