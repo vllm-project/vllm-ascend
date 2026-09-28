@@ -95,6 +95,29 @@ def _is_mxfp8_dynamic(linear) -> bool:
     return isinstance(inner_method, AscendW8A8MXFP8DynamicLinearMethod)
 
 
+def get_indexer_k_dtype(vllm_config: VllmConfig) -> torch.dtype:
+    """Resolve the DeepSeek V4 indexer K cache dtype.
+
+    The indexer K cache has no bf16 write path: the Non-A5 scatter
+    (``npu_scatter_nd_update_sk``) only accepts int8 updates, and A5
+    quantizes to fp8 inside ``indexer_compress_epilog_v2``. Resolve
+    ``indexer_kv_dtype="auto"`` to the platform default and reject
+    unsupported combinations early instead of failing later with a
+    cryptic ACLNN dtype mismatch error.
+    """
+    supports_compressed_cache = get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+    default_kv_dtype = "fp8" if supports_compressed_cache else "int8"
+    indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(default_kv_dtype)
+    k_dtype = kv_cache_dtype_str_to_dtype(indexer_kv_dtype, vllm_config.model_config)
+    expected_dtype = torch.float8_e4m3fn if supports_compressed_cache else torch.int8
+    if k_dtype != expected_dtype:
+        raise ValueError(
+            f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the DeepSeek V4 "
+            f"indexer on this platform; expected {default_kv_dtype!r}."
+        )
+    return k_dtype
+
+
 class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
     def __init__(
         self,
@@ -304,9 +327,8 @@ class DeepseekV4Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
-        k_dtype = kv_cache_dtype_str_to_dtype(
-            self.vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
-        )
+        k_dtype = get_indexer_k_dtype(vllm_config)
+
 
         if self.compress_ratio == 4:
             # TODO(cmq): change the dtype of cache
