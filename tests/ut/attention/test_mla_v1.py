@@ -54,6 +54,7 @@ def test_v_up_proj_transpose_bmm_limits(num_tokens, num_heads, kv_lora_rank):
     assert fused.call_count == int(use_fused)
     torch.testing.assert_close(result, expected)
 
+
 @pytest.mark.parametrize("use_rope", [False, True])
 @pytest.mark.parametrize("weight_quant_mode", [0, 3])
 def test_mla_prolog_k3_and_cann_dispatch_are_isolated(use_rope, weight_quant_mode):
