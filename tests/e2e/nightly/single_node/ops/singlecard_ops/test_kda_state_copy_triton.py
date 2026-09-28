@@ -1,19 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Triton copy correctness adapted from PR #17301 at 5bcbad36fdc3.
+"""Production-plan copy correctness adapted from PR #17301 at 5bcbad36fdc3.
 
-Retain the original 17 parameterized cases and exact assertions. Only the
-operator entry is adapted. Preparation executes all cases before sealing;
-formal pytest execution rejects any subsequent compiler API entry.
-Run this file in its own process: the registry cannot be unsealed.
+Retain the original 17 parameterized cases and exact assertions. A test-local
+set of worker-owned plans is prepared on disposable scratch during setup,
+sealed, then exercised while compiler entry points are forbidden.
 """
 
 import importlib
-import importlib.util
-from pathlib import Path
 
 import pytest
 import torch
 import torch_npu  # noqa: F401
+
+from vllm_ascend.ops import kda_state_copy as production
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -139,41 +138,47 @@ def test_kda_state_copy_noncontiguous_indices_and_flags(index_dtype):
 
 
 def _copy_state(state, packed, indices, flags, to_cache):
-    """Placeholder replaced by the module-scoped, test-local adapter fixture."""
-    raise AssertionError("Triton lifecycle fixture was not initialized")
+    """Placeholder replaced by the module-scoped, worker-plan adapter fixture."""
+    raise AssertionError("Production plan fixture was not initialized")
 
 
 @pytest.fixture(scope="module", autouse=True)
 def prepared_state_copy():
-    """Prepare original case signatures, seal, then forbid compilation.
+    """Compile each test layout through the production plan before serving.
 
-    Import the source from this checkout rather than an older installed plugin.
-    Use a private module instance so sealing cannot affect unrelated tests.
-    This fixture deliberately runs the same test bodies once during startup;
-    those executions are not counted as additional pytest correctness cases.
+    Replaying the original assertions during startup discovers only test-local
+    layouts. The formal cases then run with sealed plans and compiler APIs
+    disabled; no process-global registration or JIT monkey-patch is installed
+    by production code.
     """
-    source = Path(__file__).resolve().parents[6] / "vllm_ascend/ops/triton/kda_state_copy.py"
-    spec = importlib.util.spec_from_file_location("isolated_npu_kda_state_copy", source)
-    assert spec is not None and spec.loader is not None
-    strict = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(strict)
+    plans: dict[tuple, production.KDAStateCopyPlan] = {}
+    preparing = True
 
-    def adapter(prepare):
-        """Translate the native operator signature without changing assertions."""
-        fn = strict.prepare_kda_states_triton if prepare else strict.copy_kda_states_triton
-
-        def copy(state, packed, indices, flags, to_cache):
-            """Use the explicit block size of the previously accepted candidate."""
-            return fn(state, packed, indices, has_initial_state=flags, to_cache=to_cache, block_size=8192)
-
-        return copy
+    def copy(state, packed, indices, flags, to_cache):
+        """Adapt a preallocated native test result to worker-plan execution."""
+        signature = production.cache_signature(state)
+        plan = plans.get(signature)
+        if plan is None:
+            if not preparing:
+                # Preserve the original invalid-inner-layout assertion without
+                # preparing a new plan (or entering JIT) during formal tests.
+                production._validate_inputs(state, packed, indices)
+                raise AssertionError("Unprepared production cache layout")
+            plan = production.KDAStateCopyPlan.prepare(state, 129)
+            plan.seal()
+            plan._layer_name = "standalone_test"
+            plans[signature] = plan
+        if to_cache:
+            plan.scatter(state, packed, indices)
+        else:
+            packed.copy_(plan.gather(state, indices, flags))
 
     def forbid_compile(*args, **kwargs):
         """Fail immediately if a formal test attempts compiler entry."""
         raise AssertionError("Compilation forbidden after KDA seal")
 
     with pytest.MonkeyPatch.context() as patch:
-        patch.setitem(globals(), "_copy_state", adapter(True))
+        patch.setitem(globals(), "_copy_state", copy)
         for dtype in (torch.float32, torch.bfloat16):
             for index_dtype in (torch.int32, torch.int64):
                 for shape in ((2, 3, 4), (1, 1, 129), (12, 128, 128)):
@@ -183,8 +188,11 @@ def prepared_state_copy():
         test_kda_state_copy_empty_selection_and_inner_stride_rejection()
         for index_dtype in (torch.int32, torch.int64):
             test_kda_state_copy_noncontiguous_indices_and_flags(index_dtype)
-        strict.seal_kda_states_triton()
-        patch.setitem(globals(), "_copy_state", adapter(False))
+        assert plans
+        # Every plan was sealed before its first use, as production requires.
+        assert all(plan._sealed for plan in plans.values())
+        preparing = False
+        patch.setattr(production._kda_state_copy_kernel, "run", forbid_compile)
         for name in ("triton", "triton.compiler", "triton.compiler.compiler", "triton.runtime.jit"):
             backend = importlib.import_module(name)
             if callable(getattr(backend, "compile", None)):

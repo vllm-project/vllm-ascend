@@ -43,7 +43,7 @@ Invalid inner layouts remain rejected by the strided fallback, as in the PR.
 INT32/INT64 indices multiplied by gather/scatter. All variants use fixed cache
 metadata and block size 8192. Gather flags are aligned contiguous BOOL. Index
 values and selected counts are runtime data; launch grid is rebound without a
-JIT call. `0 <= selected <= scheduler.max_num_seqs` does not expand the registry.
+JIT call. `0 <= selected <= scheduler.max_num_seqs` does not expand the plan variant table.
 
 Preparation uses one disposable payload row and small metadata tensors. The
 actual row count, stride and alignment are scalar/layout information only; all
@@ -108,8 +108,8 @@ The suite separately asserts that aligned INT32 inputs retain their identity
 and serving never invokes the compiler-environment scanner. Changing selected
 counts and graph input values must succeed with a constant variant table.
 
-Run the integration tests before the standalone suite if collecting them in one
-process; the latter uses an isolated module and compiler-denying fixture:
+Run the integration and independent plan-copy suites together; the latter
+uses test-local worker-owned plans and a compiler-denying fixture:
 
 ```bash
 python -m pytest --confcutdir=tests/ut/ops \
@@ -138,9 +138,27 @@ additional hardware validation. Full-model compilation/Inductor acceptance is
 not established by operator tracing tests. The no-JIT guarantee here covers
 prepared state-copy routes, not unrelated model kernels.
 
-The standalone explicit prepare/seal API in `ops/triton/kda_state_copy.py` remains
-available for its existing tests; production uses worker-owned plans instead of
-its process-global signature registry and per-call environment checks.
+There is one lifecycle: `KDAStateCopyPlan.prepare` compiles four variants on
+scratch, `seal` validates startup configuration, and the worker publishes only
+after all layer plans are ready. Tests instantiate the same plan independently.
+`ops/triton/kda_state_copy.py` retains only the kernel and common metadata
+validation, not a process-global launcher registry, signature budget, lock,
+per-call environment scan, or mutation of the JIT object's `run` method.
+
+Previous standalone-only policy tests were migrated as follows:
+
+| Old assertion | Unified-lifecycle assertion |
+|---|---|
+| global empty registry / irreversible global seal | unsealed plan rejects use; independent plans may prepare and seal |
+| unknown signature, tensor identity, dynamic grid | cache layout/alignment checked; same-layout rebinding and dynamic S reuse four variants |
+| global 128-signature budget / block-size overrides | canceled: finite worker layout set and fixed 8192 block replace user-specified signature budget |
+| metadata errors / empty selection | invalid layout and metadata reject before compile/launch; S=0 launches nothing |
+| per-call compiler-environment drift | canceled: prepare/seal checks drift; serving must not scan configuration |
+| global `kernel.run` replacement | canceled: compiled launch object only; compiler entry denied in tests |
+
+`test_kda_state_copy_lifecycle.py` tests the production plan with isolated host
+stubs. `test_kda_state_copy_triton.py` retains the original numerical assertions
+but invokes sealed production plans rather than a standalone registry.
 
 ### Reproducible paired performance check
 

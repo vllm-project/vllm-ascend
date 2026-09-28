@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Explicit-lifecycle Triton implementation of KDA state gather/clear/scatter.
+"""KDA state-copy kernel and metadata validation for worker-owned plans.
 
-Production Kimi prefill integration selects the prepared plan by device and cache layout.
-The worker-owned plan in ops/kda_state_copy.py shares this kernel, not the
-standalone process-global prepare/seal registry below.
+Production selects its plan by device/cache layout. The sole prepare/seal
+lifecycle lives in ops/kda_state_copy.py; independent tests use that same plan.
+This module has no launcher registry.
 
 Contract:
     state: NPU FP32/BF16 cache [cache_rows, H, V, K]. Inner payload is dense;
@@ -24,9 +24,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from contextlib import nullcontext
-from threading import RLock
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol
 
 import torch
@@ -41,6 +38,21 @@ if TYPE_CHECKING:
 
 
 DEFAULT_KDA_BLOCK_SIZE = 8192
+
+
+def _configuration():
+    """Pin compile-related environment and runtime versions for this process.
+
+    This is a fail-closed configuration check, not a portable compiler-cache key.
+    Loaded backend/binaries must remain fixed; live code replacement is unsupported.
+    """
+    prefixes = ("TRITON_", "ASCEND_", "CANN_", "TORCH_NPU_", "NPU_", "LLVM_")
+    keys = {"LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONPATH"}
+    return (
+        torch.__version__,
+        triton.__version__,
+        tuple(sorted((k, v) for k, v in os.environ.items() if k.startswith(prefixes) or k in keys)),
+    )
 
 
 @triton.jit
@@ -138,190 +150,3 @@ def _validate_inputs(state, packed_states, indices):
     if strides[0] < payload:
         raise RuntimeError("cache pages must not overlap")
     return payload, device, dtype, index_dtype, selected, shape[0], strides[0], indices.stride(0)
-
-
-def _copy_kda_states_triton(
-    state: torch.Tensor,
-    packed_states: torch.Tensor,
-    indices: torch.Tensor,
-    *,
-    to_cache: bool = False,
-    has_initial_state: torch.Tensor | None = None,
-    block_size: int = DEFAULT_KDA_BLOCK_SIZE,
-    _prepare: bool = False,
-) -> None:
-    """Gather/clear into packed_states, or scatter packed_states into state.
-
-    This is an explicit alternative entry point, not an automatic fallback.
-    block_size is a power-of-two tile size in ELEMENTS, defaulting to 8192.
-    Callers must prepare the same explicit block size used during serving.
-    The wrapper allocates no payload/output tensor. Metadata conversion below
-    may allocate, matching the existing Python wrapper's flag normalization.
-
-    Empty selections are validated and return without a kernel launch.
-    Device availability, resource limits and compiler errors are not swallowed.
-    Kernel launch is asynchronous; the caller controls synchronization/timing.
-    """
-    # This internal entry is called only while the lifecycle lock is held.
-    if _prepare:
-        if _SEALED:
-            raise RuntimeError("preparation is forbidden after seal")
-    elif not _SEALED:
-        raise RuntimeError("call prepare_kda_states_triton then seal_kda_states_triton first")
-    _check_configuration()
-    if _kda_state_copy_kernel.pre_run_hooks:
-        raise RuntimeError("JIT pre-run hooks are unsupported by strict dispatch")
-    if type(to_cache) is not bool:
-        raise TypeError("to_cache must be bool")
-    if type(block_size) is not int or block_size <= 0 or block_size & (block_size - 1):
-        raise ValueError("block_size must be a positive power of two")
-    (payload, device, dtype, index_dtype, selected, cache_rows, cache_stride, index_stride) = _validate_inputs(
-        state, packed_states, indices
-    )
-
-    flags = has_initial_state
-    if flags is not None:
-        # Match the existing Python wrapper's device/dtype/shape normalization.
-        if flags.device != device or flags.dtype != torch.bool:
-            flags = flags.to(device=device, dtype=torch.bool, non_blocking=True)
-        if flags.ndim != 1:
-            flags = flags.reshape(-1)
-        if flags.numel() != selected:
-            raise RuntimeError("initial-state flags must match the number of indices")
-
-    if selected == 0:
-        return
-
-    has_flags = flags is not None and not to_cache
-    # A valid dummy pointer avoids passing None; HAS_FLAGS removes its load.
-    flags_arg = flags if flags is not None and has_flags else indices
-    flag_stride = flags.stride(0) if flags is not None and has_flags else 0
-    grid = (selected, triton.cdiv(payload, block_size))
-
-    # Exact scalar values prevent reusing implicit equal-to-one specializations.
-    # Pointer alignment classes cover this installed backend's specialization.
-    # Never retain tensors, data pointers, streams or runtime index/flag values.
-    tensors = (state, packed_states, indices, flags_arg)
-    scalars = (cache_rows, cache_stride, payload, index_stride, flag_stride)
-    # Validated packed dtype equals cache dtype; normalized flags are boolean.
-    # Retain every pointer alignment class and exact scalar specialization.
-    # selected and launch grid are runtime dimensions, not JIT specializations.
-    key = (
-        device,
-        (dtype, dtype, index_dtype, torch.bool if has_flags else index_dtype),
-        (state.data_ptr() % 16, packed_states.data_ptr() % 16, indices.data_ptr() % 16, flags_arg.data_ptr() % 16),
-        scalars,
-        to_cache,
-        has_flags,
-        block_size,
-        os.environ.get("TRITON_DEBUG", "0"),
-    )
-    # Skip redundant context switching only when this thread is already on
-    # the tensor device. Preserve the original guard for a mismatching device.
-    with _NO_DEVICE_SWITCH if torch.npu.current_device() == device.index else torch.npu.device(device):
-        runner = _LAUNCHERS.get(key)
-        if runner is None:
-            if not _prepare:
-                raise RuntimeError("unprepared KDA signature; JIT compilation is forbidden")
-            # No eviction: exceeding the budget fails BEFORE entering JIT.
-            if len(_LAUNCHERS) >= _MAX_SIGNATURES:
-                raise RuntimeError("preparation signature budget exhausted; no eviction")
-            # Only startup owns a mutable registry; seal replaces it with a proxy.
-            if not isinstance(_LAUNCHERS, dict):
-                raise RuntimeError("sealed KDA registry cannot accept new launchers")
-            compiled = _kda_state_copy_kernel[grid](
-                *tensors, *scalars, TO_CACHE=to_cache, HAS_FLAGS=has_flags, BLOCK_SIZE=block_size
-            )
-            _LAUNCHERS[key] = compiled
-        else:
-            # Bind the current request grid to the precompiled kernel. This
-            # direct compiled-kernel path cannot enter the Triton JIT.
-            runner[(grid[0], grid[1], 1)](*tensors, *scalars)
-
-
-# Lifecycle is process-local and irreversible. Private state is not a security
-# boundary against monkey-patching; restarting requires a new prepare/seal pass.
-_LAUNCHERS: dict[tuple, _CompiledKernel] | MappingProxyType[tuple, _CompiledKernel] = {}
-_MAX_SIGNATURES = 128
-_SEALED = False
-_CONFIGURATION = None
-_PREPARED_DEVICES: set[torch.device] = set()
-_LOCK = RLock()
-_NO_DEVICE_SWITCH = nullcontext()
-
-
-def _configuration():
-    """Pin compile-related environment and runtime versions for this process.
-
-    This is a fail-closed configuration check, not a portable compiler-cache key.
-    Loaded backend/binaries must remain fixed; live code replacement is unsupported.
-    """
-    prefixes = ("TRITON_", "ASCEND_", "CANN_", "TORCH_NPU_", "NPU_", "LLVM_")
-    keys = {"LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONPATH"}
-    return (
-        torch.__version__,
-        triton.__version__,
-        tuple(sorted((k, v) for k, v in os.environ.items() if k.startswith(prefixes) or k in keys)),
-    )
-
-
-def _check_configuration():
-    """Reject configuration drift before compilation or a steady-state launch."""
-    global _CONFIGURATION
-    current = _configuration()
-    if _CONFIGURATION is None:
-        _CONFIGURATION = current
-    elif current != _CONFIGURATION:
-        raise RuntimeError("KDA compiler/runtime configuration changed; restart and prepare")
-
-
-def _deny_jit(*args, **kwargs):
-    """Hard stop accidental JIT dispatch on this kernel after sealing."""
-    raise RuntimeError("sealed KDA kernel: JIT entry is disabled")
-
-
-def prepare_kda_states_triton(state, packed_states, indices, **kwargs):
-    """Compile AND EXECUTE one signature on disposable startup tensors.
-
-    Gather overwrites packed_states; scatter overwrites state. Call outside graph
-    capture before serving traffic. Prepare each dtype/device/layout/alignment/
-    block/direction/flag-presence class that serving will admit.
-    Tensor values are not keys. Do not warm up on live state unless writes are safe.
-    """
-    with _LOCK:
-        _copy_kda_states_triton(state, packed_states, indices, _prepare=True, **kwargs)
-        _PREPARED_DEVICES.add(state.device)
-
-
-def seal_kda_states_triton():
-    """Synchronize startup work and irreversibly prohibit new signatures/JIT.
-
-    Multiple seals are idempotent. No unseal, automatic warmup, eviction, or JIT
-    fallback exists. Installations of pre-run hooks after seal are rejected.
-    """
-    global _SEALED, _LAUNCHERS
-    with _LOCK:
-        if _SEALED:
-            return
-        _check_configuration()
-        if not _LAUNCHERS:
-            raise RuntimeError("cannot seal an empty launcher registry")
-        if _kda_state_copy_kernel.pre_run_hooks:
-            raise RuntimeError("remove JIT pre-run hooks before sealing")
-        for device in _PREPARED_DEVICES:
-            with torch.npu.device(device):
-                torch.npu.synchronize()
-        _LAUNCHERS = MappingProxyType(dict(_LAUNCHERS))
-        _kda_state_copy_kernel.run = _deny_jit
-        _SEALED = True
-
-
-def copy_kda_states_triton(state, packed_states, indices, **kwargs):
-    """Run only a sealed prepared signature; never invoke the Triton JIT.
-
-    Metadata/normalization and compiled-kernel launch still run on the host.
-    Graph replay uses captured pointers: their lifetime belongs to the caller.
-    No promise is made about unrelated Torch/Legacy kernels compiling elsewhere.
-    """
-    with _LOCK:
-        _copy_kda_states_triton(state, packed_states, indices, **kwargs)
