@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, NamedTuple, TypeVar
+from typing import Any, NamedTuple, TypeVar, cast
 
 import torch
 import torch_npu
@@ -1667,9 +1667,9 @@ class AscendSFADSADCPImpl(AscendSFADCPImpl, AscendSFADSACPImpl):
     def _get_indexer_attn_q_gather_handle(self, attn_metadata: M) -> torch.distributed.Work | None:
         if self._has_prefill(attn_metadata):
             return None
-        assert isinstance(attn_metadata, AscendSFADCPMetadata)
-        assert attn_metadata.dcp_context is not None
-        gather_context = attn_metadata.dcp_context.gather_context
+        dcp_metadata = cast(AscendSFADCPMetadata, attn_metadata)
+        assert dcp_metadata.dcp_context is not None
+        gather_context = dcp_metadata.dcp_context.gather_context
         return gather_context.handle if gather_context is not None else None
 
 
