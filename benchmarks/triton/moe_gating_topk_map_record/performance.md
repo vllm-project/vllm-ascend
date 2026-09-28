@@ -7,10 +7,44 @@ by a grid-owned Triton map/record kernel and a single-writer Triton reduction.
 Neither Triton kernel uses global atomics. The isolated Ascend 910B4 target
 passed all 96 business-shape accuracy cases, 14 smoke cases, six edge cases,
 routing-table graph replay, and 24/24 NPU tests (including the large-prefill
-router dispatch) with this exact source. The historical rounds
-below describe earlier implementations and **are not performance claims for
-the current source**. Exact-source `msprof op` timings will be added in a
-follow-up after the call chain is committed.
+router dispatch) with this exact source. The table immediately below profiles
+commit `0eb608d36`; the historical rounds farther down describe earlier
+implementations and are **not performance claims for the current source**.
+
+### Current-source `msprof op` component timings
+
+Ascend 910B4-1, CANN 9.1.0, Triton-Ascend 3.2.2; independent idle devices
+0–7, each at 1650 MHz. One `msprof op` capture per kernel and case, using its
+own warmup. Times are Task Duration in µs, including the task's head overhead.
+The mainline sum is CANN TopK + original map + downstream record; the new sum
+is the same CANN TopK + grid-owned map/record + one-writer reduce. As the
+mainline record follows MoE execution, these sums are component cost models,
+not measured contiguous MoE or serving latency. Profiles and summaries are
+under `/workspace/hybrid-grid-v1/profiles_exact` in the isolated container.
+
+| T | E | K | Score | CANN TopK | Main map | Main record | Grid map/record | Grid reduce | Main sum | New sum | Main/New |
+|---:|---:|---:|:---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 32 | 32 | 8 | softmax | 5.18 | 30.44 | 1.68 | 17.16 | 1.70 | 37.30 | 24.04 | 1.55× |
+| 64 | 8 | 8 | softmax | 6.62 | 26.46 | 1.74 | 19.74 | 1.72 | 34.82 | 28.08 | 1.24× |
+| 64 | 16 | 6 | sigmoid | 6.04 | 28.86 | 1.88 | 21.12 | 1.82 | 36.78 | 28.98 | 1.27× |
+| 128 | 16 | 8 | sigmoid | 7.50 | 27.04 | 1.76 | 24.34 | 1.68 | 36.30 | 33.52 | 1.08× |
+| 256 | 32 | 8 | softmax | 10.78 | 30.42 | 1.76 | 16.90 | 2.22 | 42.96 | 29.90 | 1.44× |
+| 512 | 16 | 8 | sigmoid | 13.82 | 27.64 | 1.76 | 23.28 | 2.10 | 43.22 | 39.20 | 1.10× |
+| 65536 | 16 | 8 | sigmoid | 942.88 | 1301.60 | 1.64 | 533.62 | 2.10 | 2246.12 | 1478.60 | 1.52× |
+| 131072 | 32 | 8 | softmax | 2470.10 | 2883.44 | 1.76 | 1416.44 | 2.12 | 5355.30 | 3888.66 | 1.38× |
+| 262144 | 32 | 6 | softmax | 5004.28 | 3566.18 | 1.66 | 2423.68 | 2.10 | 8572.12 | 7430.06 | 1.15× |
+| 524288 | 32 | 8 | sigmoid | 7510.18 | 11494.78 | 1.54 | 5572.28 | 2.06 | 19006.50 | 13084.52 | 1.45× |
+
+`PipeUtilization.csv` explains the large-prefill gain without treating the
+kernel as a black box. At T=65536/E=16, median per-vector-program scalar time
+falls from 1255.26 to 481.83 µs, while vector time rises from 8.99 to
+55.20 µs and MTE2 stays small (13.10 versus 7.36 µs). At T=524288/E=32,
+scalar time falls from 11226.33 to 4988.27 µs; vector work rises from 70.67
+to 661.95 µs, and MTE2 is essentially unchanged (105.07 versus 104.88 µs).
+The grid-local histogram spends extra vector work but removes much more
+scalar work from the old mapping path. At T=128/E=16, both mapping kernels
+remain scalar-dominated (25.44 versus 20.27 µs), so the gain is only 1.08×.
+These are overlapping profiler component times, not quantities to add.
 
 Environment: Ascend 910B4-1, CANN 9.1.0, PyTorch 2.10.0, torch-npu
 2.10.0.post4, Triton-Ascend 3.2.2, one otherwise idle NPU. Upstream main
