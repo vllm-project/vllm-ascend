@@ -1,4 +1,4 @@
-"""Shared token coordinates for AscendStore operations."""
+"""Shared coordinates for the AscendStore v1 domain."""
 
 from dataclasses import dataclass
 

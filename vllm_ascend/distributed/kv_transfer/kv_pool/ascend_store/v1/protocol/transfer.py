@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.v1.core.kv_cache_utils import BlockHash
 
-from ..graph.coordinates import TokenRange
+from ..coordinates import TokenRange
 
 
 @dataclass(frozen=True, slots=True)

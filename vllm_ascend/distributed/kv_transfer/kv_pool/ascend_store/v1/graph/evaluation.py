@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from ..protocol.transfer import KVTransferStep
 
 if TYPE_CHECKING:
-    from ..execution.timeline import StoreBatch
+    from ..execution.timeline import StoreBatch, StoreTransfer
 
 
 @dataclass(slots=True)
@@ -18,6 +18,7 @@ class KVPoolStepEvaluation:
     step: KVTransferStep
     failed_request_ids: set[str] = field(default_factory=set)
     failed_block_ids: set[int] = field(default_factory=set)
+    store_transfers: list[StoreTransfer] = field(default_factory=list)
     pending_store: StoreBatch | None = None
 
 

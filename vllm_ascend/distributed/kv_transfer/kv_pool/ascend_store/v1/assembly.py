@@ -7,22 +7,37 @@ from typing import TYPE_CHECKING
 
 from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_cache_spec
 
-from .execution.io import BackendExistenceMissingFilter, BackendIO, IdentityMissingFilter, MissingFilter
-from .execution.resources import KVResources
+from ..attention_fence import reset_attention_compute_start_gate
+from .backend import BLOCK_KEY_LAYERWISE_BACKENDS
+from .execution.io import BackendIO, LayerwiseBackendIO
+from .execution.resources import KVPoolResources
 from .execution.runtime import KVPoolRuntime
-from .execution.timeline import AsynchronousLoadTimeline, LoadTimeline, StoreTimeline, SynchronousLoadTimeline
+from .execution.timeline import LoadTimelineProtocol, StoreTimelineProtocol
+from .execution.timeline.bulk import AsyncLoadTimeline, LoadTimeline, StoreTimeline
+from .execution.timeline.layerwise import (
+    LayerwiseLoadTimeline,
+    LayerwiseStoreTimeline,
+    LayerwiseStoreTimelineProtocol,
+)
+from .graph.filter import BackendExistenceMissingFilter, IdentityMissingFilter, MissingFilter
 from .graph.graph import KVPoolGraph
-from .graph.projection import (
+from .graph.projection.binding import (
     BindingProjection,
-    ConsumerProjection,
     ContiguousBindingProjection,
-    IdentityConsumerProjection,
-    KVProjection,
-    PipelinePartitionConsumerProjection,
+    LayerwiseBindingProjection,
     StridedBindingProjection,
 )
+from .graph.projection.block import KVBlockProjection
+from .graph.projection.chunk import KVChunkProjection
+from .graph.projection.consumer import (
+    ConsumerProjection,
+    IdentityConsumerProjection,
+    PipelinePartitionConsumerProjection,
+)
+from .graph.projection.object import RemoteObjectProjection
+from .graph.projection.ownership import StoreOwnershipProjection
 from .graph.reachability import HybridReachability, KVReachability, UnitaryReachability
-from .graph.topology import KVTopology, resolve_kv_topology
+from .graph.topology import KVPoolTopology, resolve_kv_pool_topology
 from .planning.availability import RemoteAvailabilityProbe
 from .planning.planner import TransferPlanner
 from .planning.progress import AllocationLoadPublication, LoadPublication, ScheduledLoadPublication
@@ -41,7 +56,7 @@ def build_transfer_planner(
     spec = resolve_transfer_planning_spec(vllm_config, kv_cache_config)
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     load_publication: LoadPublication
-    if extra_config.get("load_async", False):
+    if extra_config.get("load_async", False) and not extra_config.get("use_layerwise", False):
         load_publication = AllocationLoadPublication()
     else:
         load_publication = ScheduledLoadPublication()
@@ -64,50 +79,93 @@ def build_transfer_planner(
 def build_kv_pool_runtime(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> KVPoolRuntime:
     """Assemble the fixed KV Pool graph and its process-owned runtime."""
 
-    topology = resolve_kv_topology(vllm_config, kv_cache_config)
+    topology = resolve_kv_pool_topology(vllm_config, kv_cache_config)
     transfer_config = vllm_config.kv_transfer_config
     extra_config = transfer_config.kv_connector_extra_config
+    use_layerwise = bool(extra_config.get("use_layerwise", False))
+    backend_name = extra_config.get("backend", "mooncake").strip().lower()
+    store_enabled = _is_store_enabled(vllm_config)
     consumer_partitions = topology.consumer_pipeline_partitions
+    layerwise_prefetch_layers = 2
+    if use_layerwise:
+        configured_prefetch_layers = extra_config.get("layerwise_prefetch_layers", layerwise_prefetch_layers)
+        if isinstance(configured_prefetch_layers, bool):
+            raise ValueError("layerwise_prefetch_layers must be a positive integer")
+        try:
+            layerwise_prefetch_layers = int(configured_prefetch_layers)
+        except (TypeError, ValueError) as error:
+            raise ValueError("layerwise_prefetch_layers must be a positive integer") from error
+        if layerwise_prefetch_layers <= 0:
+            raise ValueError("layerwise_prefetch_layers must be a positive integer")
     if consumer_partitions is not None and len(consumer_partitions) > 1 and topology.tp_partition.tp_mismatch:
         raise ValueError("Consumer pipeline projection cannot yet be composed with TP mismatch")
-    resources = KVResources.create(
+    if use_layerwise and topology.tp_partition.tp_mismatch:
+        raise ValueError("Layerwise binding projection cannot yet be composed with TP mismatch")
+    if use_layerwise and consumer_partitions is not None and len(consumer_partitions) > 1:
+        raise ValueError("Layerwise binding projection cannot yet be composed with consumer pipeline projection")
+    if use_layerwise and any(group.uses_align_state for group in topology.groups):
+        raise ValueError("AscendStore v1 Layerwise transfer does not yet coordinate Mamba align-state copies")
+    if use_layerwise and backend_name not in BLOCK_KEY_LAYERWISE_BACKENDS:
+        raise ValueError(f"AscendStore v1 Layerwise transfer requires a block-key Backend; got {backend_name!r}")
+    resources = KVPoolResources.create(
         vllm_config.parallel_config,
         extra_config,
-        topology.kv_cache_groups,
+        topology.groups,
         topology.hash_block_size,
         kv_cache_config.num_blocks,
         topology.consumer_pipeline_partitions,
     )
     reachability = _build_reachability(vllm_config, kv_cache_config, topology)
     binding_projection: BindingProjection
-    if topology.tp_partition.tp_mismatch:
-        binding_projection = StridedBindingProjection(resources.token_database, topology)
+    if use_layerwise:
+        binding_projection = LayerwiseBindingProjection(topology)
+    elif topology.tp_partition.tp_mismatch:
+        binding_projection = StridedBindingProjection(topology)
     else:
-        binding_projection = ContiguousBindingProjection(resources.token_database)
-    projection = KVProjection(resources.token_database, topology, binding_projection)
+        binding_projection = ContiguousBindingProjection(topology)
     consumer_projection: ConsumerProjection
     if consumer_partitions is not None and len(consumer_partitions) > 1:
-        consumer_projection = PipelinePartitionConsumerProjection(resources.token_database, consumer_partitions)
+        consumer_projection = PipelinePartitionConsumerProjection(consumer_partitions)
     else:
         consumer_projection = IdentityConsumerProjection()
-    backend_io = BackendIO(resources.backend)
+    backend_io = LayerwiseBackendIO(resources.backend) if use_layerwise else BackendIO(resources.backend)
     missing_filter: MissingFilter
     if resources.backend.requires_exists_before_put:
         missing_filter = BackendExistenceMissingFilter()
     else:
         missing_filter = IdentityMissingFilter()
-    load_timeline: LoadTimeline
-    if extra_config.get("load_async", False):
-        load_timeline = AsynchronousLoadTimeline(backend_io.backend.set_device)
+    load_timeline: LoadTimelineProtocol
+    if use_layerwise:
+        assert isinstance(backend_io, LayerwiseBackendIO)
+        load_timeline = LayerwiseLoadTimeline(
+            topology,
+            backend_io,
+            layerwise_prefetch_layers,
+            backend_io.backend.set_device,
+            reset_attention_compute_start_gate,
+        )
+    elif extra_config.get("load_async", False):
+        load_timeline = AsyncLoadTimeline(backend_io.backend.set_device)
     else:
-        load_timeline = SynchronousLoadTimeline()
-    store_timeline = StoreTimeline(backend_io.backend.set_device) if _is_store_enabled(vllm_config) else None
+        load_timeline = LoadTimeline()
+    store_timeline: StoreTimelineProtocol | LayerwiseStoreTimelineProtocol | None
+    if use_layerwise and store_enabled:
+        assert isinstance(backend_io, LayerwiseBackendIO)
+        store_timeline = LayerwiseStoreTimeline(topology, backend_io, backend_io.backend.set_device)
+    elif store_enabled:
+        store_timeline = StoreTimeline(backend_io.backend.set_device)
+    else:
+        store_timeline = None
     graph = KVPoolGraph(
-        topology,
-        reachability,
-        projection,
-        consumer_projection,
-        missing_filter,
+        topology=topology,
+        reachability=reachability,
+        chunk_projection=KVChunkProjection(resources.token_database, topology),
+        remote_object_projection=RemoteObjectProjection(topology),
+        block_projection=KVBlockProjection(topology),
+        binding_projection=binding_projection,
+        store_ownership_projection=StoreOwnershipProjection(topology),
+        consumer_projection=consumer_projection,
+        missing_filter=missing_filter,
     )
     return KVPoolRuntime(graph, resources, backend_io, load_timeline, store_timeline)
 
@@ -115,7 +173,7 @@ def build_kv_pool_runtime(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
 def _build_reachability(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
-    topology: KVTopology,
+    topology: KVPoolTopology,
 ) -> KVReachability:
     if len(topology.transfer_group_ids) == 1:
         return UnitaryReachability(

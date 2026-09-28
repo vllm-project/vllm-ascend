@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash
 
-from ..graph.coordinates import TokenRange
+from ..coordinates import TokenRange
 from ..protocol.lookup import LookupRequest
 from ..protocol.rpc import LookupClient
 

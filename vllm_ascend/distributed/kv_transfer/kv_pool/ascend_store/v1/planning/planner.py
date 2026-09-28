@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from vllm.utils.math_utils import cdiv
 
-from ..graph.coordinates import TokenRange
+from ..coordinates import TokenRange
 from ..protocol.transfer import KVTransferStep, LoadCommand, LoadCommandBatch, StoreCommand, StoreCommandBatch
 from .availability import ExternalPrefixPlan, LookupQuery, RemoteAvailabilityProbe
 from .progress import LoadCandidate, LoadPublication, RequestSnapshot
