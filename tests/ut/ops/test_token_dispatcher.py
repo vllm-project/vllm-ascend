@@ -981,6 +981,90 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_dynamic_quant.assert_not_called()
         self.assertIsNone(result.dynamic_scale)
 
+    def _build_dispatch_preprocess_inputs(self):
+        hidden_states = torch.randn(8, 16)
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor([0, 1], dtype=torch.int32)
+        self.dispatcher.local_expert_indices = [0, 1]
+        return hidden_states, topk_ids
+
+    def test_dispatch_preprocess_enqueues_permute_before_host_sync(self):
+        """The dispatch preprocess must not stall the stream.
+
+        The first npu_moe_token_permute is enqueued before the host waits on
+        the async D2H event, and repeat_interleave is given an explicit
+        output_size so it performs no implicit .item() synchronization.
+        """
+        hidden_states, topk_ids = self._build_dispatch_preprocess_inputs()
+
+        with patch("torch.npu.Event") as mock_event_cls, patch("torch.npu.synchronize") as mock_device_sync:
+            mock_event = mock_event_cls.return_value
+            call_order = MagicMock()
+            call_order.attach_mock(self.mock_npu_moe_token_permute, "permute")
+            call_order.attach_mock(mock_event.synchronize, "host_sync")
+
+            (
+                _,
+                _,
+                tokens_per_expert,
+                input_splits,
+                output_splits,
+                global_input_tokens_local_experts_indices,
+                _,
+                _,
+            ) = self.dispatcher._dispatch_preprocess(hidden_states, topk_ids)
+
+        # No full-device synchronization anywhere on the dispatch path.
+        mock_device_sync.assert_not_called()
+        # The permutation is enqueued before the host blocks on the D2H event,
+        # so the device keeps busy during the host wait.
+        self.assertEqual(
+            [c[0] for c in call_order.mock_calls],
+            ["permute", "host_sync"],
+        )
+        mock_event.record.assert_called_once()
+        # Splits are materialized as host numpy arrays only after the event.
+        np.testing.assert_array_equal(input_splits, [4, 4])
+        np.testing.assert_array_equal(output_splits, [4, 4])
+        np.testing.assert_array_equal(tokens_per_expert, [4, 4])
+        # repeat_interleave receives an explicit output_size instead of
+        # deriving the output length from device-side repeats.
+        self.mock_repeat_interleave.assert_called_once()
+        self.assertEqual(self.mock_repeat_interleave.call_args.kwargs.get("output_size"), 8)
+        # The (mocked) second-level permute indices flow through unchanged.
+        self.assertTrue(
+            torch.equal(global_input_tokens_local_experts_indices, torch.arange(16)),
+        )
+
+    def test_dispatch_preprocess_single_local_expert_avoids_device_sync(self):
+        """With a single local expert there is no second-level permute, and
+        the former torch.npu.synchronize() fallback must not be hit."""
+        self.dispatcher = TokenDispatcherWithAll2AllV(top_k=2, num_experts=4, num_local_experts=1)
+        self.mock_histc.return_value = torch.tensor([2, 2], dtype=torch.int64)
+        self.dispatcher.local_expert_indices = [0]
+
+        hidden_states = torch.randn(8, 16)
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+
+        with patch("torch.npu.synchronize") as mock_device_sync, patch("torch.npu.Event") as mock_event_cls:
+            (
+                _,
+                _,
+                _,
+                input_splits,
+                output_splits,
+                global_input_tokens_local_experts_indices,
+                _,
+                _,
+            ) = self.dispatcher._dispatch_preprocess(hidden_states, topk_ids)
+
+        mock_device_sync.assert_not_called()
+        mock_event_cls.return_value.synchronize.assert_called_once()
+        self.assertIsNone(global_input_tokens_local_experts_indices)
+        self.mock_repeat_interleave.assert_not_called()
+        np.testing.assert_array_equal(input_splits, [2, 2])
+        np.testing.assert_array_equal(output_splits, [2, 2])
+
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_combine(self):
         hidden_states = torch.randn(16, 16)
