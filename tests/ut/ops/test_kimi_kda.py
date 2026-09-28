@@ -67,7 +67,18 @@ class _RecordingStreamSwitch:
         self.trace.append(f"exit:{self.stream.name}")
 
 
-def test_kda_output_norm_uses_checkpoint_epsilon():
+@pytest.mark.parametrize(
+    "additional_config, backend",
+    [
+        (None, "auto"),
+        ({}, "auto"),
+        ({"kda_state_copy_backend": "triton"}, "triton"),
+        (SimpleNamespace(kda_state_copy_backend="torch"), "torch"),
+    ],
+)
+def test_kda_output_norm_uses_checkpoint_epsilon(additional_config, backend):
+    """Construction preserves checkpoint epsilon and dictionary/object backend selection."""
+
     def fake_upstream_init(attention, _config, _vllm_config, _prefix):
         nn.Module.__init__(attention)
         attention.o_norm = SimpleNamespace(eps=1e-5)
@@ -80,10 +91,11 @@ def test_kda_output_norm_uses_checkpoint_epsilon():
 
     config = SimpleNamespace(rms_norm_eps=1e-6)
     vllm_config = SimpleNamespace(
+        additional_config=additional_config,
         model_config=SimpleNamespace(
             multimodal_config=None,
             enable_prompt_embeds=False,
-        )
+        ),
     )
     with patch(
         "vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__",
@@ -92,6 +104,7 @@ def test_kda_output_norm_uses_checkpoint_epsilon():
         attention = AscendKimiK3DeltaAttention(config, vllm_config)
 
     assert attention.o_norm.eps == config.rms_norm_eps
+    assert attention._kda_state_copy_backend == backend
 
 
 def test_prepare_beta_slices_and_applies_sigmoid_in_fp32():

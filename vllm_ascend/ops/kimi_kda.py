@@ -185,8 +185,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         # AscendConfig validates this enum before model construction. Retain the
         # requested backend even before cache binding, so a missed startup hook
         # cannot silently bypass preparation for an automatic/explicit request.
-        self._kda_state_copy_backend = (getattr(vllm_config, "additional_config", None) or {}).get(
-            "kda_state_copy_backend", "auto"
+        additional_config = getattr(vllm_config, "additional_config", None)
+        self._kda_state_copy_backend = (
+            additional_config.get("kda_state_copy_backend", "auto")
+            if isinstance(additional_config, dict)
+            else getattr(additional_config, "kda_state_copy_backend", "auto")
         )
         self._ascend_kda_state_copy = None
         if uses_mixed_projection:
@@ -467,6 +470,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             if prebuilt_metadata.cu_seqlens_kern is None
             else prebuilt_metadata.cu_seqlens_kern
         )
+        # Unlike the standalone copy API, prefill requires per-request flags.
+        # Missing flags must not silently preserve potentially stale cache rows.
+        if has_initial_state is None:
+            raise ValueError("KDA prefill requires has_initial_state metadata")
         keep = prebuilt_metadata.keep_meta
         if keep is not None:
             state_indices = state_indices[keep]

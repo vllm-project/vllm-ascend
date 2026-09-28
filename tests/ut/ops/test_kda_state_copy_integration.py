@@ -279,3 +279,38 @@ def test_same_layout_layers_trace_their_own_binding(monkeypatch, plan_type):
         plan.scatter(state, packed, indices)
         assert gather.call_args.args[-1] == name
         assert scatter.call_args.args[-1] == name
+
+
+@pytest.mark.parametrize("cache", [None, (), 3, (None, None), (None, object())])
+def test_startup_rejects_unbound_or_non_tensor_cache(monkeypatch, cache):
+    """Invalid cache binding fails before compilation and leaves layers unready."""
+    layer = SimpleNamespace(_kda_state_copy_backend="auto", kv_cache=cache)
+    prepare = Mock(side_effect=AssertionError("invalid cache reached preparation"))
+    monkeypatch.setattr(production.KDAStateCopyPlan, "prepare", prepare)
+    with pytest.raises(RuntimeError, match="cache.*(bound|torch.Tensor)"):
+        production.initialize_kda_state_copy({"layer": layer}, 8)
+    assert not layer._kda_state_copy_ready
+    assert layer._ascend_kda_state_copy is None
+    prepare.assert_not_called()
+
+
+def test_startup_rejects_missing_cache_attribute():
+    """Absent bindings use the same explicit lifecycle error as empty caches."""
+    layer = SimpleNamespace(_kda_state_copy_backend="auto")
+    with pytest.raises(RuntimeError, match="cache must be bound"):
+        production.initialize_kda_state_copy({"layer": layer}, 8)
+    assert not layer._kda_state_copy_ready
+
+
+@pytest.mark.parametrize("backend", ["auto", "triton", "torch"])
+@pytest.mark.parametrize("keep", [None, torch.tensor([0])])
+def test_prefill_rejects_missing_flags_before_cache_access(backend, keep):
+    """Missing prefill metadata must not preserve stale states on any backend."""
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    torch.nn.Module.__init__(attention)
+    attention._kda_state_copy_backend = backend
+    metadata = SimpleNamespace(cu_seqlens_host=(0, 1), cu_seqlens_kern=None, keep_meta=keep)
+    state = torch.full((2, 1, 2, 2), 7.0)
+    with pytest.raises(ValueError, match="requires has_initial_state"):
+        attention._run_prefill(None, None, None, None, None, state, torch.tensor([0]), None, metadata)
+    torch.testing.assert_close(state, torch.full_like(state, 7), rtol=0, atol=0)

@@ -360,9 +360,12 @@ def initialize_kda_state_copy(static_forward_context: dict, max_selected: int) -
     selected_plans: list[KDAStateCopyPlan | StridedKDAFallbackPlan | None] = []
     plan_type: type[KDAStateCopyPlan] | type[StridedKDAFallbackPlan]
     for _, layer in bindings:
-        if len(layer.kv_cache) != 2:
+        kv_cache = getattr(layer, "kv_cache", None)
+        if not isinstance(kv_cache, (tuple, list)) or len(kv_cache) != 2:
             raise RuntimeError("Kimi KDA cache must be bound before strict state-copy preparation")
-        state = layer.kv_cache[1]
+        state = kv_cache[1]
+        if not isinstance(state, torch.Tensor):
+            raise RuntimeError("Kimi KDA cache state must be a torch.Tensor")
         if layer._kda_state_copy_backend == "triton" or supports_kda_state_copy(state):
             plan_type = KDAStateCopyPlan
         elif not state.is_contiguous():
