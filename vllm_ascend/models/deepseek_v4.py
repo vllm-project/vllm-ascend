@@ -415,16 +415,14 @@ class DeepseekV4MoE(nn.Module):
 
         self.hash = layer_idx < config.num_hash_layers and not is_draft_layer
         if self.hash:
-            # Use zeros instead of empty to avoid garbage values causing
-            # invalid memory access in dummy mode (--load-format="dummy")
-            self.gate.tid2eid = nn.Parameter(
-                torch.zeros(
-                    config.vocab_size,
-                    config.num_experts_per_tok,
-                    dtype=torch.int32,
-                ),
-                requires_grad=False,
-            )
+            # Dummy profile also runs MC2 dispatch/combine. Top-k expert ids
+            # of one token must be unique. All zeros or randint can repeat an
+            # id in the same row. token_id + offset mod n_routed_experts is
+            # O(vocab * top_k) and does not allocate [vocab, n_routed_experts].
+            token_ids = torch.arange(config.vocab_size, dtype=torch.int32).unsqueeze(1)
+            expert_offsets = torch.arange(config.num_experts_per_tok, dtype=torch.int32).unsqueeze(0)
+            token_to_expert = (token_ids + expert_offsets) % config.n_routed_experts
+            self.gate.tid2eid = nn.Parameter(token_to_expert, requires_grad=False)
             self.gate.e_score_correction_bias = None
         else:
             self.gate.tid2eid = None
