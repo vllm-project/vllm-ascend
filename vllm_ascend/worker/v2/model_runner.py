@@ -136,11 +136,10 @@ class NPUModelRunner(GPUModelRunner):
             )
             and not self.model_config.enforce_eager
         )
-        load_collection_phase = self.ascend_config.eplb_config.load_collection_phase
         self.eplb = AscendEPLBController(
             parallel_config,
             device,
-            load_collection_phase=(load_collection_phase if parallel_config.enable_eplb else "all"),
+            self.ascend_config.eplb_config if parallel_config.enable_eplb else None,
         )
 
         self.update_stream = None
@@ -285,6 +284,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
+                self.pcp_manager.kv_cache_config = kv_cache_config
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
@@ -465,6 +465,7 @@ class NPUModelRunner(GPUModelRunner):
             num_reqs,
             num_scheduled_tokens_np,
             num_valid_tokens,
+            kv_cache_config=self.kv_cache_config,
         )
 
         # Get the number of draft tokens for each request.
@@ -559,8 +560,11 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
         self.eplb.set_batch_phase(batch_req_state.has_prefill)
 
-        # Get prefill tokens if any.
-        if batch_req_state.has_prefill:
+        # Graph dispatch may classify a PD prompt-tail step as decode, but
+        # its input still comes from all_token_ids rather than sampled tokens.
+        # Keep input preparation tied to the actual prefill progress so the
+        # prompt tail and MTP lookahead are populated even on a decode graph.
+        if np.any(batch_req_state.num_computed_prefill_tokens_np < batch_req_state.prefill_len_np):
             prepare_prefill_inputs(
                 self.input_buffers.input_ids,
                 self.req_states.next_prefill_tokens,

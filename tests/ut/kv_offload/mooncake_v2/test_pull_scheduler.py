@@ -10,12 +10,14 @@ import msgspec
 import pytest
 import torch
 import zmq
-from vllm.v1.request import RequestStatus
+from vllm.sampling_params import SamplingParams
+from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadataGroups,
 )
@@ -608,3 +610,82 @@ def test_set_worker_metadata_is_ignored_on_consumer() -> None:
     scheduler.set_xfer_handshake_metadata_from_workers({0: make_transfer_metadata()})
 
     assert scheduler._sending_thread is None
+
+
+@pytest.fixture
+def prefix_connector():
+    result = MooncakePullConnector.__new__(MooncakePullConnector)
+    result.connector_scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
+    result.connector_scheduler.need_truncate = True
+    return result
+
+
+def make_prefix_request(num_tokens, params, use_embeds=False):
+    request = Request(
+        request_id="prefill",
+        prompt_token_ids=None if use_embeds else list(range(num_tokens)),
+        prompt_embeds=torch.zeros(num_tokens, 4) if use_embeds else None,
+        sampling_params=SamplingParams(max_tokens=8),
+        pooling_params=None,
+    )
+    request.kv_transfer_params = params
+    return request
+
+
+@pytest.mark.parametrize("num_tokens", [512, 513, 514])
+@pytest.mark.parametrize("use_embeds", [False, True])
+def test_truncation_precedes_prefix_lookup(prefix_connector, num_tokens, use_embeds):
+    request = make_prefix_request(num_tokens, {"do_remote_decode": True}, use_embeds)
+
+    # Scheduler.add_request calls this facade before querying the prefix cache.
+    prefix_connector.on_new_request(request)
+    assert request.num_prompt_tokens == num_tokens - 1
+    assert len(request.all_token_ids) == num_tokens - 1
+    if use_embeds:
+        assert request.prompt_embeds.shape[0] == num_tokens - 1
+    else:
+        assert request.prompt_token_ids == list(range(num_tokens - 1))
+    assert request.max_tokens == 1
+    assert request.kv_transfer_params["_p_side_truncated"] is True
+
+    # A warm cache can return only complete blocks before the final token.
+    # In particular, raw 513 must yield a 384-token hit, not 512.
+    local_hit = ((request.num_prompt_tokens - 1) // 128) * 128
+    assert local_hit == {512: 384, 513: 384, 514: 512}[num_tokens]
+    assert prefix_connector.get_num_new_matched_tokens(request, local_hit) == (0, False)
+    assert request.num_prompt_tokens - local_hit > 0
+
+    # Reentry/preemption must not remove another token.
+    prefix_connector.on_new_request(request)
+    assert prefix_connector.get_num_new_matched_tokens(request, local_hit) == (0, False)
+    assert request.num_prompt_tokens == num_tokens - 1
+
+
+@pytest.mark.parametrize("params", [None, {}, {"do_remote_prefill": True}, {"do_remote_decode": False}])
+def test_non_producer_requests_are_not_truncated(prefix_connector, params):
+    request = make_prefix_request(513, params)
+    prefix_connector.on_new_request(request)
+    assert request.num_prompt_tokens == 513
+    assert len(request.all_token_ids) == 513
+    assert request.max_tokens == 8
+    if params and params.get("do_remote_prefill"):
+        assert prefix_connector.get_num_new_matched_tokens(request, 128) == (384, True)
+        assert request.num_prompt_tokens == 513
+
+
+@pytest.mark.parametrize("need_truncate,num_tokens", [(False, 513), (True, 1)])
+def test_truncation_guards(prefix_connector, need_truncate, num_tokens):
+    prefix_connector.connector_scheduler.need_truncate = need_truncate
+    request = make_prefix_request(num_tokens, {"do_remote_decode": True})
+    prefix_connector.on_new_request(request)
+    assert request.num_prompt_tokens == num_tokens
+    assert request.max_tokens == 8
+    assert "_p_side_truncated" not in request.kv_transfer_params
+
+
+def test_matched_token_query_does_not_change_prompt_length(prefix_connector):
+    request = make_prefix_request(513, {"do_remote_decode": True})
+    # Protect against reintroducing the late mutation, after a 512-token hit.
+    assert prefix_connector.get_num_new_matched_tokens(request, 512) == (0, False)
+    assert request.num_prompt_tokens == 513
+    assert len(request.all_token_ids) == 513
