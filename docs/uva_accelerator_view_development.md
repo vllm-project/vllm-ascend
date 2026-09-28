@@ -1,6 +1,6 @@
 # UVA accelerator view: 方案、编译与测试
 
-> 状态：implementation candidate / host-side validation complete。本文描述 MRV2 pinned CPU buffer 的 NPU view 实现和复现方法；Triton direct-read、MRV2 E2E、ACL Graph、并发与性能 Gate 尚未通过。
+> 状态：implementation candidate。2026-09-28 的源码构建已通过 Triton direct-read、component UT 和本地权重路径适配的 MRV2 eager E2E；组件级 ACL Graph replay 已通过。完整 serving graph、fallback E2E、并发与性能 Gate 尚未通过。
 
 ## 范围与语义
 
@@ -92,6 +92,62 @@ PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True \
 
 ## 当前 A3 证据与剩余 Gate
 
-在 CANN 9.1.0、torch_npu 2.10.0.post4、Triton-Ascend 3.2.2 的同一 A3 容器中，base `75c3ff9d` 和候选 `71ea84e6` 的 clean full source build 都通过；候选独立 clean targeted build、extension import 和 `_C_ascend` symbol 注册也通过。20 个 component node 为 16 passed、4 skipped。单独调用 int32 direct-read 测试体时，Triton launcher 在 kernel 执行前报 `ValueError: Pointer argument (at 0) cannot be accessed from Triton (cpu tensor?)`。
+在 CANN 9.1.0、torch_npu 2.10.0.post4、当时容器预装的旧 Triton-Ascend 3.2.2 的同一 A3 容器中，base `75c3ff9d` 和候选 `71ea84e6` 的 clean full source build 都通过；候选独立 clean targeted build、extension import 和 `_C_ascend` symbol 注册也通过。当时 20 个 component node 为 16 passed、4 skipped。单独调用 int32 direct-read 测试体时，旧 Triton launcher 在 kernel 执行前报 `ValueError: Pointer argument (at 0) cannot be accessed from Triton (cpu tensor?)`。
 
-因此 G1/G2/G4 只有部分证据，G3 未通过，G5 仅 A3 构建层通过；MRV2 E2E、ACL Graph、并发与 profiler 尚未验证。不要将当前实现标记为已验证 UVA feature，也不要把 fallback 的 NPU H2D 测试解释为 mapped Host direct-read 通过。
+以上是旧 wheel 的历史结果，不应覆盖下方新源码 wheel 的验证记录。G5 仍只有 A3 构建层证据；不要将当前实现标记为已验证 UVA feature，也不要把 fallback 的 NPU H2D 测试解释为 mapped Host direct-read 通过。
+
+## 2026-09-28：Triton-Ascend 3.2.2 源码 wheel 与 Docker 验证
+
+官方 `release/3.2.2` 源码固定在 `da442e46e6a9fff828c7829dcc92d1cf17d3b2dd`，并补齐该提交锁定的 `AscendNPU-IR` 子模块 `d4405acb6159d2203889ae4527a735c310da9a3e`。在蓝区 A3 Docker 容器内编译 wheel，保留原始源码，不修改 launcher。构建使用 Python 3.12、CANN 9.1.0、`MAX_JOBS=16`、`TRITON_BUILD_PROTON=OFF`、`TRITON_BUILD_WITH_CCACHE=OFF`、`IS_MANYLINUX=FALSE`；容器没有 `ccache` 和 `auditwheel`，后两项避免构建脚本依赖它们。产物为 `triton_ascend-3.2.2+source20260928-cp312-cp312-linux_aarch64.whl`，SHA256 `fb535f6d3c605e9c359ec9532cad822913cafb1fe8258743cfc5cea3658837d`。这是 Linux AArch64 / CPython 3.12 wheel，不能安装到 x86 WSL。
+
+在独立 venv 中使用 `pip install --no-deps` 安装该 wheel。`importlib.metadata.version("triton-ascend")` 为 `3.2.2+source20260928`，`triton.__file__` 和 Ascend driver 均指向 venv；源码内 `triton.__version__` 仍为 `3.2.0`，不能单独用它确认发行包。Ascend compiler 解析到 CANN 9.1.0 的 `bishengir-compile`，未设置 `TRITON_NPU_COMPILER_PATH` 覆盖。
+
+同一 Docker 容器中新建安装用 venv，按以下顺序安装，`--no-deps` 用于保留上述 Triton wheel：
+
+```bash
+VLLM_TARGET_DEVICE=empty CARGO_NET_OFFLINE=true \
+  python -m pip install --no-deps --no-build-isolation -e /path/to/matched-vllm
+COMPILE_CUSTOM_KERNELS=1 MAX_JOBS=16 CMAKE_BUILD_PARALLEL_LEVEL=16 \
+  CCACHE_DISABLE=1 CARGO_NET_OFFLINE=true \
+  python -m pip install --no-deps --no-build-isolation -e /path/to/uva-candidate
+```
+
+第二条命令执行 `build_aclnn` 后构建 `vllm_ascend_C`，安装成功。运行时须从候选源码目录启动，或把它放在 `PYTHONPATH` 首位；容器默认工作目录含另一份 vLLM-Ascend checkout，会抢先被 Python 导入。已核对匹配 vLLM、候选 vLLM-Ascend、隔离 Triton 的真实 `__file__`，并确认 `_C_ascend.get_npu_view_from_cpu_tensor` 注册。
+
+| 验证层 | 结果 | 边界 |
+| --- | --- | --- |
+| Triton direct-read | int32、int64、float32 CPU 更新可见性与 storage 生命周期 4/4 通过 | 真实 NPU/Triton `tl.load`，G3 组件证据 |
+| Component pytest | 20 passed，0 skipped | 其中 4 个 direct-read node 真实执行 Triton；其他包含 NPU view、H2D fallback 与 mock/host 检查 |
+| MRV2 eager E2E | 1 passed；本地 Qwen3-0.6B 权重路径适配，真实 `VllmRunner`、async scheduling、4 条 prompt | 使用本次候选 custom op 包；只证明该 eager 用例完成，未逐请求记录 real-UVA/fallback 分支 |
+| 独立 wrapper capability | `is_uva_available=True`，`_use_real_uva=True`，返回 `npu:0` | 证明该环境的样例 allocation 可映射，不是 E2E 分支追踪 |
+| 组件级 ACL Graph | 同一 mapped view 捕获后，20 次 CPU 更新与 replay 均读取新值，指针稳定 | 真实 Triton/NPU graph；不是完整 MRV2 serving graph |
+| fallback E2E | 未完成 | 显式关闭 real-UVA 的用例在引擎初始化前因 8 张 NPU 被其他作业占用、空闲显存不足而退出 |
+
+本次详细日志留在蓝区隔离目录的 `build.log`、`install_vllm.log`、`install_vllm_ascend.log`、`direct_read.log`、`component_installed.log`、`e2e_installed.log`、`graph_probe.log`、`e2e_fallback_installed.log`。G6 的 fallback、重复请求与输出基线检查，G7 完整 serving graph，G8 并发压力，G9 profiler 仍需补齐。
+
+### 本次 component pytest node 清单
+
+命令为 `python -m pytest -vv -rs tests/ut/device/test_uva_view.py tests/ut/device/test_uva_wrapper.py`；以下 20 个 node 全部 `PASSED`，没有 skip reason。`dtype0/1/2` 分别为 int32/int64/float32。
+
+| Pytest node id（省略共同的 `tests/ut/device/` 前缀） | 目的与执行边界 | Gate |
+| --- | --- | --- |
+| `test_uva_view.py::test_npu_view_preserves_metadata[dtype0]` | int32 非连续 view 元数据；创建 NPU view，未读 payload | G1 |
+| `test_uva_view.py::test_npu_view_preserves_metadata[dtype1]` | int64 同上 | G1 |
+| `test_uva_view.py::test_npu_view_preserves_metadata[dtype2]` | float32 同上 | G1 |
+| `test_uva_view.py::test_npu_views_keep_cpu_storage_alive` | 双 view 的 weakref/GC 生命周期；未执行设备读取 | G2 |
+| `test_uva_view.py::test_npu_view_reads_cpu_updates_without_copy[dtype0]` | int32 CPU 更新后 Triton `tl.load` 读取 mapped view | G3 |
+| `test_uva_view.py::test_npu_view_reads_cpu_updates_without_copy[dtype1]` | int64 同上 | G3 |
+| `test_uva_view.py::test_npu_view_reads_cpu_updates_without_copy[dtype2]` | float32 同上 | G3 |
+| `test_uva_view.py::test_npu_view_keeps_cpu_storage_alive` | CPU 外部引用消失后 Triton direct-read | G2/G3 |
+| `test_uva_view.py::test_empty_npu_view` | 空 Tensor 的 dtype/shape/stride/device；未读 payload | G1 |
+| `test_uva_view.py::test_npu_view_rejects_unpinned_or_device_input` | 非 pinned/device 输入拒绝；未读 mapped payload | G1 |
+| `test_uva_wrapper.py::test_fallback_copies_modified_prefix_and_sparse_rows` | prefix/sparse fallback，真实 NPU H2D/readback | G4 |
+| `test_uva_wrapper.py::test_unmapped_storage_uses_fallback` | 映射不可用时 fallback；capability 使用 mock，H2D/readback 为真实 NPU | G4 |
+| `test_uva_wrapper.py::test_pool_fallback_growth_shrink_and_round_robin[list-2]` | list 输入、2 slot 轮转/扩缩；mock capability，真实 H2D/readback | G4 |
+| `test_uva_wrapper.py::test_pool_fallback_growth_shrink_and_round_robin[list-3]` | list 输入、3 slot；同上 | G4 |
+| `test_uva_wrapper.py::test_pool_fallback_growth_shrink_and_round_robin[numpy-2]` | NumPy 输入、2 slot；同上 | G4 |
+| `test_uva_wrapper.py::test_pool_fallback_growth_shrink_and_round_robin[numpy-3]` | NumPy 输入、3 slot；同上 | G4 |
+| `test_uva_wrapper.py::test_pool_fallback_growth_shrink_and_round_robin[tensor-2]` | Tensor 输入、2 slot；同上 | G4 |
+| `test_uva_wrapper.py::test_pool_fallback_growth_shrink_and_round_robin[tensor-3]` | Tensor 输入、3 slot；同上 | G4 |
+| `test_uva_wrapper.py::test_real_path_uses_npu_typed_view` | mock availability 后创建真实 mapped NPU view；未读 payload | G1/G4 |
+| `test_uva_wrapper.py::test_pool_real_path_returns_mapped_view` | pool real-path 映射与类型；mock availability，未读 payload | G4 |
