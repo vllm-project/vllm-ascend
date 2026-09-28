@@ -391,6 +391,25 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+        # GATHER_FIX(stride): --cp-kv-cache-interleave-size makes the MLA cache a
+        # strided view; npu_gather_pa_kv_cache (CANN 9.1/9.2) requires contiguous
+        # inputs (vllm-ascend issue #17518 Bug A, layout-independent).
+        # Compact ONLY the touched blocks (index_select) instead of copying the
+        # whole pool (full-pool .contiguous() costs ~217MB cross-die per call and
+        # dominates step time; touched blocks per call are few: csl/128).
+        if not cache_kv_c.is_contiguous():
+            bt_flat = block_table.reshape(-1)
+            num_pool = cache_kv_c.shape[0]
+            ids = torch.unique(bt_flat)
+            ids = ids[(ids >= 0) & (ids < num_pool)]
+            dt = block_table.dtype
+            lut = torch.zeros(num_pool, dtype=dt, device=ids.device)
+            lut[ids] = torch.arange(len(ids), dtype=dt, device=ids.device)
+            safe_bt = bt_flat.clamp(0, num_pool - 1)
+            new_bt = lut.index_select(0, safe_bt).reshape(block_table.shape).contiguous()
+            cache_kv_c = cache_kv_c.index_select(0, ids)
+            cache_k_pe = cache_k_pe.index_select(0, ids)
+            block_table = new_bt
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
