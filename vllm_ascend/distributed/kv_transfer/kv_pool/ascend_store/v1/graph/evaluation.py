@@ -19,3 +19,12 @@ class KVPoolStepEvaluation:
     failed_request_ids: set[str] = field(default_factory=set)
     failed_block_ids: set[int] = field(default_factory=set)
     pending_store: StoreBatch | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LoadResult:
+    """Terminal Load facts consumed through vLLM's split completion hooks."""
+
+    completed_request_ids: frozenset[str]
+    failed_request_ids: frozenset[str]
+    failed_block_ids: frozenset[int]

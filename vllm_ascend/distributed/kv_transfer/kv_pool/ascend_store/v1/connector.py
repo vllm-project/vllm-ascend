@@ -15,7 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 
 from .assembly import build_kv_pool_runtime, build_transfer_planner
 from .backend import BACKEND_IMPORTS
-from .kv_pool import LoadResult
+from .graph.evaluation import LoadResult
 from .planning.availability import LookupQuery
 from .protocol.rpc import LookupServer
 from .protocol.transfer import KVTransferStep

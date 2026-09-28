@@ -44,6 +44,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.elements 
     PhysicalCoordinate,
     RemoteKVObject,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.graph import KVPoolGraph
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.projection import (
     ContiguousBindingProjection,
     IdentityConsumerProjection,
@@ -65,7 +66,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.topology 
     TPPartitionSpec,
     resolve_consumer_pipeline_partitions,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.kv_pool import KVPoolGraph
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.availability import (
     ExternalPrefixPlan,
     LookupQuery,

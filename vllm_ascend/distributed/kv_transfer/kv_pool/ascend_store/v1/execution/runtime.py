@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import torch
 
-from ..graph.evaluation import KVPoolStepEvaluation
-from ..kv_pool import KVPoolGraph, LoadResult
+from ..graph.evaluation import KVPoolStepEvaluation, LoadResult
+from ..graph.graph import KVPoolGraph
 from ..protocol.lookup import LookupRequest, LookupResult
 from ..protocol.transfer import KVTransferStep
 from .io import BackendIO

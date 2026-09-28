@@ -11,6 +11,7 @@ from .execution.io import BackendExistenceMissingFilter, BackendIO, IdentityMiss
 from .execution.resources import KVResources
 from .execution.runtime import KVPoolRuntime
 from .execution.timeline import AsynchronousLoadTimeline, LoadTimeline, StoreTimeline, SynchronousLoadTimeline
+from .graph.graph import KVPoolGraph
 from .graph.projection import (
     BindingProjection,
     ConsumerProjection,
@@ -22,7 +23,6 @@ from .graph.projection import (
 )
 from .graph.reachability import HybridReachability, KVReachability, UnitaryReachability
 from .graph.topology import KVTopology, resolve_kv_topology
-from .kv_pool import KVPoolGraph
 from .planning.availability import RemoteAvailabilityProbe
 from .planning.planner import TransferPlanner
 from .planning.progress import AllocationLoadPublication, LoadPublication, ScheduledLoadPublication
