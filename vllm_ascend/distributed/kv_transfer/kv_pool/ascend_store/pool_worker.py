@@ -134,6 +134,12 @@ class KVPoolWorker:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = extra_config.get("load_async", False)
         self._invalid_block_ids: set[int] = set()
+        # Keep the save fence separate from scheduler error reporting. The
+        # scheduler may consume (and clear) _invalid_block_ids before the
+        # deferred save runs, but failed loads must remain fenced for the
+        # whole connector step.
+        self._load_failed_block_ids: set[int] = set()
+        self._load_failed_req_ids: set[str] = set()
         self._invalid_block_ids_lock = threading.Lock()
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend = extra_config.get("backend", "mooncake")
@@ -734,6 +740,9 @@ class KVPoolWorker:
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0
         self.layerwise_retrievers: list[Any] = []
+        with self._invalid_block_ids_lock:
+            self._load_failed_block_ids.clear()
+            self._load_failed_req_ids.clear()
         if self.use_layerwise:
             self.next_layer_to_submit = 0
             reset_attention_compute_start_gate()
@@ -847,9 +856,12 @@ class KVPoolWorker:
                     block_id_list_c,
                     ret,
                 )
-                if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
+                with self._invalid_block_ids_lock:
+                    self._load_failed_req_ids.add(request.req_id)
+                    self._load_failed_block_ids.update(missing_block_ids)
+                    if len(request.block_ids_by_group) == 1:
+                        self._invalid_block_ids.update(missing_block_ids)
+                if len(request.block_ids_by_group) > 1 and missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "
                         "Skip invalid-block fallback to avoid scheduler crash. "
@@ -862,9 +874,12 @@ class KVPoolWorker:
                     block_id_list_c,
                     [1] * len(block_id_list_c),
                 )
-                if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
+                with self._invalid_block_ids_lock:
+                    self._load_failed_req_ids.add(request.req_id)
+                    self._load_failed_block_ids.update(missing_block_ids)
+                    if len(request.block_ids_by_group) == 1:
+                        self._invalid_block_ids.update(missing_block_ids)
+                if len(request.block_ids_by_group) > 1 and missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "
                         "Skip invalid-block fallback to avoid scheduler crash. "
@@ -1434,9 +1449,23 @@ class KVPoolWorker:
         assert self.kv_send_thread is not None
         send_thread = self.kv_send_thread
 
+        with self._invalid_block_ids_lock:
+            load_failed_block_ids = self._load_failed_block_ids.copy()
+            load_failed_req_ids = self._load_failed_req_ids.copy()
+
         for request in connector_metadata.requests:
             can_save = request.can_save
             if can_save is None or not can_save:
+                continue
+            if request.req_id in load_failed_req_ids or (
+                load_failed_block_ids
+                and len(request.block_ids_by_group) == 1
+                and any(block_id in load_failed_block_ids for block_id in request.block_ids)
+            ):
+                logger.warning(
+                    "Skip KV save for request %s because its step contains blocks from a failed load",
+                    request.req_id,
+                )
                 continue
             if current_event is None:
                 current_event = torch.npu.Event()
@@ -1448,6 +1477,9 @@ class KVPoolWorker:
 
         if current_event is not None:
             send_thread.request_queue.join()
+        with self._invalid_block_ids_lock:
+            self._load_failed_block_ids.clear()
+            self._load_failed_req_ids.clear()
 
     def retrieve_layer(
         self,
