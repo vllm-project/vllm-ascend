@@ -13,7 +13,6 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.worker import (
     ECCPUWorker,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.worker.descriptor_buffers import DescriptorBuffers
-from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -87,17 +86,12 @@ class AscendECCPUWorker(ECCPUWorker):
         direction: ECCPUTransferDirection,
     ) -> None:
         cann_direction = _DIRECTION_H2D if direction == ECCPUTransferDirection.HOST_TO_DEVICE else _DIRECTION_D2H
-        try:
-            _swap_blocks_batch(
-                bufs.src_ptrs[:count],
-                bufs.dst_ptrs[:count],
-                bufs.sizes[:count],
-                cann_direction,
-            )
-        except Exception:
-            current_platform.current_stream().synchronize()
-            self._buf_pool.release(bufs)
-            raise
+        _swap_blocks_batch(
+            bufs.src_ptrs[:count],
+            bufs.dst_ptrs[:count],
+            bufs.sizes[:count],
+            cann_direction,
+        )
 
     def _shutdown_transfer_backend(self) -> None:
         if not self._mmap_pinned:

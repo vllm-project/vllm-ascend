@@ -144,7 +144,6 @@ def patch_init_dependencies(
     monkeypatch.setattr(upstream_worker_mod, "get_pcp_group", lambda: pcp_group)
     monkeypatch.setattr(worker_mod, "_supports_eccpu_offload", lambda: supported)
     monkeypatch.setattr(worker_mod.torch, "npu", npu, raising=False)
-    monkeypatch.setattr(worker_mod, "current_platform", platform)
     monkeypatch.setattr(upstream_worker_mod, "current_platform", platform)
 
     def register(blocks):
@@ -232,11 +231,9 @@ def test_submit_transfer_maps_cann_direction_without_releasing(monkeypatch, dire
     assert worker._buf_pool._pool == []
 
 
-def test_submit_failure_synchronizes_and_releases_descriptors(monkeypatch):
+def test_submit_failure_propagates_without_releasing_descriptors(monkeypatch):
     worker = make_worker()
-    platform = FakePlatform()
     bufs = worker._buf_pool.acquire(1)
-    monkeypatch.setattr(worker_mod, "current_platform", platform)
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", raises("copy failed"))
 
     with pytest.raises(RuntimeError, match="copy failed"):
@@ -246,8 +243,7 @@ def test_submit_failure_synchronizes_and_releases_descriptors(monkeypatch):
             ECCPUTransferDirection.DEVICE_TO_HOST,
         )
 
-    assert platform.compute_stream.synchronize_calls == 1
-    assert worker._buf_pool._pool == [bufs]
+    assert worker._buf_pool._pool == []
 
 
 def test_upstream_completion_recycles_npu_transfer_resources():
