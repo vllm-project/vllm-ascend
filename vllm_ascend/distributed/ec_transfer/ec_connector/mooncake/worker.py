@@ -231,10 +231,10 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         self._producer_pushes = ProducerPushManager(self._push_ready.set)
         self._dispatch_stop = threading.Event()
         self._dispatcher = None
-        self._failed_saves = set()
+        self._failed_saves: set[str] = set()
         self._collecting_sources = False
-        self._completed_loads = set()
-        self._failed_loads = set()
+        self._completed_loads: set[str] = set()
+        self._failed_loads: set[str] = set()
         self._shutdown = False
         self._control_thread = threading.local()
         if self.is_producer:

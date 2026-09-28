@@ -23,7 +23,7 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
 )
 
 if TYPE_CHECKING:
-    from mooncake.engine import TransferEngine
+    from mooncake.engine import TransferEngine  # type: ignore[import-not-found]
 
 
 @dataclass(frozen=True)
@@ -204,6 +204,8 @@ def _plan_transfer_waves(
 
 class AscendMooncakeTransfer(MooncakeTransfer):
     """Use the process-wide Ascend engine with EC registration ownership."""
+
+    _engine: TransferEngine | None
 
     def __init__(self, hostname: str, device_index: int) -> None:
         super().__init__(hostname, "ascend")
