@@ -12,6 +12,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import sfa_cp
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadata, AscendSFADCPMetadataBuilder
 from vllm_ascend.worker.dcp_utils import DCPManager
@@ -342,20 +343,18 @@ def test_dspark_propose_passes_cpu_lengths_through_existing_factory(monkeypatch,
     monkeypatch.setattr(DSparkSpeculator, "propose", propose)
     result = spec.propose(spec.input_batch, {}, {}, None, None, None, None, None, None, None, None)
     common = result["draft.layer"].common
-    if use_dcp and architecture in ("GQA", "MLA"):
-        expected = [34, 128] + [0] * (padded - 2)
-    else:
-        expected = [128] * padded
+    expected = [34, 128] + [0] * (padded - 2)
     assert common.seq_lens_cpu.tolist() == expected
     if use_dcp:
         torch.testing.assert_close(common.dcp_local_seq_lens_cpu, _local(expected))
         torch.testing.assert_close(common.dcp_local_seq_lens, _local(device_lengths[:padded].tolist()))
-    if use_dcp and architecture in ("GQA", "MLA"):
+    if architecture in ("GQA", "MLA"):
         # The draft hook allocates one decode flag per uniform query group.
-        assert common.is_prefilling.tolist() == [False] * (desc.num_tokens // width)
+        assert common.is_prefilling.tolist() == [False] * padded
     else:
         assert common.is_prefilling.tolist() == [True, False]
-    assert common.attn_state is None
+    expected_attn_state = AscendAttentionState.ChunkedPrefill if architecture in ("GQA", "MLA") else None
+    assert common.attn_state is expected_attn_state
     torch.testing.assert_close(common.positions, spec.input_buffers.positions)
     torch.testing.assert_close(spec.target_input_buffers.seq_lens_cpu, target)
     assert module.build_attn_metadata is original_builder

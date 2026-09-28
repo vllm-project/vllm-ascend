@@ -273,7 +273,7 @@ def test_propose_uses_draft_decode_flags_for_dcp(monkeypatch, use_dcp):
         captured.update(is_prefilling=is_prefilling, seq_lens_cpu=seq_lens_cpu)
         yield
 
-    monkeypatch.setattr(shared, "build_draft_attn_metadata_factory", factory)
+    monkeypatch.setattr(shared, "build_attn_metadata_factory", factory)
     monkeypatch.setattr(DSparkSpeculator, "propose", lambda self, *args, **kwargs: "draft")
     result = spec.propose(input_batch, None, None, None, None, None, None, None, None, None, None)
 
