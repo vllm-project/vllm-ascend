@@ -21,7 +21,7 @@
 #                        partitions (patterns are evaluated longest first,
 #                        most specific wins). Each entry has a ``default``
 #                        partition and an optional ``310p`` override for
-#                        files whose name contains ``_310p``.
+#                        tests under a ``_310p`` directory.
 # - ``partition:``       maps logical test buckets to exact labels from
 #                        runner_label.json and controls how many
 #                        load-balanced groups are created for each bucket.
@@ -104,7 +104,7 @@ accuracy_tests:
 # === Runner Mapping ===
 # Maps test paths to logical partitions using regex patterns.
 # Each entry has a ``default`` partition and an optional ``310p`` override
-# for files whose name contains ``_310p``.
+# for tests under a ``_310p`` directory.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
   tests/e2e/pull_request/one_card:
@@ -112,6 +112,7 @@ runner_mapping:
     310p: 310p-1
   tests/e2e/pull_request/two_card:
     default: a3-2
+    310p: 310p-2
   tests/e2e/pull_request/four_card:
     default: a3-4
     310p: 310p-4
@@ -122,6 +123,9 @@ runner_mapping:
 partition:
   310p-1:
     runner_label: linux-aarch64-310p-1
+    count: 1
+  310p-2:
+    runner_label: linux-aarch64-310p-2
     count: 1
   310p-4:
     runner_label: linux-aarch64-310p-4

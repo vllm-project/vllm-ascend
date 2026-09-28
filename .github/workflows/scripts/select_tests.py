@@ -137,7 +137,7 @@ def _load_runner_mapping(meta: dict) -> None:
         runner_mapping:
           <regex_pattern>:
             default: <partition_key>
-            "310p": <partition_key>   # optional override for 310P files
+            "310p": <partition_key>   # optional override for the _310p directory
 
     Patterns are sorted longest first so more specific patterns match first.
     """
@@ -152,17 +152,22 @@ def _load_runner_mapping(meta: dict) -> None:
         _RUNNER_MAPPING.append((re.compile(pattern_str), runners))
 
 
+def _is_310p_test_path(route_path: str) -> bool:
+    """Return whether *route_path* is inside a ``_310p`` directory."""
+    return "_310p" in route_path.split("/")
+
+
 def _resolve_partition(file_path: str) -> PartitionKey | None:
     """Match *file_path* against ``_RUNNER_MAPPING``.
 
     Returns the ``default`` logical partition for the first matching pattern.
-    If the filename contains ``_310p`` and the matched pattern has
+    If the path is under a ``_310p`` directory and the matched pattern has
     a ``"310p"`` entry, that entry is returned instead.
     """
     route_path = _as_posix_path(_pytest_node_file_path(file_path))
     for pattern, runners in _RUNNER_MAPPING:
         if pattern.search(route_path):
-            if "_310p" in Path(route_path).name and "310p" in runners:
+            if _is_310p_test_path(route_path) and "310p" in runners:
                 return runners["310p"]
             return runners.get("default")
     return None
