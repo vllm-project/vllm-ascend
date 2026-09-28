@@ -100,6 +100,15 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Bert                          | 🔵        |                                                                      |         A2/A3        | 🟡 |      |
     | Qwen2.5-Math-RM-72B           | 🔵        | Reward Model, gsm8k_correctness accuracy=0.80 | A2 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
+=== "Ascend 950DT&950PR Products"
+
+    | Model                | Support | Supported Hardware              | Doc |
+    |----------------------|---------|----------------------------------|-----|
+    | Qwen3-Embedding       | 🔵      | Ascend 950DT&950PR Products      | [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md) |
+    | Qwen3-VL-Embedding    | 🔵      | Ascend 950DT&950PR Products      | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |
+    | Qwen3-Reranker        | 🔵      | Ascend 950DT&950PR Products      | [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md) |
+    | Qwen3-VL-Reranker     | 🔵      | Ascend 950DT&950PR Products      | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |
+
 === "Atlas 300I DUO"
 
     | Model | Support | Note | Supported Hardware | W8A8|Doc |
@@ -137,6 +146,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Qwen3.5-397B-A17B                   | 🔵      |      | ✅  | A2/A3              | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 1010000 | [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
     | Qwen3.5-27B / Qwen3.6-27B           | 🔵      |      | ✅  | A2/A3              | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
     | Qwen3.6-35B-A3B                     | 🔵      |      | ✅  | A2/A3              | ✅ | ✅ | ✅ |  | 🔵 | ✅ | ✅ |  | ✅ | ✅ | ❌ | ✅ | ✅ | 262144 | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
+    | Qwen3.8-Flash-Next           | 🔵      |      | ✅  | A3              | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Qwen3.8-Flash-Next](../../tutorials/models/Qwen3.8-Flash-Next.md) |
     | Qwen3-Omni-30B-A3B-Thinking         | 🔵      |      |      | A2/A3              |  |  |  |  |  |  | ✅ |  | ✅ |  |  |  |  |  | [Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md) |
     | Kimi-K2.5/Kimi-K2.6                 | 🔵      |      |      | A2/A3              |  | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md) |
     | Kimi-K3                             | 🔵      | W4A8; DSpark; FULL_DECODE_ONLY |      | A3 |  |  | ✅ |  | ✅ |  | ✅ |  | ✅ | ✅ |  |  | ✅ |  | [Kimi-K3](../../tutorials/models/Kimi-K3.md) |

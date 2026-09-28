@@ -164,6 +164,10 @@ if not _npu_available:
     torch.npu.graph_task_update_begin = MagicMock()
     torch.npu.graph_task_update_end = MagicMock()
     torch.npu.stream = MagicMock()
+    # cpu-ut is never capturing an ACL graph. Leave this unstubbed and
+    # is_current_stream_capturing() is a truthy MagicMock, which would send
+    # FIA into graph_task_group_begin.
+    torch.npu.is_current_stream_capturing = MagicMock(return_value=False)
     # Some code paths do `import torch.npu`; attribute assignment alone is not enough.
     sys.modules["torch.npu"] = torch.npu
     torch_npu.npu.Stream = _NpuStreamStub  # type: ignore[attr-defined]
@@ -173,6 +177,18 @@ if not _npu_available:
     torch_npu.npu.stream = MagicMock()  # type: ignore[attr-defined]
     torch.version.cann = None
     torch.distributed.is_hccl_available = MagicMock(return_value=True)
+
+    # The NPU privateuse1 backend has no registered hooks in this CPU-only
+    # environment, so pinned-memory staging (`Tensor.pin_memory`,
+    # `async_tensor_h2d`, `CpuGpuBuffer.copy_to_gpu`) raises
+    # "Please register PrivateUse1HooksInterface". Disable pinned memory for
+    # the whole CPU UT session. Both bindings must be updated because
+    # `vllm.v1.utils` imports the value by name.
+    import vllm.utils.torch_utils as _vllm_torch_utils
+    import vllm.v1.utils as _vllm_v1_utils
+
+    _vllm_torch_utils.PIN_MEMORY = False
+    _vllm_v1_utils.PIN_MEMORY = False
 
 import pytest
 
@@ -253,6 +269,7 @@ if not _npu_available:
     # Re-sync after enable_custom_op / adapt_patch so @patch("torch.npu.*") hits
     # the same object production code uses via `torch.npu`.
     torch.npu.current_device = MagicMock(return_value="cpu")
+    torch.npu.is_current_stream_capturing = MagicMock(return_value=False)
     sys.modules["torch.npu"] = torch.npu
 
 # Clean up any stale mock modules that may have been installed by

@@ -89,9 +89,15 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is  # noqa: E402
+from vllm_ascend.utils import get_kv_cache_tensor_layers  # noqa: E402
 
+# Keep the freshly imported Mooncake modules active.  D2RH tests import the
+# shared connector before this module is collected; restoring that stale
+# module here would leave the test classes bound to one module object while
+# patch() resolves targets through another, so all mocks would silently miss.
 for _k, _v in _saved_modules.items():
+    if _k.startswith(f"{_kv_xfer}.kv_p2p"):
+        continue
     sys.modules[_k] = _v
 
 GET_META_MSG = b"get_meta_msg"
@@ -105,7 +111,7 @@ def make_mock_kv_caches() -> dict[str, Any]:
 
 def make_mock_kv_cache_tensor(size: int, layer_names: list[str]) -> types.SimpleNamespace:
     """Build the descriptor renamed by vLLM #51718 for the active lane."""
-    layer_field = "shared_by" if vllm_version_is("0.28.0") else "layers"
+    layer_field = "layers"
     return types.SimpleNamespace(size=size, **{layer_field: layer_names})
 
 
@@ -407,17 +413,13 @@ class TestMooncakeTransferGroups(unittest.TestCase):
             get_kv_cache_tensor_layers(tensor)[0]: tensor.size for tensor in allocated_config.kv_cache_tensors
         }
         self.assertEqual(allocated_config.num_blocks, num_blocks)
-        if vllm_version_is("0.28.0"):
-            self.assertEqual(allocated_sizes[main_layer], main_spec.page_size_bytes * num_blocks)
-            self.assertEqual(allocated_sizes[index_layer], index_spec.page_size_bytes * num_blocks)
-        else:
-            # vLLM #51718: on main every layer tensor in a KV cache group shares
-            # one allocation sized by the group's total bytes-per-block
-            # (UniformTypeKVCacheSpecs sums the per-layer page sizes), so each
-            # tensor.size is the sum of the two page sizes times num_blocks.
-            group_bytes_per_block = main_spec.page_size_bytes + index_spec.page_size_bytes
-            self.assertEqual(allocated_sizes[main_layer], group_bytes_per_block * num_blocks)
-            self.assertEqual(allocated_sizes[index_layer], group_bytes_per_block * num_blocks)
+        # vLLM #51718: on main every layer tensor in a KV cache group shares
+        # one allocation sized by the group's total bytes-per-block
+        # (UniformTypeKVCacheSpecs sums the per-layer page sizes), so each
+        # tensor.size is the sum of the two page sizes times num_blocks.
+        group_bytes_per_block = main_spec.page_size_bytes + index_spec.page_size_bytes
+        self.assertEqual(allocated_sizes[main_layer], group_bytes_per_block * num_blocks)
+        self.assertEqual(allocated_sizes[index_layer], group_bytes_per_block * num_blocks)
 
         kv_cache_config = MockKVCacheConfig(
             kv_cache_groups=[
@@ -1754,6 +1756,9 @@ class TestMainThreadLoop(unittest.TestCase):
 class MockVllmConfig:
     def __init__(self):
         self.model_config = MagicMock()
+        # vLLM main reads attention_config.hisparse_config in the KV cache
+        # config helpers; Ascend does not enable HiSparse.
+        self.attention_config = types.SimpleNamespace(indexer_kv_dtype="auto", hisparse_config=None)
         self.parallel_config = MagicMock()
         self.cache_config = MagicMock()
         self.kv_transfer_config = MagicMock()
@@ -1798,6 +1803,10 @@ class MockRequest:
         self.kv_transfer_params = kv_transfer_params or {}
         self.status = status or "running"
         self.output_token_ids = [101, 102]
+        self.num_prompt_tokens: int = len(self.prompt_token_ids)
+        self._all_token_ids: list[int] = list(self.prompt_token_ids)
+        self.max_tokens: int = 8
+        self.prompt_embeds: torch.Tensor | None = None
 
 
 class MockKVCacheGroup:
@@ -1937,6 +1946,79 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(tokens, 4)
         self.assertTrue(async_flag)
         self.assertEqual(request.kv_transfer_params["num_computed_tokens"], 0)
+
+    def make_prefix_request(self, num_tokens, params, use_embeds=False):
+        request = MockRequest("prefill", prompt_token_ids=list(range(num_tokens)))
+        request.kv_transfer_params = params
+        request.num_prompt_tokens = num_tokens
+        request._all_token_ids = list(range(num_tokens))
+        request.max_tokens = 8
+        if use_embeds:
+            request.prompt_token_ids = None
+            request.prompt_embeds = torch.zeros(num_tokens, 4)
+        return request
+
+    def test_truncation_precedes_prefix_lookup(self):
+        self.scheduler.need_truncate = True
+        connector = MooncakeConnector.__new__(MooncakeConnector)
+        connector.connector_scheduler = self.scheduler
+        for num_tokens in (512, 513, 514):
+            for use_embeds in (False, True):
+                with self.subTest(num_tokens=num_tokens, use_embeds=use_embeds):
+                    request = self.make_prefix_request(num_tokens, {"do_remote_decode": True}, use_embeds)
+
+                    # Scheduler.add_request calls this facade before prefix lookup.
+                    connector.on_new_request(request)
+                    self.assertEqual(request.num_prompt_tokens, num_tokens - 1)
+                    self.assertEqual(len(request._all_token_ids), num_tokens - 1)
+                    if use_embeds:
+                        self.assertEqual(request.prompt_embeds.shape[0], num_tokens - 1)
+                    else:
+                        self.assertEqual(request.prompt_token_ids, list(range(num_tokens - 1)))
+                    self.assertEqual(request.max_tokens, 1)
+                    self.assertTrue(request.kv_transfer_params["_p_side_truncated"])
+
+                    # Model a full-block cache hit before the final prompt token.
+                    local_hit = ((request.num_prompt_tokens - 1) // 128) * 128
+                    self.assertEqual(local_hit, {512: 384, 513: 384, 514: 512}[num_tokens])
+                    self.assertEqual(connector.get_num_new_matched_tokens(request, local_hit), (0, False))
+                    self.assertGreater(request.num_prompt_tokens - local_hit, 0)
+
+                    # Reentry/preemption must not remove another token.
+                    connector.on_new_request(request)
+                    self.assertEqual(connector.get_num_new_matched_tokens(request, local_hit), (0, False))
+                    self.assertEqual(request.num_prompt_tokens, num_tokens - 1)
+
+    def test_non_producer_requests_are_not_truncated(self):
+        self.scheduler.need_truncate = True
+        for params in (None, {}, {"do_remote_prefill": True}, {"do_remote_decode": False}):
+            with self.subTest(params=params):
+                request = self.make_prefix_request(513, params)
+                self.scheduler.on_new_request(request)
+                self.assertEqual(request.num_prompt_tokens, 513)
+                self.assertEqual(len(request._all_token_ids), 513)
+                self.assertEqual(request.max_tokens, 8)
+                if params and params.get("do_remote_prefill"):
+                    self.assertEqual(self.scheduler.get_num_new_matched_tokens(request, 128), (384, True))
+                    self.assertEqual(request.num_prompt_tokens, 513)
+
+    def test_truncation_guards(self):
+        for need_truncate, num_tokens in ((False, 513), (True, 1)):
+            with self.subTest(need_truncate=need_truncate, num_tokens=num_tokens):
+                self.scheduler.need_truncate = need_truncate
+                request = self.make_prefix_request(num_tokens, {"do_remote_decode": True})
+                self.scheduler.on_new_request(request)
+                self.assertEqual(request.num_prompt_tokens, num_tokens)
+                self.assertEqual(request.max_tokens, 8)
+                self.assertNotIn("_p_side_truncated", request.kv_transfer_params)
+
+    def test_matched_token_query_does_not_change_prompt_length(self):
+        self.scheduler.need_truncate = True
+        request = self.make_prefix_request(513, {"do_remote_decode": True})
+        # Protect against reintroducing the late mutation, after a 512-token hit.
+        self.assertEqual(self.scheduler.get_num_new_matched_tokens(request, 512), (0, False))
+        self.assertEqual(request.num_prompt_tokens, 513)
+        self.assertEqual(len(request._all_token_ids), 513)
 
     def test_build_connector_meta(self):
         request = MockRequest("req1")
@@ -2710,6 +2792,31 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         ptrs, lengths = worker._get_registered_kv_tensor_buffers({layer_name: logical_tensor})
 
         self.assertEqual(ptrs, [aligned_tensor.data_ptr()])
+        self.assertEqual(lengths, [tensor_size])
+
+    def test_registered_hybrid_buffers_deduplicate_shared_backing(self):
+        alignment = 2 * 1024 * 1024
+        tensor_size = 4 * alignment
+        raw_tensor = torch.empty(tensor_size + alignment, dtype=torch.uint8)
+        aligned_offset = (-raw_tensor.data_ptr()) % alignment
+        backing = raw_tensor[aligned_offset : aligned_offset + tensor_size]
+        layer_names = [
+            "model.layers.3.self_attn",
+            "model.layers.0.linear_attn",
+            "model.layers.1.linear_attn",
+            "model.layers.2.linear_attn",
+        ]
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_cache_config = types.SimpleNamespace(
+            kv_cache_tensors=[make_mock_kv_cache_tensor(tensor_size, [layer_name]) for layer_name in layer_names]
+        )
+
+        ptrs, lengths = worker._get_registered_kv_tensor_buffers(
+            {layer_name: backing[index * alignment :] for index, layer_name in enumerate(layer_names)}
+        )
+
+        self.assertEqual(ptrs, [backing.data_ptr()])
         self.assertEqual(lengths, [tensor_size])
 
     def test_registered_mtp_buffer_ignores_aligned_stale_group_padding(self):

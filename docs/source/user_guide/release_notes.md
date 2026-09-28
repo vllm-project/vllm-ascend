@@ -1,5 +1,20 @@
 # Release Notes
 
+## v0.23.0.post1 - 2026.09.21
+
+This is the first post release of vLLM Ascend v0.23.0. It includes the fixes, dependency updates, CI changes, and documentation updates merged into the v0.23.0 release branch after the v0.23.0 tag. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/) to get started.
+
+### Bug Fixes
+
+- Fixed stale KV-cache writes during DP-aligned dummy runs by invalidating per-KV-group slot mappings before attention metadata construction. [#15362](https://github.com/vllm-project/vllm-ascend/pull/15362)
+- Fixed MTP overlay prefix-cache precision on Atlas 300I DUO and kept W8A8 MXFP8 transformed buffers stable across RL weight reloads in ACL Graph mode. [#14336](https://github.com/vllm-project/vllm-ascend/pull/14336) [#13905](https://github.com/vllm-project/vllm-ascend/pull/13905)
+
+### Other Changes
+
+- Pinned the KV Pool dependencies to `memfabric_hybrid==1.2.0` and `memcache_hybrid==1.2.0`. [#14352](https://github.com/vllm-project/vllm-ascend/pull/14352)
+- Consolidated installation guidance, GLM-5/5.2 and Kimi-K3 deployment instructions, PD and 310P notes, release metadata, navigation titles, English comments, and Chinese translations. [#15449](https://github.com/vllm-project/vllm-ascend/pull/15449) [#14242](https://github.com/vllm-project/vllm-ascend/pull/14242) [#14338](https://github.com/vllm-project/vllm-ascend/pull/14338) [#14634](https://github.com/vllm-project/vllm-ascend/pull/14634) [#14698](https://github.com/vllm-project/vllm-ascend/pull/14698) [#14713](https://github.com/vllm-project/vllm-ascend/pull/14713) [#14906](https://github.com/vllm-project/vllm-ascend/pull/14906) [#15998](https://github.com/vllm-project/vllm-ascend/pull/15998) [#16106](https://github.com/vllm-project/vllm-ascend/pull/16106) [#14382](https://github.com/vllm-project/vllm-ascend/pull/14382) [#14387](https://github.com/vllm-project/vllm-ascend/pull/14387) [#14436](https://github.com/vllm-project/vllm-ascend/pull/14436) [#14579](https://github.com/vllm-project/vllm-ascend/pull/14579) [#14684](https://github.com/vllm-project/vllm-ascend/pull/14684) [#15534](https://github.com/vllm-project/vllm-ascend/pull/15534) [#16202](https://github.com/vllm-project/vllm-ascend/pull/16202)
+- Added release-branch nightly and weekly model configurations and installed `concurrent-log-handler` in release images. [#14559](https://github.com/vllm-project/vllm-ascend/pull/14559) [#14645](https://github.com/vllm-project/vllm-ascend/pull/14645) [#14739](https://github.com/vllm-project/vllm-ascend/pull/14739) [#16191](https://github.com/vllm-project/vllm-ascend/pull/16191)
+
 ## v0.26.0rc1 - 2026.09.03
 
 This is the first release candidate of v0.26.0 for vLLM Ascend, aligned with upstream vLLM v0.26.0. This release is a model‑restricted version. Fully validated models include Kimi K3, GLM‑5.2, DeepSeek V4 Flash 0731, DeepSeek V4 Pro 0813. Availability is not guaranteed for other models. For the full test report, see: [v0.26.0rc1 Test Conclusion](https://github.com/vllm-project/vllm-ascend/blob/releases/v0.26.0rc/tests/vllm_ascend_v0.26.0rc1_test_conclusion.md). Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/) to get started.

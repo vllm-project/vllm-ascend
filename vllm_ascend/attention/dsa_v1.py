@@ -428,11 +428,16 @@ def build_dspark_swa_indices(
     index_width: int | None = None,
     indices_output: torch.Tensor | None = None,
     buffer: torch.Tensor | None = None,
+    *,
+    use_logical_indices: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
     Each token in a draft block sees the trailing context window plus the
     whole current draft block. Invalid/padded rows get lens=0 and -1 slots.
+    ``use_logical_indices`` returns positions within each sequence for
+    SparseFlashMLA, which applies its own block-table lookup. The default
+    preserves physical slots for existing DSA callers.
 
     When ``buffer`` is given, the per-token slots are copied into its leading
     rows and the returned tensor is a slice view of ``buffer``. This keeps the
@@ -460,13 +465,15 @@ def build_dspark_swa_indices(
     cols = torch.arange(index_width, device=start_pos.device)
     col_mask = cols[None, :] < visible_lens[:, None]
     pos = start_pos[:, None] + cols[None, :]
-    block_nums = pos // block_size
-    # Clamp to valid block-table columns so gather never goes OOB on the
-    # out-of-range columns (their results are discarded by col_mask anyway).
-    safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
-    block_offsets = pos % block_size
-    block_ids = torch.gather(block_table, 1, safe_nums)
-    slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
+    if use_logical_indices:
+        slot_ids = pos.to(torch.int32)
+    else:
+        block_nums = pos // block_size
+        # Clamp out-of-range columns before gathering; col_mask discards them.
+        safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
+        block_offsets = pos % block_size
+        block_ids = torch.gather(block_table, 1, safe_nums)
+        slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
     slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
 
     per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
@@ -668,6 +675,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
         if not layer_names:
             raise ValueError("DSV4 compressor metadata builder requires at least one layer name")
+        self.layer_names = list(layer_names)
         # vLLM assigns the builder result to every layer in an attention group.
         self.cache_group_key = layer_names[0]
         self.hadamard = None
@@ -815,6 +823,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        can_use_rope_cache: bool = True,
         **kwargs,
     ) -> AscendDSAMetadata:
         num_reqs = common_attn_metadata.num_reqs
@@ -849,9 +859,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
             self.common_ratio_to_sas_metadata["seq_lens_cpu"] = seq_lens_cpu
             input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            need_use_rope_cache = can_use_rope_cache and self.num_prefills == 0
             cos, sin = get_cos_and_sin_dsa(
                 input_positions,
-                use_cache=self.num_prefills == 0,
+                use_cache=need_use_rope_cache,
             )
             self.common_ratio_to_sas_metadata["cos"] = cos
             self.common_ratio_to_sas_metadata["sin"] = sin
@@ -1043,25 +1054,44 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         assert self.num_actual_tokens is not None
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
         seq_lens = self.seq_lens[:num_reqs]
-        seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
-        max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.method == "dspark"
-            and getattr(self.speculative_config, "enable_adaptive_verification", False)
-            and self.num_prefills == 0
-        ):
-            # `query_start_loc_cpu` retains a layout with tokens evenly distributed across requests.
-            # Longer query will typically appear after reallocation, recorded in `query_start_loc`.
-            # So use the upper bound `num_speculative_tokens + 1` as `max_seqlen_q`.
-            max_seqlen_q = max(max_seqlen_q, self.speculative_config.num_speculative_tokens + 1)
-        max_seqlen_kv = torch.max(seq_lens_cpu[:num_reqs]).item()
+        # build() runs once per (kv_cache_group, attn_group) pair, but
+        # build_attn_metadata hands every pair the same query_start_loc /
+        # seq_lens objects -- only block_table, slot_mapping and causal vary by
+        # group. So these three are group-invariant: compute them on the first
+        # group of the step and share them like seq_lens / cos / sin above.
+        # Keyed separately from the num_decodes gate in build() so a caller that
+        # populates this dict itself still gets the sharing.
+        preamble = metadata_cache.get("req_preamble")
+        if preamble is None:
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
+            seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
+            max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.method == "dspark"
+                and getattr(self.speculative_config, "enable_adaptive_verification", False)
+                and self.num_prefills == 0
+            ):
+                # `query_start_loc_cpu` retains a layout with tokens evenly distributed across requests.
+                # Longer query will typically appear after reallocation, recorded in `query_start_loc`.
+                # So use the upper bound `num_speculative_tokens + 1` as `max_seqlen_q`.
+                max_seqlen_q = max(max_seqlen_q, self.speculative_config.num_speculative_tokens + 1)
+            preamble = (
+                max_seqlen_q,
+                torch.max(seq_lens_cpu[:num_reqs]).item(),
+                seq_lens - seq_lens_q,
+            )
+            metadata_cache["req_preamble"] = preamble
+        max_seqlen_q, max_seqlen_kv, start_pos = preamble
         has_prefill = self.num_prefills > 0
 
-        self.start_pos_prefill.fill_(0)
-        self.start_pos_prefill[:num_reqs] = seq_lens - seq_lens_q
+        # start_pos_prefill is a per-builder buffer with a capture-stable
+        # address, so the shared start_pos is copied in rather than aliased.
+        # Only the tail past num_reqs needs zeroing; [:num_reqs] is overwritten.
+        self.start_pos_prefill[:num_reqs].copy_(start_pos)
+        if num_reqs < self.start_pos_prefill.shape[0]:
+            self.start_pos_prefill[num_reqs:].fill_(0)
         if num_actual_reqs is None:
             num_actual_reqs = num_reqs
         else:
@@ -1285,9 +1315,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         if self.num_prefills:
-            cos, sin = get_cos_and_sin_dsa(input_positions)
+            cos, sin = get_cos_and_sin_dsa(input_positions, layer_names=self.layer_names)
         else:
-            cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True, draft_index=draft_index)
+            cos, sin = get_cos_and_sin_dsa(
+                input_positions,
+                use_cache=True,
+                draft_index=draft_index,
+                layer_names=self.layer_names,
+            )
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         assert self.spec_slot_mapping is not None
         self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = get_dsa_attn_kv_plan(

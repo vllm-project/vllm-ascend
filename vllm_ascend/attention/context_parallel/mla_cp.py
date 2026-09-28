@@ -79,9 +79,33 @@ class DCPChunkedContextMetadata(ChunkedContextMetadata):
 class AscendMLADCPDecodeMetadata(AscendMLADecodeMetadata):
     """MLA decode metadata fields used only by DCP."""
 
-    cp_seq_len: torch.Tensor = None
+    cp_seq_len: list[int] | None = None
     dcp_mtp_attn_mask: torch.Tensor = None
     cp_history_seq_len: list[int] | None = None
+
+    def update_dcp_seq_lens_cpu(
+        self,
+        seq_lens_cpu: torch.Tensor,
+        dcp_local_seq_lens_cpu: torch.Tensor,
+        query_lens_cpu: torch.Tensor,
+        *,
+        dcp_size: int,
+        dcp_rank: int,
+        cp_kv_cache_interleave_size: int,
+    ) -> None:
+        """Consume producer-local lengths and derive MLA's cached history."""
+        self.cp_seq_len = dcp_local_seq_lens_cpu.tolist()
+        # Queries must be subtracted globally before partitioning history.
+        history_lens = (seq_lens_cpu - query_lens_cpu).clamp(min=0)
+        cp_history_seq_len = get_dcp_local_seq_lens(
+            history_lens,
+            dcp_size=dcp_size,
+            dcp_rank=dcp_rank,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+        ).tolist()
+        assert self.actual_seq_lengths_q is not None
+        num_padded = len(self.actual_seq_lengths_q) - len(cp_history_seq_len)
+        self.cp_history_seq_len = cp_history_seq_len + [0] * num_padded
 
 
 class AscendMlaDCPMetadataBuilder(
@@ -121,9 +145,12 @@ class AscendMlaDCPMetadataBuilder(
         if chunked_context_metadata is None:
             return None
 
-        local_context_lens_allranks = self._get_dcp_context_lens(
-            common_attn_metadata,
-            start=self.num_decodes,
+        # The base builder has removed query tokens from the global lengths.
+        # Both runners partition only cached history for chunked prefill.
+        local_context_lens_allranks = get_dcp_local_seq_lens(
+            self.context_lens_cpu,
+            dcp_size=self.dcp_size,
+            cp_kv_cache_interleave_size=self.cp_local_block_size,
         )
         padded_local_context_lens_cpu = (
             cdiv(self.context_lens_cpu, self.cp_virtual_block_size) * self.cp_local_block_size
@@ -179,32 +206,17 @@ class AscendMlaDCPMetadataBuilder(
     ) -> AscendMLADecodeMetadata:
         decode_metadata = super().build_decode_metadata(common_prefix_len, common_attn_metadata)
         assert isinstance(decode_metadata, AscendMLADCPDecodeMetadata)
-        dcp_metadata = self._require_dcp_metadata(common_attn_metadata)
-        if dcp_metadata.draft_cp_seq_len is not None:
-            decode_metadata.cp_seq_len = dcp_metadata.draft_cp_seq_len[: self.num_decodes]
-        else:
-            decode_metadata.cp_seq_len = self._get_dcp_rank_context_lens(
-                common_attn_metadata,
-                end=self.num_decodes,
-            ).tolist()
-        # Use the DCP CPU mirror: it includes corrected verifier lengths
-        # and the draft-step extension. Do not synchronize GPU lengths here.
-        local_lengths = self._get_dcp_context_lens(common_attn_metadata, end=self.num_decodes)
-        # DCP lengths contain real requests; FULL graph query lengths also
-        # include padded requests. Compute real histories before padding.
-        query_lens = self.query_lens[: local_lengths.shape[0]]
-        history_lens = (local_lengths.sum(dim=-1) - query_lens).clamp(min=0)
-        cp_history_seq_len: list[int] = get_dcp_local_seq_lens(
-            history_lens,
+        dcp_local_seq_lens_cpu = common_attn_metadata.dcp_local_seq_lens_cpu
+        assert dcp_local_seq_lens_cpu is not None
+        seq_lens_cpu = self.seq_lens[: self.num_decodes]
+        decode_metadata.update_dcp_seq_lens_cpu(
+            seq_lens_cpu,
+            dcp_local_seq_lens_cpu[: self.num_decodes],
+            self.query_lens[: seq_lens_cpu.shape[0]],
             dcp_size=self.dcp_size,
             dcp_rank=self.dcp_rank,
             cp_kv_cache_interleave_size=self.cp_local_block_size,
-        ).tolist()
-        # Preserve the base builder's cumulative TND query boundaries,
-        # including graph padding; the old BSND path used per-request lengths.
-        assert decode_metadata.actual_seq_lengths_q is not None
-        num_padded = len(decode_metadata.actual_seq_lengths_q) - len(cp_history_seq_len)
-        decode_metadata.cp_history_seq_len = cp_history_seq_len + [0] * num_padded
+        )
         decode_metadata.dcp_mtp_attn_mask = None
         return decode_metadata
 
@@ -214,6 +226,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    can_return_lse_for_decode: bool = True
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
 
     @staticmethod
     def update_graph_params(
@@ -508,9 +523,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 graph_params = get_graph_params()
             assert graph_params is not None
             if graph_params.workspaces.get(num_tokens) is None:
-                # Both FIA calls execute serially on the main stream. Size the
-                # shared workspace before either call is captured so its address
-                # stays fixed; history all-to-all only reads the FIA outputs.
+                # The current FIA waits for the history FIA across streams. Size
+                # their shared workspace before capture so its address stays
+                # fixed; history packing only reads the FIA outputs.
                 workspace_kwargs = {
                     "num_key_value_heads": self.num_kv_heads,
                     "input_layout": "TND",
@@ -567,46 +582,45 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             attention_kind=MLASplitAttentionKind.HISTORY,
         )
 
-        # Overlap history all-to-all with current-token attention.
+        # Run current-token attention on the side stream while the main
+        # stream packs and exchanges history. The ready event also orders
+        # current attention after the history FIA's shared workspace use.
         main_stream = torch.npu.current_stream()
-        comm_stream = _dcp_mtp_comm_stream()
+        attn_stream = _dcp_mtp_comm_stream()
         history_ready = main_stream.record_event()
-        history_output.record_stream(comm_stream)
-        history_lse.record_stream(comm_stream)
-        with torch.npu.stream(comm_stream):
-            comm_stream.wait_event(history_ready)
-            history_recv = torch.ops.vllm.sfa_dcp_a2a_fused(
-                history_output.float(),
-                history_lse.float(),
-                self.dcp_size,
-                1,
-                self.dcp_group.unique_name if self.dcp_size > 1 else "",
-                defer_combine=True,
+        for tensor in (current_q_nope, current_q_pe, current_k_nope, current_k_pe, decode_meta.attn_mask):
+            if tensor is not None:
+                tensor.record_stream(attn_stream)
+        with torch.npu.stream(attn_stream):
+            attn_stream.wait_event(history_ready)
+            # Current K/V is replicated. Each rank computes its own Q heads
+            # and contributes the current chunk once during the local merge.
+            current_output, current_lse = self._run_dcp_mtp_split_attention_op(
+                current_q_nope,
+                current_q_pe,
+                current_k_nope,
+                current_k_pe,
+                attn_mask=decode_meta.attn_mask,
+                sparse_mode=3,
+                block_table=None,
+                block_size=0,
+                actual_seq_lengths=decode_meta.actual_seq_lengths_q,
+                actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
+                attention_kind=MLASplitAttentionKind.CURRENT,
             )
-            history_comm_done = comm_stream.record_event()
-        # The result is allocated on the communication stream and consumed
-        # on the main stream; keep its storage alive through the merge.
-        history_recv.record_stream(main_stream)
+            current_attn_done = attn_stream.record_event()
+        current_output.record_stream(main_stream)
+        current_lse.record_stream(main_stream)
 
-        # Current K/V is replicated on every CP rank. Each DCP rank computes
-        # only the Q heads it owns after history all-to-all. Merge this chunk
-        # locally after the collective so it is counted exactly once.
-        current_output, current_lse = self._run_dcp_mtp_split_attention_op(
-            current_q_nope,
-            current_q_pe,
-            current_k_nope.contiguous(),
-            current_k_pe.contiguous(),
-            attn_mask=decode_meta.attn_mask,
-            sparse_mode=3,
-            block_table=None,
-            block_size=0,
-            actual_seq_lengths=decode_meta.actual_seq_lengths_q,
-            actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
-            attention_kind=MLASplitAttentionKind.CURRENT,
+        history_recv = torch.ops.vllm.sfa_dcp_a2a_fused(
+            history_output,
+            history_lse,
+            self.dcp_size,
+            1,
+            self.dcp_group.unique_name if self.dcp_size > 1 else "",
+            defer_combine=True,
         )
-
-        # Join the history communication only when both branches are ready.
-        main_stream.wait_event(history_comm_done)
+        main_stream.wait_event(current_attn_done)
         # Reduce all history shards and the replicated current chunk exactly
         # once, reading current FIA tensors directly without packing them.
         attn_output = fused_sfa_dcp_lse_combine(

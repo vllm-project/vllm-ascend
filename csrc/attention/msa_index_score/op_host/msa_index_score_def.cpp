@@ -10,7 +10,7 @@
 
 /*!
  * \file msa_index_score_def.cpp
- * \brief MsaIndexScore 算子原型注册（对齐 ../README.md）。
+ * \brief MsaIndexScore 算子原型注册（对齐 docs/aclnnMsaIndexScore.md）。
  *
  * dtype 组合（按列表下标对齐）：
  *   A2/A3（3 组，全 ND）：0 bf16/bf16、1 fp16/fp16、2 fp16/int8

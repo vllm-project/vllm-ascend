@@ -16,7 +16,7 @@
 #
 """Regression tests for the NPU IPC weight transfer engine.
 
-These cover two bugs that broke ``examples/rl/rlhf_http_npu_ipc.py``:
+These cover the bugs that broke ``examples/rl/rlhf_http_npu_ipc.py``:
 
 1. ``NPUIPCWeightTransferEngine.__init__`` did not accept the ``model``
    argument that ``WeightTransferEngineFactory.create_engine`` passes,
@@ -28,6 +28,11 @@ These cover two bugs that broke ``examples/rl/rlhf_http_npu_ipc.py``:
    unpack (expected 2)``. Aligned with upstream vLLM's CUDA IPC engine:
    the producer stores args only and the consumer rebuilds with the
    well-known ``rebuild_npu_tensor``.
+3. The NPU IPC worker skipped the layerwise reload START/FINISH lifecycle,
+   so runtime-formatted weights were not restored before loading and graph-
+   visible storage was not preserved after loading.
+4. The packed receive path decoded tensors but never passed them to
+   ``model.load_weights``.
 """
 
 import inspect
@@ -59,6 +64,17 @@ def _patch_rebuild_npu_tensor(rebuild_func):
             "torch_npu.multiprocessing": types.ModuleType("torch_npu.multiprocessing"),
             "torch_npu.multiprocessing.reductions": fake_mod,
         },
+    )
+
+
+def _patch_reload_module(*, initialize=None, finalize=None):
+    """Provide the lazy-imported reload helpers without importing vLLM models."""
+    fake_mod = types.ModuleType("vllm.model_executor.model_loader.reload")
+    fake_mod.initialize_layerwise_reload = initialize or MagicMock()  # type: ignore[attr-defined]
+    fake_mod.finalize_layerwise_reload = finalize or MagicMock()  # type: ignore[attr-defined]
+    return patch.dict(
+        sys.modules,
+        {"vllm.model_executor.model_loader.reload": fake_mod},
     )
 
 
@@ -156,6 +172,7 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
         engine.receive_weights(update_info)
 
     mock_uuid.assert_called_once_with()
+    engine.model.load_weights.assert_called_once()
     assert received["weights"][0][0] == "model.weight"
     assert torch.equal(received["weights"][0][1], rebuilt_weight)
     # Index 6 (device index) overwritten with the receiver's device.
@@ -165,19 +182,57 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
 def test_start_weight_update():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
+    mock_init = MagicMock()
 
-    with patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload") as mock_init:
+    with _patch_reload_module(initialize=mock_init):
         engine.start_weight_update()
 
-    mock_init.assert_not_called()
+    mock_init.assert_called_once_with(engine.model)
 
 
 def test_finish_weight_update():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
     engine.model_config = MagicMock()
+    mock_finalize = MagicMock()
 
-    with patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload") as mock_finalize:
+    with _patch_reload_module(finalize=mock_finalize):
         engine.finish_weight_update()
 
-    mock_finalize.assert_not_called()
+    mock_finalize.assert_called_once_with(engine.model, engine.model_config)
+
+
+def test_receive_packed_weights_loads_model():
+    packed_weights = [("model.weight", torch.tensor([1.0, 2.0, 3.0]))]
+    update_info = MagicMock(
+        tensor_sizes=[12],
+        ipc_handles={"node-0": ("packed-handle",)},
+        names=["model.weight"],
+        shapes=[[3]],
+        dtype_names=["float32"],
+    )
+
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.model = MagicMock()
+    engine.device = MagicMock(index=0)
+    engine.packed = True
+
+    with (
+        patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
+        patch(
+            f"{_MODULE}.packed_npu_ipc_consumer",
+            return_value=packed_weights,
+        ) as mock_consumer,
+    ):
+        engine.receive_weights(update_info)
+
+    mock_consumer.assert_called_once_with(
+        ipc_handle=update_info.ipc_handles,
+        physical_npu_id="node-0",
+        names=update_info.names,
+        shapes=update_info.shapes,
+        dtype_names=update_info.dtype_names,
+        tensor_sizes=update_info.tensor_sizes,
+        device_index=0,
+    )
+    engine.model.load_weights.assert_called_once_with(packed_weights)

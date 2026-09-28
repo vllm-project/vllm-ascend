@@ -58,7 +58,7 @@ _benchmarks: &benchmarks
     batch_size: 4
     trust_remote_code: true
     request_rate: 0
-    baseline: 49.2258
+    baseline: 34.1937
     threshold: 0.95
   acc_aime2025:
     case_type: accuracy

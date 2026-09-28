@@ -21,10 +21,11 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
-from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
@@ -38,6 +39,54 @@ else:
 
 
 class BaseDeviceAdaptor:
+    @classmethod
+    def scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> None:
+        """Write cache rows in place, falling back to the generic scatter.
+
+        The actual-token prefix must contain valid slots: this helper does not
+        filter negative slots, and neither fast operator is assumed to skip them.
+        Layout checks inspect strides only; no device-to-host synchronization is
+        introduced. Never make a contiguous copy of the destination cache.
+        """
+        if (
+            key.ndim in (2, 3)
+            and cache.ndim == 4
+            and cache.shape[2] == 1
+            and (key.ndim == 2 or key.shape[1] == 1)
+            and key.shape[0] >= tokens
+            and slots.ndim == 1
+            and slots.numel() >= tokens
+            and slots.dtype in (torch.int32, torch.int64)
+            and key.dtype == cache.dtype
+            and key.shape[-1] == cache.shape[-1]
+        ):
+            stored = cls._scatter_cache(key[:tokens].reshape(tokens, key.shape[-1]), cache, slots[:tokens])
+            if stored:
+                return
+
+        torch_npu.npu_scatter_nd_update_(
+            cache.view(-1, key.shape[-1]),
+            slots[:tokens].view(-1, 1),
+            key[:tokens],
+        )
+
+    @staticmethod
+    def _scatter_cache(key, cache, slots) -> bool:
+        if not get_current_hardware_profile().supports(HardwareCapability.SCATTER_ND_CACHE_STORE):
+            return False
+        operation = getattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None)
+        if operation is None or key.dtype not in (torch.int8, torch.float16, torch.bfloat16):
+            return False
+        width = key.shape[-1]
+        try:
+            target = cache.view(-1, width)
+        except RuntimeError:
+            return False
+        if target.stride(1) != 1 or target.stride(0) < width:
+            return False
+        operation(target, slots.reshape(-1, 1), key)
+        return True
+
     @classmethod
     def reshape_and_cache(
         cls,
@@ -743,6 +792,68 @@ class BaseDeviceAdaptor:
         return x
 
     @staticmethod
+    def fla_gdn_prefill(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        scale: float,
+        prebuilt_meta,
+        fused_fwd,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the A2/A3 Phase6 FLA NPU GDN prefill kernel."""
+        q = l2norm_fwd(q).contiguous()
+        k = l2norm_fwd(k).contiguous()
+        v = v.contiguous()
+        g = g.to(torch.float32).contiguous()
+        beta = beta.to(v.dtype).contiguous()
+        initial_state = initial_state.contiguous()
+
+        # BNSD/NTD take [B, H, T, D]; q/k/v arrive sequence-major. The output is
+        # still returned sequence-major, so only the inputs are permuted.
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
+
+        cu_seqlens = prebuilt_meta.cu_seqlens_host
+        chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
+        keep_meta = prebuilt_meta.keep_meta
+        # stateVFirst=false takes [N, Hv, K, V], i.e. the transpose of ssm_state.
+        initial_state_kern = initial_state.transpose(-1, -2).contiguous()
+        if keep_meta is not None:
+            cu_seqlens = prebuilt_meta.cu_seqlens_kern
+            initial_state_kern = initial_state[keep_meta].transpose(-1, -2).contiguous()
+
+        output, final_state, *_ = fused_fwd(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=initial_state_kern,
+            output_final_state=True,
+            chunk_size=64,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            scale=scale,
+            layout="BNSD",
+            use_exp2=False,
+            use_qk_l2norm_in_kernel=False,
+            allow_neg_eigval=False,
+            disable_recompute=True,
+            state_v_first=False,
+        )
+        if keep_meta is not None:
+            # Scatter in the kernel layout so empty segments keep their initial state,
+            # then flip back to the caller's [.., Dv, Dk].
+            full_final_state = initial_state.transpose(-1, -2).contiguous()
+            full_final_state[keep_meta] = final_state
+            final_state = full_final_state
+        return output, final_state.transpose(-1, -2).contiguous()
+
+    @staticmethod
     def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
         return fused_gdn_gating_patch(A_log, a, b, dt_bias)
 
@@ -776,6 +887,35 @@ class BaseDeviceAdaptor:
         return results
 
     @staticmethod
+    def split_qkv_rmsnorm_rope_vnorm(
+        input,
+        q_weight,
+        k_weight,
+        q_hidden_size,
+        kv_hidden_size,
+        head_dim,
+        eps,
+        q_bias,
+        k_bias,
+        cos_sin_cache,
+        positions,
+    ):
+        results = torch.ops.vllm.qkv_rmsnorm_rope_vnorm(
+            input=input,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            q_hidden_size=q_hidden_size,
+            kv_hidden_size=kv_hidden_size,
+            head_dim=head_dim,
+            eps=eps,
+            q_bias=q_bias,
+            k_bias=k_bias,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+        )
+        return results
+
+    @staticmethod
     def npu_moe_token_unpermute(permuted_tokens, sorted_indices, probs):
         return torch_npu.npu_moe_token_unpermute(
             permuted_tokens=permuted_tokens, sorted_indices=torch.abs(sorted_indices), probs=probs
@@ -793,6 +933,16 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
+    @staticmethod
+    def _scatter_cache(key, cache, slots) -> bool:
+        operation = getattr(torch_npu, "npu_scatter_pa_cache", None)
+        if operation is None or not cache.is_contiguous():
+            return False
+        if key.dtype not in (torch.int8, torch.float16, torch.bfloat16, torch.float32, torch.float8_e4m3fn):
+            return False
+        operation(key.reshape(-1, 1, key.shape[-1]).contiguous(), slots.contiguous(), key_cache=cache)
+        return True
+
     @classmethod
     def reshape_and_cache(
         cls,
@@ -1442,6 +1592,59 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return x
 
     @staticmethod
+    def fla_gdn_prefill(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        scale: float,
+        prebuilt_meta,
+        fused_fwd,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the A5 arch35 FLA NPU GDN prefill kernel."""
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+        g = g.to(torch.float32).contiguous()
+        beta = beta.to(v.dtype).contiguous()
+        initial_state = initial_state.contiguous()
+
+        cu_seqlens = prebuilt_meta.cu_seqlens_host
+        chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
+        keep_meta = prebuilt_meta.keep_meta
+        initial_state_kern = initial_state
+        if keep_meta is not None:
+            cu_seqlens = prebuilt_meta.cu_seqlens_kern
+            initial_state_kern = initial_state[keep_meta]
+
+        output, final_state, *_ = fused_fwd(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=initial_state_kern,
+            output_final_state=True,
+            chunk_size=64,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            scale=scale,
+            layout="BSND",
+            use_exp2=True,
+            use_qk_l2norm_in_kernel=True,
+            allow_neg_eigval=False,
+            disable_recompute=True,
+            state_v_first=True,
+        )
+        if keep_meta is not None:
+            full_final_state = initial_state.clone()
+            full_final_state[keep_meta] = final_state
+            final_state = full_final_state
+        return output, final_state
+
+    @staticmethod
     def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
         return fused_gdn_gating_patch(A_log, a, b, dt_bias)
 
@@ -1479,6 +1682,41 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return torch_npu.npu_moe_token_unpermute(
             permuted_tokens=permuted_tokens, sorted_indices=sorted_indices, probs=probs
         )
+
+    @staticmethod
+    def index_fill(
+        tensor: torch.Tensor,
+        dim: int,
+        indices: torch.Tensor,
+        value: int,
+    ) -> torch.Tensor:
+        """Temporarily emulate ``index_fill_`` with ``scatter_`` on A5.
+
+        The current A5 torch-npu implementation converts the device index
+        tensor to a host vector, which introduces device-to-host synchronization
+        proportional to the number of indices. Remove this workaround once the
+        native A5 ``index_fill_`` path accepts device indices without syncing.
+        """
+        if indices.numel() == 0:
+            return tensor
+
+        if dim < 0:
+            dim += tensor.dim()
+        if dim < 0 or dim >= tensor.dim():
+            raise IndexError(
+                f"Dimension out of range (expected to be in range of "
+                f"[-{tensor.dim()}, {tensor.dim() - 1}], but got {dim})"
+            )
+
+        dim_size = tensor.size(dim)
+        norm_indices = torch.where(indices < 0, indices + dim_size, indices)
+        index_shape = [1] * tensor.dim()
+        index_shape[dim] = norm_indices.numel()
+        scatter_shape = list(tensor.shape)
+        scatter_shape[dim] = norm_indices.numel()
+        scatter_indices = norm_indices.reshape(index_shape).expand(scatter_shape)
+        tensor.scatter_(dim, scatter_indices, value)
+        return tensor
 
 
 class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):

@@ -21,9 +21,6 @@ msgstr ""
 msgid "# Minitron-8B-Base"
 msgstr "# Minitron-8B-Base"
 
-msgid "## Introduction"
-msgstr "## 简介"
-
 msgid ""
 "The released `Minitron-8B-Base` is a lightweight, efficient large language "
 "model developed by NVIDIA. It is designed for general-purpose text "
@@ -39,12 +36,6 @@ msgid ""
 "functional verification, and accuracy evaluation on the GSM8K benchmark."
 msgstr "本文档介绍了该模型的主要验证步骤，包括支持的特性、环境准备、单节点部署、功能验证以及在 GSM8K 基准上的精度评估。"
 
-msgid "## Environment Preparation"
-msgstr "## 环境准备"
-
-msgid "### Model Weight"
-msgstr "### 模型权重"
-
 msgid ""
 "It is recommended to place the model weight in a shared cache directory, "
 "such as `/root/.cache/` or a local model path like `/data/vllm-"
@@ -52,9 +43,6 @@ msgid ""
 msgstr ""
 "建议将模型权重放置在共享缓存目录中，例如 `/root/.cache/` 或本地模型路径，如 `/data/vllm-"
 "workspace/models/Minitron-8B-Base`。"
-
-msgid "### Installation"
-msgstr "### 安装"
 
 msgid ""
 "`Minitron-8B-Base` can be deployed with `vllm-ascend` in a compatible "
@@ -68,14 +56,8 @@ msgid ""
 "If you do not want to use the docker image, you can also build from source:"
 msgstr "如果您不想使用 Docker 镜像，也可以从源码构建："
 
-msgid "## Deployment"
-msgstr "## 部署"
-
 msgid "Start the online serving service with the following command:"
 msgstr "使用以下命令启动在线服务："
-
-msgid "## Functional Verification"
-msgstr "## 功能验证"
 
 msgid ""
 "Once your server is started, you can query the model with a simple prompt:"
@@ -85,9 +67,6 @@ msgid ""
 "A valid response indicates that the model is deployed correctly and can "
 "generate text outputs."
 msgstr "有效的响应表明模型已正确部署，并且能够生成文本输出。"
-
-msgid "## Accuracy Evaluation"
-msgstr "## 精度评估"
 
 msgid ""
 "The GSM8K dataset was used to evaluate the reasoning capability of "
@@ -124,15 +103,6 @@ msgid ""
 msgstr ""
 "- **exact_match,strict-match**：仅严格匹配预期最终答案提取格式的预测才被视为正确。\n"
 "- **exact_match,flexible-extract**：使用更灵活的答案提取规则评估预测，只要最终数字答案正确，可容忍细微的格式差异。"
-
-msgid "## Performance"
-msgstr "## 性能"
-
-msgid "### Baseline Result"
-msgstr "### 基线结果"
-
-msgid "### Remarks"
-msgstr "### 备注"
 
 msgid ""
 "- request latency\n"
@@ -177,3 +147,39 @@ msgid ""
 msgstr ""
 "本文档重点介绍 GSM8K 上的功能验证和基准测试准确性。\n"
 "建议进一步进行以下基准测试："
+
+msgid "## 1 Introduction"
+msgstr "## 1 简介"
+
+msgid "## 2 Environment Preparation"
+msgstr "## 2 环境准备"
+
+msgid "### 2.1 Model Weight"
+msgstr "### 2.1 模型权重"
+
+msgid "## 3 Installation"
+msgstr "## 3 安装"
+
+msgid "### 3.1 Docker Image Installation"
+msgstr "### 3.1 Docker 镜像安装"
+
+msgid "### 3.2 Source Code Installation"
+msgstr "### 3.2 源码安装"
+
+msgid "## 4 Deployment"
+msgstr "## 4 部署"
+
+msgid "## 5 Functional Verification"
+msgstr "## 5 功能验证"
+
+msgid "## 6 Accuracy Evaluation"
+msgstr "## 6 精度评估"
+
+msgid "## 7 Performance Evaluation"
+msgstr "## 7 性能评估"
+
+msgid "### 7.1 Baseline Result"
+msgstr "### 7.1 基线结果"
+
+msgid "### 7.2 Remarks"
+msgstr "### 7.2 备注"

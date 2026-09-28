@@ -36,6 +36,10 @@ def register_model():
         "vllm_ascend.models.deepseek_v4.vl_model:AscendDeepseekV4ForConditionalGeneration",
     )
     ModelRegistry.register_model(
+        "DeepseekV41ForCausalLM",
+        "vllm_ascend.models.deepseek_v41.vl_model:AscendDeepseekV41ForCausalLM",
+    )
+    ModelRegistry.register_model(
         "MiniMaxM3SparseForCausalLM",
         "vllm_ascend.models.minimax_m3:MiniMaxM3SparseForCausalLM",
     )
@@ -47,6 +51,10 @@ def register_model():
     ModelRegistry.register_model(
         "DSparkDraftModel",
         "vllm_ascend.models.deepseek_v4.dspark:DSparkDeepseekV4ForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "DeepseekV41DSparkModel",
+        "vllm_ascend.models.deepseek_v41.dspark:DSparkDeepseekV41ForCausalLM",
     )
     ModelRegistry.register_model(
         "LlamaForCausalLMVwnEagle3", "vllm_ascend.models.llama_eagle3_vwn:Eagle3VwnLlamaForCausalLM"

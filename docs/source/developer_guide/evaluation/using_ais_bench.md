@@ -124,8 +124,9 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    git lfs install
-    git clone https://huggingface.co/datasets/livecodebench/code_generation_lite
+    # If HuggingFace is slow or unreachable, set HF_ENDPOINT to a mirror:
+    # export HF_ENDPOINT=https://hf-mirror.com
+    huggingface-cli download livecodebench/code_generation_lite --repo-type dataset --local-dir code_generation_lite
     ```
 
 6. `AIME 2024` dataset.

@@ -4,14 +4,21 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
 
-from .helpers import make_full_spec, make_mamba_spec, make_sliding_spec
+from .helpers import (
+    make_circular_spec,
+    make_full_spec,
+    make_kpool_tail_spec,
+    make_mamba_spec,
+    make_request,
+    make_sliding_spec,
+)
 
 
 def make_scheduler_config(
@@ -91,7 +98,7 @@ def test_base_scheduler_rejects_invalid_transfer_roles(
         MooncakeBaseConnectorScheduler(config, "engine", SimpleNamespace())  # type: ignore[arg-type]
 
 
-def test_base_scheduler_rejects_unsupported_pcp(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_base_scheduler_accepts_consumer_pcp(monkeypatch: pytest.MonkeyPatch) -> None:
     config = make_scheduler_config(pcp_size=2)
     monkeypatch.setattr(
         base_scheduler,
@@ -109,8 +116,30 @@ def test_base_scheduler_rejects_unsupported_pcp(monkeypatch: pytest.MonkeyPatch)
         MagicMock(return_value="10.0.0.1"),
     )
 
-    with pytest.raises(AssertionError, match="prefill context parallel size 1"):
-        MooncakeBaseConnectorScheduler(config, "engine", SimpleNamespace())  # type: ignore[arg-type]
+    scheduler = MooncakeBaseConnectorScheduler(
+        config,
+        "engine",
+        SimpleNamespace(kv_cache_groups=[]),
+    )  # type: ignore[arg-type]
+
+    assert scheduler.pcp_size == 2
+
+
+def test_base_scheduler_accepts_producer_pcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = make_scheduler_config(is_consumer=False, is_producer=True, pcp_size=2)
+    monkeypatch.setattr(base_scheduler, "init_ascend_config", MagicMock())
+    monkeypatch.setattr(base_scheduler, "get_ascend_config", MagicMock())
+    monkeypatch.setattr(base_scheduler, "get_ip", MagicMock(return_value="10.0.0.1"))
+
+    scheduler = MooncakeBaseConnectorScheduler(
+        config,
+        "engine",
+        SimpleNamespace(kv_cache_groups=[]),
+    )  # type: ignore[arg-type]
+
+    assert scheduler.pcp_size == 2
+    assert scheduler.max_device_id == 48
+    assert scheduler.side_channel_port == 6049
 
 
 def test_base_scheduler_expands_unique_uniform_specs_in_layer_order() -> None:
@@ -140,11 +169,46 @@ def test_base_scheduler_transfer_blocks_handles_empty_and_state_without_speculat
     assert scheduler._get_transfer_block_ids(([10, 11],), prompt_len=32) == ([10, 11],)
 
 
+def test_base_scheduler_pcp_does_not_shard_attention_blocks() -> None:
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.pcp_size = 2
+    scheduler.dcp_size = 1
+    scheduler.num_speculative_tokens = 0
+    scheduler.group_block_size = [16]
+    scheduler.group_unique_specs = [[make_full_spec()]]
+
+    assert scheduler._get_transfer_block_ids(([10, 11, 12, 13],), prompt_len=64) == ([10, 11, 12, 13],)
+
+
+def test_base_scheduler_dcp_shards_full_attention_but_keeps_swa_block_size() -> None:
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.pcp_size = 2
+    scheduler.dcp_size = 2
+    scheduler.num_speculative_tokens = 0
+    scheduler.group_block_size = [16, 16]
+    scheduler.group_unique_specs = [[make_full_spec()], [make_sliding_spec()]]
+
+    assert scheduler._get_transfer_block_ids(
+        ([10, 11, 12, 13], [20, 21, 22, 23]),
+        prompt_len=64,
+    ) == ([10, 11], [20, 21, 22, 23])
+
+
+@pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
+def test_base_scheduler_keeps_single_circular_block_independent_of_prompt(spec: KVCacheSpec) -> None:
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.pcp_size = 2
+    scheduler.dcp_size = 4
+    scheduler.num_speculative_tokens = 3
+    scheduler.group_block_size = [16]
+    scheduler.group_unique_specs = [[spec]]
+
+    assert scheduler._get_transfer_block_ids(([10],), prompt_len=4096) == ([10],)
+
+
 def test_base_scheduler_abstract_contract_and_legacy_metadata_delegation() -> None:
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
 
-    with pytest.raises(NotImplementedError):
-        scheduler.on_new_request(MagicMock())
     with pytest.raises(NotImplementedError):
         scheduler.update_connector_output(MagicMock())
     with pytest.raises(NotImplementedError):
@@ -160,3 +224,26 @@ def test_base_scheduler_abstract_contract_and_legacy_metadata_delegation() -> No
     metadata = {0: MagicMock()}
     scheduler.set_xfer_handshake_metadata(metadata)
     scheduler.set_xfer_handshake_metadata_from_workers.assert_called_once_with(metadata)
+
+
+@pytest.mark.parametrize("need_truncate", [False, True])
+@pytest.mark.parametrize("params", [None, {}, {"do_remote_prefill": True}, {"do_remote_decode": True}])
+def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_truncate, params):
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.need_truncate = need_truncate
+    request = make_request(
+        prompt_token_ids=[1, 2, 3],
+        num_prompt_tokens=3,
+        _all_token_ids=[1, 2, 3],
+        kv_transfer_params=None if params is None else dict(params),
+        max_tokens=8,
+    )
+
+    scheduler.on_new_request(request)
+    scheduler.on_new_request(request)
+
+    truncated = need_truncate and params is not None and params.get("do_remote_decode", False)
+    assert request.prompt_token_ids == ([1, 2] if truncated else [1, 2, 3])
+    assert request._all_token_ids == request.prompt_token_ids
+    assert request.num_prompt_tokens == (2 if truncated else 3)
+    assert request.max_tokens == (1 if truncated else 8)

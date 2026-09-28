@@ -6,9 +6,6 @@
 #
 msgid ""
 msgstr ""
-
-msgid ""
-msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-07-02 07:02+0000\n"
@@ -21,6 +18,9 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
+
+msgid ""
+msgstr ""
 
 msgid ""
 "MiniMax-M2 is MiniMax's flagship large language model series, including "
@@ -700,3 +700,9 @@ msgid ""
 msgstr ""
 "如果您希望从源码构建而不是使用Docker镜像，请按照[安装指南](../../getting_started/installation.md)安装vLLM-"
 "Ascend。"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。确保后续部署命令中的模型路径与此目录一致。"

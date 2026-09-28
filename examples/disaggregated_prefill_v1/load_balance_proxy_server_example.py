@@ -162,6 +162,7 @@ class InstanceInfo:
     decoder_host: str
     decoder_port: int
     prefiller_cached_tokens: int | None = None
+    decoder_released: bool = False
 
 
 TAINT_PRIORITY = 1e15
@@ -925,10 +926,18 @@ async def _finish_instance(runtime: WorkerRuntime, info: InstanceInfo, *, releas
         "finish_request",
         info.prefiller_key,
         info.prefiller_score,
-        info.decoder_key,
+        None if info.decoder_released else info.decoder_key,
         info.decoder_score,
         release_prefill_kv,
     )
+    info.decoder_released = True
+
+
+async def _release_decoder_once(runtime: WorkerRuntime, info: InstanceInfo) -> None:
+    if info.decoder_released:
+        return
+    await runtime.schedule("release_decoder", info.decoder_key, info.decoder_score)
+    info.decoder_released = True
 
 
 async def assign_instances(
@@ -1002,7 +1011,7 @@ async def reassign_instances(
     runtime = get_runtime()
     if not previous_prefiller_kv_released:
         await runtime.schedule("release_prefill_kv", previous_instance.prefiller_key, previous_instance.prefiller_score)
-    await runtime.schedule("release_decoder", previous_instance.decoder_key, previous_instance.decoder_score)
+    await _release_decoder_once(runtime, previous_instance)
     return await assign_instances(api, req_data, request_length, is_initial_request=False)
 
 

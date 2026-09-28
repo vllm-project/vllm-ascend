@@ -461,7 +461,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         def rearrange(x):
             return x.reshape(1, -1, self.local_num_heads, self.head_dim)
 
-        core_attn_out.zero_()
+        # Pure decode writes the whole captured buffer, including padding.
+        direct_output = (
+            not use_spec and attn_metadata_narrowed.num_prefills == 0 and attn_metadata_narrowed.num_decodes > 0
+        )
+        if not direct_output:
+            core_attn_out.zero_()
         if use_spec:
             spec_output = recurrent_kda(
                 rearrange(q_spec),
@@ -498,6 +503,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 self.A_log,
                 self.dt_bias,
                 lower_bound,
+                output_buffer=core_attn_out if direct_output else None,
             )
         if metadata.num_prefills > 0:
             prefill_output = chunk_kda(
@@ -516,6 +522,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             )
             output = prefill_output if output is None else torch.cat((output, prefill_output), dim=1)
         assert output is not None
+        if direct_output:
+            return
         if use_spec:
             core_attn_out[0].index_copy_(0, non_spec_token_indx, output[0])
         else:

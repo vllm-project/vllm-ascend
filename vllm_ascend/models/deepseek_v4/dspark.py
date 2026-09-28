@@ -54,8 +54,9 @@ def _apply_dsv4_rope(
     x: torch.Tensor,
     *,
     inverse: bool = False,
+    rope=None,
 ) -> torch.Tensor:
-    cos, sin = get_cos_and_sin_dsa(positions)
+    cos, sin = rope if rope is not None else get_cos_and_sin_dsa(positions)
     layer_name = rotary_emb.layername
     cos_t = cos[layer_name]
     sin_t = sin[layer_name]
@@ -143,6 +144,10 @@ class DeepseekV4DSparkModel(nn.Module):
             bias=False,
             with_markov=True,
         )
+        last_layer = self.layers[str(last_layer_idx)]
+        last_layer.norm = self.norm
+        last_layer.markov_head = self.markov_head
+
         hc_dim = self.hc_mult * config.hidden_size
         self.hc_head_fn = nn.Parameter(
             torch.empty(self.hc_mult, hc_dim, dtype=torch.float32),
@@ -156,9 +161,6 @@ class DeepseekV4DSparkModel(nn.Module):
             torch.empty(1, dtype=torch.float32),
             requires_grad=False,
         )
-        last_layer = self.layers[str(last_layer_idx)]
-        last_layer.norm = self.norm
-        last_layer.markov_head = self.markov_head
         last_layer.hc_head_fn = self.hc_head_fn
         last_layer.hc_head_base = self.hc_head_base
         last_layer.hc_head_scale = self.hc_head_scale
@@ -177,12 +179,22 @@ class DeepseekV4DSparkModel(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         attn: type[nn.Module] | None = None,
+        rope=None,
     ) -> torch.Tensor:
         assert attn is not None
         kv = attn.kv_norm(attn.wkv(hidden_states))
-        k_nope, k_pe = kv.split([attn.nope_head_dim, attn.rope_head_dim], dim=-1)
-        k_pe = _apply_dsv4_rope(attn.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
-        return torch.cat([k_nope, k_pe], dim=-1).view(-1, 1, attn.head_dim).contiguous()
+        # npu_rotary_mul writes its result back to the input storage
+        # (ComplexExpRotaryEmbedding.forward ends with y.copy_(...)), so rope
+        # can run in-place on the rope-segment view of kv; the previous
+        # split -> rope -> cat -> contiguous round-trip was a redundant copy.
+        k_pe = kv[:, attn.nope_head_dim :]
+        _apply_dsv4_rope(
+            attn.rotary_emb,
+            positions,
+            k_pe.unsqueeze(1),
+            rope=rope,
+        )
+        return kv.view(-1, 1, attn.head_dim)
 
     def _store_standard_swa_kv(
         self,
@@ -217,12 +229,22 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> None:
         if context_states.numel() == 0 or context_slot_mapping is None:
             return
+        rope_layers = [layer.self_attn.rotary_emb.layername for layer in self.layers.values()]
+        rope = get_cos_and_sin_dsa(
+            context_positions,
+            layer_names=rope_layers,
+        )
         for layer_idx, layer in enumerate(self.layers.values()):
             layer_context_slot_mapping = None if context_slot_mapping is None else context_slot_mapping[layer_idx]
             if context_positions.numel() == 0:
                 return
             attn = layer.self_attn
-            shared_kv = self._project_shared_kv(context_states, context_positions, attn)
+            shared_kv = self._project_shared_kv(
+                context_states,
+                context_positions,
+                attn,
+                rope=rope,
+            )
             self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
 
     def forward(

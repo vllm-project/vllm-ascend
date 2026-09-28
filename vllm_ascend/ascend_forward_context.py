@@ -5,7 +5,6 @@ from enum import Enum
 from typing import Any
 
 import torch
-import vllm.envs as envs_vllm
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
@@ -17,11 +16,26 @@ from vllm_ascend.device.hardware_profile import (
     MoECommPolicy,
     get_current_hardware_profile,
 )
+from vllm_ascend.mrv2_utils import use_v2_model_runner
 from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
 from vllm_ascend.utils import (
     has_layer_idx,
     is_moe_model,
 )
+
+# Dynamo constant-folds this like VLLM_USE_V2_MODEL_RUNNER. Sync from eager
+# setup so compiled FIA/MoE never traces use_v2_model_runner (warning_once).
+_USE_V2_EXTRA_KWARGS = False
+
+
+def sync_v2_extra_kwargs(vllm_config: VllmConfig) -> None:
+    """Cache whether Ascend extras belong in ``additional_kwargs``.
+
+    Call this from eager config / forward-context setup, not from compiled
+    attention. Require an actual bool: MagicMock configs can be truthy.
+    """
+    global _USE_V2_EXTRA_KWARGS
+    _USE_V2_EXTRA_KWARGS = use_v2_model_runner(vllm_config) is True
 
 
 class MoECommType(Enum):
@@ -127,6 +141,7 @@ def set_ascend_forward_context(
     exit, so wrapping only ``load_model`` is not enough; pin it here instead of
     in the Worker.
     """
+    sync_v2_extra_kwargs(vllm_config)
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,
         "vllm_config": vllm_config,
@@ -157,7 +172,13 @@ def set_ascend_forward_context(
         )
 
         forward_context.moe_comm_type = moe_comm_type
-        forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
+        # A target and its drafter may own different expert shapes. Resolve
+        # model-owned communication state before graph execution; legacy
+        # models retain the original singleton implementation.
+        model_comm_methods = getattr(model_instance, "moe_comm_methods", None)
+        forward_context.moe_comm_method = (
+            model_comm_methods[moe_comm_type] if model_comm_methods is not None else get_moe_comm_method(moe_comm_type)
+        )
         forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
         forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
         forward_context.draft_moe_quant_type = draft_moe_quant_type
@@ -463,7 +484,7 @@ class _ExtraForwardContextProxy:
     def __getattr__(self, name: str) -> Any:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+        if _USE_V2_EXTRA_KWARGS:
             # Unset known extras default to None so optional flags (e.g. `sinks`)
             # can be read with truthiness checks before the V2 path populates them.
             return ctx.additional_kwargs.get(name)
@@ -472,7 +493,7 @@ class _ExtraForwardContextProxy:
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+        if _USE_V2_EXTRA_KWARGS:
             ctx.additional_kwargs[name] = value
         else:
             setattr(ctx, name, value)

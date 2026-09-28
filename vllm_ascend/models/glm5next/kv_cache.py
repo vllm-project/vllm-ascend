@@ -19,11 +19,27 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def is_glm5_next_cache_spec(spec: KVCacheSpec) -> bool:
     return getattr(spec, "model_version", None) == "glm5_next"
+
+
+def get_kpool_tail_ring_capacity(vllm_config: VllmConfig, compress_ratio: int) -> int:
+    """Keep the open pool plus every not-yet-accepted speculative token.
+
+    Target verification writes all draft rows before rejection sampling is
+    known.  The first row is the already-sampled token and is committed; the
+    remaining ``num_speculative_tokens`` rows are lookahead.  Retaining that
+    lookahead in addition to one full pool prevents rejected rows from wrapping
+    around and destroying committed history that a replayed boundary token
+    still needs.
+    """
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    lookahead = int(getattr(speculative_config, "num_speculative_tokens", 0) or 0)
+    if lookahead < 0:
+        raise ValueError(f"num_speculative_tokens must be nonnegative, got {lookahead}.")
+    return compress_ratio + lookahead
 
 
 def format_indexer_kpool_slot_mapping(
@@ -88,11 +104,7 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config
-        ratio_kwargs: dict[str, Any] = (
-            {"compress_ratio": self.compress_ratio}
-            if vllm_version_is("0.28.0")
-            else {"tokens_per_state": self.compress_ratio}
-        )
+        ratio_kwargs: dict[str, Any] = {"tokens_per_state": self.compress_ratio}
         return AscendMLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,

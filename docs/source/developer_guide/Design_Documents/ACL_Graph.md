@@ -4,7 +4,7 @@
 
 ACL Graph is the Ascend realization of vLLM static graph execution. Upstream vLLM and PyTorch documents already describe the generic graph model, including `CUDAGraphMode`, runtime dispatch, batch descriptors, bucketing and padding, and the definitions of full graph and piecewise graph. This document focuses on what is specific to Ascend in `vllm-ascend`: the platform integration points, the extra constraints introduced by ACL graph capture, and the mechanisms used to keep attention parameters correct during replay.
 
-On Ascend, the design goal is the same as upstream static graph execution: reduce host launch overhead for small and medium runtime shapes. The implementation boundary is different. vLLM provides the generic dispatch path, while `vllm-ascend` supplies the platform wrapper, capture-size trimming, and attention-specific update logic needed by ACL graph replay.
+On Ascend, the design goal is the same as upstream static graph execution: reduce host launch overhead for small and medium runtime shapes. The implementation boundary is different. vLLM provides the generic dispatch path, while `vllm-ascend` supplies the platform wrapper, capture-size pruning, and attention-specific update logic needed by ACL graph replay.
 
 ## Prerequisites and References
 
@@ -32,19 +32,7 @@ The wrapper does not define the upstream dispatch policy. It assumes the runtime
 
 vLLM graph replay requires stable runtime shapes, so vLLM does not try to capture every possible batch shape. Instead, it prepares a finite set of capture sizes and dispatches a runtime batch to the nearest supported size. If the runtime batch is larger than the largest configured capture size, graph mode is skipped and execution falls back to eager mode.
 
-By default, vLLM builds capture sizes as:
-
-- `1`, `2`, `4`
-- multiples of `8` from `8` up to `255`
-- multiples of `16` from `256` up to `max_cudagraph_capture_size`
-
-Conceptually, the default list looks like:
-
-```text
-[1, 2, 4, 8, 16, 24, 32, ..., 248, 256, 272, 288, ...]
-```
-
-The smaller step at small batch sizes reduces padding overhead where latency is most sensitive, while the larger step at bigger sizes keeps the number of captured graphs under control.
+For further information, see the upstream [CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/) design document.
 
 On Ascend, this generic upstream bucketing strategy is still the starting point, but the final capture sizes may be reduced further by platform-specific constraints:
 
@@ -56,9 +44,9 @@ On Ascend, this generic upstream bucketing strategy is still the starting point,
 
 ### Capture breadth is still constrained by runtime resources
 
-Unlike CUDA Graph on CUDA devices, ACL graph capture on Ascend can still fail when the selected graph sizes consume more runtime resources than the current backend can supply. Piecewise mode is the most sensitive case because it captures many subgraphs and the total capture cost scales with model depth and configured size coverage.
+ACL graph capture can fail when the selected graph sizes consume more runtime resources than the current backend can supply. Piecewise mode is the most sensitive case because it captures many subgraphs and the total capture cost scales with model depth and configured size coverage.
 
-Older versions of vLLM Ascend applied a local `update_aclgraph_sizes()` heuristic to shrink the PIECEWISE capture-size set before final capture. That heuristic has been removed. The current implementation keeps upstream sizing and dispatch behavior intact, then intercepts the confirmed capture-time stream-resource signature in `vllm_ascend/compilation/acl_graph.py` and re-raises it with clearer mitigation guidance.
+The current implementation can prune the capture-size set for hardware profiles with reduced graph capacity. It also intercepts the confirmed capture-time stream-resource signature in `vllm_ascend/compilation/acl_graph.py` and re-raises it with clearer mitigation guidance.
 
 In practice, this means users should treat `cudagraph_capture_sizes` and `max_cudagraph_capture_size` as the primary tuning levers when capture fails. Newer HDK/CANN combinations can materially improve ACL graph capacity, while communication-heavy configurations may still require a smaller configured size set.
 
@@ -66,9 +54,8 @@ In practice, this means users should treat `cudagraph_capture_sizes` and `max_cu
 
 Ascend currently narrows some generic upstream modes in `vllm_ascend.platform.NPUPlatform.check_and_update_config()`.
 
-- Encoder-decoder models are forced to `PIECEWISE`.
+- Encoder-decoder models requesting a full graph mode fall back to `PIECEWISE` when vLLM compilation is enabled, or `NONE` otherwise.
 - `use_inductor` is disabled for ACL graph paths.
-- `ASCEND_LAUNCH_BLOCKING=1` is rejected when ACL graph is enabled.
 - Xlite graph mode can disable ACL graph full mode or fall back to `FULL_DECODE_ONLY`, depending on configuration.
 
 These checks document the subset of upstream graph behavior that the current Ascend backend can execute safely.
@@ -117,9 +104,8 @@ Full graph mode is the more performance-oriented path when the attention backend
 
 - The simplest way to confirm that graph mode is active is to enable cudagraph metrics and keep log stats enabled. In CLI usage, use `--cudagraph-metrics` and do not pass `--disable-log-stats`. In Python usage, set `cudagraph_metrics=True` and `disable_log_stats=False`. Then inspect the emitted metrics and logs.
 - Profiling can also confirm whether replay is happening, and developers can add temporary prints before replay when debugging locally, but those are secondary methods and are not expanded here.
-- Capture-size selection primarily follows upstream configuration and dispatch behavior; only the confirmed stream-resource capture failure is rewritten with user-facing guidance at runtime.
+- Capture-size selection follows upstream configuration with platform filtering and hardware-specific pruning. `ACLGraphWrapper` adds guidance for recognized old-HDK and stream-resource capture errors.
 - In debug mode, `ACLGraphWrapper` asserts that replay uses the same tensor addresses recorded during capture.
-- `ASCEND_LAUNCH_BLOCKING=1` is incompatible with ACL graph enablement in the current implementation.
 - For debugging inside graph execution, the repo also provides graph-aware print helpers in `vllm_ascend.utils`, but those are developer diagnostics rather than part of the execution design.
 
 ## Related Files

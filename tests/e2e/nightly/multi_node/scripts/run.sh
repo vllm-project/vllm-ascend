@@ -142,8 +142,10 @@ check_npu_info() {
 check_and_config() {
     echo "====> Configure mirrors and git proxy"
     git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
-    pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+    pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
+    pip config set global.trusted-host mirrors.huaweicloud.com
     export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+    pip config set global.timeout 120
 }
 
 install_extra_components() {
@@ -197,8 +199,14 @@ checkout_src() {
 
 install_vllm_ascend() {
     echo "====> Install vllm-ascend"
-    pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
-    pip install -e "$WORKSPACE/vllm-ascend"
+    pip install uv
+    export UV_SYSTEM_PYTHON=1
+    export UV_INDEX_URL="https://mirrors.huaweicloud.com/repository/pypi/simple/"
+    export UV_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+    export UV_INDEX_STRATEGY="unsafe-best-match"
+    export UV_NO_CACHE=1
+    uv pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
+    uv pip install -e "$WORKSPACE/vllm-ascend"
 }
 
 install_aisbench() {
