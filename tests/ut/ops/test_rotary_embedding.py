@@ -503,7 +503,7 @@ def _build_ascend_mrope(is_neox_style: bool):
 
 class TestAscendMRotaryEmbeddingForwardOOT:
     @pytest.mark.parametrize("is_neox_style, expected_mode", [(True, "half"), (False, "interleave")])
-    @patch("torch_npu.npu_mrope")
+    @patch("torch_npu.npu_mrope", create=True)
     def test_rotary_mode_follows_is_neox_style(self, mock_npu_mrope, is_neox_style, expected_mode):
         """rotary_mode must follow is_neox_style; GPT-J models (GLM-OCR,
         GLM-4V) otherwise receive Neox pairing and produce wrong output."""
@@ -518,7 +518,7 @@ class TestAscendMRotaryEmbeddingForwardOOT:
         mock_npu_mrope.assert_called_once()
         assert mock_npu_mrope.call_args.kwargs["rotary_mode"] == expected_mode
 
-    @patch("torch_npu.npu_mrope")
+    @patch("torch_npu.npu_mrope", create=True)
     def test_other_mrope_section_delegates_to_super(self, mock_npu_mrope):
         """Sections other than the gated literal must keep using the base
         implementation, so this fix cannot change their behaviour."""
