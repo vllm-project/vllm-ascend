@@ -118,7 +118,6 @@ jobs:
               pip install -e tests/plugins/prithvi_io_processor_plugin
               pip install -e tests/plugins/colbert_query_plugin
               pip install -e tests/plugins/vllm_add_dummy_endpoint_plugin
-              sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Get csrc hash
             id: get_csrc_hash
@@ -191,7 +190,9 @@ jobs:
             env:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
+              PYTEST_ADDOPTS: -p upstream_test_plugin
             run: |
+              export PYTHONPATH="${GITHUB_WORKSPACE}/tests${PYTHONPATH:+:$PYTHONPATH}"
               python3 ../.github/workflows/scripts/run_suite.py \
                 --suite e2e-upstream_singlecard \
                 --auto-partition-id "${{ matrix.part }}" \

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 """Focused tests for the Ascend Engram configuration and storage path."""
 
 import json
@@ -13,6 +14,11 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+pytest.importorskip(
+    "vllm.models.deepseek_v4_1",
+    reason="DeepSeek V4.1 is unavailable on this vLLM release",
+)
+
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.patch.platform.patch_engram_config import AscendEngramConfig
@@ -24,6 +30,7 @@ def _topology(tp=4, dp=4, **overrides):
         tensor_parallel_size=tp,
         data_parallel_size=dp,
         data_parallel_size_local=dp,
+        data_parallel_external_lb=False,
         pipeline_parallel_size=1,
         prefill_context_parallel_size=1,
         decode_context_parallel_size=1,
@@ -35,9 +42,12 @@ def _topology(tp=4, dp=4, **overrides):
 
 
 @pytest.mark.parametrize("tp,dp", [(2, 8), (4, 4), (8, 2)])
-def test_dp_shared_memory_config_and_topologies(tp, dp):
+@pytest.mark.parametrize("external", [False, True])
+def test_dp_shared_memory_config_and_topologies(tp, dp, external):
     config = AscendEngramConfig(cpu_offload=True, dp_shared_memory=True)
-    config.verify_parallel_config(_topology(tp, dp))
+    config.verify_parallel_config(
+        _topology(tp, dp, data_parallel_external_lb=external, data_parallel_size_local=1 if external else dp)
+    )
     config.verify_model_config(
         SimpleNamespace(
             architecture="DeepseekV41ForCausalLM",
@@ -46,7 +56,9 @@ def test_dp_shared_memory_config_and_topologies(tp, dp):
     )
     assert not AscendEngramConfig().dp_shared_memory
     with pytest.raises(ValueError, match="cpu_offload"):
-        AscendEngramConfig(dp_shared_memory=True)
+        # vLLM main defaults VLLM_PLE_CPU_OFFLOAD to True, so force it off here
+        # to exercise the dp_shared_memory -> cpu_offload validation.
+        AscendEngramConfig(cpu_offload=False, dp_shared_memory=True)
     with pytest.raises(ValueError, match="single-node"):
         config.verify_parallel_config(_topology(tp, dp, nnodes=2))
 
@@ -182,3 +194,12 @@ def test_v1_lookback_uses_prompt_tokens_only():
     runner.input_batch.num_computed_tokens_cpu[0] = 6
     generated = runner._prepare_lookback_token_ids(1).numpy()
     assert generated[0].tolist() == [-1, -1, 13]
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_engram_rejects_dp_outside_shared_node_before_allocation(monkeypatch, shared):
+    group = SimpleNamespace(cpu_group=object())
+    monkeypatch.setattr(embedding_mod, "get_engram_dp_group", lambda: group)
+    monkeypatch.setattr(embedding_mod, "in_the_same_node_as", lambda pg: [True, False])
+    with pytest.raises(ValueError, match="same node and shared-memory namespace"):
+        embedding_mod.AscendParallelEngramEmbedding(96, 64, (4,) * 24, 0, dp_shared_memory=shared)

@@ -381,7 +381,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl = MagicMock()
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
-        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+        with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn):
             mock_tp_size.return_value = 2
             mock_vllm_config = MagicMock(spec=VllmConfig)
             mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=True)
@@ -423,7 +423,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
                 mock_mla_attn.impl.fused_qkv_a_proj = fused_qkv_a_proj
                 mock_mla_attn.impl.q_proj = q_proj
 
-                with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+                with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn):
                     mock_tp_size.return_value = 2
                     mock_vllm_config = MagicMock(spec=VllmConfig)
                     mock_vllm_config.model_config.hf_text_config = MagicMock(
@@ -477,7 +477,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl = MagicMock()
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
-        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+        with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn):
             attn = AscendMultiHeadLatentAttention(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_heads,
@@ -546,6 +546,18 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         self.assertIs(attn.topk_indices_buffer, buffer)
         self.assertIs(mock_impl.topk_indices_buffer, buffer)
 
+    def test_lim_topk_metadata_compaction_forwards_to_impl(self):
+        attn = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
+        mock_impl = MagicMock()
+        mock_impl.use_fused_copy_sfa = True
+        attn.mla_attn = SimpleNamespace(impl=mock_impl)
+        indices = torch.tensor([1, 5], dtype=torch.int32)
+
+        self.assertTrue(attn.uses_lim_topk_metadata)
+        attn.compact_lim_topk_metadata(indices)
+
+        mock_impl.compact_lim_topk_metadata.assert_called_once_with(indices)
+
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
     @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size")
     def test_initialization_skip_topk_consistency(self, mock_tp_size, mock_get_vllm_config):
@@ -556,7 +568,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
         with (
-            patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn) as mock_mla_attn_cls,
+            patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn) as mock_mla_attn_cls,
             patch("vllm_ascend.ops.mla.IndexerWrapper"),
         ):
             mock_tp_size.return_value = 2

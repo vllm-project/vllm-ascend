@@ -2,6 +2,7 @@ test_name: "test DeepSeek-R1-W8A8 disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
 num_nodes: 4
 npu_per_node: 16
+dp_load_balancing: internal
 env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 1024
@@ -12,7 +13,7 @@ env_common: &env_common
   HCCL_DETERMINISTIC: True
   TASK_QUEUE_ENABLE: 1
   HCCL_OP_RETRY_ENABLE: "L0:0, L1:0, L2:0"
-  DYNAMIC_EPLB: true
+  VLLM_USE_V2_MODEL_RUNNER: "1"
   VLLM_ENGINE_READY_TIMEOUT_S: 3000
 
 disaggregated_prefill:
@@ -56,8 +57,10 @@ deployment:
                     }
               }
           }'
+          --enable-eplb
+          --eplb-config '{"window_size":2048,"step_interval":200,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
           --additional-config
-          '{"weight_nz_mode":1,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
+          '{"weight_nz_mode":1,"eplb_config":{"load_collection_phase":"all"}}'
 
   -
     envs:
@@ -94,12 +97,13 @@ deployment:
                     }
               }
           }'
+          --enable-eplb
+          --eplb-config '{"window_size":2048,"step_interval":200,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
           --additional-config
-          '{"weight_nz_mode":1,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
+          '{"weight_nz_mode":1,"eplb_config":{"load_collection_phase":"all"}}'
   -
     envs:
       <<: *env_common
-    # #5533 requires the EPLB keys in the command below to be nested.
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
         --host 0.0.0.0
@@ -133,8 +137,10 @@ deployment:
                   }
             }
         }'
+        --enable-eplb
+        --eplb-config '{"window_size":2048,"step_interval":200,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
         --additional-config
-        '{"multistream_overlap_shared_expert":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
+        '{"multistream_overlap_shared_expert":true,"eplb_config":{"load_collection_phase":"all"}}'
   -
     envs:
       <<: *env_common
@@ -171,8 +177,10 @@ deployment:
                   }
             }
         }'
+        --enable-eplb
+        --eplb-config '{"window_size":2048,"step_interval":200,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
         --additional-config
-        '{"multistream_overlap_shared_expert":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
+        '{"multistream_overlap_shared_expert":true,"eplb_config":{"load_collection_phase":"all"}}'
 benchmarks:
   perf:
     case_type: performance

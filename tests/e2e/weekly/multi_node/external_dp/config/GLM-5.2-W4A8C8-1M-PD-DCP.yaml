@@ -2,6 +2,7 @@ test_name: "GLM-5.2-W4A8C8-1M-PD-DCP"
 model: "Eco-Tech/GLM-5.2-w4a8c8"
 num_nodes: 4
 npu_per_node: 16
+dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"

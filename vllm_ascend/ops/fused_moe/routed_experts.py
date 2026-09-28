@@ -326,6 +326,32 @@ def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> Simpl
     )
 
 
+def _record_v2_eplb_load(router: FusedMoERouter, result: FusedExpertsResult) -> None:
+    """Record the local expert counts supplied by the MoE operator."""
+    eplb_state = router.eplb_state
+    if eplb_state is None:
+        return
+    expert_tokens = result.expert_tokens
+    if expert_tokens is None:
+        raise RuntimeError("MRV2 EPLB requires operator-provided expert counts")
+    expert_load_view = eplb_state.expert_load_view
+    record_enabled = eplb_state.should_record_tensor
+    if expert_load_view is None or record_enabled is None:
+        raise RuntimeError("MRV2 EPLB load-recording state is not initialized")
+    if expert_tokens.numel() != eplb_state.local_expert_count:
+        raise RuntimeError(
+            "MoE expert count does not match local EPLB experts: "
+            f"{expert_tokens.numel()} != {eplb_state.local_expert_count}"
+        )
+    torch.ops.vllm.ascend_eplb_record_expert_tokens(
+        expert_tokens,
+        expert_load_view,
+        record_enabled,
+        result.group_list_type,
+        eplb_state.local_expert_start,
+    )
+
+
 class EplbExpertTensorList(list[torch.Tensor]):
     """Per-expert tensors exposed through the upstream EPLB weight contract."""
 
@@ -687,6 +713,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         finally:
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
+
+        if self._use_v2_model_runner:
+            _record_v2_eplb_load(self.router, fused_experts_results)
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens

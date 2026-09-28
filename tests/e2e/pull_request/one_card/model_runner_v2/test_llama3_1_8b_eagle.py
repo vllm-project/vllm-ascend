@@ -41,6 +41,7 @@ EAGLE_MODELS = ["vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B"]
             id="full_decode_only",
         ),
         pytest.param({}, id="default_full_and_piecewise"),
+        pytest.param({"cudagraph_mode": "NONE"}, id="eager"),
     ],
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})

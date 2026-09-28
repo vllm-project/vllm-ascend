@@ -15,13 +15,17 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from collections.abc import Mapping
 from typing import Any, cast
 
+import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_dcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
@@ -29,10 +33,11 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_metadata_factory,
     build_attn_metadata_wrapper,
-    build_draft_attn_metadata_factory,
 )
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
@@ -45,6 +50,22 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
+        self._init_dcp()
+
+    def _init_dcp(self) -> None:
+        self.use_dcp = self.attn_vllm_config.parallel_config.decode_context_parallel_size > 1
+        self.dcp_manager: DCPManager | None = None
+        if not self.use_dcp:
+            return
+        self.dcp_manager = DCPManager(
+            dcp_world_size=self.attn_vllm_config.parallel_config.decode_context_parallel_size,
+            dcp_rank=get_dcp_group().rank_in_group,
+            max_buffer_num_tokens=self.max_num_tokens,
+            max_num_reqs=self.max_num_reqs,
+            device=self.device,
+            vllm_config=self.attn_vllm_config,
+            use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
+        )
 
     def load_draft_model(
         self,
@@ -53,8 +74,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     ) -> torch.nn.Module:
         model = super().load_draft_model(target_model, target_attn_layer_names)
         if hasattr(model, "post_process"):
-            with set_current_vllm_config(self.vllm_config):
-                model.post_process(self.vllm_config)
+            model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):
             model.configure_target_aux_hidden_capture(target_model)
 
@@ -113,71 +133,115 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             else:
                 self.attn_architecture = None
 
+    def _prepare_draft_dcp_metadata_inputs(
+        self, num_reqs: int, num_reqs_padded: int, step: int
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool)
+        if not self.use_dcp:
+            return None, is_prefilling
+        assert self.dcp_manager is not None
+        return self.dcp_manager.prepare_draft_dcp_metadata_inputs(
+            target_seq_lens_cpu=self.target_input_buffers.seq_lens_cpu,
+            is_prefilling=is_prefilling,
+            num_reqs=num_reqs,
+            num_reqs_padded=num_reqs_padded,
+            step=step,
+            max_model_len=self.max_model_len,
+        )
+
+    # Graph capture builds metadata from the padded request shape.
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         assert self.input_batch is not None
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
-
+        seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
+            self.input_batch.num_reqs, num_reqs_padded, self.num_query_per_req
+        )
         with (
             build_attn_metadata_wrapper(),
-            build_draft_attn_metadata_factory(
+            build_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens_padded,
-                is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool),
+                is_prefilling=is_prefilling,
+                seq_lens_cpu=seq_lens_cpu,
                 attn_state=AscendAttentionState.ChunkedPrefill,
+                parallel_config=self.attn_vllm_config.parallel_config,
             ),
         ):
-            attn_metadata = super()._build_draft_attn_metadata(
+            # vLLM main (#56181) replaced _build_draft_attn_metadata with
+            # _build_uniform_attn_metadata (BatchExecutionDescriptor).
+            batch_desc = BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.FULL,
+                num_tokens=num_tokens_padded,
+                num_reqs=num_reqs_padded,
+            )
+            attn_metadata = self._build_uniform_attn_metadata(
                 num_reqs=self.input_batch.num_reqs,
-                num_reqs_padded=num_reqs_padded,
-                num_tokens_padded=num_tokens_padded,
+                batch_desc=batch_desc,
+                num_query_per_req=self.num_query_per_req,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
 
+        return [attn_metadata]
+
+    def _build_attn_metadata(
+        self,
+        num_reqs: int,
+        batch_desc: BatchExecutionDescriptor,
+        query_start_loc_np: np.ndarray,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        causal: bool | Mapping[int, bool] = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        """Build Ascend draft metadata through the upstream attention hook."""
         if self.attn_architecture not in ("GQA", "MLA"):
-            return [attn_metadata]
+            # Non-MLA/GQA (e.g. SFA) delegates straight to upstream without
+            # Ascend CPU-side DCP preparation.
+            return super()._build_attn_metadata(
+                num_reqs=num_reqs,
+                batch_desc=batch_desc,
+                query_start_loc_np=query_start_loc_np,
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                step=step,
+                causal=causal,
+                dcp_local_seq_lens=dcp_local_seq_lens,
+            )
 
-        return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
-
-    def _build_draft_attn_metadata(self, *, num_reqs_padded, **kwargs):
-        if self.attn_architecture not in ("GQA", "MLA"):
-            return super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
-
-        # This kwargs["num_tokens_padded"] is only useful in eager/PIECEWISE.
-        # TODO: Replace this temporary padding workaround with upstream #56181's
-        # actual-token metadata and MLA input slicing for non-FULL execution.
-        num_tokens_padded = kwargs["num_tokens_padded"]
-        assert num_tokens_padded % self.num_query_per_req == 0, "Draft tokens must contain whole query groups"
-        num_reqs_padded = num_tokens_padded // self.num_query_per_req
-
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        # The draft forward may process padded inputs outside FULL graphs, but
+        # attention only consumes the tokens owned by real requests there.
+        num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
+        seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(num_reqs, num_reqs_padded, step)
         with (
             build_attn_metadata_wrapper(),
-            build_draft_attn_metadata_factory(
+            build_attn_metadata_factory(
                 self.input_buffers.positions,
-                num_tokens_padded,
-                is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool),
+                num_tokens,
+                is_prefilling=is_prefilling,
+                seq_lens_cpu=seq_lens_cpu,
                 attn_state=AscendAttentionState.ChunkedPrefill,
+                parallel_config=self.attn_vllm_config.parallel_config,
             ),
         ):
-            attn_metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
-        return self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+            attn_metadata = super()._build_attn_metadata(
+                num_reqs=num_reqs,
+                batch_desc=batch_desc,
+                query_start_loc_np=query_start_loc_np,
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                step=step,
+                causal=causal,
+                dcp_local_seq_lens=dcp_local_seq_lens,
+            )
+        if batch_desc.cg_mode == CUDAGraphMode.FULL and attn_metadata is not None:
+            # FULL replay uses the captured padded Q, so FIA needs cumulative
+            # query lengths through every padded request slot.
+            self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+        return attn_metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
-        """Rebuild ``actual_seq_lengths_q`` from the padded request count,
-        mirroring Eagle's ``_update_decode_attn_metadata``.
-
-        DSpark inherits DFlash's full-graph path, and upstream
-        ``Speculator._build_draft_attn_metadata`` clamps ``query_start_loc`` at
-        the real ``num_reqs`` to keep the cumulative series non-decreasing, so
-        when a batch is padded to a capture size (``num_reqs_padded >
-        num_reqs``) the cumulative query lengths stop at
-        ``num_reqs * num_query_per_req`` instead of ``num_tokens_padded``. The
-        Ascend FIA operator requires, in TND layout, that the last element of
-        ``actual_seq_lengths_q`` equals the query token count of the graph
-        being replayed; otherwise tiling fails with
-        ``queryT != last element of actualSequenceLengthQ``.
-        """
+        """Match FULL-graph query lengths to the padded request count."""
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
@@ -215,8 +279,11 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             sync_state = None
         with (
             build_attn_metadata_wrapper(),
-            build_draft_attn_metadata_factory(
-                self.input_buffers.positions, self.max_num_tokens, torch.from_numpy(self.input_batch.is_prefilling_np)
+            build_attn_metadata_factory(
+                self.input_buffers.positions,
+                self.max_num_tokens,
+                torch.from_numpy(self.input_batch.is_prefilling_np),
+                parallel_config=self.attn_vllm_config.parallel_config,
             ),
         ):
             return super().propose(

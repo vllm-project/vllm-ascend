@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 import torch
+from vllm.config import AttentionConfig
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
@@ -27,7 +28,11 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpec
 def make_speculator():
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.attn_architecture = "MLA"
-    spec.vllm_config = SimpleNamespace()
+    spec.use_dcp = False
+    spec.requires_non_causal = True
+    spec.vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(), parallel_config=SimpleNamespace(decode_context_parallel_size=1)
+    )
     spec.draft_model_config = SimpleNamespace(
         hf_config=SimpleNamespace(target_layer_ids=[0, 2], target_hidden_size=4, num_target_layers=2)
     )
@@ -77,14 +82,18 @@ def test_shared_speculator_selects_draft_backend(monkeypatch, target_backend, dr
 
 def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABackend):
     monkeypatch.setattr(draft_backend, "get_impl_cls", staticmethod(lambda: object))
-    monkeypatch.setattr(DSparkSpeculator, "__init__", lambda self, *args: None)
+    monkeypatch.setattr(DSparkSpeculator, "__init__", lambda self, config, device: setattr(self, "vllm_config", config))
     monkeypatch.setattr(shared, "prepare_replicated_pcp_config", lambda config: (config, False))
-    config = SimpleNamespace(speculative_config=SimpleNamespace(method="dspark", use_dspark=lambda: True))
+    config = SimpleNamespace(
+        attention_config=AttentionConfig(),
+        speculative_config=SimpleNamespace(method="dspark", use_dspark=lambda: True),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: config))
     spec = init_speculator(config, torch.device("cpu"))
     assert type(spec) is AscendDSparkSpeculator
     assert spec.attn_architecture is None
     spec.vllm_config = config
-    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: config))
     spec.draft_attn_layer_names = {"draft"}
     spec._context_slot_mappings = torch.zeros(1, dtype=torch.int64)
     target_groups = [[SimpleNamespace(backend=target_backend)]]
@@ -246,23 +255,27 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
 @pytest.mark.parametrize("architecture", [None, "GQA", "MLA"])
 def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architecture):
     spec = make_speculator()
+    spec.arange_np = np.arange(3, dtype=np.int32)
     spec.attn_architecture = architecture
     spec.input_batch = SimpleNamespace(num_reqs=1, is_prefilling_np=np.array([True, True]))
     spec._group_causal = {0: False}
     query_metadata = SimpleNamespace(actual_seq_lengths_q=[5, 5])
     metadata = {"draft": SimpleNamespace(decode=query_metadata) if architecture == "MLA" else query_metadata}
     builder = MagicMock(return_value=metadata)
-    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", builder)
+    # Keep the real uniform builder so it dispatches to Ascend's new hook.
+    monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", builder)
     update = MagicMock(wraps=spec._update_draft_attn_metadata)
     monkeypatch.setattr(spec, "_update_draft_attn_metadata", update)
     captured: dict[str, Any] = {}
 
     @contextmanager
-    def factory(positions, pad, is_prefilling, *, attn_state=None):
+    def factory(positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None):
+        assert seq_lens_cpu is None
+        assert parallel_config is spec.vllm_config.parallel_config
         captured.update(pad=pad, is_prefilling=is_prefilling, attn_state=attn_state)
         yield
 
-    monkeypatch.setattr(shared, "build_draft_attn_metadata_factory", factory)
+    monkeypatch.setattr(shared, "build_attn_metadata_factory", factory)
     result = spec.build_draft_attn_metadatas(2, torch.tensor([128]))
     assert captured["pad"] == 10
     assert result == [metadata]
@@ -277,9 +290,11 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
         assert query_metadata.actual_seq_lengths_q == [5, 5]
         update.assert_not_called()
     kwargs = builder.call_args.kwargs
-    assert "update_query_lengths" not in kwargs
     assert kwargs["num_reqs"] == 1
-    assert kwargs["num_reqs_padded"] == 2
+    assert kwargs["batch_desc"].num_reqs == 2
+    assert kwargs["batch_desc"].num_tokens == 10
+    assert kwargs["query_start_loc_np"].tolist() == [0, 5]
+    assert kwargs["step"] == 5
     assert kwargs["causal"] == {0: False}
     assert spec.input_batch.is_prefilling_np.tolist() == [True, True]
 
@@ -306,7 +321,7 @@ def test_metadata_factory_applies_configured_state(monkeypatch, fail, attn_state
     with (
         pytest.raises(RuntimeError, match="build failed") if fail else nullcontext(),
         attn_utils.build_attn_metadata_wrapper(),
-        attn_utils.build_draft_attn_metadata_factory(torch.arange(10), 6, flags, attn_state=attn_state),
+        attn_utils.build_attn_metadata_factory(torch.arange(10), 6, flags, attn_state=attn_state),
     ):
         module.build_attn_metadata(num_tokens=6, attn_state=AscendAttentionState.DecodeOnly)
         if fail:
@@ -321,6 +336,7 @@ def test_metadata_factory_applies_configured_state(monkeypatch, fail, attn_state
 @pytest.mark.parametrize("fail", [False, True])
 def test_query_builder_overrides_and_restores_target_context(monkeypatch, architecture, fail):
     spec = make_speculator()
+    spec.arange_np = np.arange(3, dtype=np.int32)
     spec.attn_architecture = architecture
     module = attn_utils._BUILD_ATTN_METADATA_MODULE
     original = module.build_attn_metadata
@@ -337,21 +353,20 @@ def test_query_builder_overrides_and_restores_target_context(monkeypatch, archit
         return {"draft": metadata}
 
     def parent(self, **kwargs):
-        assert kwargs["num_reqs_padded"] == 2
         return module.build_attn_metadata(attn_state=None)
 
+    spec.input_batch = SimpleNamespace(num_reqs=1)
+    spec._group_causal = {}
     monkeypatch.setattr(attn_utils, "build_attn_metadata", build)
-    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", parent)
+    monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", parent)
     with (
         attn_utils.build_attn_metadata_wrapper(),
-        attn_utils.build_draft_attn_metadata_factory(
-            torch.arange(20), 20, flags, attn_state=AscendAttentionState.DecodeOnly
-        ),
+        attn_utils.build_attn_metadata_factory(torch.arange(20), 20, flags, attn_state=AscendAttentionState.DecodeOnly),
     ):
         outer = module.build_attn_metadata
         with pytest.raises(RuntimeError, match="query failed") if fail else nullcontext():
-            result = spec._build_draft_attn_metadata(num_reqs=1, num_reqs_padded=1, num_tokens_padded=10, step=5)
-            metadata = result["draft"]
+            result = spec.build_draft_attn_metadatas(2, torch.tensor([5]))
+            metadata = result[0]["draft"]
             query = metadata.decode if architecture == "MLA" else metadata
             assert query.actual_seq_lengths_q == [5, 10]
             assert metadata.attn_state == AscendAttentionState.ChunkedPrefill

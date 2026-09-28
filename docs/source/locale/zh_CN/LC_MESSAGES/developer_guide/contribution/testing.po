@@ -199,18 +199,6 @@ msgstr ""
 "2. `select_tests.py` 根据目录约定（`tests/ut/<module>/` → CPU，`tests/ut/<module>/a2/` → A2，`tests/e2e/pull_request/{one,two,four,eight}_card/` → A3，`_310p` → 310P）将每个推荐的测试路径路由到运行器，通过预估时间平衡负载，并生成 CI 矩阵。"
 
 msgid ""
-"Adding a new test requires no configuration change: place the UT file under the\n"
-"matching `tests/ut/<module>[/<npu>]` directory or the E2E file under the matching\n"
-"`tests/e2e/pull_request/<card>` directory, and CI picks it up automatically from\n"
-"the test tree. Routing metadata (runner mapping, partitions, estimated times)\n"
-"lives in [`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml)."
-msgstr ""
-"添加新测试无需更改配置：将 UT 文件放在匹配的 `tests/ut/<module>[/<npu>]` 目录下，或将 E2E 文件放在匹配的 "
-"`tests/e2e/pull_request/<card>` 目录下，CI 会自动从测试树中获取。路由元数据（运行器映射、分区、预估时间）位于 "
-"[`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-"
-"project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml) 中。"
-
-msgid ""
 "You can preview locally which runners a set of tests would be routed to:"
 msgstr "您可以在本地预览一组测试将被路由到哪些运行器："
 
@@ -250,20 +238,138 @@ msgstr ""
 "软件包）。请提前准备示例的模型缓存；worker 会启用 Hugging Face 离线模式。"
 
 msgid ""
-"In CI, `.github/workflows/schedule_doctest.yaml` appears as **Doc Test**. "
-"Relevant PR changes targeting `main` or `releases/v*` select affected cases "
-"automatically. You can also run it manually with `quickstart_device` and/or "
-"`installation_method`; `none` skips that case. Each selected case runs on "
-"both operating systems. There is no scheduled trigger."
-msgstr ""
-"在 CI 中，`.github/workflows/schedule_doctest.yaml` 显示为 **Doc Test**。针对 `main` "
-"或 `releases/v*` 的相关 PR 变更会自动选择受影响的用例。你也可以通过 `quickstart_device` 和/或 "
-"`installation_method` 手动运行；`none` 会跳过该用例。每个选中的用例都会在两个操作系统上运行。没有定时触发。"
-
-msgid ""
 "For block extraction, plan preview, and selection rules, see the usage notes"
 " and function comments in `tests/e2e/doctests/scripts/doctest_helper.py` on "
 "the corresponding branch."
 msgstr ""
 "有关代码块提取、计划预览和选择规则，请参阅对应分支上 `tests/e2e/doctests/scripts/doctest_helper.py` "
 "中的使用说明和函数注释。"
+
+msgid "Run the remaining commands inside the container:"
+msgstr "在容器内运行剩余命令："
+
+msgid ""
+"Adding a new test requires no configuration change: place the UT file under the\n"
+"matching `tests/ut/<module>[/<npu>]` directory or the E2E file under the matching\n"
+"`tests/e2e/pull_request/<card>` directory, and CI picks it up automatically from\n"
+"the test tree. Routing metadata (runner mapping, partitions) lives in\n"
+"[`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml).\n"
+"Estimated times used for load balancing live in\n"
+"`.github/workflows/scripts/estimated_times.yaml`."
+msgstr ""
+"新增测试无需修改配置：将 UT 文件放到对应的\n"
+"`tests/ut/<module>[/<npu>]` 目录下，或将 E2E 文件放到对应的\n"
+"`tests/e2e/pull_request/<card>` 目录下，CI 会自动从测试树中识别。路由元数据（runner 映射、分区）位于\n"
+"[`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml)。\n"
+"用于负载均衡的预估时间位于\n"
+"`.github/workflows/scripts/estimated_times.yaml`。"
+
+msgid "### CI workflow triggers and the `schedule_` prefix"
+msgstr "### CI 工作流触发方式与 `schedule_` 前缀"
+
+msgid ""
+"Workflow files under `.github/workflows/` whose names start with `schedule_`\n"
+"belong to the recurring CI family (nightly, weekly, doc, coverage, and similar\n"
+"periodic jobs). The `schedule_` prefix does **not** guarantee that the workflow\n"
+"declares a GitHub Actions `schedule:` (cron) trigger."
+msgstr ""
+"`.github/workflows/` 下名称以 `schedule_` 开头的工作流文件\n"
+"属于周期性 CI 系列（nightly、weekly、doc、coverage 及类似的\n"
+"周期性任务）。`schedule_` 前缀**并不**保证该工作流\n"
+"声明了 GitHub Actions 的 `schedule:`（cron）触发器。"
+
+msgid ""
+"Some `schedule_*.yaml` files intentionally omit `schedule:` and are dispatched by\n"
+"the project's external automation through `workflow_dispatch` instead. This is by\n"
+"design, not a missing cron entry, because the external scheduler has more control\n"
+"over when resource-heavy NPU jobs run."
+msgstr ""
+"部分 `schedule_*.yaml` 文件有意省略 `schedule:`，改由\n"
+"项目的外部自动化通过 `workflow_dispatch` 进行调度。这是有意\n"
+"设计，而非缺少 cron 条目，因为外部调度器能更好地控制\n"
+"资源密集型 NPU 任务的运行时机。"
+
+msgid "Workflows with a native GitHub cron trigger:"
+msgstr "带有原生 GitHub cron 触发器的工作流："
+
+msgid "| Workflow | Additional triggers |"
+msgstr "| 工作流 | 其他触发器 |"
+
+msgid ""
+"| `schedule_doc_linkcheck.yaml` | PR path filter, `workflow_dispatch` |"
+msgstr "| `schedule_doc_linkcheck.yaml` | PR 路径过滤、`workflow_dispatch` |"
+
+msgid "| `schedule_doc_translate.yaml` | `workflow_dispatch` |"
+msgstr "| `schedule_doc_translate.yaml` | `workflow_dispatch` |"
+
+msgid "| `schedule_e2e_upstream_test.yaml` | - |"
+msgstr "| `schedule_e2e_upstream_test.yaml` | - |"
+
+msgid "| `schedule_lint_image_build.yaml` | `workflow_dispatch`, `push` |"
+msgstr "| `schedule_lint_image_build.yaml` | `workflow_dispatch`、`push` |"
+
+msgid "| `schedule_main2main.yaml` | `workflow_dispatch` |"
+msgstr "| `schedule_main2main.yaml` | `workflow_dispatch` |"
+
+msgid "| `schedule_stale_manage.yaml` | `issue_comment` |"
+msgstr "| `schedule_stale_manage.yaml` | `issue_comment` |"
+
+msgid ""
+"Workflows without a cron trigger, dispatched externally via "
+"`workflow_dispatch`:"
+msgstr "无 cron 触发器、通过 `workflow_dispatch` 由外部调度的工作流："
+
+msgid "| `schedule_doc_getting_started_test.yaml` | PR path filter |"
+msgstr "| `schedule_doc_getting_started_test.yaml` | PR 路径过滤 |"
+
+msgid "| `schedule_e2e_test.yaml` | - |"
+msgstr "| `schedule_e2e_test.yaml` | - |"
+
+msgid "| `schedule_image_build_and_push.yaml` | PR label, tag `push` |"
+msgstr "| `schedule_image_build_and_push.yaml` | PR 标签、tag `push` |"
+
+msgid "| `schedule_nightly_test_310p.yaml` | - |"
+msgstr "| `schedule_nightly_test_310p.yaml` | - |"
+
+msgid "| `schedule_nightly_test_a2.yaml` | - |"
+msgstr "| `schedule_nightly_test_a2.yaml` | - |"
+
+msgid "| `schedule_nightly_test_a3.yaml` | - |"
+msgstr "| `schedule_nightly_test_a3.yaml` | - |"
+
+msgid "| `schedule_nightly_test_a3_560t.yaml` | - |"
+msgstr "| `schedule_nightly_test_a3_560t.yaml` | - |"
+
+msgid "| `schedule_nightly_test_a5.yaml` | - |"
+msgstr "| `schedule_nightly_test_a5.yaml` | - |"
+
+msgid "| `schedule_release_code_and_wheel.yml` | tag `push` |"
+msgstr "| `schedule_release_code_and_wheel.yml` | tag `push` |"
+
+msgid "| `schedule_test_coverage.yaml` | - |"
+msgstr "| `schedule_test_coverage.yaml` | - |"
+
+msgid "| `schedule_weekly_test_310p.yaml` | - |"
+msgstr "| `schedule_weekly_test_310p.yaml` | - |"
+
+msgid "| `schedule_weekly_test_a2.yaml` | - |"
+msgstr "| `schedule_weekly_test_a2.yaml` | - |"
+
+msgid "| `schedule_weekly_test_a3.yaml` | - |"
+msgstr "| `schedule_weekly_test_a3.yaml` | - |"
+
+msgid "| `schedule_weekly_test_a3_560t.yaml` | - |"
+msgstr "| `schedule_weekly_test_a3_560t.yaml` | - |"
+
+msgid ""
+"In CI, `.github/workflows/schedule_doc_getting_started_test.yaml` appears as"
+" **Doc Test**. Relevant PR changes targeting `main` or `releases/v*` select "
+"affected cases automatically. External automation can dispatch it on a "
+"schedule, or you can run it manually with comma-separated "
+"`quickstart_devices` and/or `installation_methods`; leave an input empty to "
+"skip that test type. Each selected case runs on both operating systems."
+msgstr ""
+"在 CI 中，`.github/workflows/schedule_doc_getting_started_test.yaml` 显示为 **Doc "
+"Test**。针对 `main` 或 `releases/v*` 的相关 PR "
+"变更会自动选择受影响的用例。外部自动化可以按计划调度它，你也可以使用逗号分隔的 `quickstart_devices` 和/或 "
+"`installation_methods` 手动运行；将某个输入留空即可跳过该测试类型。每个选中的用例都会在两个操作系统上运行。"

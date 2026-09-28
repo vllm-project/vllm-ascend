@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import connector as connector_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import (
     MooncakeBaseConnector,
     MooncakeConnector,
@@ -84,12 +85,14 @@ def test_pull_connector_selects_implementation_by_role() -> None:
 
     with (
         patch.object(MooncakeBaseConnector, "__init__", initialize_base),
-        patch(
-            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector.MooncakePullConnectorScheduler",
+        patch.object(
+            connector_module,
+            "MooncakePullConnectorScheduler",
             return_value=MagicMock(),
         ) as scheduler_cls,
-        patch(
-            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector.MooncakePullConnectorWorker",
+        patch.object(
+            connector_module,
+            "MooncakePullConnectorWorker",
             return_value=MagicMock(),
         ) as worker_cls,
     ):

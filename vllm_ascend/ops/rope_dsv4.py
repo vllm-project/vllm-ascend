@@ -1,4 +1,5 @@
 import math
+from collections.abc import Iterable
 from typing import Any
 
 import torch
@@ -84,15 +85,30 @@ def get_cos_and_sin_dsa(
     positions: torch.Tensor | dict[str, torch.Tensor],
     use_cache: bool = False,
     draft_index: int | None = None,
+    layer_names: str | Iterable[str] | None = None,
 ):
     if isinstance(positions, torch.Tensor):
         pos_map = {"default": positions}
     else:
         pos_map = positions
 
+    requested_configs: set[str] | None = None
+    if layer_names is not None:
+        names = [layer_names] if isinstance(layer_names, str) else list(layer_names)
+        requested_configs = set()
+        for layer_name in names:
+            info = _ROPE_STATE.layer_info.get(layer_name)
+            if info is None and layer_name.endswith(".swa_cache"):
+                info = _ROPE_STATE.layer_info.get(f"{layer_name.removesuffix('.swa_cache')}.attn")
+            if info is None:
+                raise KeyError(f"Layer {layer_name} not registered.")
+            requested_configs.add(info[0])
+
     batch_result: dict[Any, Any] = {}
 
     for config_key, registered_groups in _ROPE_STATE.registry_summary.items():
+        if requested_configs is not None and config_key not in requested_configs:
+            continue
         if config_key not in _ROPE_STATE.full_rope_cache:
             continue
         full_rope_cos, full_rope_sin = _ROPE_STATE.full_rope_cache[config_key]
@@ -248,6 +264,18 @@ class ComplexExpRotaryEmbedding(nn.Module):
             sin = sin.to(current_platform.device_type)
 
             _ROPE_STATE.full_rope_cache[config_key] = (cos.unsqueeze(1).unsqueeze(1), sin.unsqueeze(1).unsqueeze(1))
+
+        # The DSA RoPE tables are built while the sleep-mode weights mem-pool is
+        # active and every DSA layer reads them through the process-global
+        # ``_ROPE_STATE`` cache. Own them as non-persistent buffers as well, so a
+        # level-2 sleep backs up and restores their contents in place; the cache
+        # keeps the same tensor objects, so the lookup path and the addresses
+        # baked into captured ACL graphs are unchanged. ``named_buffers()``
+        # de-duplicates shared tensors, so the layers that share a config key
+        # cost a single backup entry.
+        full_rope_cos, full_rope_sin = _ROPE_STATE.full_rope_cache[config_key]
+        self.register_buffer("full_rope_cos", full_rope_cos, persistent=False)
+        self.register_buffer("full_rope_sin", full_rope_sin, persistent=False)
 
         use_eagle = (
             vllm_config is not None

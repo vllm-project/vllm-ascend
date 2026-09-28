@@ -349,17 +349,18 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
         if dcp_size > 1:
-            if cad.is_prefilling is not None:
-                cad.is_prefilling.fill_(False)
             assert self.runner is not None
             dcp_manager = getattr(self.runner, "dcp_manager", None)
             assert dcp_manager is not None
-            long_seq_args = dcp_manager.prepare_dspark_first_pass_cp_metadata(
-                common_attn_metadata=cad,
-                num_query_per_req=self.num_query_per_req,
-            )
+            dcp_manager.prepare_parallel_draft_metadata(cad, self.draft_attn_groups)
 
         return num_query_total, token_indices_to_sample, cad, long_seq_args
+
+    def _clear_dummy_slot_mappings(self) -> None:
+        for buf in self._per_group_query_slot_mapping_buffers.values():
+            buf.fill_(-1)
+        for buf in self._per_group_context_slot_mapping_buffers.values():
+            buf.fill_(-1)
 
     @torch.inference_mode()
     def dummy_run(
@@ -389,7 +390,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         context_states = self.hidden_states[:num_input_tokens]
 
         self.token_indices_to_sample.fill_(0)
-        self._pad_draft_buffers(num_query_total, num_input_tokens)
+        self._clear_dummy_slot_mappings()
 
         with set_ascend_forward_context(
             None,

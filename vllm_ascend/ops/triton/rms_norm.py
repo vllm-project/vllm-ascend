@@ -37,6 +37,19 @@ def triton_rms_kernel(
         tl.store(norm_output_ptr + offset_hidden, output, mask=mask_row)
 
 
+def _rms_block_m(total_batch: int, num_vectorcore: int) -> int:
+    """Tile size used by ``triton_q_rms``.
+
+    Flooring ``BLOCK_M`` to a power of two is math-equivalent (leftover rows
+    are already masked) and cuts the JIT constexpr set from 16 values to
+    ``{1, 2, 4, 8, 16}``.
+    """
+    row_block_size = 16
+    batch_per_core = triton.cdiv(total_batch, num_vectorcore)
+    raw = min(row_block_size, int(batch_per_core))
+    return 1 << (max(raw, 1).bit_length() - 1)
+
+
 def triton_q_rms(
     q,  # bs, 64, 512
     variance_epsilon,
@@ -51,10 +64,7 @@ def triton_q_rms(
     device_properties = triton.runtime.driver.active.utils.get_device_properties(q.device)
     num_vectorcore = device_properties.get("num_vectorcore", -1)
 
-    ROW_BLOCK_SIZE = 16  # A safe default balancing parallelism and register pressure.
-    batch_per_core = triton.cdiv(total_batch, num_vectorcore)
-    raw = min(ROW_BLOCK_SIZE, batch_per_core)
-    BLOCK_M = 1 << (raw.bit_length() - 1)
+    BLOCK_M = _rms_block_m(total_batch, num_vectorcore)
 
     grid = (num_vectorcore,)
     norm_output = torch.empty_like(q)
