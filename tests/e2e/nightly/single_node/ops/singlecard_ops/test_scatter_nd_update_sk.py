@@ -6,9 +6,15 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.device.device_config import check_ascend_device_type
+from vllm_ascend.utils import bootstrap_custom_op_env
 
-enable_custom_op()
+# A5 的 hardware profile 未启用 RUNTIME_CUSTOM_OPS，enable_custom_op() 会直接
+# 返回 False，需参考 test_add_rms_norm_bias_a5.py 用 bootstrap + 显式 import。
+bootstrap_custom_op_env()
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, E402
+
+check_ascend_device_type()
 
 seed = 45
 random.seed(seed)

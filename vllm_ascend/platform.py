@@ -38,6 +38,7 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
+from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
 # isort: off
 from vllm_ascend.utils import (
@@ -75,6 +76,12 @@ logger.info_once(
 )
 
 _CUSTOM_OP_REGISTERED = False
+_MINIMAX_M3_ARCHITECTURES = frozenset(
+    {
+        "MiniMaxM3SparseForCausalLM",
+        "MiniMaxM3SparseForConditionalGeneration",
+    }
+)
 
 
 class NPUPlatform(Platform):
@@ -456,9 +463,22 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        # NOTE: This still monkey-patches VllmConfig by replacing the
+        # use_v2_model_runner property (the "patch way"). It is kept here
+        # because upstream vLLM does not yet expose a platform hook to
+        # make V2 the unconditional platform default.
+        # The upstream V2 validation is also neutralized, since Ascend fully
+        # owns the V2 enablement decision.
+        # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
+        # override the default runner selection.
+        apply_v2_model_runner_config_patch()
+
         # Lazy import vllm/vllm-ascend to avoid circular import
+        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
+
+        sync_v2_extra_kwargs(vllm_config)
 
         # 1.Configure logging
         configure_ascend_file_logging()
@@ -550,6 +570,7 @@ class NPUPlatform(Platform):
             get_mc2_mask,
             get_mrv2_in_profile_run,
             select_moe_comm_method,
+            sync_v2_extra_kwargs,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
@@ -563,6 +584,7 @@ class NPUPlatform(Platform):
 
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = CUDAGraphMode.NONE
+        sync_v2_extra_kwargs(vllm_config)
         # TODO(Ronald1995): model runner v1 still use ascend_forward_context,
         # when v1's forward context is refactored, we can remove this branch.
         # Currently, model runner v2 use the new forward context.
@@ -580,7 +602,12 @@ class NPUPlatform(Platform):
         sinks = False
         in_profile_run = get_mrv2_in_profile_run()
 
-        tp_world_size = get_tensor_model_parallel_world_size()
+        try:
+            tp_world_size = get_tensor_model_parallel_world_size()
+        except AssertionError:
+            # Kernel / precision tests call set_forward_context without
+            # initializing TP. Keep V1 extras there.
+            return {"dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg}
 
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing.
@@ -640,6 +667,50 @@ class NPUPlatform(Platform):
         }
 
 
+def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
+    """Keep MiniMax-M3 GQA KV cache in BF16 on the A5 FP8 path."""
+    model_config = vllm_config.model_config
+    cache_config = vllm_config.cache_config
+    if (
+        model_config is None
+        or cache_config is None
+        or cache_config.cache_dtype not in ("fp8", "fp8_e4m3")
+        or not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+    ):
+        return
+
+    # ModelConfig.architecture is populated later in vLLM initialization. Read
+    # the source-of-truth HF architectures here because this hook runs early.
+    hf_config = getattr(model_config, "hf_config", None)
+    architectures = getattr(hf_config, "architectures", None) or ()
+    if not _MINIMAX_M3_ARCHITECTURES.intersection(architectures):
+        return
+
+    text_config = getattr(model_config, "hf_text_config", None)
+    if text_config is None:
+        return
+    num_hidden_layers = getattr(text_config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int):
+        return
+
+    sparse_config = getattr(text_config, "sparse_attention_config", None) or {}
+    sparse_freq = sparse_config.get("sparse_attention_freq") or []
+    sparse_layer_ids = {layer_idx for layer_idx, freq in enumerate(sparse_freq) if freq != 0}
+    gqa_layer_ids = [str(layer_idx) for layer_idx in range(num_hidden_layers) if layer_idx not in sparse_layer_ids]
+    if not gqa_layer_ids:
+        return
+
+    skip_layers = list(dict.fromkeys(str(layer) for layer in (cache_config.kv_cache_dtype_skip_layers or [])))
+    known_skip_layers = set(skip_layers)
+    skip_layers.extend(layer for layer in gqa_layer_ids if layer not in known_skip_layers)
+    cache_config.kv_cache_dtype_skip_layers = skip_layers
+    logger.info_once(
+        "Using BF16 KV cache for MiniMax-M3 GQA layers %s on Ascend A5; other layers retain the configured %s policy.",
+        ", ".join(gqa_layer_ids),
+        cache_config.cache_dtype,
+    )
+
+
 def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
     """
     Check and correct parameters in VllmConfig that are incompatible with Ascend NPU.
@@ -673,6 +744,8 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
                 "Parameter is not supported on Ascend NPU. parameter=calculate_kv_scales, action: resetting to False."
             )
             vllm_config.cache_config.calculate_kv_scales = False
+
+        _configure_minimax_m3_a5_mixed_kv_cache(vllm_config)
 
     # ==================== 3. MultiModal Config ====================
     multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
@@ -879,12 +952,13 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
 
     use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
     if use_v2_model_runner:
-        legacy_eplb_fields = sorted(set(eplb_config) - {"load_collection_phase"})
-        if legacy_eplb_fields:
+        supported_eplb_fields = {"load_collection_phase", "stair_config"}
+        unsupported_eplb_fields = sorted(set(eplb_config) - supported_eplb_fields)
+        if unsupported_eplb_fields:
             raise ValueError(
-                "Model Runner V2 only accepts 'load_collection_phase' in "
-                "additional_config.eplb_config; legacy fields are not supported: "
-                f"{', '.join(legacy_eplb_fields)}."
+                "Model Runner V2 only accepts 'load_collection_phase' and 'stair_config' in "
+                "additional_config.eplb_config; unsupported fields: "
+                f"{', '.join(unsupported_eplb_fields)}."
             )
         if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
             "EXPERT_MAP_RECORD", "false"
@@ -914,10 +988,10 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                 upstream_eplb_config.communicator = "torch_gloo"
             if vllm_config.parallel_config.enable_elastic_ep:
                 raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
-    elif "load_collection_phase" in eplb_config:
+    elif {"load_collection_phase", "stair_config"} & eplb_config.keys():
         raise ValueError(
-            "additional_config.eplb_config.load_collection_phase is only supported by "
-            "Model Runner V2; use eplb_heat_collection_stage with Model Runner V1."
+            "stair_config and load_collection_phase are only supported by Model Runner V2; "
+            "use eplb_heat_collection_stage with Model Runner V1."
         )
     elif vllm_config.parallel_config.enable_eplb:
         raise ValueError("Upstream EPLB is only supported by Model Runner V2 on Ascend.")
@@ -1528,7 +1602,8 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
             )
         # A5 supports non-C8 SFA DCP, but its SFA C8 operator does not yet
         # support DCP with a replicated indexer. Reject that combination early.
-        if vllm_config.additional_config.get("enable_sparse_sfa_c8", False) and not (
+        additional_config = getattr(vllm_config, "additional_config", None) or {}
+        if additional_config.get("enable_sparse_sfa_c8", False) and not (
             get_current_hardware_profile().supports(HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER)
         ):
             raise NotImplementedError(
