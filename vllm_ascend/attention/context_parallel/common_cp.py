@@ -173,7 +173,8 @@ def _process_attn_out_lse(
         dcp_size = get_decode_context_model_parallel_world_size()
     if dcp_size > 1 and dcp_device_group is None:
         dcp_device_group = get_dcp_group().device_group
-    softmax_lse = softmax_lse.to(torch.float32)
+    # With zeroed empty-shard outputs, avoid exp(-inf - -inf) in the merge.
+    softmax_lse = softmax_lse.to(torch.float32).clamp_min(torch.finfo(torch.float32).min)
     attn_output = attn_output.to(torch.float32)
     # Concat out&lse: [bs,num_heads,v_head_dim] + [bs,num_heads,1] -> [bs,num_heads,v_head_dim+1]
     attn_out_lse = torch.cat([attn_output, softmax_lse], dim=-1)
