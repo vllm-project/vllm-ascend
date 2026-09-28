@@ -344,14 +344,17 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(self, layer: torch.nn.Module):
         pass
 
-    def get_computed_params(self) -> set[str]:
-        get_computed_params = getattr(self.quant_method, "get_computed_params", None)
-        return get_computed_params() if get_computed_params is not None else set()
-
     @property
     def supports_eplb(self):
         supports_eplb = getattr(self.quant_method, "supports_eplb", False)
         return supports_eplb
+
+
+class AscendOnlineFusedMoEMethod(AscendFusedMoEMethod):
+    """Expose online-computed MoE scales without changing offline methods."""
+
+    def get_computed_params(self) -> set[str]:
+        return self.quant_method.get_computed_params()
 
 
 class AscendEmbeddingMethod(AscendLinearMethod):

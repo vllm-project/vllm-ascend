@@ -16,7 +16,11 @@ from vllm.model_executor.model_loader.reload import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, get_quant_config
 
 from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig
-from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod, AscendLinearMethod
+from vllm_ascend.quantization.method_adapters import (
+    AscendFusedMoEMethod,
+    AscendLinearMethod,
+    AscendOnlineFusedMoEMethod,
+)
 from vllm_ascend.quantization.methods.w8a8 import w8a8_mxfp8 as methods
 from vllm_ascend.utils import AscendDeviceType
 
@@ -74,13 +78,9 @@ class TestOnlineMXFP8(unittest.TestCase):
         mock = patch("vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=config)
         mock.start()
         self.addCleanup(mock.stop)
-        for target, return_value in (
-            ("vllm_ascend.quantization.method_adapters.enable_dsa_cp_with_layer_shard", False),
-            ("vllm_ascend.quantization.method_adapters.FusedMoEMethodBase.__init__", None),
-        ):
-            mock = patch(target, return_value=return_value)
-            mock.start()
-            self.addCleanup(mock.stop)
+        mock = patch("vllm_ascend.quantization.method_adapters.FusedMoEMethodBase.__init__", return_value=None)
+        mock.start()
+        self.addCleanup(mock.stop)
 
     def linear_layer(self, dtype, input_size=96):
         layer = torch.nn.Module()
@@ -94,7 +94,7 @@ class TestOnlineMXFP8(unittest.TestCase):
         layer = torch.nn.Module()
         # Avoid unrelated fused-kernel configuration; create_weights and loading
         # still run through the real Ascend adapter implementation.
-        adapter = object.__new__(AscendFusedMoEMethod)
+        adapter = object.__new__(AscendOnlineFusedMoEMethod)
         adapter.quant_method = methods.AscendMXFP8OnlineMoEMethod()
         layer.quant_method = adapter
         adapter.create_weights(layer, 2, 96, 96, dtype, weight_loader=default_weight_loader)
@@ -116,6 +116,11 @@ class TestOnlineMXFP8(unittest.TestCase):
                         param = getattr(layer, name)
                         param.data.fill_(1)
                     loader.process_weights_after_loading(layer)
+                    if names == ("weight",):
+                        self.assertEqual(tuple(layer.weight_scale.shape), (2, 8, 2))
+                    else:
+                        self.assertEqual(tuple(layer.w13_weight_scale.shape), (2, 2, 192, 2))
+                        self.assertEqual(tuple(layer.w2_weight_scale.shape), (2, 2, 96, 2))
                     before = storage_snapshot(layer)
                     for value in (2, 3):
                         initialize_layerwise_reload(layer)
@@ -143,7 +148,7 @@ class TestOnlineMXFP8(unittest.TestCase):
                 torch.tensor([[1, 2, 3, 99], [4, 5, 6, 99]], dtype=torch.uint8),
             )
             _, scales = methods._quantize_online_weight(weight)
-        expected = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.uint8)
+        expected = torch.tensor([[1, 2, 3, 0], [4, 5, 6, 0]], dtype=torch.uint8)
         torch.testing.assert_close(scales, expected)
 
     def test_rejects_invalid_dtype_and_reduction_dimension(self):
@@ -171,6 +176,30 @@ class TestOnlineMXFP8(unittest.TestCase):
             self.assertEqual(weight.dtype, torch.float8_e4m3fn)
         self.assertFalse(getattr(linear, "online_quantization", False))
         self.assertFalse(getattr(moe, "online_quantization", False))
+        self.quantize.assert_not_called()
+
+    def test_disabled_online_option_keeps_existing_method_selection(self):
+        from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+
+        linear = object.__new__(LinearBase)
+        torch.nn.Module.__init__(linear)
+        moe = object.__new__(RoutedExperts)
+        torch.nn.Module.__init__(moe)
+        moe.moe_config = SimpleNamespace()
+        moe.weight_loader = lambda *args, **kwargs: None
+
+        float_config = AscendModelSlimConfig.from_config({})
+        self.assertFalse(float_config.online_quantization)
+        self.assertIsInstance(float_config.get_quant_method(linear, "linear"), AscendUnquantizedLinearMethod)
+
+        offline_config = AscendModelSlimConfig.from_config(
+            {"online_quantization": False, "linear.weight": "W8A8_MXFP8", "moe.weight": "W8A8_MXFP8"}
+        )
+        linear_method = offline_config.get_quant_method(linear, "linear")
+        moe_method = offline_config.get_quant_method(moe, "moe")
+        self.assertIs(type(linear_method.quant_method), methods.AscendW8A8MXFP8DynamicLinearMethod)
+        self.assertIs(type(moe_method), AscendFusedMoEMethod)
+        self.assertIs(type(moe_method.quant_method), methods.AscendW8A8MXFP8DynamicFusedMoEMethod)
         self.quantize.assert_not_called()
 
     def online_config(self, **kwargs):
@@ -231,7 +260,7 @@ class TestOnlineMXFP8(unittest.TestCase):
         config = self.online_config()
         self.assertIsInstance(config.get_quant_method(linear, "linear"), AscendLinearMethod)
         selected = config.get_quant_method(moe, "moe", tid2eid="sentinel")
-        self.assertIsInstance(selected, AscendFusedMoEMethod)
+        self.assertIsInstance(selected, AscendOnlineFusedMoEMethod)
         self.assertEqual(selected.tid2eid, "sentinel")
         config = self.online_config(ignore=["linear", "moe"])
         self.assertIsInstance(config.get_quant_method(linear, "linear"), AscendUnquantizedLinearMethod)

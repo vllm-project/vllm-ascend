@@ -428,7 +428,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         # Delayed imports avoid the quantization/ops import cycle.
         from vllm.model_executor.layers.quantization.compressed_tensors.utils import should_ignore_layer
 
-        from ..method_adapters import AscendFusedMoEMethod, AscendLinearMethod
+        from ..method_adapters import AscendLinearMethod, AscendOnlineFusedMoEMethod
         from ..methods.w8a8.w8a8_mxfp8 import AscendMXFP8OnlineLinearMethod, AscendMXFP8OnlineMoEMethod
 
         if not isinstance(layer, LinearBase) and not is_fused_moe_layer(layer):
@@ -450,7 +450,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
 
             return AscendUnquantizedFusedMoEMethod(layer.moe_config, tid2eid=tid2eid)
-        return AscendFusedMoEMethod(AscendMXFP8OnlineMoEMethod(), layer.moe_config, tid2eid=tid2eid)
+        return AscendOnlineFusedMoEMethod(AscendMXFP8OnlineMoEMethod(), layer.moe_config, tid2eid=tid2eid)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg, user_quant, hf_config: Any = None) -> str | None:

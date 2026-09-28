@@ -601,7 +601,9 @@ def _quantize_online_weight(weight: torch.Tensor) -> tuple[torch.Tensor, torch.T
     if scales.numel() not in (rows.shape[0] * groups, rows.shape[0] * padded_groups):
         raise ValueError("npu_dynamic_mx_quant returned an unexpected scale shape.")
     scales = scales.reshape(rows.shape[0], -1)[:, :groups].contiguous()
-    return quantized.reshape(weight.shape), scales.reshape(*weight.shape[:-1], groups)
+    if groups % 2:
+        scales = F.pad(scales, (0, 1), value=0)
+    return quantized.reshape(weight.shape), scales.reshape(*weight.shape[:-1], padded_groups)
 
 
 class AscendMXFP8OnlineLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
