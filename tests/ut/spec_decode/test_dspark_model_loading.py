@@ -64,8 +64,9 @@ def test_post_process_receives_target_config_after_loading(monkeypatch, fail):
 )
 @pytest.mark.parametrize("own_embed,own_head", [(False, False), (True, False), (False, True), (True, True)])
 @pytest.mark.parametrize("rotated", [False, True])
+@pytest.mark.parametrize("pp_size", [1, 2])
 def test_post_process_aligns_weights_without_modifying_target(
-    monkeypatch, model_cls, projection_name, num_aux_layers, own_embed, own_head, rotated
+    monkeypatch, model_cls, projection_name, num_aux_layers, own_embed, own_head, rotated, pp_size
 ):
     target_embed = torch.nn.Embedding(4, 2, dtype=torch.float64)
     target_head = torch.nn.Linear(2, 4, bias=False, dtype=torch.float64)
@@ -94,6 +95,7 @@ def test_post_process_aligns_weights_without_modifying_target(
     rotation = torch.tensor([[0.0, -1.0], [1.0, 0.0]], dtype=torch.float64)
     monkeypatch.setattr(qwen3_dspark, "get_rotation_path", lambda received: "/rotation" if rotated else None)
     monkeypatch.setattr(qwen3_dflash2, "get_rotation_path", lambda received: "/rotation" if rotated else None)
+    monkeypatch.setattr(qwen3_dspark, "get_pp_group", lambda: SimpleNamespace(world_size=pp_size))
     loader = MagicMock(return_value=rotation)
     monkeypatch.setattr(qwen3_dspark, "get_rotation_matrix", loader)
     created = []
@@ -106,7 +108,7 @@ def test_post_process_aligns_weights_without_modifying_target(
 
     def load_layer(layer, path, names, matrix, label):
         source = target_embed_before if "embed_tokens" in label else target_head_before
-        layer.weight.copy_(source @ matrix.T)
+        layer.weight.copy_(source @ matrix.T if matrix is not None else source)
 
     monkeypatch.setattr(qwen3_dspark, "VocabParallelEmbedding", make_layer)
     monkeypatch.setattr(qwen3_dspark, "ParallelLMHead", make_layer)
@@ -121,21 +123,22 @@ def test_post_process_aligns_weights_without_modifying_target(
         inputs = torch.arange(1, 2 * num_aux_layers + 1, dtype=torch.float64).view(1, -1)
         rotated_inputs = (inputs.view(1, num_aux_layers, 2) @ rotation).view_as(inputs)
         torch.testing.assert_close(rotated_inputs @ projection.weight.T, inputs @ original_projection.T)
-        assert len(created) == int(not own_embed) + int(not own_head)
-        for layer in created:
-            layer.quant_method.process_weights_after_loading.assert_called_once_with(layer)
     else:
         loader.assert_not_called()
-        assert not created
         torch.testing.assert_close(projection.weight, original_projection)
-    for actual, original, before, target_weight, owns in (
-        (draft.model.embed_tokens, original_embed, original_embed_weight, target_embed_before, own_embed),
-        (draft.lm_head, original_head, original_head_weight, target_head_before, own_head),
+    # DFlash2 only invokes weight alignment for rotated targets.
+    reload_embed = rotated or (pp_size > 1 and model_cls is not DFlash2Qwen3ForCausalLM)
+    assert len(created) == int(not own_embed and reload_embed) + int(not own_head and rotated)
+    for layer in created:
+        layer.quant_method.process_weights_after_loading.assert_called_once_with(layer)
+    for actual, original, before, target_weight, owns, is_embed in (
+        (draft.model.embed_tokens, original_embed, original_embed_weight, target_embed_before, own_embed, True),
+        (draft.lm_head, original_head, original_head_weight, target_head_before, own_head, False),
     ):
-        if rotated and not owns:
+        if not owns and (reload_embed if is_embed else rotated):
             assert actual is not original
             assert actual.weight.data_ptr() != original.weight.data_ptr()
-            torch.testing.assert_close(actual.weight, target_weight @ rotation.T)
+            torch.testing.assert_close(actual.weight, target_weight @ rotation.T if rotated else target_weight)
         else:
             assert actual is original
             torch.testing.assert_close(actual.weight, before)
