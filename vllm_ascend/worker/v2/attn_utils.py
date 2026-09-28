@@ -1219,7 +1219,8 @@ def _reshape_kv_cache_v2(
                     vllm_config.cache_config.cache_dtype,
                     vllm_config.model_config,
                 )
-                k_cache = raw_cache.view(k_dtype).view(k_shape)
+                raw_k_tensor = raw_cache[0] if isinstance(raw_cache, tuple) else raw_cache
+                k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
             else:
                 k_dtype = v_dtype = kv_cache_spec.dtype
