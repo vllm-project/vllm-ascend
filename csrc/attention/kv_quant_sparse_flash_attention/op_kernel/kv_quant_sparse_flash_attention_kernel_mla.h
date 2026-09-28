@@ -174,6 +174,7 @@ private:
                                            RunInfo extraInfo[QSFA_PRELOAD_TASK_CACHE_SIZE]);
     // ================================Offset Calc=====================================
     __aicore__ inline void GetActualSeqLen(uint32_t bIdx, uint32_t s1Idx = 0);
+    __aicore__ inline uint64_t GetTopKBaseOffset(uint32_t bIdx, uint32_t s1Idx, uint32_t n2Idx);
     __aicore__ inline void GetSparseActualSeqLen(uint32_t bIdx, uint32_t s1Idx, uint32_t n2Idx);
     __aicore__ inline void UpdateInnerLoopCond();
     __aicore__ inline void DealActSeqLenIsZero(uint32_t bIdx, uint32_t s1Idx, uint32_t n2Idx);
@@ -330,6 +331,23 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<QSFAT>::GetActualSeqLen(ui
 }
 
 template <typename QSFAT>
+__aicore__ inline uint64_t KvQuantSparseFlashAttentionMla<QSFAT>::GetTopKBaseOffset(
+    uint32_t bIdx, uint32_t s1Idx, uint32_t n2Idx)
+{
+    if constexpr (LAYOUT_T == QSFA_LAYOUT::BSND) { // B,S1,N2,K
+        return bIdx * constInfo.qSeqSize * kvHeadNum * constInfo.sparseBlockCount +
+               s1Idx * kvHeadNum * constInfo.sparseBlockCount + n2Idx * constInfo.sparseBlockCount;
+    } else if (LAYOUT_T == QSFA_LAYOUT::TND) { // T,N2,K
+        uint64_t actualSeqQPrefixSum = (bIdx == 0) ? 0 : actualSeqLengthsQGm.GetValue(bIdx - 1);
+        return actualSeqQPrefixSum * kvHeadNum * constInfo.sparseBlockCount +
+               s1Idx * kvHeadNum * constInfo.sparseBlockCount + n2Idx * constInfo.sparseBlockCount;
+    } else { // B,N2,S1,K
+        return bIdx * kvHeadNum * constInfo.qSeqSize * constInfo.sparseBlockCount +
+               n2Idx * constInfo.qSeqSize * constInfo.sparseBlockCount + s1Idx * constInfo.sparseBlockCount;
+    }
+}
+
+template <typename QSFAT>
 __aicore__ inline void KvQuantSparseFlashAttentionMla<QSFAT>::GetSparseActualSeqLen(uint32_t bIdx, uint32_t s1Idx,
                                                                                       uint32_t n2Idx)
 {
@@ -342,24 +360,31 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<QSFAT>::GetSparseActualSeq
         threshold = static_cast<int64_t>(tempLoopInfo.nextTokensPerBatch) + s1Idx + 1;
     }
     if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
-        tempLoopInfo.curActualSeqLen = (constInfo.sparseBlockCount * constInfo.sparseBlockSize > threshold) ?
-                                           threshold :
-                                           constInfo.sparseBlockCount * constInfo.sparseBlockSize;
-    } else {
-        uint64_t topKBaseOffset = 0;
-        if constexpr (LAYOUT_T == QSFA_LAYOUT::BSND) { // B,S1,N2 K
-            topKBaseOffset = bIdx * constInfo.qSeqSize * kvHeadNum * constInfo.sparseBlockCount +
-                             s1Idx * kvHeadNum * constInfo.sparseBlockCount + n2Idx * constInfo.sparseBlockCount;
-        } else if (LAYOUT_T == QSFA_LAYOUT::TND) { // T N2 K
-            uint64_t actualSeqQPrefixSum = (bIdx <= 0) ? 0 : actualSeqLengthsQGm.GetValue(bIdx - 1);
-            topKBaseOffset = actualSeqQPrefixSum * kvHeadNum * constInfo.sparseBlockCount +
-                             s1Idx * kvHeadNum * constInfo.sparseBlockCount +
-                             n2Idx * constInfo.sparseBlockCount;
-        } else { // B N2 S1 K
-            topKBaseOffset = bIdx * kvHeadNum * constInfo.qSeqSize * constInfo.sparseBlockCount +
-                             n2Idx * constInfo.qSeqSize * constInfo.sparseBlockCount +
-                             s1Idx * constInfo.sparseBlockCount;
+        uint64_t selectedSparseBlockCount = constInfo.sparseBlockCount;
+#if defined(VLLM_ASCEND_SFA_A3)
+        if (constInfo.sparseMode == 0 && constInfo.sparseBlockSize == 1) {
+            // The operator contract requires [valid indices..., -1...]. Find the
+            // compact prefix length with O(log K) global-memory reads.
+            uint64_t topKBaseOffset = GetTopKBaseOffset(bIdx, s1Idx, n2Idx);
+            uint64_t left = 0;
+            uint64_t right = constInfo.sparseBlockCount;
+            while (left < right) {
+                uint64_t middle = left + (right - left) / 2;
+                if (topKGm.GetValue(topKBaseOffset + middle) >= 0) {
+                    left = middle + 1;
+                } else {
+                    right = middle;
+                }
+            }
+            // Preserve the original raw softmax max/sum contract for a row
+            // with no local winner; non-empty rows skip the invalid suffix.
+            selectedSparseBlockCount = (left == 0) ? constInfo.sparseBlockCount : left;
         }
+#endif
+        int64_t selectedSparseLen = static_cast<int64_t>(selectedSparseBlockCount * constInfo.sparseBlockSize);
+        tempLoopInfo.curActualSeqLen = (selectedSparseLen > threshold) ? threshold : selectedSparseLen;
+    } else {
+        uint64_t topKBaseOffset = GetTopKBaseOffset(bIdx, s1Idx, n2Idx);
 
         uint64_t sparseLen = 0;
 
