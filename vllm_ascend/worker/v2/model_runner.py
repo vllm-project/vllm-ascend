@@ -309,6 +309,13 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.model_state.kvpp_runtime = self.kvpp
 
+    def capture_model(self) -> int:
+        from vllm_ascend.worker.model_runner_v1 import _zero_static_kv_buffers
+
+        cuda_graph_size = super().capture_model()
+        _zero_static_kv_buffers(self)
+        return cuda_graph_size
+
     @torch.inference_mode()
     def execute_model(
         self,

@@ -22,7 +22,7 @@ import math
 import sys
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
@@ -345,6 +345,54 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+
+
+def _iter_kv_tensors(kv_cache: Any) -> Iterator[torch.Tensor]:
+    """Yield every tensor nested inside a kv_cache container."""
+    if isinstance(kv_cache, torch.Tensor):
+        yield kv_cache
+    elif isinstance(kv_cache, (list, tuple)):
+        for item in kv_cache:
+            yield from _iter_kv_tensors(item)
+    elif isinstance(kv_cache, dict):
+        for item in kv_cache.values():
+            yield from _iter_kv_tensors(item)
+
+
+def _zero_tensor(t: torch.Tensor) -> None:
+    """Zero a tensor in place, tolerating fp8 storages without zero_()."""
+    try:
+        t.zero_()
+    except RuntimeError:
+        # fp8 storages may not implement zero_(); reinterpret as int8.
+        try:
+            t.view(torch.int8).zero_()
+        except RuntimeError:
+            # view() requires a contiguous tensor; copy zeros in instead.
+            t.copy_(torch.zeros_like(t))
+
+
+def _zero_static_kv_buffers(runner) -> None:
+    """Zero every KV-cache / recurrent-state tensor in static_forward_context.
+
+    Fix for the GLM-5.3-Flash C8 accuracy collapse: FULL_DECODE_ONLY capture
+    runs dummy decodes that really execute the attention KV-write path over
+    the persistent buffers while the C8 cache is still all-zero. The
+    resulting inf/NaN get baked into the resident KDA recurrent state and SFA
+    fp8 KV pages (fp8_e4m3 has NaN encodings; the dynamic block quantizer
+    writes them into the per-block scale slot, and the read-side dequant
+    multiply turns 0 * inf into NaN). Nothing resets the buffers after
+    capture, so the first real request reads poisoned state and collapses
+    into emitting '!' forever. Zeroing right after capture_model() restores
+    the logically-empty state the engine assumes at startup. It runs exactly
+    once per startup, outside any captured graph, so graph replay and
+    steady-state inference are unaffected.
+    """
+    compilation_config = getattr(runner, "compilation_config", None)
+    ctx = getattr(compilation_config, "static_forward_context", None) or {}
+    for mod in ctx.values():
+        for tensor in _iter_kv_tensors(getattr(mod, "kv_cache", None)):
+            _zero_tensor(tensor)
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -6305,6 +6353,8 @@ class NPUModelRunner(GPUModelRunner):
                 cuda_graph_size = GPUModelRunner.capture_model(self)
         finally:
             self._engram_capture_active = False
+
+        _zero_static_kv_buffers(self)
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and self.update_stream is not None:
