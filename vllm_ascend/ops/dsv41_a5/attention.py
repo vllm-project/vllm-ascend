@@ -62,7 +62,7 @@ def _resolve_window_indices(q, metadata, window_size):
 
 def qsmla(
     q,
-    win_kv,
+    ori_kv,
     cmp_kv,
     metadata,
     compressed_indices,
@@ -74,28 +74,28 @@ def qsmla(
 ):
     import_packaged_a5_module("cann_ops_transformer.ops.attention.mixed_quant_sparse_flash_mla_dsl")
 
-    win_indices, win_lengths = _resolve_window_indices(q, metadata, window_size)
+    ori_indices, ori_lengths = _resolve_window_indices(q, metadata, window_size)
     has_cmp = cmp_kv is not None
     if has_cmp:
         cmp_indices = compressed_indices[:, None, :].to(torch.int32).contiguous()
         cmp_lengths = compressed_lengths
     else:
         cmp_indices = None
-        cmp_lengths = torch.zeros_like(win_lengths)
+        cmp_lengths = torch.zeros_like(ori_lengths)
     task_metadata = metadata.swa.smla_metadata
     wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(task_metadata))
     output, _ = torch.ops.cann_ops_transformer.ds41.mixed_quant_sparse_flash_mla(
         q,
-        win_kv=win_kv,
+        ori_kv=ori_kv,
         cmp_kv=cmp_kv,
-        win_sparse_indices=win_indices,
+        ori_sparse_indices=ori_indices,
         cmp_sparse_indices=cmp_indices,
-        win_block_table=metadata.swa.block_table,
+        ori_block_table=metadata.swa.block_table,
         cmp_block_table=metadata.attention.block_table if has_cmp else None,
         cu_seqlens_q=metadata.swa.query_start_loc,
-        seqused_win_kv=metadata.swa.seq_lens,
+        seqused_ori_kv=metadata.swa.seq_lens,
         seqused_cmp_kv=metadata.attention.cache_seq_lens if has_cmp else None,
-        win_topk_length=win_lengths,
+        ori_topk_length=ori_lengths,
         cmp_topk_length=cmp_lengths if has_cmp else None,
         sinks=sinks.detach().float().contiguous(),
         metadata=task_metadata,

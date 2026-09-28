@@ -8,7 +8,7 @@ import typing
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import partial
+from itertools import islice
 from typing import Any
 
 import torch
@@ -98,7 +98,7 @@ from .indexer import DeepseekV41Indexer
 
 def _engram_enabled_for_runtime(config, vllm_config) -> bool:
     """Use the current vLLM Engram opt-in for both runtime paths."""
-    return engram_enabled(config, vllm_config)
+    return engram_enabled(config) and vllm_config.engram_config is not None
 
 
 class DeepseekV41MLP(nn.Module):
@@ -1090,7 +1090,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         if self.has_engram:
             if vllm_config.load_config.load_format != "dummy":
                 with torch.device("cpu"):
-                    block = load_engram_rotation_block(self.engram_root, config.hidden_size, rotation_path)
+                    block = load_engram_rotation_block(self.engram_root, config.hidden_size)
                 self.engram_rotation.copy_(block)
             # Upstream owns the n-gram history; the adapter only hands it the
             # Ascend SWA slot metadata (see engram/hash_state.py).

@@ -36,6 +36,8 @@ A5_INDEX_LOGICAL_DIM = 128
 A5_INDEX_GROUP_SIZE = 32
 A5_INDEX_DATA_BYTES = A5_INDEX_LOGICAL_DIM // 2
 A5_INDEX_SCALE_COUNT = A5_INDEX_LOGICAL_DIM // A5_INDEX_GROUP_SIZE
+A5_INDEX_FOLDED_GROUP_ROWS = 8
+A5_INDEX_FOLDED_ROW_BYTES = A5_INDEX_FOLDED_GROUP_ROWS * (A5_INDEX_DATA_BYTES + A5_INDEX_SCALE_COUNT)
 
 
 def uses_a5_packed_cache() -> bool:
@@ -100,6 +102,21 @@ def make_index_cache_spec(*, block_size, head_size, compress_ratio):
         storage_block_size=block_size // compress_ratio,
         scale_dim=scale_dim,
         scale_dtype=scale_dtype,
+    )
+
+
+def make_folded_index_cache_spec(*, block_size):
+    """0923 QSLI candidate-source view: 8 K/scale rows per 544-byte row."""
+    if block_size % A5_INDEX_FOLDED_GROUP_ROWS:
+        raise ValueError("A5 folded index page must contain full 8-token groups")
+    return AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=A5_INDEX_FOLDED_ROW_BYTES,
+        dtype=torch.uint8,
+        tokens_per_state=A5_INDEX_FOLDED_GROUP_ROWS,
+        model_version="deepseek_v41",
+        storage_block_size=block_size // A5_INDEX_FOLDED_GROUP_ROWS,
     )
 
 

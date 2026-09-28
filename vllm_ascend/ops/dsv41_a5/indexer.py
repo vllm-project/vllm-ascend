@@ -9,6 +9,7 @@ import torch
 from vllm_ascend.ops.triton.prepare_indexer_indices import (
     prepare_indexer_indices,
 )
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 from .package_loader import import_packaged_a5_module
 from .quantization import mxfp4_quantize_e8m0
@@ -32,6 +33,10 @@ def _prepare_indices(
 
 
 def _common(query, weights, source_cache, source_metadata, compress_ratio):
+    op_metadata = source_metadata.qli_metadata
+    if op_metadata is None:
+        raise RuntimeError("A5 QLI metadata was not built")
+    wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata))
     q_data, q_scale = mxfp4_quantize_e8m0(query)
     query_start_loc = source_metadata.query_start_loc
     return (
@@ -42,19 +47,24 @@ def _common(query, weights, source_cache, source_metadata, compress_ratio):
         source_cache[1].unflatten(-1, (2, 2)),
         dict(
             cu_seqlens_q=query_start_loc,
-            seqused_q=query_start_loc[1:] - query_start_loc[:-1],
             seqused_k=source_metadata.cache_seq_lens,
             cmp_residual_k=(source_metadata.cmp_residual if compress_ratio != 1 else None),
             block_table=source_metadata.block_table,
-            metadata=None,
-            max_seqlen_q=source_metadata.max_query_len,
+            metadata=op_metadata,
+            max_seqlen_q=-1,
             mask_mode=3,
             cmp_ratio=compress_ratio,
             layout_q="TND",
-            layout_kv="PA_BBND",
-            return_value=True,
+            return_value=False,
         ),
     )
+
+
+def _layout_keyword(op) -> str:
+    schema = getattr(op, "_schema", None)
+    if schema is None:
+        schema = op.default._schema
+    return "layout_kv" if "layout_kv" in str(schema) else "layout_k"
 
 
 def _qli(
@@ -82,6 +92,7 @@ def _qli(
         source_metadata,
         compress_ratio,
     )
+    common[_layout_keyword(torch.ops.cann_ops_transformer.ds41.quant_lightning_indexer)] = "PA_BBND"
     indices, _, candidate_out, candidate_length = torch.ops.cann_ops_transformer.ds41.quant_lightning_indexer(
         q,
         k,
@@ -122,19 +133,43 @@ def _qsli(
     indices_output,
 ):
     import_packaged_a5_module("cann_ops_transformer.ops.attention.quant_sparse_lightning_indexer_dsl")
-    q, qs, w, k, ks, common = _common(
+    if len(source_cache) != 3:
+        raise RuntimeError("A5 QSLI requires its source's folded K/scale twin")
+    q, qs, w, _, _, common = _common(
         query,
         weights,
         source_cache,
         source_metadata,
         compress_ratio,
     )
-    indices, _ = torch.ops.cann_ops_transformer.ds41.quant_sparse_lightning_indexer(
+    common.pop("metadata")
+    ops = torch.ops.cann_ops_transformer.ds41
+    metadata = ops.quant_sparse_lightning_indexer_metadata(
+        candidate_lengths,
+        cu_seqlens_q=common["cu_seqlens_q"],
+        seqused_k=common["seqused_k"],
+        cmp_residual_k=common["cmp_residual_k"],
+        batch_size=source_metadata.num_reqs,
+        max_seqlen_q=-1,
+        max_seqlen_k=-1,
+        num_heads_q=query.shape[1],
+        num_heads_k=1,
+        head_dim=query.shape[2],
+        topk=topk,
+        quant_mode=1,
+        candidate_block_size=candidate_block_size,
+        mask_mode=3,
+        cmp_ratio=compress_ratio,
+        layout_q="TND",
+        layout_k="PA_BBND",
+    )
+    common["metadata"] = metadata
+    common[_layout_keyword(ops.quant_sparse_lightning_indexer)] = "PA_BBND"
+    indices, _ = ops.quant_sparse_lightning_indexer(
         q,
-        k,
+        source_cache[2].squeeze(2),
         w,
         qs,
-        ks,
         candidates,
         candidate_lengths,
         topk,

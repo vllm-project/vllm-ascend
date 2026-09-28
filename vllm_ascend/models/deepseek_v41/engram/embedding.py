@@ -271,31 +271,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         with safe_open(root / index[key], framework="pt", device="cpu") as file:
             tensor = file.get_slice(key)
             source_dtype = tensor.get_dtype()
-            if self.weight.dtype == torch.bfloat16:
-                if tensor.get_dtype() != "BF16":
-                    raise ValueError(f"{key}: expected BF16 source for BF16 storage")
-                for chunk_start in range(start, end, chunk_rows):
-                    stop = min(chunk_start + chunk_rows, end)
-                    offset = chunk_start - start
-                    self.weight.data[offset : offset + stop - chunk_start].copy_(tensor[chunk_start:stop])
-            elif self.weight.dtype == torch.float8_e4m3fn:
-                if source_dtype not in ("F8_E4M3", "F8_E4M3FN"):
-                    raise ValueError(f"{key}: expected MXFP8 source for MXFP8 storage")
-                with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
-                    scale = sf.get_slice(scale_key)
-                    if scale.get_dtype() != "F8_E8M0":
-                        raise ValueError(f"{scale_key}: MXFP8 requires E8M0 scales")
-                    for chunk_start in range(start, end, chunk_rows):
-                        stop = min(chunk_start + chunk_rows, end)
-                        offset = chunk_start - start
-                        target_end = offset + stop - chunk_start
-                        # Preserve the checkpoint bits; uint8 scales hold the
-                        # E8M0 exponent, not a numerically cast integer value.
-                        self.weight.data[offset:target_end].view(torch.uint8).copy_(
-                            tensor[chunk_start:stop].view(torch.uint8)
-                        )
-                        self.weight_scale_inv.data[offset:target_end].copy_(scale[chunk_start:stop].view(torch.uint8))
-            elif source_dtype in ("I8", "INT8"):
+            if source_dtype in ("I8", "INT8"):
                 with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
                     scale = sf.get_slice(scale_key)
                     for chunk_start in range(start, end, chunk_rows):
@@ -305,9 +281,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                         self.weight.data[offset:target_end].copy_(tensor[chunk_start:stop])
                         self.weight_scale_inv.data[offset:target_end].copy_(scale[chunk_start:stop])
             elif source_dtype in ("F8_E4M3", "F8_E4M3FN"):
-                # Older devices use INT8/FP32 storage. Decode the checkpoint's
-                # E8M0 group-32 scales before requantizing; A5 takes the native
-                # bit-preserving load path above.
+                # A5 ships an MXFP8 Engram table, not unscaled floating-point
+                # rows. Decode the checkpoint's E8M0 group-32 scales before
+                # requantizing into the runtime's INT8 + FP32 representation.
                 with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
                     scale = sf.get_slice(scale_key)
                     for chunk_start in range(start, end, chunk_rows):

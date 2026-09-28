@@ -5459,6 +5459,13 @@ class NPUModelRunner(GPUModelRunner):
                             )
                         )
                         kv_cache_dtype_list.append(current_kv_cache_spec.scale_dtype)
+                    elif layer_name.endswith(".indexer.k_cache_folded"):
+                        source_name = layer_name.removesuffix(".indexer.k_cache_folded") + ".long_kv_cache"
+                        index_name = layer_name.removesuffix("_folded")
+                        initial_offset = (
+                            layer_kv_cache_spec[source_name].unpadded_page_size_bytes
+                            + layer_kv_cache_spec[index_name].unpadded_page_size_bytes
+                        )
                     views = self._adjust_kv_layout(
                         kv_cache_raw_tensors[layer_name],
                         kv_cache_shape_list,

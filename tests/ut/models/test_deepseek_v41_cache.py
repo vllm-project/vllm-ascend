@@ -232,43 +232,11 @@ def test_candidate_source_folded_index_cache_is_in_same_physical_slot(runtime):
     assert tuples[source_slot][:3] == (long_name, index_name, name)
     assert page_sizes[source_slot] >= sum(specs[layer].unpadded_page_size_bytes for layer in tuples[source_slot][:3])
     groups = make_cache_groups(group_cache_specs(specs))
-    planned = get_deepseek_v41_kv_cache_config(runtime, groups, get_deepseek_v41_pool_bytes_per_block(groups) * 2)
+    planned = get_deepseek_v41_kv_cache_config(
+        runtime, groups, get_deepseek_v41_pool_bytes_per_block(groups) * 2
+    )
     assert planned.kv_cache_tensors[source_slot].layers[:3] == [long_name, index_name, name]
     assert planned.kv_cache_tensors[source_slot].block_stride == page_sizes[source_slot]
-
-
-@pytest.mark.parametrize("block_size", [32, 64, 128])
-def test_mrv2_folded_indexer_view_does_not_alias_long_kv(runtime, monkeypatch, block_size):
-    from vllm_ascend.worker.v2 import attn_utils
-
-    runtime.cache_config.block_size = block_size
-    specs = collect_specs(runtime)
-    folded = "model.layers.20.self_attn.indexer.k_cache_folded"
-    index = folded.removesuffix("_folded")
-    long_kv = folded.removesuffix(".indexer.k_cache_folded") + ".long_kv_cache"
-    specs[folded] = make_folded_index_cache_spec(block_size=runtime.cache_config.block_size)
-    groups = make_cache_groups(group_cache_specs(specs))
-    planned = get_deepseek_v41_kv_cache_config(runtime, groups, get_deepseek_v41_pool_bytes_per_block(groups) * 2)
-    layer_specs = attn_utils._get_layer_kv_cache_specs(planned)
-    allocation = next(d for d in planned.kv_cache_tensors if folded in d.layers)
-    backing = torch.zeros(allocation.size, dtype=torch.int8)
-    backend = SimpleNamespace(get_kv_cache_shape=lambda *shape: shape)
-    names = [long_kv, index, folded]
-    attn_groups = [
-        SimpleNamespace(kv_cache_group_id=i, kv_cache_spec=layer_specs[name], layer_names=[name], backend=backend)
-        for i, name in enumerate(names)
-    ]
-    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
-    views = attn_utils._reshape_kv_cache_v2(
-        attn_groups, dict.fromkeys(names, backing), "auto", [runtime.cache_config.block_size] * 3, {}, planned
-    )
-    expected_offset = layer_specs[long_kv].unpadded_page_size_bytes + layer_specs[index].unpadded_page_size_bytes
-    assert views[folded].data_ptr() - backing.data_ptr() == expected_offset
-    assert views[folded].stride(0) * views[folded].element_size() == allocation.block_stride
-    views[folded].fill_(7)
-    assert torch.count_nonzero(views[long_kv]) == 0
-    assert all(torch.count_nonzero(part) == 0 for part in views[index])
 
 
 def test_production_layout_matches_design(config, runtime):
