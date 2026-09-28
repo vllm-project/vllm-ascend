@@ -6,8 +6,10 @@ Run inside an Ascend container, without installing the local checkout:
     python case_generator.py --task function --t 64 --e 16 --k 8
     python case_generator.py --task performance --matrix
 
-The baseline is the current two-launch path: the project CANN operator and
-the extracted, installed Triton map-and-record function. A candidate module
+The profile baseline is the current three-task path: the project CANN operator
+and extracted Triton map and record kernels. Correctness additionally uses
+the actual NPU MoE init-routing count as the mainline record input, rather
+than the representative count vector used only for timing. A candidate module
 can be passed with --candidate; it must export ``moe_gating_topk_map_record``.
 """
 
@@ -28,6 +30,7 @@ EXPERT_COUNTS = (8, 16, 32)
 TOP_K_VALUES = (6, 8)
 SCORING_KINDS = ("softmax", "sigmoid")
 TABLE_ROWS = 1024
+COUNT_REFERENCE_HIDDEN_SIZE = 32
 
 
 @dataclass(frozen=True)
@@ -97,11 +100,11 @@ def load_baseline_ops(path: str):
     return module
 
 
-def baseline(case: Case, tensors, baseline_ops):
+def mainline_gating_and_mapping(case: Case, tensors, baseline_ops):
     from vllm_ascend.utils import enable_custom_op
 
     enable_custom_op()
-    logits, bias, table, load, enabled, _, expert_tokens = tensors
+    logits, bias, table, _, _, _, _ = tensors
     weights, logical_ids, _ = torch.ops._C_ascend.moe_gating_top_k(
         logits,
         k=case.top_k,
@@ -116,8 +119,41 @@ def baseline(case: Case, tensors, baseline_ops):
         bias_opt=bias,
     )
     physical_ids = baseline_ops.map_to_physical_triton(logical_ids, table)
+    return weights, physical_ids
+
+
+def baseline(case: Case, tensors, baseline_ops):
+    weights, physical_ids = mainline_gating_and_mapping(case, tensors, baseline_ops)
+    _, _, _, load, enabled, _, expert_tokens = tensors
     baseline_ops.record_expert_tokens_triton(expert_tokens, load, enabled, 1, 0)
     return weights, physical_ids
+
+
+def mainline_moe_record(case: Case, physical_ids: torch.Tensor, enabled: torch.Tensor, initial_load, baseline_ops):
+    """Use the MoE dispatcher's real count-mode output as record input.
+
+    This direct reference is the EP=1, all-valid domain. A synthetic partial
+    valid-prefix case is checked separately against its explicit histogram;
+    it is not mislabelled as an MoE-returned-count comparison.
+    """
+    import torch_npu
+
+    hidden = torch.zeros((case.tokens, COUNT_REFERENCE_HIDDEN_SIZE), dtype=torch.bfloat16, device=physical_ids.device)
+    # DeviceOperator.npu_moe_init_routing delegates to this CANN op with
+    # identical arguments. Importing DeviceOperator directly from an extracted
+    # case causes a circular import before vllm-ascend initializes its ops.
+    _, _, expert_tokens, _ = torch_npu.npu_moe_init_routing_v2(
+        hidden,
+        physical_ids,
+        active_num=case.tokens * case.top_k,
+        expert_num=case.experts,
+        expert_tokens_num_type=1,
+        expert_tokens_num_flag=True,
+        active_expert_range=[0, case.experts],
+    )
+    recorded_load = initial_load.clone()
+    baseline_ops.record_expert_tokens_triton(expert_tokens, recorded_load, enabled, 1, 0)
+    return expert_tokens, recorded_load
 
 
 def independent_reference(case: Case, tensors):
@@ -150,17 +186,18 @@ def load_candidate(path: str):
 
 def run_one(case: Case, baseline_ops, candidate=None, check=True):
     tensors = make_inputs(case, "npu")
-    weights, physical_ids = baseline(case, tensors, baseline_ops)
+    weights, physical_ids = mainline_gating_and_mapping(case, tensors, baseline_ops)
     torch.npu.synchronize()
     if check:
         ref_weights, ref_ids, _ = independent_reference(case, tensors)
         torch.testing.assert_close(physical_ids.cpu(), ref_ids, rtol=0, atol=0)
         torch.testing.assert_close(weights.cpu(), ref_weights, rtol=1e-4, atol=1e-5)
     if candidate is not None:
+        initial_load = torch.arange(case.experts, dtype=torch.int32, device="npu")
         candidate_valid = (
             (case.tokens if case.valid_tokens is None else case.valid_tokens) if case.valid_as_int else tensors[5]
         )
-        candidate_tensors = (*tensors[:3], torch.zeros_like(tensors[3]), tensors[4], candidate_valid)
+        candidate_tensors = (*tensors[:3], initial_load.clone(), tensors[4], candidate_valid)
         out_weights, out_ids = candidate(
             *candidate_tensors,
             k=case.top_k,
@@ -168,8 +205,19 @@ def run_one(case: Case, baseline_ops, candidate=None, check=True):
         )
         torch.npu.synchronize()
         torch.testing.assert_close(out_ids.cpu(), physical_ids.cpu(), rtol=0, atol=0)
-        expected_load = torch.zeros(case.experts, dtype=torch.int32)
-        if case.record:
+        expected_load = initial_load.cpu().clone()
+        if case.valid_tokens is None or case.valid_tokens == case.tokens:
+            expert_tokens, mainline_load = mainline_moe_record(
+                case, physical_ids, tensors[4], initial_load, baseline_ops
+            )
+            torch.testing.assert_close(
+                expert_tokens.cpu().to(torch.int32),
+                torch.bincount(physical_ids.cpu().long().flatten(), minlength=case.experts).to(torch.int32),
+                rtol=0,
+                atol=0,
+            )
+            expected_load = mainline_load.cpu()
+        elif case.record:
             valid_rows = case.tokens if case.valid_tokens is None else case.valid_tokens
             expected_load += torch.bincount(
                 physical_ids[:valid_rows].cpu().reshape(-1).to(torch.int64),
@@ -222,8 +270,8 @@ def benchmark(case: Case, baseline_ops, candidate=None, repetitions=20):
 
 
 def check_graph_replay(candidate):
-    case = Case(64, 16, 8, "softmax", record=False, valid_as_int=True)
-    logits, _, table, load, enabled, _, _ = make_inputs(case, "npu")
+    case = Case(64, 16, 8, "softmax", record=False)
+    logits, _, table, load, enabled, valid, _ = make_inputs(case, "npu")
     from vllm_ascend.utils import enable_custom_op
 
     enable_custom_op()
@@ -240,28 +288,57 @@ def check_graph_replay(candidate):
         eps=1e-20,
         bias_opt=None,
     )
-    candidate(logits, None, table, load, enabled, 64, k=8, scoring="softmax")
+    candidate(logits, None, table, load, enabled, valid, k=8, scoring="softmax")
     torch.npu.synchronize()
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
-        weights, ids = candidate(logits, None, table, load, enabled, 64, k=8, scoring="softmax")
+        weights, ids = candidate(logits, None, table, load, enabled, valid, k=8, scoring="softmax")
     row = torch.arange(TABLE_ROWS, dtype=torch.int32, device="npu")[:, None]
     expert = torch.arange(case.experts, dtype=torch.int32, device="npu")[None, :]
-    for shift in (1, 3):
+    expected_load = torch.zeros_like(load)
+    for shift, record, valid_rows in ((1, True, 48), (3, True, 64), (2, False, 32)):
         table.copy_((row + expert + shift) % case.experts)
+        enabled.fill_(record)
+        valid.fill_(valid_rows)
         graph.replay()
         torch.npu.synchronize()
         expected_ids = table[torch.arange(case.tokens, device="npu")[:, None], logical_ids.long()]
         torch.testing.assert_close(ids, expected_ids, rtol=0, atol=0)
         torch.testing.assert_close(weights, expected_weights, rtol=1e-4, atol=1e-5)
-        torch.testing.assert_close(load, torch.zeros_like(load), rtol=0, atol=0)
+        if record:
+            expected_load += torch.bincount(ids[:valid_rows].long().flatten(), minlength=case.experts).to(torch.int32)
+        torch.testing.assert_close(load, expected_load, rtol=0, atol=0)
     return {"case": case.label(), "status": "graph-replay-pass"}
 
 
 def cases_from_args(args):
-    if args.edge_suite:
+    if args.smoke:
+        from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+
+        init_device_properties_triton()
+        vector_cores = get_vectorcore_num()
+        shapes = (
+            (1, 8, 6, "softmax"),
+            (2, 16, 8, "sigmoid"),
+            (4, 32, 8, "softmax"),
+            (8, 8, 6, "sigmoid"),
+            (16, 16, 8, "softmax"),
+            (32, 32, 8, "sigmoid"),
+            (vector_cores - 1, 16, 8, "softmax"),
+            (vector_cores, 16, 8, "softmax"),
+            (vector_cores + 1, 16, 8, "softmax"),
+            (65, 16, 8, "softmax"),
+            (128, 32, 8, "softmax"),
+            (256, 16, 8, "softmax"),
+            (512, 32, 8, "sigmoid"),
+            (4096, 32, 8, "softmax"),
+        )
+        for tokens, experts, top_k, scoring in shapes:
+            yield Case(tokens, experts, top_k, scoring)
+    elif args.edge_suite:
         yield Case(64, 8, 6, "sigmoid", True, False, 64, "float32", "random", "permutation", True)
         yield Case(64, 16, 8, "softmax", False, True, 48, "float32", "all-zero", "redundant", True)
+        yield Case(64, 16, 8, "softmax", False, True, 64, "float32", "ties", "redundant", False)
         yield Case(128, 32, 6, "sigmoid", True, True, 96, "float32", "ties", "redundant", False)
         yield Case(256, 16, 8, "softmax", True, True, 256, "float16", "random", "redundant", False)
         yield Case(512, 32, 8, "sigmoid", True, True, 500, "bfloat16", "random", "permutation", False)
@@ -299,6 +376,7 @@ def main():
     parser.add_argument("--matrix", action="store_true")
     parser.add_argument("--gradient", action="store_true")
     parser.add_argument("--edge-suite", action="store_true")
+    parser.add_argument("--smoke", action="store_true", help="Tiny, vector-core boundary and decode controls")
     parser.add_argument("--t", type=int, default=64)
     parser.add_argument("--e", type=int, default=16)
     parser.add_argument("--k", type=int, default=8)

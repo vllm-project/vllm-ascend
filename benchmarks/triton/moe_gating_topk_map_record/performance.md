@@ -315,3 +315,58 @@ comparison-only pass.
 Private PR #3 is not in this table: its AscendC tiling accepts only
 `ASCEND950` (A5), while this machine is 910B4, and it fuses only TopK + a
 one-dimensional map, not record. The user asked to defer A5 validation.
+
+## Round 6 — grid-owned record, two kernels, no atomic
+
+The new kernel 1 partitions contiguous tokens among programs, carries one
+`[E_record]` grid-owned count across all its token tiles, and stores one
+non-overlapping row. Kernel 2 reduces those rows and adds them to cumulative
+load in one program. This round retains the original stable TopK and uses
+`BLOCK_T=2` for T≤64, `8` for 65–512, and `32` above 512, with at most the
+40 vector-core-count programs for non-tiny cases. No grouped-route expansion.
+
+Correctness gold was strengthened from a synthetic histogram to CANN TopK +
+mainline EPLB mapping + actual `torch_npu.npu_moe_init_routing_v2` count-mode
+output + the existing EPLB record kernel. The isolated 910B4 container passed
+22 NPU tests, including nonzero initial load, EP-local physical offset,
+record-off, All2All/domain fallback and graph replay after device-side table,
+flag and valid-count changes. The standalone smoke set passed 14/14, the
+edge set 6/6, and T=65536/E=16 plus T=524288/E=32 actual-MoE-count controls
+passed. The T=524288 run verifies function, not production routing eligibility.
+`TRITON_KERNEL_DUMP=1`, `TRITON_DEBUG=1` and forced recompilation produced
+TTIR and NPU IR for both kernels; neither contains an atomic operation.
+
+The following are same-case, same-physical-card `msprof op` Task Durations
+with profiler-owned warmup and `PipeUtilization`. Each implementation of a
+case ran serially on its assigned card. The mainline and new two-kernel
+columns sum component Task Durations; they are a device-task cost model, not
+contiguous serving latency. Mainline record timing uses a stable representative
+count vector, while **correctness** above uses the actual MoE-returned vector.
+The old atomic version is this branch's pre-redesign source, not PR #17574.
+
+| T/E/K, scoring | Card | Mainline: CANN + map + record µs | Old atomic µs | Grid routing µs | Grid reduce µs | New sum µs | Main/new |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 64/16/8, softmax | 0 | 5.76 + 27.90 + 1.68 = 35.34 | 24.20 | 25.68 | 2.24 | 27.92 | 1.27× |
+| 128/32/6, softmax | 0 | 7.90 + 32.76 + 1.74 = 42.40 | 30.04 | 33.88 | 2.08 | 35.96 | 1.18× |
+| 256/8/6, sigmoid | 1 | 8.70 + 26.40 + 1.72 = 36.82 | 36.00 | 35.12 | 2.20 | 37.32 | 0.99× |
+| 512/32/8, sigmoid | 1 | 13.86 + 31.26 + 1.68 = 46.80 | 91.44 | 61.96 | 2.10 | 64.06 | 0.73× |
+| 4096/32/8, softmax | 3 | 82.16 + 116.62 + 1.58 = 200.36 | 216.78 | 212.06 | 2.12 | 214.18 | 0.94× |
+| 65536/16/8, softmax | 3 | 1227.94 + 1306.62 + 1.66 = 2536.22 | 2538.00 | 2478.90 | 2.36 | 2481.26 | 1.02× |
+| 262144/32/8, sigmoid | 4 | 3784.04 + 5776.12 + 1.96 = 9562.12 | unavailable | 10445.98 | 2.10 | 10448.08 | 0.92× |
+
+At T=262144 the old atomic profile reached its target but its profiler
+analysis did not finish after about ten minutes; that task-owned capture was
+terminated and **no old-atomic duration is claimed**. The new and mainline
+captures completed separately. All artifact logs are retained under
+`/home/shy/moe-gating-topk-map-record/grid-record-v1/` in the isolated
+`va-blue-b4-moe-gating-01` container's mounted task directory; the script is
+`profile_msprof_op.sh`.
+
+The T=512 component comparison explains the incomplete benefit. Old atomic
+routing used 256 programs with median per-program AIV/Scalar/Vector times
+11.32/5.08/4.46 µs. Grid-owned routing used 40 programs but had median
+57.59/27.98/12.65 µs, plus 6.34 µs MTE3 active time. Those units overlap;
+their times are not additive. Fewer programs and no atomic reduced the old
+91.44 µs task to 61.96 µs, yet the long per-program token loop left it above
+the 46.80 µs three-task mainline cost. This motivated the next round's
+single-factor token-tile experiment, not a TopK algorithm change.

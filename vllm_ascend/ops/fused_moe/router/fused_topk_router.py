@@ -155,6 +155,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             state is None
             or not getattr(state, "fused_record_allowed", False)
             or self.capture_fn is not None
+            or _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER
             or not router_logits.is_contiguous()
             or router_logits.shape[0] > MAX_FUSED_ROUTING_TOKENS
             or router_logits.shape[1] > MAX_FUSED_ROUTING_EXPERTS
@@ -163,6 +164,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             or num_expert_group != 1
             or renorm != 1
             or self.scoring_func not in ("softmax", "sigmoid")
+            or state.local_expert_count != router_logits.shape[1]
         ):
             return None
         bias = self.e_score_correction_bias

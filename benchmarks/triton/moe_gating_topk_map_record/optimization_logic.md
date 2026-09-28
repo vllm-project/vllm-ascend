@@ -163,3 +163,73 @@ duration. The earlier T≤4096 guard came from eager wrapper event screens;
 if `msprof op` Task Duration is the acceptance metric, a narrower guard
 should be evaluated with a broader same-metric scan rather than presumed
 from those event results.
+
+## Round 6 — grid-owned record redesign
+
+## Contract and reference
+
+The input is `router_logits[T, E]`, after the gate matrix multiplication. The
+correctness reference is the current mainline path: CANN `moe_gating_top_k`,
+EPLB logical-to-physical mapping, the downstream MoE operator's returned
+`expert_tokens`, and the existing EPLB record update. PR #17574 and the former
+atomic Triton kernel are performance/design comparisons, not correctness
+references. The mainline record input is an **unweighted count of final
+physical expert assignments**, not the routing weights or provisional logical
+IDs.
+
+The present fast path remains ungrouped (`group_count=k_group=1`), renormalized,
+and limited to cases where the EP-local physical record width equals the
+logical expert count. Other routes retain mainline. The Router must also
+exclude All2All and post-Router ID rewrite paths: All2All gathers assignments
+from other ranks before the MoE count is produced, so a rank-local Router
+histogram cannot replace that count.
+
+## Data flow and ownership
+
+```text
+router_logits[T,E] ── score ── score+bias (selection only) ── stable TopK
+                            │                                │
+                            └── pre-bias selected scores ────┼── renorm+scale → weights[T,K]
+                                                             └── runtime EPLB table → physical_ids[T,K]
+                                                                                      │
+kernel 1: each program owns one contiguous token range; one grid_record[E] ───────────────────────┘
+          ordinary store → grid_records[num_grids,E]
+kernel 2: one program sums the grid dimension → expert_load[local_start:local_end] += record[E]
+```
+
+One program owns every operation for each of its tokens, including the complete
+expert-axis score reduction and TopK. A large range is processed in bounded
+token tiles while the program carries **one** grid-local record across tiles.
+`program_id` names a work partition, not a physical vector core. Kernel 1
+has no global atomic: its output rows do not overlap. Kernel 2 has one writer
+and uses load/add/store, also without atomic. The scratch space is
+`num_grids * local_expert_count * sizeof(int32)`, independent of token count
+for a fixed grid count. Kernel 2's extra launch is a real cost; the design is
+worthwhile only if removed atomic contention/program overhead outweighs it.
+
+For tiny decode, test 1/2/4/8 tokens per program rather than splitting an
+expert axis across programs to fill the chip. For medium/prefill, keep program
+count near `vector_core_count * {1,2,4}` and use continuous token partitions.
+The internal token tile controls register/live-set size, not record count.
+This is a hypothesis until the same-case `msprof op` task summaries and
+per-component pipeline metrics establish the useful schedule.
+
+## Validation and measurement boundary
+
+Compare IDs exactly with mainline mapping; compare weights within the stated
+tolerance; compare the accumulated load exactly with actual MoE returned
+counts after the existing record conversion. Initialize load to nonzero to
+detect accidental overwrite. Separately test record off, tail padding,
+duplicate physical mappings, ties, EP-local range offsets, and graph replay
+after mutating the routing table and device-side controls. A valid-token count
+is legal only for a known contiguous valid prefix; otherwise use mainline.
+
+For each shape, capture CANN TopK + map + record, former atomic fused, and
+grid routing + grid reduction on the same physical NPU. `msprof op` performs
+its own warmup; invoke the profile script once per target kernel and sum its
+reported Task Durations. That sum is a device-task cost model, not serving
+latency: the mainline record occurs after MoE in production. Task Duration
+already includes task head overhead, so do not derive a second head estimate
+by subtracting it from host or stream-event times. Use PipeUtilization only
+for the component implicated by a measured difference; active unit times may
+overlap. Preserve slower and missing cases in the performance record.
