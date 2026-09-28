@@ -35,7 +35,6 @@ def test_post_process_receives_target_config_after_loading(monkeypatch, fail):
         return draft
 
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
-    monkeypatch.setattr(shared, "set_current_vllm_config", lambda _: nullcontext())
     with pytest.raises(ValueError, match="load failed") if fail else nullcontext():
         assert spec.load_draft_model(target, set()) is draft
     expected: list[tuple[str, object]] = [("load", config)]
