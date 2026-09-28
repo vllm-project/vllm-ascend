@@ -40,5 +40,5 @@ def test_encoder_only_zero_cache_groups_initialize_and_compute(monkeypatch) -> N
     )
 
     assert block_tables.num_kv_cache_groups == 0
-    assert block_tables._block_table_pad_size == 1
+    assert block_tables._block_table_window_size == 1
     assert slot_mappings.shape == (0, 1)
