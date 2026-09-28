@@ -19,7 +19,7 @@ import queue
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import pytest
@@ -736,6 +736,13 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.num_layers = 4
         worker.num_kv_cache_groups = 2
         worker.hf_config = SimpleNamespace(num_hidden_layers=4)
+        model_config = MagicMock()
+        model_config.get_total_num_hidden_layers.return_value = 4
+        model_config.get_layers_start_end_indices.return_value = (0, 4)
+        worker.vllm_config = SimpleNamespace(
+            model_config=model_config,
+            parallel_config=MagicMock(),
+        )
         worker.use_layerwise_transfer = True
         worker._extra_config = {"layerwise_num_shared_buffers": 2}
         main_spec = FullAttentionSpec(
@@ -777,6 +784,139 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertEqual(len(worker.layer_load_tasks), 5)
         self.assertEqual(len(worker.layer_save_tasks), 5)
 
+    def test_pp_layerwise_layout_uses_local_execution_indices(self):
+        import torch
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_layers = 2
+        worker.num_kv_cache_groups = 2
+        worker.hf_config = SimpleNamespace(num_hidden_layers=4)
+        worker.pp_size = 2
+        worker.pp_rank = 1
+        worker.pp_layer_offset = 2
+        worker.total_layers = 4
+        model_config = MagicMock()
+        model_config.get_total_num_hidden_layers.return_value = 4
+        model_config.get_layers_start_end_indices.return_value = (2, 4)
+        worker.vllm_config = SimpleNamespace(
+            model_config=model_config,
+            parallel_config=MagicMock(),
+        )
+        worker.use_layerwise_transfer = True
+        worker._extra_config = {
+            "layerwise_num_shared_buffers": 1,
+            "layerwise_independent_layers": [],
+        }
+        spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+        )
+        main_names = [
+            "model.layers.2.self_attn.attn",
+            "model.layers.3.self_attn.attn",
+            "model.mtp.0.self_attn.attn",
+        ]
+        indexer_names = [
+            "model.layers.2.self_attn.indexer.k_cache",
+            "model.layers.3.self_attn.indexer.k_cache",
+        ]
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(layer_names=main_names, kv_cache_spec=spec),
+                SimpleNamespace(layer_names=indexer_names, kv_cache_spec=spec),
+            ]
+        )
+
+        worker._init_layerwise_config()
+
+        self.assertEqual(worker.num_layers, 3)
+        self.assertEqual(worker.prefetch_layer_map, {1: 0, 2: 1})
+        self.assertEqual(worker.independent_layers, [])
+        self.assertEqual(
+            worker.physical_layer_to_group_layers,
+            {
+                0: [(0, 0), (1, 0)],
+                1: [(0, 1), (1, 1)],
+                2: [(0, 2)],
+            },
+        )
+        worker.group_block_len = {0: [16, 16, 16], 1: [8, 8]}
+        worker.group_num_layers = {0: 3, 1: 2}
+        self.assertEqual(worker._global_group_alloc_size(0), 5 * 16)
+        self.assertEqual(worker._global_group_alloc_size(1), 4 * 8)
+
+        worker.backend_name = "memcache"
+        worker.use_block_key_layerwise = False
+        worker._compute_reachable_store_masks = MagicMock(return_value=None)
+        worker._process_save_for_layer_batch = MagicMock()
+        worker._prepare_load_gvas = MagicMock()
+        worker._alloc_gvas_for_save = MagicMock()
+        worker._build_shared_save_data = MagicMock()
+        worker._process_load_for_layer_batch = MagicMock()
+        worker._build_shared_load_data = MagicMock()
+        request = MagicMock()
+
+        worker.process_layer_data([request])
+
+        expected_calls = [
+            call([request], 0, 0, 0),
+            call([request], 0, 1, 0),
+            call([request], 1, 0, 1),
+            call([request], 1, 1, 1),
+            call([request], 2, 0, 2),
+        ]
+        self.assertEqual(worker._process_save_for_layer_batch.call_args_list, expected_calls)
+        self.assertEqual(worker._process_load_for_layer_batch.call_args_list, expected_calls)
+
+    def test_incomplete_concrete_layout_is_not_reenabled_from_layer_count(self):
+        import torch
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_layers = 4
+        worker.num_kv_cache_groups = 1
+        worker.hf_config = SimpleNamespace(num_hidden_layers=4)
+        model_config = MagicMock()
+        model_config.get_total_num_hidden_layers.return_value = 4
+        model_config.get_layers_start_end_indices.return_value = (0, 4)
+        worker.vllm_config = SimpleNamespace(
+            model_config=model_config,
+            parallel_config=MagicMock(),
+        )
+        worker.use_layerwise_transfer = True
+        worker._extra_config = {
+            "layerwise_num_shared_buffers": 1,
+            "layerwise_independent_layers": [],
+        }
+        spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+        )
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=[
+                        "model.layers.0.self_attn.attn",
+                        "model.layers.1.self_attn.attn",
+                    ],
+                    kv_cache_spec=spec,
+                )
+            ]
+        )
+
+        worker._init_layerwise_config()
+
+        self.assertIsNone(worker._layerwise_reuse_layout)
+        self.assertFalse(worker.layerwise_offload)
+        self.assertEqual(worker.prefetch_layer_map, {})
+
 
 class TestKVPoolWorkerInit(unittest.TestCase):
     """Test KVPoolWorker initialization with mocked dependencies."""
@@ -787,6 +927,8 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.model_config.use_mla = False
         config.model_config.hf_text_config = MagicMock(spec=[])  # no index_topk
         config.model_config.get_num_layers.return_value = 32
+        config.model_config.get_total_num_hidden_layers.return_value = 32
+        config.model_config.get_layers_start_end_indices.return_value = (0, 32)
         config.model_config.get_total_num_kv_heads.return_value = 8
         config.model_config.max_model_len = 1024
         config.parallel_config.data_parallel_rank = 0
@@ -1039,6 +1181,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         config.model_config.hf_text_config = MagicMock(spec=[])
         config.model_config.max_model_len = 1024
         config.model_config.get_num_layers.return_value = 2
+        config.model_config.get_total_num_hidden_layers.return_value = 2
+        config.model_config.get_layers_start_end_indices.return_value = (0, 2)
         config.model_config.get_total_num_kv_heads.return_value = 1
         config.parallel_config.data_parallel_rank = 0
         config.parallel_config.rank = 0
@@ -2158,6 +2302,8 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
             config.model_config.hf_text_config = MagicMock(spec=[])  # no index_topk
             config.model_config.hf_text_config.num_hidden_layers = 36
         config.model_config.get_num_layers.return_value = 36
+        config.model_config.get_total_num_hidden_layers.return_value = 36
+        config.model_config.get_layers_start_end_indices.return_value = (0, 36)
         config.model_config.get_total_num_kv_heads.return_value = num_kv_heads
         config.model_config.max_model_len = 4096
         config.parallel_config.data_parallel_rank = 0

@@ -40,9 +40,21 @@ def _make_full_attention_spec(
     )
 
 
-def _make_vllm_config(num_layers: int, num_shared_buffers: int):
+def _make_vllm_config(
+    num_layers: int,
+    num_shared_buffers: int,
+    *,
+    total_num_layers: int | None = None,
+    layer_start: int = 0,
+):
+    total_num_layers = total_num_layers or num_layers
     model_config = MagicMock()
     model_config.get_num_layers.return_value = num_layers
+    model_config.get_total_num_hidden_layers.return_value = total_num_layers
+    model_config.get_layers_start_end_indices.return_value = (
+        layer_start,
+        layer_start + num_layers,
+    )
     return SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
             kv_connector="AscendStoreConnector",
@@ -270,6 +282,66 @@ def test_partial_layout_skips_tensor_merge():
     assert kv_cache_config.kv_cache_tensors == original_tensors
 
 
+def test_mtp_layer_does_not_hide_missing_base_layer():
+    layer_names = [
+        "model.layers.0.self_attn",
+        "model.layers.1.self_attn",
+        "model.layers.2.self_attn",
+        "model.mtp.0.self_attn",
+    ]
+    original_tensors = [_make_kv_cache_tensor(16, [layer_name]) for layer_name in layer_names]
+    spec = _make_full_attention_spec()
+    kv_cache_config = SimpleNamespace(
+        num_blocks=1,
+        kv_cache_tensors=original_tensors.copy(),
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=layer_names,
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=2,
+                    kv_cache_specs=dict.fromkeys(layer_names, spec),
+                ),
+            )
+        ],
+    )
+
+    apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(4, 1))
+
+    assert kv_cache_config.kv_cache_tensors == original_tensors
+
+
+def test_pp_mtp_uses_total_base_layer_offset():
+    layer_names = [
+        "model.layers.2.self_attn",
+        "model.layers.3.self_attn",
+        "model.mtp.0.self_attn",
+    ]
+    spec = _make_full_attention_spec()
+    kv_cache_config = SimpleNamespace(
+        num_blocks=1,
+        kv_cache_tensors=[_make_kv_cache_tensor(spec.page_size_bytes, [name]) for name in layer_names],
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=layer_names,
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=2,
+                    kv_cache_specs=dict.fromkeys(layer_names, spec),
+                ),
+            )
+        ],
+    )
+    config = _make_vllm_config(
+        2,
+        1,
+        total_num_layers=4,
+        layer_start=2,
+    )
+    config.kv_transfer_config.kv_connector_extra_config["layerwise_independent_layers"] = []
+
+    assert apply_layerwise_kv_cache_plan(kv_cache_config, config)
+    assert [get_kv_cache_tensor_layers(tensor) for tensor in kv_cache_config.kv_cache_tensors] == [layer_names]
+
+
 def test_layout_includes_mtp_layers():
     spec = _make_full_attention_spec()
     specs = {
@@ -402,6 +474,36 @@ def test_multi_main_spec_layer_selects_attn_as_main():
     assert [s.layer_name for s in layer_specs.extra_main_specs] == ["model.layers.0.self_attn.other_cache"]
 
 
+def test_multiple_indexer_components_are_all_planned():
+    main_spec = _make_full_attention_spec()
+    indexer_spec = AscendSFAIndexerCacheSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float16,
+    )
+    specs = {
+        "model.layers.0.self_attn.attn": main_spec,
+        "model.layers.0.self_attn.first.indexer.k_cache": indexer_spec,
+        "model.layers.0.self_attn.second.indexer.k_cache": indexer_spec,
+        "model.layers.1.self_attn.attn": main_spec,
+    }
+
+    layout = build_layerwise_reuse_layout(
+        specs,
+        2,
+        {
+            "layerwise_num_shared_buffers": 1,
+            "layerwise_independent_layers": [],
+        },
+    )
+
+    planned_names = {component.layer_name for components in layout.component_lanes.values() for component in components}
+    assert planned_names == set(specs)
+
+
 def test_multi_group_sfa_descriptors_are_merged_by_main_component():
     main_names = [
         *(f"model.layers.{layer}.self_attn.attn" for layer in range(4)),
@@ -480,6 +582,41 @@ def _make_sfa_indexer_spec() -> AscendSFAIndexerCacheSpec:
         scale_dtype=torch.float16,
         cache_sparse_li_c8=True,
     )
+
+
+def test_mixed_sfa_indexer_specs_share_one_component_lane():
+    main_spec = _make_sfa_main_spec()
+    bf16_indexer = AscendSFAIndexerCacheSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.bfloat16,
+    )
+    c8_indexer = _make_sfa_indexer_spec()
+    specs = {
+        "model.layers.0.self_attn.attn": main_spec,
+        "model.layers.1.self_attn.attn": main_spec,
+        "model.layers.2.self_attn.attn": main_spec,
+        "model.layers.1.self_attn.indexer.k_cache": bf16_indexer,
+        "model.layers.2.self_attn.indexer.k_cache": c8_indexer,
+    }
+
+    layout = build_layerwise_reuse_layout(
+        specs,
+        3,
+        {"layerwise_num_shared_buffers": 1},
+    )
+
+    mixed_lane = next(
+        components
+        for components in layout.component_lanes.values()
+        if {component.layer_name for component in components}
+        == {
+            "model.layers.1.self_attn.indexer.k_cache",
+            "model.layers.2.self_attn.indexer.k_cache",
+        }
+    )
+    assert len(mixed_lane) == 2
 
 
 def test_component_sharing_merges_main_across_a_and_b_layers():

@@ -77,6 +77,8 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.model_config.hf_text_config = MagicMock(spec=[])
     config.model_config.get_total_num_kv_heads.return_value = 1
     config.model_config.get_num_layers.return_value = 2
+    config.model_config.get_total_num_hidden_layers.return_value = 2
+    config.model_config.get_layers_start_end_indices.return_value = (0, 2)
     return config
 
 
@@ -537,7 +539,89 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         config.model_config.hf_text_config = MagicMock(spec=[])
         config.model_config.get_total_num_kv_heads.return_value = 1
         config.model_config.get_num_layers.return_value = num_layers
+        config.model_config.get_total_num_hidden_layers.return_value = num_layers
+        config.model_config.get_layers_start_end_indices.return_value = (0, num_layers)
         return config
+
+    def test_pp_layerwise_scheduler_counts_mtp_with_total_layer_offset(self):
+        config = self._make_config(
+            extra_config={
+                "backend": "memcache",
+                "use_layerwise": True,
+                "layerwise_num_shared_buffers": 1,
+                "layerwise_independent_layers": [],
+            },
+            num_layers=2,
+        )
+        config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+        config.parallel_config.pipeline_parallel_size = 2
+        config.parallel_config.rank = 1
+        config.parallel_config.world_size = 2
+        config.model_config.get_total_num_hidden_layers.return_value = 4
+        config.model_config.get_layers_start_end_indices.return_value = (2, 4)
+        spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+        )
+        layer_names = [
+            "model.layers.2.self_attn.attn",
+            "model.layers.3.self_attn.attn",
+            "model.mtp.0.self_attn.attn",
+        ]
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=layer_names, kv_cache_spec=spec)]
+        )
+
+        scheduler = KVPoolScheduler(
+            config,
+            use_layerwise=True,
+            kv_cache_config=kv_cache_config,
+        )
+
+        self.assertEqual(scheduler.num_layers, 3)
+        self.assertTrue(scheduler.layerwise_offload)
+
+    def test_wrong_pp_base_layers_do_not_enable_reuse(self):
+        config = self._make_config(
+            extra_config={
+                "backend": "memcache",
+                "use_layerwise": True,
+                "layerwise_num_shared_buffers": 1,
+                "layerwise_independent_layers": [],
+            },
+            num_layers=2,
+        )
+        config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+        config.parallel_config.pipeline_parallel_size = 2
+        config.parallel_config.rank = 1
+        config.parallel_config.world_size = 2
+        config.model_config.get_total_num_hidden_layers.return_value = 4
+        config.model_config.get_layers_start_end_indices.return_value = (2, 4)
+        spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+        )
+        layer_names = [
+            "model.layers.0.self_attn.attn",
+            "model.layers.2.self_attn.attn",
+            "model.layers.3.self_attn.attn",
+            "model.mtp.0.self_attn.attn",
+        ]
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=layer_names, kv_cache_spec=spec)]
+        )
+
+        scheduler = KVPoolScheduler(
+            config,
+            use_layerwise=True,
+            kv_cache_config=kv_cache_config,
+        )
+
+        self.assertFalse(scheduler.layerwise_offload)
 
     def _set_running_chunk(self, scheduler):
         request = MagicMock()

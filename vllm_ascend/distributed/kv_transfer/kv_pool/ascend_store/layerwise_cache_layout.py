@@ -238,8 +238,12 @@ def build_layerwise_reuse_layout(
             )
         # Select '.attn' as main spec, rest as extra
         main_spec = next((s for s in main_specs if s.layer_name.endswith(".attn")), main_specs[0])
-        extra_specs = tuple(s for s in main_specs if s is not main_spec)
         indexer_spec = indexer_specs[0] if indexer_specs else None
+        # Keep every remaining named component. ``extra_main_specs`` predates
+        # component lanes, but it is also the least invasive place to retain a
+        # second indexer or any other component that is neither the selected
+        # main nor the primary indexer.
+        extra_specs = tuple(s for s in named_specs if s is not main_spec and s is not indexer_spec)
         layer_cache_specs[physical_layer] = LayerwiseLayerCacheSpecs(
             main=main_spec,
             indexer=indexer_spec,
@@ -307,11 +311,26 @@ def apply_layerwise_kv_cache_plan(
     if not old_tensors:
         return
 
-    base_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+    local_base_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+    total_base_layers = vllm_config.model_config.get_total_num_hidden_layers()
     layer_specs = get_layerwise_kv_cache_specs(kv_cache_config)
+    physical_layers = {get_layerwise_physical_layer_index(layer_name, total_base_layers) for layer_name in layer_specs}
+    base_layer_start, base_layer_end = vllm_config.model_config.get_layers_start_end_indices(
+        vllm_config.parallel_config
+    )
+    expected_base_layers = set(range(base_layer_start, base_layer_end))
+    actual_base_layers = {layer for layer in physical_layers if 0 <= layer < total_base_layers}
+    if actual_base_layers != expected_base_layers:
+        logger.warning(
+            "Layer reuse has missing base layers %s and unexpected base layers %s; skip tensor merge.",
+            sorted(expected_base_layers - actual_base_layers),
+            sorted(actual_base_layers - expected_base_layers),
+        )
+        return False
+
     reuse_layout = build_layerwise_reuse_layout(
         layer_specs,
-        base_layers,
+        total_base_layers,
         extra_config,
     )
     actual_layers = len(reuse_layout.layer_cache_specs)
@@ -327,8 +346,8 @@ def apply_layerwise_kv_cache_plan(
     if actual_layers > base_layers:
         logger.info(
             "Layer reuse includes %d base and %d MTP/spec-decode layer(s).",
-            base_layers,
-            actual_layers - base_layers,
+            local_base_layers,
+            actual_layers - local_base_layers,
         )
 
     # vLLM describes multiple contiguous layer regions in one backing
@@ -365,6 +384,15 @@ def apply_layerwise_kv_cache_plan(
                 block_stride=reference_spec.page_size_bytes,
                 offset=0,
             )
+        )
+    planned_names = {
+        named_spec.layer_name for named_specs in reuse_layout.component_lanes.values() for named_spec in named_specs
+    }
+    if planned_names != set(layer_specs):
+        missing = sorted(set(layer_specs) - planned_names)
+        unexpected = sorted(planned_names - set(layer_specs))
+        raise ValueError(
+            f"Layerwise component plan does not match the cache specs; missing={missing}, unexpected={unexpected}."
         )
 
     new_tensors: list[KVCacheTensor] = []
