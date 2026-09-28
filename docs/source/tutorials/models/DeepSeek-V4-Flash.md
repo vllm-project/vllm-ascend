@@ -11,6 +11,8 @@ DeepSeek-V4-Flash is the lightweight variant of the DeepSeek-V4 family, suitable
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
+This document adds support for the Ascend 950DT server based on vLLM-Ascend v0.27.1rc.
+
 ## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
