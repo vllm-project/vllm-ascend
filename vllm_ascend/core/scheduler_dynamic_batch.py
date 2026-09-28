@@ -381,7 +381,7 @@ class SchedulerDynamicBatch(Scheduler):
                 # KVTransfer: WAITING reqs have num_computed_tokens > 0
                 # after async KV recvs are completed.
                 else:
-                    new_computed_blocks = self.kv_cache_manager.create_empty_block_list()
+                    new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
 
