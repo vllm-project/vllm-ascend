@@ -29,10 +29,9 @@ from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
 class _NpuAll2AllManager:
     """All2All-manager adapter for MC2 and MegaMoe fault tolerance.
 
-    Owns the dead-rank mask, encoded into the ``elastic_info`` tensor consumed
-    by the MC2 dispatch/combine operators. The public interface mirrors the
-    upstream All2AllManagerBase mask API. MegaMoe additionally binds its own
-    device mask before capture while sharing the CPU dead-rank state.
+    Shares CPU dead-rank state across both backends. MC2 encodes it in
+    ``elastic_info``; MegaMoe uses its own device mask bound before capture.
+    The public interface mirrors the upstream All2AllManagerBase mask API.
     """
 
     # MC2 kernels do not detect faults themselves; the mask is written
@@ -51,10 +50,10 @@ class _NpuAll2AllManager:
         #  + table2(dense->orig). num_physical_experts is derived from the
         #  dead set and num_local_experts on every rebuild.
         size = 4 + 2 * ep_world_size
-        self._elastic_info_host = torch.zeros(size, dtype=torch.int32)
+        self._mc2_elastic_info_host = torch.zeros(size, dtype=torch.int32)
         if device is None:
             device = torch.device("npu", torch.npu.current_device())
-        self._elastic_info = torch.zeros(size, dtype=torch.int32, device=device)
+        self._mc2_elastic_info = torch.zeros(size, dtype=torch.int32, device=device)
 
     @property
     def has_mega_moe_buffer(self) -> bool:
@@ -67,25 +66,23 @@ class _NpuAll2AllManager:
         EP and MC2 use the same rank order. MegaMoe preserves physical
         expert ids, whereas MC2 uses elastic_info's dense ids.
         """
-        # A graph captured with mask_buffer=None cannot honor a mask allocated
-        # after the fault. Allocate it now and propagate any existing dead ranks.
+        # Allocate the mask before graph capture.
         buffer.clean_mask_buffer()
-        for rank in sorted(self._dead):
-            buffer.update_mask_buffer(rank, True)
         self._mega_moe_buffer = buffer
 
     @torch.inference_mode()
     def update_mask(self, rank: int, masked: bool = True) -> None:
-        """Mark an EP rank dead/alive and rebuild elastic_info in place."""
+        """Update CPU liveness and the active backend's mask state in place."""
         if isinstance(rank, bool) or not isinstance(rank, int) or not 0 <= rank < self._ep_world_size:
             raise ValueError(f"EP rank must be in [0, {self._ep_world_size}), got {rank}.")
-        if self.has_mega_moe_buffer:
-            self._mega_moe_buffer.update_mask_buffer(rank, masked)
         if masked:
             self._dead.add(rank)
         else:
             self._dead.discard(rank)
-        self._rebuild_elastic_info()
+        if self.has_mega_moe_buffer:
+            self._mega_moe_buffer.update_mask_buffer(rank, masked)
+        else:
+            self._rebuild_mc2_elastic_info()
 
     def query_active_mask(self) -> torch.Tensor:
         """Per-EP-rank mask (1=dead, 0=live) as a CPU tensor, matching the
@@ -113,13 +110,14 @@ class _NpuAll2AllManager:
         if self.has_mega_moe_buffer:
             self._mega_moe_buffer.get_local_buffer_tensor(torch.uint8).zero_()
             self._mega_moe_buffer.clean_mask_buffer()
+        else:
+            self._mc2_elastic_info_host.zero_()
+            self._mc2_elastic_info.zero_()
         self._dead.clear()
-        self._elastic_info_host.zero_()
-        self._elastic_info.zero_()
 
-    def get_elastic_info(self) -> torch.Tensor:
+    def get_mc2_elastic_info(self) -> torch.Tensor:
         """The device elastic_info tensor for the next MC2 dispatch/combine."""
-        return self._elastic_info
+        return self._mc2_elastic_info
 
     def set_num_local_physical_experts(self, num_local_experts: int) -> None:
         """Record the physical expert slots per EP rank."""
@@ -132,13 +130,8 @@ class _NpuAll2AllManager:
         table[alive] = torch.arange(len(alive), dtype=torch.int32)
         return table
 
-    def _rebuild_elastic_info(self) -> None:
-        """Rebuild elastic_info from the dead set into the existing device
-        tensor (never reallocates, so captured graphs stay valid).
-
-        Only the unfused MC2 dispatch/combine path consumes this tensor;
-        MegaMoe uses its own mask and retains physical expert ids.
-        """
+    def _rebuild_mc2_elastic_info(self) -> None:
+        """Rebuild MC2 rank mappings in place, preserving captured storage."""
 
         world_size = self._ep_world_size
         alive = sorted(set(range(world_size)) - self._dead)
@@ -146,10 +139,10 @@ class _NpuAll2AllManager:
         table1 = self.orig_to_dense_rank_table()
         table2 = torch.full((world_size,), -1, dtype=torch.int32)
         table2[: len(alive)] = torch.tensor(alive, dtype=torch.int32)
-        self._elastic_info_host.copy_(
+        self._mc2_elastic_info_host.copy_(
             torch.cat([torch.tensor([1, len(alive), 0, num_physical_experts], dtype=torch.int32), table1, table2])
         )
-        self._elastic_info.copy_(self._elastic_info_host, non_blocking=True)
+        self._mc2_elastic_info.copy_(self._mc2_elastic_info_host, non_blocking=True)
 
 
 class NPUCommunicator(DeviceCommunicatorBase):

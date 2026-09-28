@@ -37,6 +37,9 @@ def test_mega_moe_cleanup_and_mask_replay_preserve_captured_storage(inference_mo
         buffer = FakeSymmBuffer()
         manager.bind_mega_moe_buffer(buffer)
     address = buffer.mask_buffer.data_ptr()
+    # MegaMoe recovery must never read or write MC2-only tensors.
+    manager._mc2_elastic_info = Mock(spec=[])
+    manager._mc2_elastic_info_host = Mock(spec=[])
     manager.update_mask(1)
     manager.update_mask(3)
     assert manager.query_active_mask().tolist() == [0, 1, 0, 1]
@@ -45,7 +48,6 @@ def test_mega_moe_cleanup_and_mask_replay_preserve_captured_storage(inference_mo
     assert not buffer.ccl.any()
     assert not manager.query_active_mask().any()
     assert not buffer.mask_buffer.any()
-    assert not manager.get_elastic_info().any()
     assert buffer.mask_buffer.data_ptr() == address
     # retry replays the cumulative dead set after cleanup.
     manager.update_mask(1)
@@ -88,7 +90,7 @@ def test_mask_allocation_failure_is_not_silently_ignored():
 def test_mc2_manager_keeps_dense_rank_translation_and_retry_behavior():
     manager = _NpuAll2AllManager(4, torch.device("cpu"))
     manager.set_num_local_physical_experts(8)
-    info = manager.get_elastic_info()
+    info = manager.get_mc2_elastic_info()
     address = info.data_ptr()
     manager.update_mask(1)
     assert not manager.has_mega_moe_buffer
@@ -108,14 +110,6 @@ def test_invalid_fault_rank_cannot_corrupt_cpu_mask(rank):
     with pytest.raises(ValueError, match="EP rank"):
         manager.update_mask(rank)
     assert not manager.query_active_mask().any()
-
-
-def test_binding_buffer_replays_existing_fault_mask():
-    manager = _NpuAll2AllManager(4, torch.device("cpu"))
-    manager.update_mask(2)
-    buffer = FakeSymmBuffer()
-    manager.bind_mega_moe_buffer(buffer)
-    assert buffer.mask_buffer.tolist() == [0, 0, 1, 0]
 
 
 @pytest.mark.parametrize("mega_moe", [False, True])

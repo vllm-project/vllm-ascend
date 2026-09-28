@@ -25,6 +25,7 @@ import torch
 from tests.ut.base import TestBase
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.distributed.device_communicators.npu_communicator import _NpuAll2AllManager
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
@@ -99,6 +100,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         mock_config.speculative_config = None
 
         mock_config.parallel_config.tensor_parallel_size = 1
+        mock_config.parallel_config.enable_fault_tolerance = False
 
         self.mock_get_config.return_value = mock_config
         self.mc2_tokens_capacity = 128
@@ -279,7 +281,13 @@ class TestTokenDispatcherWithMC2(TestBase):
             apply_router_weight_on_input=False,
             pertoken_scale=None,
         )
-        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+        self.dispatcher._ft_enabled = True
+        manager = _NpuAll2AllManager(self.dispatcher.ep_world_size, torch.device("cpu"))
+        manager.set_num_local_physical_experts(1)
+        manager.update_mask(1)
+        with patch("vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_all2all_manager", return_value=manager):
+            kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+        self.assertIs(kwargs["elastic_info"], manager.get_mc2_elastic_info())
         self.assertIn("x", kwargs)
         self.assertIn("expert_ids", kwargs)
         self.assertEqual(kwargs["moe_expert_num"], 8)
@@ -381,7 +389,13 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.dispatcher.need_extra_args = True
         self.dispatcher.enable_dispatch_v2 = True
         self.dispatcher.moe_expert_num = len(expert_map)
-        kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, combine_metadata)
+        self.dispatcher._ft_enabled = True
+        manager = _NpuAll2AllManager(self.dispatcher.ep_world_size, torch.device("cpu"))
+        manager.set_num_local_physical_experts(1)
+        manager.update_mask(1)
+        with patch("vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_all2all_manager", return_value=manager):
+            kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, combine_metadata)
+        self.assertIs(kwargs["elastic_info"], manager.get_mc2_elastic_info())
         self.assertIn("tp_send_counts", kwargs)
         self.assertIs(kwargs["expert_scales"], topk_weights)
         self.assertEqual(kwargs["expert_scales"].dtype, torch.float32)

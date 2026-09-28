@@ -12,10 +12,8 @@ from vllm_ascend.worker.sentinel.eplb_redistribute import _reload_local_slots, s
 from vllm_ascend.worker.sentinel.npu_worker_sentinel import WorkerSentinel
 
 
-@pytest.mark.parametrize("mega_moe", [False, True])
-def test_retry_publishes_mega_moe_mask_writes_before_leaving_quarantine(mega_moe):
+def test_retry_publishes_device_writes_before_leaving_quarantine():
     sentinel = object.__new__(WorkerSentinel)
-    sentinel.worker = SimpleNamespace(vllm_config=object())
     sentinel.worker_faulted = True
     sentinel.reset_device = Mock()
     request = object()
@@ -26,14 +24,13 @@ def test_retry_publishes_mega_moe_mask_writes_before_leaving_quarantine(mega_moe
 
     with (
         patch.object(sentinel_module.GPUWorkerSentinel, "retry") as retry,
-        patch.object(sentinel_module, "use_cann_megamoe", return_value=mega_moe),
         patch.object(torch.npu, "synchronize", side_effect=synchronize_while_quarantined) as synchronize,
         patch.object(sentinel_module, "get_ep_all2all_manager", side_effect=AssertionError("unexpected EP lookup")),
     ):
         sentinel.retry(request)
     sentinel.reset_device.assert_called_once()
     retry.assert_called_once_with(request)
-    assert synchronize.call_count == int(mega_moe)
+    synchronize.assert_called_once_with()
     assert not sentinel.worker_faulted
 
 
@@ -54,7 +51,7 @@ def test_scale_down_uses_backend_specific_physical_expert_ids(mega_moe):
     manager = SimpleNamespace(
         has_mega_moe_buffer=mega_moe,
         query_active_mask=lambda: torch.tensor([0, 1, 0, 0]),
-        get_elastic_info=Mock(return_value=torch.zeros(12)),
+        get_mc2_elastic_info=Mock(return_value=torch.zeros(12)),
     )
     with (
         patch.object(sentinel_module, "mark_dead_expert_slots_inplace"),

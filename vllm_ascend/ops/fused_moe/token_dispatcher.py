@@ -195,7 +195,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "expert_token_nums_type": expert_token_nums_type,
         }
         if self._ft_enabled:
-            kwargs_mc2["elastic_info"] = get_ep_all2all_manager().get_elastic_info()
+            kwargs_mc2["elastic_info"] = get_ep_all2all_manager().get_mc2_elastic_info()
         if self.global_bs == 0:
             kwargs_mc2["x_active_mask"] = token_dispatch_input.routing.mc2_mask
 
@@ -326,7 +326,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         if self._ft_enabled:
             # The combine's alltoallv spans the same EP group and must
             # exclude dead ranks with the identical elastic_info tensor.
-            kwargs_mc2["elastic_info"] = get_ep_all2all_manager().get_elastic_info()
+            kwargs_mc2["elastic_info"] = get_ep_all2all_manager().get_mc2_elastic_info()
         if self.global_bs == 0:
             kwargs_mc2["x_active_mask"] = combine_metadata.mc2_mask
 
