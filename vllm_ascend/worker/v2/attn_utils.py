@@ -1205,7 +1205,7 @@ def _reshape_kv_cache_v2(
                 )
 
             k_dtype = v_dtype = kv_cache_spec.dtype
-            if enable_fa_quant(vllm_config):
+            if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and not enable_sfa(vllm_config) and enable_fa_quant(vllm_config):
                 k_dtype, v_dtype = vllm_config.quant_config.get_kv_quant_dtype(
                     layer_name,
                     kv_cache_spec.dtype,
