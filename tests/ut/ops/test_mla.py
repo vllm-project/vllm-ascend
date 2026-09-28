@@ -382,7 +382,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         self.mock_mla_modules.indexer = None
         backend = MagicMock()
         original = backend.process_weights_after_loading
-        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=backend) as constructor:
+        with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=backend) as constructor:
             attn = AscendMultiHeadLatentAttention(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_heads,

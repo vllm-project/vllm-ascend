@@ -33,6 +33,13 @@ def make_sparse_impl(active=True, dcp=2, rank=0):
 @pytest.mark.parametrize("active", [False, True])
 def test_sparse_weights_reload_from_local_source(active):
     impl = make_sparse_impl(active)
+    # __new__ bypasses initialization of the remap buffers and their owner.
+    impl.layer_name = "model.layers.0.self_attn.attn"
+    impl.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(static_forward_context={impl.layer_name: torch.nn.Module()})
+    )
+    impl._remap_order = torch.arange(4, dtype=torch.float32)
+    impl._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32)
     source = torch.arange(24, dtype=torch.float32).view(12, 2)
     impl.kv_b_proj = SimpleNamespace(weight=source.clone(), quant_method=None)
     remote = torch.randn(2, 3, 2)
