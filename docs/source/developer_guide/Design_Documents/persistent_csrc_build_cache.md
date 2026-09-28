@@ -179,7 +179,9 @@ An unreadable explicit semantic input is never silently omitted from identity.
 ## Recipe and compiler environment
 
 The recipe identity covers compiler commands, recipe files, and explicit
-recipe values after the same root normalization contract.
+recipe values after the same root normalization contract. `--set-env` compiler
+overrides also participate, using their exact values: an override may point to
+an input not otherwise covered by the prepared-input identity.
 
 The compiler-environment identity covers the host platform, selected compiler
 profile, tool version output, CANN metadata, and explicit environment values.
@@ -194,6 +196,8 @@ update the matching identity group in the same change:
 
 - `PREPARED_INPUT` describes source, generated, dependent, and shared content;
 - `RECIPE_FILE` and `RECIPE_VALUE` describe how that content is built;
+- `SET_ENV` changes the compiler process environment and must remain in recipe
+  identity whenever its value can affect the output;
 - `ENVIRONMENT_FILE`, `ENVIRONMENT_VALUE`, and `ENVIRONMENT_TOOL` describe the
   compiler/toolkit environment; and
 - `NORMALIZE_PATH` removes only a physical location whose referenced semantic

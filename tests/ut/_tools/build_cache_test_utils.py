@@ -26,6 +26,7 @@ def build_cache_command(
     build_command: Sequence[str],
     normalize_paths: Sequence[Path] = (),
     artifact_includes: Sequence[str] = (),
+    set_env_values: Sequence[str] = (),
     soc: str | None = None,
     operator: str | None = None,
     action: str | None = None,
@@ -60,6 +61,8 @@ def build_cache_command(
         command.extend(["--normalize-path", str(path)])
     for pattern in artifact_includes:
         command.extend(["--artifact-include", pattern])
+    for value in set_env_values:
+        command.extend(["--set-env", value])
 
     custom_values: dict[str, str | Path | None] = {
         "--soc": soc,

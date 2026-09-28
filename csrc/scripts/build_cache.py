@@ -603,6 +603,7 @@ def _hash_recipe(
     recipe_values: Sequence[str],
     command: Sequence[str],
     normalize_paths: Sequence[Path],
+    set_env_values: Sequence[str] = (),
 ) -> tuple[str, list[dict]]:
     records: list[tuple[str, str]] = []
     manifest: list[dict] = []
@@ -656,6 +657,13 @@ def _hash_recipe(
         )
     )
     manifest.append({"kind": "command", "argv": normalized_command})
+
+    # Compiler overrides can reference inputs outside the prepared-input set.
+    # Hash exact values: normalizing those paths could create a false HIT.
+    for index, value in enumerate(set_env_values):
+        value_hash = _sha256_bytes(value.encode("utf-8"))
+        records.append((f"set_env[{index}]", value_hash))
+        manifest.append({"kind": "set_env", "index": index, "sha256": value_hash})
 
     return _canonical_hash(records), manifest
 
@@ -1457,7 +1465,7 @@ def run(args: argparse.Namespace) -> int:
         repo_root = Path(args.repo_root) if args.repo_root else None
         operator_text_hash, operator_text_manifest = _hash_operator_text(Path(args.operator_source), repo_root)
 
-    recipe_hash, recipe_manifest = _hash_recipe(recipe_files, args.recipe_value, command, normalize_paths)
+    recipe_hash, recipe_manifest = _hash_recipe(recipe_files, args.recipe_value, command, normalize_paths, args.set_env)
     environment_hash, environment_manifest = _hash_compiler_environment(
         args.environment_profile,
         environment_files,

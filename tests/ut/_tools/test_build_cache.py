@@ -39,7 +39,8 @@ def _sha256_file(path: Path) -> str:
 def _write_builder(tmp_path: Path) -> Path:
     builder = tmp_path / "fake_builder.py"
     builder.write_text(
-        """from pathlib import Path
+        """import os
+from pathlib import Path
 import sys
 import time
 
@@ -69,7 +70,10 @@ if mode == "symlink":
 else:
     artifact = output_dir / artifact_name
     artifact.parent.mkdir(parents=True, exist_ok=True)
-    content = "fixed-artifact" if mode == "fixed" else f"artifact-{count}"
+    if mode == "env":
+        content = os.environ["TILINGKEY_PAR_COMPILE"]
+    else:
+        content = "fixed-artifact" if mode == "fixed" else f"artifact-{count}"
     artifact.write_text(content, encoding="utf-8")
 """,
         encoding="utf-8",
@@ -95,6 +99,7 @@ def _run_cache(
     stage_dir: Path | None = None,
     publish_state_dir: Path | None = None,
     normalize_paths: list[Path] | None = None,
+    set_env_values: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     actual_output = output_dir
     if domain == "custom_operator":
@@ -133,6 +138,7 @@ def _run_cache(
         environment_tools=[sys.executable],
         normalize_paths=normalize_paths or [],
         artifact_includes=artifact_includes or [],
+        set_env_values=set_env_values or [],
         build_command=[
             sys.executable,
             str(builder),
@@ -755,6 +761,60 @@ def test_compiler_environment_change_invalidates_cache(tmp_path: Path):
     _assert_success(second)
     assert "[build-cache] MISS" in second.stdout
     assert _extract_key(second) != key_a
+    assert counter.read_text() == "2"
+
+
+def test_set_env_change_invalidates_compiler_action(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        builder_mode="env",
+        set_env_values=["TILINGKEY_PAR_COMPILE=0"],
+    )
+    _assert_success(first)
+    assert (output / "kernel.o").read_text() == "0"
+
+    _fresh_dir(output)
+    second = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        builder_mode="env",
+        set_env_values=["TILINGKEY_PAR_COMPILE=1"],
+    )
+    _assert_success(second)
+    assert "[build-cache] MISS" in second.stdout
+    assert (output / "kernel.o").read_text() == "1"
+    assert counter.read_text() == "2"
+
+    _fresh_dir(output)
+    third = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+        builder_mode="env",
+        set_env_values=["TILINGKEY_PAR_COMPILE=1"],
+    )
+    _assert_success(third)
+    assert "[build-cache] HIT" in third.stdout
+    assert (output / "kernel.o").read_text() == "1"
     assert counter.read_text() == "2"
 
 
