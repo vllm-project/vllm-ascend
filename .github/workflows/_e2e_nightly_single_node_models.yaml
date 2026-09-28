@@ -53,6 +53,11 @@ on:
         type: string
         default: ''
         description: PR commit SHA for PR-triggered checkout
+      vllm_ref:
+        required: false
+        type: string
+        default: ''
+        description: vllm commit SHA / tag / branch to install instead of the image-baked vllm (empty = keep image version)
       testcase_timeout:
         required: false
         default: 120
@@ -101,6 +106,40 @@ jobs:
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           pip install uv
+
+      - name: Install vllm from ref
+        if: ${{ inputs.vllm_ref != '' }}
+        run: |
+          cd /vllm-workspace/vllm
+          git config --global --add safe.directory /vllm-workspace/vllm
+          # The nightly image ships an editable vllm checkout at /vllm-workspace/vllm.
+          # Fetch the requested ref into it and refresh the editable install.
+          # Mirrors tools/bisect/version_compat.py (_switch_vllm).
+          git remote add origin https://github.com/vllm-project/vllm.git 2>/dev/null || \
+            git remote set-url origin https://github.com/vllm-project/vllm.git
+          VLLM_REF='${{ inputs.vllm_ref }}'
+          # Fetch the tag ref itself when the ref names a tag: a plain
+          # "git fetch origin <tag>" only fetches the commit object and leaves
+          # no local tag ref, so vllm's setuptools_scm falls back to a wrong
+          # 0.1.dev1+g<sha> version instead of the release version.
+          if ! git fetch --depth 1 origin "+refs/tags/${VLLM_REF}:refs/tags/${VLLM_REF}" 2>/dev/null; then
+            if ! git fetch --depth 1 origin "$VLLM_REF"; then
+              git fetch --depth 1 origin "refs/heads/$VLLM_REF" || \
+                { echo "::error::cannot fetch vllm ref '$VLLM_REF' (use a full commit SHA, tag, or branch name)"; exit 1; }
+            fi
+          fi
+          git checkout FETCH_HEAD
+          VLLM_TARGET_DEVICE=empty pip install -e . --no-deps --no-input --disable-pip-version-check
+          echo ""
+          echo "Installed vllm from ref '$VLLM_REF':"
+          pip show vllm
+          # setuptools_scm falls back to 0.1.dev1+g<sha> when the ref carries no
+          # tag information (bare SHA / branch); surface it instead of silently
+          # misrouting every vllm_version_is() check in vllm-ascend.
+          INSTALLED_VLLM_VERSION=$(pip show vllm 2>/dev/null | sed -n 's/^Version: //p')
+          if [[ "$INSTALLED_VLLM_VERSION" == 0.1.dev* ]]; then
+            echo "::warning::vllm version fell back to '$INSTALLED_VLLM_VERSION': ref '$VLLM_REF' carries no tag info. Version-gated code paths in vllm-ascend may misbehave; prefer a release tag (e.g. v0.29.0) for reliable results."
+          fi
 
       - name: Uninstall vllm and remove code (if pr test)
         if: ${{ inputs.request_id != '' }}

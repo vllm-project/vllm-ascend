@@ -166,6 +166,39 @@ install_extra_components() {
     echo "====> Extra components installation completed"
 }
 
+checkout_and_install_vllm() {
+    echo "====> Checkout and install vllm from ref: ${VLLM_REF}"
+    # The nightly image ships an editable vllm checkout at /vllm-workspace/vllm.
+    # Fetch the requested ref into it and refresh the editable install.
+    # Mirrors tools/bisect/version_compat.py (_switch_vllm).
+    cd "$WORKSPACE/vllm" || {
+        echo "ERROR: $WORKSPACE/vllm not found in image, cannot override vllm ref"
+        return 1
+    }
+    git remote add origin https://github.com/vllm-project/vllm.git 2>/dev/null || \
+        git remote set-url origin https://github.com/vllm-project/vllm.git
+    # Fetch the tag ref itself when the ref names a tag: a plain
+    # "git fetch origin <tag>" only fetches the commit object and leaves
+    # no local tag ref, so vllm's setuptools_scm falls back to a wrong
+    # 0.1.dev1+g<sha> version instead of the release version.
+    if ! git fetch --depth 1 origin "+refs/tags/${VLLM_REF}:refs/tags/${VLLM_REF}" 2>/dev/null; then
+        if ! git fetch --depth 1 origin "$VLLM_REF"; then
+            git fetch --depth 1 origin "refs/heads/$VLLM_REF" || \
+                { echo "ERROR: cannot fetch vllm ref '$VLLM_REF' (use a full commit SHA, tag, or branch name)"; return 1; }
+        fi
+    fi
+    git checkout FETCH_HEAD
+    VLLM_TARGET_DEVICE=empty pip install -e . --no-deps --no-input --disable-pip-version-check
+    # setuptools_scm falls back to 0.1.dev1+g<sha> when the ref carries no tag
+    # information (bare SHA / branch); surface it instead of silently
+    # misrouting every vllm_version_is() check in vllm-ascend.
+    local installed_vllm_version
+    installed_vllm_version=$(pip show vllm 2>/dev/null | sed -n 's/^Version: //p')
+    if [[ "$installed_vllm_version" == 0.1.dev* ]]; then
+        echo "WARNING: vllm version fell back to '$installed_vllm_version': ref '$VLLM_REF' carries no tag info. Version-gated code paths in vllm-ascend may misbehave; prefer a release tag for reliable results."
+    fi
+}
+
 checkout_src() {
     echo "====> Checkout source code"
     mkdir -p "$WORKSPACE"
@@ -565,6 +598,9 @@ main() {
     check_npu_info
     clear_logs
     check_and_config
+    if [ -n "${VLLM_REF:-}" ]; then
+        checkout_and_install_vllm
+    fi
     if [[ "$IS_PR_TEST" == "true" ]]; then
         checkout_src
         install_vllm_ascend
