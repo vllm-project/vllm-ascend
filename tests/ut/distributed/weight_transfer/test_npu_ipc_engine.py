@@ -208,6 +208,11 @@ def _send_update(engine, index: int) -> None:
     engine._post_send_sync()
 
 
+def _send_updates(engine, count: int) -> None:
+    for index in range(count):
+        _send_update(engine, index)
+
+
 @pytest.mark.parametrize(
     ("failure_point", "update_count"),
     [
@@ -234,7 +239,7 @@ def test_sender_rpc_failure_reaches_every_rank(failure_point, update_count):
         sender.client.finish_weight_update.side_effect = ValueError("finish rejected")
 
     for engine in (sender, non_sender):
-        engine._send = lambda _, engine=engine: [_send_update(engine, index) for index in range(update_count)]
+        engine._send = lambda _, engine=engine: _send_updates(engine, update_count)
 
     all_gather = _ThreadedAllGather()
     barrier = threading.Barrier(2)
