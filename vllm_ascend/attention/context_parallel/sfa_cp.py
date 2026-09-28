@@ -60,6 +60,39 @@ from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
+class SFAPCPPrologV3MetadataMixin:
+    @staticmethod
+    def _prepare_prolog_v3_slots(metadata: AscendSFAMetadata, slot_mapping: torch.Tensor) -> None:
+        if metadata.num_prefills == 0 and not metadata.pcp_has_global_prefill:
+            return
+        group = get_pcp_group()
+        num_tokens = metadata.num_input_tokens
+        rank_slots = slot_mapping[: group.world_size * num_tokens].view(group.world_size, num_tokens)
+        num_decode_tokens = metadata.num_decode_tokens
+        local_slots = rank_slots[group.rank_in_group].contiguous()
+        if num_decode_tokens and group.rank_in_group != 0:
+            # The gathered mapping masks replicated decode slots on nonzero
+            # ranks, although every rank must write its locally computed KV.
+            local_slots = torch.cat((rank_slots[0, :num_decode_tokens], local_slots[num_decode_tokens:]))
+        metadata.pcp_prolog_local_slots = local_slots
+        metadata.pcp_prolog_global_prefill_slots = rank_slots[:, num_decode_tokens:].reshape(-1)
+
+
+class AscendSFAPCPMetadataBuilder(SFAPCPPrologV3MetadataMixin, AscendSFAMetadataBuilder):
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool = False,
+        **kwargs,
+    ) -> AscendSFAMetadata:
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
+        if kwargs.get("pcp_context") is not None:
+            assert metadata.pcp_slot_mapping is not None
+            self._prepare_prolog_v3_slots(metadata, metadata.pcp_slot_mapping)
+        return metadata
+
+
 class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     """SFA PCP implementation with PCP-sharded O-proj weights.
 
@@ -191,13 +224,9 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         if attn_metadata.num_prefills == 0 and not attn_metadata.pcp_has_global_prefill:
             return super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, slot_mapping[:num_tokens])
         group = get_pcp_group()
-        rank_slots = slot_mapping[: group.world_size * num_tokens].view(group.world_size, num_tokens)
-        local_slots = rank_slots[group.rank_in_group].contiguous()
-        if num_decode_tokens and group.rank_in_group != 0:
-            # Gathered slots mask replicated decode copies outside rank 0.
-            # Each rank still writes its local decode KV; only prefills are
-            # gathered below, so reuse rank 0's valid decode slot prefix.
-            local_slots = torch.cat((rank_slots[0, :num_decode_tokens], local_slots[num_decode_tokens:]))
+        local_slots = attn_metadata.pcp_prolog_local_slots
+        global_slots = attn_metadata.pcp_prolog_global_prefill_slots
+        assert local_slots is not None and global_slots is not None
         result = super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, local_slots)
         # Same stream orders the fused cache write, pack, collective and scatter.
         # C8 packs quantized K, BF16 RoPE and scales into the first cache.
@@ -205,28 +234,25 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         main_cache = kv_cache[:1] if self.enable_sparse_sfa_c8 else kv_cache[:2]
         packed = copy_pcp_kv_cache(main_cache, local_slots[num_decode_tokens:])
         gathered = group.all_gather(packed, dim=0)
-        global_slots = rank_slots[:, num_decode_tokens:].reshape(-1)
-        if self.enable_sparse_sfa_c8 and global_slots.numel():
+        if not global_slots.numel():
+            return result
+        if self.enable_sparse_sfa_c8:
             # Preserve packed K, RoPE and scale bytes, including FP8 storage.
-            # The paired scatter writes the same payload to the same cache.
             packed_kv = gathered.unsqueeze(1)
             cache_bytes = main_cache[0].view(torch.int8)
-            DeviceOperator.reshape_and_cache(
-                key=packed_kv,
-                value=packed_kv,
-                key_cache=cache_bytes,
-                value_cache=cache_bytes,
-                slot_mapping=global_slots,
-            )
-        elif global_slots.numel():
+            k_nope, k_pe = packed_kv, packed_kv
+            key_cache, value_cache = cache_bytes, cache_bytes
+        else:
             k_nope, k_pe = gathered.split([kv_cache[0].shape[-1], kv_cache[1].shape[-1]], dim=-1)
-            DeviceOperator.reshape_and_cache(
-                key=k_nope.unsqueeze(1),
-                value=k_pe.unsqueeze(1),
-                key_cache=kv_cache[0],
-                value_cache=kv_cache[1],
-                slot_mapping=global_slots,
-            )
+            k_nope, k_pe = k_nope.unsqueeze(1), k_pe.unsqueeze(1)
+            key_cache, value_cache = kv_cache[0], kv_cache[1]
+        DeviceOperator.reshape_and_cache(
+            key=k_nope,
+            value=k_pe,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=global_slots,
+        )
         return result
 
     def exec_kv(
@@ -961,7 +987,7 @@ class AscendSFADCPMetadataBuilder(
         return attn_metadata
 
 
-class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
+class AscendSFAPCPDCPMetadataBuilder(SFAPCPPrologV3MetadataMixin, AscendSFADCPMetadataBuilder):
     """Adds PCP's main-cache token layout to the DCP metadata view."""
 
     def __init__(
@@ -1093,6 +1119,8 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
         assert isinstance(metadata, AscendSFADCPMetadata)
         if pcp_ordered_indexer_slot_mapping is not None:
             metadata.pcp_slot_mapping = pcp_ordered_indexer_slot_mapping
+        assert metadata.dcp_context is not None
+        self._prepare_prolog_v3_slots(metadata, metadata.dcp_context.slot_mapping)
         return metadata
 
 
@@ -1668,6 +1696,8 @@ def resolve_sfa_metadata_builder(
         return AscendSFAPCPDCPMetadataBuilder
     if dcp_enabled:
         return AscendSFADCPMetadataBuilder
+    if pcp_enabled:
+        return AscendSFAPCPMetadataBuilder
     return AscendSFAMetadataBuilder
 
 

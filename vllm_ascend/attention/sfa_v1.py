@@ -436,6 +436,8 @@ class AscendSFAMetadata:
     pcp_slot_mapping: torch.Tensor | None = None
     # All PCP ranks must join prefill KV gathers even when a rank has only padding.
     pcp_has_global_prefill: bool = False
+    pcp_prolog_local_slots: torch.Tensor | None = None
+    pcp_prolog_global_prefill_slots: torch.Tensor | None = None
     # The dimension of the attention heads
     head_dim: int | None = None
     attn_mask: torch.Tensor = None
