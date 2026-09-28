@@ -232,7 +232,8 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
     ):
         self._g4_committed = None
         with _gemma4_prefill_inputs(self, input_batch, num_sampled, num_rejected):
-            return super().propose(
+            return AscendAutoRegressiveSpeculator.propose(
+                self,
                 input_batch=input_batch,
                 attn_metadata=attn_metadata,
                 slot_mappings=slot_mappings,
