@@ -9,9 +9,9 @@ DeepSeek-V4 introduces several key upgrades over DeepSeek-V3:
 
 DeepSeek-V4-Flash is the lightweight variant of the DeepSeek-V4 family, suitable for high-throughput and low-latency serving scenarios.
 
-This document adds support for the Ascend 950DT server based on vLLM-Ascend v0.27.1rc.
-
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
+
+This document adds support for the Ascend 950DT server based on vLLM-Ascend v0.27.1rc.
 
 ## 2 Supported Features
 
