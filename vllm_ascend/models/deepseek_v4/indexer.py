@@ -329,7 +329,6 @@ class DeepseekV4Indexer(nn.Module):
         )
         k_dtype = get_indexer_k_dtype(vllm_config)
 
-
         if self.compress_ratio == 4:
             # TODO(cmq): change the dtype of cache
             self.k_cache = AscendDeepseekV4IndexerCache(
