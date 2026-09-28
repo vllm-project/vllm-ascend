@@ -40,51 +40,43 @@ else:
 
 class BaseDeviceAdaptor:
     @classmethod
-    def scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> None:
-        """Write cache rows in place, falling back to the generic scatter.
+    def scatter_cache(cls, var: torch.Tensor, indices: torch.Tensor, updates: torch.Tensor) -> None:
+        """Dispatch a cache scatter with the original operator's arguments.
 
-        The actual-token prefix must contain valid slots: this helper does not
-        filter negative slots, and neither fast operator is assumed to skip them.
-        Layout checks inspect strides only; no device-to-host synchronization is
-        introduced. Never make a contiguous copy of the destination cache.
+        Callers retain their existing views and slices. Both operators receive
+        the same tensors without reshaping, truncation, or slot filtering.
         """
-        if (
-            key.ndim in (2, 3)
-            and cache.ndim == 4
-            and cache.shape[2] == 1
-            and (key.ndim == 2 or key.shape[1] == 1)
-            and key.shape[0] >= tokens
-            and slots.ndim == 1
-            and slots.numel() >= tokens
-            and slots.dtype in (torch.int32, torch.int64)
-            and key.dtype == cache.dtype
-            and key.shape[-1] == cache.shape[-1]
-        ):
-            stored = cls._scatter_cache(key[:tokens].reshape(tokens, key.shape[-1]), cache, slots[:tokens])
-            if stored:
-                return
-
-        torch_npu.npu_scatter_nd_update_(
-            cache.view(-1, key.shape[-1]),
-            slots[:tokens].view(-1, 1),
-            key[:tokens],
-        )
+        if cls._scatter_cache(var, indices, updates):
+            return
+        torch_npu.npu_scatter_nd_update_(var, indices, updates)
 
     @staticmethod
-    def _scatter_cache(key, cache, slots) -> bool:
-        if not get_current_hardware_profile().supports(HardwareCapability.SCATTER_ND_CACHE_STORE):
+    def _scatter_cache(var, indices, updates) -> bool:
+        profile = get_current_hardware_profile()
+        if not profile.supports(HardwareCapability.SCATTER_ND_CACHE_STORE):
             return False
         operation = getattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None)
-        if operation is None or key.dtype not in (torch.int8, torch.float16, torch.bfloat16):
+        if operation is None:
             return False
-        width = key.shape[-1]
-        try:
-            target = cache.view(-1, width)
-        except RuntimeError:
+        if updates.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            if not profile.supports(HardwareCapability.SCATTER_ND_FP8_CACHE_STORE):
+                return False
+        elif updates.dtype not in (torch.int8, torch.float16, torch.bfloat16, torch.float32):
             return False
-        if target.stride(1) != 1 or target.stride(0) < width:
+        if not (
+            var.ndim == 2
+            and indices.ndim == 2
+            and indices.shape[1] == 1
+            and updates.ndim == 2
+            and updates.shape[0] == indices.shape[0]
+            and updates.shape[1] == var.shape[1]
+            and updates.dtype == var.dtype
+            and indices.dtype in (torch.int32, torch.int64)
+        ):
             return False
-        operation(target, slots.reshape(-1, 1), key)
+        if var.stride(1) != 1 or var.stride(0) < var.shape[1]:
+            return False
+        operation(var, indices, updates)
         return True
 
     @classmethod
@@ -933,16 +925,6 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
-    @staticmethod
-    def _scatter_cache(key, cache, slots) -> bool:
-        operation = getattr(torch_npu, "npu_scatter_pa_cache", None)
-        if operation is None or not cache.is_contiguous():
-            return False
-        if key.dtype not in (torch.int8, torch.float16, torch.bfloat16, torch.float32, torch.float8_e4m3fn):
-            return False
-        operation(key.reshape(-1, 1, key.shape[-1]).contiguous(), slots.contiguous(), key_cache=cache)
-        return True
-
     @classmethod
     def reshape_and_cache(
         cls,

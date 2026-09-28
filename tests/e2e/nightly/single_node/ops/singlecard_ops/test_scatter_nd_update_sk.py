@@ -1,12 +1,17 @@
 import gc
 import random
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.device.device_config import check_ascend_device_type
+from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import bootstrap_custom_op_env
 
 # A5 的 hardware profile 未启用 RUNTIME_CUSTOM_OPS，enable_custom_op() 会直接
@@ -121,3 +126,121 @@ def test_scatter_nd_update_sk_duplicate_indices(var_dtype, idx_dtype, contiguous
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize(
+    "dtype", [torch.int8, torch.float16, torch.bfloat16, torch.float32, torch.float8_e4m3fn, torch.float8_e5m2]
+)
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("tokens", [3, 2049])
+@pytest.mark.parametrize("layout", ["contiguous", "row_gap", "offset"])
+@torch.inference_mode()
+def test_cache_adaptor_uses_sk_and_preserves_backing_storage(dtype, index_dtype, tokens, layout):
+    # Run this same adaptor regression on A2/A3 and A5, including the packed
+    # SFA C8 width and genuinely strided NPU views (do not clone the views).
+    width, block_size, blocks = 656, 128, 32
+    fp8 = dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+    if fp8 and not get_current_hardware_profile().supports(HardwareCapability.SCATTER_ND_FP8_CACHE_STORE):
+        pytest.skip("FP8 SK cache writes require arch35")
+    storage_dtype = torch.uint8 if fp8 else dtype
+    backing = torch.full(
+        (blocks + 1, block_size, 1, width * 2), 0xA5 if fp8 else -7, dtype=storage_dtype, device="npu"
+    ).view(dtype)
+    if layout == "row_gap":
+        cache = backing[:-1, ..., :width]
+    elif layout == "offset":
+        cache = backing.view(-1, block_size, 1, width)[1 : blocks + 1]
+    else:
+        cache = backing.view(-1, block_size, 1, width)[:blocks]
+    padded = ((tokens + 7) // 8) * 8
+    key = torch.arange(padded * width * 2, device="npu").reshape(padded, width * 2) % 251 - 125
+    key = key.to(storage_dtype).view(dtype)[:, ::2]
+    slots = torch.empty(padded * 2, dtype=index_dtype, device="npu")[::2]
+    slots[:tokens] = torch.arange(tokens, dtype=index_dtype, device="npu") + 37
+    slots[tokens:] = -1
+    expected = backing.view(torch.uint8).cpu()
+    expected_cache = torch.as_strided(expected.view(dtype), cache.shape, cache.stride(), cache.storage_offset())
+    expected_cache.view(-1, width).view(torch.uint8)[slots[:tokens].cpu().long()] = (
+        key[:tokens].contiguous().view(torch.uint8).cpu()
+    )
+    pointer = cache.data_ptr()
+
+    with (
+        patch.object(
+            torch.ops._C_ascend, "npu_scatter_nd_update_sk", wraps=torch.ops._C_ascend.npu_scatter_nd_update_sk
+        ) as sk,
+        patch.object(torch_npu, "npu_scatter_pa_cache") as pa,
+        patch.object(torch_npu, "npu_scatter_nd_update_") as generic,
+    ):
+        assert DeviceOperator.scatter_cache(cache.view(-1, key.shape[-1]), slots.view(-1, 1), key) is None
+        torch.npu.synchronize()
+        sk.assert_called_once()
+        pa.assert_not_called()
+        generic.assert_not_called()
+
+    assert cache.data_ptr() == pointer
+    torch.testing.assert_close(backing.view(torch.uint8).cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "key_dtype,scale_dtype", [(torch.bfloat16, None), (torch.int8, torch.float16), (torch.float8_e4m3fn, torch.float32)]
+)
+@pytest.mark.parametrize("row_gap", [False, True])
+@pytest.mark.parametrize("tokens", [3, 2049])
+@torch.inference_mode()
+def test_indexer_cache_uses_sk_for_keys_and_scales(key_dtype, scale_dtype, row_gap, tokens):
+    is_fp8_key = key_dtype == torch.float8_e4m3fn  # gitleaks:allow
+    if is_fp8_key and not get_current_hardware_profile().supports(HardwareCapability.SCATTER_ND_FP8_CACHE_STORE):
+        pytest.skip("FP8 indexer cache requires arch35")
+    padded = ((tokens + 7) // 8) * 8
+    slots = torch.arange(padded, dtype=torch.int64, device="npu") + 37
+    slots[tokens // 2] = -1  # Invalid slots inside a gathered region must be skipped.
+    slots[tokens:] = -1
+    cpu_slots = slots.cpu().long()
+    valid = cpu_slots >= 0
+    keys, caches, backings, expected = [], [], [], []
+    for dtype, width in [(key_dtype, 128)] + ([(scale_dtype, 1)] if scale_dtype else []):
+        storage_dtype = torch.uint8 if dtype == torch.float8_e4m3fn else dtype
+        backing = torch.full((32, 128, 1, width * (2 if row_gap else 1)), 7, dtype=storage_dtype, device="npu").view(
+            dtype
+        )
+        cache = backing[..., :width]
+        key = (
+            torch.arange(padded * width, device="npu")
+            .reshape(padded, width)
+            .remainder(17)
+            .to(storage_dtype)
+            .view(dtype)
+        )
+        before = backing.view(torch.uint8).cpu()
+        reference = torch.as_strided(before.view(dtype), cache.shape, cache.stride(), cache.storage_offset())
+        reference.view(-1, width).view(torch.uint8)[cpu_slots[valid]] = key.view(torch.uint8).cpu()[valid]
+        keys.append(key)
+        caches.append(cache)
+        backings.append(backing)
+        expected.append(before)
+    indexer = SimpleNamespace(
+        enable_sparse_li_c8=scale_dtype is not None,
+        k_cache=SimpleNamespace(kv_cache=tuple(caches)),
+        _use_c8_reshape_optim=lambda: False,
+    )
+    with (
+        patch.object(
+            torch.ops._C_ascend, "npu_scatter_nd_update_sk", wraps=torch.ops._C_ascend.npu_scatter_nd_update_sk
+        ) as sk,
+        patch.object(torch_npu, "npu_scatter_nd_update_") as generic,
+        patch.object(torch_npu, "npu_scatter_pa_cache") as pa,
+    ):
+        AscendSFAIndexerBackend.write_cache(
+            indexer,
+            keys[0] if scale_dtype else keys[0].unsqueeze(1),
+            keys[1] if scale_dtype else None,
+            slots,
+            SimpleNamespace(num_actual_tokens=tokens // 2),
+        )
+        torch.npu.synchronize()
+        assert sk.call_count == len(caches)
+        generic.assert_not_called()
+        pa.assert_not_called()
+    for backing, reference in zip(backings, expected):
+        torch.testing.assert_close(backing.view(torch.uint8).cpu(), reference, rtol=0, atol=0)

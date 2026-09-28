@@ -265,7 +265,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 indexer_attn_metadata.block_size,
             )
         else:
-            torch_npu.npu_scatter_nd_update_(
+            DeviceOperator.scatter_cache(
                 indexer_k_cache.view(-1, k_li.shape[-1]),
                 slot_mapping.view(-1, 1),
                 k_li.view(-1, k_li.shape[-1]),
@@ -284,7 +284,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     indexer_attn_metadata.block_size,
                 )
             else:
-                torch_npu.npu_scatter_nd_update_(
+                DeviceOperator.scatter_cache(
                     indexer_scale_cache.view(-1, k_li_scale.shape[-1]),
                     slot_mapping.view(-1, 1),
                     k_li_scale.view(-1, k_li_scale.shape[-1]),
