@@ -849,7 +849,7 @@ class NPUWorker(WorkerBase):
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
-        if self.use_v2_model_runner and has_ec_transfer():
+        if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()
 
         if self.vllm_config.weight_transfer_config is not None:
