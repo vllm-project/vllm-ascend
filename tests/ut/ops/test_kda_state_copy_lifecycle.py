@@ -109,15 +109,22 @@ def module(monkeypatch):
     torch = ModuleType("torch")
     for name in ("float32", "bfloat16", "int32", "int64", "bool"):
         setattr(torch, name, name)
-    torch.__version__ = "test"
-    torch.npu = SimpleNamespace(current_device=lambda: 0, device=lambda _: nullcontext(), synchronize=lambda: None)
+    # Populate dynamic module namespaces without pretending ModuleType declares
+    # vendor-specific Torch/Triton attributes in its static interface.
+    torch.__dict__.update(
+        __version__="test",
+        npu=SimpleNamespace(current_device=lambda: 0, device=lambda _: nullcontext(), synchronize=lambda: None),
+    )
     utils = ModuleType("vllm.triton_utils")
-    utils.triton = SimpleNamespace(jit=lambda _: kernel, cdiv=lambda n, d: (n + d - 1) // d, __version__="test")
-    utils.tl = SimpleNamespace()
+    utils.__dict__.update(
+        triton=SimpleNamespace(jit=lambda _: kernel, cdiv=lambda n, d: (n + d - 1) // d, __version__="test"),
+        tl=SimpleNamespace(),
+    )
     monkeypatch.setitem(sys.modules, "torch", torch)
     monkeypatch.setitem(sys.modules, "vllm", ModuleType("vllm"))
     monkeypatch.setitem(sys.modules, "vllm.triton_utils", utils)
     spec = importlib.util.spec_from_file_location("isolated_kda_state_copy", SOURCE)
+    assert spec is not None and spec.loader is not None
     result = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(result)
     return result
@@ -159,7 +166,7 @@ def test_unknown_signature_never_compiles(module, change):
     module.prepare_kda_states_triton(*inputs())
     module.seal_kda_states_triton()
     args = inputs(payload=8) if change == "payload" else inputs()
-    kwargs = {}
+    kwargs: dict[str, object] = {}
     if change == "alignment":
         args[0].pointer += 4
     elif change == "index_dtype":
@@ -210,7 +217,7 @@ def test_invalid_block_size(module, block):
 def test_metadata_errors_do_not_compile(module, invalid):
     """Reject invalid metadata rather than attempting a device launch."""
     args = inputs()
-    kwargs = {}
+    kwargs: dict[str, object] = {}
     if invalid == "dtype":
         args[0].dtype = "float16"
     elif invalid == "packed":

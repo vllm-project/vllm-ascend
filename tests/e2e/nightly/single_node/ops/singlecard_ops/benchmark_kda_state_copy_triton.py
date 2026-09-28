@@ -15,12 +15,24 @@ import random
 import statistics
 import time
 from pathlib import Path
+from typing import TypedDict
 
 import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.ops import kda_state_copy as production
 from vllm_ascend.ops.triton import kda_state_copy as kernels
+
+
+class BenchmarkResult(TypedDict):
+    """JSON result schema with independently typed counters and record lists."""
+
+    trials: int
+    seed: int
+    records: list[dict[str, object]]
+    correctness: list[list[int | str]]
+    compiler_entries: int
+    source_sha256: dict[str, str]
 
 
 def _paths(state, indices, flags, packed, plan, to_cache):
@@ -80,7 +92,7 @@ def _measure(paths, mode, trials, rng):
             for _ in range(10):
                 graph.replay()
             graphs[name] = graph
-    samples = {name: [] for name in paths}
+    samples: dict[str, list[float]] = {name: [] for name in paths}
     for _ in range(trials):
         names = list(paths)
         rng.shuffle(names)
@@ -118,11 +130,19 @@ def main(output: Path, trials: int, seed: int):
     torch.npu.set_device(0)
     torch.manual_seed(seed)
     rng = random.Random(seed)
-    result = {"trials": trials, "seed": seed, "records": [], "correctness": [], "compiler_entries": 0}
-    result["source_sha256"] = {
-        name: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
-        for name, module in (("production", production), ("kernel", kernels))
+    result: BenchmarkResult = {
+        "trials": trials,
+        "seed": seed,
+        "records": [],
+        "correctness": [],
+        "compiler_entries": 0,
+        "source_sha256": {},
     }
+    for name, module in (("production", production), ("kernel", kernels)):
+        source = module.__file__
+        if source is None:
+            raise RuntimeError(f"cannot fingerprint {name}: module has no source file")
+        result["source_sha256"][name] = hashlib.sha256(Path(source).read_bytes()).hexdigest()
     workloads = []
     for count in (1, 8):
         payload, stride, offset, rows = 196608, 5308416, 393216, max(8, count + 1)
@@ -155,7 +175,7 @@ def main(output: Path, trials: int, seed: int):
     for name in ("triton", "triton.compiler", "triton.compiler.compiler", "triton.runtime.jit"):
         module = importlib.import_module(name)
         if callable(getattr(module, "compile", None)):
-            module.compile = forbidden
+            module.__dict__["compile"] = forbidden
     for count, case, paths in workloads:
         for mode in ("host_enqueue", "wall", "event", "graph"):
             record = {"selected": count, "case": case, "mode": mode, **_measure(paths, mode, trials, rng)}

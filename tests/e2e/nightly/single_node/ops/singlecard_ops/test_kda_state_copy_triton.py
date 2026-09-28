@@ -154,6 +154,7 @@ def prepared_state_copy():
     """
     source = Path(__file__).resolve().parents[6] / "vllm_ascend/ops/triton/kda_state_copy.py"
     spec = importlib.util.spec_from_file_location("isolated_npu_kda_state_copy", source)
+    assert spec is not None and spec.loader is not None
     strict = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(strict)
 
