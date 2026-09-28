@@ -51,10 +51,6 @@ deployment:
                   }
             }
         }'
-        --enable-eplb
-        --eplb-config '{"window_size":50,"step_interval":5,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
-        --additional-config
-        '{"eplb_config":{"load_collection_phase":"all"}}'
 
   -
     envs:
@@ -90,8 +86,4 @@ deployment:
                   }
             }
         }'
-        --enable-eplb
-        --eplb-config '{"window_size":600,"step_interval":50,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
-        --additional-config
-        '{"eplb_config":{"load_collection_phase":"all"}}'
 benchmarks:
