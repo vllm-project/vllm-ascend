@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Small-expert MoE routing with grid-owned EPLB records.
+"""CANN gating TopK followed by grid-owned EPLB mapping and recording.
 
-Each routing program owns a contiguous token range and writes one record
-for the EP-local physical experts. A second, single-writer program reduces
-the records into the cumulative load.
+The first Triton kernel maps CANN's logical IDs and writes one physical
+expert-count row per grid. A single-writer second kernel adds their sum to
+the cumulative load. Neither Triton kernel uses a global atomic.
 """
 
 import torch
@@ -12,20 +12,18 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
-TINY_DECODE_MAX_TOKENS = 64
-TINY_DECODE_TOKENS_PER_GRID = 2
-MIN_GRID_TOKEN_TILE = 8
-MAX_GRID_TOKEN_TILE = 64
+# Bound the live [assignment, local-expert] comparison tensor. The token
+# ownership range is independent of this inner processing tile.
+MAX_ASSIGNMENTS_PER_TILE = 512
+MAX_COMPARISON_ELEMENTS = 8192
 
 
 @triton.jit
-def _moe_gating_topk_map_record_kernel(
-    logits_ptr,
-    bias_ptr,
+def _map_grid_record_kernel(
+    logical_ids_ptr,
     table_ptr,
     record_enabled_ptr,
     valid_tokens_ptr,
-    weights_ptr,
     physical_ids_ptr,
     grid_records_ptr,
     tokens,
@@ -33,87 +31,42 @@ def _moe_gating_topk_map_record_kernel(
     table_rows,
     local_expert_start,
     local_expert_count,
-    scaling,
     K: tl.constexpr,
-    BLOCK_T: tl.constexpr,
-    BLOCK_E: tl.constexpr,
-    BLOCK_K: tl.constexpr,
+    TOKENS_PER_GRID: tl.constexpr,
+    BLOCK: tl.constexpr,
     BLOCK_P: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
-    SOFTMAX: tl.constexpr,
     VALID_IS_TENSOR: tl.constexpr,
 ):
     grid_id = tl.program_id(0)
-    num_grids = tl.num_programs(0)
-    tokens_per_grid = tokens // num_grids
-    extra_tokens = tokens % num_grids
-    token_start = grid_id * tokens_per_grid + tl.minimum(grid_id, extra_tokens)
-    token_end = token_start + tokens_per_grid + (grid_id < extra_tokens).to(tl.int32)
-    expert = tl.arange(0, BLOCK_E)
+    assignment_start = grid_id * TOKENS_PER_GRID * K
+    assignment_end = tl.minimum((grid_id + 1) * TOKENS_PER_GRID, tokens) * K
     physical = tl.arange(0, BLOCK_P)
-    slot = tl.arange(0, BLOCK_K)
-    expert_mask = expert < experts
     grid_record = tl.full((BLOCK_P,), 0, tl.int32)
     recording = tl.load(record_enabled_ptr) != 0
     if VALID_IS_TENSOR:
-        valid_tokens = tl.load(valid_tokens_ptr)
+        valid_end = tl.load(valid_tokens_ptr) * K
     else:
-        valid_tokens = valid_tokens_ptr
-    if HAS_BIAS:
-        bias = tl.load(bias_ptr + expert, mask=expert_mask, other=0).to(tl.float32)
+        valid_end = valid_tokens_ptr * K
 
-    for tile_start in tl.range(token_start, token_end, BLOCK_T):
-        row = tile_start + tl.arange(0, BLOCK_T)
-        row_mask = row < token_end
-        valid = row_mask[:, None] & expert_mask[None, :]
-        logits = tl.load(
-            logits_ptr + row[:, None] * experts + expert[None, :],
-            mask=valid,
-            other=0,
-        ).to(tl.float32)
-        if SOFTMAX:
-            safe_logits = tl.where(valid, logits, float("-inf"))
-            max_logits = tl.max(safe_logits, 1)
-            safe_max = tl.where(max_logits == float("-inf"), 0.0, max_logits)
-            exponent = tl.exp(safe_logits - safe_max[:, None])
-            score = exponent / (tl.sum(exponent, 1)[:, None] + 1e-20)
-        else:
-            score = tl.sigmoid(logits)
-
-        if HAS_BIAS:
-            ranking = score + bias[None, :]
-        else:
-            ranking = score
-        ranking = tl.where(valid, ranking, float("-inf"))
-
-        tile_hits = tl.full((BLOCK_T, BLOCK_P), 0, tl.int32)
-        selected_scores = tl.full((BLOCK_T, BLOCK_K), 0, tl.float32)
-        record_row = row_mask & (row < valid_tokens) & recording
-
-        for rank in tl.static_range(K):
-            best = tl.max(ranking, 1)
-            index = tl.min(tl.where(ranking == best[:, None], expert[None, :], BLOCK_E), 1)
-            picked = tl.sum(tl.where(expert[None, :] == index[:, None], score, 0), 1)
-            mapped = tl.load(
-                table_ptr + (row % table_rows) * experts + index,
-                mask=row_mask,
-                other=-1,
-            )
-            tl.store(physical_ids_ptr + row * K + rank, mapped, mask=row_mask)
-            selected_scores = tl.where(slot[None, :] == rank, picked[:, None], selected_scores)
-            local_id = mapped - local_expert_start
-            tile_hits += ((physical[None, :] == local_id[:, None]) & record_row[:, None]).to(tl.int32)
-            ranking = tl.where(expert[None, :] == index[:, None], float("-inf"), ranking)
-
-        denominator = tl.sum(selected_scores, 1) + 1e-20
-        tl.store(
-            weights_ptr + row[:, None] * K + slot[None, :],
-            selected_scores / denominator[:, None] * scaling,
-            mask=row_mask[:, None] & (slot[None, :] < K),
+    for base in range(assignment_start, assignment_end, BLOCK):
+        assignment = base + tl.arange(0, BLOCK)
+        assignment_mask = assignment < assignment_end
+        logical_id = tl.load(logical_ids_ptr + assignment, mask=assignment_mask, other=0).to(tl.int32)
+        logical_valid = (logical_id >= 0) & (logical_id < experts)
+        safe_logical_id = tl.where(logical_valid, logical_id, 0)
+        table_index = ((assignment // K) % table_rows) * experts + safe_logical_id
+        physical_id = tl.load(
+            table_ptr + table_index,
+            mask=assignment_mask & logical_valid,
+            other=-1,
         )
-        grid_record += tl.sum(tile_hits, 0)
+        tl.store(physical_ids_ptr + assignment, physical_id, mask=assignment_mask)
+        if recording:
+            valid_assignment = assignment_mask & (assignment < valid_end)
+            hits = (physical_id[:, None] - local_expert_start == physical[None, :]) & valid_assignment[:, None]
+            grid_record += tl.sum(hits.to(tl.int32), axis=0)
 
-    # One ordinary store per grid-owned EP-local physical expert.
+    # Grid rows have disjoint addresses, so this is an ordinary store.
     tl.store(
         grid_records_ptr + grid_id * local_expert_count + physical,
         grid_record,
@@ -161,10 +114,11 @@ def moe_gating_topk_map_record(
     local_expert_start: int = 0,
     local_expert_count: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return routing weights and physical IDs, accumulating valid-token load.
+    """Return CANN routing weights and mapped IDs, accumulating valid load.
 
-    This initial implementation supports the ungrouped, renormalized route.
-    The routing table is periodic over token rows, as in the EPLB path.
+    Only the ungrouped, renormalized route is accepted by its router guard.
+    Device-side routing-table, recording-flag and valid-count updates remain
+    visible under NPU graph replay.
     """
     if logits.ndim != 2 or not logits.is_contiguous():
         raise ValueError("logits must be contiguous [tokens, experts]")
@@ -210,30 +164,39 @@ def moe_gating_topk_map_record(
         raise ValueError("local expert range exceeds expert_load")
     if local_expert_count != experts:
         raise ValueError("grid-record fast path requires matching logical and local physical expert counts")
-    weights = torch.empty((tokens, k), dtype=logits.dtype, device=logits.device)
-    physical_ids = torch.empty((tokens, k), dtype=torch.int32, device=logits.device)
+
     if tokens == 0:
-        return weights, physical_ids
-    init_device_properties_triton()
-    if tokens <= TINY_DECODE_MAX_TOKENS:
-        block_t = TINY_DECODE_TOKENS_PER_GRID
-        num_grids = triton.cdiv(tokens, block_t)
-    else:
-        num_grids = min(tokens, get_vectorcore_num())
-        tokens_per_grid = triton.cdiv(tokens, num_grids)
-        # Prefer one token tile per grid where possible, with a bounded live set.
-        block_t = min(
-            MAX_GRID_TOKEN_TILE,
-            max(MIN_GRID_TOKEN_TILE, triton.next_power_of_2(tokens_per_grid)),
+        return (
+            torch.empty((0, k), dtype=logits.dtype, device=logits.device),
+            torch.empty((0, k), dtype=torch.int32, device=logits.device),
         )
-    grid_records = torch.empty((num_grids, local_expert_count), dtype=torch.int32, device=logits.device)
-    _moe_gating_topk_map_record_kernel[(num_grids,)](
+    weights, logical_ids, _ = torch.ops._C_ascend.moe_gating_top_k(
         logits,
-        bias if bias is not None else logits,
+        k=k,
+        k_group=1,
+        group_count=1,
+        group_select_mode=1,
+        renorm=1,
+        norm_type=0 if scoring == "softmax" else 1,
+        out_flag=False,
+        routed_scaling_factor=routed_scaling_factor,
+        eps=1e-20,
+        bias_opt=bias,
+    )
+    logical_ids = logical_ids.to(torch.int32)
+    physical_ids = torch.empty_like(logical_ids)
+
+    block_p = triton.next_power_of_2(local_expert_count)
+    block = min(MAX_ASSIGNMENTS_PER_TILE, max(triton.next_power_of_2(k), MAX_COMPARISON_ELEMENTS // block_p))
+    init_device_properties_triton()
+    num_grids = min(triton.cdiv(tokens * k, block), get_vectorcore_num())
+    tokens_per_grid = triton.cdiv(tokens, num_grids)
+    grid_records = torch.empty((num_grids, local_expert_count), dtype=torch.int32, device=logits.device)
+    _map_grid_record_kernel[(num_grids,)](
+        logical_ids,
         routing_table,
         record_enabled,
         valid_tokens,
-        weights,
         physical_ids,
         grid_records,
         tokens,
@@ -241,16 +204,11 @@ def moe_gating_topk_map_record(
         routing_table.shape[0],
         local_expert_start,
         local_expert_count,
-        routed_scaling_factor,
         K=k,
-        BLOCK_T=block_t,
-        BLOCK_E=triton.next_power_of_2(experts),
-        BLOCK_K=triton.next_power_of_2(k),
-        BLOCK_P=triton.next_power_of_2(max(local_expert_count, 1)),
-        HAS_BIAS=bias is not None,
-        SOFTMAX=scoring == "softmax",
+        TOKENS_PER_GRID=tokens_per_grid,
+        BLOCK=block,
+        BLOCK_P=block_p,
         VALID_IS_TENSOR=isinstance(valid_tokens, torch.Tensor),
-        num_warps=4,
     )
     _reduce_grid_records_kernel[(1,)](
         grid_records,
@@ -260,7 +218,6 @@ def moe_gating_topk_map_record(
         local_expert_start,
         local_expert_count,
         BLOCK_GRID=triton.next_power_of_2(num_grids),
-        BLOCK_P=triton.next_power_of_2(local_expert_count),
-        num_warps=4,
+        BLOCK_P=block_p,
     )
     return weights, physical_ids

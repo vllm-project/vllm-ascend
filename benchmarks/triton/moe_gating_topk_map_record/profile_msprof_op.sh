@@ -49,8 +49,10 @@ profile_one() {
 profile_one baseline MoeGatingTopK '' mainline_gating
 profile_one baseline _map_to_physical_kernel '' mainline_mapping
 profile_one baseline _record_expert_tokens_kernel '' mainline_record
-profile_one candidate _moe_gating_topk_map_record_kernel "${atomic_source}" atomic_fused
-profile_one candidate _moe_gating_topk_map_record_kernel "${candidate_source}" grid_routing
+if [[ -n "${atomic_source}" ]]; then
+    profile_one candidate _moe_gating_topk_map_record_kernel "${atomic_source}" atomic_fused
+fi
+profile_one candidate _map_grid_record_kernel "${candidate_source}" grid_routing
 profile_one candidate _reduce_grid_records_kernel "${candidate_source}" grid_reduce
 if [[ "$#" -ge 11 && -n "${11}" ]]; then
     profile_one candidate gating_top_k_map_and_record_kernel "${11}" pr17574_fused
