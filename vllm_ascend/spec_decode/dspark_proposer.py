@@ -611,6 +611,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                     num_tokens=num_input_tokens,
                 )
 
-            forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
+            if aclgraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
+                forward_context = get_forward_context()
                 self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
