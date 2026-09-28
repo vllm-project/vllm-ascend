@@ -91,7 +91,7 @@ on:
       triton_ascend:
         description: 'Triton Ascend version and package version (JSON array: ["version", "package_version"])'
         required: false
-        default: '["20260722051020", "3.2.2+dev20260722051020"]'
+        default: '["20260923230212", "3.6.0+dev20260923230212"]'
         type: string
       chips:
         description: 'Chips to build (JSON array: ["a2","a3","310p","a5"]). Default builds all.'
@@ -167,8 +167,8 @@ jobs:
       memfabric_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260923.6","1.3.0"],"memfabric":["20260923.6","1.3.0"]}').memfabric[0] }}
       torch_npu_version: ${{ fromJSON(inputs.torch_npu || '["20260926.5", "26.2.0"]')[1] }}
       torch_npu_date: ${{ fromJSON(inputs.torch_npu || '["20260926.5", "26.2.0"]')[0] }}
-      triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["20260722051020", "3.2.2+dev20260722051020"]')[0] }}
-      triton_ascend_package_version: ${{ fromJSON(inputs.triton_ascend || '["20260722051020", "3.2.2+dev20260722051020"]')[1] }}
+      triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["20260923230212", "3.6.0+dev20260923230212"]')[0] }}
+      triton_ascend_package_version: ${{ fromJSON(inputs.triton_ascend || '["20260923230212", "3.6.0+dev20260923230212"]')[1] }}
       
       build_args: |
         ${{ needs.setup-matrix.outputs.build_type == 'daily' && format('BASE_OS={0}', contains(matrix.build_meta.suffix, 'openeuler') && 'openeuler24.03-lts-sp4' || 'ubuntu24.04') || '' }}
@@ -215,8 +215,8 @@ jobs:
       memfabric_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260923.6","1.3.0"],"memfabric":["20260923.6","1.3.0"]}').memfabric[0] }}
       torch_npu_version: ${{ fromJSON(inputs.torch_npu || '["20260926.5", "26.2.0"]')[1] }}
       torch_npu_date: ${{ fromJSON(inputs.torch_npu || '["20260926.5", "26.2.0"]')[0] }}
-      triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["20260722051020", "3.2.2+dev20260722051020"]')[0] }}
-      triton_ascend_package_version: ${{ fromJSON(inputs.triton_ascend || '["20260722051020", "3.2.2+dev20260722051020"]')[1] }}
+      triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["20260923230212", "3.6.0+dev20260923230212"]')[0] }}
+      triton_ascend_package_version: ${{ fromJSON(inputs.triton_ascend || '["20260923230212", "3.6.0+dev20260923230212"]')[1] }}
 
       build_args: |
         ${{ needs.setup-matrix.outputs.build_type == 'daily' && format('BASE_OS={0}', contains(matrix.build_meta.suffix, 'openeuler') && 'openeuler24.03-lts-sp4' || 'ubuntu24.04') || '' }}
