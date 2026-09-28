@@ -294,10 +294,9 @@ def test_draft_decode_hooks_forward_parallel_config(monkeypatch):
         yield
 
     monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_draft_attn_metadata_factory",
+        "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_factory",
         factory,
     )
-    monkeypatch.setattr(AutoRegressiveSpeculator, "_build_uniform_attn_metadata", lambda *a, **k: None)
     monkeypatch.setattr(AutoRegressiveSpeculator, "_build_attn_metadata", lambda *a, **k: None)
     batch = SimpleNamespace(num_tokens=2, num_reqs=2)
     seq_lens = spec.input_batch.seq_lens_cpu_upper_bound
