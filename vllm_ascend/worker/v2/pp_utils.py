@@ -4,15 +4,16 @@
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from copy import copy
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from unittest.mock import patch
 
 import torch
 import vllm.envs as vllm_envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, replace
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -20,6 +21,25 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 _PP_TRANSPORT_PREFIX = "pp_transport"
+
+
+def copy_vllm_config(vllm_config: VllmConfig, /, **changes: Any) -> VllmConfig:
+    """Copy a runtime config without re-running target-only validation."""
+    # TODO: Use replace() once draft config construction no longer re-runs
+    # validations that apply to the target model's parallel topology only.
+    copied_config = copy(vllm_config)
+    for name, value in changes.items():
+        if not hasattr(copied_config, name):
+            raise TypeError(f"VllmConfig has no field {name!r}")
+        object.__setattr__(copied_config, name, value)
+    return copied_config
+
+
+def replace_or_copy_vllm_config(config: Any, /, **changes: Any) -> Any:
+    """Preserve dataclass replace semantics except for the top-level config."""
+    if isinstance(config, VllmConfig):
+        return copy_vllm_config(config, **changes)
+    return replace(config, **changes)
 
 
 def use_legacy_spec_pp() -> bool:

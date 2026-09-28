@@ -50,6 +50,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.pp_utils import copy_vllm_config
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_target_pcp_for_replicated_draft,
     prepare_replicated_pcp_config,
@@ -137,7 +138,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             pipeline_parallel_size=1,
             decode_context_parallel_size=1 if self.replicated_pcp else dcp_size,
         )
-        draft_config = replace(
+        draft_config = copy_vllm_config(
             self.vllm_config,
             model_config=self.draft_model_config,
             parallel_config=parallel_config,
