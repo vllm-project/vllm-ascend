@@ -483,18 +483,22 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     (raw_cache,) = raw_caches[layer_name]
     assert raw_cache.numel() == num_blocks * 488448
 
-    attn_group = AttentionGroup(
-        backend=backend,
-        layer_names=[layer_name],
-        kv_cache_spec=spec,
-        kv_cache_group_id=0,
-    )
     flash_profile = SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH)
     component_profile = SimpleNamespace(supports=lambda capability: False)
 
     def reshape():
+        # Build the group from the current spec each time. AttentionGroup may
+        # normalize its cache spec in a version-specific constructor, so
+        # mutating one group instance is not a reliable test primitive.
         return attn_utils._reshape_kv_cache_v2(
-            attn_groups=[attn_group],
+            attn_groups=[
+                AttentionGroup(
+                    backend=backend,
+                    layer_names=[layer_name],
+                    kv_cache_spec=spec,
+                    kv_cache_group_id=0,
+                )
+            ],
             kv_cache_raw_tensors=raw_caches,
             cache_dtype="auto",
             kernel_block_sizes=[128],
