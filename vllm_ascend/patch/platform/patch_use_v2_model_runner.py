@@ -4,7 +4,7 @@ from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 from vllm_ascend.worker.v2.pp_utils import resolve_spec_pp_support
 
 # Default to the Ascend V2 runner unless the environment explicitly selects
-# V1, or the config hits the V2 feature blacklist.
+# V1, or the config hits the V2 feature blacklist (including EPLB).
 apply_v2_model_runner_config_patch()
 
 _original_get_unsupported_features = VllmConfig._get_v2_model_runner_unsupported_features

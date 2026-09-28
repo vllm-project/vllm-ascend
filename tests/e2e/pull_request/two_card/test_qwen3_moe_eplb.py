@@ -44,9 +44,9 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
         compilation_config,
     ]
     env_dict = {
-        # Qwen3MoeForCausalLM now defaults to MRv2, which rejects V1 dynamic
-        # EPLB fields. Both servers must stay on V1 so the output comparison
-        # is not mixed across runners.
+        # The baseline server has no EPLB, so it would otherwise default to V2.
+        # Pin both servers to V1 so the output comparison stays on one runner.
+        # Do not set VLLM_USE_V2_MODEL_RUNNER=1 for the EPLB server.
         "VLLM_USE_V2_MODEL_RUNNER": "0",
         "HCCL_BUFFSIZE": "1024",
     }

@@ -12,6 +12,10 @@ env_common: &env_common
   OMP_NUM_THREADS: 1
   TASK_QUEUE_ENABLE: 1
   SERVER_PORT: 8080
+  # V2 decode TPOT is higher than V1, so delayed prefiller KV can sit past the
+  # default 480s Mooncake abort and get force-freed mid-request. Nightly-A3
+  # 36327818144 hit 39 aborts (TTFT p99 622s) and missed 0.97*2161.95 by 15 tok/s.
+  VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: 3600
   
 disaggregated_prefill:
   enabled: true
@@ -40,7 +44,7 @@ deployment:
         --trust-remote-code
         --gpu-memory-utilization 0.9
         --no-enable-prefix-caching
-        --additional-config '{"enable_fused_mc2":1}'
+        --additional-config '{"enable_fused_mc2":1,"enable_mlapo":true}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -79,7 +83,7 @@ deployment:
         --gpu-memory-utilization 0.9
         --no-enable-prefix-caching
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-        --additional-config '{"enable_fused_mc2":1}'
+        --additional-config '{"enable_fused_mc2":1,"enable_mlapo":true}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
