@@ -38,7 +38,9 @@ def _grouped_conv(
         position = position & (block_size - 1)
     else:
         position = position % block_size
-    for tap in range(1, taps):
+    # Taps outside the current query block cannot contribute. Skipping them
+    # also keeps single-request short drafts from padding beyond the input.
+    for tap in range(1, min(taps, block_size)):
         shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, tap, 0))
         output += coefficients[:, tap] * shifted * (position >= tap).view(-1, 1, 1)
     return output.flatten(-2)

@@ -276,8 +276,10 @@ LiLiCorr is a DFlash variant that reranks the per-position top-k candidate
 lattice before target-model verification. It requires a dedicated
 `LiLiCorrDraftModel` checkpoint trained for the target model; a regular DFlash
 or DFlash2 checkpoint cannot be substituted. The configured
-`num_speculative_tokens` must equal the checkpoint's trained block size minus
-one (the example below assumes a block size of eight).
+`num_speculative_tokens` should equal the checkpoint's trained block size minus
+one (the example below assumes a block size of eight). Shorter lengths down to
+one token are supported, but may reduce acceptance; measure them with your
+checkpoint and workload. Longer lengths are unsupported.
 
 LiLiCorr currently uses Model Runner V2 and eager draft execution on Ascend.
 Set `VLLM_USE_V2_MODEL_RUNNER=1` and set the nested speculative
@@ -296,6 +298,30 @@ Both the plain and convolutional LiLiCorr checkpoint variants are supported.
 Use the checkpoint's own `dflash_config` values for candidate top-k and
 convolution geometry; these values are part of the trained model and should
 not be tuned at serving time.
+
+Both `draft_sample_method: "greedy"` and `"probabilistic"` use the correlator's
+conditional scores. Probabilistic drafting supplies the realized proposal
+distribution to the rejection sampler and uses a separate random stream from
+target sampling. Compare acceptance length and throughput for both modes with
+your workload. Quantized draft projections require a quantization format
+supported by Ascend; NVIDIA ModelOpt NVFP4 exports are not portable merely
+because the upstream LiLiCorr loader accepts them.
+
+For a latency comparison on NPU, use real checkpoint weights and run the same
+batch and sequence lengths without speculative decoding, with greedy drafts,
+and with probabilistic drafts. For example:
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm bench latency --model <target-model> \
+  --batch-size 8 --input-len 1024 --output-len 128 \
+  --num-iters-warmup 5 --num-iters 30 --output-json lilicorr-latency.json \
+  --speculative-config '{"method":"dflash","model":"<matching-lilicorr-checkpoint>","num_speculative_tokens":7,"enforce_eager":true,"draft_sample_method":"probabilistic"}'
+```
+
+Repeat at the production batch sizes and context lengths, keeping TP size,
+target execution mode, and prefix caching settings fixed. Measure acceptance
+length and serving throughput alongside latency; synthetic prompts alone do
+not establish the production speedup.
 
 ## Speculating using DSpark
 

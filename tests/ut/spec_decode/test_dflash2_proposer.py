@@ -31,10 +31,10 @@ def _stub_device_properties(monkeypatch):
     monkeypatch.setattr("vllm_ascend.ops.triton.triton_utils._NUM_VECTORCORE", 8)
 
 
-@pytest.mark.parametrize("block_size", [5, 8])
-def test_grouped_conv_matches_reference(block_size: int):
+@pytest.mark.parametrize("block_size,taps,batch", [(5, 3, 3), (8, 3, 3), (2, 5, 1), (2, 5, 3)])
+def test_grouped_conv_matches_reference(block_size: int, taps: int, batch: int):
     torch.manual_seed(0)
-    batch, taps, num_groups, group_size = 3, 3, 4, 2
+    num_groups, group_size = 4, 2
     hidden = torch.randn(batch * block_size, num_groups * group_size)
     delta = torch.randn(batch * block_size, taps, num_groups)
     base = torch.randn(taps, num_groups * group_size)
@@ -87,6 +87,91 @@ def test_lilicorr_convolution_uses_ascend_dflash2_layer():
     import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa: F401
 
     assert upstream_lilicorr.DFlash2Qwen3DecoderLayer is DFlash2Qwen3DecoderLayer
+
+
+def test_lilicorr_cannot_silently_use_plain_dflash_on_v1():
+    from vllm_ascend.spec_decode import get_spec_decode_method
+
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="dflash",
+            draft_model_config=SimpleNamespace(architectures=["LiLiCorrDraftModel"]),
+        )
+    )
+    with (
+        patch("vllm_ascend.spec_decode.AscendDflashProposer") as plain_dflash,
+        pytest.raises(NotImplementedError, match="VLLM_USE_V2_MODEL_RUNNER=1"),
+    ):
+        get_spec_decode_method("dflash", config, "cpu", None)
+    plain_dflash.assert_not_called()
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+@pytest.mark.parametrize("v_scale", [None, 0.5])
+@pytest.mark.parametrize("mapping_kind", ["shared", "per_layer", "dummy"])
+def test_context_kv_preserves_projection_norm_rope_and_value_scale(quantized, v_scale, mapping_kind):
+    from vllm_ascend.patch.worker.patch_qwen3_dflash import (
+        _project_context_kv,
+        precompute_and_store_context_kv,
+    )
+
+    torch.manual_seed(7)
+    num_ctx, num_layers, hidden_size, num_kv_heads, head_dim = 3, 2, 8, 2, 2
+    kv_size = num_kv_heads * head_dim
+    hidden_norm = torch.nn.RMSNorm(hidden_size, eps=1e-6)
+    states = torch.randn(num_ctx, hidden_size)
+    positions = torch.arange(num_ctx)
+    weights = [torch.randn(q_size + 2 * kv_size, hidden_size) for q_size in (4, 8)]
+    biases = [torch.randn(weight.shape[0]) for weight in weights]
+    q_sizes = [weight.shape[0] - 2 * kv_size for weight in weights]
+    projections = [
+        MagicMock(side_effect=lambda x, w=w, b=b: (torch.nn.functional.linear(x, w, b), None))
+        for w, b in zip(weights, biases)
+    ]
+
+    def rotate(pos, query, key):
+        # A deterministic in-place transform verifies the layer-major layout.
+        query.add_(pos[:, None])
+
+    norms = [torch.nn.RMSNorm(head_dim, eps=1e-6) for _ in range(num_layers)]
+    caches = [SimpleNamespace(impl=MagicMock(), kv_cache=object()) for _ in range(num_layers)]
+    model = SimpleNamespace(
+        hidden_norm=hidden_norm,
+        layers=[
+            SimpleNamespace(self_attn=SimpleNamespace(k_norm=n, rotary_emb=rotate, v_scale=v_scale)) for n in norms
+        ],
+        _num_attn_layers=num_layers,
+        _kv_size=kv_size,
+        _head_dim=head_dim,
+        _num_kv_heads=num_kv_heads,
+        _context_qkv_projs=projections,
+        _context_q_sizes=q_sizes,
+        _fused_kv_weight=None if quantized else torch.cat([w[q:] for w, q in zip(weights, q_sizes)]),
+        _fused_kv_bias=None if quantized else torch.cat([b[q:] for b, q in zip(biases, q_sizes)]),
+        _attn_layers=caches,
+    )
+    model._project_context_kv = lambda *args: _project_context_kv(model, *args)
+    mapping = torch.tensor([1, 3, 5])
+    slot_mapping = {"shared": mapping, "per_layer": [mapping, None], "dummy": None}[mapping_kind]
+    precompute_and_store_context_kv(model, states, positions, slot_mapping)
+
+    for i, (weight, bias, q_size, norm, cache) in enumerate(zip(weights, biases, q_sizes, norms, caches)):
+        update = cache.impl.do_kv_cache_update
+        if mapping_kind == "dummy" or (mapping_kind == "per_layer" and i == 1):
+            update.assert_not_called()
+            continue
+        expected = torch.nn.functional.linear(hidden_norm(states), weight, bias)[:, q_size:]
+        k, v = expected.chunk(2, dim=-1)
+        expected_k = norm(k.reshape(num_ctx, num_kv_heads, head_dim)) + positions[:, None, None]
+        expected_v = v.reshape(num_ctx, num_kv_heads, head_dim) * (1.0 if v_scale is None else v_scale)
+        update.assert_called_once()
+        args = update.call_args.args
+        assert args[0] is cache and args[3] is cache.kv_cache and args[4] is mapping
+        torch.testing.assert_close(args[1], expected_k)
+        torch.testing.assert_close(args[2], expected_v)
+
+    for proj in projections:
+        assert proj.call_count == int(quantized)
 
 
 def test_grouped_conv_projection_uses_draft_quantization():
