@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Four-NPU acceptance for unquantized, head-sharded SFA/DSA Q replication."""
 
+from typing import Any
+
 import pytest
 from vllm import SamplingParams
 
@@ -19,11 +21,15 @@ def test_sparse_dcp_q_replication(graph_mode, interleave, method, request, monke
         "Explain how sparse attention selects tokens. " * 60,
         "The capital of France is",
     ]
-    spec = None if method is None else {"method": method, "num_speculative_tokens": 3}
-    if method == "ngram":
-        spec.update(prompt_lookup_min=2, prompt_lookup_max=5)
+    spec: dict[str, Any] | None = None
+    if method is not None:
+        spec = {"method": method, "num_speculative_tokens": 3}
+        if method == "ngram":
+            spec.update(prompt_lookup_min=2, prompt_lookup_max=5)
     outputs, scores = [], []
-    runs = [(False, None), (True, None)] if spec is None else [(False, None), (False, spec), (True, spec)]
+    runs: list[tuple[bool, dict[str, Any] | None]] = (
+        [(False, None), (True, None)] if spec is None else [(False, None), (False, spec), (True, spec)]
+    )
     for enabled, speculative in runs:
         with VllmRunner(
             model,

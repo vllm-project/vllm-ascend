@@ -1586,7 +1586,7 @@ class TestAscendMLAImpl(TestBase):
             "v_head_dim": 128,
             "q_lora_rank": 64,
             "q_proj": MagicMock(),
-            "q_b_proj": MagicMock(),
+            "q_b_proj": MagicMock(qrep_active=False),
             "kv_b_proj": MagicMock(),
             "o_proj": MagicMock(),
             "kv_a_proj_with_mqa": MagicMock(),
@@ -1597,7 +1597,6 @@ class TestAscendMLAImpl(TestBase):
             "use_mla_rope": True,
         }
 
-        kwargs["q_b_proj"].qrep_active = False
         self.impl = AscendMLAImpl(
             num_heads=num_heads,
             head_size=head_size,

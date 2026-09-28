@@ -161,14 +161,14 @@ def test_sparse_decode_matches_explicit_selected_attention(dcp, interleave):
         caches.append(local_cache)
         indices.append(mapped)
     merged = (torch.stack(partials) * torch.stack(lses).softmax(0)).sum(0)
-    expected = []
+    expected_outputs = []
     for t in range(tokens):
         ids = topk[t][topk[t] >= 0].long()
         full_k = torch.cat((torch.einsum("jl,hpl->jhp", cache[ids], uk), rope[ids, None].expand(-1, heads, -1)), -1)
         full_v = torch.einsum("jl,hlv->jhv", cache[ids], uv)
         probs = (torch.einsum("hd,jhd->hj", projected[t], full_k) * scale).softmax(-1)
-        expected.append(torch.einsum("hj,jhv->hv", probs, full_v))
-    expected = torch.stack(expected)
+        expected_outputs.append(torch.einsum("hj,jhv->hv", probs, full_v))
+    expected = torch.stack(expected_outputs)
 
     for rank, impl in enumerate(impls):
         local = slice(rank * 2, rank * 2 + 2)
@@ -189,7 +189,7 @@ def test_sparse_decode_matches_explicit_selected_attention(dcp, interleave):
                 torch.testing.assert_close(q, group_q)
                 torch.testing.assert_close(p, group_pe)
                 torch.testing.assert_close(idx, indices[rank])
-                out, lse = sparse_attention(q, p, *kv, idx)
+                out, lse = sparse_attention(q, p, kv[0], kv[1], idx)
                 return out, lse.transpose(0, 1), torch.ones_like(lse.transpose(0, 1))
 
             def merge(out, lse, size, dim, name, rank=rank, local=local):

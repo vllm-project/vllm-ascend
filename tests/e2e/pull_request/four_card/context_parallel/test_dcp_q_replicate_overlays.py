@@ -2,6 +2,7 @@
 """Qrep feature overlays with observed cache hits and scheduler batches."""
 
 import json
+from typing import Any
 
 import pytest
 from vllm import SamplingParams
@@ -12,6 +13,9 @@ from tests.e2e.conftest import VllmRunner
 
 
 class OverlayWorkerExtension:
+    # Supplied by the worker when it composes this extension into its class.
+    model_runner: Any
+
     def overlay_activation(self):
         model = self.model_runner.get_model()
         layers = [
@@ -22,7 +26,7 @@ class OverlayWorkerExtension:
         return {"runner": type(self.model_runner).__module__, "qrep": layers}
 
 
-class ScheduleEvidence:
+class ScheduleEvidence(Scheduler):
     """Observe CPU scheduling metadata without changing scheduling decisions."""
 
     def _update_after_schedule(self, scheduler_output):
@@ -43,7 +47,7 @@ class ScheduleEvidence:
         return super()._update_after_schedule(scheduler_output)
 
 
-class ObservedScheduler(ScheduleEvidence, Scheduler):
+class ObservedScheduler(ScheduleEvidence):
     pass
 
 
@@ -76,7 +80,7 @@ def test_qrep_overlays(case, monkeypatch, dcp_qrep_model, tmp_path):
     results = []
     repeat_matches = []
     for enabled in (False, True):
-        additional = {"enable_mlapo": False, "enable_dsa_cp": False}
+        additional: dict[str, Any] = {"enable_mlapo": False, "enable_dsa_cp": False}
         if case == "lmhead_tp":
             additional["finegrained_tp_config"] = {"lmhead_tensor_parallel_size": 1}
         with VllmRunner(
