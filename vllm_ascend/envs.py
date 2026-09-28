@@ -110,6 +110,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Experimental Qwen3.5-9B one-token decode GDN head-tile pipeline. It is
+    # disabled by default and restricted to the non-speculative one-token
+    # decode kernel shape; all other invocations keep the stock path.
+    "VLLM_ASCEND_ENABLE_GDN_DECODE_TILE_PIPELINE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_GDN_DECODE_TILE_PIPELINE", "0"))
+    ),
 }
 
 # end-env-vars-definition
