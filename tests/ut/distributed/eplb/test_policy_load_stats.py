@@ -78,6 +78,19 @@ def test_mapping_change_discards_old_samples():
     assert model_state._observed_load_mapping_generation == 2
 
 
+def test_initialize_load_stats_adds_empty_commit_anchors():
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.expert_load_window_size = 3
+    model_state = _model_state(model=SimpleNamespace(num_moe_layers=2))
+
+    state._initialize_load_stats_state(model_state)
+
+    np.testing.assert_array_equal(
+        np.isnan(model_state._last_committed_mean_ratios),
+        [True, True],
+    )
+
+
 def test_collect_global_load_stats_maps_physical_to_logical(monkeypatch):
     cpu_group = object()
     device_group = object()
@@ -150,7 +163,6 @@ def test_publish_async_load_stats_is_atomic(monkeypatch):
         "get_eplb_group",
         lambda: SimpleNamespace(device_group=device_group),
     )
-    monkeypatch.setattr(state_module, "get_node_count", lambda: 2)
     model_state = _model_state(
         model=SimpleNamespace(
             num_physical_experts=8,
@@ -160,6 +172,7 @@ def test_publish_async_load_stats_is_atomic(monkeypatch):
     )
     state = AscendEplbState.__new__(AscendEplbState)
     state.model_states = {"model": model_state}
+    state.get_rank_node_ids = MagicMock(return_value=np.array([0, 0, 1, 1]))
     state.rearrange_event = MagicMock()
     stats = PreparedLoadStats(torch.ones(2, 1, 3), np.array([2, 1]))
 
@@ -169,4 +182,35 @@ def test_publish_async_load_stats_is_atomic(monkeypatch):
     assert model_state.eplb_stats.num_nodes == 2
     assert model_state.eplb_stats.num_gpus == 4
     assert model_state.rebalanced
+    state.get_rank_node_ids.assert_called_once_with()
     state.rearrange_event.record.assert_called_once_with()
+
+
+def test_rank_node_ids_are_discovered_once(monkeypatch):
+    cpu_group = MagicMock()
+    cpu_group.size.return_value = 5
+    monkeypatch.setattr(
+        state_module,
+        "get_eplb_group",
+        lambda: SimpleNamespace(cpu_group=cpu_group),
+    )
+    same_node = MagicMock(
+        side_effect=(
+            [True, False, True, False, False],
+            [False, True, False, True, False],
+            [False, False, False, False, True],
+        )
+    )
+    monkeypatch.setattr(state_module, "in_the_same_node_as", same_node)
+    state = AscendEplbState.__new__(AscendEplbState)
+
+    first = state.get_rank_node_ids()
+    second = state.get_rank_node_ids()
+
+    np.testing.assert_array_equal(first, [0, 1, 0, 1, 2])
+    np.testing.assert_array_equal(second, first)
+    assert [call.args for call in same_node.call_args_list] == [
+        (cpu_group, 0),
+        (cpu_group, 1),
+        (cpu_group, 4),
+    ]

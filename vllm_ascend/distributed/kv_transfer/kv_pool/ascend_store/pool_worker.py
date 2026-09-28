@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import os
 import threading
 import time
 from collections.abc import Callable, Generator, Sequence
@@ -99,6 +100,14 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+
+# PERF-TUNE switch: defer the last layer's save drain out of the forward
+# critical path; the drain runs at the start of the next step's start_load_kv.
+# Opt-in (default off): the synchronous inline drain is the long-standing
+# contract that layerwise tests (e.g. test_mooncake_pipeline) and downstream
+# readers rely on, and deferring widens the window in which a subsequent
+# request can observe a partially published prefix.
+_LW_DEFER_LAST_SAVE = os.environ.get("VLLM_ASCEND_LW_DEFER_LAST_SAVE", "0") == "1"
 
 # Read lease TTL (ms) for the layerwise load path. batch_add_lease acquires a
 # read lease before batch_copy(G2L); the lease must cover the asynchronous
@@ -455,6 +464,12 @@ class KVPoolWorker:
         self._layerwise_session_tracker = LayerwiseSessionTracker()
         self._current_layerwise_request_ids: set[str] = set()
         self._current_layerwise_last_chunk_req_ids: set[str] = set()
+        # PERF-TUNE(4): per-step RPC result caches. Defined once here so
+        # mypy does not flag repeated attribute definitions; they are reset
+        # per step via .clear() in process_layer_data().
+        self._step_keyinfo_cache: dict[str, Any] = {}
+        self._step_lease_result: dict[str, int] = {}
+        self._step_exist_cache: dict[str, int] = {}
 
     def _init_layerwise_config(self) -> None:
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
@@ -1116,6 +1131,7 @@ class KVPoolWorker:
         self.current_layer = 0
         self.layerwise_retrievers: list[Any] = []
         if self.use_layerwise:
+            self._drain_deferred_last_save()
             self.next_layer_to_submit = 0
             # Transfer threads receive these lists by reference. Give every
             # step fresh lists so a late clear of a previous step cannot drop
@@ -1539,12 +1555,20 @@ class KVPoolWorker:
         cached_keys = list(dict.fromkeys(key for key in keys if key in self._allocated_gvas))
         if not cached_keys:
             return
-        exists_states = self.m_store.batch_is_exist(cached_keys)
-        if len(exists_states) != len(cached_keys):
-            raise RuntimeError(
-                "MemCache exists check returned unexpected number of states: "
-                f"expected={len(cached_keys)}, actual={len(exists_states)}"
-            )
+        # PERF-TUNE(4): reuse this step's existence results for repeated keys
+        step_cache = getattr(self, "_step_exist_cache", None) or {}
+        self._step_exist_cache = step_cache
+        uncached_keys = [k for k in cached_keys if k not in step_cache]
+        if uncached_keys:
+            fetched_states = self.m_store.batch_is_exist(uncached_keys)
+            if len(fetched_states) != len(uncached_keys):
+                raise RuntimeError(
+                    "MemCache exists check returned unexpected number of states: "
+                    f"expected={len(uncached_keys)}, actual={len(fetched_states)}"
+                )
+            for k, st in zip(uncached_keys, fetched_states):
+                step_cache[k] = st
+        exists_states = [step_cache[k] for k in cached_keys]
         for key, exists in zip(cached_keys, exists_states):
             if exists == 0:
                 self._allocated_gvas.pop(key, None)
@@ -1828,7 +1852,20 @@ class KVPoolWorker:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
 
-                key_infos = self.m_store.batch_get_key_info(keys)
+                # PERF-TUNE(4): dedup identical keys across concurrent requests
+                ki_cache = getattr(self, "_step_keyinfo_cache", None) or {}
+                self._step_keyinfo_cache = ki_cache
+                uncached = [k for k in keys if k not in ki_cache]
+                if uncached:
+                    fetched_infos = self.m_store.batch_get_key_info(uncached)
+                    if len(fetched_infos) != len(uncached):
+                        raise RuntimeError(
+                            "MemCache key info check returned unexpected number of results: "
+                            f"expected={len(uncached)}, actual={len(fetched_infos)}"
+                        )
+                    for k, ki in zip(uncached, fetched_infos):
+                        ki_cache[k] = ki
+                key_infos = [ki_cache[k] for k in keys]
                 gvas = []
                 valid_gva_indices = []
                 invalid_block_ids: list[int] = []
@@ -1850,15 +1887,25 @@ class KVPoolWorker:
                             int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else "N/A",
                         )
 
-                # Only call batch_add_lease for keys with valid size
+                # Only call batch_add_lease for keys with valid size.
+                # PERF-TUNE(4): keys leased earlier in this step reuse their
+                # recorded result code; only new keys hit the RPC. The result
+                # list below stays aligned with valid_gva_indices.
+                lease_cache = getattr(self, "_step_lease_result", None) or {}
+                self._step_lease_result = lease_cache
                 valid_keys = [keys[index] for index in valid_gva_indices]
-                if valid_keys:
-                    lease_results = self.m_store.batch_add_lease(valid_keys, LAYERWISE_READ_LEASE_TTL_MS)
-                    if len(lease_results) != len(valid_keys):
+                new_lease_keys = [k for k in valid_keys if k not in lease_cache]
+                if new_lease_keys:
+                    new_results = self.m_store.batch_add_lease(new_lease_keys, LAYERWISE_READ_LEASE_TTL_MS)
+                    if len(new_results) != len(new_lease_keys):
                         raise RuntimeError(
                             "MemCache lease returned unexpected number of results: "
-                            f"expected={len(valid_keys)}, actual={len(lease_results)}"
+                            f"expected={len(new_lease_keys)}, actual={len(new_results)}"
                         )
+                    for k, res in zip(new_lease_keys, new_results):
+                        lease_cache[k] = res
+                if valid_keys:
+                    lease_results = [lease_cache[k] for k in valid_keys]
                     leased_keys = []
                     for gva_index, lease_res in zip(valid_gva_indices, lease_results):
                         block_idx = block_indices[gva_index]
@@ -1876,6 +1923,7 @@ class KVPoolWorker:
                                         f"unexpected number of results: {len(retry_results)}"
                                     )
                                 lease_res = retry_results[0]
+                                lease_cache[partial_key] = lease_res
                                 if lease_res != MEMCACHE_UNMATCHED_STATE:
                                     break
                         block_id = int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else None
@@ -2402,9 +2450,33 @@ class KVPoolWorker:
         except AssertionError:
             return None
 
+    def _drain_deferred_last_save(self) -> None:
+        """PERF-TUNE(2): deferred tail of the previous step's last-layer save."""
+        if not getattr(self, "_pending_last_save_drain", False):
+            return
+        self._pending_last_save_drain = False
+        assert self.kv_send_thread is not None
+        # PP-aware: only the per-stage LOCAL layers are forwarded; mirror
+        # save_kv_layer's num_local computation for the drain lifecycle.
+        if getattr(self, "pp_size", 1) > 1:
+            num_local = getattr(self, "layerwise_key_layers", 0) or self.num_layers
+        else:
+            num_local = self.num_layers
+        self._wait_for_final_layer_save(num_local, self.kv_send_thread)
+
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         if not requests:
             return
+        # PERF-TUNE(4): per-step RPC result caches. Concurrent requests with a
+        # shared prefix issue identical memcache queries; cache per step so each
+        # distinct key is queried/leased/existence-checked once.
+        # Plain (un-annotated) re-assignment keeps mypy happy (only the
+        # annotated definition in _init_state_vars counts as a definition)
+        # and stays safe on workers built via __new__ that never ran
+        # _init_state_vars (e.g. unit tests).
+        self._step_keyinfo_cache = {}
+        self._step_lease_result = {}
+        self._step_exist_cache = {}
         # Keep this method safe for direct callers as well as start_load_kv().
         # Worker threads may still own the lists from the preceding step.
         # Mooncake uses the projected stage-local cache layout, including any
@@ -2643,7 +2715,14 @@ class KVPoolWorker:
             # Recurrent and record-only paths do not exit an attention window.
             self._finish_attention_window()
         if self.current_layer == num_local - 1:
-            self._wait_for_final_layer_save(num_local, send_thread)
+            if _LW_DEFER_LAST_SAVE:
+                # PERF-TUNE(2): move the last layer's save drain off the forward
+                # critical path. The drain (host wait + event reset) runs at the
+                # start of the NEXT step's start_load_kv, absorbing the send
+                # thread's tail latency into the inter-step scheduling gap.
+                self._pending_last_save_drain = True
+            else:
+                self._wait_for_final_layer_save(num_local, send_thread)
         self.current_layer += 1
 
     def _wait_for_final_layer_save(self, num_local: int, send_thread: KVTransferThread) -> None:

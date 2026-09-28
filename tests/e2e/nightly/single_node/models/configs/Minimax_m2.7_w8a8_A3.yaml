@@ -42,6 +42,19 @@ _server_cmd: &server_cmd
   - '{"enable_cpu_binding": true, "enable_fused_mc2": true, "weight_nz_mode": 1, "enable_flashcomm1": true}'
 
 _benchmarks_3500: &benchmarks_3500
+  # Same prefill shape as perf_50. Model Runner V2 compiles that shape on
+  # the first request; baseline 0 keeps the warmup out of the 0.97 gate.
+  perf_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_in3500_bs4000_minimax
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 190
+    max_out_len: 128
+    batch_size: 190
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
   perf_50:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_in3500_bs4000_minimax
