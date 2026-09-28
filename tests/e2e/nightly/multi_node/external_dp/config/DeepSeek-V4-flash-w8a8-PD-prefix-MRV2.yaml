@@ -178,7 +178,7 @@ benchmarks:
     thinking: "true"
     max_out_len: 65536
     batch_size: 32
-    baseline: 96.67
+    baseline: 90.40
     threshold: 10
 
   perf_TPOT50_16k_1_prefix0_warmup:
@@ -202,7 +202,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 200
     request_rate: 2.7
-    baseline: 2584.0526
+    baseline: 2603.5149
     threshold: 0.95
 
   perf_TPOT50_128k_1_prefix90_warmup:
@@ -226,5 +226,5 @@ benchmarks:
     max_out_len: 1024
     batch_size: 128
     request_rate: 2.5
-    baseline: 2267.90
+    baseline: 2186.0874
     threshold: 0.95
