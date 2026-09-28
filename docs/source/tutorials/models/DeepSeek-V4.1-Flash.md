@@ -30,8 +30,9 @@ configuration.
 The A3 configurations in this guide use W8A8 weights and INT8 Engram storage.
 The single-node colocated configuration uses DP4/TP4. The PD configuration
 uses DP4/TP4 on the Prefill node, DP8/TP2 on the Decode node, DSpark
-speculative decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode. Both use
-model runner V1.
+speculative decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode. The
+DeepSeek-V4.1-Flash model currently supports only model runner V1 on Ascend, so
+all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
 ## 3 Prerequisites
 
@@ -187,6 +188,7 @@ and use the `main` branch with the matching vLLM revision recorded in
 
   MODEL_PATH="<YOUR_MODEL_PATH>"
 
+  export VLLM_USE_V2_MODEL_RUNNER=0
   export VLLM_ENGINE_READY_TIMEOUT_S=36000
 
   export HCCL_BUFFSIZE=1024
@@ -243,6 +245,9 @@ Key parameters:
 - `VLLM_ENGINE_READY_TIMEOUT_S=36000` allows up to 36,000 seconds for engine
     processes to finish initialization, including weight loading and graph
     preparation.
+- `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1. Keep this
+    value at `0` because DeepSeek-V4.1-Flash currently does not support model
+    runner V2 on Ascend.
 - `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
     Engram table in host memory and lets local DP ranks share the host-memory
     allocation. This reduces duplicate host-memory copies. The A3 container
@@ -370,6 +375,7 @@ export HCCL_IF_IP="$LOCAL_IP"
 export GLOO_SOCKET_IFNAME="$NIC_NAME"
 export TP_SOCKET_IFNAME="$NIC_NAME"
 export HCCL_SOCKET_IFNAME="$NIC_NAME"
+export VLLM_USE_V2_MODEL_RUNNER=0
 export VLLM_ENGINE_READY_TIMEOUT_S=36000
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -456,6 +462,7 @@ NIC_NAME="<NETWORK_INTERFACE>"
 LOCAL_IP="<DECODE_NODE_IP>"
 MODEL_PATH="<YOUR_MODEL_PATH>"
 
+export VLLM_USE_V2_MODEL_RUNNER=0
 export VLLM_ENGINE_READY_TIMEOUT_S=36000
 export HCCL_IF_IP="$LOCAL_IP"
 export GLOO_SOCKET_IFNAME="$NIC_NAME"
@@ -543,6 +550,9 @@ Configure the proxy with Prefill endpoints `<PREFILL_NODE_IP>:7100` through
 - `VLLM_ENGINE_READY_TIMEOUT_S=36000` gives every Prefill and Decode engine up
   to 36,000 seconds to finish startup. This includes weight loading and Decode
   graph preparation.
+- `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1 on both
+  Prefill and Decode. Keep this value at `0` because DeepSeek-V4.1-Flash
+  currently does not support model runner V2 on Ascend.
 - `--data-parallel-size` and `--tensor-parallel-size` define DP4/TP4 on
   Prefill and DP8/TP2 on Decode. Their product must be 16 on each A3 node.
 - `--data-parallel-address` and `--data-parallel-rpc-port` coordinate DP ranks
@@ -825,7 +835,9 @@ For common environment, installation, and parameter issues, refer to the
   servers in 1P1D mode, with an Ascend W8A8 checkpoint and INT8 Engram storage.
 - The A2 configuration is retained unchanged and is not revalidated by this
   update. Its revised configuration will be documented separately.
-- Pipeline parallelism and model runner V2 are not covered by this guide.
+- DeepSeek-V4.1-Flash currently supports only model runner V1 on Ascend. Keep
+  `VLLM_USE_V2_MODEL_RUNNER=0` in every A3 serving script. Pipeline parallelism
+  is not covered by this guide.
 - In the A3 PD example, Prefill runs in eager mode. Decode uses
   `FULL_DECODE_ONLY` ACL Graph for the target model and eager execution for the
   DSpark draft model.
