@@ -703,9 +703,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
             pcp_slot_mapping=pcp_slot_mapping,
-            pcp_has_global_prefill=bool(
-                pcp_context is not None and pcp_context.global_batch.is_prefilling_np.any()
-            ),
+            pcp_has_global_prefill=bool(pcp_context is not None and pcp_context.global_batch.is_prefilling_np.any()),
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,
