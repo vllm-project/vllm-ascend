@@ -21,10 +21,12 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+import torch_npu
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 EPLB_EXPERT_WEIGHT_NAMES = {
     (QuantType.NONE, False): ("w13_weight", "w2_weight"),
@@ -61,8 +63,10 @@ EPLB_EXPERT_WEIGHT_NAMES = {
     ),
     (QuantType.W4A4MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
     (QuantType.W4A4MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.W8A8MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.W8A8MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W8A8MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale",
+                                  "w13_weight_list", "w2_weight_list", "w13_weight_scale_list", "w2_weight_scale_list"),
+    (QuantType.W8A8MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale",
+                                 "w13_weight_list", "w2_weight_list", "w13_weight_scale_list", "w2_weight_scale_list"),
 }
 
 
@@ -127,9 +131,14 @@ class VllmEplbAdaptor:
                 continue
             buffer_tensor_shapes[expert_weight_key] = expert_tensor_shapes
             self.buffer_tensor_list[expert_weight_key] = [[] for _ in range(num_buffer_tensor)]
+            quant_type = expert_weight_key[0]
             for buffer_id in range(num_buffer_tensor):
-                for expert_tensor in expert_tensors:
+                for name, expert_tensor in zip(expert_weight_names, expert_tensors):
                     buffer_tensor = torch.empty_like(expert_tensor)
+                    if quant_type == QuantType.W8A8MXFP and name in ("w13_weight_list", "w2_weight_list"):
+                        torch_npu.npu_format_cast_(
+                            buffer_tensor, ACL_FORMAT_FRACTAL_NZ, customize_dtype = torch.float8_e4m3fn
+                        )
                     self.buffer_tensor_list[expert_weight_key][buffer_id].append(buffer_tensor)
 
     def init_expert_param_per_layer(self):
@@ -201,11 +210,16 @@ class VllmEplbAdaptor:
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
         expert_weight_key = self.expert_weight_key_per_layer[layer_id]
-        for expert_tensor, buffer_tensor in zip(
+        weight_names = EPLB_EXPERT_WEIGHT_NAMES[expert_weight_key]
+        for name, expert_tensor, buffer_tensor in zip(
+            weight_names,
             self.expert_param_per_layer[layer_id][local_expert_to_replace],
             self.buffer_tensor_list[expert_weight_key][buffer_tensor_id],
         ):
-            expert_tensor.copy_(buffer_tensor)
+            if expert_weight_key[0] ==QuantType.W8A8MXFP and name in ("w13_weight_list", "w2_weight_list"):
+                torch_npu.copy_memory_(expert_tensor, buffer_tensor)
+            else:
+                expert_tensor.copy_(buffer_tensor)
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
