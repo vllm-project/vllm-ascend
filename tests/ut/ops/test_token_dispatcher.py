@@ -926,6 +926,14 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.addCleanup(patcher12.stop)
         self.mock_repeat_interleave.return_value = torch.arange(16)
 
+        # Mock torch.npu.Event: the dispatch path records a D2H event, and on
+        # real-NPU runners record() resolves the current stream through
+        # torch.npu.current_device(), which the CPU-tensor fixtures above
+        # patch to "cpu" and therefore never initialize.
+        patcher13 = patch("torch.npu.Event")
+        self.mock_npu_event = patcher13.start()
+        self.addCleanup(patcher13.stop)
+
         self.dispatcher = TokenDispatcherWithAll2AllV(top_k=2, num_experts=4, num_local_experts=2, with_quant=False)
 
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
@@ -997,8 +1005,8 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         """
         hidden_states, topk_ids = self._build_dispatch_preprocess_inputs()
 
-        with patch("torch.npu.Event") as mock_event_cls, patch("torch.npu.synchronize") as mock_device_sync:
-            mock_event = mock_event_cls.return_value
+        with patch("torch.npu.synchronize") as mock_device_sync:
+            mock_event = self.mock_npu_event.return_value
             call_order = MagicMock()
             call_order.attach_mock(self.mock_npu_moe_token_permute, "permute")
             call_order.attach_mock(mock_event.synchronize, "host_sync")
@@ -1046,7 +1054,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         hidden_states = torch.randn(8, 16)
         topk_ids = torch.randint(0, 4, (8, 2)).long()
 
-        with patch("torch.npu.synchronize") as mock_device_sync, patch("torch.npu.Event") as mock_event_cls:
+        with patch("torch.npu.synchronize") as mock_device_sync:
             (
                 _,
                 _,
@@ -1059,7 +1067,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
             ) = self.dispatcher._dispatch_preprocess(hidden_states, topk_ids)
 
         mock_device_sync.assert_not_called()
-        mock_event_cls.return_value.synchronize.assert_called_once()
+        self.mock_npu_event.return_value.synchronize.assert_called_once()
         self.assertIsNone(global_input_tokens_local_experts_indices)
         self.mock_repeat_interleave.assert_not_called()
         np.testing.assert_array_equal(input_splits, [2, 2])
