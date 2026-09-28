@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
 
 from ..backend import BackendAdapter, BackendStoreEvidence
 from ..graph.elements import BindingBatch, KVBinding, RemoteKVObject, RemoteObjectBatch
-
-ObjectPresenceObserver = Callable[[list[str]], tuple[int, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,56 +32,6 @@ class StoreEvidence:
     succeeded: bool
     source_release_confirmed: bool
     error: Exception | None = None
-
-
-class MissingFilter(Protocol):
-    """Select Store bindings that still require a Backend write."""
-
-    def select_missing(
-        self,
-        batches: tuple[BindingBatch, ...],
-        observe_presence: ObjectPresenceObserver,
-    ) -> tuple[BindingBatch, ...]: ...
-
-
-class IdentityMissingFilter:
-    """Preserve every Store binding when the Backend overwrites existing keys safely."""
-
-    @staticmethod
-    def select_missing(
-        batches: tuple[BindingBatch, ...],
-        observe_presence: ObjectPresenceObserver,
-    ) -> tuple[BindingBatch, ...]:
-        del observe_presence
-        return batches
-
-
-class BackendExistenceMissingFilter:
-    """Remove Store bindings whose remote keys already exist in the Backend."""
-
-    def select_missing(
-        self,
-        batches: tuple[BindingBatch, ...],
-        observe_presence: ObjectPresenceObserver,
-    ) -> tuple[BindingBatch, ...]:
-        bindings = tuple(binding for batch in batches for binding in batch.bindings)
-        if not bindings:
-            return batches
-        presence = observe_presence([binding.remote_object.key for binding in bindings])
-        if len(presence) != len(bindings):
-            raise RuntimeError(f"Store exists returned {len(presence)} results for {len(bindings)} bindings")
-        if any(value not in (0, 1) for value in presence):
-            raise RuntimeError("Store exists returned states other than 0 or 1")
-        selected_batches = []
-        result_offset = 0
-        for batch in batches:
-            batch_presence = presence[result_offset : result_offset + len(batch.bindings)]
-            result_offset += len(batch.bindings)
-            selected = tuple(
-                binding for binding, value in zip(batch.bindings, batch_presence, strict=True) if value != 1
-            )
-            selected_batches.append(BindingBatch(batch.group_id, selected))
-        return tuple(selected_batches)
 
 
 class BackendIO:
@@ -115,8 +61,8 @@ class BackendIO:
             return ()
         native_result = self.backend.get(
             [binding.remote_object.key for binding in bindings],
-            [list(binding.local_slice.addresses) for binding in bindings],
-            [list(binding.local_slice.sizes) for binding in bindings],
+            [list(binding.memory.addresses) for binding in bindings],
+            [list(binding.memory.sizes) for binding in bindings],
         )
         if native_result is None:
             return tuple(BindingEvidence(binding, None) for binding in bindings)
@@ -131,8 +77,8 @@ class BackendIO:
             return StoreEvidence((), True, source_release_confirmed=True)
         backend_evidence = self.backend.put(
             [binding.remote_object.key for binding in bindings],
-            [list(binding.local_slice.addresses) for binding in bindings],
-            [list(binding.local_slice.sizes) for binding in bindings],
+            [list(binding.memory.addresses) for binding in bindings],
+            [list(binding.memory.sizes) for binding in bindings],
         )
         binding_evidence = self._align_store_evidence(bindings, backend_evidence)
         return StoreEvidence(
@@ -152,3 +98,71 @@ class BackendIO:
             BindingEvidence(binding, code)
             for binding, code in zip(bindings, backend_evidence.result_codes, strict=True)
         )
+
+
+class LayerwiseBackendIO(BackendIO):
+    """Apply Backend range-session APIs to layer-restricted bindings."""
+
+    def validate_support(self) -> None:
+        self.backend.validate_layerwise_support()
+
+    def start_load_sessions(self, keys: list[str]) -> tuple[int, ...]:
+        return self.backend.start_load_sessions(keys)
+
+    def start_store_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
+        return self.backend.start_store_sessions(keys, object_sizes)
+
+    def load(self, bindings: tuple[KVBinding, ...]) -> tuple[BindingEvidence, ...]:
+        if not bindings:
+            return ()
+        bindings_by_key: dict[str, list[KVBinding]] = {}
+        for binding in bindings:
+            bindings_by_key.setdefault(binding.remote_object.key, []).append(binding)
+        keys = list(bindings_by_key)
+        result_codes = self.backend.load_session_ranges(
+            keys,
+            [[address for binding in bindings_by_key[key] for address in binding.memory.addresses] for key in keys],
+            [[size for binding in bindings_by_key[key] for size in binding.memory.sizes] for key in keys],
+            [[offset for binding in bindings_by_key[key] for offset in binding.remote_offsets] for key in keys],
+        )
+        codes_by_key = dict(zip(keys, result_codes, strict=True))
+        return tuple(BindingEvidence(binding, codes_by_key[binding.remote_object.key]) for binding in bindings)
+
+    def finish_load_sessions(self, keys: list[str]) -> None:
+        result = self.backend.finish_load_sessions(keys)
+        if result != 0:
+            raise RuntimeError(f"batch_get_end failed with result code {result}")
+
+    def store(self, batches: tuple[BindingBatch, ...]) -> StoreEvidence:
+        bindings = tuple(binding for batch in batches for binding in batch.bindings)
+        if not bindings:
+            return StoreEvidence((), True, source_release_confirmed=True)
+        bindings_by_key: dict[str, list[KVBinding]] = {}
+        for binding in bindings:
+            bindings_by_key.setdefault(binding.remote_object.key, []).append(binding)
+        keys = list(bindings_by_key)
+        backend_evidence = self.backend.store_session_ranges(
+            keys,
+            [[address for binding in bindings_by_key[key] for address in binding.memory.addresses] for key in keys],
+            [[size for binding in bindings_by_key[key] for size in binding.memory.sizes] for key in keys],
+            [[offset for binding in bindings_by_key[key] for offset in binding.remote_offsets] for key in keys],
+        )
+        codes_by_key = None
+        if backend_evidence.result_codes is not None and len(backend_evidence.result_codes) == len(keys):
+            codes_by_key = dict(zip(keys, backend_evidence.result_codes, strict=True))
+        binding_evidence = tuple(
+            BindingEvidence(binding, None if codes_by_key is None else codes_by_key[binding.remote_object.key])
+            for binding in bindings
+        )
+        return StoreEvidence(
+            binding_evidence,
+            backend_evidence.succeeded,
+            backend_evidence.source_release_confirmed,
+            backend_evidence.error,
+        )
+
+    def commit_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
+        return self.backend.commit_store_sessions(keys)
+
+    def revoke_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
+        return self.backend.revoke_store_sessions(keys)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -30,18 +31,30 @@ class TPPartitionSpec:
 
 
 @dataclass(frozen=True, slots=True)
-class KVCacheGroupTopology:
+class KVPoolLayerTopology:
+    """Cache entries owned by one physical model layer inside one group."""
+
+    physical_layer_id: int
+    layer_names: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class KVPoolGroupTopology:
     """Instance-lifetime topology for one vLLM KV cache group."""
 
     group_id: int
     block_size: int
-    layer_names: tuple[str, ...]
+    layers: tuple[KVPoolLayerTopology, ...]
     key_metadata: KeyMetadata
     uses_align_state: bool = False
 
+    @property
+    def layer_names(self) -> tuple[str, ...]:
+        return tuple(layer_name for layer in self.layers for layer_name in layer.layer_names)
+
 
 @dataclass(frozen=True, slots=True)
-class KVTopology:
+class KVPoolTopology:
     """Instance-lifetime topology and cache geometry compiled into graph mappings."""
 
     tp_rank: int
@@ -54,12 +67,12 @@ class KVTopology:
     cache_transfer_granularity: int
     hash_block_size: int
     tp_partition: TPPartitionSpec
-    kv_cache_groups: tuple[KVCacheGroupTopology, ...]
+    groups: tuple[KVPoolGroupTopology, ...]
     transfer_group_ids: tuple[int, ...]
     consumer_pipeline_partitions: tuple[int, ...] | None
 
 
-def resolve_kv_topology(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> KVTopology:
+def resolve_kv_pool_topology(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> KVPoolTopology:
     parallel_config = vllm_config.parallel_config
     model_config = vllm_config.model_config
     tp_rank = get_tensor_model_parallel_rank()
@@ -78,15 +91,16 @@ def resolve_kv_topology(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig)
         kv_cache_config, vllm_config
     )
     model_name = model_config.model.rstrip("/").split("/")[-1]
-    kv_cache_groups = []
+    base_layer_count = model_config.get_total_num_hidden_layers()
+    groups = []
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
         uses_align_state = _uses_align_state(group)
         key_tp_rank = tp_rank if uses_align_state else head_or_tp_rank
-        kv_cache_groups.append(
-            KVCacheGroupTopology(
+        groups.append(
+            KVPoolGroupTopology(
                 group_id,
                 kv_cache_utils.resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_size),
-                tuple(group.layer_names),
+                _resolve_group_layers(group.layer_names, base_layer_count),
                 KeyMetadata(model_name, key_tp_rank, dcp_rank, pp_rank, group_id),
                 uses_align_state,
             )
@@ -94,7 +108,7 @@ def resolve_kv_topology(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig)
     transfer_group_ids = tuple(
         getattr(kv_cache_config, "transfer_group_ids", range(len(kv_cache_config.kv_cache_groups)))
     )
-    return KVTopology(
+    return KVPoolTopology(
         tp_rank,
         tp_size,
         pp_size,
@@ -105,7 +119,7 @@ def resolve_kv_topology(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig)
         cache_transfer_granularity,
         hash_block_size,
         tp_partition,
-        tuple(kv_cache_groups),
+        tuple(groups),
         transfer_group_ids,
         resolve_consumer_pipeline_partitions(vllm_config),
     )
@@ -175,3 +189,27 @@ def _uses_align_state(group) -> bool:
                 return True
         return False
     return isinstance(kv_cache_spec, MambaSpec) and kv_cache_spec.mamba_cache_mode == "align"
+
+
+def _resolve_group_layers(layer_names: list[str], base_layer_count: int) -> tuple[KVPoolLayerTopology, ...]:
+    names_by_physical_layer: dict[int, list[str]] = {}
+    for layer_name in layer_names:
+        physical_layer_id = _resolve_physical_layer_id(layer_name, base_layer_count)
+        names_by_physical_layer.setdefault(physical_layer_id, []).append(layer_name)
+    return tuple(
+        KVPoolLayerTopology(physical_layer_id, tuple(sorted(names)))
+        for physical_layer_id, names in sorted(names_by_physical_layer.items())
+    )
+
+
+def _resolve_physical_layer_id(layer_name: str, base_layer_count: int) -> int:
+    mtp_layer = re.search(r"(?:^|\.)mtp(?:\.layers)?\.(\d+)(?:\.|$)", layer_name)
+    if mtp_layer is not None:
+        return base_layer_count + int(mtp_layer.group(1))
+    model_layer = re.search(r"layers\.(\d+)", layer_name)
+    if model_layer is not None:
+        return int(model_layer.group(1))
+    first_number = re.search(r"\d+", layer_name)
+    if first_number is not None:
+        return int(first_number.group())
+    raise ValueError(f"Cannot resolve a physical layer from cache entry {layer_name!r}")
