@@ -16,8 +16,8 @@ import torch
 def runner_cls():
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/model_runner.py"
     tree = ast.parse(source.read_text())
-    cls = next(node for node in tree.body if getattr(node, "name", None) == "NPUModelRunner")
-    init = next(node for node in cls.body if getattr(node, "name", None) == "__init__")
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "NPUModelRunner")
+    init = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
     assignment = next(
         node
         for node in init.body
@@ -35,6 +35,10 @@ def runner_cls():
     cls.bases = [ast.Name(id="Parent", ctx=ast.Load())]
 
     class Parent:
+        device_count: int
+        events: list[str]
+        num_computed_tokens_cpu: torch.Tensor
+
         def postprocess_sampled(self, idx_mapping, sampled_tokens, num_sampled, num_rejected, query_start_loc=None):
             self.device_count -= num_rejected
             self.events.append("reject")
