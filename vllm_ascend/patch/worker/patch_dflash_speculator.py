@@ -29,5 +29,5 @@ cudagraph_module.build_attn_metadata = build_attn_metadata
 speculator_module.DFlashCudaGraphManager = DFlashAclGraphManager
 
 # triton-ascend cannot lower tldevice.log1p in the upstream selector walk;
-# swap in the algebraically equivalent log(1 - u) variant.
+# use an open-uniform log(u) transform with an independent draft noise stream.
 speculator2_module._selector_walk_kernel = _selector_walk_kernel_ascend
