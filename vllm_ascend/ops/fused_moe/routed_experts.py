@@ -680,12 +680,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
         lora_context = getattr(self, "_ascend_moe_lora_context", None)
-        if lora_context is not None:
-            sync_lora_context(self.quant_method, lora_context)
-
         moe_comm_method = get_moe_comm_method(_EXTRA_CTX.moe_comm_type, self.moe_config)
         _EXTRA_CTX.moe_comm_method = moe_comm_method
         assert moe_comm_method is not None
+        if lora_context is not None:
+            sync_lora_context(self.quant_method, lora_context)
+
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
