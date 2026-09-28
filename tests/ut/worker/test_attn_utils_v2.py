@@ -240,7 +240,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     "state_kwargs", [{}, {"attn_state": None}, {"attn_state": AscendAttentionState.ChunkedPrefill}]
 )
 @pytest.mark.parametrize("factory_state", [None, AscendAttentionState.ChunkedPrefill])
-def test_build_draft_attn_metadata_applies_factory_state(monkeypatch, state_kwargs, factory_state):
+def test_build_attn_metadata_factory_applies_state(monkeypatch, state_kwargs, factory_state):
     captured_kwargs = {}
 
     def raw_build_attn_metadata(*_args, **kwargs):
@@ -255,7 +255,7 @@ def test_build_draft_attn_metadata_applies_factory_state(monkeypatch, state_kwar
     positions = torch.arange(8, dtype=torch.int32)
     is_prefilling = torch.tensor([False, False])
 
-    with attn_utils.build_draft_attn_metadata_factory(
+    with attn_utils.build_attn_metadata_factory(
         positions,
         pad=5,
         is_prefilling=is_prefilling,
@@ -633,6 +633,32 @@ def _make_dsa_metadata_groups(builder_cls=_RecordingDSAMetadataBuilder):
         ],
     )
     return layer_names, specs, calls, attn_groups, kv_cache_config
+
+
+def test_draft_metadata_uses_per_request_cpu_upper_bounds():
+    _, _, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
+    upper_bounds = torch.tensor([13, 27], dtype=torch.int32)
+
+    attn_utils.build_attn_metadata(
+        attn_groups=attn_groups,
+        num_reqs=2,
+        num_tokens=2,
+        query_start_loc_gpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([11, 25], dtype=torch.int32),
+        max_seq_len=27,
+        block_tables=(torch.zeros((2, 1), dtype=torch.int32),) * 2,
+        slot_mappings=(torch.zeros(2, dtype=torch.int32),) * 2,
+        kv_cache_config=kv_cache_config,
+        seq_lens_cpu_upper_bound=upper_bounds,
+    )
+
+    assert len(calls) == 2
+    for call in calls:
+        common_metadata = call["common_attn_metadata"]
+        torch.testing.assert_close(common_metadata.seq_lens_cpu, upper_bounds)
+        torch.testing.assert_close(common_metadata.seq_lens, torch.tensor([11, 25], dtype=torch.int32))
 
 
 def test_prepare_kernel_block_sizes_uses_logical_size_for_dsv4():
@@ -1178,9 +1204,9 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
         is state.PrefillCacheHit
     )
     assert attn_utils.build_attn_state(no_spec, seq, 2, seq, seq) is state.PrefillNoCache
-    assert attn_utils.build_attn_state(mtp, seq, 2, ones, ones) is state.SpecDecoding
+    assert attn_utils.build_attn_state(mtp, seq, 2, ones, ones) is state.DecodeOnly
     assert attn_utils.build_attn_state(no_spec, seq, 2, ones, ones) is state.DecodeOnly
-    assert attn_utils.build_attn_state(mtp, seq, 2, scheduled, ones) is state.SpecDecoding
+    assert attn_utils.build_attn_state(mtp, seq, 2, scheduled, ones) is state.ChunkedPrefill
     assert attn_utils.build_attn_state(eagle, seq, 2, scheduled, ones) is state.ChunkedPrefill
     assert attn_utils.build_attn_state(chunked, seq, 2, scheduled, scheduled) is state.ChunkedPrefill
     assert attn_utils.build_attn_state(no_spec, seq, 2, scheduled, scheduled) is state.PrefillCacheHit
@@ -1254,7 +1280,7 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     monkeypatch.setattr(attn_utils, "_BUILD_ATTN_METADATA_MODULE", module)
     with attn_utils.build_attn_metadata_wrapper():
         assert module.build_attn_metadata is attn_utils.build_attn_metadata
-    with attn_utils.build_draft_attn_metadata_factory(torch.arange(4), 2, True):
+    with attn_utils.build_attn_metadata_factory(torch.arange(4), 2, True):
         forwarded = module.build_attn_metadata()
     assert forwarded["positions"].tolist() == [0, 1]
     assert forwarded["is_prefilling"] is True

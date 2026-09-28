@@ -258,8 +258,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         super().bind_connector_metadata(connector_metadata)
         if self.use_layerwise:
             assert self.connector_worker is not None
+            # Layerwise hooks need this step's tasks before target forward.
+            # If scheduler_output.has_sync_kv_loads is False (e.g. save-only
+            # steps), V1 calls start_load_kv after target forward, before MTP.
+            # Target hooks have advanced current_layer by then, so preparing
+            # the step there would reset the current layer before MTP.
             self._mamba_copy_bufs = None
-            # Layer hooks run before start_load_kv on steps without sync loads.
             self.connector_worker.prepare_layerwise_step(connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:

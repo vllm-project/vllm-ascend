@@ -214,10 +214,18 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
 
     assert indexer_cache.is_contiguous()
     assert indexer_cache.data_ptr() == raw_caches[INDEXER].data_ptr()
-    tail_packed_bytes = tail_cache.numel() * tail_cache.element_size()
+    assert tail_cache.data_ptr() == raw_caches[STATE].data_ptr()
     slot = raw_caches[STATE]
-    slot_bytes = slot.numel() * slot.element_size()
-    assert tail_cache.data_ptr() + tail_packed_bytes == slot.data_ptr() + slot_bytes
+    page_bytes = descriptors[STATE].size // plan.num_blocks
+    slot_fp32 = slot.view(torch.float32)
+    page_els_fp32 = page_bytes // slot_fp32.element_size()
+    tail_block_els = tail_cache[0].numel()
+    for block_index in range(plan.num_blocks):
+        assert tail_cache[block_index].data_ptr() == slot.data_ptr() + block_index * page_bytes
+    tail_cache[2].fill_(7)
+    assert torch.all(slot_fp32[2 * page_els_fp32 : 2 * page_els_fp32 + tail_block_els] == 7)
+    assert torch.count_nonzero(slot_fp32[2 * page_els_fp32 + tail_block_els : 3 * page_els_fp32]) == 0
+    assert torch.count_nonzero(slot_fp32[: 2 * page_els_fp32]) == 0
     for cache in caches[MAMBA]:
         assert cache.stride(0) * cache.element_size() == descriptors[MAMBA].size // plan.num_blocks
 
@@ -225,13 +233,6 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     assert caches[MAMBA][1].data_ptr() - raw_caches[MAMBA].data_ptr() == mamba_second_offset
     mamba_payload_size = sum(cache.numel() * cache.element_size() for cache in caches[MAMBA])
     assert mamba_payload_size < descriptors[MAMBA].size
-
-    tail_cache[2].fill_(7)
-    tail_packed_els = tail_packed_bytes // slot.element_size()
-    block2_els = tail_cache[2].numel() * tail_cache[2].element_size() // slot.element_size()
-    assert torch.all(slot[slot.numel() - block2_els :].view(torch.float32) == 7)
-    assert torch.count_nonzero(slot[: slot.numel() - tail_packed_els]) == 0
-    assert torch.count_nonzero(slot[slot.numel() - tail_packed_els : slot.numel() - block2_els]) == 0
 
 
 def test_glm5_next_runner_splits_main_mla_components_within_each_page():
