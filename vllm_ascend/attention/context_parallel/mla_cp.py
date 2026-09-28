@@ -36,7 +36,7 @@ from vllm_ascend.compilation.acl_graph import (
     get_graph_params,
     update_graph_params_workspaces,
 )
-from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
+from vllm_ascend.ops.triton.dcp.sfa_cp import fused_dcp_lse_combine
 from vllm_ascend.utils import weak_ref_tensors
 
 
@@ -630,7 +630,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         main_stream.wait_event(current_attn_done)
         # Reduce all history shards and the replicated current chunk exactly
         # once, reading current FIA tensors directly without packing them.
-        attn_output = fused_sfa_dcp_lse_combine(
+        attn_output = fused_dcp_lse_combine(
             history_recv,
             self.kv_lora_rank,
             scatter_dim=1,

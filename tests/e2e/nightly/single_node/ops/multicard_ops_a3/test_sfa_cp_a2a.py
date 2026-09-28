@@ -12,8 +12,7 @@ from vllm.distributed.parallel_state import (
     init_model_parallel_group,
 )
 
-import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
-from vllm_ascend.ops.triton import sfa_cp
+from vllm_ascend.ops.triton.dcp import sfa_cp
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import enable_custom_op
 
@@ -106,7 +105,7 @@ def _worker(rank: int, world_size: int, port: int, result_queue: mp.SimpleQueue)
             )
             local = torch.full_like(expected, 2.0, dtype=torch.float32)
             local_lse = torch.zeros((*expected.shape[:2], 1), device="npu")
-            combined = sfa_cp.fused_sfa_dcp_lse_combine(
+            combined = sfa_cp.fused_dcp_lse_combine(
                 recv,
                 head_dim,
                 scatter_dim,

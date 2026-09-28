@@ -7,7 +7,7 @@ parallelism (DCP) is enabled. Each rank starts with a partial attention output
 and its FP32 log-sum-exp (LSE). The operator returns the output slice owned by
 the local DCP rank after combining contributions from every rank.
 
-The implementation is in `vllm_ascend/ops/triton/sfa_cp.py` and has three
+The implementation is in `vllm_ascend/ops/triton/dcp/sfa_cp.py` and has three
 stages:
 
 1. A stride-aware Triton kernel packs the partial output and LSE into one send
@@ -16,6 +16,9 @@ stages:
    HCCL process group.
 3. A Triton kernel reconstructs the LSE values and performs a numerically
    stable weighted reduction of the partial outputs.
+
+The individual kernels are described in [pack_dcp_output_lse](pack_dcp_output_lse.md)
+and [fused_dcp_lse_combine](fused_dcp_lse_combine.md).
 
 ## Inputs and output
 
@@ -95,7 +98,7 @@ with shape `[source ranks, local heads, tokens, packed D]` for head scatter.
 Packing and communication overlap current-token FIA on the main stream.
 
 After the main stream waits for the communication event,
-`fused_sfa_dcp_lse_combine(..., local_output=current_output,
+`fused_dcp_lse_combine(..., local_output=current_output,
 local_lse=current_lse)` reads both raw FIA tensors using their strides. A single
 kernel finds the maximum LSE over all history ranks and the local contribution,
 accumulates their FP32 weighted outputs, and normalizes once. Current KV is

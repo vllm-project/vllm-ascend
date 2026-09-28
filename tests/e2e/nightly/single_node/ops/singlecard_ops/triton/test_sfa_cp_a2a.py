@@ -3,10 +3,10 @@
 import pytest
 import torch
 
-from vllm_ascend.ops.triton import sfa_cp
-from vllm_ascend.ops.triton.sfa_cp import (
-    fused_sfa_dcp_lse_combine,
-    pack_sfa_dcp_output_lse,
+from vllm_ascend.ops.triton.dcp import sfa_cp
+from vllm_ascend.ops.triton.dcp.sfa_cp import (
+    fused_dcp_lse_combine,
+    pack_dcp_output_lse,
 )
 
 
@@ -26,7 +26,7 @@ def _simulate_receive(
 ) -> torch.Tensor:
     dcp_size = sender_outputs.shape[0]
     send_buffers = [
-        pack_sfa_dcp_output_lse(
+        pack_dcp_output_lse(
             sender_outputs[source_rank],
             sender_lses[source_rank],
             dcp_size,
@@ -86,9 +86,9 @@ def _check_a5_batching_case(
     local_lse = torch.randn(num_tokens, local_heads, 1, device="npu", dtype=torch.float32)
 
     monkeypatch.setattr(sfa_cp, "is_950", lambda: False)
-    scalar_send = pack_sfa_dcp_output_lse(output, lse, dcp_size, 1)
+    scalar_send = pack_dcp_output_lse(output, lse, dcp_size, 1)
     if run_combine:
-        scalar_combined = fused_sfa_dcp_lse_combine(
+        scalar_combined = fused_dcp_lse_combine(
             scalar_send, head_dim, 1, local_output=local_output, local_lse=local_lse
         )
 
@@ -106,14 +106,14 @@ def _check_a5_batching_case(
 
             return tracked_launch
 
-    pack_spy = LaunchSpy(sfa_cp._pack_sfa_dcp_output_lse_batched_kernel)
-    combine_spy = LaunchSpy(sfa_cp._fused_sfa_dcp_lse_combine_batched_kernel)
-    monkeypatch.setattr(sfa_cp, "_pack_sfa_dcp_output_lse_batched_kernel", pack_spy)
-    monkeypatch.setattr(sfa_cp, "_fused_sfa_dcp_lse_combine_batched_kernel", combine_spy)
+    pack_spy = LaunchSpy(sfa_cp._pack_dcp_output_lse_batched_kernel)
+    combine_spy = LaunchSpy(sfa_cp._fused_dcp_lse_combine_batched_kernel)
+    monkeypatch.setattr(sfa_cp, "_pack_dcp_output_lse_batched_kernel", pack_spy)
+    monkeypatch.setattr(sfa_cp, "_fused_dcp_lse_combine_batched_kernel", combine_spy)
     monkeypatch.setattr(sfa_cp, "is_950", lambda: True)
-    batched_send = pack_sfa_dcp_output_lse(output, lse, dcp_size, 1)
+    batched_send = pack_dcp_output_lse(output, lse, dcp_size, 1)
     if run_combine:
-        batched_combined = fused_sfa_dcp_lse_combine(
+        batched_combined = fused_dcp_lse_combine(
             batched_send, head_dim, 1, local_output=local_output, local_lse=local_lse
         )
 
@@ -253,7 +253,7 @@ def test_pack_and_fused_lse_combine(
             sender_outputs[:, :, head_slice],
             sender_lses[:, :, head_slice, 0],
         )
-    actual = fused_sfa_dcp_lse_combine(recv, head_dim, scatter_dim)
+    actual = fused_dcp_lse_combine(recv, head_dim, scatter_dim)
 
     tolerance = 2e-2 if dtype == torch.bfloat16 else 1e-2
     torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
@@ -306,7 +306,7 @@ def test_stride_aware_pack(scatter_dim: int) -> None:
             sender_outputs[:, :, head_slice],
             sender_lses[:, :, head_slice, 0],
         )
-    actual = fused_sfa_dcp_lse_combine(recv, head_dim, scatter_dim)
+    actual = fused_dcp_lse_combine(recv, head_dim, scatter_dim)
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
@@ -346,7 +346,7 @@ def test_invalid_lse_and_all_invalid_rows(scatter_dim: int) -> None:
         destination_rank,
         scatter_dim,
     )
-    actual = fused_sfa_dcp_lse_combine(recv, head_dim, scatter_dim)
+    actual = fused_dcp_lse_combine(recv, head_dim, scatter_dim)
 
     if scatter_dim == 0:
         expected = _reference_merge(
@@ -394,7 +394,7 @@ def test_finite_lse_outside_activation_dtype_range(
         destination_rank,
         scatter_dim,
     )
-    actual = fused_sfa_dcp_lse_combine(recv, head_dim, scatter_dim)
+    actual = fused_dcp_lse_combine(recv, head_dim, scatter_dim)
 
     if scatter_dim == 0:
         local_tokens = num_tokens // dcp_size
@@ -432,14 +432,14 @@ def test_mla_history_lse_then_current_merge() -> None:
     expected = _reference_merge(outputs, lse)
     # Compare direct and staged merges against the same independent reference.
     partials = torch.cat((outputs, lse.unsqueeze(-1)), dim=-1).npu()
-    direct = fused_sfa_dcp_lse_combine(partials, 512, scatter_dim=0)
+    direct = fused_dcp_lse_combine(partials, 512, scatter_dim=0)
     assert direct.dtype == torch.float32
     torch.testing.assert_close(direct.cpu(), expected, atol=3e-6, rtol=3e-5)
     history = torch.cat((outputs[:16], lse[:16].unsqueeze(-1)), dim=-1).npu()
-    merged_history = fused_sfa_dcp_lse_combine(history, 512, scatter_dim=0, return_lse=True)
+    merged_history = fused_dcp_lse_combine(history, 512, scatter_dim=0, return_lse=True)
     assert merged_history.shape == (num_tokens, 6, 513)
     current = torch.cat((outputs[-1], lse[-1].unsqueeze(-1)), dim=-1).npu()
-    actual = fused_sfa_dcp_lse_combine(torch.stack((merged_history, current)), 512, scatter_dim=0)
+    actual = fused_dcp_lse_combine(torch.stack((merged_history, current)), 512, scatter_dim=0)
     torch.testing.assert_close(actual.cpu(), expected, atol=5e-4, rtol=5e-4)
     assert torch.isfinite(actual).all()
 
@@ -469,7 +469,7 @@ def test_combine_with_raw_local_fia(scatter_dim, dcp_size, head_dim, local_dtype
     recv = torch.cat((history, history_lse), dim=-1)
     if scatter_dim == 1:
         recv = recv.transpose(1, 2).contiguous()
-    actual = fused_sfa_dcp_lse_combine(
+    actual = fused_dcp_lse_combine(
         recv, head_dim, scatter_dim, return_lse=True, local_output=local, local_lse=local_lse
     )
     values = torch.cat((history, local.float().unsqueeze(0)))

@@ -95,7 +95,7 @@ def test_sfa_custom_op_optional_lse_fake_shape(scatter_dim, dtype, return_lse):
 
 
 def test_sfa_custom_op_passes_optional_lse_to_combine():
-    import vllm_ascend.ops.triton.sfa_cp as kernels
+    import vllm_ascend.ops.triton.dcp.sfa_cp as kernels
 
     output = torch.randn(2, 3, 4)
     lse = torch.randn(2, 3, 1)

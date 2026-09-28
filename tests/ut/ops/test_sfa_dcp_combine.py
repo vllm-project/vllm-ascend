@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm_ascend.ops.triton import sfa_cp
+from vllm_ascend.ops.triton.dcp import sfa_cp
 
 
 @pytest.mark.parametrize("scatter_dim", [0, 1])
@@ -21,11 +21,11 @@ def test_deferred_fake_layout(scatter_dim, dtype, packed_extra):
 @pytest.mark.parametrize("scatter_size", [1, 2])
 def test_deferred_exchange_skips_combine(monkeypatch, scatter_size):
     send = torch.empty(scatter_size, 2, 3, 5)
-    monkeypatch.setattr(sfa_cp, "pack_sfa_dcp_output_lse", Mock(return_value=send))
+    monkeypatch.setattr(sfa_cp, "pack_dcp_output_lse", Mock(return_value=send))
     collective = Mock()
     monkeypatch.setattr(sfa_cp.dist, "all_to_all_single", collective)
     combine = Mock(side_effect=AssertionError("deferred exchange must not combine"))
-    monkeypatch.setattr(sfa_cp, "fused_sfa_dcp_lse_combine", combine)
+    monkeypatch.setattr(sfa_cp, "fused_dcp_lse_combine", combine)
     result = sfa_cp.sfa_dcp_a2a_fused_combine(
         torch.empty(2, 3, 4), torch.empty(2, 3, 1), scatter_size, 1, object(), defer_combine=True
     )

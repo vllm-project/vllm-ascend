@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Batch independent SFA rows while keeping DCP rank accumulation sequential.
+"""Batch independent DCP rows while keeping DCP rank accumulation sequential.
 
 Eight D=512 rows use 16 KiB for the FP32 accumulator. The rank dimension
 is streamed, so it does not multiply the accumulator size.
@@ -9,7 +9,7 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
-def _pack_sfa_dcp_output_lse_batched_kernel(
+def _pack_dcp_output_lse_batched_kernel(
     output_ptr,
     lse_ptr,
     send_ptr,
@@ -109,7 +109,7 @@ def _pack_sfa_dcp_output_lse_batched_kernel(
 
 
 @triton.jit
-def _fused_sfa_dcp_lse_combine_batched_kernel(
+def _fused_dcp_lse_combine_batched_kernel(
     recv_ptr,
     output_ptr,
     local_output_ptr,
