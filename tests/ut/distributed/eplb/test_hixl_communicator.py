@@ -23,6 +23,9 @@ class _Tensor:
     def data_ptr(self):
         return self._address
 
+    def is_contiguous(self):
+        return True
+
 
 class _Engine:
     def __init__(self):
@@ -181,3 +184,44 @@ def test_hixl_reads_registered_remote_expert(monkeypatch):
     communicator._close()
     assert engine.deregistered == [1]
     assert engine.finalized
+
+
+def test_hixl_rejects_interleaved_expert_rows():
+    communicator = object.__new__(eplb_communicator.AscendHixlEplbCommunicator)
+    communicator._device = torch.device("cpu")
+    communicator._num_local_experts = 4
+
+    stacked = torch.arange(8).reshape(2, 4).T
+    assert stacked.shape == (4, 2)
+    assert stacked.stride() == (1, 4)
+    assert eplb_communicator.is_weak_contiguous(stacked)
+
+    with pytest.raises(ValueError, match="contiguous expert rows"):
+        communicator._validate_view(stacked)
+    with pytest.raises(ValueError, match="contiguous expert rows"):
+        communicator._validate_view(torch.empty_like(stacked))
+
+    communicator._validate_view(stacked.contiguous())
+
+
+def test_hixl_destructor_cleans_up_when_modules_are_unavailable(monkeypatch):
+    communicator = object.__new__(eplb_communicator.AscendHixlEplbCommunicator)
+    engine = MagicMock()
+    engine.disconnect.side_effect = RuntimeError("disconnect failed")
+    engine.deregister_mem.side_effect = RuntimeError("deregister failed")
+    communicator._engine = engine
+    communicator._device = SimpleNamespace(type="npu", index=0)
+    communicator._remote_engines = {1: "peer"}
+    communicator._registered_handles = [1, 2]
+    communicator._remote_send_meta = {1: {}}
+    monkeypatch.setattr(
+        torch, "npu", SimpleNamespace(set_device=MagicMock(side_effect=RuntimeError("no device"))), raising=False
+    )
+    monkeypatch.setattr(eplb_communicator, "contextlib", None)
+
+    communicator.__del__()
+
+    engine.disconnect.assert_called_once_with("peer")
+    assert engine.deregister_mem.call_count == 2
+    engine.finalize.assert_called_once_with()
+    assert communicator._engine is None
