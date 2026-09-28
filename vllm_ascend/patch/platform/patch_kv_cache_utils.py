@@ -8,7 +8,11 @@ import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
+from vllm.v1.core.kv_cache_utils import (
+    _approximate_gcd,
+    may_override_num_blocks,
+    resolve_dcp_kv_block_size,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -106,7 +110,15 @@ def _resolve_dcp_hash_block_size(
     if not (cache_config.enable_prefix_caching or connector_enabled):
         return scheduler_block_size
 
-    hashing_sizes = [group.kv_cache_spec.block_size for group in hashing_groups]
+    if any(
+        isinstance(spec, MambaSpec) and spec.mamba_cache_mode != "align"
+        for group in hashing_groups
+        for spec in _iter_layer_specs(group.kv_cache_spec)
+    ):
+        return scheduler_block_size
+
+    dcp = vllm_config.parallel_config.decode_context_parallel_size
+    hashing_sizes = [resolve_dcp_kv_block_size(group.kv_cache_spec, dcp) for group in hashing_groups]
     requested = getattr(cache_config, "prefix_match_unit", None)
     hash_block_size = requested if requested is not None else math.gcd(*hashing_sizes)
     if any(size % hash_block_size != 0 for size in hashing_sizes):
@@ -124,7 +136,18 @@ def _resolve_dcp_hash_block_size(
         and isinstance(getattr(spec, "tokens_per_state", None), int)
         and spec.tokens_per_state > 1
     }
-    if any(hash_block_size % alignment for alignment in prefix_alignments):
+    has_partial_mamba_group = any(
+        isinstance(spec, MambaSpec)
+        and spec.mamba_cache_mode == "align"
+        and (
+            (dcp == 1 and block_size > hash_block_size)
+            or (dcp > 1 and block_size >= hash_block_size)
+        )
+        for group, block_size in zip(hashing_groups, hashing_sizes)
+        for spec in _iter_layer_specs(group.kv_cache_spec)
+    )
+    cache_hit_alignment = hash_block_size if has_partial_mamba_group else scheduler_block_size
+    if any(cache_hit_alignment % alignment for alignment in prefix_alignments):
         raise ValueError(
             f"Invalid prefix_match_unit={hash_block_size}; prefix-cache boundaries "
             "must align with each spec's per-state compression. "
@@ -144,8 +167,9 @@ def _ascend_resolve_kv_cache_block_sizes(
     This restriction is correct for CUDA but not for Ascend, which implements
     context parallelism for MLA and SWA-MLA layers independently.
 
-    For multiple KV cache groups with DCP, compute scheduler_block_size as
-    lcm(group_block_sizes) * dcp to maintain alignment.
+    For multiple KV cache groups with DCP, scale each sharded attention
+    group's block size before computing the scheduling LCM. Mamba state
+    groups remain replicated and therefore keep their original block size.
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
@@ -160,7 +184,7 @@ def _ascend_resolve_kv_cache_block_sizes(
 
     cacheable_groups = [g for g in groups if is_prefix_cacheable(g.kv_cache_spec)]
     if len(cacheable_groups) != len(groups):
-        scheduler_block_size = math.lcm(*(g.kv_cache_spec.block_size for g in groups)) * dcp
+        scheduler_block_size = math.lcm(*(resolve_dcp_kv_block_size(g.kv_cache_spec, dcp) for g in groups))
         if not cacheable_groups:
             return scheduler_block_size, scheduler_block_size
         filtered = replace(kv_cache_config, kv_cache_groups=cacheable_groups)
@@ -180,12 +204,11 @@ def _ascend_resolve_kv_cache_block_sizes(
         bs = block_size * dcp
         return bs, bs
 
-    group_block_sizes = [group.kv_cache_spec.block_size for group in groups]
+    group_block_sizes = [resolve_dcp_kv_block_size(group.kv_cache_spec, dcp) for group in groups]
     if dcp != 1:
-        # Ascend supports CP with multiple KV cache groups; compute
-        # scheduler_block_size using the LCM of all group block sizes
-        # multiplied by DCP for proper alignment.
-        scheduler_block_size = math.lcm(*group_block_sizes) * dcp
+        # Attention groups are DCP-sharded while Mamba states are replicated,
+        # so apply DCP per spec before taking the scheduling LCM.
+        scheduler_block_size = math.lcm(*group_block_sizes)
         hash_block_size = _resolve_dcp_hash_block_size(vllm_config, cache_config, groups, scheduler_block_size)
         return scheduler_block_size, hash_block_size
 
