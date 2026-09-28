@@ -1,12 +1,16 @@
+import json
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import requests
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.metrics.reader import Counter
 
-from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
+from tests.e2e.conftest import DisaggPDProxy, RemotePDServer, VllmRunner, cleanup_dist_env_and_memory
 
 ACCEPTANCE_LENGTH_RTOL = 0.08
 
@@ -478,3 +482,125 @@ def compare_logprobs(
         _check_prefill_token(base_seq, comp_seq, prompt_idx, atol)
         for token_idx in range(1, 3):
             _check_decode_token(base_seq, comp_seq, token_idx, prompt_idx, decode_atol)
+
+
+def _run_pd_disaggregation(
+    model: str,
+    *,
+    model_args: Sequence[str],
+    prefill_tp_size: int,
+    prefill_pcp_size: int,
+    decode_tp_size: int,
+    async_scheduling: bool,
+    env_dict: dict[str, str] | None = None,
+) -> None:
+    """Run one 1P1D request through the disaggregated proxy."""
+    prefiller_port = [get_open_port()]
+    decoder_port = [get_open_port()]
+    proxy_port = get_open_port()
+
+    server_env = {
+        "LD_LIBRARY_PATH": f"/usr/local/lib:{os.environ.get('LD_LIBRARY_PATH', '')}",
+        **(env_dict or {}),
+    }
+
+    vllm_server_args = [
+        [
+            "--port",
+            str(prefiller_port[0]),
+            "--model",
+            model,
+            "--trust-remote-code",
+            "--enable-request-id-headers",
+            "--no-enable-prefix-caching",
+            *model_args,
+            "--max-model-len",
+            "1024",
+            "--max-num-batched-tokens",
+            "1024",
+            "--max-num-seqs",
+            "4",
+            "--tensor-parallel-size",
+            str(prefill_tp_size),
+            "--prefill-context-parallel-size",
+            str(prefill_pcp_size),
+            "--gpu-memory-utilization",
+            "0.9",
+            "--kv-transfer-config",
+            json.dumps(
+                {
+                    "kv_connector": "MooncakeConnectorV1",
+                    "kv_role": "kv_producer",
+                    "kv_port": "30000",
+                    "kv_connector_extra_config": {
+                        "prefill": {"dp_size": 1, "tp_size": prefill_tp_size},
+                        "decode": {"dp_size": 1, "tp_size": decode_tp_size},
+                    },
+                }
+            ),
+            "--enforce-eager",
+        ],
+        [
+            "--port",
+            str(decoder_port[0]),
+            "--model",
+            model,
+            "--trust-remote-code",
+            "--enable-request-id-headers",
+            "--no-enable-prefix-caching",
+            *model_args,
+            "--max-model-len",
+            "1024",
+            "--max-num-batched-tokens",
+            "1024",
+            "--max-num-seqs",
+            "4",
+            "--tensor-parallel-size",
+            str(decode_tp_size),
+            "--gpu-memory-utilization",
+            "0.9",
+            "--kv-transfer-config",
+            json.dumps(
+                {
+                    "kv_connector": "MooncakeConnectorV1",
+                    "kv_role": "kv_consumer",
+                    "kv_port": "30200",
+                    "kv_connector_extra_config": {
+                        "prefill": {"dp_size": 1, "tp_size": prefill_tp_size},
+                        "decode": {"dp_size": 1, "tp_size": decode_tp_size},
+                    },
+                }
+            ),
+            "--compilation-config",
+            json.dumps(
+                {
+                    "cudagraph_mode": "FULL_DECODE_ONLY",
+                    "cudagraph_capture_sizes": [1, 2, 4, 8],
+                }
+            ),
+            *(["--async-scheduling"] if async_scheduling else []),
+        ],
+    ]
+
+    with (
+        RemotePDServer(vllm_server_args, env_dict=server_env),
+        DisaggPDProxy(
+            port=proxy_port,
+            prefiller_ports=prefiller_port,
+            decoder_ports=decoder_port,
+        ) as proxy,
+    ):
+        response = requests.post(
+            proxy.url_for("v1", "chat", "completions"),
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "Hello, my name is"}],
+                "max_tokens": 5,
+                "temperature": 0.0,
+            },
+            timeout=600,
+        )
+        response.raise_for_status()
+        output = response.json()
+
+        assert output["choices"][0]["message"]["content"]
