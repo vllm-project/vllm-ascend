@@ -100,14 +100,14 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Bert                          | 🔵        |                                                                      |         A2/A3        | 🟡 |      |
     | Qwen2.5-Math-RM-72B           | 🔵        | Reward Model, gsm8k_correctness accuracy=0.80 | A2 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
-=== "A5"
+=== "Ascend 950DT&950PR Products"
 
-    | Model                | Support | Supported Hardware | Doc |
-    |----------------------|---------|--------------------|-----|
-    | Qwen3-Embedding       | 🔵      | A5                 | [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md) |
-    | Qwen3-VL-Embedding    | 🔵      | A5                 | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |
-    | Qwen3-Reranker        | 🔵      | A5                 | [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md) |
-    | Qwen3-VL-Reranker     | 🔵      | A5                 | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |
+    | Model                | Support | Supported Hardware              | Doc |
+    |----------------------|---------|----------------------------------|-----|
+    | Qwen3-Embedding       | 🔵      | Ascend 950DT&950PR Products      | [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md) |
+    | Qwen3-VL-Embedding    | 🔵      | Ascend 950DT&950PR Products      | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |
+    | Qwen3-Reranker        | 🔵      | Ascend 950DT&950PR Products      | [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md) |
+    | Qwen3-VL-Reranker     | 🔵      | Ascend 950DT&950PR Products      | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |
 
 === "Atlas 300I DUO"
 

@@ -29,9 +29,9 @@ You can use our official docker image to run `Qwen3-VL-Embedding` model directly
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-=== "A5"
+=== "Ascend 950DT&950PR Products"
 
-    The following command uses the Ubuntu A5 image to start the container.
+    The following command uses the Ubuntu image for Ascend 950DT&950PR Products to start the container.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
@@ -138,7 +138,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
-=== "A5/A3/A2"
+=== "Ascend 950DT&950PR Products/A3/A2"
 
     ```shell
     vllm serve Qwen/Qwen3-VL-Embedding-2B \

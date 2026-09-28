@@ -29,9 +29,9 @@ You can use our official docker image to run `Qwen3-VL-Reranker` model directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-=== "A5"
+=== "Ascend 950DT&950PR Products"
 
-    The following command uses the Ubuntu A5 image to start the container.
+    The following command uses the Ubuntu image for Ascend 950DT&950PR Products to start the container.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
@@ -173,7 +173,7 @@ Judge whether the Document meets the requirements based on the Query and the Ins
 
 Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
 
-=== "A5/A3/A2"
+=== "Ascend 950DT&950PR Products/A3/A2"
 
     ```shell
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
