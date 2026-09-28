@@ -3,8 +3,16 @@
 """Convert score-ordered QLI indices into visible, chronological positions."""
 
 import math
+from dataclasses import dataclass
+from typing import Any
 
 import torch
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -49,6 +57,85 @@ def _prepare_indexer_indices_kernel(
         tl.store(output_ptr + offsets, selected, mask)
 
 
+class PrepareIndexerIndicesKernel(VllmTritonJitKernel["PrepareIndexerIndicesKernel.CompileKey"]):
+    kernel = _prepare_indexer_indices_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        topk: int
+        compress_ratio: int
+        block_rows: int
+        positions_dtype: torch.dtype
+
+    def dispatch(self, *, topk: int, compress_ratio: int, block_rows: int, positions_dtype: torch.dtype) -> CompileKey:
+        return self.CompileKey(
+            topk=topk, compress_ratio=compress_ratio, block_rows=block_rows, positions_dtype=positions_dtype
+        )
+
+    def get_warmup_keys(self, context: Any) -> list[CompileKey]:
+        padded_topk = 1 << (context.topk - 1).bit_length()
+        max_block_rows = 128 * 1024 // (padded_topk * 4 * 8)
+        rows = []
+        for tokens in context.token_counts:
+            raw_rows = (tokens + context.num_cores - 1) // context.num_cores
+            block_rows = min(max_block_rows, 1 << (max(raw_rows, 1) - 1).bit_length())
+            for ratio in context.compress_ratios:
+                for positions_dtype in (torch.int32, torch.int64):
+                    rows.append(
+                        dict(
+                            topk=context.topk,
+                            compress_ratio=ratio,
+                            block_rows=block_rows,
+                            positions_dtype=positions_dtype,
+                        )
+                    )
+        from vllm.model_executor.warmup.jit_warmup import zip_inputs
+
+        return self._trace_dispatch(self.dispatch)(zip_inputs(*rows)) if rows else []
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        shape = (1, compile_key.topk)
+        strides = (compile_key.topk, 1)
+        return dict(
+            selected=TritonWarmupTensor(torch.int32, shape=shape, strides=strides),
+            positions=TritonWarmupTensor(compile_key.positions_dtype, shape=(1,)),
+            output=TritonWarmupTensor(torch.int32, shape=shape, strides=strides),
+            num_rows=1,
+            TOPK=compile_key.topk,
+            COMPRESS_RATIO=compile_key.compress_ratio,
+            blocks_per_core=1,
+            BLOCK_ROWS=compile_key.block_rows,
+            BLOCK_COLS=1 << (compile_key.topk - 1).bit_length(),
+            SENTINEL=torch.iinfo(torch.int32).max,
+            SORT_KEY_SHIFT=1 << 23,
+            NEGATIVE_KEY_BASE=0x81800000 - (1 << 32),
+            grid_size=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        selected,
+        positions,
+        output,
+        *,
+        num_rows,
+        TOPK,
+        COMPRESS_RATIO,
+        blocks_per_core,
+        BLOCK_ROWS,
+        BLOCK_COLS,
+        SENTINEL,
+        SORT_KEY_SHIFT,
+        NEGATIVE_KEY_BASE,
+        grid_size,
+    ) -> LaunchSpec:
+        return (grid_size,), dict(multibuffer=False, unit_flag=False)
+
+
+_PREPARE_INDEXER_INDICES_KERNEL = PrepareIndexerIndicesKernel()
+
+
 def prepare_indexer_indices(
     selected: torch.Tensor,
     positions: torch.Tensor,
@@ -89,11 +176,11 @@ def prepare_indexer_indices(
     aligned_blocks = triton.cdiv(aligned_rows, block_rows)
     grid = min(triton.cdiv(num_blocks, aligned_blocks), num_cores)
     blocks_per_core = triton.cdiv(triton.cdiv(num_blocks, grid), aligned_blocks) * aligned_blocks
-    _prepare_indexer_indices_kernel[(grid,)](
-        selected,
-        positions,
-        output,
-        num_rows,
+    _PREPARE_INDEXER_INDICES_KERNEL(
+        selected=selected,
+        positions=positions,
+        output=output,
+        num_rows=num_rows,
         TOPK=topk,
         COMPRESS_RATIO=compress_ratio,
         blocks_per_core=blocks_per_core,
@@ -102,7 +189,6 @@ def prepare_indexer_indices(
         SENTINEL=torch.iinfo(torch.int32).max,
         SORT_KEY_SHIFT=1 << 23,
         NEGATIVE_KEY_BASE=0x81800000 - (1 << 32),
-        multibuffer=False,
-        unit_flag=False,
+        grid_size=grid,
     )
     return output

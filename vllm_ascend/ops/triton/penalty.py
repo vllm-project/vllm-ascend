@@ -20,7 +20,17 @@
 # Migrated from model_executor/layers/utils.apply_penalties.
 # Reference: https://github.com/vllm-project/vllm-ascend/pull/6979
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.bincount import get_token_bin_counts_and_mask_triton
@@ -97,6 +107,75 @@ def apply_all_penalties_kernel(
             tl.store(logits_ptr + logits_offset, updated, mask=mask)
 
 
+class ApplyAllPenaltiesKernel(VllmTritonJitKernel["ApplyAllPenaltiesKernel.CompileKey"]):
+    BLOCK_SIZE = 512
+    kernel = apply_all_penalties_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_size: int
+        vocab_size: int
+        logits_dtype: torch.dtype
+
+    def dispatch(self, *, block_size: int, vocab_size: int, logits_dtype: torch.dtype) -> CompileKey:
+        return self.CompileKey(block_size=block_size, vocab_size=vocab_size, logits_dtype=logits_dtype)
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        vocab_size = max(
+            1,
+            vllm_config.model_config.get_vocab_size() // get_tensor_model_parallel_world_size(),
+        )
+        return self._trace_dispatch(self.dispatch)(
+            block_size=self.BLOCK_SIZE,
+            vocab_size=vocab_size,
+            logits_dtype=torch.float32,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            logits=TritonWarmupTensor(compile_key.logits_dtype, shape=(1, 1), strides=(1, 1)),
+            prompt_mask=TritonWarmupTensor(torch.bool, shape=(1, 1), strides=(1, 1)),
+            output_mask=TritonWarmupTensor(torch.bool, shape=(1, 1), strides=(1, 1)),
+            output_bin_counts=TritonWarmupTensor(torch.int32, shape=(1, 1), strides=(1, 1)),
+            repetition_penalties=TritonWarmupTensor(torch.float32),
+            frequency_penalties=TritonWarmupTensor(torch.float32),
+            presence_penalties=TritonWarmupTensor(torch.float32),
+            num_seqs=1,
+            vocab_size=compile_key.vocab_size,
+            grid_size=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        prompt_mask: torch.Tensor,
+        output_mask: torch.Tensor,
+        output_bin_counts: torch.Tensor,
+        repetition_penalties: torch.Tensor,
+        frequency_penalties: torch.Tensor,
+        presence_penalties: torch.Tensor,
+        *,
+        num_seqs: int,
+        vocab_size: int,
+        grid_size: int,
+    ) -> LaunchSpec:
+        return (grid_size,), dict(
+            stride_logits_seq=logits.stride(0),
+            stride_logits_vocab=logits.stride(1),
+            stride_prompt_mask_seq=prompt_mask.stride(0),
+            stride_prompt_mask_vocab=prompt_mask.stride(1),
+            stride_output_mask_seq=output_mask.stride(0),
+            stride_output_mask_vocab=output_mask.stride(1),
+            stride_bin_counts_seq=output_bin_counts.stride(0),
+            stride_bin_counts_vocab=output_bin_counts.stride(1),
+            BLOCK_SIZE=self.BLOCK_SIZE,
+        )
+
+
+_APPLY_ALL_PENALTIES_KERNEL = ApplyAllPenaltiesKernel()
+
+
 def apply_penalties_triton(
     logits: torch.Tensor,
     prompt_tokens_tensor: torch.Tensor,
@@ -138,25 +217,16 @@ def _apply_all_penalties_triton(
 ) -> None:
     """Apply all penalties given precomputed bin counts and masks."""
     num_seqs, vocab_size = logits.shape
-    grid = (min(num_seqs, get_vectorcore_num()), 1, 1)
 
-    apply_all_penalties_kernel[grid](
-        logits,
-        prompt_mask,
-        output_mask,
-        output_bin_counts,
-        repetition_penalties,
-        frequency_penalties,
-        presence_penalties,
+    _APPLY_ALL_PENALTIES_KERNEL(
+        logits=logits,
+        prompt_mask=prompt_mask,
+        output_mask=output_mask,
+        output_bin_counts=output_bin_counts,
+        repetition_penalties=repetition_penalties,
+        frequency_penalties=frequency_penalties,
+        presence_penalties=presence_penalties,
         num_seqs=num_seqs,
         vocab_size=vocab_size,
-        stride_logits_seq=logits.stride(0),
-        stride_logits_vocab=logits.stride(1),
-        stride_prompt_mask_seq=prompt_mask.stride(0),
-        stride_prompt_mask_vocab=prompt_mask.stride(1),
-        stride_output_mask_seq=output_mask.stride(0),
-        stride_output_mask_vocab=output_mask.stride(1),
-        stride_bin_counts_seq=output_bin_counts.stride(0),
-        stride_bin_counts_vocab=output_bin_counts.stride(1),
-        BLOCK_SIZE=2048,
+        grid_size=min(num_seqs, get_vectorcore_num()),
     )

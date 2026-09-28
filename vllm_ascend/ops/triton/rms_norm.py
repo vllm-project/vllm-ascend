@@ -1,4 +1,13 @@
+from dataclasses import dataclass
+from typing import Any
+
 import torch
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
 from vllm.triton_utils import tl, triton
 
 
@@ -37,6 +46,70 @@ def triton_rms_kernel(
         tl.store(norm_output_ptr + offset_hidden, output, mask=mask_row)
 
 
+class TritonQRmsKernel(VllmTritonJitKernel["TritonQRmsKernel.CompileKey"]):
+    kernel = triton_rms_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        dim: int
+        block_m: int
+        dtype: torch.dtype
+
+    def dispatch(
+        self,
+        *,
+        dim: int,
+        block_m: int,
+        dtype: torch.dtype,
+    ) -> CompileKey:
+        return self.CompileKey(dim=dim, block_m=block_m, dtype=dtype)
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        model_config = vllm_config.model_config
+        return self._trace_dispatch(self.dispatch)(
+            dim=model_config.get_head_size(),
+            dtype=model_config.dtype,
+            block_m=(1, 2, 4, 8, 16),
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            hidden_state=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.dim),
+                strides=(compile_key.dim, 1),
+            ),
+            norm_output=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.dim),
+                strides=(compile_key.dim, 1),
+            ),
+            variance_epsilon=1e-6,
+            total_batch=1,
+            DIM=compile_key.dim,
+            BLOCK_M=compile_key.block_m,
+            num_vectorcore=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        hidden_state: torch.Tensor,
+        norm_output: torch.Tensor,
+        variance_epsilon: float,
+        total_batch: int,
+        DIM: int,
+        BLOCK_M: int,
+        num_vectorcore: int,
+    ) -> LaunchSpec:
+        return (num_vectorcore,), {
+            "hidden_state_stride_bs": hidden_state.stride(0),
+        }
+
+
+_TRITON_Q_RMS_KERNEL = TritonQRmsKernel()
+
+
 def _rms_block_m(total_batch: int, num_vectorcore: int) -> int:
     """Tile size used by ``triton_q_rms``.
 
@@ -66,16 +139,15 @@ def triton_q_rms(
 
     BLOCK_M = _rms_block_m(total_batch, num_vectorcore)
 
-    grid = (num_vectorcore,)
     norm_output = torch.empty_like(q)
 
-    triton_rms_kernel[grid](
-        q,
-        q.stride(0),
-        norm_output,
-        variance_epsilon,
-        total_batch,
-        dim,
-        BLOCK_M,
+    _TRITON_Q_RMS_KERNEL(
+        hidden_state=q,
+        norm_output=norm_output,
+        variance_epsilon=variance_epsilon,
+        total_batch=total_batch,
+        DIM=dim,
+        BLOCK_M=BLOCK_M,
+        num_vectorcore=num_vectorcore,
     )
     return norm_output.view(bs, head_num, dim)

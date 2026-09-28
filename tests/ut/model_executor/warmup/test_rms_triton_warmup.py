@@ -1,72 +1,68 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Unit tests for ``rms_triton_warmup``."""
+"""Tests for kernel-owned RMS warmup."""
 
+import importlib
+import sys
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import torch
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 
-from tests.ut.model_executor.warmup.helpers import make_mock_worker
-from vllm_ascend.model_executor.warmup import rms_triton_warmup as rw
+rw = importlib.import_module("vllm_ascend.model_executor.warmup.rms_triton_warmup")
 
 
-def test_triton_rms_warmup():
-    worker = make_mock_worker(head_size=128, dtype=torch.float16)
-    mock_triton_q_rms = MagicMock()
-    fake_module = SimpleNamespace(triton_q_rms=mock_triton_q_rms)
-    num_vectorcore = 4
+def _make_vllm_config():
+    model_config = SimpleNamespace(dtype=torch.float16, get_head_size=lambda: 128)
+    return SimpleNamespace(
+        model_config=model_config,
+        kernel_config=SimpleNamespace(enable_jit_warmup=True),
+    )
+
+
+def test_model_uses_triton_q_rms_accepts_backend_subclasses():
+    class DummyDSABackend:
+        pass
+
+    class DummyDSAChildBackend(DummyDSABackend):
+        pass
+
+    fake_module = SimpleNamespace(AscendDSABackend=DummyDSABackend)
+    model_runner = SimpleNamespace(attn_groups=[[SimpleNamespace(backend=DummyDSAChildBackend)]])
+
+    with patch.dict(sys.modules, {"vllm_ascend.attention.dsa_v1": fake_module}):
+        assert rw._model_uses_triton_q_rms(model_runner)
+
+
+def test_triton_rms_warmup_direct_uses_compile_only_path():
+    vllm_config = _make_vllm_config()
+    worker = SimpleNamespace(vllm_config=vllm_config, model_runner=SimpleNamespace())
 
     with (
         patch.object(rw, "HAS_TRITON", True),
         patch.object(rw, "_model_uses_triton_q_rms", return_value=True),
-        patch.object(rw, "get_vectorcore_num", return_value=num_vectorcore),
-        patch.dict("sys.modules", {"vllm_ascend.ops.triton.rms_norm": fake_module}),
+        patch.object(rw._TRITON_Q_RMS_KERNEL, "compile") as mock_compile,
     ):
         rw.triton_rms_warmup(worker)
 
-    assert mock_triton_q_rms.call_count == len(rw.collect_triton_rms_warmup_block_m_values())
-    q, eps = mock_triton_q_rms.call_args_list[0][0]
-    assert q.shape == (1 * num_vectorcore, 1, 128)
-    assert eps == 1e-5
+    assert mock_compile.call_count == 5
 
 
-def test_collect_block_m_values_are_powers_of_two():
-    """The kernel floors BLOCK_M to a power of two, so only those are JIT keys."""
-    values = rw.collect_triton_rms_warmup_block_m_values()
-
-    assert values == [1, 2, 4, 8, 16]
-    assert values[-1] == rw._ROW_BLOCK_SIZE
-
-
-def test_triton_rms_warmup_assume_used_skips_model_probe():
-    """Construct-time warmup runs before ``model_runner.attn_groups`` exists."""
-    worker = make_mock_worker(head_size=128, dtype=torch.float16)
-    fake_module = SimpleNamespace(triton_q_rms=MagicMock())
+def test_triton_rms_warmup_registers_with_registry():
+    vllm_config = _make_vllm_config()
+    registry = JitWarmupRegistry(vllm_config)
+    worker = SimpleNamespace(
+        vllm_config=vllm_config,
+        model_runner=SimpleNamespace(jit_warmup_registry=registry),
+    )
 
     with (
         patch.object(rw, "HAS_TRITON", True),
-        patch.object(rw, "_model_uses_triton_q_rms") as mock_probe,
-        patch.object(rw, "get_vectorcore_num", return_value=4),
-        patch.dict("sys.modules", {"vllm_ascend.ops.triton.rms_norm": fake_module}),
+        patch.object(rw, "_model_uses_triton_q_rms", return_value=True),
+        patch.object(rw._TRITON_Q_RMS_KERNEL, "compile") as mock_compile,
     ):
-        rw.triton_rms_warmup(worker, assume_used=True)
+        with registry.activate():
+            assert rw.register_triton_rms_warmup(worker)
+        registry.warmup()
 
-    mock_probe.assert_not_called()
-    assert fake_module.triton_q_rms.call_count == len(rw.collect_triton_rms_warmup_block_m_values())
-
-
-def test_triton_rms_warmup_joins_early_thread():
-    worker = make_mock_worker(head_size=128, dtype=torch.float16)
-    fake_module = SimpleNamespace(triton_q_rms=MagicMock())
-
-    with (
-        patch.object(rw, "HAS_TRITON", True),
-        patch.object(rw, "_model_uses_triton_q_rms", return_value=False),
-        patch.object(rw, "get_vectorcore_num", return_value=4),
-        patch.dict("sys.modules", {"vllm_ascend.ops.triton.rms_norm": fake_module}),
-        patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.join_early_kernel_warmup") as mock_join,
-    ):
-        rw.triton_rms_warmup(worker)
-
-    mock_join.assert_called_once_with("rms")
-    fake_module.triton_q_rms.assert_not_called()
+    assert mock_compile.call_count == 5

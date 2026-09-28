@@ -58,7 +58,12 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
-from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
+from vllm_ascend.ops.triton.spec_decode.utils import (
+    _PREPARE_INPUTS_PADDED_KERNEL,
+)
+from vllm_ascend.ops.triton.spec_decode.utils import (
+    PREPARE_INPUTS_BLOCK_SIZE as _PREPARE_INPUTS_BLOCK_SIZE,
+)
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
 from vllm_ascend.spec_decode.utils import (
@@ -74,9 +79,6 @@ from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadat
 class _HiddenStateDrafter(Protocol):
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor: ...
 
-
-# Currently we will fix block size to a small one since `num_reqs` can't be too large
-_PREPARE_INPUTS_BLOCK_SIZE = 4
 
 _HIDDEN_STATE_DRAFTER_TYPES: tuple[type, ...] = (
     Eagle3LlamaForCausalLM,
@@ -2446,16 +2448,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_blocks_needed = triton.cdiv(num_reqs, _PREPARE_INPUTS_BLOCK_SIZE)
             num_vector_core = get_vectorcore_num()
             grid_size = min(num_blocks_needed, num_vector_core)
-            grid = (grid_size,)
-
-            prepare_inputs_padded_kernel[grid](
-                spec_decode_metadata.cu_num_draft_tokens,
-                valid_sampled_tokens_count,
-                common_attn_metadata.query_start_loc,
-                token_indices_to_sample,
-                num_rejected_tokens_gpu,
-                num_reqs,
-                BLOCK_SIZE=_PREPARE_INPUTS_BLOCK_SIZE,
+            _PREPARE_INPUTS_PADDED_KERNEL(
+                cu_num_draft_tokens=spec_decode_metadata.cu_num_draft_tokens,
+                valid_sampled_tokens_count=valid_sampled_tokens_count,
+                query_start_loc=common_attn_metadata.query_start_loc,
+                token_indices_to_sample=token_indices_to_sample,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                num_reqs=num_reqs,
+                grid_size=grid_size,
             )
         else:
             num_draft_tokens_gpu = torch.cat(

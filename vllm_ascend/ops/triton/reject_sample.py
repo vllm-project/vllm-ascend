@@ -15,8 +15,19 @@
 # limitations under the License.
 #
 
+from dataclasses import dataclass
+from typing import Any
+
+import torch
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
+from vllm.v1.sample.rejection_sampler import MAX_SPEC_LEN
 
 from vllm_ascend.ops.triton.triton_utils import get_element, get_vectorcore_num
 
@@ -69,6 +80,64 @@ def rejection_greedy_sample_spec_len_1_triton(
         tl.store(output_token_ids_ptr + offset * 2, target_argmax_id, mask)
         accept_mask = (draft_token_id == target_argmax_id) & mask
     tl.store(output_token_ids_ptr + offset * 2 + 1, bonus_token_id, accept_mask)
+
+
+class RejectionGreedySpecLen1Kernel(VllmTritonJitKernel["RejectionGreedySpecLen1Kernel.CompileKey"]):
+    kernel = rejection_greedy_sample_spec_len_1_triton
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_size: int
+        synthetic_mode: bool
+
+    def dispatch(self, *, block_size: int, synthetic_mode: bool) -> CompileKey:
+        return self.CompileKey(block_size=block_size, synthetic_mode=synthetic_mode)
+
+    def get_warmup_keys(self, context: Any) -> list[CompileKey]:
+        # num_draft_tokens is all ones only in the spec-len-1 path. For larger
+        # max_spec_len the runtime dispatcher selects the general greedy kernel.
+        if context.max_spec_len != 1:
+            return []
+        rows = [
+            dict(block_size=block_size, synthetic_mode=context.synthetic_mode) for block_size in context.block_sizes
+        ]
+        return self._trace_dispatch(self.dispatch)(zip_inputs(*rows)) if rows else []
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            output_token_ids=TritonWarmupTensor(torch.int32, shape=(1, 2)),
+            draft_token_ids=TritonWarmupTensor(torch.int32, shape=(1,)),
+            target_argmax=TritonWarmupTensor(torch.int64, shape=(1,)),
+            bonus_token_ids=TritonWarmupTensor(torch.int64, shape=(1,)),
+            vec_len=1,
+            uniform_probs=(TritonWarmupTensor(torch.float32, shape=(1,)) if compile_key.synthetic_mode else None),
+            synthetic_conditional_rates=(
+                TritonWarmupTensor(torch.float32, shape=(1,)) if compile_key.synthetic_mode else None
+            ),
+            block_size=compile_key.block_size,
+            synthetic_mode=compile_key.synthetic_mode,
+            grid_size=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        output_token_ids: torch.Tensor,
+        draft_token_ids: torch.Tensor,
+        target_argmax: torch.Tensor,
+        bonus_token_ids: torch.Tensor,
+        uniform_probs: torch.Tensor | None,
+        synthetic_conditional_rates: torch.Tensor | None,
+        *,
+        vec_len: int,
+        block_size: int,
+        synthetic_mode: bool,
+        grid_size: int,
+    ) -> LaunchSpec:
+        return (grid_size,), dict(SYNTHETIC_MODE=synthetic_mode, BLOCK_SIZE=block_size)
+
+
+_REJECTION_GREEDY_SPEC_LEN_1_KERNEL = RejectionGreedySpecLen1Kernel()
 
 
 @triton.jit(do_not_specialize=["max_spec_len"])
@@ -166,6 +235,77 @@ def rejection_greedy_sample_triton(
                 max_spec_len,
                 num_tokens1,
             )
+
+
+class RejectionGreedyKernel(VllmTritonJitKernel["RejectionGreedyKernel.CompileKey"]):
+    kernel = rejection_greedy_sample_triton
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_size: int
+        synthetic_mode: bool
+        has_is_greedy: bool
+
+    def dispatch(self, *, block_size: int, synthetic_mode: bool, has_is_greedy: bool) -> CompileKey:
+        return self.CompileKey(block_size=block_size, synthetic_mode=synthetic_mode, has_is_greedy=has_is_greedy)
+
+    def get_warmup_keys(self, context: Any) -> list[CompileKey]:
+        # With spec_len == 1, is_greedy=None is handled by the spec-len-1
+        # kernel. Only the explicit is_greedy tensor path reaches this kernel.
+        # For larger spec lengths, both paths use the general greedy kernel.
+        has_is_greedy_values = (True,) if context.max_spec_len == 1 else (False, True)
+        rows = [
+            dict(
+                block_size=block_size,
+                synthetic_mode=context.synthetic_mode,
+                has_is_greedy=has_is_greedy,
+            )
+            for block_size in context.block_sizes
+            for has_is_greedy in has_is_greedy_values
+        ]
+        return self._trace_dispatch(self.dispatch)(zip_inputs(*rows)) if rows else []
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            output_token_ids=TritonWarmupTensor(torch.int32, shape=(1, MAX_SPEC_LEN + 1)),
+            cu_num_draft_tokens=TritonWarmupTensor(torch.int32, shape=(1,)),
+            draft_token_ids=TritonWarmupTensor(torch.int32, shape=(1,)),
+            target_argmax=TritonWarmupTensor(torch.int64, shape=(1,)),
+            bonus_token_ids=TritonWarmupTensor(torch.int64, shape=(1,)),
+            is_greedy=(TritonWarmupTensor(torch.bool, shape=(1,)) if compile_key.has_is_greedy else None),
+            vec_len=1,
+            max_spec_len=1,
+            uniform_probs=(TritonWarmupTensor(torch.float32, shape=(1,)) if compile_key.synthetic_mode else None),
+            synthetic_conditional_rates=(
+                TritonWarmupTensor(torch.float32, shape=(1,)) if compile_key.synthetic_mode else None
+            ),
+            block_size=compile_key.block_size,
+            synthetic_mode=compile_key.synthetic_mode,
+            grid_size=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        output_token_ids: torch.Tensor,
+        cu_num_draft_tokens: torch.Tensor,
+        draft_token_ids: torch.Tensor,
+        target_argmax: torch.Tensor,
+        bonus_token_ids: torch.Tensor,
+        is_greedy: torch.Tensor | None,
+        uniform_probs: torch.Tensor | None,
+        synthetic_conditional_rates: torch.Tensor | None,
+        *,
+        vec_len: int,
+        max_spec_len: int,
+        block_size: int,
+        synthetic_mode: bool,
+        grid_size: int,
+    ) -> LaunchSpec:
+        return (grid_size,), dict(SYNTHETIC_MODE=synthetic_mode, BLOCK_SIZE=block_size)
+
+
+_REJECTION_GREEDY_KERNEL = RejectionGreedyKernel()
 
 
 @triton.jit(
@@ -361,6 +501,163 @@ def rejection_random_sample_kernel(
                 )
 
 
+class RejectionRandomSampleKernel(VllmTritonJitKernel["RejectionRandomSampleKernel.CompileKey"]):
+    kernel = rejection_random_sample_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_size: int
+        no_ori_target_probs: bool
+        no_draft_probs: bool
+        enable_reduce_sampling: bool
+        synthetic_mode: bool
+        entropy_verify: bool
+        vocab_block_size: int
+        posterior_threshold: float
+        posterior_alpha: float
+        sub_block: int
+        epsilon: float
+
+    def dispatch(
+        self,
+        *,
+        block_size: int,
+        no_ori_target_probs: bool,
+        no_draft_probs: bool,
+        enable_reduce_sampling: bool,
+        synthetic_mode: bool,
+        entropy_verify: bool,
+        vocab_block_size: int,
+        posterior_threshold: float,
+        posterior_alpha: float,
+        sub_block: int,
+        epsilon: float,
+    ) -> CompileKey:
+        return self.CompileKey(
+            block_size=block_size,
+            no_ori_target_probs=no_ori_target_probs,
+            no_draft_probs=no_draft_probs,
+            enable_reduce_sampling=enable_reduce_sampling,
+            synthetic_mode=synthetic_mode,
+            entropy_verify=entropy_verify,
+            vocab_block_size=vocab_block_size,
+            posterior_threshold=posterior_threshold,
+            posterior_alpha=posterior_alpha,
+            sub_block=sub_block,
+            epsilon=epsilon,
+        )
+
+    def get_warmup_keys(self, context: Any) -> list[CompileKey]:
+        no_ori = (False, True) if context.entropy_verify else (True,)
+        rows = [
+            dict(
+                block_size=block_size,
+                no_ori_target_probs=no_ori_value,
+                no_draft_probs=no_draft,
+                enable_reduce_sampling=context.enable_reduce_sampling,
+                synthetic_mode=context.synthetic_mode,
+                entropy_verify=context.entropy_verify,
+                vocab_block_size=context.vocab_block_size,
+                posterior_threshold=context.posterior_threshold,
+                posterior_alpha=context.posterior_alpha,
+                sub_block=context.sub_block,
+                epsilon=context.epsilon,
+            )
+            for block_size in context.block_sizes
+            for no_ori_value in no_ori
+            for no_draft in context.no_draft_probs_values
+        ]
+        return self._trace_dispatch(self.dispatch)(zip_inputs(*rows)) if rows else []
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            output_token_ids=TritonWarmupTensor(torch.int32, shape=(1, MAX_SPEC_LEN + 1)),
+            cu_num_draft_tokens=TritonWarmupTensor(torch.int32, shape=(1,)),
+            draft_token_ids=TritonWarmupTensor(torch.int32, shape=(1,)),
+            draft_probs=(None if compile_key.no_draft_probs else TritonWarmupTensor(torch.float32, shape=(1, 1))),
+            target_probs=TritonWarmupTensor(torch.float32, shape=(1, 1)),
+            target_indices=(
+                TritonWarmupTensor(torch.int32, shape=(1, 1)) if compile_key.enable_reduce_sampling else None
+            ),
+            bonus_token_ids=TritonWarmupTensor(torch.int64, shape=(1,)),
+            recovered_token_ids=TritonWarmupTensor(torch.int32, shape=(1,)),
+            uniform_probs=TritonWarmupTensor(torch.float32, shape=(1,)),
+            is_greedy=TritonWarmupTensor(torch.bool, shape=(1,)),
+            max_spec_len=1,
+            vocab_size=1,
+            global_vocab_size=1,
+            vec_len=1,
+            ori_target_probs=(
+                None if compile_key.no_ori_target_probs else TritonWarmupTensor(torch.float32, shape=(1, 1))
+            ),
+            synthetic_conditional_rates=(
+                TritonWarmupTensor(torch.float32, shape=(1,)) if compile_key.synthetic_mode else None
+            ),
+            block_size=compile_key.block_size,
+            no_ori_target_probs=compile_key.no_ori_target_probs,
+            no_draft_probs=compile_key.no_draft_probs,
+            enable_reduce_sampling=compile_key.enable_reduce_sampling,
+            synthetic_mode=compile_key.synthetic_mode,
+            entropy_verify=compile_key.entropy_verify,
+            vocab_block_size=compile_key.vocab_block_size,
+            posterior_threshold=compile_key.posterior_threshold,
+            posterior_alpha=compile_key.posterior_alpha,
+            sub_block=compile_key.sub_block,
+            epsilon=compile_key.epsilon,
+            grid_size=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        target_indices,
+        bonus_token_ids,
+        recovered_token_ids,
+        uniform_probs,
+        is_greedy,
+        ori_target_probs,
+        synthetic_conditional_rates,
+        *,
+        max_spec_len,
+        vocab_size,
+        global_vocab_size,
+        vec_len,
+        block_size,
+        no_ori_target_probs,
+        no_draft_probs,
+        enable_reduce_sampling,
+        synthetic_mode,
+        entropy_verify,
+        vocab_block_size,
+        posterior_threshold,
+        posterior_alpha,
+        sub_block,
+        epsilon,
+        grid_size,
+    ) -> LaunchSpec:
+        return (grid_size,), dict(
+            NO_ORI_TARGET_PROBS=no_ori_target_probs,
+            NO_DRAFT_PROBS=no_draft_probs,
+            ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
+            SYNTHETIC_MODE=synthetic_mode,
+            ENTROPY_VERIFY=entropy_verify,
+            BLOCK_SIZE=block_size,
+            VOCAB_BLOCK_SIZE=vocab_block_size,
+            POSTERIOR_THRESHOLD=posterior_threshold,
+            POSTERIOR_ALPHA=posterior_alpha,
+            SUB_BLOCK=sub_block,
+            EPSILON=epsilon,
+        )
+
+
+_REJECTION_RANDOM_SAMPLE_KERNEL = RejectionRandomSampleKernel()
+
+
 @triton.jit(do_not_specialize=["replace_from", "replace_to", "vec_len"])
 def expand_kernel(
     output_ptr,  # [num_tokens]
@@ -393,6 +690,64 @@ def expand_kernel(
         src_val1 = get_element(src_val, (i,))
         offset1 = tl.arange(0, MAX_NUM_TOKENS)
         tl.store(output_ptr + start_idx1 + offset1, src_val1, mask=offset1 < num_tokens1)
+
+
+class ExpandKernel(VllmTritonJitKernel["ExpandKernel.CompileKey"]):
+    kernel = expand_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_size: int
+        max_num_tokens: int
+        dtype: torch.dtype
+
+    def dispatch(self, *, block_size: int, max_num_tokens: int, dtype: torch.dtype) -> CompileKey:
+        return self.CompileKey(block_size=block_size, max_num_tokens=max_num_tokens, dtype=dtype)
+
+    def get_warmup_keys(self, context: Any) -> list[CompileKey]:
+        rows = [
+            dict(block_size=block_size, max_num_tokens=MAX_SPEC_LEN, dtype=dtype)
+            for block_size in context.block_sizes
+            for dtype in (torch.int32, torch.float32)
+        ]
+        return self._trace_dispatch(self.dispatch)(zip_inputs(*rows)) if rows else []
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            expanded_x=TritonWarmupTensor(compile_key.dtype, shape=(1,)),
+            x=TritonWarmupTensor(compile_key.dtype, shape=(1,)),
+            cu_num_tokens=TritonWarmupTensor(torch.int32, shape=(1,)),
+            replace_from=-1,
+            replace_to=0,
+            vec_len=1,
+            max_num_tokens=compile_key.max_num_tokens,
+            block_size=compile_key.block_size,
+            grid_size=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        expanded_x: torch.Tensor,
+        x: torch.Tensor,
+        cu_num_tokens: torch.Tensor,
+        *,
+        replace_from: int,
+        replace_to: int,
+        vec_len: int,
+        max_num_tokens: int,
+        block_size: int,
+        grid_size: int,
+    ) -> LaunchSpec:
+        return (grid_size,), dict(
+            output_ptr=expanded_x,
+            input_ptr=x,
+            MAX_NUM_TOKENS=max_num_tokens,
+            BLOCK_SIZE=block_size,
+        )
+
+
+_EXPAND_KERNEL = ExpandKernel()
 
 
 @triton.jit
@@ -529,6 +884,92 @@ def sample_recovered_tokens_kernel(
         tl.store(output_token_ids_ptr + start_idx + pos, global_recovered_id)
 
 
+class SampleRecoveredTokensKernel(VllmTritonJitKernel["SampleRecoveredTokensKernel.CompileKey"]):
+    kernel = sample_recovered_tokens_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        no_draft_probs: bool
+        enable_reduce_sampling: bool
+        vocab_block_size: int
+        sub_block: int
+
+    def dispatch(
+        self, *, no_draft_probs: bool, enable_reduce_sampling: bool, vocab_block_size: int, sub_block: int
+    ) -> CompileKey:
+        return self.CompileKey(
+            no_draft_probs=no_draft_probs,
+            enable_reduce_sampling=enable_reduce_sampling,
+            vocab_block_size=vocab_block_size,
+            sub_block=sub_block,
+        )
+
+    def get_warmup_keys(self, context: Any) -> list[CompileKey]:
+        rows = [
+            dict(
+                no_draft_probs=no_draft,
+                enable_reduce_sampling=context.enable_reduce_sampling,
+                vocab_block_size=context.vocab_block_size,
+                sub_block=context.sub_block,
+            )
+            for no_draft in context.no_draft_probs_values
+        ]
+        return self._trace_dispatch(self.dispatch)(zip_inputs(*rows)) if rows else []
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            recovered_token_ids=TritonWarmupTensor(torch.int32, shape=(1,)),
+            cu_num_draft_tokens=TritonWarmupTensor(torch.int32, shape=(1,)),
+            draft_token_ids=TritonWarmupTensor(torch.int32, shape=(1,)),
+            draft_probs=(None if compile_key.no_draft_probs else TritonWarmupTensor(torch.float32, shape=(1, 1))),
+            target_probs=TritonWarmupTensor(torch.float32, shape=(1, 1)),
+            target_indices=(
+                TritonWarmupTensor(torch.int32, shape=(1, 1)) if compile_key.enable_reduce_sampling else None
+            ),
+            q=TritonWarmupTensor(torch.float32, shape=(1, 1)),
+            vocab_size=1,
+            global_vocab_size=1,
+            no_draft_probs=compile_key.no_draft_probs,
+            enable_reduce_sampling=compile_key.enable_reduce_sampling,
+            vocab_block_size=compile_key.vocab_block_size,
+            sub_block=compile_key.sub_block,
+            batch_size=1,
+            max_spec_len=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        recovered_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        target_indices,
+        q,
+        *,
+        vocab_size,
+        global_vocab_size,
+        no_draft_probs,
+        enable_reduce_sampling,
+        vocab_block_size,
+        sub_block,
+        batch_size,
+        max_spec_len,
+    ) -> LaunchSpec:
+        return (batch_size, max_spec_len), dict(
+            output_token_ids_ptr=recovered_token_ids,
+            NO_DRAFT_PROBS=no_draft_probs,
+            ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
+            VOCAB_BLOCK_SIZE=vocab_block_size,
+            SUB_BLOCK=sub_block,
+            multibuffer=False,
+        )
+
+
+_SAMPLE_RECOVERED_TOKENS_KERNEL = SampleRecoveredTokensKernel()
+
+
 def rejection_greedy_sample_with_triton(
     output_token_ids,
     num_draft_tokens,
@@ -547,31 +988,33 @@ def rejection_greedy_sample_with_triton(
     vec_len = output_token_ids.shape[0]
 
     if min(num_draft_tokens) == 1 and max(num_draft_tokens) == 1 and is_greedy is None:
-        rejection_greedy_sample_spec_len_1_triton[(grid,)](
-            output_token_ids,
-            draft_token_ids,
-            target_argmax,
-            bonus_token_ids,
-            vec_len,
-            uniform_probs,
-            synthetic_conditional_rates,
-            SYNTHETIC_MODE=synthetic_mode,
-            BLOCK_SIZE=block_size,
+        _REJECTION_GREEDY_SPEC_LEN_1_KERNEL(
+            output_token_ids=output_token_ids,
+            draft_token_ids=draft_token_ids,
+            target_argmax=target_argmax,
+            bonus_token_ids=bonus_token_ids,
+            vec_len=vec_len,
+            uniform_probs=uniform_probs,
+            synthetic_conditional_rates=synthetic_conditional_rates,
+            block_size=block_size,
+            synthetic_mode=synthetic_mode,
+            grid_size=grid,
         )
     else:
-        rejection_greedy_sample_triton[(grid,)](
-            output_token_ids,
-            cu_num_draft_tokens,
-            draft_token_ids,
-            target_argmax,
-            bonus_token_ids,
-            is_greedy,
-            vec_len,
-            max_spec_len,
-            uniform_probs,
-            synthetic_conditional_rates,
-            SYNTHETIC_MODE=synthetic_mode,
-            BLOCK_SIZE=block_size,
+        _REJECTION_GREEDY_KERNEL(
+            output_token_ids=output_token_ids,
+            cu_num_draft_tokens=cu_num_draft_tokens,
+            draft_token_ids=draft_token_ids,
+            target_argmax=target_argmax,
+            bonus_token_ids=bonus_token_ids,
+            is_greedy=is_greedy,
+            vec_len=vec_len,
+            max_spec_len=max_spec_len,
+            uniform_probs=uniform_probs,
+            synthetic_conditional_rates=synthetic_conditional_rates,
+            block_size=block_size,
+            synthetic_mode=synthetic_mode,
+            grid_size=grid,
         )
 
 
@@ -579,15 +1022,16 @@ def expand_triton(batch_size, expanded_x, x, cu_num_tokens, replace_from, replac
     vec_len = batch_size
     grid, block_size = cal_grid_and_block_size(batch_size)
 
-    expand_kernel[(grid,)](
-        expanded_x,
-        x,
-        cu_num_tokens,
-        replace_from,
-        replace_to,
-        vec_len,
-        MAX_NUM_TOKENS=max_num_tokens,  # To avoid recompilation.
-        BLOCK_SIZE=block_size,
+    _EXPAND_KERNEL(
+        expanded_x=expanded_x,
+        x=x,
+        cu_num_tokens=cu_num_tokens,
+        replace_from=replace_from,
+        replace_to=replace_to,
+        vec_len=vec_len,
+        max_num_tokens=max_num_tokens,
+        block_size=block_size,
+        grid_size=grid,
     )
 
 
@@ -792,3 +1236,149 @@ def rejection_random_sample_block_verify_kernel(
                     # All accepted - store bonus token
                     bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
                     tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens, bonus_token_id)
+
+
+class RejectionRandomSampleBlockVerifyKernel(VllmTritonJitKernel["RejectionRandomSampleBlockVerifyKernel.CompileKey"]):
+    kernel = rejection_random_sample_block_verify_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_size: int
+        no_ori_target_probs: bool
+        no_draft_probs: bool
+        enable_reduce_sampling: bool
+        entropy_verify: bool
+        vocab_block_size: int
+        posterior_threshold: float
+        posterior_alpha: float
+        sub_block: int
+        epsilon: float
+
+    def dispatch(
+        self,
+        *,
+        block_size: int,
+        no_ori_target_probs: bool,
+        no_draft_probs: bool,
+        enable_reduce_sampling: bool,
+        entropy_verify: bool,
+        vocab_block_size: int,
+        posterior_threshold: float,
+        posterior_alpha: float,
+        sub_block: int,
+        epsilon: float,
+    ) -> CompileKey:
+        return self.CompileKey(
+            block_size=block_size,
+            no_ori_target_probs=no_ori_target_probs,
+            no_draft_probs=no_draft_probs,
+            enable_reduce_sampling=enable_reduce_sampling,
+            entropy_verify=entropy_verify,
+            vocab_block_size=vocab_block_size,
+            posterior_threshold=posterior_threshold,
+            posterior_alpha=posterior_alpha,
+            sub_block=sub_block,
+            epsilon=epsilon,
+        )
+
+    def get_warmup_keys(self, context: Any) -> list[CompileKey]:
+        no_ori = (False, True) if context.entropy_verify else (True,)
+        rows = [
+            dict(
+                block_size=block_size,
+                no_ori_target_probs=no_ori_value,
+                no_draft_probs=no_draft,
+                enable_reduce_sampling=context.enable_reduce_sampling,
+                entropy_verify=context.entropy_verify,
+                vocab_block_size=context.vocab_block_size,
+                posterior_threshold=context.posterior_threshold,
+                posterior_alpha=context.posterior_alpha,
+                sub_block=context.sub_block,
+                epsilon=context.epsilon,
+            )
+            for block_size in context.block_sizes
+            for no_ori_value in no_ori
+            for no_draft in context.no_draft_probs_values
+        ]
+        return self._trace_dispatch(self.dispatch)(zip_inputs(*rows)) if rows else []
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            output_token_ids=TritonWarmupTensor(torch.int32, shape=(1, MAX_SPEC_LEN + 1)),
+            cu_num_draft_tokens=TritonWarmupTensor(torch.int32, shape=(1,)),
+            draft_token_ids=TritonWarmupTensor(torch.int32, shape=(1,)),
+            draft_probs=(None if compile_key.no_draft_probs else TritonWarmupTensor(torch.float32, shape=(1, 1))),
+            target_probs=TritonWarmupTensor(torch.float32, shape=(1, 1)),
+            target_indices=(
+                TritonWarmupTensor(torch.int32, shape=(1, 1)) if compile_key.enable_reduce_sampling else None
+            ),
+            bonus_token_ids=TritonWarmupTensor(torch.int64, shape=(1,)),
+            recovered_token_ids=TritonWarmupTensor(torch.int32, shape=(1,)),
+            uniform_probs=TritonWarmupTensor(torch.float32, shape=(1,)),
+            is_greedy=TritonWarmupTensor(torch.bool, shape=(1,)),
+            max_spec_len=1,
+            vocab_size=1,
+            global_vocab_size=1,
+            vec_len=1,
+            ori_target_probs=(
+                None if compile_key.no_ori_target_probs else TritonWarmupTensor(torch.float32, shape=(1, 1))
+            ),
+            block_size=compile_key.block_size,
+            no_ori_target_probs=compile_key.no_ori_target_probs,
+            no_draft_probs=compile_key.no_draft_probs,
+            enable_reduce_sampling=compile_key.enable_reduce_sampling,
+            entropy_verify=compile_key.entropy_verify,
+            vocab_block_size=compile_key.vocab_block_size,
+            posterior_threshold=compile_key.posterior_threshold,
+            posterior_alpha=compile_key.posterior_alpha,
+            sub_block=compile_key.sub_block,
+            epsilon=compile_key.epsilon,
+            grid_size=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        target_indices,
+        bonus_token_ids,
+        recovered_token_ids,
+        uniform_probs,
+        is_greedy,
+        ori_target_probs,
+        *,
+        max_spec_len,
+        vocab_size,
+        global_vocab_size,
+        vec_len,
+        block_size,
+        no_ori_target_probs,
+        no_draft_probs,
+        enable_reduce_sampling,
+        entropy_verify,
+        vocab_block_size,
+        posterior_threshold,
+        posterior_alpha,
+        sub_block,
+        epsilon,
+        grid_size,
+    ) -> LaunchSpec:
+        return (grid_size,), dict(
+            NO_ORI_TARGET_PROBS=no_ori_target_probs,
+            NO_DRAFT_PROBS=no_draft_probs,
+            ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
+            ENTROPY_VERIFY=entropy_verify,
+            BLOCK_SIZE=block_size,
+            VOCAB_BLOCK_SIZE=vocab_block_size,
+            POSTERIOR_THRESHOLD=posterior_threshold,
+            POSTERIOR_ALPHA=posterior_alpha,
+            SUB_BLOCK=sub_block,
+            EPSILON=epsilon,
+        )
+
+
+_REJECTION_RANDOM_SAMPLE_BLOCK_VERIFY_KERNEL = RejectionRandomSampleBlockVerifyKernel()

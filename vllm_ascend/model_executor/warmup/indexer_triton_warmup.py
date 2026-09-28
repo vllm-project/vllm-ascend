@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Warm the finite tile variants used by the V4.1 indexer."""
+"""Register and materialize DeepSeek V4.1 indexer Triton specializations."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import torch
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.ops.triton.prepare_indexer_indices import prepare_indexer_indices
-from vllm_ascend.ops.triton.quantize_indexer_query import quantize_indexer_query
+from vllm_ascend.ops.triton.prepare_indexer_indices import (
+    _PREPARE_INDEXER_INDICES_KERNEL,
+)
+from vllm_ascend.ops.triton.quantize_indexer_query import (
+    _QUANTIZE_INDEXER_QUERY_KERNEL,
+)
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import is_deepseek_v41
 
@@ -18,9 +22,16 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.worker import NPUWorker
 
 
+@dataclass(frozen=True)
+class IndexerWarmupContext:
+    topk: int
+    token_counts: tuple[int, ...]
+    num_cores: int
+    compress_ratios: tuple[int, ...]
+
+
 def collect_indexer_warmup_token_counts(topk: int, num_cores: int, max_tokens: int) -> list[int]:
-    """One token count per reachable ``BLOCK_ROWS`` in index postprocessing."""
-    # Match the 128 KiB, eight-buffer sort budget in prepare_indexer_indices.
+    """One token count per reachable BLOCK_ROWS in index postprocessing."""
     padded_topk = 1 << (topk - 1).bit_length()
     max_block_rows = 128 * 1024 // (padded_topk * 4 * 8)
     token_counts = [1]
@@ -34,26 +45,56 @@ def collect_indexer_warmup_token_counts(topk: int, num_cores: int, max_tokens: i
     return token_counts
 
 
-@torch.inference_mode()
-def indexer_triton_warmup(worker: NPUWorker) -> None:
-    """Precompile indexer tiles before serving arbitrary eager token counts."""
+def _enabled(worker: NPUWorker) -> bool:
     if not HAS_TRITON:
-        return
+        return False
+    kernel_config = getattr(worker.vllm_config, "kernel_config", None)
+    return kernel_config is None or bool(kernel_config.enable_jit_warmup)
+
+
+def _make_context(worker: NPUWorker) -> IndexerWarmupContext | None:
     config = worker.model_config.hf_text_config
     if not is_deepseek_v41(config):
-        return
-    ratios = sorted(set(config.compress_ratios[: config.num_hidden_layers]) - {0})
-    if not ratios:
-        return
+        return None
 
-    device = worker.device
-    query = torch.zeros(1, config.index_n_heads, config.index_head_dim, dtype=worker.model_config.dtype, device=device)
-    quantize_indexer_query(query)
-    token_counts = collect_indexer_warmup_token_counts(
-        config.index_topk, get_vectorcore_num(), worker.scheduler_config.max_num_batched_tokens
+    ratios = tuple(sorted(set(config.compress_ratios[: config.num_hidden_layers]) - {0}))
+    if not ratios:
+        return None
+
+    num_cores = max(get_vectorcore_num(), 1)
+    token_counts = tuple(
+        collect_indexer_warmup_token_counts(
+            config.index_topk,
+            num_cores,
+            worker.scheduler_config.max_num_batched_tokens,
+        )
     )
-    for tokens in token_counts:
-        selected = torch.zeros(tokens, config.index_topk, dtype=torch.int32, device=device)
-        positions = torch.zeros(tokens, dtype=torch.int64, device=device)
-        for ratio in ratios:
-            prepare_indexer_indices(selected, positions, ratio)
+    return IndexerWarmupContext(
+        topk=config.index_topk,
+        token_counts=token_counts,
+        num_cores=num_cores,
+        compress_ratios=ratios,
+    )
+
+
+def register_indexer_triton_warmup(worker: NPUWorker) -> bool:
+    """Register indexer wrappers with the active warmup registry."""
+    if not _enabled(worker):
+        return False
+    context = _make_context(worker)
+    if context is None:
+        return False
+    _QUANTIZE_INDEXER_QUERY_KERNEL.register_warmup(worker.vllm_config)
+    _PREPARE_INDEXER_INDICES_KERNEL.register_warmup(context)
+    return True
+
+
+def indexer_triton_warmup(worker: NPUWorker) -> None:
+    """Materialize indexer specializations directly for early/fallback paths."""
+    if not _enabled(worker):
+        return
+    context = _make_context(worker)
+    if context is None:
+        return
+    _QUANTIZE_INDEXER_QUERY_KERNEL.warmup(worker.vllm_config)
+    _PREPARE_INDEXER_INDICES_KERNEL.warmup(context)
