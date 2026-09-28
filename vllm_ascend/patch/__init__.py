@@ -164,28 +164,19 @@
 #
 # ** 6. File: platform/patch_engram_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.engine.arg_utils.EngramConfig`
-#   2. `vllm.engine.arg_utils.get_kwargs`
-#   3. `vllm.config.vllm.VllmConfig._resolve_and_verify_engram_config`
+#   1. `vllm.config.engram.EngramConfig.verify_model_config`
 #    Why:
-#       The pinned vLLM 84030bbe does not define `dp_shared_memory` and only
-#       accepts CUDA Qwen Engram models. Its CLI schema is built from that
-#       config before the platform can supply an Ascend-specific subtype.
-#    How：
-#       Define an Ascend EngramConfig subtype with `dp_shared_memory`, use it
-#       for EngineArgs conversion and `--engram-config` JSON parsing, then
-#       resolve DeepSeek V4.1 target configs through that subtype. Keep model,
-#       topology, load-format and DBO validation in the subtype.
-#       Skip this patch when vLLM does not provide EngramConfig. External DP
-#       locality is checked on the initialized DP group because its
-#       data_parallel_size_local counts engines per launcher.
+#       Upstream Engram model validation requires CUDA before the platform hook.
+#    How:
+#       Keep upstream model/layer checks and lift only the CUDA requirement.
+#       Use the native EngramConfig and resolver. Ascend's normal platform hook
+#       supplies missing defaults and checks its model, topology and loader limits.
+#       Skip this patch when vLLM does not provide EngramConfig.
 #    Related PR (if no, explain why):
-#       No Ascend upstream PR. The required generic Engram behavior is
-#       selectively backported from vLLM commit f84b0c4bce:
-#       https://github.com/vllm-project/vllm/commit/f84b0c4bce
+#       No upstream PR yet; Engram needs a platform capability check.
 #    Future Plan:
-#       Remove this patch when the pinned vLLM includes `dp_shared_memory` and
-#       exposes a platform hook for Engram config selection and validation.
+#       Remove this patch and platform default handling when upstream provides
+#       supports_engram for model validation and automatic config resolution.
 #
 # ** 7. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

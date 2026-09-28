@@ -15,65 +15,25 @@ import torch
 from safetensors.torch import save_file
 
 pytest.importorskip(
-    "vllm.models.deepseek_v4_1",
+    "vllm.models.deepseek_v41",
     reason="DeepSeek V4.1 is unavailable on this vLLM release",
 )
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.models.deepseek_v41.engram.common import engram_gate
-from vllm_ascend.patch.platform.patch_engram_config import AscendEngramConfig
+from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
-def _topology(tp=4, dp=4, **overrides):
-    values = dict(
-        tensor_parallel_size=tp,
-        data_parallel_size=dp,
-        data_parallel_size_local=dp,
-        data_parallel_external_lb=False,
-        pipeline_parallel_size=1,
-        prefill_context_parallel_size=1,
-        decode_context_parallel_size=1,
-        nnodes=1,
-        enable_elastic_ep=False,
-    )
-    values.update(overrides)
-    return SimpleNamespace(**values)
+def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
+    from vllm_ascend.models.deepseek_v41.engram import parallel
 
-
-@pytest.mark.parametrize("tp,dp", [(2, 8), (4, 4), (8, 2)])
-@pytest.mark.parametrize("external", [False, True])
-def test_dp_shared_memory_config_and_topologies(tp, dp, external):
-    config = AscendEngramConfig(cpu_offload=True, dp_shared_memory=True)
-    config.verify_parallel_config(
-        _topology(tp, dp, data_parallel_external_lb=external, data_parallel_size_local=1 if external else dp)
-    )
-    config.verify_model_config(
-        SimpleNamespace(
-            architecture="DeepseekV41ForCausalLM",
-            hf_text_config=SimpleNamespace(engram_layer_ids=[1, 14]),
-        )
-    )
-    assert not AscendEngramConfig().dp_shared_memory
-    with pytest.raises(ValueError, match="cpu_offload"):
-        # vLLM main defaults VLLM_PLE_CPU_OFFLOAD to True, so force it off here
-        # to exercise the dp_shared_memory -> cpu_offload validation.
-        AscendEngramConfig(cpu_offload=False, dp_shared_memory=True)
-    with pytest.raises(ValueError, match="single-node"):
-        config.verify_parallel_config(_topology(tp, dp, nnodes=2))
-
-
-def test_dp_shared_memory_survives_cli_parsing():
-    from vllm.engine.arg_utils import EngineArgs
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-    value = {"cpu_offload": True, "dp_shared_memory": True}
-    direct = EngineArgs(engram_config=value).engram_config
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    parsed = parser.parse_args(["--engram-config", json.dumps(value)]).engram_config
-    assert isinstance(direct, AscendEngramConfig) and direct.dp_shared_memory
-    assert isinstance(parsed, AscendEngramConfig) and parsed.dp_shared_memory
+    monkeypatch.setattr(parallel, "get_engram_dp_size", lambda: 1)
+    assert not resolve_dp_shared_memory(True)
+    monkeypatch.setattr(parallel, "get_engram_dp_size", lambda: 2)
+    assert resolve_dp_shared_memory(True)
+    assert not resolve_dp_shared_memory(False)
 
 
 @pytest.mark.parametrize("quantized", [False, True])
@@ -129,16 +89,18 @@ def _fake_host_library(device_offset):
     return Library()
 
 
-def test_shared_uva_uses_one_python_shared_memory_segment(monkeypatch):
+@pytest.mark.parametrize("leader_rank", [0, 16])
+def test_shared_uva_uses_one_python_shared_memory_segment(monkeypatch, leader_rank):
     name_ready = threading.Event()
     attached = threading.Barrier(2)
     names: list[str] = []
     monkeypatch.setattr(npu, "_host_library", lambda: _fake_host_library(1 << 40))
-    monkeypatch.setattr(npu.dist, "get_global_rank", lambda group, rank: 0)
+    monkeypatch.setattr(npu.dist, "get_global_rank", lambda group, rank: leader_rank)
     monkeypatch.setattr(npu.dist, "barrier", lambda group: attached.wait(timeout=10))
     monkeypatch.setattr(npu.dist, "all_gather_object", lambda errors, error, group: None)
 
     def broadcast(payload, src, group):
+        assert src == leader_rank
         if payload[0] is None:
             assert name_ready.wait(timeout=10)
             payload[0] = names[0]
@@ -213,9 +175,34 @@ def test_v1_lookback_uses_prompt_tokens_only():
 
 
 @pytest.mark.parametrize("shared", [False, True])
-def test_engram_rejects_dp_outside_shared_node_before_allocation(monkeypatch, shared):
-    group = SimpleNamespace(cpu_group=object())
-    monkeypatch.setattr(embedding_mod, "get_engram_dp_group", lambda: group)
-    monkeypatch.setattr(embedding_mod, "in_the_same_node_as", lambda pg: [True, False])
-    with pytest.raises(ValueError, match="same node and shared-memory namespace"):
+@pytest.mark.parametrize("remote_group", ["tp", "edp"])
+def test_engram_rejects_nonlocal_groups_before_allocation(monkeypatch, shared, remote_group):
+    monkeypatch.setattr(embedding_mod, "get_tp_group", lambda: SimpleNamespace(cpu_group="tp"))
+    monkeypatch.setattr(embedding_mod, "get_engram_dp_group", lambda: SimpleNamespace(cpu_group="edp"))
+    monkeypatch.setattr(embedding_mod, "in_the_same_node_as", lambda pg: [True, pg != remote_group])
+    error = "TP ranks" if remote_group == "tp" else "same node and shared-memory namespace"
+    with pytest.raises(ValueError, match=error):
         embedding_mod.AscendParallelEngramEmbedding(96, 64, (4,) * 24, 0, dp_shared_memory=shared)
+
+
+@pytest.mark.parametrize("dp_rank,num_tokens", [(2, 3), (3, 2), (3, 0)])
+def test_engram_gather_uses_the_local_edp_token_slice(monkeypatch, dp_rank, num_tokens):
+    """A replica pads to its own EDP slot, never to another node's prefill."""
+    from vllm_ascend.models.deepseek_v41.engram import parallel as parallel_mod
+
+    edp_group = SimpleNamespace(world_size=2, rank_in_group=dp_rank - 2, all_gather=lambda ids, dim=0: ids.repeat(2, 1))
+    monkeypatch.setattr(parallel_mod, "get_engram_dp_group", lambda: edp_group)
+    monkeypatch.setattr(parallel_mod, "get_dp_group", lambda: SimpleNamespace(rank_in_group=dp_rank))
+    # This EDP starts at global DP rank 2, so its slice is (4, 2) and not the
+    # 9 tokens another node is prefilling.
+    monkeypatch.setattr(
+        parallel_mod,
+        "get_forward_context",
+        lambda: SimpleNamespace(dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=torch.tensor([1, 9, 4, 2]))),
+    )
+    ids = torch.full((num_tokens, 5), dp_rank + 10, dtype=torch.int32)
+    gathered = parallel_mod.gather_engram_hashes(ids)
+    assert gathered.shape == (8, 5)
+    for replica in gathered.reshape(2, 4, 5):
+        torch.testing.assert_close(replica[:num_tokens], ids)
+        assert (replica[num_tokens:] == parallel_mod.DEAD_ID).all()
