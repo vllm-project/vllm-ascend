@@ -285,14 +285,16 @@ def test_sfa_consumer_uses_device_local_lengths_and_ignores_cpu(monkeypatch):
     assert common.dcp_local_seq_lens_cpu.tolist() == [999] * 4
 
 
-def test_draft_decode_hooks_forward_parallel_config(monkeypatch):
-    """DCP draft decode calls these hooks directly and needs parallel_config."""
-    spec, _, _ = _speculator(monkeypatch, "mtp", "SFA", 1, 2, 1)
-    seen: list[object] = []
+@pytest.mark.parametrize("architecture", ["MLA", "SFA"])
+@pytest.mark.parametrize("use_dcp", [False, True])
+def test_draft_decode_hooks_forward_parallel_config(monkeypatch, architecture, use_dcp):
+    """Both upstream draft hooks must receive the current DCP CPU view."""
+    spec, _, _ = _speculator(monkeypatch, "mtp", architecture, 1, 2, 1, use_dcp=use_dcp)
+    seen = []
 
     @contextmanager
-    def factory(*_args, **kwargs):
-        seen.append(kwargs["parallel_config"])
+    def factory(_positions, _num_tokens, is_prefilling, **kwargs):
+        seen.append((kwargs["parallel_config"], kwargs["seq_lens_cpu"], is_prefilling))
         yield
 
     monkeypatch.setattr(
@@ -306,7 +308,15 @@ def test_draft_decode_hooks_forward_parallel_config(monkeypatch):
     spec._build_uniform_attn_metadata(batch, 2, 1, seq_lens, 1, dcp_local_seq_lens=dcp_local)
     spec._build_attn_metadata(2, batch, np.array([0, 1, 2]), seq_lens, 1, dcp_local_seq_lens=dcp_local)
 
-    assert seen == [spec.draft_vllm_config.parallel_config, spec.draft_vllm_config.parallel_config]
+    assert len(seen) == 2
+    for parallel_config, seq_lens_cpu, is_prefilling in seen:
+        assert parallel_config is spec.draft_vllm_config.parallel_config
+        if use_dcp:
+            assert seq_lens_cpu.tolist() == [32, 128]
+            assert is_prefilling.tolist() == [False, False]
+        else:
+            assert seq_lens_cpu is None
+            assert is_prefilling.tolist() == [True, False]
 
 
 @pytest.mark.parametrize("mode", ["NONE", "PIECEWISE", "FULL"])

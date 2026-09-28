@@ -98,7 +98,8 @@ class _RecordingIndexer:
         self.call: tuple | None = None
         self.k_cache = SimpleNamespace(prefix="model.layers.0.self_attn.indexer.k_cache")
 
-    def __call__(self, hidden, q_c, k_hidden, metadata, compute_topk):
+    def __call__(self, hidden, q_c, k_hidden, metadata, compute_topk, attn_q_gather_handle=None):
+        assert attn_q_gather_handle is None
         self.call = (hidden.clone(), q_c.clone(), k_hidden.clone(), metadata, compute_topk)
         return self.indices
 
