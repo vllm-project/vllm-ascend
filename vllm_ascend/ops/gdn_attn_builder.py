@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.attention.utils import HostSeqLensRequirement
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
@@ -319,6 +320,11 @@ def _build_non_spec_chunked_prefill_metadata(
 
 class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+
+    # RFC #17479 stage 1: declared EXACT to stay behavior-equivalent while
+    # the contract lands. GDN kernels consume query-side cu_seqlens; staged
+    # for downgrade during the stage-2 audit.
+    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
 
     def __init__(
         self,

@@ -34,7 +34,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_dcp_max_local_block_table_cols,
     get_sfa_pcp_global_metadata,
 )
-from vllm_ascend.attention.utils import split_decodes_and_prefills
+from vllm_ascend.attention.utils import HostSeqLensRequirement, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
@@ -513,6 +513,11 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     built for the SFA attention layer. The slot mapping is emitted write-ready
     for the active parallel mode (full gather mapping under PCP).
     """
+
+    # RFC #17479 stage 1: declared EXACT to stay behavior-equivalent while
+    # the contract lands. Indexer kernels consume device seq_lens; staged
+    # for downgrade during the stage-2 audit.
+    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
 
     reorder_batch_threshold = None
     consumes_pcp_context = True
