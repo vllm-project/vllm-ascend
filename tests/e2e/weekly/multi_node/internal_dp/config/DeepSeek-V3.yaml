@@ -13,6 +13,7 @@ test_name: "test DeepSeek-V3 disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-V3-W8A8"
 num_nodes: 2
 npu_per_node: 16
+dp_load_balancing: internal
 env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   OMP_PROC_BIND: false

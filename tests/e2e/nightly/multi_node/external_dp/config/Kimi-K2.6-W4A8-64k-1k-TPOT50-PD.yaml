@@ -2,6 +2,7 @@ test_name: "Kimi-K2.6-W4A8-64k-1k-TPOT50-PD"
 model: "Eco-Tech/Kimi-K2.6-w4a8"
 num_nodes: 2
 npu_per_node: 16
+dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"
