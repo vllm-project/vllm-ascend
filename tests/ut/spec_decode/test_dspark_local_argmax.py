@@ -2,13 +2,19 @@
 """CPU checks for Markov-corrected, vocabulary-sharded greedy drafting."""
 
 from datetime import timedelta
+from pathlib import Path
+from runpy import run_path
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from vllm_ascend.spec_decode.dspark_local_argmax import sample_local_draft_tokens
+# Spawn workers do not run pytest's conftest or install its NPU mocks.
+# Load only the pure-Torch helper, bypassing spec_decode package initialization.
+sample_local_draft_tokens = run_path(
+    str(Path(__file__).resolve().parents[3] / "vllm_ascend/spec_decode/dspark_local_argmax.py")
+)["sample_local_draft_tokens"]
 
 
 def _check_case(rank, world_size, dtype, steps, mode, vocab_size):
