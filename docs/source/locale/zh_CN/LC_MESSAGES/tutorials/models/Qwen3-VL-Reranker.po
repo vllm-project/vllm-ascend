@@ -36,18 +36,6 @@ msgstr ""
 " Ascend 运行该模型。"
 
 msgid ""
-"- `Qwen3-VL-Reranker-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B)\n"
-"- `Qwen3-VL-Reranker-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B)"
-msgstr ""
-"- `Qwen3-VL-Reranker-8B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B)\n"
-"- `Qwen3-VL-Reranker-2B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B)"
-
-msgid ""
-"It is recommended to download the model weight to the shared directory of "
-"multiple nodes, such as `/root/.cache/`"
-msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cache/`"
-
-msgid ""
 "If you don't want to use the docker image as above, you can also build all "
 "from source:"
 msgstr "如果您不想使用上述 Docker 镜像，也可以从源码构建所有内容："
@@ -177,9 +165,6 @@ msgstr "## 7 精度评估"
 msgid "Here are two accuracy evaluation methods."
 msgstr "这里提供两种精度评估方法。"
 
-msgid "### Using MTEB"
-msgstr "### 使用MTEB"
-
 msgid "1. Refer to [MTEB](https://docs.mteb.org/) for details."
 msgstr "1. 有关详细信息，请参考[MTEB](https://docs.mteb.org/)。"
 
@@ -191,9 +176,6 @@ msgstr "3. 执行后，您可以获得结果。"
 
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
-
-msgid "### Using vLLM Benchmark"
-msgstr "### 使用vLLM基准测试"
 
 msgid ""
 "Run performance of `Qwen3-VL-Reranker-2B` as an example.\n"
@@ -241,3 +223,37 @@ msgid ""
 "- Install `vllm-ascend` from source, refer to "
 "[installation](../../getting_started/installation.md)."
 msgstr "- 从源码安装`vllm-ascend`，请参考[安装](../../getting_started/installation.md)。"
+
+msgid "|  Weight Version        | Download Links |"
+msgstr "|  权重版本        | 下载链接 |"
+
+msgid ""
+"| `Qwen3-VL-Reranker-8B` | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B) |"
+msgstr ""
+"| `Qwen3-VL-Reranker-8B` | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B) |"
+
+msgid ""
+"| `Qwen3-VL-Reranker-2B` | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B) |"
+msgstr ""
+"| `Qwen3-VL-Reranker-2B` | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B) |"
+
+msgid ""
+"It is recommended to download the model weight to the shared directory of "
+"multiple nodes, such as `/root/.cache/`."
+msgstr "建议将模型权重下载到多节点的共享目录中，例如 `/root/.cache/`。"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。确保后续部署命令中的模型路径与该目录一致。"
+
+msgid "### 7.1 Using MTEB"
+msgstr "### 7.1 使用 MTEB"
+
+msgid "### 8.1 Using vLLM Benchmark"
+msgstr "### 8.1 使用 vLLM Benchmark"

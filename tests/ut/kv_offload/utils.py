@@ -88,6 +88,7 @@ def create_vllm_config(
     block_size: int = 128,
     kv_transfer_config: KVTransferConfig | None = None,
     speculative_method: str | None = None,
+    num_speculative_tokens: int = 3,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     fake_weight_path = os.path.join(os.path.dirname(__file__), "..", "_fake_weight")
@@ -115,7 +116,7 @@ def create_vllm_config(
                 model_config.hf_overrides = mtp_override
             speculative_config = SpeculativeConfig(
                 method=speculative_method,
-                num_speculative_tokens=3,
+                num_speculative_tokens=num_speculative_tokens,
                 target_model_config=model_config,
                 target_parallel_config=parallel_config,
             )

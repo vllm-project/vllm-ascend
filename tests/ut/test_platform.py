@@ -234,6 +234,15 @@ class TestNPUPlatform(TestBase):
 
         self.assertIsNone(vllm_config.parallel_config.eplb_config.communicator)
 
+    def test_validate_eplb_config_allows_v2_stair_config(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.additional_config = {"eplb_config": {"stair_config": {"rank_transfer_limit": 2}}}
+
+        with patch.dict("os.environ", {}, clear=True):
+            _validate_eplb_config(vllm_config)
+
     def test_validate_eplb_config_warns_and_forces_async_mode(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
@@ -348,13 +357,29 @@ class TestNPUPlatform(TestBase):
         vllm_config.use_v2_model_runner = True
         vllm_config.additional_config = {"eplb_config": {"dynamic_eplb": True}}
 
-        with self.assertRaisesRegex(ValueError, "legacy fields are not supported: dynamic_eplb"):
+        with self.assertRaisesRegex(ValueError, "unsupported fields: dynamic_eplb"):
+            _validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_rejects_additional_policy(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.additional_config = {"eplb_config": {"policy": "stair"}}
+
+        with self.assertRaisesRegex(ValueError, "unsupported fields: policy"):
             _validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_rejects_v1_load_collection_phase(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = False
         vllm_config.additional_config = {"eplb_config": {"load_collection_phase": "decode"}}
+
+        with self.assertRaisesRegex(ValueError, "only supported by Model Runner V2"):
+            _validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_rejects_v1_stair_config(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = False
+        vllm_config.additional_config = {"eplb_config": {"stair_config": {}}}
 
         with self.assertRaisesRegex(ValueError, "only supported by Model Runner V2"):
             _validate_eplb_config(vllm_config)
@@ -828,6 +853,29 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(kwargs["max_tokens_across_pcp"], 5)
         self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
         self.assertEqual(kwargs["dynamic_mx_quant_scale_alg"], 0)
+
+    def test_set_additional_forward_context_v2_without_tp_falls_back(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+
+        with (
+            patch(
+                "vllm_ascend.quantization.utils.get_dynamic_mx_quant_scale_alg",
+                return_value=1,
+            ),
+            patch(
+                "vllm.distributed.get_tensor_model_parallel_world_size",
+                side_effect=AssertionError("tensor model parallel group is not initialized"),
+            ),
+        ):
+            kwargs = self.platform.set_additional_forward_context(
+                attn_metadata=None,
+                vllm_config=vllm_config,
+                dp_metadata=None,
+                num_tokens=5,
+            )
+
+        self.assertEqual(kwargs, {"dynamic_mx_quant_scale_alg": 1})
 
     def test_set_additional_forward_context_v1_includes_dynamic_mx_scale_alg(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
