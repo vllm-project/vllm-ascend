@@ -169,6 +169,10 @@ def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
             else:
                 # True (chunked) prefill: the stock window matches MRv1.
                 committed.append(int(input_batch.positions[qe - 1].item()) + 1)
+                # Seed the stash with the target hidden at the last committed
+                # position (the prompt tail), so the first decode-continue
+                # window's head row does not read an all-zero buffer.
+                stash[slot].copy_(hidden[qe - 1])
         if not saw_decode_continue:
             # Pure-prefill batch: hand `_prefill` the committed boundary so
             # it rebuilds cache-based draft attention metadata (the stock
@@ -290,13 +294,12 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         slot_mappings = build_slot_mappings_by_layer(
             slot_mappings_tensor, self.kv_cache_config
         )
-        # input_buffers.seq_lens was already rewritten to the committed
-        # boundary by the window rebuild, so it seeds the GPU seq_lens,
-        # the CPU upper bound, and — via _inject_seq_lens_np — the Ascend
-        # seq_lens_np that would otherwise default to max_seq_len.
-        seq_lens_upper = self.input_buffers.seq_lens[:num_reqs].to(
-            torch.int32
-        ).cpu()
+        # `_g4_committed` is the committed boundary the window rebuild
+        # computed for this pure-prefill batch; use it directly for the CPU
+        # upper bound (and via _inject_seq_lens_np the Ascend seq_lens_np
+        # that would otherwise default to max_seq_len) instead of syncing
+        # input_buffers.seq_lens back to the host.
+        seq_lens_upper = torch.from_numpy(self._g4_committed)
         # The window is a multi-row query per request, so it must run as a
         # Prefill-state batch like the target verify metadata it replaces;
         # the Ascend draft override forces DecodeOnly (single-row query
