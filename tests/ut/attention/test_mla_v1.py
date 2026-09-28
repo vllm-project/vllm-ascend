@@ -55,6 +55,26 @@ def test_v_up_proj_transpose_bmm_limits(num_tokens, num_heads, kv_lora_rank):
     torch.testing.assert_close(result, expected)
 
 
+@pytest.mark.parametrize("kv_lora_rank", [4, 65536])
+def test_v_up_proj_batch_major_matches_weight_dtype(kv_lora_rank):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.num_heads = 1
+    impl.kv_lora_rank = kv_lora_rank
+    impl.v_head_dim = 2
+    impl.W_UV = torch.randn(1, kv_lora_rank, 2, dtype=torch.bfloat16)
+    x = torch.randn(2, 1, kv_lora_rank, dtype=torch.float32)
+    expected = torch.bmm(x.to(impl.W_UV.dtype).transpose(0, 1), impl.W_UV).transpose(0, 1).reshape(2, -1)
+
+    def fused_bmm(input, weight, *, perm_x1=(0, 1, 2), perm_y):
+        return torch.bmm(input.permute(perm_x1), weight).permute(perm_y)
+
+    with patch("vllm_ascend.attention.mla_v1.torch_npu.npu_transpose_batchmatmul", side_effect=fused_bmm):
+        result = impl._v_up_proj_batch_major(x)
+
+    assert result.dtype == impl.W_UV.dtype
+    torch.testing.assert_close(result, expected)
+
+
 @pytest.mark.parametrize("use_rope", [False, True])
 @pytest.mark.parametrize("weight_quant_mode", [0, 3])
 def test_mla_prolog_k3_and_cann_dispatch_are_isolated(use_rope, weight_quant_mode):
