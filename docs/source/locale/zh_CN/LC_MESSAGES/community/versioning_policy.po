@@ -720,3 +720,13 @@ msgstr ""
 "|     main    | {{main_vllm_commit}}, {{main_vllm_tag}} | "
 "{{main_python_version}}   | {{main_cann_version}} | {{main_pytorch_version}}"
 " / {{main_torch_npu_version}} | {{main_triton_ascend_version}} |"
+
+msgid ""
+"| v0.27.1rc1  | v0.27.1           | >= 3.10, < 3.13 | 9.1.0       | 2.10.0 /"
+" 2.10.0.post4           | 3.2.2             | v0.3.11.post1 |"
+msgstr ""
+"| v0.27.1rc1  | v0.27.1           | >= 3.10, < 3.13 | 9.1.0       | 2.10.0 /"
+" 2.10.0.post4           | 3.2.2             | v0.3.11.post1 |"
+
+msgid "| 2026.09.24 | Release candidates, v0.27.1rc1            |"
+msgstr "| 2026.09.24 | 候选版本，v0.27.1rc1            |"
