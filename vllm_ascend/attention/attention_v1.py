@@ -569,7 +569,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.kv_cache_dtype in [torch.float16, torch.bfloat16, torch.float32]:
             self.enable_c8_quant = False
         else:
-            if not self.enable_c8_quant:
+            from vllm_ascend.utils import is_c8_mxfp_kv_quant
+
+            # C8-MXFP8 is switched on by --kv-cache-dtype mxfp8 itself; the
+            # ModelSlim recipe only routes the static V-scale weight there,
+            # so the recipe-derived C8 flag must not gate it. The legacy
+            # int8 C8 path still requires the recipe's kv_cache_type entry.
+            if not self.enable_c8_quant and not is_c8_mxfp_kv_quant(self.vllm_config):
                 raise ValueError(
                     "The current GQA‑related models adopt static quantization. "
                     "KV quantization is configured via `--kv‑cache‑dtype` upon service startup, "
