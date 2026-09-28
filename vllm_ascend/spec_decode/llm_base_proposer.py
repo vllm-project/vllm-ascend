@@ -61,6 +61,7 @@ from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
+from vllm_ascend.spec_decode.dspark_local_argmax import sample_local_draft_tokens
 from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
     _maybe_eager_context,
@@ -1377,6 +1378,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             active_device_metadata_executor.release()
         return draft_token_ids
 
+    def _can_use_dspark_local_argmax(self) -> bool:
+        """Keep other draft models and vocabulary layouts on their existing path."""
+        return (
+            self.use_local_argmax_reduction
+            and not self._enable_probabilistic_draft_probs
+            and isinstance(self.model, DSparkDeepseekV4ForCausalLM)
+            and getattr(self.model, "draft_id_to_target_id", None) is None
+            and not lmhead_tp_enable()
+        )
+
     def _sample_draft_from_logits(
         self,
         logits: torch.Tensor,
@@ -1581,40 +1592,61 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         "are in draft-vocab space and incompatible with target-space "
                         "rejection sampling. Falling back to greedy."
                     )
-                # Reduced-vocab drafters (e.g. Qwen3DSparkForCausalLM) must
-                # compute logits in draft-vocab space so that the Markov bias
-                # (draft_vocab_size) can be added; sampled draft ids are then
-                # remapped to target ids.
-                raw_logits = self.model.compute_draft_logits(sample_hidden_states)
-                if lmhead_tp_enable():
-                    # Remove B_max - B communication padding.
-                    raw_logits = raw_logits[:num_indices]
-                logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
-                num_blk = logits.shape[0]
-                draft_token_ids = self._dspark_draft_buffer[:num_blk]
-                draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
-                dspark_probs_list: list[torch.Tensor] = []
-                for idx in range(self.num_speculative_tokens):
-                    markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
-                    logits_bias = self.model.markov_bias(markov_emb)
-                    logits[:, idx].add_(logits_bias)
-                    if use_probabilistic:
-                        # Use probabilistic sampling instead of argmax.
-                        # logits[:, idx] is [num_blk, V], matching
-                        # batch_size for per-request temperature.
-                        token_ids, probs = self._sample_draft_from_logits(logits[:, idx], sampling_metadata)
-                        draft_token_ids[:, idx + 1].copy_(token_ids)
-                        if probs is not None:
-                            dspark_probs_list.append(probs)
-                    else:
-                        next_token_ids = logits[:, idx].argmax(dim=-1)
-                        if dspark_has_vocab_mapping:
-                            next_token_ids = self.model.map_draft_to_target(next_token_ids)
-                        draft_token_ids[:, idx + 1].copy_(next_token_ids)
-                if use_probabilistic and dspark_probs_list:
-                    # Stack [K x [num_blk, V]] -> [num_blk, K, V] ->
-                    # [num_blk * K, V] to match early_exit view logic.
-                    draft_probs_step0 = torch.stack(dspark_probs_list, dim=1).view(-1, logits.shape[-1]).contiguous()
+                if self._can_use_dspark_local_argmax():
+                    local_logits = self.model.compute_local_draft_logits(sample_hidden_states)
+                    local_logits = local_logits.view(-1, self.num_speculative_tokens, local_logits.shape[-1])
+                    num_blk = local_logits.shape[0]
+                    draft_token_ids = self._dspark_draft_buffer[:num_blk]
+                    draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
+                    group = get_tp_group()
+                    draft_token_ids[:, 1:].copy_(
+                        sample_local_draft_tokens(
+                            local_logits,
+                            draft_token_ids[:, 0],
+                            lambda tokens: self.model.markov_bias(self.model.markov_embed(tokens)),
+                            self.model.lm_head.shard_indices.org_vocab_start_index,
+                            self.model.config.vocab_size,
+                            group.world_size,
+                            lambda pairs: group.all_gather(pairs, dim=-1),
+                        )
+                    )
+                else:
+                    # Reduced-vocab drafters (e.g. Qwen3DSparkForCausalLM) must
+                    # compute logits in draft-vocab space so that the Markov bias
+                    # (draft_vocab_size) can be added; sampled draft ids are then
+                    # remapped to target ids.
+                    raw_logits = self.model.compute_draft_logits(sample_hidden_states)
+                    if lmhead_tp_enable():
+                        # Remove B_max - B communication padding.
+                        raw_logits = raw_logits[:num_indices]
+                    logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
+                    num_blk = logits.shape[0]
+                    draft_token_ids = self._dspark_draft_buffer[:num_blk]
+                    draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
+                    dspark_probs_list: list[torch.Tensor] = []
+                    for idx in range(self.num_speculative_tokens):
+                        markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+                        logits_bias = self.model.markov_bias(markov_emb)
+                        logits[:, idx].add_(logits_bias)
+                        if use_probabilistic:
+                            # Use probabilistic sampling instead of argmax.
+                            # logits[:, idx] is [num_blk, V], matching
+                            # batch_size for per-request temperature.
+                            token_ids, probs = self._sample_draft_from_logits(logits[:, idx], sampling_metadata)
+                            draft_token_ids[:, idx + 1].copy_(token_ids)
+                            if probs is not None:
+                                dspark_probs_list.append(probs)
+                        else:
+                            next_token_ids = logits[:, idx].argmax(dim=-1)
+                            if dspark_has_vocab_mapping:
+                                next_token_ids = self.model.map_draft_to_target(next_token_ids)
+                            draft_token_ids[:, idx + 1].copy_(next_token_ids)
+                    if use_probabilistic and dspark_probs_list:
+                        # Stack [K x [num_blk, V]] -> [num_blk, K, V] ->
+                        # [num_blk * K, V] to match early_exit view logic.
+                        draft_probs_step0 = (
+                            torch.stack(dspark_probs_list, dim=1).view(-1, logits.shape[-1]).contiguous()
+                        )
 
                 # Dynamic verify-length path, implemented in DynamicSpecScheduler
                 # Only the dspark method is handled here since it relies on
