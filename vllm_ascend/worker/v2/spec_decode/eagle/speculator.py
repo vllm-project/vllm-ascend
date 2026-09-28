@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
+    ensure_draft_hf_overrides,
 )
 
 
@@ -32,6 +33,7 @@ class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
         # EAGLE draft models are dense even when the target is an MoE model.
         # Reusing the target's EP/EPLB flags makes VllmConfig validate the
         # draft as an expert model and fail because the draft has no experts.
+        ensure_draft_hf_overrides(self.draft_model_config)
         return replace(
             self.vllm_config,
             model_config=self.draft_model_config,

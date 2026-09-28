@@ -47,6 +47,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
@@ -127,6 +128,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     elif c8_k_cache_dtype == torch.int8:
         c8_k_scale_cache_dtype = torch.float16
 
+    c8_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+
     for layer_name, attn_module in attn_layers.items():
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
             continue
@@ -152,7 +155,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                     vllm_config.model_config.hf_text_config.kv_lora_rank,
                     vllm_config.model_config.hf_text_config.qk_rope_head_dim,
                 )
-                dtype = c8_k_cache_dtype
+                dtype = c8_cache_dtype
                 cache_dtype_str = vllm_config.cache_config.cache_dtype
             else:
                 head_size = spec.head_size
@@ -331,7 +334,12 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
-            is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
+            # Legacy DSA-CP does not subclass AscendDSAMetadataBuilder, but it
+            # still requires the shared request-level cache during capture.
+            is_dsa_builder = isinstance(
+                attn_metadata_builder,
+                (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder),
+            )
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
             consumes_pcp_context = bool(getattr(attn_metadata_builder, "consumes_pcp_context", False))
             attn_metadata_extra_kwargs = (

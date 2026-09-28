@@ -91,7 +91,8 @@ estimated_times:
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py: 710
   tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 460
-  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 1870
+  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 850
+  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode_heavy.py: 1020
   tests/e2e/pull_request/two_card/test_data_parallel.py: 590
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 270
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 170
