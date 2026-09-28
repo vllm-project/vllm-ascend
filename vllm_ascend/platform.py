@@ -986,7 +986,7 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                 )
                 upstream_eplb_config.use_async = True
                 if upstream_eplb_config.communicator is None:
-                    upstream_eplb_config.communicator = "torch_gloo"
+                    upstream_eplb_config.communicator = "hixl"
             if vllm_config.parallel_config.enable_elastic_ep:
                 raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
     elif {"load_collection_phase", "stair_config"} & eplb_config.keys():

@@ -136,9 +136,7 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         try:
             import hixl  # type: ignore[import-not-found]
         except ImportError as error:
-            raise RuntimeError(
-                "HIXL EPLB requires the HIXL Python package from the CANN HIXL distribution"
-            ) from error
+            raise RuntimeError("HIXL EPLB requires the HIXL Python package from the CANN HIXL distribution") from error
 
         if not all_expert_weights or not all_expert_weights[0] or not expert_buffer:
             raise ValueError("HIXL EPLB requires expert weights and receive buffers")

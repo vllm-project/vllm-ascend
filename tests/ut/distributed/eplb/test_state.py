@@ -22,20 +22,39 @@ def test_uses_upstream_policy_and_async_worker_lifecycle():
 
 
 def test_result_readiness_defers_incomplete_transfer(monkeypatch):
-    readiness = iter((False, True))
+    group = SimpleNamespace(size=lambda: 2)
     monkeypatch.setattr(
-        upstream_eplb_state.EplbState,
-        "_all_ranks_result_ready",
-        lambda _self, _model_state: next(readiness),
+        "vllm_ascend.distributed.eplb.eplb_state.get_ep_group",
+        lambda: SimpleNamespace(cpu_group=group),
     )
+    works = []
+
+    def all_reduce(flag, *, group, async_op):
+        assert group.size() == 2
+        assert async_op
+        if flag.item():
+            flag.fill_(2)
+        work = SimpleNamespace(wait=MagicMock())
+        works.append(work)
+        return work
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
     state = AscendEplbState.__new__(AscendEplbState)
     state.async_worker = None
-    model_state = SimpleNamespace()
+    model_state = SimpleNamespace(pending_result=None)
 
     assert not state._all_ranks_result_ready(model_state)
+    model_state.pending_result = object()
+    assert not state._all_ranks_result_ready(model_state)
     assert state._all_ranks_result_ready(model_state)
-    assert model_state._eplb_migration_span_steps == 2
-    assert model_state._eplb_migration_deferred_steps == 1
+    assert len(works) == 2
+    for work in works:
+        work.wait.assert_called_once_with()
+    assert not hasattr(model_state, "_eplb_ready_work")
+    assert not hasattr(model_state, "_eplb_ready_flag")
+    assert model_state._eplb_foreground_wait_ms >= 0
+    assert model_state._eplb_migration_span_steps == 3
+    assert model_state._eplb_migration_deferred_steps == 2
 
 
 def test_configured_upstream_policy_registration_is_scoped():
