@@ -73,7 +73,10 @@ class D2DExpertWeightLoader:
                 transport_tensor = _as_hccl_p2p_tensor(src_tensor)
                 self.comm_op_list.append(
                     dist.P2POp(
-                        dist.isend, transport_tensor, self.comm_group.ranks[dst_rank], group=self.comm_group.device_group
+                        dist.isend,
+                        transport_tensor,
+                        self.comm_group.ranks[dst_rank],
+                        group=self.comm_group.device_group
                     )
                 )
 
@@ -84,7 +87,10 @@ class D2DExpertWeightLoader:
                 transport_tensor = _as_hccl_p2p_tensor(buffer_tensor)
                 self.comm_op_list.append(
                     dist.P2POp(
-                        dist.irecv, transport_tensor, self.comm_group.ranks[recv_rank], group=self.comm_group.device_group
+                        dist.irecv,
+                        transport_tensor,
+                        self.comm_group.ranks[recv_rank],
+                        group=self.comm_group.device_group
                     )
                 )
             local_expert_to_replace = self.updated_expert_map[global_expert_id_to_recv].item()
