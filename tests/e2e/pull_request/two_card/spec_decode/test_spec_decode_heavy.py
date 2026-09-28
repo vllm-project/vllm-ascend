@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import os
+from unittest.mock import patch
 
 import pytest
 import torch_npu
@@ -32,7 +33,7 @@ from vllm.config import CompilationConfig
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
-from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
+from tests.e2e.pull_request.utils import SPEC_DECODE_PROMPTS, _run_speculative_decoding
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -363,12 +364,22 @@ def test_hang(monkeypatch):
     "compilation_config",
     [
         pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
+            {"cudagraph_mode": "FULL_DECODE_ONLY"},
             id="full_decode_only",
         )
     ],
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
+@patch.dict(
+    os.environ,
+    {
+        "HCCL_BUFFSIZE": "1024",
+        "LCCL_DETERMINISTIC": "1",
+        "HCCL_DETERMINISTIC": "true",
+        "ATB_MATMUL_SHUFFLE_K_ENABLE": "0",
+        "CLOSE_MATMUL_K_SHIFT": "1",
+    },
+)
 def test_qwen36_35b_dspark_spec_decoding(
     model: str,
     draft_model: str,
@@ -378,39 +389,23 @@ def test_qwen36_35b_dspark_spec_decoding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-
     num_speculative_tokens = 7
-    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
-    with VllmRunner(
-        model,
-        max_model_len=4096,
-        tensor_parallel_size=2,
-        enable_expert_parallel=True,
-        enforce_eager=enforce_eager,
-        disable_log_stats=False,
-        async_scheduling=True,
+    # Baseline calibrated from repeated 40-prompt CI runs.
+    _run_speculative_decoding(
+        model_name=model,
         speculative_config={
             "method": "dspark",
             "model": draft_model,
             "num_speculative_tokens": num_speculative_tokens,
         },
-        compilation_config=compilation_config,
-    ) as runner:
-        runner.model.generate(prompts, sampling_params)
-        metrics = runner.model.get_metrics()
-
-    acceptance_per_pos = calculate_acceptance_per_pos(
-        metrics,
-        num_speculative_tokens,
-        Counter,
-        Vector,
+        example_prompts=SPEC_DECODE_PROMPTS,
+        expected_acceptance_length=3.93,
+        runner_kwargs={
+            "max_model_len": 4096,
+            "tensor_parallel_size": 2,
+            "enforce_eager": enforce_eager,
+            "async_scheduling": True,
+            "compilation_config": compilation_config,
+        },
+        max_tokens=max_tokens,
     )
-    golden = [0.78, 0.61, 0.49, 0.39, 0.33, 0.29, 0.25]
-    match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
-    assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
