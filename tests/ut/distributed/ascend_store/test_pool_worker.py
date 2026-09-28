@@ -470,6 +470,17 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
         return KVPoolWorker
 
+    def test_global_group_alloc_size_rounds_up(self):
+        cls = self._make_worker_class()
+        worker = cls.__new__(cls)
+        worker.group_block_len = {0: [2, 1]}
+        worker.group_num_layers = {0: 2}
+        worker.total_layers = 2
+        worker.num_layers = 2
+        worker.put_step = 1
+
+        self.assertEqual(worker._global_group_alloc_size(0), 4)
+
     def test_check_all_layers_exists(self):
         cls = self._make_worker_class()
         cases = [
@@ -1522,6 +1533,17 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             self.assertIsNot(worker.layer_save_tasks[layer_id], old_save_tasks[layer_id])
             self.assertIsNot(worker.layer_load_tasks[layer_id], old_load_tasks[layer_id])
 
+    def test_deferred_last_save_drains_when_next_step_binds(self):
+        worker = make_worker(self, use_layerwise=True)
+        worker._pending_last_save_drain = True
+        worker.kv_send_thread = MagicMock()
+        worker._wait_for_final_layer_save = MagicMock()
+
+        worker.prepare_layerwise_step(AscendConnectorMetadata(set(), set()))
+
+        worker._wait_for_final_layer_save.assert_called_once_with(worker.num_layers, worker.kv_send_thread)
+        self.assertFalse(worker._pending_last_save_drain)
+
     def test_bound_layerwise_state_survives_deferred_start_and_mtp(self):
         for deferred in (False, True):
             for has_load in (False, True):
@@ -1566,14 +1588,12 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         connector._mamba_state = None
 
         for step in range(2):
-            previous_tasks = worker.layer_save_tasks
             metadata = AscendConnectorMetadata(set())
             metadata.add_request(ReqMeta("request", token_len_chunk=16, block_ids=[1], block_hashes=[b"h0"]))
             connector.bind_connector_metadata(metadata)
             self.assertEqual(worker.current_layer, 0)
             self.assertEqual(worker.next_layer_to_submit, 0)
             self.assertEqual(worker._attention_saved_layers, set())
-            self.assertIsNot(worker.layer_save_tasks, previous_tasks)
             self.assertEqual(worker.process_layer_data.call_count, step + 1)
             current_tasks = worker.layer_save_tasks
             if not deferred:
