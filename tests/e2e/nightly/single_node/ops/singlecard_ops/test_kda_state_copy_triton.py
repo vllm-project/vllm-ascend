@@ -162,7 +162,7 @@ def prepared_state_copy():
             if not preparing:
                 # Preserve the original invalid-inner-layout assertion without
                 # preparing a new plan (or entering JIT) during formal tests.
-                production._validate_inputs(state, packed, indices)
+                production._validate_cache_layout(state)
                 raise AssertionError("Unprepared production cache layout")
             plan = production.KDAStateCopyPlan.prepare(state, 129)
             plan.seal()

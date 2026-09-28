@@ -24,7 +24,7 @@ from vllm_ascend.ops.triton.kda_state_copy import (
     DEFAULT_KDA_BLOCK_SIZE,
     _configuration,
     _kda_state_copy_kernel,
-    _validate_inputs,
+    _validate_cache_layout,
 )
 from vllm_ascend.utils import is_950
 
@@ -109,8 +109,8 @@ class KDAStateCopyPlan:
         """
         if type(max_selected) is not int or max_selected <= 0:
             raise ValueError("max_selected must be a positive scheduler limit")
-        if state.ndim != 4 or state.device.type != "npu" or state.dtype not in (torch.float32, torch.bfloat16):
-            raise RuntimeError("strict KDA requires an NPU FP32/BF16 cache [N,H,V,K]")
+        # Reject the real cache before allocating disposable warmup buffers.
+        payload, rows, page_stride = _validate_cache_layout(state)
         plan = cls()
         plan._sealed = False
         plan._signature = cache_signature(state)
@@ -120,7 +120,6 @@ class KDAStateCopyPlan:
             packed = torch.empty((1, *state.shape[1:]), dtype=state.dtype, device=state.device)
             indices = torch.zeros(1, dtype=torch.int64, device=state.device)
             flags = torch.ones(1, dtype=torch.bool, device=state.device)
-            payload, _, _, _, _, rows, page_stride, _ = _validate_inputs(state, packed, indices)
             backing = torch.zeros(payload + 16 // state.element_size(), dtype=state.dtype, device=state.device)
             # Preserve the cache's alignment class even with a custom allocator
             # whose scratch backing does not itself start on a 16-byte boundary.

@@ -267,25 +267,54 @@ def test_selected_limit_and_index_metadata_rejected(modules):
             plan._indices(state(), indices)
 
 
-@pytest.mark.parametrize("invalid", ["packed_dtype", "packed_shape", "packed_layout", "indices_rank", "indices_dtype"])
-def test_shared_metadata_rejects_invalid_buffers(modules, invalid):
-    """The remaining common validator rejects mismatched standalone buffers."""
+@pytest.mark.parametrize(
+    "invalid",
+    ["device", "rank", "rows", "payload", "dtype", "pages", "inner"],
+)
+def test_real_cache_layout_rejected_before_compilation(modules, invalid):
+    """Only real-cache admission and nonoverlapping dense pages are validated."""
     production, kernel = modules
-    packed = Tensor((2, 1, 1, 4))
-    indices = Tensor((2,), dtype="int32")
-    if invalid == "packed_dtype":
-        packed.dtype = "bfloat16"
-    elif invalid == "packed_shape":
-        packed.shape = (3, 1, 1, 4)
-    elif invalid == "packed_layout":
-        packed.strides = (8, 4, 4, 1)
-    elif invalid == "indices_rank":
-        indices.shape = (1, 2)
+    cache = state()
+    if invalid == "device":
+        cache.device = Device(type="cpu")
+    elif invalid == "rank":
+        cache.shape = (8, 4, 1)
+    elif invalid == "rows":
+        cache.shape = (0, 1, 1, 4)
+    elif invalid == "payload":
+        cache.shape = (8, 1, 1, 0)
+    elif invalid == "dtype":
+        cache.dtype = "int64"
+    elif invalid == "pages":
+        cache.strides = (1, 4, 4, 1)
     else:
-        indices.dtype = "float32"
+        cache.strides = (12, 4, 4, 2)
     with pytest.raises(RuntimeError):
-        production._validate_inputs(state(), packed, indices)
+        production.KDAStateCopyPlan.prepare(cache, 128)
     assert kernel.compiles == 0
+
+
+def test_cache_layout_extracts_warmup_scalars(modules):
+    """Gapped pages and a storage-offset pointer retain their launch layout."""
+    production, _ = modules
+    cache = state(pointer=4100)
+    assert production._validate_cache_layout(cache) == (4, 8, 12)
+
+
+@pytest.mark.parametrize("invalid", ["shape", "device"])
+def test_scatter_checks_external_packed_buffers(modules, invalid):
+    """Keep request-time final-state guards after removing warmup-only checks."""
+    plan = prepared(modules)
+    _, kernel = modules
+    indices = Tensor((1,), dtype="int32")
+    packed = Tensor((1, 1, 1, 4))
+    if invalid == "shape":
+        packed.shape = (2, 1, 1, 4)
+    else:
+        packed.device = Device(index=1)
+    with pytest.raises(RuntimeError, match="final states"):
+        plan.scatter(state(), packed, indices)
+    assert not kernel.launches
 
 
 def test_flags_and_unaligned_normalized_buffer_fail_closed(modules):

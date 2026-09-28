@@ -110,36 +110,21 @@ def _kda_state_copy_kernel(
         tl.store(packed_ptr + packed_offset, value, mask=in_payload)
 
 
-def _validate_inputs(state, packed_states, indices):
-    """Validate each call and return only this call's reusable tensor metadata.
+def _validate_cache_layout(state: torch.Tensor) -> tuple[int, int, int]:
+    """Validate a real fused cache once at startup and extract launch scalars.
 
-    No tensor identity or validation result survives the call. All original
-    shape, dtype, device, contiguity and nonoverlapping-page checks are retained.
-    Singleton inner axes retain the original permissive stride semantics.
+    ``prepare`` builds its own disposable packed row and index vectors from
+    this cache's metadata. Their shape, dtype, device and contiguous layout
+    are construction guarantees, not external inputs to validate here. Actual
+    request indices and packed final states are checked by the sealed plan.
     """
-    device = state.device
-    if device.type != "npu":
+    if state.device.type != "npu":
         raise RuntimeError("state must be an NPU tensor")
-    shape, packed_shape = state.shape, packed_states.shape
-    if len(shape) != 4 or shape[0] <= 0 or len(packed_shape) != 4:
-        raise RuntimeError("expected nonempty cache [N,H,V,K] and packed [S,H,V,K]")
-    dtype = state.dtype
-    if dtype not in (torch.float32, torch.bfloat16):
+    shape = state.shape
+    if len(shape) != 4 or shape[0] <= 0:
+        raise RuntimeError("expected nonempty cache [N,H,V,K]")
+    if state.dtype not in (torch.float32, torch.bfloat16):
         raise RuntimeError("state must be FP32 or BF16")
-    if packed_states.dtype != dtype or packed_states.device != device:
-        raise RuntimeError("packed_states must match cache dtype and device")
-    if not packed_states.is_contiguous():
-        raise RuntimeError("packed_states must be contiguous")
-    index_dtype = indices.dtype
-    if indices.ndim != 1 or index_dtype not in (torch.int32, torch.int64):
-        raise RuntimeError("indices must be a one-dimensional INT32/INT64 tensor")
-    if indices.device != device:
-        raise RuntimeError("indices must be on the cache device")
-    selected = indices.numel()
-    if packed_shape[0] != selected:
-        raise RuntimeError("packed row count must match the number of indices")
-    if packed_shape[1:] != shape[1:]:
-        raise RuntimeError("cache and packed inner shapes must match")
     strides = state.stride()
     payload = 1
     for axis in (3, 2, 1):
@@ -149,4 +134,4 @@ def _validate_inputs(state, packed_states, indices):
         payload *= size
     if strides[0] < payload:
         raise RuntimeError("cache pages must not overlap")
-    return payload, device, dtype, index_dtype, selected, shape[0], strides[0], indices.stride(0)
+    return payload, shape[0], strides[0]
