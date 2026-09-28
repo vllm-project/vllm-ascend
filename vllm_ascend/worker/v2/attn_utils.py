@@ -284,6 +284,20 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     return kv_cache_spec
 
 
+def _get_parallel_config_for_attn_metadata(attn_groups: list[list[AttentionGroup]]) -> ParallelConfig | None:
+    """Use the attention builder's KV layout when no config was passed."""
+    # Draft graph capture has no current vLLM config, but its attention
+    # builders retain the draft config used to create their KV layout.
+    for groups in attn_groups:
+        for group in groups:
+            builder_config = getattr(group.get_metadata_builder(0), "vllm_config", None)
+            if builder_config is not None:
+                return builder_config.parallel_config
+
+    vllm_config = get_current_vllm_config_or_none()
+    return vllm_config.parallel_config if vllm_config is not None else None
+
+
 def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
@@ -342,20 +356,7 @@ def build_attn_metadata(
     dcp_local_seq_lens_cpu = None
     if dcp_local_seq_lens is not None:
         if parallel_config is None:
-            # Draft graph capture has no current vLLM config, but its attention
-            # builders retain the draft config used to create their KV layout.
-            for groups in attn_groups:
-                for group in groups:
-                    builder_config = getattr(group.get_metadata_builder(0), "vllm_config", None)
-                    if builder_config is not None:
-                        parallel_config = builder_config.parallel_config
-                        break
-                if parallel_config is not None:
-                    break
-            if parallel_config is None:
-                vllm_config = get_current_vllm_config_or_none()
-                if vllm_config is not None:
-                    parallel_config = vllm_config.parallel_config
+            parallel_config = _get_parallel_config_for_attn_metadata(attn_groups)
         assert parallel_config is not None, "DCP metadata requires an attention builder or vLLM parallel config."
         dcp_local_seq_lens_cpu = get_dcp_local_seq_lens(
             seq_lens_cpu,

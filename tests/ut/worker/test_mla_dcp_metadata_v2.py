@@ -54,7 +54,7 @@ def test_common_lengths_cover_all_ranks_and_preserve_global(size, interleave, us
 
 @pytest.mark.parametrize("for_capture", [False, True])
 @pytest.mark.parametrize("use_dcp", [False, True])
-@pytest.mark.parametrize("config_source", ["argument", "context"])
+@pytest.mark.parametrize("config_source", ["argument", "builder", "context"])
 def test_v2_common_lengths_are_shared_by_groups(monkeypatch, for_capture, use_dcp, config_source):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=8 if use_dcp else 1, cp_kv_cache_interleave_size=4)
@@ -64,6 +64,9 @@ def test_v2_common_lengths_are_shared_by_groups(monkeypatch, for_capture, use_dc
     monkeypatch.setattr(attn_utils, "get_current_vllm_config_or_none", get_context)
 
     class Builder:
+        def __init__(self):
+            self.vllm_config = config if config_source == "builder" else None
+
         def build(self, common_prefix_len, common_attn_metadata):
             return common_attn_metadata
 
