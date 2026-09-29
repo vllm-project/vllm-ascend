@@ -902,7 +902,12 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
 
 def lmhead_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
+    try:
+        return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
+    except RuntimeError:
+        # Fail closed: before init_ascend_config() (e.g. pure-mock unit tests)
+        # lmhead TP is not configured, so treat it as disabled.
+        return False
 
 
 def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
