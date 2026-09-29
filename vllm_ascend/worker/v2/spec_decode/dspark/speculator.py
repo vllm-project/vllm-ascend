@@ -313,8 +313,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """Run the draft backbone and publish the draft LM-head capacity.
 
         ``num_tokens_across_dp`` is the group-agreed per-rank query token count
@@ -332,7 +331,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             slot_mappings,
             num_tokens_across_dp,
             cudagraph_runtime_mode,
-            mm_inputs=mm_inputs,
         )
         if num_tokens_across_dp is not None and num_tokens_across_dp.numel() > 0:
             max_query_rows = int(num_tokens_across_dp.max().item())
