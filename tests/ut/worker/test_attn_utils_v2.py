@@ -1230,7 +1230,7 @@ def test_multistep_draft_capture_metadata_lifecycle(monkeypatch, fail):
     ):
         # Each warmup/recording step rebuilds draft metadata under mode NONE.
         for _ in range(3):
-            with attn_utils.build_draft_attn_metadata_factory(
+            with attn_utils.build_attn_metadata_factory(
                 torch.arange(4),
                 2,
                 False,
@@ -1244,6 +1244,6 @@ def test_multistep_draft_capture_metadata_lifecycle(monkeypatch, fail):
     assert module.build_attn_metadata is original_builder
     with (
         attn_utils.build_attn_metadata_wrapper(),
-        attn_utils.build_draft_attn_metadata_factory(torch.arange(4), 2, False),
+        attn_utils.build_attn_metadata_factory(torch.arange(4), 2, False),
     ):
         assert "for_cudagraph_capture" not in module.build_attn_metadata()
