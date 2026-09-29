@@ -10,32 +10,21 @@ from vllm_ascend.utils import lmhead_tp_configured, lmhead_tp_max_num_logits, lm
 
 
 class LmheadTPDraftSamplingMixin:
-    """Group-aligned draft LM-head sampling for lmhead TP (V1 parity).
+    """Group-aligned draft LM-head sampling for lmhead TP (V1 parity): pad
+    the greedy hidden states to the ``lmhead_tp_max_num_logits`` capacity and
+    trim back; probabilistic sampling (fixed-size buffers) is rejected at init."""
 
-    The draft LM head is vocab-sharded like the target head, so every
-    ``sample_draft`` call must feed the group the same row count: pad the
-    hidden states with zero rows up to the ``lmhead_tp_max_num_logits``
-    capacity and trim back (V1: ``token_indices_to_sample``). Probabilistic
-    sampling writes fixed-size draft buffers that cannot hold the padding
-    rows and is rejected at init. Draft and target collectives are
-    independent; the capacity convention matches the target side only while
-    model states sample one token per step.
-    """
-
-    # Attributes injected by the hosting speculator via mixin composition;
-    # annotated here so mypy can resolve them when the mixin is analyzed
-    # standalone.
+    # Attributes injected by the hosting speculator; annotated for standalone
+    # mypy analysis.
     max_num_reqs: int
     num_speculative_steps: int
     speculative_config: Any
     use_local_argmax_reduction: bool
     enable_adaptive_verification: bool
 
-    # Speculators whose draft sampling does not funnel through sample_draft
-    # cannot be row-aligned by this mixin; they opt out and are rejected at
-    # construction (DSpark: _sample_sequential calls compute_draft_logits
-    # directly. DFlash2: _generate_draft calls compute_candidates ->
-    # get_top_k_tokens on the sharded head).
+    # Speculators whose sampling bypasses sample_draft cannot be row-aligned;
+    # they opt out and are rejected at construction (DSpark:
+    # compute_draft_logits, DFlash2: get_top_k_tokens on the sharded head).
     _lmhead_tp_sample_draft_supported = True
 
     def _lmhead_tp_max_num_logits(self) -> int:

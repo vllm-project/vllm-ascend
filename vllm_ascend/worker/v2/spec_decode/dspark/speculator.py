@@ -48,9 +48,8 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
-    # _sample_sequential samples via compute_draft_logits directly and never
-    # calls sample_draft, so the mixin's row alignment cannot reach it;
-    # _lmhead_tp_validate_draft_sampling rejects the lmhead TP combination.
+    # _sample_sequential samples via compute_draft_logits and never calls
+    # sample_draft; lmhead TP is rejected at construction instead.
     _lmhead_tp_sample_draft_supported = False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):

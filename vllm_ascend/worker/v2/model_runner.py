@@ -401,11 +401,8 @@ class NPUModelRunner(GPUModelRunner):
         self.kvpp.complete_forward()
 
         if dummy_run and lmhead_tp_configured() and not is_profile and self.is_last_pp_rank:
-            # lmhead TP: idle ranks never call sample(); join the target
-            # LM-head collectives here with zero-indexed rows at the sample()
-            # capacity (V1: ``need_dummy_logits``). Must run before the parent
-            # ``_dummy_run`` replays the speculator dummy propose, to keep the
-            # busy rank's target-then-draft ordering.
+            # lmhead TP: idle ranks never call sample(); join the target head
+            # here at capacity, before _dummy_run replays the dummy propose.
             if self.execute_model_state is None:
                 raise RuntimeError(
                     "lmhead TP dummy join expects execute_model_state published by the upstream dummy execute_model."
@@ -735,35 +732,22 @@ class NPUModelRunner(GPUModelRunner):
         return block_tables, slot_mappings
 
     def _lmhead_tp_max_num_logits(self) -> int:
-        """Logits row capacity every rank of the lmhead-TP group agrees on.
-
-        Config-derived (``max_num_reqs * decode_query_len``); cross-rank
-        drift desyncs the collectives and hangs.
-        """
+        """Logits row capacity every rank agrees on (config-derived:
+        ``max_num_reqs * decode_query_len``); drift desyncs and hangs."""
         return lmhead_tp_max_num_logits(self.max_num_reqs, self.decode_query_len)
 
     def sample(self, hidden_states, input_batch, grammar_output):
-        """Override GPUModelRunner.sample for lmhead TP.
-
-        The LM-head collectives span the whole group, so every rank must feed
-        compute_logits the same number of rows: pad hidden states up to
-        ``_lmhead_tp_max_num_logits()`` and trim the logits back before
-        sampling. ``logits_indices`` stays real (the V2 sampler gathers
-        penalties by it). prompt_logprobs is not supported with lmhead TP
-        (same as V1).
-        """
+        """Override GPUModelRunner.sample for lmhead TP: every rank must feed
+        compute_logits the same row count — pad up to ``_lmhead_tp_max_num_logits()``
+        and trim back; prompt_logprobs stays unsupported (same as V1)."""
         if not lmhead_tp_enable():
             return super().sample(hidden_states, input_batch, grammar_output)
 
         num_logits = input_batch.logits_indices.shape[0]
         capacity = self._lmhead_tp_max_num_logits()
-        # V1 pads the sample indices up to the same capacity once per step in
-        # its input preparation (model_runner_v1) and the head consumes them
-        # directly. Mirror it here: pad a private copy of the indices -- never
-        # input_batch's, the V2 sampler gathers penalties by the real ones --
-        # so the one gather feeds compute_logits the group-agreed capacity
-        # rows. Zero pad entries gather row 0; those rows carry no token and
-        # are trimmed back off below.
+        # V1-style index pad: pad a private copy of the indices (input_batch keeps
+        # the real ones; the V2 sampler gathers penalties by them) so one gather
+        # feeds compute_logits the capacity rows; zero entries gather row 0.
         sample_indices = lmhead_tp_pad_rows(
             input_batch.logits_indices,
             capacity,
@@ -826,25 +810,9 @@ class NPUModelRunner(GPUModelRunner):
         is_profile: bool = False,
         **kwargs,
     ):
-        """Balanced dummy routing for adaptive-verification cost profiling.
-
-        Adaptive verification profiles eager tail sizes after graph capture;
-        route the dummy run the way the initial memory profile does, so a
-        synthetic router hotspot cannot exhaust one EP rank during startup.
-
-        EPLB is stepped by the ``step_eplb_after`` decorator once this override
-        returns (the parent's own step is skipped via ``skip_eplb=True``), so an
-        idle rank advances EPLB only after joining the target LM-head
-        collectives -- the same order as a busy rank, which samples and then
-        advances EPLB (#17233).
-
-        The lmhead TP dummy join deliberately does NOT live here: idle ranks
-        join the target LM-head collectives at the tail of ``execute_model``,
-        ahead of the speculator dummy propose that the parent ``_dummy_run``
-        replays, keeping the busy rank's target-then-draft ordering. Joining
-        after ``super()._dummy_run`` (as #14668 did) issues the target
-        collectives after the draft ones and deadlocks the group.
-        """
+        """Balanced dummy routing for adaptive-verification profiling; EPLB
+        steps via ``step_eplb_after`` (#17233). The lmhead TP join lives in the
+        ``execute_model`` tail — joining after ``super()._dummy_run`` deadlocks."""
         skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
