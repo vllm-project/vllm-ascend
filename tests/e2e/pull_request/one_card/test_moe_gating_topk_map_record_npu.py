@@ -142,13 +142,20 @@ def test_gating_topk_map_record_uses_updated_routing_table_on_replay():
         torch.testing.assert_close(load, expected_load, rtol=0, atol=0)
 
 
-def test_grid_record_matches_moe_local_physical_range():
+@pytest.mark.parametrize(
+    "experts,local_start,local_count,total_physical,mapping_shift",
+    [(16, 16, 16, 32, 16), (128, 64, 64, 128, 0)],
+)
+def test_grid_record_matches_moe_local_physical_range(experts, local_start, local_count, total_physical, mapping_shift):
     enable_custom_op()
-    tokens, experts, top_k = 64, 16, 8
-    local_start = experts
+    tokens, top_k = 64, 8
     logits = torch.randn(tokens, experts, dtype=torch.float32, device="npu")
-    table = (torch.arange(experts, dtype=torch.int32, device="npu") + local_start).expand(1024, -1).contiguous()
-    initial_load = torch.arange(2 * experts, dtype=torch.int32, device="npu")
+    table = (
+        ((torch.arange(experts, dtype=torch.int32, device="npu") + mapping_shift) % total_physical)
+        .expand(1024, -1)
+        .contiguous()
+    )
+    initial_load = torch.arange(total_physical, dtype=torch.int32, device="npu")
     enabled = torch.tensor(True, device="npu")
     expected_weights, logical_ids, _ = torch.ops._C_ascend.moe_gating_top_k(
         logits,
@@ -169,10 +176,10 @@ def test_grid_record_matches_moe_local_physical_range():
         hidden,
         expected_ids,
         active_num=tokens * top_k,
-        expert_num=2 * experts,
+        expert_num=total_physical,
         expert_tokens_num_type=1,
         expert_tokens_num_flag=True,
-        active_expert_range=[local_start, local_start + experts],
+        active_expert_range=[local_start, local_start + local_count],
     )
     expected_load = initial_load.clone()
     record_expert_tokens_triton(expert_tokens, expected_load, enabled, 1, local_start)
@@ -187,7 +194,7 @@ def test_grid_record_matches_moe_local_physical_range():
         k=top_k,
         scoring="softmax",
         local_expert_start=local_start,
-        local_expert_count=experts,
+        local_expert_count=local_count,
     )
     torch.npu.synchronize()
     torch.testing.assert_close(ids, expected_ids, rtol=0, atol=0)
@@ -211,25 +218,28 @@ def test_fused_router_falls_back_for_noncontiguous_inputs(monkeypatch):
     assert router._try_small_expert_fused_routing(contiguous_logits, None, 1, 1, 1) is None
 
     router.e_score_correction_bias = None
-    router.eplb_state.local_expert_count = 16
+    router.eplb_state.local_expert_count = 0
     assert router._try_small_expert_fused_routing(contiguous_logits, None, 1, 1, 1) is None
     router.eplb_state.local_expert_count = 32
     context.moe_comm_type = MoECommType.ALLTOALL
     assert router._try_small_expert_fused_routing(contiguous_logits, None, 1, 1, 1) is None
 
 
-def test_fused_router_dispatches_large_prefill_and_marks_record_active(monkeypatch):
+@pytest.mark.parametrize("tokens,experts,local_count", [(65536, 16, 16), (64, 128, 64)])
+def test_fused_router_dispatches_local_physical_domain_and_marks_record_active(
+    monkeypatch, tokens, experts, local_count
+):
     class RecordingState:
         fused_record_allowed = True
         fused_map_record_active = False
         local_expert_start = 0
-        local_expert_count = 16
-        expert_replica_routing_table = torch.zeros((1, 16), dtype=torch.int32)
-        expert_load_view = torch.zeros(16, dtype=torch.int32)
         should_record_tensor = torch.tensor(True)
 
     state = RecordingState()
-    router = AscendFusedTopKRouter(top_k=8, global_num_experts=16, eplb_state=state)
+    state.local_expert_count = local_count
+    state.expert_replica_routing_table = torch.zeros((1, experts), dtype=torch.int32)
+    state.expert_load_view = torch.zeros(experts, dtype=torch.int32)
+    router = AscendFusedTopKRouter(top_k=8, global_num_experts=experts, eplb_state=state)
     context = SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER)
     monkeypatch.setattr("vllm_ascend.ops.fused_moe.router.fused_topk_router._EXTRA_CTX", context)
     calls = []
@@ -242,10 +252,10 @@ def test_fused_router_dispatches_large_prefill_and_marks_record_active(monkeypat
         "vllm_ascend.ops.fused_moe.router.fused_topk_router.moe_gating_topk_map_record",
         fake_map_record,
     )
-    logits = torch.empty((65536, 16))
+    logits = torch.empty((tokens, experts))
     result = router._try_small_expert_fused_routing(logits, None, 1, 1, 1)
     assert result is not None
-    assert result[0].shape == (65536, 8)
-    assert result[1].shape == (65536, 8)
+    assert result[0].shape == (tokens, 8)
+    assert result[1].shape == (tokens, 8)
     assert state.fused_map_record_active
-    assert calls == [((65536, 16), 65536, 8)]
+    assert calls == [((tokens, experts), tokens, 8)]

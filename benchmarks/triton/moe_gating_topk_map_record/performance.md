@@ -13,10 +13,11 @@ The second kernel reduces the grid histograms and adds to cumulative
 The post-router mapping and downstream record are skipped only when this
 entry point succeeded; otherwise the original mainline path remains active.
 
-The fast path is restricted to contiguous logits, E ≤ 32, K ≤ 8,
+The fast path is restricted to contiguous logits, E ≤ 128, K ≤ 8,
 T ≤ 524288, ungrouped renormalized softmax/sigmoid, V2 runner, ALLGATHER,
-DP=PCP=1, no downstream expert-ID rewrite, and equal logical and local
-physical expert counts. These are correctness guards, not tuning guesses:
+DP=PCP=1, and no downstream expert-ID rewrite. The grid histogram covers
+only this rank's local physical expert range, which may be smaller than E.
+These are correctness guards, not tuning guesses:
 the earlier record would otherwise count provisional IDs or padded tokens.
 The direct operator also validates its tensor ABI before raw-pointer Triton
 access. `record_enabled` and the EPLB table remain device-side runtime state
@@ -27,9 +28,14 @@ The correctness reference is mainline CANN TopK + EPLB mapping + MoE-produced
 expert counts + downstream expert-load update. The NPU tests cover exact IDs
 and counts, weights, local physical ranges, and routing-table/record-flag
 updates under graph replay. The Router dispatch test is mocked and proves
-selection of the fast path, **not a real model forward**. No end-to-end
-model/serving call has been run; an eligible checkpoint and serving setup are
-needed before claiming model-level validation.
+selection of the fast path, **not a real model forward**. A TP2/EP2
+Qwen3-MoE dummy-weight model smoke was attempted with E=16. The coherent PR
+source cannot initialize workers against the available vLLM 0.29 image
+(`vllm.models.deepseek_v41` is missing); the older vLLM 0.28 image is also
+incompatible with current EPLB imports. Therefore no real model/serving
+forward has passed, and model-level validation remains open. These smoke
+failures are environment compatibility failures, not operator accuracy
+results.
 
 ## Current-source device timings
 
@@ -37,8 +43,10 @@ The following `msprof op` Task Durations (µs) were captured for source
 `0eb608d36` on isolated Ascend 910B4-1, CANN 9.1.0,
 torch-npu 2.10.0.post4 and Triton-Ascend 3.2.2. Each kernel was captured
 once after the profiler's warmup. Task Duration already includes NPU task
-head overhead. The only subsequent source changes are non-kernel cleanup
-unless noted in a later commit. Raw summaries remain in the task-owned
+head overhead. The kernel body and tile formula are unchanged in the E=128
+coverage update, but the dispatch guard and local-range contract changed.
+This table therefore does **not** establish E=128 performance. Raw summaries
+remain in the task-owned
 `/workspace/hybrid-grid-v1/profiles_exact` directory on the validation host.
 
 | T | E | K | Score | CANN TopK | Main map | Main record | Grid map/record | Grid reduce | Main sum | New sum | Main/New |

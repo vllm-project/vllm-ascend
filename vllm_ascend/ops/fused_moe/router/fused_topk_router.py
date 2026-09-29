@@ -28,7 +28,7 @@ from vllm_ascend.ops.triton.moe_gating_topk_map_record import moe_gating_topk_ma
 
 DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
 DEEPSEEK_V4_IMAGE_SENTINEL_COUNT = 5
-MAX_FUSED_ROUTING_EXPERTS = 32
+MAX_FUSED_ROUTING_EXPERTS = 128
 MAX_FUSED_ROUTING_TOP_K = 8
 MAX_FUSED_ROUTING_TOKENS = 524288
 
@@ -164,7 +164,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             or num_expert_group != 1
             or renorm != 1
             or self.scoring_func not in ("softmax", "sigmoid")
-            or state.local_expert_count != router_logits.shape[1]
+            or state.local_expert_count <= 0
         ):
             return None
         bias = self.e_score_correction_bias

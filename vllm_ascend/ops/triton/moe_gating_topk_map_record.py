@@ -158,13 +158,10 @@ def moe_gating_topk_map_record(
         local_expert_count = expert_load.numel() - local_expert_start
     if (
         local_expert_start < 0
-        or local_expert_count < 0
+        or local_expert_count <= 0
         or local_expert_start + local_expert_count > expert_load.numel()
     ):
         raise ValueError("local expert range exceeds expert_load")
-    if local_expert_count != experts:
-        raise ValueError("grid-record fast path requires matching logical and local physical expert counts")
-
     if tokens == 0:
         return (
             torch.empty((0, k), dtype=logits.dtype, device=logits.device),
