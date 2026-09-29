@@ -254,47 +254,29 @@ def test_prefill_filters_target_only_metadata():
     )
 
 
-def test_build_draft_attn_metadata_sets_decode_only():
-    """Test draft attention metadata is marked decode-only."""
-    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
-    metadata = SimpleNamespace(attn_state=None)
-    speculator.input_batch = SimpleNamespace(is_prefilling_np=np.array([True, False]))
-    speculator.input_buffers = SimpleNamespace(positions=torch.tensor([0, 1]))
-    speculator.use_dcp = False
-    speculator.draft_vllm_config = SimpleNamespace(parallel_config=object())
-    speculator._build_uniform_attn_metadata = MagicMock(return_value={"draft": metadata, "none": None})
-    speculator._update_decode_attn_metadata = MagicMock()
-    seq_lens = torch.tensor([10, 20], dtype=torch.int32)
-    with patch(
-        "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_draft_attn_metadata_factory",
-        return_value=nullcontext(),
-    ):
-        result = speculator._build_draft_attn_metadata(2, 2, 2, seq_lens, 1)
-    assert result["draft"] is metadata
-    assert metadata.attn_state == AscendAttentionState.DecodeOnly
-    speculator._update_decode_attn_metadata.assert_called_once_with({"draft": metadata, "none": None}, 1, 2)
-
-
 def test_build_uniform_attn_metadata_sets_decode_only():
     """Test uniform attention metadata is marked decode-only."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     metadata = SimpleNamespace(attn_state=None)
+    speculator.arange_np = np.arange(3, dtype=np.int32)
     speculator.input_batch = SimpleNamespace(is_prefilling_np=np.array([False, False]))
     speculator.input_buffers = SimpleNamespace(positions=torch.tensor([0, 1]))
+    speculator.use_dcp = False
+    speculator.draft_vllm_config = SimpleNamespace(parallel_config=object())
+    speculator._update_decode_attn_metadata = MagicMock()
     batch_desc = SimpleNamespace(num_tokens=2)
     seq_lens = torch.tensor([10, 20], dtype=torch.int32)
 
     with (
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_draft_attn_metadata_factory",
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_factory",
             return_value=nullcontext(),
         ),
         patch.object(
             AutoRegressiveSpeculator,
-            "_build_uniform_attn_metadata",
+            "_build_attn_metadata",
             return_value={"draft": metadata},
-            create=True,
-        ) as parent_build,
+        ),
     ):
         result = speculator._build_uniform_attn_metadata(
             batch_desc,
@@ -306,14 +288,10 @@ def test_build_uniform_attn_metadata_sets_decode_only():
 
     assert result == {"draft": metadata}
     assert metadata.attn_state == AscendAttentionState.DecodeOnly
-    parent_build.assert_called_once_with(
-        batch_desc,
+    speculator._update_decode_attn_metadata.assert_called_once_with(
+        {"draft": metadata},
+        1,
         2,
-        1,
-        seq_lens,
-        1,
-        True,
-        None,
     )
 
 
@@ -323,20 +301,22 @@ def test_build_attn_metadata_sets_decode_only():
     metadata = SimpleNamespace(attn_state=None)
     speculator.input_batch = SimpleNamespace(is_prefilling_np=np.array([False, False]))
     speculator.input_buffers = SimpleNamespace(positions=torch.tensor([0, 1]))
+    speculator.use_dcp = False
+    speculator.draft_vllm_config = SimpleNamespace(parallel_config=object())
+    speculator._update_decode_attn_metadata = MagicMock()
     batch_desc = SimpleNamespace(num_tokens=2)
     query_start_loc_np = np.array([0, 1, 2], dtype=np.int32)
     seq_lens = torch.tensor([10, 20], dtype=torch.int32)
 
     with (
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_draft_attn_metadata_factory",
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_factory",
             return_value=nullcontext(),
         ),
         patch.object(
             AutoRegressiveSpeculator,
             "_build_attn_metadata",
             return_value={"draft": metadata},
-            create=True,
         ) as parent_build,
     ):
         result = speculator._build_attn_metadata(
@@ -349,14 +329,11 @@ def test_build_attn_metadata_sets_decode_only():
 
     assert result == {"draft": metadata}
     assert metadata.attn_state == AscendAttentionState.DecodeOnly
-    parent_build.assert_called_once_with(
-        2,
-        batch_desc,
-        query_start_loc_np,
-        seq_lens,
+    parent_build.assert_called_once()
+    speculator._update_decode_attn_metadata.assert_called_once_with(
+        {"draft": metadata},
         1,
-        True,
-        None,
+        2,
     )
 
 
@@ -403,7 +380,10 @@ def test_init_decode_draft_attn_metadatas_gqa():
     """Test draft decode metadata initialization for GQA."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     speculator.attn_architecture = "GQA"
-    speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_cpu_upper_bound=torch.tensor([10, 20]))
+    speculator.input_batch = SimpleNamespace(
+        num_reqs=2,
+        seq_lens_cpu_upper_bound=torch.tensor([10, 20]),
+    )
     speculator.input_buffers = SimpleNamespace(
         draft_seq_lens_cpus=[
             torch.tensor([11, 21, 0]),
@@ -411,12 +391,25 @@ def test_init_decode_draft_attn_metadatas_gqa():
         ]
     )
     metadata = SimpleNamespace(attn_state=None, seq_lens_cpu=None)
-    speculator._build_draft_attn_metadata = MagicMock(return_value={"draft": metadata})
-    result = speculator._init_decode_draft_attn_metadatas({"draft": metadata}, 3)
+    speculator._build_uniform_attn_metadata = MagicMock(
+        return_value={"draft": metadata}
+    )
+
+    result = speculator._init_decode_draft_attn_metadatas(
+        {"draft": metadata},
+        3,
+    )
+
     assert len(result) == 2
     assert result[0]["draft"].attn_state == AscendAttentionState.DecodeOnly
-    assert torch.equal(result[0]["draft"].seq_lens_cpu, torch.tensor([11, 21, 0]))
-    assert torch.equal(result[1]["draft"].seq_lens_cpu, torch.tensor([12, 22, 0]))
+    assert torch.equal(
+        result[0]["draft"].seq_lens_cpu,
+        torch.tensor([11, 21, 0]),
+    )
+    assert torch.equal(
+        result[1]["draft"].seq_lens_cpu,
+        torch.tensor([12, 22, 0]),
+    )
 
 
 def test_update_decode_attn_metadata_gqa():
