@@ -54,7 +54,11 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.quantization.methods import AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod
+from vllm_ascend.quantization.methods import (
+    AscendW8A8DynamicLinearMethod,
+    AscendW8A8LinearMethod,
+    AscendW8A8MXFP8DynamicLinearMethod,
+)
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
@@ -1113,6 +1117,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             supports_quantized_weights = isinstance(
                 quant_method,
                 (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
+            ) or (
+                # Exclude the FP8 subclass; A2/A3 use CANN's INT8 mode 2.
+                not self.support_fp8_attention and type(quant_method) is AscendW8A8DynamicLinearMethod
             )
             supports_native_weights = get_current_hardware_profile().supports(
                 HardwareCapability.MLAPO_NATIVE_WEIGHTS
@@ -1120,7 +1127,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             if self.fused_qkv_a_proj is None or not (supports_quantized_weights or supports_native_weights):
                 self.enable_mlapo = False
                 logger.warning_once(
-                    "MLAPO supports W8A8/W8A8-MXFP8 weights, plus native "
+                    "MLAPO supports W8A8/W8A8-MXFP8 weights, INT8 W8A8_DYNAMIC "
+                    "weights on A2/A3, plus native "
                     "floating-point weights on A5. Some layers use an "
                     "unsupported weight type, so MLAPO is disabled for these layers."
                 )

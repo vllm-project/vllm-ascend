@@ -25,8 +25,9 @@ from vllm_ascend.attention.mla_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, PreprocessType, mark_fused_preprocess_weights
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
-from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8DynamicLinearMethod
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
@@ -244,6 +245,39 @@ def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, 
         impl.process_weights_after_loading(torch.bfloat16)
     assert impl.enable_mlapo == enable_mlapo
     assert fused.call_count == int(enable_mlapo or fa_quant_layer)
+
+
+@pytest.mark.parametrize(
+    "device_type,scheme_type,expected_enabled",
+    [
+        (AscendDeviceType.A2, AscendW8A8DynamicLinearMethod, True),
+        (AscendDeviceType.A3, AscendW8A8DynamicLinearMethod, True),
+        (AscendDeviceType.A5, AscendW8A8DynamicLinearMethod, False),
+        (AscendDeviceType.A3, AscendW8A8FP8DynamicLinearMethod, False),
+    ],
+)
+def test_mla_dynamic_int8_weight_whitelist(device_type, scheme_type, expected_enabled):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    profile = get_hardware_profile(device_type)
+    impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
+    impl.enable_mlapo = True
+    impl.fa_quant_layer = False
+    impl.fused_qkv_a_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=scheme_type()))
+    impl.q_proj = SimpleNamespace()
+    impl.kv_lora_rank = 4
+    impl.num_heads = 1
+    impl.qk_nope_head_dim = 2
+    impl.v_head_dim = 2
+    impl.kv_b_proj = SimpleNamespace(weight=torch.randn(4, 4), quant_method=UnquantizedLinearMethod())
+    with (
+        patch("vllm_ascend.attention.mla_v1.get_current_hardware_profile", return_value=profile),
+        patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight),
+        patch("vllm_ascend.attention.mla_v1.maybe_trans_nz", side_effect=lambda weight: weight),
+        patch.object(impl, "_process_weights_for_fused") as fused,
+    ):
+        impl.process_weights_after_loading(torch.bfloat16)
+    assert impl.enable_mlapo is expected_enabled
+    assert fused.call_count == int(expected_enabled)
 
 
 class TestAscendMLABackend(TestBase):
