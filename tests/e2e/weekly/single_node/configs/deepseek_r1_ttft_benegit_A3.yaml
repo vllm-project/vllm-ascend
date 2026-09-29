@@ -1,6 +1,6 @@
 test_cases:
-  - name: "GLM-5.2-W4A8-DSpark-A3"
-    model: "Eco-Tech/Qwen3-32b-int8"
+  - name: "deepseek_r1_ttft_benegit_A3"
+    model: "Eco-Tech/DeepSeek-R1-0528-w8a8-mtp-QuaRot"
     envs:
       HCCL_OP_EXPANSION_MODE: "AIV"
       OMP_PROC_BIND: "false"

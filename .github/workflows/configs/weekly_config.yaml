@@ -354,6 +354,16 @@ a3-560t:
       - name: Qwen3.5-397B-Memcache-perf
         os: linux-aarch64-a3-800i-16
         config_file_path: Qwen3.5-397B-Memcache-perf.yaml
+      - name: qwen3_32b_mooncake_acc
+        os: linux-aarch64-a3-800i-4
+        tests: tests/e2e/weekly/single_node/models/qwen3_32b_mooncake_acc.py
+      - name: deepseek_r1_ttft_benegit_A3
+        os: linux-aarch64-a3-800i-4
+        config_file_path: deepseek_r1_ttft_benegit_A3.yaml
+      - name: Qwen3_32b_ttft_benegit_A3
+        os: linux-aarch64-a3-800i-4
+        config_file_path: Qwen3_32b_ttft_benegit_A3.yaml
+
   multi_card:
     test_config:
       # pytest-driven tests

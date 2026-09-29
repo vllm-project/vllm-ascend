@@ -1,6 +1,6 @@
 test_cases:
-  - name: "GLM-5.2-W4A8-DSpark-A3"
-    model: "Eco-Tech/Qwen3-32b-int8"
+  - name: "Qwen3_32b_ttft_benegit_A3"
+    model: "Qwen/Qwen3-32B"
     envs:
       VLLM_USE_V1: "1"
       LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
