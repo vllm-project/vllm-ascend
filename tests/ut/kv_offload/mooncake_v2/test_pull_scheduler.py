@@ -4,7 +4,7 @@ import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 import msgspec
 import pytest
@@ -13,7 +13,7 @@ import zmq
 from vllm.sampling_params import SamplingParams
 from vllm.v1.request import Request, RequestStatus
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_scheduler
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import heartbeat, pull_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
@@ -79,6 +79,8 @@ def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     scheduler._reqs_recv_info = {}
     scheduler._sending_thread = None
     scheduler._recving_thread = None
+    scheduler._heartbeat_thread = None
+    scheduler._kv_lease_duration = None
     return scheduler
 
 
@@ -262,10 +264,10 @@ def test_sending_thread_handles_early_and_normal_completion_once() -> None:
 
     thread._handle_finished_request("early")
     assert thread.get_and_clear_finished_requests() == set()
-    thread.add_delayed_request("early", time.time())
+    thread.add_delayed_request("early", time.monotonic())
     assert thread.get_and_clear_finished_requests() == {"early"}
 
-    thread.add_delayed_request("normal", time.time())
+    thread.add_delayed_request("normal", time.monotonic())
     thread._handle_finished_request("normal")
     thread._handle_finished_request("normal")
     assert thread.get_and_clear_finished_requests() == {"normal"}
@@ -273,7 +275,6 @@ def test_sending_thread_handles_early_and_normal_completion_once() -> None:
 
 def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPatch) -> None:
     thread = make_sending_thread()
-    thread.add_delayed_request("expired", 10.0)
     monkeypatch.setattr(
         pull_scheduler.envs,
         "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT",
@@ -281,18 +282,21 @@ def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPa
     )
     monkeypatch.setattr(
         pull_scheduler.time,
-        "time",
+        "monotonic",
         MagicMock(return_value=20.0),
     )
+    thread.add_delayed_request("expired", 10.0)
 
     assert thread.get_and_clear_finished_requests() == {"expired"}
     assert not thread.delayed_free_requests
 
 
+@pytest.mark.parametrize("attempts", [3, 5])
 def test_recving_thread_reuses_socket_after_ack_and_discards_it_on_error(
     monkeypatch: pytest.MonkeyPatch,
+    attempts: int,
 ) -> None:
-    thread = MooncakeSchedulerRecvingThread(threading.Event())
+    thread = MooncakeSchedulerRecvingThread(threading.Event(), max_attempts=attempts)
     socket = MagicMock()
     thread._get_remote_socket = MagicMock(return_value=socket)  # type: ignore[method-assign]
     thread._return_remote_socket = MagicMock()  # type: ignore[method-assign]
@@ -315,19 +319,23 @@ def test_recving_thread_reuses_socket_after_ack_and_discards_it_on_error(
     thread._get_remote_socket.assert_called_once_with(path)
     thread._return_remote_socket.assert_called_once_with(path, socket)
     socket.close.assert_not_called()
+    assert send.call_args.kwargs == {"max_retries": attempts}
+    assert recv.call_args.kwargs == {"max_retries": attempts}
 
     recv.return_value = b"not-ack"
-    with pytest.raises(RuntimeError, match="Unexpected.*completion response"):
+    with pytest.raises(RuntimeError, match="Unexpected.*control response"):
         thread._send_done_recving("10.0.0.1", 6000, "request-p")
 
     socket.close.assert_called_once_with(linger=0)
     assert thread._return_remote_socket.call_count == 1
 
 
+@pytest.mark.parametrize("timeout", [1000, 2500])
 def test_recving_thread_socket_pool_creates_once_and_reuses_by_endpoint(
     monkeypatch: pytest.MonkeyPatch,
+    timeout: int,
 ) -> None:
-    thread = MooncakeSchedulerRecvingThread(threading.Event())
+    thread = MooncakeSchedulerRecvingThread(threading.Event(), io_timeout_ms=timeout)
     context = MagicMock()
     socket = MagicMock()
     context_cls = MagicMock(return_value=context)
@@ -356,7 +364,7 @@ def test_recving_thread_socket_pool_creates_once_and_reuses_by_endpoint(
         socket_type=zmq.REQ,  # type: ignore[attr-defined]
         bind=False,
     )
-    assert socket.setsockopt.call_count == 2
+    assert socket.setsockopt.call_args_list == [call(zmq.SNDTIMEO, timeout), call(zmq.RCVTIMEO, timeout)]
 
 
 def test_base_scheduler_clips_attention_and_keeps_mamba_state_blocks() -> None:
@@ -457,7 +465,7 @@ def test_update_connector_output_routes_worker_completion_and_scheduler_ack() ->
     scheduler._sending_thread = MagicMock()
     scheduler._sending_thread.get_and_clear_finished_requests.return_value = {"request-p"}
     scheduler._reqs_recv_info["request-d"] = ("10.0.0.1", 6000, "request-p")
-    scheduler._reqs_need_send["request-p"] = time.time()
+    scheduler._reqs_need_send["request-p"] = time.monotonic()
     output = SimpleNamespace(finished_recving={"request-d"}, finished_sending=None)
 
     scheduler.update_connector_output(output)  # type: ignore[arg-type]
@@ -548,23 +556,6 @@ def test_sending_busy_loop_serves_metadata_and_completion_ack() -> None:
     thread._handle_finished_request.assert_called_once_with("request-p")
 
 
-def test_recving_run_requeues_failed_completion() -> None:
-    ready_event = threading.Event()
-    thread = MooncakeSchedulerRecvingThread(ready_event)
-    request = ("10.0.0.1", 6000, "request-p")
-    request_queue = MagicMock()
-    request_queue.get.side_effect = [request, _StopLoop()]
-    thread.request_queue = request_queue
-    thread._send_done_recving = MagicMock(side_effect=RuntimeError("network error"))  # type: ignore[method-assign]
-
-    with pytest.raises(_StopLoop):
-        thread.run()
-
-    assert ready_event.is_set()
-    request_queue.put.assert_called_once_with(request)
-    request_queue.task_done.assert_called_once_with()
-
-
 def test_set_worker_metadata_starts_only_one_producer_sending_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -617,6 +608,8 @@ def prefix_connector():
     result = MooncakePullConnector.__new__(MooncakePullConnector)
     result.connector_scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
     result.connector_scheduler.need_truncate = True
+    result.connector_scheduler._recving_thread = None
+    result.connector_scheduler._heartbeat_thread = None
     return result
 
 
@@ -689,3 +682,367 @@ def test_matched_token_query_does_not_change_prompt_length(prefix_connector):
     assert prefix_connector.get_num_new_matched_tokens(request, 512) == (0, False)
     assert request.num_prompt_tokens == 513
     assert len(request.all_token_ids) == 513
+
+
+@pytest.mark.parametrize("duration", [0, 5, -1, True, "30", float("nan"), float("inf")])
+def test_invalid_lease_configuration_is_rejected(duration):
+    with pytest.raises(ValueError, match="kv_lease_duration"):
+        pull_scheduler.validate_lease_duration(duration)
+
+
+def test_heartbeat_renews_without_shortening_and_expiry_ignores_insertion_order(monkeypatch):
+    thread = make_sending_thread()
+    thread.kv_lease_duration = 30
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", lambda: 0.0)
+    thread.add_delayed_request("renewed", 0.0)
+    thread.add_delayed_request("expired", 1.0)
+    assert thread._handle_heartbeat("engine-p", ["renewed", "unknown"])
+    assert thread.delayed_free_requests["renewed"] == 30
+    assert "unknown" not in thread.delayed_free_requests
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", lambda: 20.0)
+    thread._handle_heartbeat("engine-p", ["renewed"])
+    assert thread.delayed_free_requests["renewed"] == 40
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", lambda: 32.0)
+    assert thread.get_and_clear_finished_requests() == {"expired"}
+    thread._handle_heartbeat("engine-p", ["expired"])
+    assert "expired" not in thread.delayed_free_requests
+    thread._handle_finished_request("renewed")
+    thread._handle_heartbeat("engine-p", ["renewed"])
+    assert thread.get_and_clear_finished_requests() == {"renewed"}
+    assert thread.get_and_clear_finished_requests() == set()
+
+
+def test_heartbeat_cannot_revive_expired_lease_before_reaper_runs(monkeypatch):
+    thread = make_sending_thread()
+    thread.kv_lease_duration = 30
+    thread.add_delayed_request("expired", 0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", lambda: 30.0)
+    thread._handle_heartbeat("engine-p", ["expired"])
+    assert thread.get_and_clear_finished_requests() == {"expired"}
+
+
+@pytest.mark.parametrize("engine, ids", [("old-engine", ["req"]), ("engine-p", "req"), ("engine-p", [1])])
+def test_heartbeat_rejects_wrong_engine_or_malformed_payload(engine, ids):
+    thread = make_sending_thread()
+    thread.kv_lease_duration = 30
+    thread.add_delayed_request("req", time.monotonic())
+    before = dict(thread.delayed_free_requests)
+    assert not thread._handle_heartbeat(engine, ids)
+    assert dict(thread.delayed_free_requests) == before
+
+
+def lease_request(local_id="request-d", remote_id="request-p", **overrides):
+    params = {
+        "do_remote_prefill": True,
+        "remote_block_ids": ([20],),
+        "remote_engine_id": "engine-p",
+        "remote_host": "10.0.0.1",
+        "remote_port": 6000,
+        "remote_request_id": remote_id,
+        "kv_lease_version": 1,
+        "kv_lease_duration": 30,
+    }
+    params.update(overrides)
+    return make_request(request_id=local_id, kv_transfer_params=params)
+
+
+def start_heartbeat(thread, local_id="d", remote_id="p", **overrides):
+    request = lease_request(local_id, remote_id, **overrides)
+    thread.start_request(request.request_id, request.kv_transfer_params)
+
+
+def heartbeat_tick(thread):
+    with patch.object(thread._wakeup, "wait"):
+        thread._run_once()
+
+
+def test_waiting_requests_heartbeat_without_scheduler_steps(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", lambda: now[0])
+    scheduler = make_pull_scheduler()
+    thread = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    scheduler._heartbeat_thread = thread
+    thread._send_control = MagicMock()
+    scheduler.on_new_request(lease_request("d1", "p1"))
+    scheduler.on_new_request(lease_request("d2", "p2"))
+    assert not scheduler._reqs_need_recv
+    heartbeat_tick(thread)
+    heartbeat_tick(thread)
+    assert thread._send_control.call_count == 1
+    for moment in (5.0, 10.0, 30.0):
+        now[0] = moment
+        heartbeat_tick(thread)
+        thread._send_control.assert_called_with(
+            "10.0.0.1", 6000, (pull_scheduler.HEARTBEAT_MSG, "engine-p", ("p1", "p2"))
+        )
+    assert thread._send_control.call_count == 4
+
+
+def test_legacy_request_does_not_track_heartbeats():
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    scheduler.on_new_request(lease_request(kv_lease_version=None))
+    assert not scheduler._heartbeat_thread.requests
+
+
+def test_producer_advertises_opt_in_lease(monkeypatch):
+    scheduler = make_pull_scheduler()
+    scheduler._sending_thread = MagicMock()
+    scheduler._kv_lease_duration = 30
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", lambda: 123.0)
+    request = make_request(
+        request_id="p",
+        status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        kv_transfer_params={"do_remote_decode": True},
+        output_token_ids=[1],
+    )
+    delayed, params = scheduler.request_finished(request, ([10, 11, 12],))
+    assert delayed and params["kv_lease_duration"] == 30 and params["kv_lease_version"] == 1
+    scheduler._sending_thread.add_delayed_request.assert_called_once_with("p", 123.0)
+
+
+def test_control_channel_dispatches_heartbeat_and_ack():
+    thread = make_sending_thread()
+    thread.kv_lease_duration = 30
+    thread._handle_heartbeat = MagicMock(return_value=True)
+    socket = MagicMock()
+    socket.recv_multipart.side_effect = [
+        [b"decoder", b"", msgspec.msgpack.encode((pull_scheduler.HEARTBEAT_MSG, "engine-p", ["p"]))],
+        _StopLoop(),
+    ]
+    with pytest.raises(_StopLoop):
+        thread._run_busy_loop(socket)
+    thread._handle_heartbeat.assert_called_once_with("engine-p", ["p"])
+    socket.send_multipart.assert_called_once_with((b"decoder", b"", ACK_MSG))
+
+
+def test_legacy_producer_rejects_heartbeat_without_changing_deadline():
+    thread = make_sending_thread()
+    thread.add_delayed_request("p", time.monotonic())
+    before = dict(thread.delayed_free_requests)
+    assert not thread._handle_heartbeat("engine-p", ["p"])
+    assert dict(thread.delayed_free_requests) == before
+
+
+def test_same_engine_cannot_change_endpoint_or_lease_duration():
+    tracker = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    start_heartbeat(tracker, "d1", "p1")
+    with pytest.raises(ValueError, match="Inconsistent"):
+        start_heartbeat(tracker, "d2", "p2", remote_port=7000)
+    with pytest.raises(ValueError, match="Inconsistent"):
+        start_heartbeat(tracker, "d3", "p3", kv_lease_duration=60)
+    assert set(tracker.requests) == {"d1"}
+
+
+def test_stopping_one_local_request_preserves_shared_remote_request(monkeypatch):
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", lambda: 0.0)
+    tracker = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    start_heartbeat(tracker, "d1", "p")
+    start_heartbeat(tracker, "d2", "p")
+    tracker.stop_request("d1")
+    snapshot, _ = tracker._next_heartbeat()
+    assert snapshot is not None and snapshot[3] == ("p",)
+    tracker.stop_request("d2")
+    tracker.stop_request("d2")
+    assert not tracker.requests and not tracker.last_sent
+    assert tracker._next_heartbeat() == (None, None)
+
+
+def test_duplicate_delayed_registration_cannot_resurrect_finished_request():
+    thread = make_sending_thread()
+    thread.add_delayed_request("p", time.monotonic())
+    thread._handle_finished_request("p")
+    assert thread.get_and_clear_finished_requests() == {"p"}
+    thread.add_delayed_request("p", time.monotonic())
+    assert not thread.delayed_free_requests
+    assert thread.get_and_clear_finished_requests() == set()
+
+
+def test_stop_is_processed_before_due_heartbeat(monkeypatch):
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", lambda: 10.0)
+    thread = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    thread._send_control = MagicMock()
+    start_heartbeat(thread)
+    thread.stop_request("d")
+    heartbeat_tick(thread)
+    thread._send_control.assert_not_called()
+
+
+def test_next_heartbeat_rebuilds_membership_after_failed_snapshot(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", lambda: now[0])
+    thread = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    thread._send_control = MagicMock(side_effect=[RuntimeError("timeout"), None])
+    start_heartbeat(thread, "d1", "p1")
+    start_heartbeat(thread, "d2", "p2")
+    heartbeat_tick(thread)
+    thread._send_control.assert_called_with("10.0.0.1", 6000, (pull_scheduler.HEARTBEAT_MSG, "engine-p", ("p1", "p2")))
+    thread.stop_request("d1")
+    start_heartbeat(thread, "d3", "p3")
+    heartbeat_tick(thread)
+    heartbeat_tick(thread)
+    assert thread._send_control.call_count == 1
+    now[0] = 15.0
+    heartbeat_tick(thread)
+    thread._send_control.assert_called_with("10.0.0.1", 6000, (pull_scheduler.HEARTBEAT_MSG, "engine-p", ("p2", "p3")))
+    assert thread._send_control.call_count == 2
+
+
+@pytest.mark.parametrize("cleanup", ["finished", "aborted", "zero_external"])
+def test_separate_threads_stop_renewal_and_ack_only_ended_reads(monkeypatch, cleanup):
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", lambda: 0.0)
+    scheduler = make_pull_scheduler()
+    hb = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    ack = MooncakeSchedulerRecvingThread(threading.Event())
+    scheduler._heartbeat_thread, scheduler._recving_thread = hb, ack
+    hb._send_control = MagicMock()
+    ack._send_done_recving = MagicMock()
+    request = lease_request()
+    scheduler.on_new_request(request)
+    hb._run_once()
+    if cleanup == "finished":
+        scheduler._reqs_recv_info[request.request_id] = ("10.0.0.1", 6000, "request-p")
+        scheduler.update_connector_output(
+            SimpleNamespace(
+                finished_recving={request.request_id},
+                finished_sending=None,
+            )
+        )
+    elif cleanup == "aborted":
+        scheduler.request_finished(request, ())
+    else:
+        scheduler.update_state_after_alloc(request, make_blocks(), 0)
+    assert not hb.requests
+    if cleanup == "aborted":
+        assert ack.request_queue.empty()
+    else:
+        ack._process_next_request()
+        ack._send_done_recving.assert_called_once_with("10.0.0.1", 6000, "request-p")
+
+
+def test_blocked_heartbeat_does_not_block_done(monkeypatch):
+    hb = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    ack = MooncakeSchedulerRecvingThread(threading.Event())
+    entered, release = threading.Event(), threading.Event()
+
+    def blocked_send(*args):
+        entered.set()
+        assert release.wait(timeout=5)
+
+    hb._send_control = blocked_send
+    start_heartbeat(hb)
+    runner = threading.Thread(target=hb._run_once)
+    runner.start()
+    try:
+        assert entered.wait(timeout=5)
+        hb.stop_request("d")
+        start_heartbeat(hb, "new-d", "new-p")
+        assert set(hb.requests) == {"new-d"}
+        ack._send_done_recving = MagicMock(side_effect=RuntimeError("P unreachable"))
+        ack.add_request("host", 6000, "p")
+        ack._process_next_request()
+        assert ack.request_queue.empty()
+        ack._send_done_recving.assert_called_once()
+    finally:
+        release.set()
+        runner.join(timeout=5)
+    assert not runner.is_alive()
+
+
+@pytest.mark.parametrize("timeout", [1000, 1800])
+def test_heartbeat_network_uses_one_attempt_and_own_socket(monkeypatch, timeout):
+    hb = heartbeat.MooncakeHeartbeatThread(threading.Event(), io_timeout_ms=timeout)
+    sock = MagicMock()
+    context = MagicMock()
+    context.__enter__.return_value = sock
+    monkeypatch.setattr(heartbeat, "zmq_ctx", MagicMock(return_value=context))
+    send, recv = MagicMock(), MagicMock(side_effect=RuntimeError("timeout"))
+    monkeypatch.setattr(heartbeat, "ensure_zmq_send", send)
+    monkeypatch.setattr(heartbeat, "ensure_zmq_recv", recv)
+    with pytest.raises(RuntimeError, match="timeout"):
+        hb._send_control("host", 6000, (heartbeat.HEARTBEAT_MSG, "engine", ("p",)))
+    assert send.call_args.kwargs == {"max_retries": 1}
+    assert recv.call_args.kwargs == {"max_retries": 1}
+    context.__exit__.assert_called_once()
+    assert sock.setsockopt.call_args_list == [call(zmq.SNDTIMEO, timeout), call(zmq.RCVTIMEO, timeout)]
+
+
+@pytest.mark.parametrize("active, expected", [(False, None), (True, 5.0)])
+def test_heartbeat_event_waits_for_deadline_or_membership_change(monkeypatch, active, expected):
+    monkeypatch.setattr(heartbeat.time, "monotonic", lambda: 10.0)
+    thread = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    thread._send_control = MagicMock()
+    if active:
+        start_heartbeat(thread)
+        thread._run_once()
+    with patch.object(thread._wakeup, "wait") as wait:
+        thread._run_once()
+    wait.assert_called_once_with(expected)
+
+
+def test_new_request_between_snapshot_and_wait_keeps_wakeup():
+    thread = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    original_wait = thread._wakeup.wait
+
+    def add_before_wait(timeout):
+        assert timeout is None
+        start_heartbeat(thread)
+        assert original_wait(0)  # START must not be cleared after the snapshot.
+
+    with patch.object(thread._wakeup, "wait", side_effect=add_before_wait):
+        thread._run_once()
+    thread._send_control = MagicMock()
+    thread._run_once()
+    thread._send_control.assert_called_once()
+
+
+def test_request_tracking_copies_params_before_scheduler_mutation():
+    thread = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    request = lease_request()
+    thread.start_request(request.request_id, request.kv_transfer_params)
+    request.kv_transfer_params["do_remote_prefill"] = False
+    request.kv_transfer_params["remote_request_id"] = "changed"
+    assert thread.requests["request-d"][3] == "request-p"
+
+
+@pytest.mark.parametrize(
+    "extra, expected",
+    [
+        ({}, (1000, 3, 1000)),
+        ({"control_io_timeout_ms": 2500, "done_max_attempts": 5, "lease_io_timeout_ms": 1800}, (2500, 5, 1800)),
+    ],
+)
+def test_scheduler_passes_extra_config_to_threads(monkeypatch, extra, expected):
+    config = SimpleNamespace(is_kv_consumer=True, get_from_extra_config=lambda key, default: extra.get(key, default))
+    monkeypatch.setattr(
+        MooncakeBaseConnectorScheduler, "__init__", lambda self, *args: setattr(self, "kv_transfer_config", config)
+    )
+
+    def ready_thread(event, **kwargs):
+        event.set()
+        return MagicMock()
+
+    done_cls = MagicMock(side_effect=ready_thread)
+    heartbeat_cls = MagicMock(side_effect=ready_thread)
+    monkeypatch.setattr(pull_scheduler, "MooncakeSchedulerRecvingThread", done_cls)
+    monkeypatch.setattr(pull_scheduler, "MooncakeHeartbeatThread", heartbeat_cls)
+    MooncakePullConnectorScheduler(MagicMock(), "d", MagicMock())
+    assert done_cls.call_args.kwargs == {"io_timeout_ms": expected[0], "max_attempts": expected[1]}
+    assert heartbeat_cls.call_args.kwargs == {"io_timeout_ms": expected[2]}
+
+
+@pytest.mark.parametrize("field", ["control_io_timeout_ms", "done_max_attempts", "lease_io_timeout_ms"])
+@pytest.mark.parametrize("value", [0, -1, True, "1000", 1.5, None])
+def test_invalid_control_config_rejected_before_threads_start(monkeypatch, field, value):
+    extra = {field: value}
+    config = SimpleNamespace(is_kv_consumer=True, get_from_extra_config=lambda key, default: extra.get(key, default))
+    monkeypatch.setattr(
+        MooncakeBaseConnectorScheduler, "__init__", lambda self, *args: setattr(self, "kv_transfer_config", config)
+    )
+    done_cls, heartbeat_cls = MagicMock(), MagicMock()
+    monkeypatch.setattr(pull_scheduler, "MooncakeSchedulerRecvingThread", done_cls)
+    monkeypatch.setattr(pull_scheduler, "MooncakeHeartbeatThread", heartbeat_cls)
+    with pytest.raises(ValueError, match=field):
+        MooncakePullConnectorScheduler(MagicMock(), "d", MagicMock())
+    done_cls.assert_not_called()
+    heartbeat_cls.assert_not_called()
