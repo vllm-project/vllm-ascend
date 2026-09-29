@@ -204,24 +204,26 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
         assert isinstance(input_batch, AscendInputBatch)
         if input_batch.is_dummy:
-            return attn_metadata, slot_mappings
-
-        # Omitting out updates the default buffers bound by draft graph capture.
-        self.block_tables.gather_block_tables(
-            input_batch.idx_mapping,
-            num_reqs_padded=num_reqs_padded,
-        )
-        slot_mappings_tensor = self.block_tables.compute_slot_mappings(
-            input_batch.idx_mapping,
-            input_batch.query_start_loc,
-            input_batch.positions,
-            num_tokens_padded=num_tokens_padded,
-        )
-        # TODO: Remove this early return once FIA supports padded Query tensors
-        # whose token count exceeds the cumulative query length. Keep the
-        # mapping refresh above when unifying metadata construction.
-        if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA"):
-            return attn_metadata, slot_mappings
+            # Replicated drafts need local dummy slots instead of target PCP slots.
+            self.block_tables.get_dummy_block_tables(num_reqs_padded)
+            slot_mappings_tensor = self.block_tables.get_dummy_slot_mappings(num_tokens_padded)
+        else:
+            # Omitting out updates the default buffers bound by draft graph capture.
+            self.block_tables.gather_block_tables(
+                input_batch.idx_mapping,
+                num_reqs_padded=num_reqs_padded,
+            )
+            slot_mappings_tensor = self.block_tables.compute_slot_mappings(
+                input_batch.idx_mapping,
+                input_batch.query_start_loc,
+                input_batch.positions,
+                num_tokens_padded=num_tokens_padded,
+            )
+            # TODO: Remove this early return once FIA supports padded Query tensors
+            # whose token count exceeds the cumulative query length. Keep the
+            # mapping refresh above when unifying metadata construction.
+            if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA"):
+                return attn_metadata, slot_mappings
 
         slot_mappings = build_slot_mappings_by_layer(
             slot_mappings_tensor,
@@ -364,9 +366,13 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
-        with disable_target_pcp_for_replicated_draft(self):
+        with (
+            disable_target_pcp_for_replicated_draft(self),
+            build_attn_metadata_wrapper(),
+        ):
+            # Replicated capture already prepares draft metadata; do not rebuild it from the runtime batch.
             self.prefill_cudagraph_manager.capture(
-                self._prefill,
+                super()._prefill if self.replicated_pcp else self._prefill,
                 self.model_state,
                 self.target_input_buffers,
                 self.block_tables,
