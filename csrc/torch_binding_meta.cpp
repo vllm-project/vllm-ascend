@@ -573,6 +573,16 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
+at::Tensor npu_mhc_expand_meta(const at::Tensor& x, int64_t mult)
+{
+    TORCH_CHECK(x.dim() == 2, "npu_mhc_expand expects a rank-2 tensor");
+    TORCH_CHECK(x.is_contiguous(), "npu_mhc_expand expects contiguous input");
+    TORCH_CHECK(x.scalar_type() == at::kHalf || x.scalar_type() == at::kBFloat16,
+                "npu_mhc_expand supports float16 and bfloat16");
+    TORCH_CHECK(mult > 0, "npu_mhc_expand mult must be positive");
+    return at::empty_symint(c10::SymDimVector{x.sym_size(0), c10::SymInt(mult), x.sym_size(1)}, x.options());
+}
+
 std::tuple<at::Tensor, at::Tensor> npu_rms_norm_cast_meta(
     const at::Tensor& x,
     const at::Tensor& gamma,
@@ -2114,6 +2124,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     ops.impl("npu_rms_norm_cast", &vllm_ascend::meta::npu_rms_norm_cast_meta);
+    ops.impl("npu_mhc_expand", &vllm_ascend::meta::npu_mhc_expand_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
     // npu_sign_bits_pack
