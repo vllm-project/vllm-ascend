@@ -28,11 +28,10 @@ def _build_dspark_swa_indices_kernel(
     )
     req_idx = tl.sum((token_idx >= req_ends).to(tl.int32), axis=0)
 
-    valid_req = req_idx < num_reqs
-    query_start = tl.load(query_start_loc_ptr + req_idx, mask=valid_req, other=0)
-    query_end = tl.load(query_start_loc_ptr + req_idx + 1, mask=valid_req, other=0)
+    query_start = tl.load(query_start_loc_ptr + req_idx)
+    query_end = tl.load(query_start_loc_ptr + req_idx + 1)
     query_len = query_end - query_start
-    seq_len = tl.load(seq_lens_ptr + req_idx, mask=valid_req, other=0)
+    seq_len = tl.load(seq_lens_ptr + req_idx)
     prefix_len = seq_len - query_len
     start_pos = tl.maximum(prefix_len - WINDOW_SIZE, 0)
     visible_len = seq_len - start_pos

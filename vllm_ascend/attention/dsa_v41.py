@@ -42,6 +42,7 @@ from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
 )
+from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
 from vllm_ascend.utils import npu_stream_switch
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -813,6 +814,23 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._device_metadata_tasks = ()
         return tasks
 
+    def a5_slot_mapping_layout(
+        self,
+    ) -> tuple[str, str, int, int] | None:
+        """Return the reusable address-layout keys for the batched A5 path."""
+        spec = self.kv_cache_spec
+        if not self._uses_a5_packed_cache or self._cache_kind == "compressor_state":
+            return None
+        compressed = self._cache_kind in {"long_kv", "index_k"}
+        ratio = get_kv_cache_compression_ratio(spec) if compressed else 1
+        page_size = get_storage_block_size(spec)
+        return (
+            f"slot:coordinates:c{ratio}:b{page_size}",
+            f"slot:flat:c{ratio}:b{page_size}",
+            page_size,
+            ratio,
+        )
+
     def _publish_task(
         self,
         shared: dict[str, Any],
@@ -1227,7 +1245,11 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             skip_ring_update = bool(kwargs.get("skip_ring_state_update", False))
 
             def build_c2_metadata() -> None:
-                if self._uses_a5_packed_cache and full_source_cos is not None and full_source_sin is not None:
+                if (
+                    self._uses_a5_packed_cache
+                    and full_source_cos is not None
+                    and full_source_sin is not None
+                ):
                     build_c2_ring_metadata(
                         common.query_start_loc,
                         seq_lens,
@@ -1241,8 +1263,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                         num_actual_tokens,
                         skip_update=skip_ring_update,
                         ring_metadata_output=ring_meta,
-                        complete_mask_output=self._c2_complete_mask[:num_input_tokens],
-                        source_positions_output=self._c2_source_positions[:num_input_tokens],
+                        complete_mask_output=self._c2_complete_mask[
+                            :num_input_tokens
+                        ],
+                        source_positions_output=self._c2_source_positions[
+                            :num_input_tokens
+                        ],
                         cos_output=self._c2_source_cos[:num_input_tokens],
                         sin_output=self._c2_source_sin[:num_input_tokens],
                     )

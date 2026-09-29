@@ -59,6 +59,7 @@ from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -844,11 +845,14 @@ class DeepseekV41DecoderLayer(nn.Module):
 
     def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalize once and provide the exact FP32 routing input."""
-        outputs = DeviceOperator.rms_norm_cast(
-            hidden_states, self.post_attention_layernorm.weight, self.post_attention_layernorm.variance_epsilon
-        )
-        if outputs is not None:
-            return outputs
+        if enable_custom_op() and get_current_hardware_profile().supports(HardwareCapability.RMS_NORM_CAST):
+            op = getattr(torch.ops._C_ascend, "npu_rms_norm_cast", None)
+            if op is not None:
+                return op(
+                    hidden_states,
+                    self.post_attention_layernorm.weight,
+                    self.post_attention_layernorm.variance_epsilon,
+                )
         normalized = self.post_attention_layernorm(hidden_states)
         return normalized, normalized.float()
 
