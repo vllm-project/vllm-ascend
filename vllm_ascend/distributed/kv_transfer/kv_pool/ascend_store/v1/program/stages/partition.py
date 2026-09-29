@@ -10,17 +10,19 @@ from ..representation import (
     KVMemorySegment,
     KVMemoryView,
     KVRegion,
-    KVTransferRegion,
-    TransferRegionBatch,
+    KVTransferLayout,
+    LocalKVRegion,
+    RemoteObjectLayout,
+    TransferLayoutBatch,
 )
 
 
 class RegionPartition(Protocol):
-    """Partition Store transfer regions before they are bound to object identities."""
+    """Partition Store layouts before they are bound to remote object identities."""
 
     def bind_memory(self, memory_geometry: KVMemoryGeometry) -> None: ...
 
-    def project(self, batches: tuple[TransferRegionBatch, ...]) -> tuple[TransferRegionBatch, ...]: ...
+    def project(self, batches: tuple[TransferLayoutBatch, ...]) -> tuple[TransferLayoutBatch, ...]: ...
 
 
 class IdentityRegionPartition:
@@ -31,7 +33,7 @@ class IdentityRegionPartition:
         del memory_geometry
 
     @staticmethod
-    def project(batches: tuple[TransferRegionBatch, ...]) -> tuple[TransferRegionBatch, ...]:
+    def project(batches: tuple[TransferLayoutBatch, ...]) -> tuple[TransferLayoutBatch, ...]:
         return batches
 
 
@@ -61,7 +63,7 @@ class PipelineRegionPartition:
             partitions_by_group[group_id] = self._compile_group_partitions(layers)
         self._partitions_by_group = partitions_by_group
 
-    def project(self, batches: tuple[TransferRegionBatch, ...]) -> tuple[TransferRegionBatch, ...]:
+    def project(self, batches: tuple[TransferLayoutBatch, ...]) -> tuple[TransferLayoutBatch, ...]:
         return tuple(self._project_batch(batch) for batch in batches)
 
     def _compile_group_partitions(
@@ -104,30 +106,38 @@ class PipelineRegionPartition:
             raise ValueError(f"Pipeline partitions do not cover physical layers {sorted(registered_layer_ids)}")
         return tuple(partitions)
 
-    def _project_batch(self, batch: TransferRegionBatch) -> TransferRegionBatch:
+    def _project_batch(self, batch: TransferLayoutBatch) -> TransferLayoutBatch:
         if self._partitions_by_group is None:
             raise RuntimeError("Pipeline region partition is unavailable before cache registration")
         partitions = self._partitions_by_group[batch.group_id]
         projected = []
-        for transfer_region in batch.regions:
-            memory = transfer_region.memory
+        for transfer_layout in batch.layouts:
+            local_region = transfer_layout.local_region
+            memory = local_region.memory
             if partitions and len(memory.addresses) != partitions[-1].segment_end:
                 raise ValueError("Pipeline region partition received misaligned memory segments")
             for partition in partitions:
                 projected.append(
-                    KVTransferRegion(
-                        KVRegion(transfer_region.region.chunk, partition.physical_layer_ids),
-                        replace(transfer_region.coordinate, consumer_pp_slice=partition.pipeline_rank),
-                        partition.remote_object_size,
-                        partition.remote_offsets,
-                        KVMemoryView(
-                            memory.block_id,
-                            memory.addresses[partition.segment_start : partition.segment_end],
-                            memory.sizes[partition.segment_start : partition.segment_end],
+                    KVTransferLayout(
+                        LocalKVRegion(
+                            KVRegion(local_region.region.chunk, partition.physical_layer_ids),
+                            KVMemoryView(
+                                memory.block_id,
+                                memory.addresses[partition.segment_start : partition.segment_end],
+                                memory.sizes[partition.segment_start : partition.segment_end],
+                            ),
+                        ),
+                        RemoteObjectLayout(
+                            replace(
+                                transfer_layout.remote_layout.coordinate,
+                                consumer_pp_slice=partition.pipeline_rank,
+                            ),
+                            partition.remote_object_size,
+                            partition.remote_offsets,
                         ),
                     )
                 )
-        return TransferRegionBatch(batch.group_id, tuple(projected))
+        return TransferLayoutBatch(batch.group_id, tuple(projected))
 
 
 def _group_segments_by_layer(

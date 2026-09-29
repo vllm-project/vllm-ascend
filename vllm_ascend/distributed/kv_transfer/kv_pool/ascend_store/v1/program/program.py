@@ -6,12 +6,12 @@ every ``V`` node once; each request selects an existing subgraph without rebuild
 
 1. Lookup: Reachability[D,V] -> Chunk[D,F] -> Remote identity[D,F] -> Remote object[D,F]
    -> observation -> Availability[D,F] -> reachable frontier[-,V].
-2. Load: Reachability[D,V] -> Chunk[D,F] -> Local Block[D,F] -> Transfer Region[D,V]
+2. Load: Reachability[D,V] -> Chunk[D,F] -> Local Block[D,F] -> Transfer Layout[D,V]
    -> Remote object[D,F] -> Binding[D,F] -> traversal[-,F].
 3. Range Store: Reachability[D,V] -> Chunk[D,F] -> Local Block[D,F] -> shared Store tail.
 4. Checkpoint Store: Checkpoint Chunk[D,F] -> Checkpoint Block[D,F] -> shared Store tail.
 
-The shared Store tail is Ownership[-,V] -> Transfer Region[D,V] -> Partition[-,V]
+The shared Store tail is Ownership[-,V] -> Transfer Layout[D,V] -> Partition[-,V]
 -> Remote object[D,F] -> Binding[D,F] -> Admission[-,V].
 """
 
@@ -39,7 +39,7 @@ from .representation import (
     KVMemoryGeometry,
     RemoteObjectBatch,
     RemoteObjectKeyBatch,
-    TransferRegionBatch,
+    TransferLayoutBatch,
 )
 from .spec.schedule import KVPoolSchedule
 from .spec.topology import KVPoolTopology
@@ -128,7 +128,9 @@ class KVPoolProgram:
 
     def record_load_completion(self, frame: KVPoolStepFrame, completion: LoadCompletion) -> None:
         failed_block_ids = {
-            evidence.binding.memory.block_id for evidence in completion.binding_evidence if evidence.result_code != 0
+            evidence.binding.local_region.memory.block_id
+            for evidence in completion.binding_evidence
+            if evidence.result_code != 0
         }
         if not failed_block_ids:
             return
@@ -150,14 +152,14 @@ class KVPoolProgram:
         chunks = self._semantic_chunk_projection.project_load(selection, command.tail_key_boundaries)
         object_keys = project_remote_identities(chunks, self._groups_by_id, self._topology.transfer_group_ids)
         block_assignments = self._local_block_resolution.resolve(chunks, command.block_ids_by_group)
-        transfer_regions = tuple(self._transfer_region_projection.project(batch) for batch in block_assignments)
+        transfer_layouts = tuple(self._transfer_region_projection.project(batch) for batch in block_assignments)
         remote_objects = tuple(
-            self._remote_object_projection.project_transfer(regions, keys)
-            for regions, keys in zip(transfer_regions, object_keys, strict=True)
+            self._remote_object_projection.project_transfer(layout_batch, keys)
+            for layout_batch, keys in zip(transfer_layouts, object_keys, strict=True)
         )
         batches = tuple(
-            _bind_transfer_regions(regions, objects)
-            for regions, objects in zip(transfer_regions, remote_objects, strict=True)
+            _bind_transfer_layouts(layout_batch, objects)
+            for layout_batch, objects in zip(transfer_layouts, remote_objects, strict=True)
         )
         return LoadTransfer(command.request_id, _order_load_traversal(batches, self._topology.tp_rank))
 
@@ -176,15 +178,15 @@ class KVPoolProgram:
 
         object_keys = project_remote_identities(chunks, self._groups_by_id, self._topology.transfer_group_ids)
         owned_assignments = tuple(self._store_ownership_selection.select_batch(batch) for batch in block_assignments)
-        transfer_regions = tuple(self._transfer_region_projection.project(batch) for batch in owned_assignments)
-        transfer_regions = self._region_partition.project(transfer_regions)
+        transfer_layouts = tuple(self._transfer_region_projection.project(batch) for batch in owned_assignments)
+        transfer_layouts = self._region_partition.project(transfer_layouts)
         remote_objects = tuple(
-            self._remote_object_projection.project_transfer(regions, keys)
-            for regions, keys in zip(transfer_regions, object_keys, strict=True)
+            self._remote_object_projection.project_transfer(layout_batch, keys)
+            for layout_batch, keys in zip(transfer_layouts, object_keys, strict=True)
         )
         batches = tuple(
-            _bind_transfer_regions(regions, objects)
-            for regions, objects in zip(transfer_regions, remote_objects, strict=True)
+            _bind_transfer_layouts(layout_batch, objects)
+            for layout_batch, objects in zip(transfer_layouts, remote_objects, strict=True)
         )
         return StoreTransfer(command.request_id, batches, command.store_job_id)
 
@@ -237,29 +239,18 @@ def _reduce_remote_availability(
     )
 
 
-def _bind_transfer_regions(regions: TransferRegionBatch, remote_objects: RemoteObjectBatch) -> BindingBatch:
-    if regions.group_id != remote_objects.group_id:
+def _bind_transfer_layouts(layout_batch: TransferLayoutBatch, remote_objects: RemoteObjectBatch) -> BindingBatch:
+    if layout_batch.group_id != remote_objects.group_id:
         raise ValueError(
-            f"Transfer region group {regions.group_id} does not match remote object group {remote_objects.group_id}"
+            f"Transfer layout group {layout_batch.group_id} does not match remote object group "
+            f"{remote_objects.group_id}"
         )
-    if len(regions.regions) != len(remote_objects.remote_objects):
-        raise ValueError("Transfer regions and remote objects must have the same length")
+    if len(layout_batch.layouts) != len(remote_objects.remote_objects):
+        raise ValueError("Transfer layouts and remote objects must have the same length")
     bindings = []
-    for transfer_region, remote_object in zip(regions.regions, remote_objects.remote_objects, strict=True):
-        if transfer_region.region.chunk != remote_object.chunk:
-            raise ValueError("Transfer region and remote object must belong to the same semantic chunk")
-        if transfer_region.coordinate != remote_object.coordinate:
-            raise ValueError("Transfer region and remote object must use the same physical coordinate")
-        bindings.append(
-            KVBinding(
-                transfer_region.region,
-                remote_object,
-                transfer_region.remote_object_size,
-                transfer_region.remote_offsets,
-                transfer_region.memory,
-            )
-        )
-    return BindingBatch(regions.group_id, tuple(bindings))
+    for layout, remote_object in zip(layout_batch.layouts, remote_objects.remote_objects, strict=True):
+        bindings.append(KVBinding(layout.local_region, remote_object, layout.remote_layout))
+    return BindingBatch(layout_batch.group_id, tuple(bindings))
 
 
 def _order_load_traversal(batches: tuple[BindingBatch, ...], rank_offset: int) -> tuple[KVBinding, ...]:

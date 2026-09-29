@@ -223,7 +223,7 @@ class _StoreSession:
         transfer_keys = {binding.remote_object.key for batch in transfer.batches for binding in batch.bindings}
         for item in completion.evidence.binding_evidence:
             key = item.binding.remote_object.key
-            layer_id = item.binding.region.physical_layer_ids[0]
+            layer_id = item.binding.local_region.region.physical_layer_ids[0]
             self.range_result_codes[key, layer_id] = item.result_code
             if item.result_code not in (0, None):
                 self.failed_keys.add(key)
@@ -348,7 +348,7 @@ class _StoreSession:
         key = binding.remote_object.key
         if key in self.session_result_codes:
             return self.session_result_codes[key]
-        return self.range_result_codes.get((key, binding.region.physical_layer_ids[0]))
+        return self.range_result_codes.get((key, binding.local_region.region.physical_layer_ids[0]))
 
 
 @dataclass(slots=True)
@@ -422,10 +422,10 @@ class LayerwiseLoadTimeline:
             bindings = tuple(binding for transfer in transfers for binding in transfer.traversal)
             if not bindings:
                 return tuple(LoadCompletion(transfer.request_id, ()) for transfer in transfers)
-            if any(len(binding.region.physical_layer_ids) != 1 for binding in bindings):
+            if any(len(binding.local_region.region.physical_layer_ids) != 1 for binding in bindings):
                 raise ValueError("Layerwise Load requires every binding to address one physical layer")
             unknown_layer_ids = sorted(
-                {binding.region.physical_layer_ids[0] for binding in bindings} - set(self._layer_order)
+                {binding.local_region.region.physical_layer_ids[0] for binding in bindings} - set(self._layer_order)
             )
             if unknown_layer_ids:
                 raise ValueError(f"Unknown physical Layer IDs {unknown_layer_ids}")
@@ -801,13 +801,13 @@ class LayerwiseStoreTimeline:
 
     def _open_session(self, transfers: list[StoreTransfer]) -> _StoreSession:
         bindings = tuple(binding for transfer in transfers for batch in transfer.batches for binding in batch.bindings)
-        if any(len(binding.region.physical_layer_ids) != 1 for binding in bindings):
+        if any(len(binding.local_region.region.physical_layer_ids) != 1 for binding in bindings):
             raise ValueError("Layerwise Store requires every binding to address one physical layer")
         object_sizes_by_key: dict[str, int] = {}
         for binding in bindings:
             key = binding.remote_object.key
-            previous_size = object_sizes_by_key.setdefault(key, binding.remote_object_size)
-            if previous_size != binding.remote_object_size:
+            previous_size = object_sizes_by_key.setdefault(key, binding.remote_layout.object_size)
+            if previous_size != binding.remote_layout.object_size:
                 raise ValueError(f"Layerwise Store key {key!r} has inconsistent object sizes")
         command = _OpenStoreSession(tuple(transfers), object_sizes_by_key)
         self._executor.submit(command)
@@ -860,7 +860,7 @@ def _group_layerwise_transfers(
         for binding in transfer.traversal:
             if binding.remote_object.key not in session_keys:
                 continue
-            layer_id = binding.region.physical_layer_ids[0]
+            layer_id = binding.local_region.region.physical_layer_ids[0]
             bindings_by_layer.setdefault(layer_id, []).append(binding)
         for layer_id, bindings in bindings_by_layer.items():
             grouped.setdefault(layer_id, []).append(LoadTransfer(transfer.request_id, tuple(bindings)))
@@ -879,7 +879,7 @@ def _group_layerwise_store_transfers(
                 key = binding.remote_object.key
                 if key not in session_keys:
                     continue
-                layer_id = binding.region.physical_layer_ids[0]
+                layer_id = binding.local_region.region.physical_layer_ids[0]
                 bindings_by_layer_and_key.setdefault((layer_id, key), []).append((batch.group_id, binding))
         bindings_by_layer_and_group: dict[int, dict[int, list[KVBinding]]] = {}
         for layer_and_key, owned_bindings in bindings_by_layer_and_key.items():

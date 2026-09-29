@@ -15,7 +15,7 @@ from ..representation import (
     RemoteObjectBatch,
     RemoteObjectKey,
     RemoteObjectKeyBatch,
-    TransferRegionBatch,
+    TransferLayoutBatch,
 )
 from ..spec.topology import KVPoolGroupTopology, KVPoolTopology
 
@@ -121,34 +121,35 @@ class RemoteObjectProjection:
 
     def project_transfer(
         self,
-        regions: TransferRegionBatch,
+        layout_batch: TransferLayoutBatch,
         object_keys: RemoteObjectKeyBatch,
     ) -> RemoteObjectBatch:
-        if regions.group_id != object_keys.group_id:
+        if layout_batch.group_id != object_keys.group_id:
             raise ValueError(
-                f"Transfer region group {regions.group_id} does not match remote object key group "
+                f"Transfer layout group {layout_batch.group_id} does not match remote object key group "
                 f"{object_keys.group_id}"
             )
         templates = {item.chunk: _RemoteKeyTemplate.compile(item.base_key) for item in object_keys.keys}
         projected: dict[tuple[KVChunk, PhysicalCoordinate], RemoteKVObject] = {}
         remote_objects = []
-        for region in regions.regions:
-            chunk = region.region.chunk
+        for layout in layout_batch.layouts:
+            chunk = layout.local_region.region.chunk
+            coordinate = layout.remote_layout.coordinate
             try:
                 template = templates[chunk]
             except KeyError as error:
-                raise ValueError(f"KV transfer region has no remote object key: {chunk}") from error
-            object_identity = chunk, region.coordinate
+                raise ValueError(f"KV transfer layout has no remote object key: {chunk}") from error
+            object_identity = chunk, coordinate
             remote_object = projected.get(object_identity)
             if remote_object is None:
                 remote_object = RemoteKVObject(
                     chunk,
-                    template.render(self._rank_values(regions.group_id, region.coordinate)),
-                    region.coordinate,
+                    template.render(self._rank_values(layout_batch.group_id, coordinate)),
+                    coordinate,
                 )
                 projected[object_identity] = remote_object
             remote_objects.append(remote_object)
-        return RemoteObjectBatch(regions.group_id, tuple(remote_objects))
+        return RemoteObjectBatch(layout_batch.group_id, tuple(remote_objects))
 
     def _project_lookup_batch(self, batch: RemoteObjectKeyBatch) -> RemoteObjectBatch:
         representations = self._representations_by_group[batch.group_id]

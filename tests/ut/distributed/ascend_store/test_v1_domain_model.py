@@ -55,7 +55,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.invocat
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.program import (
     KVPoolProgram,
-    _bind_transfer_regions,
+    _bind_transfer_layouts,
     _order_load_traversal,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.representation import (
@@ -66,11 +66,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.represe
     KVMemorySegment,
     KVMemoryView,
     KVRegion,
-    KVTransferRegion,
+    KVTransferLayout,
+    LocalKVRegion,
     PhysicalCoordinate,
     RemoteKVObject,
     RemoteObjectKeyBatch,
-    TransferRegionBatch,
+    RemoteObjectLayout,
+    TransferLayoutBatch,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.compilation import (
     KVPoolCompilationSpec,
@@ -589,14 +591,14 @@ def project_bindings(
     block_assignments = nodes.blocks.resolve(chunks, block_ids_by_group)
     if owned:
         block_assignments = nodes.store_ownership.select(block_assignments)
-    transfer_regions = tuple(nodes.regions.project(assignments) for assignments in block_assignments)
+    transfer_layouts = tuple(nodes.regions.project(assignments) for assignments in block_assignments)
     remote_objects = tuple(
-        nodes.remote_objects.project_transfer(regions, keys)
-        for regions, keys in zip(transfer_regions, object_keys, strict=True)
+        nodes.remote_objects.project_transfer(layout_batch, keys)
+        for layout_batch, keys in zip(transfer_layouts, object_keys, strict=True)
     )
     return tuple(
-        _bind_transfer_regions(regions, objects)
-        for regions, objects in zip(transfer_regions, remote_objects, strict=True)
+        _bind_transfer_layouts(layout_batch, objects)
+        for layout_batch, objects in zip(transfer_layouts, remote_objects, strict=True)
     )
 
 
@@ -634,7 +636,11 @@ def make_binding_batch(group_id=0, *, coordinate=None) -> BindingBatch:
     chunk = KVChunk(group_id, 0, TokenRange(0, 4), b"a")
     region = KVRegion(chunk, (0,))
     remote = RemoteKVObject(chunk, "key", coordinate)
-    binding = KVBinding(region, remote, 16, (0,), KVMemoryView(1, (100,), (16,)))
+    binding = KVBinding(
+        LocalKVRegion(region, KVMemoryView(1, (100,), (16,))),
+        remote,
+        RemoteObjectLayout(coordinate, 16, (0,)),
+    )
     return BindingBatch(group_id, (binding,))
 
 
@@ -1038,9 +1044,17 @@ def test_binding_requires_the_same_chunk_and_aligned_segments() -> None:
     region = KVRegion(chunk, (0,))
     remote_object = RemoteKVObject(chunk, "key")
     with pytest.raises(ValueError, match="semantic chunk"):
-        KVBinding(KVRegion(other, (0,)), remote_object, 16, (0,), KVMemoryView(1, (100,), (16,)))
+        KVBinding(
+            LocalKVRegion(KVRegion(other, (0,)), KVMemoryView(1, (100,), (16,))),
+            remote_object,
+            RemoteObjectLayout(PhysicalCoordinate(), 16, (0,)),
+        )
     with pytest.raises(ValueError, match="align every remote offset"):
-        KVBinding(region, remote_object, 16, (0, 8), KVMemoryView(1, (100,), (16,)))
+        KVBinding(
+            LocalKVRegion(region, KVMemoryView(1, (100,), (16,))),
+            remote_object,
+            RemoteObjectLayout(PhysicalCoordinate(), 16, (0, 8)),
+        )
 
 
 def test_projection_preserves_original_group_identity() -> None:
@@ -1259,7 +1273,7 @@ def test_registered_memory_geometry_is_bound_once() -> None:
     database.group_kv_caches_base_addr[0][0] = 5000
     binding = project_bindings(projection, selection, ((1,),))[0].bindings[0]
 
-    assert binding.memory.addresses == (1032,)
+    assert binding.local_region.memory.addresses == (1032,)
     with pytest.raises(RuntimeError, match="already bound"):
         compile_projection(projection, memory_geometry)
 
@@ -1285,7 +1299,7 @@ def test_strided_mapping_compiles_each_memory_segment_geometry() -> None:
     compile_projection(projection, make_memory_geometry(database, topology))
     selection = KVSelection(TokenRange(0, 4), (b"a",), (GroupSelection(0, None),))
     first_representation = project_bindings(projection, selection, ((1,),))[0].bindings[0]
-    assert first_representation.memory.sizes == (4, 4, 4, 4, 8, 8, 8, 8)
+    assert first_representation.local_region.memory.sizes == (4, 4, 4, 4, 8, 8, 8, 8)
 
 
 def test_binding_rejects_misaligned_memory_segments() -> None:
@@ -1303,7 +1317,14 @@ def test_binding_rejects_misaligned_memory_segments() -> None:
     with pytest.raises(ValueError, match="align every remote offset"):
         replace(
             binding,
-            memory=KVMemoryView(binding.memory.block_id, (binding.memory.addresses[0],), (binding.memory.sizes[0],)),
+            local_region=replace(
+                binding.local_region,
+                memory=KVMemoryView(
+                    binding.local_region.memory.block_id,
+                    (binding.local_region.memory.addresses[0],),
+                    (binding.local_region.memory.sizes[0],),
+                ),
+            ),
         )
 
 
@@ -1322,13 +1343,13 @@ def test_pipeline_region_partition_precedes_transfer_binding() -> None:
     chunks = projection.chunks.project(selection)
     object_keys = project_object_identities(projection, chunks)
     assignments = projection.store_ownership.select(projection.blocks.resolve(chunks, ((1,),)))
-    regions = tuple(projection.regions.project(batch) for batch in assignments)
-    regions = region_partition.project(regions)
-    remote_objects = projection.remote_objects.project_transfer(regions[0], object_keys[0])
-    projected = _bind_transfer_regions(regions[0], remote_objects).bindings
-    assert [binding.memory.addresses for binding in projected] == [(1032,), (2032,)]
+    layouts = tuple(projection.regions.project(batch) for batch in assignments)
+    layouts = region_partition.project(layouts)
+    remote_objects = projection.remote_objects.project_transfer(layouts[0], object_keys[0])
+    projected = _bind_transfer_layouts(layouts[0], remote_objects).bindings
+    assert [binding.local_region.memory.addresses for binding in projected] == [(1032,), (2032,)]
     assert [binding.remote_object.coordinate.consumer_pp_slice for binding in projected] == [0, 1]
-    assert [binding.region.physical_layer_ids for binding in projected] == [(0,), (1,)]
+    assert [binding.local_region.region.physical_layer_ids for binding in projected] == [(0,), (1,)]
     assert "@pp_rank:1@" in projected[1].remote_object.key
 
 
@@ -1353,15 +1374,15 @@ def test_pipeline_region_partition_projects_sparse_hybrid_groups_by_physical_lay
     )
     chunks = projection.chunks.project(selection)
     assignments = projection.blocks.resolve(chunks, ((1,), (2,)))
-    regions = tuple(projection.regions.project(batch) for batch in assignments)
+    layouts = tuple(projection.regions.project(batch) for batch in assignments)
 
-    projected = region_partition.project(regions)
+    projected = region_partition.project(layouts)
 
-    assert [[region.region.physical_layer_ids for region in batch.regions] for batch in projected] == [
+    assert [[layout.local_region.region.physical_layer_ids for layout in batch.layouts] for batch in projected] == [
         [(0,), (2,)],
         [(1,), (3,)],
     ]
-    assert [[region.coordinate.consumer_pp_slice for region in batch.regions] for batch in projected] == [
+    assert [[layout.remote_layout.coordinate.consumer_pp_slice for layout in batch.layouts] for batch in projected] == [
         [0, 1],
         [0, 1],
     ]
@@ -1378,23 +1399,20 @@ def test_pipeline_region_partition_assigns_mtp_layers_to_the_final_rank() -> Non
         }
     )
     chunk = KVChunk(0, 0, TokenRange(0, 4), b"a")
-    batch = TransferRegionBatch(
+    batch = TransferLayoutBatch(
         0,
         (
-            KVTransferRegion(
-                KVRegion(chunk, (0, 4)),
-                PhysicalCoordinate(),
-                64,
-                (0, 32),
-                KVMemoryView(1, (1032, 2032), (32, 32)),
+            KVTransferLayout(
+                LocalKVRegion(KVRegion(chunk, (0, 4)), KVMemoryView(1, (1032, 2032), (32, 32))),
+                RemoteObjectLayout(PhysicalCoordinate(), 64, (0, 32)),
             ),
         ),
     )
 
     projected = partition.project((batch,))[0]
 
-    assert [region.region.physical_layer_ids for region in projected.regions] == [(0,), (4,)]
-    assert [region.coordinate.consumer_pp_slice for region in projected.regions] == [0, 1]
+    assert [item.local_region.region.physical_layer_ids for item in projected.layouts] == [(0,), (4,)]
+    assert [item.remote_layout.coordinate.consumer_pp_slice for item in projected.layouts] == [0, 1]
 
 
 def test_layerwise_projection_splits_regions_inside_one_remote_object() -> None:
@@ -1412,11 +1430,11 @@ def test_layerwise_projection_splits_regions_inside_one_remote_object() -> None:
     selection = KVSelection(TokenRange(0, 4), (b"a",), (GroupSelection(0, None),))
     bindings = project_bindings(projection, selection, ((1,),))[0].bindings
 
-    assert [binding.region.physical_layer_ids for binding in bindings] == [(0,), (1,)]
+    assert [binding.local_region.region.physical_layer_ids for binding in bindings] == [(0,), (1,)]
     assert bindings[0].remote_object is bindings[1].remote_object
-    assert [binding.remote_offsets for binding in bindings] == [(0, 32), (64,)]
-    assert [binding.memory.sizes for binding in bindings] == [(32, 32), (64,)]
-    assert [binding.memory.addresses for binding in bindings] == [(1064, 2064), (3128,)]
+    assert [binding.remote_layout.offsets for binding in bindings] == [(0, 32), (64,)]
+    assert [binding.local_region.memory.sizes for binding in bindings] == [(32, 32), (64,)]
+    assert [binding.local_region.memory.addresses for binding in bindings] == [(1064, 2064), (3128,)]
 
 
 def test_store_ownership_precedes_physical_fanout() -> None:
@@ -1426,7 +1444,7 @@ def test_store_ownership_precedes_physical_fanout() -> None:
     compile_projection(projection, make_memory_geometry(database, topology))
     selection = KVSelection(TokenRange(0, 8), (b"a", b"b"), (GroupSelection(0, None),))
     batch = project_bindings(projection, selection, ((1, 2),), owned=True)[0]
-    assert {binding.memory.block_id for binding in batch.bindings} == {2}
+    assert {binding.local_region.memory.block_id for binding in batch.bindings} == {2}
     assert len(batch.bindings) == 2
 
 
@@ -1437,7 +1455,7 @@ def test_strided_store_ownership_does_not_drop_chunks_as_tp_replicas() -> None:
     compile_projection(projection, make_memory_geometry(database, topology))
     selection = KVSelection(TokenRange(0, 8), (b"a", b"b"), (GroupSelection(0, None),))
     batch = project_bindings(projection, selection, ((1, 2),), owned=True)[0]
-    assert {binding.memory.block_id for binding in batch.bindings} == {1, 2}
+    assert {binding.local_region.memory.block_id for binding in batch.bindings} == {1, 2}
     assert len(batch.bindings) == 4
 
 
@@ -1450,7 +1468,7 @@ def test_strided_mapping_keeps_align_state_null_blocks() -> None:
     selection = KVSelection(TokenRange(0, 4), (b"a",), (GroupSelection(0, None),))
     batch = project_bindings(projection, selection, ((0,),))[0]
     assert len(batch.bindings) == 2
-    assert all(binding.memory.block_id == 0 for binding in batch.bindings)
+    assert all(binding.local_region.memory.block_id == 0 for binding in batch.bindings)
 
 
 def test_identity_region_partition_preserves_strided_regions() -> None:
@@ -2852,8 +2870,8 @@ def test_program_projects_boundary_state_from_the_exact_handed_off_block() -> No
     transfer = program.build_store_transfers(frame)[0]
 
     assert transfer.store_job_id == 3
-    assert transfer.batches[0].bindings[0].memory.block_id == 7
-    assert transfer.batches[0].bindings[0].memory.sizes == (64,)
+    assert transfer.batches[0].bindings[0].local_region.memory.block_id == 7
+    assert transfer.batches[0].bindings[0].local_region.memory.sizes == (64,)
     assert transfer.batches[0].bindings[0].remote_object.key.endswith("@61")
 
 
@@ -2885,10 +2903,10 @@ def test_program_projects_other_groups_needed_by_a_sub_block_mamba_boundary() ->
 
     bindings_by_group = {batch.group_id: batch.bindings for batch in transfer.batches}
     assert set(bindings_by_group) == {0, 1}
-    assert bindings_by_group[0][0].memory.block_id == 3
-    assert bindings_by_group[1][0].memory.block_id == 11
-    assert bindings_by_group[0][0].memory.sizes == (64,)
-    assert bindings_by_group[1][0].memory.sizes == (64,)
+    assert bindings_by_group[0][0].local_region.memory.block_id == 3
+    assert bindings_by_group[1][0].local_region.memory.block_id == 11
+    assert bindings_by_group[0][0].local_region.memory.sizes == (64,)
+    assert bindings_by_group[1][0].local_region.memory.sizes == (64,)
 
 
 def test_connector_store_leases_exclude_mamba_position_table_and_release_after_every_worker() -> None:

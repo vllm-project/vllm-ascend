@@ -158,7 +158,7 @@ class KVMemoryView:
 
 
 # ===============================
-# Transfer Region
+# Physical Projection
 # ===============================
 
 
@@ -177,37 +177,54 @@ class KVRegion:
 
 
 @dataclass(frozen=True, slots=True)
-class KVTransferRegion:
-    """A physical transfer region before it is joined to a remote object identity."""
+class LocalKVRegion:
+    """One semantic region projected onto Worker-local registered memory."""
 
     region: KVRegion
-    coordinate: PhysicalCoordinate
-    remote_object_size: int
-    remote_offsets: tuple[int, ...]
     memory: KVMemoryView
-
-    def __post_init__(self) -> None:
-        if self.remote_object_size <= 0:
-            raise ValueError("A KV transfer region must identify a positive remote object size")
-        if len(self.remote_offsets) != len(self.memory.addresses):
-            raise ValueError("A KV transfer region must align every remote offset, local address and size")
-        if any(
-            offset < 0 or size <= 0 or offset + size > self.remote_object_size
-            for offset, size in zip(self.remote_offsets, self.memory.sizes, strict=True)
-        ):
-            raise ValueError("A KV transfer region must fit inside its remote object")
 
 
 @dataclass(frozen=True, slots=True)
-class TransferRegionBatch:
-    """Physical transfer regions selected for one cache group and one invocation."""
+class RemoteObjectLayout:
+    """The remote coordinate and byte layout selected for one local region."""
 
-    group_id: int
-    regions: tuple[KVTransferRegion, ...]
+    coordinate: PhysicalCoordinate
+    object_size: int
+    offsets: tuple[int, ...]
 
     def __post_init__(self) -> None:
-        if any(region.region.chunk.group_id != self.group_id for region in self.regions):
-            raise ValueError(f"Transfer region batch contains regions outside cache group {self.group_id}")
+        if self.object_size <= 0:
+            raise ValueError("A remote object layout must identify a positive object size")
+        if any(offset < 0 or offset >= self.object_size for offset in self.offsets):
+            raise ValueError("A remote object layout offset must fall inside its object")
+
+
+@dataclass(frozen=True, slots=True)
+class KVTransferLayout:
+    """Describe how one local KV region maps into a remote object layout."""
+
+    local_region: LocalKVRegion
+    remote_layout: RemoteObjectLayout
+
+    def __post_init__(self) -> None:
+        memory = self.local_region.memory
+        layout = self.remote_layout
+        if len(layout.offsets) != len(memory.addresses):
+            raise ValueError("A KV transfer layout must align every remote offset, local address and size")
+        if any(offset + size > layout.object_size for offset, size in zip(layout.offsets, memory.sizes, strict=True)):
+            raise ValueError("A KV transfer layout must fit inside its remote object")
+
+
+@dataclass(frozen=True, slots=True)
+class TransferLayoutBatch:
+    """Transfer layouts selected for one cache group and one invocation."""
+
+    group_id: int
+    layouts: tuple[KVTransferLayout, ...]
+
+    def __post_init__(self) -> None:
+        if any(item.local_region.region.chunk.group_id != self.group_id for item in self.layouts):
+            raise ValueError(f"Transfer layout batch contains layouts outside cache group {self.group_id}")
 
 
 # ===============================
@@ -219,22 +236,20 @@ class TransferRegionBatch:
 class KVBinding:
     """Map one semantic region between a remote object and Worker-local memory."""
 
-    region: KVRegion
+    local_region: LocalKVRegion
     remote_object: RemoteKVObject
-    remote_object_size: int
-    remote_offsets: tuple[int, ...]
-    memory: KVMemoryView
+    remote_layout: RemoteObjectLayout
 
     def __post_init__(self) -> None:
-        if self.region.chunk != self.remote_object.chunk:
+        if self.local_region.region.chunk != self.remote_object.chunk:
             raise ValueError("A KV binding must belong to its remote object's semantic chunk")
-        if self.remote_object_size <= 0:
-            raise ValueError("A KV binding must identify a positive remote object size")
-        if len(self.remote_offsets) != len(self.memory.addresses):
+        if self.remote_layout.coordinate != self.remote_object.coordinate:
+            raise ValueError("A KV binding and remote object must use the same physical coordinate")
+        if len(self.remote_layout.offsets) != len(self.local_region.memory.addresses):
             raise ValueError("A KV binding must align every remote offset, local address and size")
         if any(
-            offset < 0 or size <= 0 or offset + size > self.remote_object_size
-            for offset, size in zip(self.remote_offsets, self.memory.sizes, strict=True)
+            offset + size > self.remote_layout.object_size
+            for offset, size in zip(self.remote_layout.offsets, self.local_region.memory.sizes, strict=True)
         ):
             raise ValueError("A KV binding range must fit inside its remote object")
 
@@ -247,5 +262,5 @@ class BindingBatch:
     bindings: tuple[KVBinding, ...]
 
     def __post_init__(self) -> None:
-        if any(binding.region.chunk.group_id != self.group_id for binding in self.bindings):
+        if any(binding.local_region.region.chunk.group_id != self.group_id for binding in self.bindings):
             raise ValueError(f"Binding batch contains bindings outside cache group {self.group_id}")
