@@ -85,24 +85,7 @@
 
 namespace vllm_ascend {
 
-bool can_get_npu_view_from_cpu_tensor(const at::Tensor& cpu_tensor)
-{
-    if (!cpu_tensor.defined() || !cpu_tensor.device().is_cpu() || cpu_tensor.layout() != at::kStrided) {
-        return false;
-    }
-    if (cpu_tensor.numel() == 0) {
-        return true;
-    }
-    if (!cpu_tensor.is_pinned()) {
-        return false;
-    }
-    void* mapped_base = nullptr;
-    const auto* host_base = cpu_tensor.storage().data_ptr().get();
-    return aclrtHostGetDevicePointer(const_cast<void*>(host_base), &mapped_base, 0) == ACL_SUCCESS &&
-           mapped_base != nullptr;
-}
-
-at::Tensor get_npu_view_from_cpu_tensor(const at::Tensor& cpu_tensor)
+c10::optional<at::Tensor> get_npu_view_from_cpu_tensor(const at::Tensor& cpu_tensor)
 {
     TORCH_CHECK(cpu_tensor.defined(), "UVA view requires a defined CPU tensor");
     TORCH_CHECK(cpu_tensor.device().is_cpu(), "UVA view requires a CPU tensor");
@@ -114,14 +97,17 @@ at::Tensor get_npu_view_from_cpu_tensor(const at::Tensor& cpu_tensor)
         return at::empty_strided(cpu_tensor.sizes(), cpu_tensor.strides(), options);
     }
 
-    TORCH_CHECK(cpu_tensor.is_pinned(), "UVA view requires pinned CPU memory");
+    if (!cpu_tensor.is_pinned()) {
+        return c10::nullopt;
+    }
     // Query the registered storage base, then apply the logical tensor offset.
     // torch_npu's host allocator remains the sole register/unregister owner.
     void* mapped_base = nullptr;
     const auto* host_base = cpu_tensor.storage().data_ptr().get();
     const aclError ret = aclrtHostGetDevicePointer(const_cast<void*>(host_base), &mapped_base, 0);
-    TORCH_CHECK(ret == ACL_SUCCESS && mapped_base != nullptr,
-                "UVA view requires mapped pinned CPU memory; aclrtHostGetDevicePointer failed: ", ret);
+    if (ret != ACL_SUCCESS || mapped_base == nullptr) {
+        return c10::nullopt;
+    }
     auto* mapped_data = static_cast<char*>(mapped_base) +
                         cpu_tensor.storage_offset() * cpu_tensor.element_size();
     auto keep_cpu_alive = [base = cpu_tensor](void*) mutable {};
@@ -2821,10 +2807,7 @@ at::Tensor restore_tensor(uintptr_t ptr_val, const std::vector<int64_t>& shape,
 // Pybind on Ascend 310P
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
-    ops.def("can_get_npu_view_from_cpu_tensor(Tensor cpu_tensor) -> bool");
-    ops.impl("can_get_npu_view_from_cpu_tensor", c10::DispatchKey::CompositeExplicitAutograd,
-             &vllm_ascend::can_get_npu_view_from_cpu_tensor);
-    ops.def("get_npu_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+    ops.def("get_npu_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor?");
     ops.impl("get_npu_view_from_cpu_tensor", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::get_npu_view_from_cpu_tensor);
     ops.def("get_physical_device_id(int user_device_id) -> int");
@@ -2882,10 +2865,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 // Pybind on other platform
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
-    ops.def("can_get_npu_view_from_cpu_tensor(Tensor cpu_tensor) -> bool");
-    ops.impl("can_get_npu_view_from_cpu_tensor", c10::DispatchKey::CompositeExplicitAutograd,
-             &vllm_ascend::can_get_npu_view_from_cpu_tensor);
-    ops.def("get_npu_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+    ops.def("get_npu_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor?");
     ops.impl("get_npu_view_from_cpu_tensor", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::get_npu_view_from_cpu_tensor);
     ops.def("get_physical_device_id(int user_device_id) -> int");
