@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -10,19 +11,35 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorWorkerMetadata,
     SupportsHMA,
 )
+from vllm.v1.core import kv_cache_utils
 
 from .planning.availability import LookupQuery
+from .planning.ownership import StoreSourceLeases
 from .planning.planner import TransferPlanner
 from .protocol.rpc import LookupServer
-from .protocol.transfer import KVTransferStep
+from .protocol.transfer import (
+    CheckpointStoreCommand,
+    KVTransferStep,
+    StateCheckpointSource,
+    StoreCommandBatch,
+    StoreSourceReleaseMetadata,
+)
 from .runtime.result import LoadResult
 from .runtime.runtime import KVPoolRuntime
+from .vllm_adapter import (
+    adapt_scheduler_output,
+    create_kv_pool_runtime,
+    create_transfer_planner,
+    group_uses_align_state,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -40,11 +57,31 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         self.runtime: KVPoolRuntime | None = None
         self.lookup_server: LookupServer | None = None
         self._pending_load_result: LoadResult | None = None
+        self._requests: dict[str, Request] = {}
+        self._released_store_job_ids: set[int] = set()
+        self._finished_checkpoint_stores: list[CheckpointStoreCommand] = []
+        transfer_config = vllm_config.kv_transfer_config
+        extra_config = transfer_config.kv_connector_extra_config
+        self._store_enabled = transfer_config.kv_role in ("kv_producer", "kv_both") or extra_config.get(
+            "consumer_is_to_put", False
+        )
+        self._align_state_group_ids = frozenset(
+            group_id
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            if group_id in kv_cache_config.transfer_group_ids and group_uses_align_state(group)
+        )
+        self._transfer_group_ids = frozenset(kv_cache_config.transfer_group_ids)
+        self._store_source_leases = StoreSourceLeases(
+            self._transfer_group_ids,
+            self._align_state_group_ids,
+            vllm_config.parallel_config.world_size,
+        )
+        _, self._hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
         if role == KVConnectorRole.SCHEDULER:
             lookup_address = self._resolve_lookup_address(vllm_config)
-            self.planner = TransferPlanner.from_config(vllm_config, kv_cache_config, lookup_address)
+            self.planner = create_transfer_planner(vllm_config, kv_cache_config, lookup_address)
         else:
-            self.runtime = KVPoolRuntime.from_config(vllm_config, kv_cache_config)
+            self.runtime = create_kv_pool_runtime(vllm_config, kv_cache_config)
             if vllm_config.parallel_config.rank == 0:
                 lookup_address = self._resolve_lookup_address(vllm_config)
                 self.lookup_server = LookupServer(self.runtime.lookup, lookup_address)
@@ -64,7 +101,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         assert self.planner is not None
         lookup_query = LookupQuery(
             request_id=request.request_id,
-            prompt_token_len=len(request.prompt_token_ids),
+            prompt_token_len=request.num_prompt_tokens,
             request_token_len=request.num_tokens,
             block_hashes=request.block_hashes,
             local_cached_tokens=num_computed_tokens,
@@ -74,14 +111,31 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
 
     def update_state_after_alloc(self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int) -> None:
         assert self.planner is not None
-        self.planner.confirm_allocation(request, blocks.get_block_ids(), num_external_tokens)
+        self._requests[request.request_id] = request
+        self.planner.confirm_allocation(
+            request.request_id,
+            tuple(tuple(block_ids) for block_ids in blocks.get_block_ids()),
+            tuple(request.block_hashes),
+            request.num_prompt_tokens,
+            num_external_tokens,
+        )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
-        return
+        metadata = connector_output.kv_connector_worker_meta
+        if not isinstance(metadata, StoreSourceReleaseMetadata):
+            return
+        self._store_source_leases.release(metadata.released_store_jobs)
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVTransferStep:
         assert self.planner is not None
-        return self.planner.build_step(scheduler_output)
+        planning_step = adapt_scheduler_output(scheduler_output, self._requests, store_enabled=self._store_enabled)
+        step = self.planner.build_step(planning_step)
+        for request_id in planning_step.finished_request_ids | planning_step.preempted_request_ids:
+            self._requests.pop(request_id, None)
+        pending_checkpoint_stores = tuple(self._finished_checkpoint_stores)
+        commands = tuple(self._store_source_leases.acquire(command) for command in step.store.commands)
+        self._finished_checkpoint_stores.clear()
+        return replace(step, store=StoreCommandBatch(commands + pending_checkpoint_stores))
 
     def request_finished(self, request: Request, block_ids: list[int]) -> tuple[bool, None]:
         assert self.planner is not None
@@ -90,6 +144,47 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
     def request_finished_all_groups(self, request: Request, block_ids: tuple[list[int], ...]) -> tuple[bool, None]:
         assert self.planner is not None
         return False, None
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        assert self.planner is not None
+        if not self._store_enabled or not partial_tail_offloads:
+            return False
+        snapshot = self.planner.request_progress.get(request.request_id)
+        if snapshot is None or not any(block_ids):
+            return False
+        boundaries = {boundary for _, _, boundary in partial_tail_offloads}
+        if len(boundaries) != 1:
+            raise ValueError("Finished state checkpoints must share one token boundary")
+        boundary = next(iter(boundaries))
+        if boundary <= 0 or boundary > snapshot.num_prompt_tokens:
+            return False
+        if boundary % self._hash_block_size or boundary > len(request.block_hashes) * self._hash_block_size:
+            return False
+        sources = tuple(
+            StateCheckpointSource(group_id, block_id, boundary)
+            for group_id, block_id, boundary in partial_tail_offloads
+            if group_id in self._transfer_group_ids and group_id in self._align_state_group_ids and block_id > 0
+        )
+        if len(sources) != len(partial_tail_offloads):
+            return False
+        command = CheckpointStoreCommand(
+            request.request_id,
+            tuple(tuple(group_block_ids) for group_block_ids in block_ids),
+            tuple(request.block_hashes),
+            snapshot.published_store_end_token,
+            sources,
+        )
+        self._finished_checkpoint_stores.append(self._store_source_leases.acquire(command))
+        # Exact job-level references own the source blocks, so vLLM can release the request's own references on time.
+        return False
+
+    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
+        self._store_source_leases.bind_block_pool(gpu_block_pool)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         assert self.runtime is not None
@@ -110,8 +205,12 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         super().clear_connector_metadata()
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        del kv_connector_metadata
         assert self.runtime is not None
-        self.runtime.fence_previous_store()
+        try:
+            self.runtime.fence_previous_store()
+        finally:
+            self._released_store_job_ids.update(self.runtime.take_released_store_job_ids())
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         assert self.runtime is not None
@@ -151,6 +250,18 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         failed_block_ids = set(self._pending_load_result.failed_block_ids)
         self._pending_load_result = None
         return failed_block_ids
+
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        if self.runtime is not None:
+            self._released_store_job_ids.update(self.runtime.take_released_store_job_ids())
+        if not self._released_store_job_ids:
+            return None
+        metadata = StoreSourceReleaseMetadata({store_job_id: 1 for store_job_id in self._released_store_job_ids})
+        self._released_store_job_ids.clear()
+        return metadata
+
+    def has_pending_push_work(self) -> bool:
+        return self._store_source_leases.has_pending() or bool(self._finished_checkpoint_stores)
 
     def shutdown(self) -> None:
         if self.planner is not None:

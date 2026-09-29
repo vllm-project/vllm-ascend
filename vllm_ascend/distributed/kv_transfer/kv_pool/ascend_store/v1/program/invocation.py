@@ -60,6 +60,7 @@ class StoreTransfer:
 
     request_id: str
     batches: tuple[BindingBatch, ...]
+    store_job_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,7 @@ class StoreCompletion:
 
     request_id: str
     evidence: StoreEvidence
+    store_job_id: int | None = None
 
 
 # ===============================
@@ -83,3 +85,4 @@ class KVPoolStepFrame:
     failed_request_ids: set[str] = field(default_factory=set)
     failed_block_ids: set[int] = field(default_factory=set)
     store_transfers: list[StoreTransfer] = field(default_factory=list)
+    store_submitted: bool = False
