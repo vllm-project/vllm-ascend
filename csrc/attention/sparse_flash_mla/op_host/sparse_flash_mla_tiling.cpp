@@ -1784,9 +1784,16 @@ ge::graphStatus SMLATilingCheck::CheckSingleParaTopkLength() const
                     return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     }
-    OP_CHECK_IF(opParamInfo_.oriSparseIndices.tensor == nullptr,
-                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "ori_sparse_indices",
-                                                         "Ori_topk_length requires ori_sparse_indices"),
+    // SWA bounded replay (vLLM #56227): in band mode the caller uses this same
+    // tensor for what the window's scalar width cannot express -- how many ori
+    // KV entries each query token may see -- so it stands alone there. Outside
+    // band mode it stays tied to the index list it was written for.
+    const bool bandVisibleLen =
+        (opParamInfo_.oriMaskMode != nullptr && *opParamInfo_.oriMaskMode == SMLA_ORI_MASK_MODE_BAND);
+    OP_CHECK_IF(opParamInfo_.oriSparseIndices.tensor == nullptr && !bandVisibleLen,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    opName_, "ori_sparse_indices",
+                    "Ori_topk_length requires ori_sparse_indices unless ori_mask_mode is 4 (band)"),
                 return ge::GRAPH_FAILED);
     if (ge::GRAPH_SUCCESS != CheckDtypeSupport(opParamInfo_.oriTopkLength.desc, ORI_TOPK_LENGTH_NAME)) {
         return ge::GRAPH_FAILED;
@@ -1797,6 +1804,35 @@ ge::graphStatus SMLATilingCheck::CheckSingleParaTopkLength() const
                     SMLADataTypeToSerialString(opParamInfo_.oriTopkLength.desc->GetDataType()).c_str(),
                     "The dtype of ori_topk_length must be DT_INT32"),
                 return ge::GRAPH_FAILED);
+    if (opParamInfo_.oriSparseIndices.tensor == nullptr) {
+        // Band mode: there is no index list to match, so the tensor is checked
+        // against the query it is addressed by. The kernel reads the row of the
+        // token it is masking (and reads it with GlobalTensor::GetValue, which
+        // does not bounds check), so a shape with fewer rows than the query has
+        // tokens leaves the rows past it reading past the tensor while the bound
+        // they were meant to carry is silently lost. The A5 checker states this
+        // same contract for this input; the index path below states it against
+        // the index list instead, because there the two are written together.
+        const gert::Shape &bandTopkShape = opParamInfo_.oriTopkLength.tensor->GetStorageShape();
+        const gert::Shape &bandQueryShape = opParamInfo_.q.tensor->GetStorageShape();
+        if (qLayout_ == SMLALayout::BSND) {
+            OP_CHECK_IF(bandTopkShape.GetDimNum() != DIM_NUM_THREE ||
+                            bandTopkShape.GetDim(0) != bandQueryShape.GetDim(0) ||
+                            bandTopkShape.GetDim(1) != bandQueryShape.GetDim(1) || bandTopkShape.GetDim(2) != 1,
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            opName_, ORI_TOPK_LENGTH_NAME, Ops::Base::ToString(bandTopkShape),
+                            "BSND band ori_topk_length shape must be [B, S1, 1], matching the query's b and s1"),
+                        return ge::GRAPH_FAILED);
+        } else {
+            OP_CHECK_IF(bandTopkShape.GetDimNum() != DIM_NUM_TWO ||
+                            bandTopkShape.GetDim(0) != bandQueryShape.GetDim(0) || bandTopkShape.GetDim(1) != 1,
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            opName_, ORI_TOPK_LENGTH_NAME, Ops::Base::ToString(bandTopkShape),
+                            "TND band ori_topk_length shape must be [T, 1], matching the query's token count"),
+                        return ge::GRAPH_FAILED);
+        }
+        return ge::GRAPH_SUCCESS;
+    }
     const gert::Shape &topkLenShape = opParamInfo_.oriTopkLength.tensor->GetStorageShape();
     const gert::Shape &sparseShape = opParamInfo_.oriSparseIndices.tensor->GetStorageShape();
     if (oriSparseIndicesLayout_ == SMLALayout::TND) {
