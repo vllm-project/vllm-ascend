@@ -71,6 +71,7 @@ from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     HostSeqLensRequirement,
+    HostSeqLensRequirements,
     resolve_host_seq_lens_requirements,
 )
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
@@ -259,10 +260,11 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=True,
         )
 
-        # RFC #17479: host seq-lens requirement contract. Resolved over the
-        # instantiated target/draft metadata builders in initialize_kv_cache;
-        # EXACT is the conservative default before that.
-        self._host_seq_lens_requirements = None
+        # Host seq-lens requirement contract (see
+        # https://github.com/vllm-project/vllm-ascend/issues/17479). Resolved
+        # over the instantiated target/draft metadata builders in
+        # initialize_kv_cache; EXACT is the conservative default before that.
+        self._host_seq_lens_requirements: HostSeqLensRequirements | None = None
         self._host_seq_lens_requirement = HostSeqLensRequirement.EXACT
 
         # NOTE: In GPUModelRunner, decode_query_len is initialized in load_model(),
@@ -1361,8 +1363,7 @@ class NPUModelRunner(GPUModelRunner):
         requirements = self._host_seq_lens_requirements
         consumers = {requirement.name: names for requirement, names in sorted(requirements.consumers.items())}
         logger.debug(
-            "Host seq-lens requirement contract (RFC #17479, MRV2): "
-            "requirement=%s consumers=%s undeclared=%s",
+            "Host seq-lens requirement contract (RFC #17479, MRV2): requirement=%s consumers=%s undeclared=%s",
             requirements.requirement.name,
             consumers,
             requirements.undeclared,
@@ -1438,8 +1439,10 @@ class NPUModelRunner(GPUModelRunner):
         # RFC #17479: exact-host materialization boundary; skipped entirely
         # when no active consumer requires exact host seq lens.
         if (
-            self.speculator is not None or self.sync_spec_pp_cpu_counts
-        ) and self._needs_exact_host_seq_lens() and not self._can_skip_spec_cpu_length_sync():
+            (self.speculator is not None or self.sync_spec_pp_cpu_counts)
+            and self._needs_exact_host_seq_lens()
+            and not self._can_skip_spec_cpu_length_sync()
+        ):
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
