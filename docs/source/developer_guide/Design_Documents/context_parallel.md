@@ -10,14 +10,16 @@ Prefill Context Parallel is not supported by vLLM Ascend. This document describe
 
 DCP stores tokens in an interleaved layout across ranks. The interleaving granularity is controlled by `cp_kv_cache_interleave_size`, whose default value is `1`.
 
-For a DCP size of `dcp_size`, a virtual block contains `block_size * dcp_size` tokens. For token `x`:
+Here `physical_block_size` is the KV-cache block size configured by `--block-size` (`cache_config.block_size`). For a DCP size of `dcp_size`, a virtual block contains `physical_block_size * dcp_size` tokens. For token `x`:
 
-- `virtual_block_index = x // (block_size * dcp_size)`
-- `offset_in_virtual_block = x % (block_size * dcp_size)`
+- `virtual_block_index = x // (physical_block_size * dcp_size)`
+- `offset_in_virtual_block = x % (physical_block_size * dcp_size)`
 - `local_block_index = offset_in_virtual_block // cp_kv_cache_interleave_size`
 - `target_rank = local_block_index % dcp_size`
 
-The slot-mapping calculation uses this layout so each DCP rank stores only its local sequence shard. The current implementation requires `block_size % cp_kv_cache_interleave_size == 0`.
+The slot-mapping calculation uses this layout so each DCP rank stores only its local sequence shard. The current implementation requires `physical_block_size % cp_kv_cache_interleave_size == 0`.
+
+In Model Runner V2 DFlash/DSpark, `prepare_dflash_inputs_triton` uses `physical_block_size` to determine the owning DCP rank and the position within that rank's KV cache. Its `block_size` argument instead describes the attention kernel's block-table page size. The kernel locates a slot using `local_position // block_size` as the block-table index and `local_position % block_size` as the offset within that page. The physical block size must be divisible by this kernel page size: for a physical size of 384 and a kernel page size of 128, one physical block spans three block-table entries. Using 128 for DCP ownership in that case would assign tokens to the wrong rank.
 
 ![DCP block table](../../assets/cp/blocktable.png)
 
