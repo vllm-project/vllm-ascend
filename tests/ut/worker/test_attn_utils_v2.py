@@ -1408,6 +1408,7 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
     layer.impl = SimpleNamespace(
         fa_quant_layer=fa_quant,
         enable_sparse_sfa_c8=sparse_c8,
+        enable_sparse_sfa_turboquant=False,
         dtype=torch.bfloat16,
     )
     layer.get_kv_cache_spec = lambda _cfg: SimpleNamespace(
@@ -1665,3 +1666,49 @@ def test_mrv2_binding_wraps_only_v41_slots():
     kv_view, scale_view = v41_indexer.kv_cache[0]
     assert kv_view is kv_caches["model.layers.2.self_attn.indexer.k_cache"][0]
     assert scale_view is kv_caches["model.layers.2.self_attn.indexer.k_cache"][1]
+
+
+@pytest.mark.parametrize("for_capture", [False, True])
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_tq_groups_without_a_dsa_builder_skip_the_formatted_mapping(for_capture, dtype):
+    # Regression: TurboQuant also backs the packed SFA main cache, which has no
+    # DSA metadata builder. The DSA-only slot formatting has to be skipped rather
+    # than raised on -- and only the is_dsa_builder branch reads a formatted
+    # mapping, so nothing on the SFA path loses one.
+    layer_names, specs, _, _, kv_cache_config = _make_dsa_metadata_groups()
+    for group in kv_cache_config.kv_cache_groups:
+        group.kv_cache_spec = replace(group.kv_cache_spec, cache_dtype_str="turboquant_4bit_nc")
+    builders = [MagicMock(tq_group_block_sizes=None) for _ in layer_names]
+    attn_groups = [
+        [
+            AttentionGroup(
+                backend=AscendDSAC4Backend if _spec_compress_ratio(spec) == 4 else AscendDSAC128Backend,
+                layer_names=[layer_name],
+                kv_cache_spec=spec,
+                kv_cache_group_id=group_id,
+                metadata_builders=[builder],
+            )
+        ]
+        for group_id, (layer_name, spec, builder) in enumerate(zip(layer_names, specs, builders))
+    ]
+
+    attn_utils.build_attn_metadata(
+        attn_groups=attn_groups,
+        num_reqs=1,
+        num_tokens=3,
+        query_start_loc_gpu=torch.tensor([0, 3], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 3], dtype=torch.int32),
+        max_query_len=3,
+        seq_lens=torch.tensor([3], dtype=torch.int32),
+        max_seq_len=3,
+        block_tables=tuple(torch.zeros((1, 1), dtype=torch.int32) for _ in specs),
+        slot_mappings=torch.tensor([[0, 65, -1, 111], [1, 130, -2, 222]], dtype=dtype),
+        kv_cache_config=kv_cache_config,
+        for_cudagraph_capture=for_capture,
+    )
+
+    for builder in builders:
+        build_call = builder.build_for_cudagraph_capture if for_capture else builder.build
+        assert "formatted_slot_mapping" not in build_call.call_args.kwargs
+        # A group without a DSA builder keeps its lazy geometry untouched.
+        assert builder.tq_group_block_sizes is None

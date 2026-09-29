@@ -472,6 +472,7 @@ def test_sfa_pcp_dcp_empty_local_prefill_joins_dcp_kv_gather() -> None:
     impl = AscendSFAPCPDCPImpl.__new__(AscendSFAPCPDCPImpl)
     impl.dcp_group = object()
     impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
     impl._start_dcp_gather = Mock(return_value="gathered")
     metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
     metadata.num_prefills = 0
@@ -695,6 +696,7 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     impl.skip_topk = skip_topk
     impl.use_index_cache = True
     impl.enable_sparse_sfa_c8 = sfa_c8
+    impl.enable_sparse_sfa_turboquant = False
     impl.enable_sparse_li_c8 = li_c8
     impl.preprocess_type = preprocess_type
     impl.layer_name = "model.layers.80.self_attn.attn" if is_mtp else "model.layers.2.self_attn.attn"
@@ -1021,6 +1023,7 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
 
 def test_sfa_dcp_prefill_passes_contiguous_gathered_cache() -> None:
     impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+    impl.enable_sparse_sfa_turboquant = False
     impl.dcp_group = Mock()
     packed = torch.randn(2, 128, 1, 576)
     gathered = packed.split((512, 64), dim=-1)
@@ -1082,6 +1085,7 @@ def test_sfa_pcp_keeps_prolog_v3_enabled(is_kv_consumer, sfa_c8):
     impl.qk_rope_head_dim = 64
     impl.is_kv_consumer = is_kv_consumer
     impl.enable_sparse_sfa_c8 = sfa_c8
+    impl.enable_sparse_sfa_turboquant = False
     impl.enable_mlapo = False
     with patch.object(impl, "_try_enable_type", return_value=True) as prepare_weights:
         assert impl._resolve_preprocess_type(torch.bfloat16) == PreprocessType.PROLOG_V3
@@ -1299,6 +1303,7 @@ def test_sfa_pcp_builder_prepares_local_prolog_slots():
 def test_sfa_pcp_empty_local_prefill_joins_kv_gathers():
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
     impl.enable_sparse_sfa_c8 = False
+    impl.enable_sparse_sfa_turboquant = False
     metadata = SimpleNamespace(
         num_decode_tokens=1,
         num_prefills=0,
@@ -1342,6 +1347,7 @@ def test_sfa_pcp_empty_local_prefill_joins_kv_gathers():
 def test_sfa_pcp_empty_global_slots_skips_kv_gather():
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
     impl.enable_sparse_sfa_c8 = False
+    impl.enable_sparse_sfa_turboquant = False
     hidden = torch.empty((0, 1))
     slots = torch.empty(0, dtype=torch.int64)
     metadata = SimpleNamespace(
