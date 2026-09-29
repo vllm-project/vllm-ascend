@@ -134,6 +134,7 @@ class TestACLGraphWrapper(TestBase):
         # Mock VllmConfig
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
         self.mock_vllm_config.compilation_config = MagicMock()
+        self.mock_vllm_config.compilation_config.pass_config.fuse_gemm_comms = False
 
         # Mock runnable function
         self.mock_runnable = MagicMock(return_value="test_output")
@@ -289,6 +290,7 @@ class TestACLGraphWrapper(TestBase):
         mock_get_forward_context.return_value = self.mock_forward_context
         mock_get_forward_context_2.return_value = self.mock_forward_context
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+        self.mock_vllm_config.compilation_config.pass_config.fuse_gemm_comms = True
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
@@ -325,7 +327,11 @@ class TestACLGraphWrapper(TestBase):
         # Verify graph capture happened
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
         self.mock_updatable_graph.assert_called_once()
-        mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
+        mock_torch.npu.graph.assert_called_once_with(
+            mock_npu_graph,
+            pool=self.mock_graph_pool,
+            capture_error_mode="relaxed",
+        )
         self.mock_runnable.assert_called_once_with(test_tensor, "arg2")
 
         # Verify the entry was created and updated
@@ -687,7 +693,11 @@ class TestACLGraphWrapper(TestBase):
         # Verify graph capture happened
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
         self.mock_updatable_graph.assert_called_once()
-        mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
+        mock_torch.npu.graph.assert_called_once_with(
+            mock_npu_graph,
+            pool=self.mock_graph_pool,
+            capture_error_mode="global",
+        )
 
         # Should return the original output (not weak ref) since weak_ref_output is not enabled
         self.assertEqual(result, "test_output")
@@ -761,7 +771,11 @@ class TestACLGraphWrapper(TestBase):
         # Verify graph capture happened
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
         self.mock_updatable_graph.assert_called_once()
-        mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
+        mock_torch.npu.graph.assert_called_once_with(
+            mock_npu_graph,
+            pool=self.mock_graph_pool,
+            capture_error_mode="global",
+        )
 
         # Should return the weak ref output when weak_ref_output option is enabled
         self.assertEqual(result, "weak_ref_output")
