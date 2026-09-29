@@ -1136,6 +1136,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
         runner.use_sparse = False
         runner.enable_sparse_sfa_c8 = False
+        runner.enable_sparse_sfa_turboquant = False
         runner.enable_sparse_li_c8 = False
         runner.use_compress = False
         runner.use_hybrid_blocks = False
@@ -1982,6 +1983,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         attn_module.impl = SimpleNamespace(
             has_indexer=False,
             enable_sparse_sfa_c8=False,
+            enable_sparse_sfa_turboquant=False,
             enable_sparse_li_c8=False,
         )
         attn_module.kv_lora_rank = 512
@@ -2047,6 +2049,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         attn_module.impl = SimpleNamespace(
             has_indexer=True,
             enable_sparse_sfa_c8=False,
+            enable_sparse_sfa_turboquant=False,
             enable_sparse_li_c8=False,
         )
         attn_module.kv_lora_rank = 512
@@ -2155,6 +2158,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             has_indexer=True,
             runtime_has_indexer=False,
             enable_sparse_sfa_c8=False,
+            enable_sparse_sfa_turboquant=False,
             enable_sparse_li_c8=False,
         )
         attn_module.kv_lora_rank = 512
@@ -2369,6 +2373,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 attn_module.impl = SimpleNamespace(
                     has_indexer=True,
                     enable_sparse_sfa_c8=enable_sfa_c8,
+                    enable_sparse_sfa_turboquant=False,
+                    uses_packed_sfa_main_cache=enable_sfa_c8,
                     enable_sparse_li_c8=enable_li_c8,
                 )
                 runner.ascend_config.is_sparse_li_c8_layer.return_value = enable_li_c8

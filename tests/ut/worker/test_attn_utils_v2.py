@@ -994,6 +994,7 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
     layer.impl = SimpleNamespace(
         fa_quant_layer=fa_quant,
         enable_sparse_sfa_c8=sparse_c8,
+        enable_sparse_sfa_turboquant=False,
         dtype=torch.bfloat16,
     )
     layer.get_kv_cache_spec = lambda _cfg: SimpleNamespace(
