@@ -60,7 +60,7 @@ set(VLLM_ASCEND_CUSTOM_OP
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 
-# The INT4 MSD kernel and sidecar are supported on Ascend A3 only.
+# The INT4 MSD kernel and its host implementation are supported on Ascend A3 only.
 # setup.py normalizes the 910c alias to ascend910_9392 before invoking CMake.
 string(TOLOWER "${SOC_VERSION}" VLLM_ASCEND_GMSQ_SOC_VERSION)
 set(VLLM_ASCEND_BUILD_GMSQ OFF)
@@ -135,6 +135,12 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+if(VLLM_ASCEND_BUILD_GMSQ)
+  target_sources(vllm_ascend_C PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gmsq_situ_quant/grouped_matmul_situ_quant.cpp
+  )
+  target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_BUILD_GMSQ)
+endif()
 if(SOC_VERSION MATCHES "ascend910_93.*")
   target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD)
   target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
@@ -244,29 +250,4 @@ if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
   install(TARGETS vllm_ascend_C DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
-  if(VLLM_ASCEND_BUILD_GMSQ)
-    # Direct pybind exposure of the fused A3 GMSQ operator.
-    pybind11_add_module(vllm_ascendC
-      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gmsq_situ_quant/grouped_matmul_situ_quant.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gmsq_situ_quant/vllm_ascendC_binding.cpp
-    )
-    target_include_directories(vllm_ascendC PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gmsq_situ_quant
-    )
-    target_link_directories(vllm_ascendC PRIVATE
-      ${TORCH_LIBRARY_DIRS}
-      ${TORCH_NPU_PATH}/lib/
-      ${ASCEND_HOME_PATH}/lib64
-    )
-    target_link_libraries(vllm_ascendC PUBLIC
-      vllm_ascend_kernels
-      ${VLLM_ASCEND_C_COMMON_LIBS}
-    )
-    target_link_options(vllm_ascendC PRIVATE
-      "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib"
-    )
-    # setup.py builds vllm_ascend_C; keep the sidecar in the same build graph.
-    add_dependencies(vllm_ascend_C vllm_ascendC)
-    install(TARGETS vllm_ascendC DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
-  endif()
 endif()

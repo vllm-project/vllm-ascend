@@ -296,6 +296,36 @@ class TestW8A8FusedMoEMethod(unittest.TestCase):
         self.assertIsNone(weights.w1_scale_bias)
 
 
+class TestGmsqExtensionLoading(unittest.TestCase):
+    def setUp(self):
+        w4a8_module._get_grouped_matmul_situ_quant.cache_clear()
+        self.addCleanup(w4a8_module._get_grouped_matmul_situ_quant.cache_clear)
+
+    def test_loads_op_from_standard_extension(self):
+        gmsq_op = MagicMock()
+        with (
+            patch.object(w4a8_module, "enable_custom_op", return_value=True) as load_extension,
+            patch.object(torch.ops, "_C_ascend", SimpleNamespace(grouped_matmul_situ_quant=gmsq_op)),
+        ):
+            self.assertIs(w4a8_module._get_grouped_matmul_situ_quant(), gmsq_op)
+            self.assertIs(w4a8_module._get_grouped_matmul_situ_quant(), gmsq_op)
+        load_extension.assert_called_once_with()
+
+    def test_disabled_extension_does_not_select_registered_op(self):
+        with (
+            patch.object(w4a8_module, "enable_custom_op", return_value=False),
+            patch.object(torch.ops, "_C_ascend", SimpleNamespace(grouped_matmul_situ_quant=MagicMock())),
+        ):
+            self.assertIsNone(w4a8_module._get_grouped_matmul_situ_quant())
+
+    def test_extension_without_a3_op_falls_back(self):
+        with (
+            patch.object(w4a8_module, "enable_custom_op", return_value=True),
+            patch.object(torch.ops, "_C_ascend", SimpleNamespace()),
+        ):
+            self.assertIsNone(w4a8_module._get_grouped_matmul_situ_quant())
+
+
 class TestW4A8SituPath(unittest.TestCase):
     def test_a3_w4a8_situ_uses_gmsq_fusion(self):
         method = AscendW4A8DynamicFusedMoEMethod.__new__(AscendW4A8DynamicFusedMoEMethod)

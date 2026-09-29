@@ -4,9 +4,10 @@
 
 import pytest
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 torch_npu = pytest.importorskip("torch_npu")
-pytest.importorskip("vllm_ascend.vllm_ascendC")
+pytest.importorskip("vllm_ascend.vllm_ascend_C")
 
 BETA = 4.0
 LINEAR_BETA = 25.0
@@ -18,8 +19,7 @@ def require_a3():
         pytest.skip("GMSQ MSD requires an NPU")
     if not 250 <= torch_npu.npu.get_soc_version() <= 256:
         pytest.skip("GMSQ MSD regression requires Ascend A3")
-    if not hasattr(torch.vllm_ascendC, "grouped_matmul_situ_quant"):
-        pytest.skip("GMSQ custom operator is not built")
+    assert hasattr(torch.ops._C_ascend, "grouped_matmul_situ_quant"), "A3 extension must register GMSQ"
     previous = torch.npu.config.allow_internal_format
     torch.npu.config.allow_internal_format = True
     try:
@@ -98,7 +98,7 @@ def _check(output, expected, capacity):
 
 
 def _call(x, x_scale, layer, group_list, group_list_type):
-    return torch.vllm_ascendC.grouped_matmul_situ_quant(
+    return torch.ops._C_ascend.grouped_matmul_situ_quant(
         x, layer[0], layer[1], x_scale, group_list, [], BETA, LINEAR_BETA, group_list_type
     )
 
@@ -106,6 +106,33 @@ def _call(x, x_scale, layer, group_list, group_list_type):
 def _groups(counts, dtype, group_list_type):
     groups = torch.tensor(counts, dtype=dtype)
     return groups.cumsum(0) if group_list_type == 0 else groups
+
+
+@pytest.mark.parametrize("capacity", [0, 8])
+@pytest.mark.parametrize("fake", [False, True], ids=["meta", "fake_npu"])
+def test_gmsq_dispatcher_shape_inference(capacity, fake):
+    op_name = "_C_ascend::grouped_matmul_situ_quant"
+    assert torch._C._dispatch_has_kernel_for_dispatch_key(op_name, "PrivateUse1")
+    assert torch._C._dispatch_has_kernel_for_dispatch_key(op_name, "Meta")
+    device = "npu" if fake else "meta"
+    with FakeTensorMode() if fake else torch.device("meta"):
+        x = torch.empty((capacity, 320), dtype=torch.int8, device=device)
+        weight = torch.empty((320, 96), dtype=torch.int32, device=device)
+        weight_scale = torch.empty(768, dtype=torch.int64, device=device)
+        x_scale = torch.empty(capacity, dtype=torch.float32, device=device)
+        group_list = torch.empty(1, dtype=torch.int64, device=device)
+        # Exercise the dispatcher schema's default scalar arguments as well.
+        y, scale = torch.ops._C_ascend.grouped_matmul_situ_quant(
+            x=x,
+            weight=[weight],
+            weight_scale=[weight_scale],
+            x_scale=x_scale,
+            group_list=group_list,
+            weight_assist_matrix=[],
+        )
+        assert y.shape == (capacity, 384) and y.dtype == torch.int8
+        assert scale.shape == (capacity,) and scale.dtype == torch.float32
+        assert y.device == x.device and scale.device == x.device
 
 
 @pytest.mark.parametrize("nz", [False, True], ids=["nd", "native_nz"])

@@ -37,6 +37,7 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     dispose_tensor,
+    enable_custom_op,
     get_ascend_device_type,
     maybe_trans_nz,
 )
@@ -57,13 +58,10 @@ GMSQ_PACKED_N_FACTOR = 8
 
 @cache
 def _get_grouped_matmul_situ_quant():
-    """Return the A3 fused GMSQ op, or None when its sidecar is unavailable."""
-    try:
-        import vllm_ascend.vllm_ascendC  # type: ignore  # noqa: F401
-
-        return torch.vllm_ascendC.grouped_matmul_situ_quant
-    except (ImportError, AttributeError):
+    """Load the standard extension and return its A3 GMSQ op when available."""
+    if not enable_custom_op():
         return None
+    return getattr(torch.ops._C_ascend, "grouped_matmul_situ_quant", None)
 
 
 def _as_gmsq_expert_weights(tensor_or_list: list[torch.Tensor] | torch.Tensor) -> list[torch.Tensor]:
