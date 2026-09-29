@@ -378,7 +378,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
       --seed 1024 \
       --served-model-name glm \
       --safetensors-load-strategy prefetch \
-      --max-num-seqs 2 \
+      --max-num-seqs 32 \
       --max-model-len 133120 \
       --max-num-batched-tokens 8192 \
       --trust-remote-code \
@@ -513,7 +513,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
       speculative configuration keeps the MTP draft model in eager mode.
     - `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1 on both
       roles for this validated configuration.
-    - Prefill uses `--max-num-seqs 2` and
+    - Prefill uses `--max-num-seqs 32` and
       `--max-num-batched-tokens 8192`. Decode uses `--max-num-seqs 10` and
       `--max-num-batched-tokens 60`. Tune these role-specific scheduler limits
       independently for the target workload.
