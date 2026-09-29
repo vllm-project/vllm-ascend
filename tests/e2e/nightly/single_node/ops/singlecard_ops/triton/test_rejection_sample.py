@@ -285,36 +285,80 @@ def test_rejection_greedy_sample_spec_len_1_triton_kernel(synthetic_mode):
     torch.npu.reset_peak_memory_stats()
 
 
-@pytest.mark.parametrize("synthetic_mode", [False, True])
+@pytest.mark.parametrize("mode", ["standard", "synthetic", "fly"])
 @torch.inference_mode()
-def test_rejection_greedy_sample_triton_kernel(synthetic_mode):
+def test_rejection_greedy_sample_triton_kernel(mode):
     device = "npu"
     batch_size = 6
     max_spec_len = 3
     draft_tokens_per_req = [3, 2, 1, 0, 3, 2]
 
-    cu_num_draft_tokens = torch.tensor([3, 5, 6, 6, 9, 11], dtype=torch.int32, device=device)
-    draft_token_ids = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], dtype=torch.int64, device=device)
-    target_argmax = torch.tensor([1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11], dtype=torch.int64, device=device)
-    bonus_token_ids = torch.tensor([[21], [22], [23], [24], [25], [26]], dtype=torch.int64, device=device)
-    is_greedy = torch.ones(batch_size, dtype=torch.bool, device=device)
-    output_token_ids = torch.full((batch_size, max_spec_len + 1), -1, dtype=torch.int64, device=device)
+    cu_num_draft_tokens = torch.tensor(
+        [3, 5, 6, 6, 9, 11],
+        dtype=torch.int32,
+        device=device,
+    )
+    draft_token_ids = torch.tensor(
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        dtype=torch.int64,
+        device=device,
+    )
+    target_argmax = torch.tensor(
+        [1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11],
+        dtype=torch.int64,
+        device=device,
+    )
+    bonus_token_ids = torch.tensor(
+        [[21], [22], [23], [24], [25], [26]],
+        dtype=torch.int64,
+        device=device,
+    )
+    is_greedy = torch.ones(
+        batch_size,
+        dtype=torch.bool,
+        device=device,
+    )
+    output_token_ids = torch.full(
+        (batch_size, max_spec_len + 1),
+        -1,
+        dtype=torch.int64,
+        device=device,
+    )
     grid, block_size = cal_grid_and_block_size(batch_size)
 
-    # Synthetic: rates = [0.8, 0.5, 0.2] (non-increasing). The 11 uniform
-    # values mix accepts/rejects to exercise first-rejection: a rejected
-    # position emits target_argmax and stops the request; all-accepted
-    # requests append the bonus token.
+    synthetic_mode = mode == "synthetic"
+    fly_verify = mode == "fly"
+    fly_window_size = 1 if fly_verify else 0
+
     if synthetic_mode:
         uniform_probs_t = torch.tensor(
             [0.2, 0.4, 0.1, 0.6, 0.3, 0.9, 0.1, 0.7, 0.3, 0.1, 0.5],
             dtype=torch.float32,
             device=device,
         )
-        rates_t = torch.tensor([0.8, 0.5, 0.2], dtype=torch.float32, device=device)
+        rates_t = torch.tensor(
+            [0.8, 0.5, 0.2],
+            dtype=torch.float32,
+            device=device,
+        )
     else:
         uniform_probs_t = None
         rates_t = None
+
+    if fly_verify:
+        fly_entropy_t = torch.ones(
+            draft_token_ids.shape[0],
+            dtype=torch.float32,
+            device=device,
+        )
+        fly_draft_allowed_t = torch.ones(
+            draft_token_ids.shape[0],
+            dtype=torch.bool,
+            device=device,
+        )
+    else:
+        fly_entropy_t = None
+        fly_draft_allowed_t = None
 
     for i in range(KERNEL_TEST_ITERS):
         output_token_ids_ref = output_token_ids.clone()
@@ -332,6 +376,10 @@ def test_rejection_greedy_sample_triton_kernel(synthetic_mode):
             uniform_probs=uniform_probs_t,
             synthetic_conditional_rates=rates_t,
             synthetic_mode=synthetic_mode,
+            fly_entropy=fly_entropy_t,
+            fly_draft_allowed=fly_draft_allowed_t,
+            fly_entropy_threshold=0.5,
+            fly_window_size=fly_window_size,
         )
         rejection_greedy_sample_triton[(grid,)](
             output_token_ids_triton,
@@ -344,13 +392,19 @@ def test_rejection_greedy_sample_triton_kernel(synthetic_mode):
             max_spec_len,
             uniform_probs_t,
             rates_t,
+            fly_entropy_t,
+            fly_draft_allowed_t,
+            0.5,
             SYNTHETIC_MODE=synthetic_mode,
+            FLY_VERIFY=fly_verify,
+            FLY_WINDOW_SIZE=fly_window_size,
             BLOCK_SIZE=block_size,
         )
         torch.npu.synchronize()
-        assert torch.equal(output_token_ids_ref, output_token_ids_triton), (
-            f"iteration {i}, synthetic_mode={synthetic_mode}"
-        )
+        assert torch.equal(
+            output_token_ids_ref,
+            output_token_ids_triton,
+        ), f"iteration {i}, mode={mode}"
 
     gc.collect()
     torch.npu.empty_cache()
@@ -431,7 +485,12 @@ def test_rejection_greedy_sample_triton_boundary(is_greedy_pattern):
         max_spec_len,
         None,  # uniform_probs (standard greedy path)
         None,  # synthetic_conditional_rates
+        None,  # fly_entropy
+        None,  # fly_draft_allowed
+        0.0,  # fly_entropy_threshold
         SYNTHETIC_MODE=False,
+        FLY_VERIFY=False,
+        FLY_WINDOW_SIZE=0,
         BLOCK_SIZE=block_size,
     )
     torch.npu.synchronize()
@@ -512,7 +571,12 @@ def test_rejection_greedy_sample_triton_boundary_multilane(first_req_greedy):
         max_spec_len,
         None,
         None,
+        None,
+        None,
+        0.0,
         SYNTHETIC_MODE=False,
+        FLY_VERIFY=False,
+        FLY_WINDOW_SIZE=0,
         BLOCK_SIZE=block_size,
     )
     torch.npu.synchronize()
