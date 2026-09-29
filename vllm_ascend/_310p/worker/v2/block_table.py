@@ -11,6 +11,8 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class Ascend310PBlockTables(BlockTables):
     """CPU-owned MRV2 block tables for Ascend 310P."""
@@ -174,6 +176,10 @@ class Ascend310PBlockTables(BlockTables):
             if not self._slot_mapping_enabled[group_id]:
                 continue
             for batch_idx, req_idx in enumerate(idx_mapping_np):
+                # vLLM #56734: dummy draft decode runs use idx_mapping == -1.
+                # Leave the pre-filled PAD for rows that own no blocks.
+                if not vllm_version_is("0.30.0") and req_idx < 0:
+                    continue
                 start = int(query_start_loc_np[batch_idx])
                 end = int(query_start_loc_np[batch_idx + 1])
                 token_positions = positions_np[start:end]
