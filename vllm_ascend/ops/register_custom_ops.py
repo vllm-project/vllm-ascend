@@ -54,39 +54,55 @@ def _pad_to_ep_local_size(x: torch.Tensor, max_local_size: int) -> torch.Tensor:
 
 
 def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor) -> torch.Tensor:
-    """EP communication only: EP all_gather followed by unpad according to the DP token distribution."""
+    """EP communication only: EP all_gather followed by unpad according to the DP token distribution.
+
+    When the SP token layout is known, keep the padded layout through the
+    gather (rc1 sp_by_pass semantics): pad the input to max_local_size,
+    all_gather, and return the gathered tensor as-is. The extra pad rows from
+    imbalanced shards are dropped on the reduce side after the MoE math, and
+    the FLOPs the fast ranks spend on pad rows are wall-clock free -- they
+    would be waiting for the slow rank at the collective anyway. This removes
+    the per-shard python slicing loop + torch.cat host overhead from the hot
+    path (3 gather calls per MoE layer).
+    """
     forward_context = get_forward_context()
     dp_metadata = forward_context.dp_metadata
     ep_group = get_ep_group()
     local_sizes = _get_ep_local_sizes(dp_metadata, ep_group)
     if local_sizes is not None:
-        max_local_size = max(local_sizes)
         # all_gather requires equal-length inputs on every rank: pad to
-        # max_local_size first, then trim back to each rank's real local size.
+        # max_local_size. _pad_to_ep_local_size is a no-op for equal shards.
+        max_local_size = max(local_sizes)
         x = _pad_to_ep_local_size(x, max_local_size)
+        # Keep the padded layout (no unpad); the reduce side slices the pad
+        # rows off.
+        return ep_group.all_gather(x, 0).view(len(local_sizes) * max_local_size, *x.shape[1:])
     # need to unpad from ep size
     x = ep_group.all_gather(x, 0)
     if dp_metadata is not None:
-        if local_sizes is not None:
-            x = x.view(len(local_sizes), max(local_sizes), *x.shape[1:])
-            x = torch.cat([x[idx, :size] for idx, size in enumerate(local_sizes)], dim=0)
-        else:
-            num_tokens_across_dp_cpu = dp_metadata.num_tokens_across_dp_cpu
-            result = torch.empty((num_tokens_across_dp_cpu.sum(), *x.shape[1:]), device=x.device, dtype=x.dtype)
-            dp_size = get_dp_group().world_size
-            x = x.view(dp_size, _EXTRA_CTX.padded_length, *x.shape[1:])
-            offset = 0
-            for idx in range(dp_size):
-                num_tokens_dp = int(num_tokens_across_dp_cpu[idx])
-                result[offset : offset + num_tokens_dp] = x[idx, :num_tokens_dp]
-                offset += num_tokens_dp
-            x = result
+        num_tokens_across_dp_cpu = dp_metadata.num_tokens_across_dp_cpu
+        result = torch.empty((num_tokens_across_dp_cpu.sum(), *x.shape[1:]), device=x.device, dtype=x.dtype)
+        dp_size = get_dp_group().world_size
+        x = x.view(dp_size, _EXTRA_CTX.padded_length, *x.shape[1:])
+        offset = 0
+        for idx in range(dp_size):
+            num_tokens_dp = int(num_tokens_across_dp_cpu[idx])
+            result[offset : offset + num_tokens_dp] = x[idx, :num_tokens_dp]
+            offset += num_tokens_dp
+        x = result
 
     return x
 
 
 def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
-    """EP communication only: pad according to the DP token distribution, then EP reduce_scatter."""
+    """EP communication only: pad according to the DP token distribution, then EP reduce_scatter.
+
+    When the SP token layout is known, the gather side already produced the
+    padded layout (each shard = max_local_size rows, real tokens at the head,
+    pad rows at the tail), so the reduce input is already the contiguous
+    (ep_size, max_local_size) layout: reduce_scatter directly with zero
+    allocation and zero copy, then slice back to this rank's real token count.
+    """
     forward_context = get_forward_context()
 
     dp_metadata = forward_context.dp_metadata
@@ -96,13 +112,10 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
     ep_group = get_ep_group()
     local_sizes = _get_ep_local_sizes(dp_metadata, ep_group)
     if local_sizes is not None:
-        max_local_size = max(local_sizes)
-        padded_x = x.new_zeros((len(local_sizes), max_local_size, *x.shape[1:]))
-        offset = 0
-        for idx, size in enumerate(local_sizes):
-            padded_x[idx, :size] = x[offset : offset + size]
-            offset += size
-        reduced = ep_group.reduce_scatter(padded_x.view(-1, *x.shape[1:]), 0)
+        # Paired with the padded-layout gather: x already has
+        # len(local_sizes) * max(local_sizes) rows, each rank's real tokens at
+        # the head of its shard; the pad tail is sliced off after the reduce.
+        reduced = ep_group.reduce_scatter(x.view(-1, *x.shape[1:]), 0)
         # The collective needs equal-sized chunks, while the next
         # sequence-parallel layer expects this rank's original token count.
         return reduced[: local_sizes[ep_group.rank_in_group]]
@@ -156,7 +169,8 @@ def _maybe_all_gather_and_maybe_unpad_fake(x: torch.Tensor) -> torch.Tensor:
     ep_group = get_ep_group()
     local_sizes = _get_ep_local_sizes(forward_context.dp_metadata, ep_group)
     if local_sizes is not None:
-        return torch.empty((sum(local_sizes), *x.shape[1:]), device=x.device, dtype=x.dtype)
+        # Match the padded-layout gather impl: every shard is max_local_size.
+        return torch.empty((len(local_sizes) * max(local_sizes), *x.shape[1:]), device=x.device, dtype=x.dtype)
 
     return torch.empty((x.shape[0] * ep_group.world_size, *x.shape[1:]), device=x.device, dtype=x.dtype)
 

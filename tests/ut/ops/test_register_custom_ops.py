@@ -10,6 +10,7 @@ from vllm_ascend.ops import register_custom_ops as custom_ops
 class _EpGroup:
     world_size = 4
     rank_in_group = 2
+    max_local_size = 3
 
     def all_gather(self, x: torch.Tensor, dim: int) -> torch.Tensor:
         assert dim == 0
@@ -17,13 +18,13 @@ class _EpGroup:
         return torch.arange(48, dtype=x.dtype).view(12, 4)
 
     def reduce_scatter(self, x: torch.Tensor, dim: int) -> torch.Tensor:
+        # Padded-layout semantics: the input is already the
+        # (ep_size, max_local_size) layout; take this rank's shard (real
+        # tokens at the head, pad rows at the tail).
         assert dim == 0
         assert x.shape == (12, 4)
-        assert torch.equal(
-            x[:, 0],
-            torch.tensor([0, 0, 0, 4, 0, 0, 8, 12, 16, 20, 24, 28], dtype=x.dtype),
-        )
-        return x[:3]
+        start = self.rank_in_group * self.max_local_size
+        return x[start : start + self.max_local_size]
 
 
 class _EpGroupRank0(_EpGroup):
@@ -42,24 +43,24 @@ def _patch_sp_ep_context(monkeypatch):
     monkeypatch.setattr(custom_ops, "get_ep_group", _EpGroup)
 
 
-def test_sp_ep_all_gather_pads_and_unpads_local_chunks(monkeypatch):
+def test_sp_ep_all_gather_keeps_padded_local_chunks(monkeypatch):
     _patch_sp_ep_context(monkeypatch)
 
     result = custom_ops._maybe_all_gather_and_maybe_unpad_impl(torch.empty(1, 4))
 
-    assert result.shape == (8, 4)
-    assert torch.equal(
-        result[:, 0],
-        torch.tensor([0, 12, 24, 28, 32, 36, 40, 44], dtype=result.dtype),
-    )
+    # Padded layout: 4 shards x max(3) = 12 rows, no unpad.
+    assert result.shape == (12, 4)
+    assert torch.equal(result, torch.arange(48, dtype=result.dtype).view(12, 4))
 
 
-def test_sp_ep_reduce_scatter_pads_local_chunks(monkeypatch):
+def test_sp_ep_reduce_scatter_reduces_padded_local_chunks(monkeypatch):
     _patch_sp_ep_context(monkeypatch)
 
-    result = custom_ops._maybe_pad_and_reduce_impl(torch.arange(32).view(8, 4))
+    result = custom_ops._maybe_pad_and_reduce_impl(torch.arange(48).view(12, 4))
 
+    # rank2 shard = rows 6..8, all real tokens (local_size=3).
     assert result.shape == (3, 4)
+    assert torch.equal(result[:, 0], torch.tensor([24, 28, 32], dtype=result.dtype))
 
 
 def test_sp_ep_reduce_scatter_draft_model_keeps_ep_layout(monkeypatch):
@@ -76,7 +77,7 @@ def test_sp_ep_reduce_scatter_draft_model_keeps_ep_layout(monkeypatch):
         raising=False,
     )
 
-    result = custom_ops._maybe_pad_and_reduce_impl(torch.arange(32).view(8, 4))
+    result = custom_ops._maybe_pad_and_reduce_impl(torch.arange(48).view(12, 4))
 
     assert result.shape == (3, 4)
 
@@ -85,18 +86,21 @@ def test_sp_ep_reduce_scatter_unpads_local_chunk(monkeypatch):
     _patch_sp_ep_context(monkeypatch)
     monkeypatch.setattr(custom_ops, "get_ep_group", _EpGroupRank0)
 
-    result = custom_ops._maybe_pad_and_reduce_impl(torch.arange(32).view(8, 4))
+    result = custom_ops._maybe_pad_and_reduce_impl(torch.arange(48).view(12, 4))
 
+    # rank0 shard = rows 0..2, only the first row is a real token
+    # (local_size=1); the pad tail is sliced off.
     assert result.shape == (1, 4)
+    assert torch.equal(result[:, 0], torch.tensor([0], dtype=result.dtype))
 
 
 def test_sp_ep_fake_shapes_follow_uneven_local_chunks(monkeypatch):
     _patch_sp_ep_context(monkeypatch)
 
     gathered = custom_ops._maybe_all_gather_and_maybe_unpad_fake(torch.empty(1, 4))
-    reduced = custom_ops._maybe_pad_and_reduce_fake(torch.empty(8, 4))
+    reduced = custom_ops._maybe_pad_and_reduce_fake(torch.empty(12, 4))
 
-    assert gathered.shape == (8, 4)
+    assert gathered.shape == (12, 4)
     assert reduced.shape == (3, 4)
 
 
@@ -132,7 +136,6 @@ def test_sp_ep_pcp_token_order_and_round_trip(monkeypatch, dp_size, pcp_size, sp
     max_size = max(ep_sizes)
     chunks = [torch.full((size, 4), float(rank + 1)) for rank, size in enumerate(ep_sizes)]
     padded = torch.stack([torch.nn.functional.pad(chunk, (0, 0, 0, max_size - len(chunk))) for chunk in chunks])
-    expected = torch.cat(chunks)
     context = SimpleNamespace(
         dp_metadata=SimpleNamespace(
             get_chunk_sizes_across_dp_rank=lambda: local_sizes, num_tokens_across_dp_cpu=torch.tensor(dp_tokens)
@@ -161,8 +164,9 @@ def test_sp_ep_pcp_token_order_and_round_trip(monkeypatch, dp_size, pcp_size, sp
         group = SimpleNamespace(world_size=world_size, rank_in_group=rank, all_gather=gather, reduce_scatter=reduce)
         monkeypatch.setattr(custom_ops, "get_ep_group", lambda group=group: group)
         gathered = custom_ops._maybe_all_gather_and_maybe_unpad_impl(chunks[rank])
-        assert torch.equal(gathered, expected)
-        assert custom_ops._maybe_all_gather_and_maybe_unpad_fake(chunks[rank]).shape == expected.shape
+        # Padded layout: every shard is max_size rows, real tokens at the head.
+        assert torch.equal(gathered, padded.flatten(0, 1))
+        assert custom_ops._maybe_all_gather_and_maybe_unpad_fake(chunks[rank]).shape == padded.flatten(0, 1).shape
         reduced = custom_ops._maybe_pad_and_reduce_impl(gathered)
         assert torch.equal(reduced, chunks[rank] * world_size)
         assert custom_ops._maybe_pad_and_reduce_fake(gathered).shape == chunks[rank].shape
