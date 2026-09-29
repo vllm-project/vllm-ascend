@@ -12,6 +12,9 @@
 # Features:
 # - Load balances requests to multiple prefiller and decoder servers.
 # - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
+# - Also supports Anthropic /v1/messages and OpenAI /v1/responses. Those two
+#   responses have no OpenAI ``choices``, so they are streamed through without
+#   the recompute parser. Responses prefill uses max_output_tokens=1.
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
@@ -280,6 +283,7 @@ class SharedProxyScheduler:
             ServerRole.DECODE: RolePools(),
         }
         self._ordinal = 0
+        self._push_counter = 0
 
         for host, port in prefiller_instances:
             self._add_server_no_lock(ServerRole.PREFILL, host, port)
@@ -313,7 +317,8 @@ class SharedProxyScheduler:
         pool = self._pool(role)
         entry = pool.servers[key]
         entry.heap_seq += 1
-        heapq.heappush(pool.heap, (self._priority(role, entry, key), entry.ordinal, entry.heap_seq, key))
+        self._push_counter += 1
+        heapq.heappush(pool.heap, (self._priority(role, entry, key), self._push_counter, entry.heap_seq, key))
         if len(pool.heap) > 2 * len(pool.servers):
             self._reset_heap(role)
 
@@ -334,7 +339,8 @@ class SharedProxyScheduler:
         for key, entry in pool.servers.items():
             if bump_seq:
                 entry.heap_seq += 1
-            heap.append((self._priority(role, entry, key), entry.ordinal, entry.heap_seq, key))
+            self._push_counter += 1
+            heap.append((self._priority(role, entry, key), self._push_counter, entry.heap_seq, key))
         heapq.heapify(heap)
         pool.heap = heap
 
@@ -835,6 +841,72 @@ def build_prefill_request(req_data: dict) -> dict:
     return payload
 
 
+def _api_kind(api: str) -> str:
+    path = "/" + api.strip("/")
+    if path.endswith("/responses"):
+        return "responses"
+    if path.endswith("/messages"):
+        return "messages"
+    return "openai"
+
+
+def build_prefill_request_for_api(api: str, req_data: dict) -> dict:
+    if _api_kind(api) != "responses":
+        return build_prefill_request(req_data)
+    payload = req_data.copy()
+    payload["kv_transfer_params"] = {
+        "do_remote_decode": True,
+        "do_remote_prefill": False,
+        "remote_engine_id": None,
+        "remote_block_ids": None,
+        "remote_host": None,
+        "remote_port": None,
+    }
+    payload["stream"] = False
+    payload["max_output_tokens"] = 1
+    payload.pop("max_tokens", None)
+    payload.pop("min_tokens", None)
+    payload.pop("stream_options", None)
+    payload.pop("max_completion_tokens", None)
+    return payload
+
+
+def extract_cached_tokens_for_api(api: str, response_json: dict) -> int | None:
+    kind = _api_kind(api)
+    usage = response_json.get("usage") or {}
+    if kind == "messages":
+        cached = usage.get("cache_read_input_tokens")
+        return cached if isinstance(cached, int) else 0
+    if kind == "responses":
+        details = usage.get("input_tokens_details") or {}
+        cached = details.get("cached_tokens")
+        return cached if isinstance(cached, int) else 0
+    return extract_cached_tokens(response_json)
+
+
+def write_cached_tokens_for_api(api: str, chunk_json: dict, cached_tokens: int | None) -> bool:
+    kind = _api_kind(api)
+    if kind == "openai":
+        return update_cached_tokens_in_chunk(chunk_json, cached_tokens)
+    if cached_tokens is None:
+        return False
+    usage = chunk_json.get("usage")
+    if kind == "responses" and not isinstance(usage, dict):
+        response_obj = chunk_json.get("response")
+        usage = response_obj.get("usage") if isinstance(response_obj, dict) else None
+    if not isinstance(usage, dict):
+        return False
+    if kind == "messages":
+        usage["cache_read_input_tokens"] = cached_tokens
+        return True
+    details = usage.get("input_tokens_details")
+    if not isinstance(details, dict):
+        details = {}
+    details["cached_tokens"] = cached_tokens
+    usage["input_tokens_details"] = details
+    return True
+
+
 async def send_request_to_service(
     client: httpx.AsyncClient,
     endpoint: str,
@@ -843,7 +915,7 @@ async def send_request_to_service(
     max_retries: int = 3,
     base_delay: float = 0.2,
 ):
-    req_data = build_prefill_request(req_data)
+    req_data = build_prefill_request_for_api(endpoint, req_data)
     headers = auth_headers(request_id)
     max_attempts = max(1, max_retries)
     for attempt in range(1, max_attempts + 1):
@@ -973,7 +1045,7 @@ async def assign_instances(
     kv_transfer_params = response_json.get("kv_transfer_params", {})
     if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
-    prefiller_cached_tokens = extract_cached_tokens(response_json)
+    prefiller_cached_tokens = extract_cached_tokens_for_api(api, response_json)
 
     decoder_key = None
     try:
@@ -1113,6 +1185,57 @@ async def handle_completions_impl(api: str, request: Request):
                     released_kv = True
 
             try:
+                if _api_kind(api) != "openai":
+                    nonstream_buf = bytearray() if not stream_flag else None
+                    if preopened_gen is not None:
+                        gen = _replay_first_chunk(preopened_first, preopened_gen)
+                        preopened_gen = None
+                    else:
+                        decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
+                        gen = stream_service_response(
+                            decoder_client,
+                            api,
+                            req_data,
+                            request_id=instance_info.request_id,
+                            max_retries=args.max_retries,
+                            base_delay=args.retry_delay,
+                        )
+                    async for chunk in gen:
+                        if not released_kv and chunk:
+                            await release_prefill_kv_once()
+                        if nonstream_buf is not None:
+                            nonstream_buf += bytes(chunk)
+                            try:
+                                obj = json.loads(bytes(nonstream_buf).decode("utf-8"))
+                            except (json.JSONDecodeError, UnicodeDecodeError):
+                                continue
+                            if write_cached_tokens_for_api(api, obj, reported_prefiller_cached_tokens):
+                                yield encode_response_chunk(obj, False)
+                            else:
+                                yield bytes(nonstream_buf)
+                            nonstream_buf.clear()
+                            continue
+                        try:
+                            chunk_str = chunk.decode("utf-8").strip()
+                        except UnicodeDecodeError:
+                            yield chunk
+                            continue
+                        is_sse = chunk_str.startswith("data: ")
+                        payload = chunk_str[len("data: ") :] if is_sse else chunk_str
+                        try:
+                            chunk_json = json.loads(payload)
+                        except json.JSONDecodeError:
+                            chunk_json = None
+                        if chunk_json is not None and write_cached_tokens_for_api(
+                            api, chunk_json, reported_prefiller_cached_tokens
+                        ):
+                            yield encode_response_chunk(chunk_json, is_sse)
+                            continue
+                        yield chunk
+                    if nonstream_buf is not None and nonstream_buf:
+                        yield bytes(nonstream_buf)
+                    return
+
                 while retry:
                     retry = False
                     if preopened_gen is not None:
@@ -1297,6 +1420,18 @@ async def handle_completions(request: Request):
 @with_cancellation
 async def handle_chat_completions(request: Request):
     return await handle_completions_impl("/chat/completions", request)
+
+
+@app.post("/v1/messages")
+@with_cancellation
+async def handle_anthropic_messages(request: Request):
+    return await handle_completions_impl("/messages", request)
+
+
+@app.post("/v1/responses")
+@with_cancellation
+async def handle_openai_responses(request: Request):
+    return await handle_completions_impl("/responses", request)
 
 
 async def handle_models_impl():
