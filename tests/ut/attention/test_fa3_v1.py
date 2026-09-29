@@ -16,7 +16,7 @@ def fa3_backend(monkeypatch):
     """Load the real backend with only its optional NPU kernel replaced."""
     kernel = Mock(side_effect=lambda query, *args, **kwargs: query + (20 if kwargs["causal"] else 10))
     fa3_stub = ModuleType("flash_attn_npu_v3")
-    fa3_stub.flash_attn_with_kvcache = kernel
+    monkeypatch.setattr(fa3_stub, "flash_attn_with_kvcache", kernel, raising=False)
     monkeypatch.setitem(sys.modules, "flash_attn_npu_v3", fa3_stub)
     monkeypatch.setattr(torch.Tensor, "npu", lambda tensor: tensor, raising=False)
 
@@ -24,6 +24,7 @@ def fa3_backend(monkeypatch):
     # that import the optional FA3 backend or check whether its kernel is installed.
     source = Path(vllm_ascend.attention.__file__).with_name("fa3_v1.py")
     spec = importlib.util.spec_from_file_location("_fa3_v1_cpu_test", source)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.AscendFAImpl, kernel
