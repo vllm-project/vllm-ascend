@@ -659,6 +659,65 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         )
         return hidden_states, block_residual
 
+    else:
+
+        def forward_attn_residual(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            block_residual: torch.Tensor,
+            prefix_delta: torch.Tensor | None,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            """Run Kimi attention residuals with Ascend attention and MoE.
+
+            Mirrors upstream vLLM main (#50592/#50593): `prefix_delta` is folded
+            into the prefix stream before each attn-res mixture, the input and
+            post-attention norms are fused into the mixture via `output_norm`,
+            and the layer returns ``(prefix_sum, block_residual, hidden_states)``.
+            """
+            prefix_sum: torch.Tensor | None = hidden_states
+            hidden_states = _apply_ascend_attn_res(
+                prefix_sum,
+                block_residual,
+                self.self_attention_res_proj,
+                self.self_attention_res_norm,
+                self.prev_valid_blocks,
+                delta=prefix_delta,
+                output_norm=self.input_layernorm,
+                block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
+            )
+            if self.is_block_write_layer:
+                prefix_sum = None
+
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)
+                hidden_states = hidden_states[: positions.shape[0]]
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                positions=positions,
+            )
+            if self.use_sequence_parallel:
+                hidden_states = sp_reduce_scatter(hidden_states)
+
+            if prefix_sum is None:
+                prefix_sum = hidden_states
+                prefix_delta = None
+            else:
+                prefix_delta = hidden_states
+
+            mlp_valid_blocks = self.prev_valid_blocks + (1 if self.is_block_write_layer else 0)
+            hidden_states = _apply_ascend_attn_res(
+                prefix_sum,
+                block_residual,
+                self.mlp_res_proj,
+                self.mlp_res_norm,
+                mlp_valid_blocks,
+                delta=prefix_delta,
+                output_norm=self.post_attention_layernorm,
+            )
+            hidden_states = self.mlp(hidden_states)
+            return prefix_sum, block_residual, hidden_states
+
 
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
     """Kimi text model assembled from the Ascend decoder layer."""
