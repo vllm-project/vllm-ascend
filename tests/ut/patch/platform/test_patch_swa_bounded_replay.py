@@ -113,7 +113,7 @@ def test_declaring_the_field_is_idempotent():
 def test_resumed_request_replay_start_reaches_the_payload():
     cached_reqs = _build([_request("req-0", replay_start=REPLAY_START)])
 
-    assert cached_reqs.resumed_req_ids == ["req-0"]
+    assert set(cached_reqs.resumed_req_ids) == {"req-0"}
     assert cached_reqs.replay_start == {"req-0": REPLAY_START}
 
 

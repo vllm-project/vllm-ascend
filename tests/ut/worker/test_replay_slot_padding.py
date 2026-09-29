@@ -85,18 +85,8 @@ def _dcp_group_patch(dcp_world_size: int = 1, dcp_rank: int = 0):
     return patch("vllm_ascend.worker.block_table.get_dcp_group", return_value=mock_group)
 
 
-def _ascend_config_patch(block_table_no_commit_optimize: int = 0):
-    """``MultiGroupBlockTable`` picks its block-table class off the Ascend
-    config, which a unit test never initializes; 0 is the production default
-    and selects ``OptimizedBlockTable``."""
-    return patch(
-        "vllm_ascend.worker.block_table.get_ascend_config",
-        return_value=SimpleNamespace(block_table_no_commit_optimize=block_table_no_commit_optimize),
-    )
-
-
 def _block_table(groups, *, max_num_reqs: int = 4, max_num_batched_tokens: int = 512, dcp_world_size: int = 1):
-    with _dcp_group_patch(dcp_world_size=dcp_world_size), _ascend_config_patch():
+    with _dcp_group_patch(dcp_world_size=dcp_world_size):
         from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
         return MultiGroupBlockTable(

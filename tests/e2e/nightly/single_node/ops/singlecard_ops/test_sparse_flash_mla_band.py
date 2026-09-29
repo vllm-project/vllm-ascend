@@ -52,6 +52,10 @@ def test_band_visible_lengths_require_one_row_per_query():
     torch.npu.synchronize()
     assert output.shape == query.shape
     assert torch.isfinite(output).all()
+    # Zero queries give equal weight to each visible KV row and the zero
+    # attention sink. A one-row replay window must yield 1 / (1 + 1), even
+    # for the second query; ignoring visible lengths would yield 2 / 3 there.
+    torch.testing.assert_close(output, torch.full_like(output, 0.5))
 
     with pytest.raises(RuntimeError, match="TND band ori_topk_length shape must be"):
         torch.ops._C_ascend.npu_sparse_flash_mla(query, ori_topk_length=visible[:1], **kwargs)
