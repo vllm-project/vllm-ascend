@@ -31,6 +31,7 @@ from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.logger import logger
 
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -618,6 +619,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             if fla_gdn_prefill_op is not None:
                 initial_state = ssm_state[prefill_state_indices]
                 clear_ssm_states(initial_state, prefill_has_initial_state)
+                logger.warning("[vllm_ascend/ops/gdn.py] Using fused fla_gdn_prefill operator for prefill.")
                 (core_attn_out_non_spec, last_recurrent_state) = DeviceOperator.fla_gdn_prefill(
                     q=query_non_spec,
                     k=key_non_spec,
