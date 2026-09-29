@@ -2469,9 +2469,7 @@ class KVPoolWorker:
         # reachable. They do not contain a state snapshot. Do not allocate
         # readable pool keys or copy block zero for these holes; the
         # non-layerwise path applies the same skip_null_blocks rule.
-        result: list[list[bool] | None] = (
-            list(masks) if masks is not None else [None] * self.num_kv_cache_groups
-        )
+        result: list[list[bool] | None] = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
         for group_id, uses_align in enumerate(align_groups):
             if not uses_align:
                 continue
