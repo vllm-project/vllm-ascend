@@ -363,10 +363,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
     build_device_chunk_metadata = True
 
-    # RFC #17479 stage 1: declared EXACT to stay behavior-equivalent while
-    # the contract lands. GDN kernels consume query-side cu_seqlens; staged
-    # for downgrade during the stage-2 audit.
-    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
+    # RFC #17479 stage 2: GDN kernels consume query-side cu_seqlens; the
+    # host view used is seq_lens_cpu_upper_bound for prefill/decode
+    # classification, which is exact outside speculative decoding.
+    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.UPPER_BOUND
 
     def __init__(
         self,

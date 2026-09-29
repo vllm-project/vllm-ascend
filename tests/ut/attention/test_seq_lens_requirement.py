@@ -137,28 +137,57 @@ def test_in_tree_builders_are_declared():
     )
     from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 
-    for builder_cls in (
-        AscendAttentionMetadataBuilder,
-        AscendMLAMetadataBuilder,
-        AscendSFAMetadataBuilder,
-        AscendDSAMetadataBuilder,
-        AscendSFAIndexerMetadataBuilder,
-        AscendGDNAttentionMetadataBuilder,
-        AscendMiniMaxM3IndexerMetadataBuilder,
-        AscendMiniMaxM3SparseMetadataBuilder,
-    ):
-        assert get_host_seq_lens_requirement(builder_cls) is HostSeqLensRequirement.EXACT, (
-            f"{builder_cls.__name__} must declare HOST_SEQ_LENS_REQUIREMENT"
+    # stage 2: exact host materialization is reserved for legacy FIA/MLA
+    # host-list consumers; device-native families use bounded or no host view.
+    expected = {
+        AscendAttentionMetadataBuilder: HostSeqLensRequirement.EXACT,
+        AscendMLAMetadataBuilder: HostSeqLensRequirement.EXACT,
+        AscendMiniMaxM3IndexerMetadataBuilder: HostSeqLensRequirement.EXACT,
+        AscendMiniMaxM3SparseMetadataBuilder: HostSeqLensRequirement.EXACT,
+        AscendDSAMetadataBuilder: HostSeqLensRequirement.UPPER_BOUND,
+        AscendSFAMetadataBuilder: HostSeqLensRequirement.UPPER_BOUND,
+        AscendGDNAttentionMetadataBuilder: HostSeqLensRequirement.UPPER_BOUND,
+        AscendSFAIndexerMetadataBuilder: HostSeqLensRequirement.NONE,
+    }
+    for builder_cls, requirement in expected.items():
+        assert get_host_seq_lens_requirement(builder_cls) is requirement, (
+            f"{builder_cls.__name__} must declare HOST_SEQ_LENS_REQUIREMENT={requirement.name}"
         )
 
 
-def test_dsv4_stack_aggregates_to_exact():
+def test_dsv4_stack_aggregates_to_upper_bound():
     """The DSv4 attention stack (all AscendDSABackend) aggregates through the
-    real DSA metadata builder, exercising the aggregation path end to end
-    without touching global Ascend config."""
+    real DSA metadata builder to a non-EXACT requirement, so no exact-host
+    snapshot is staged or waited for under speculative decoding."""
     from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 
     groups = [[_make_group(AscendDSAMetadataBuilder)]]
     result = resolve_host_seq_lens_requirements(groups)
-    assert result.requirement is HostSeqLensRequirement.EXACT
+    assert result.requirement is HostSeqLensRequirement.UPPER_BOUND
     assert result.undeclared == []
+
+
+def test_hybrid_fia_gdn_model_stays_exact():
+    """A hybrid model with one legacy FIA group (e.g. Qwen3-Next full
+    attention) plus a device-native GDN group must keep exact materialization
+    available: the single EXACT consumer wins the aggregation."""
+    from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder
+    from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
+
+    groups = [
+        [_make_group(AscendAttentionMetadataBuilder)],
+        [_make_group(AscendGDNAttentionMetadataBuilder)],
+    ]
+    result = resolve_host_seq_lens_requirements(groups)
+    assert result.requirement is HostSeqLensRequirement.EXACT
+
+
+def test_sfa_stack_with_draft_stays_bounded():
+    """SFA target + SFA draft (speculator backends) aggregates to
+    UPPER_BOUND: drafting does not pull a bounded family back to EXACT."""
+    from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
+
+    groups = [[_make_group(AscendSFAMetadataBuilder)]]
+    speculator = _make_speculator([AscendSFAMetadataBuilder])
+    result = resolve_host_seq_lens_requirements(groups, speculator)
+    assert result.requirement is HostSeqLensRequirement.UPPER_BOUND
