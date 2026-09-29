@@ -1,4 +1,6 @@
-"""Unit tests for the RFC #17479 host seq-lens requirement contract.
+"""Unit tests for the host seq-lens requirement contract.
+
+See https://github.com/vllm-project/vllm-ascend/issues/17479 for the design.
 
 Covers requirement aggregation, the conservative undeclared-consumer
 fallback, subclass inheritance of declarations, and participation of
@@ -123,8 +125,10 @@ def test_consumer_names_include_backend_and_builder():
 def test_in_tree_builders_are_declared():
     """Every in-tree MRV2 metadata builder must declare its requirement.
 
-    Guards the RFC #17479 rollout: a missing declaration silently falls back
-    to EXACT and keeps an unnecessary D2H dependency alive.
+    Guards the contract rollout (see
+    https://github.com/vllm-project/vllm-ascend/issues/17479): a missing
+    declaration silently falls back to EXACT and keeps an unnecessary D2H
+    dependency alive.
     """
     from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder
     from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -137,8 +141,8 @@ def test_in_tree_builders_are_declared():
     )
     from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 
-    # stage 2: exact host materialization is reserved for legacy FIA/MLA
-    # host-list consumers; device-native families use bounded or no host view.
+    # Exact host materialization is reserved for legacy FIA/MLA host-list
+    # consumers; device-native families use bounded or no host view.
     expected = {
         AscendAttentionMetadataBuilder: HostSeqLensRequirement.EXACT,
         AscendMLAMetadataBuilder: HostSeqLensRequirement.EXACT,
