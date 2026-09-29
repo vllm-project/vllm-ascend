@@ -71,13 +71,13 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol
 
 from vllm.logger import logger
 
-from ...graph.elements import BindingBatch, KVBinding
-from ...graph.topology import KVPoolTopology
-from ..io import BindingEvidence, LayerwiseBackendIO, StoreEvidence
+from ...program.invocation import BindingEvidence, StoreEvidence
+from ...program.representation import BindingBatch, KVBinding
+from ...program.spec.topology import KVPoolTopology
 from . import (
     LoadCompletion,
     LoadTimelineProtocol,
@@ -94,20 +94,34 @@ if TYPE_CHECKING:
 _TIMELINE_POLL_INTERVAL_S = 1.0
 
 
-@runtime_checkable
+class LayerwiseBackendOperations(Protocol):
+    """Backend session operations required by layerwise timelines."""
+
+    def validate_support(self) -> None: ...
+
+    def start_load_sessions(self, keys: list[str]) -> tuple[int, ...]: ...
+
+    def finish_load_sessions(self, keys: list[str]) -> None: ...
+
+    def start_store_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]: ...
+
+    def commit_store_sessions(self, keys: list[str]) -> tuple[int, ...]: ...
+
+    def revoke_store_sessions(self, keys: list[str]) -> tuple[int, ...]: ...
+
+
 class LayerwiseLoadTimelineProtocol(LoadTimelineProtocol, Protocol):
     """Extend Load execution with a visibility fence at each model layer."""
 
     def wait_for_layer(self, layer_name: str) -> Iterable[LoadCompletion]: ...
 
 
-@runtime_checkable
 class LayerwiseStoreTimelineProtocol(Protocol):
     """Publish Store work through one session and its ordered layer ranges."""
 
-    def attach_binding_filter(self, binding_filter: Callable[[list[StoreTransfer]], list[StoreTransfer]]) -> None: ...
+    def bind_filter(self, binding_filter: Callable[[list[StoreTransfer]], list[StoreTransfer]]) -> None: ...
 
-    def attach_operation(self, operation: Callable[[StoreTransfer, Any], StoreCompletion]) -> None: ...
+    def bind_operation(self, operation: Callable[[StoreTransfer, Any], StoreCompletion]) -> None: ...
 
     def start(self) -> None: ...
 
@@ -186,7 +200,7 @@ class _StoreSession:
         self,
         filtered_transfers: tuple[StoreTransfer, ...],
         object_sizes_by_key: dict[str, int],
-        backend_io: LayerwiseBackendIO,
+        backend_io: LayerwiseBackendOperations,
     ) -> None:
         keys = tuple(object_sizes_by_key)
         self.source_release_confirmed_by_key.update((key, True) for key in keys)
@@ -224,7 +238,7 @@ class _StoreSession:
 
     def finalize(
         self,
-        backend_io: LayerwiseBackendIO,
+        backend_io: LayerwiseBackendOperations,
         incomplete_layer_ids: tuple[int, ...],
     ) -> tuple[StoreCompletion, ...]:
         if incomplete_layer_ids:
@@ -246,7 +260,7 @@ class _StoreSession:
             self._revoke_sessions(revoke_keys, backend_io)
         return self._build_completions()
 
-    def revoke_pending(self, backend_io: LayerwiseBackendIO) -> None:
+    def revoke_pending(self, backend_io: LayerwiseBackendOperations) -> None:
         if not self.pending_finalization_keys:
             return
         try:
@@ -258,7 +272,7 @@ class _StoreSession:
         self,
         missing_keys: tuple[str, ...],
         object_sizes_by_key: dict[str, int],
-        backend_io: LayerwiseBackendIO,
+        backend_io: LayerwiseBackendOperations,
     ) -> None:
         try:
             result_codes = backend_io.start_store_sessions(
@@ -295,7 +309,7 @@ class _StoreSession:
             key for key in self.pending_finalization_keys if key not in committed_keys
         )
 
-    def _revoke_sessions(self, keys: list[str], backend_io: LayerwiseBackendIO) -> None:
+    def _revoke_sessions(self, keys: list[str], backend_io: LayerwiseBackendOperations) -> None:
         try:
             result_codes = backend_io.revoke_store_sessions(keys)
         except Exception as error:
@@ -366,7 +380,7 @@ class LayerwiseLoadTimeline:
     def __init__(
         self,
         topology: KVPoolTopology,
-        backend_io: LayerwiseBackendIO,
+        backend_io: LayerwiseBackendOperations,
         prefetch_layers: int,
         thread_initializer: Callable[[], None],
         start_gate_factory: Callable[[], AttentionComputeStartGate],
@@ -385,10 +399,10 @@ class LayerwiseLoadTimeline:
             "KVPoolLayerwiseLoadExecutor", thread_initializer, self._execute, self._complete
         )
 
-    def attach_operation(self, operation: Callable[[LoadTransfer], LoadCompletion]) -> None:
+    def bind_operation(self, operation: Callable[[LoadTransfer], LoadCompletion]) -> None:
         with self._lifecycle_lock:
             if self._operation is not None:
-                raise RuntimeError("Layerwise Load timeline operation is already attached")
+                raise RuntimeError("Layerwise Load timeline operation is already bound")
             self._operation = operation
 
     def start(self) -> None:
@@ -657,7 +671,7 @@ class LayerwiseStoreTimeline:
     def __init__(
         self,
         topology: KVPoolTopology,
-        backend_io: LayerwiseBackendIO,
+        backend_io: LayerwiseBackendOperations,
         thread_initializer: Callable[[], None],
     ) -> None:
         self._backend_io = backend_io
@@ -671,19 +685,19 @@ class LayerwiseStoreTimeline:
             "KVPoolLayerwiseStoreExecutor", thread_initializer, self._execute, self._complete
         )
 
-    def attach_binding_filter(
+    def bind_filter(
         self,
         binding_filter: Callable[[list[StoreTransfer]], list[StoreTransfer]],
     ) -> None:
         with self._lifecycle_lock:
             if self._binding_filter is not None:
-                raise RuntimeError("Layerwise Store timeline binding filter is already attached")
+                raise RuntimeError("Layerwise Store timeline binding filter is already bound")
             self._binding_filter = binding_filter
 
-    def attach_operation(self, operation: Callable[[StoreTransfer, Any], StoreCompletion]) -> None:
+    def bind_operation(self, operation: Callable[[StoreTransfer, Any], StoreCompletion]) -> None:
         with self._lifecycle_lock:
             if self._operation is not None:
-                raise RuntimeError("Layerwise Store timeline operation is already attached")
+                raise RuntimeError("Layerwise Store timeline operation is already bound")
             self._operation = operation
 
     def start(self) -> None:

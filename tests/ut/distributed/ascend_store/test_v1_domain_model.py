@@ -17,80 +17,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     RequestTracker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import assembly
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
-    BackendAdapter,
-    BackendStoreEvidence,
+    BackendSpec,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.connector import AscendStoreV1Connector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.io import BackendIO, LayerwiseBackendIO
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.resources import KVPoolResources
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.runtime import KVPoolRuntime
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.timeline import (
-    LoadCompletion,
-    LoadTransfer,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.timeline.bulk import (
-    AsyncLoadTimeline,
-    LoadTimeline,
-    StoreTimeline,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.timeline.layerwise import (
-    LayerwiseLoadTimeline,
-    LayerwiseStoreTimeline,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.elements import (
-    BindingBatch,
-    KVBinding,
-    KVChunk,
-    KVMemoryGeometry,
-    KVMemorySegment,
-    KVMemoryView,
-    KVRegion,
-    PhysicalCoordinate,
-    RemoteKVObject,
-    RemoteObjectKeyBatch,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.filter import (
-    BackendExistenceMissingFilter,
-    IdentityMissingFilter,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.graph import KVPoolGraph
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.projection.binding import (
-    BindingProjection,
-    ContiguousBindingProjection,
-    LayerwiseBindingProjection,
-    StridedBindingProjection,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.projection.block import KVBlockProjection
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.projection.chunk import KVChunkProjection
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.projection.consumer import (
-    IdentityConsumerProjection,
-    PipelinePartitionConsumerProjection,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.projection.object import (
-    RemoteObjectProjection,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.projection.ownership import (
-    StoreOwnershipProjection,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.reachability import (
-    ChunkAvailability,
-    GroupAvailability,
-    GroupSelection,
-    HybridReachability,
-    KVSelection,
-    UnitaryReachability,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.topology import (
-    KVPoolGroupTopology,
-    KVPoolLayerTopology,
-    KVPoolTopology,
-    TPPartitionSpec,
-    _resolve_group_layers,
-    resolve_consumer_pipeline_partitions,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.availability import (
     ExternalPrefixPlan,
     LookupQuery,
@@ -104,6 +35,67 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.progre
     ScheduledLoadPublication,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.spec import TransferPlanningSpec
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program import compiler as compiler_module
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.compiler import (
+    ProgramCompilationError,
+    compile_kv_pool_program,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.invocation import (
+    LoadCompletion,
+    LoadTransfer,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.program import KVPoolProgram
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.representation import (
+    BindingBatch,
+    KVBinding,
+    KVChunk,
+    KVMemoryGeometry,
+    KVMemorySegment,
+    KVMemoryView,
+    KVRegion,
+    PhysicalCoordinate,
+    RemoteKVObject,
+    RemoteObjectKeyBatch,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.schedule import (
+    KVPoolSchedule,
+    LoadScheduleKind,
+    StoreScheduleKind,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.topology import (
+    KVPoolGroupTopology,
+    KVPoolLayerTopology,
+    KVPoolTopology,
+    TPPartitionSpec,
+    _resolve_group_layers,
+    resolve_consumer_pipeline_partitions,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.chunk import KVChunkProjection
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.memory import (
+    BindingProjection,
+    ContiguousBindingProjection,
+    KVBlockProjection,
+    LayerwiseBindingProjection,
+    StridedBindingProjection,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.reachability import (
+    ChunkAvailability,
+    GroupAvailability,
+    GroupSelection,
+    HybridReachability,
+    KVSelection,
+    UnitaryReachability,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.remote import (
+    RemoteObjectProjection,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.store import (
+    BackendExistenceMissingFilter,
+    IdentityConsumerProjection,
+    IdentityMissingFilter,
+    PipelinePartitionConsumerProjection,
+    StoreOwnershipProjection,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import (
     LookupCodec,
     LookupRequest,
@@ -115,6 +107,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     LoadCommandBatch,
     StoreCommand,
     StoreCommandBatch,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.io import BackendIO, LayerwiseBackendIO
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.resources import KVPoolResources
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.runtime import KVPoolRuntime
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.timeline.bulk import (
+    AsyncLoadTimeline,
+    LoadTimeline,
 )
 
 
@@ -164,12 +163,12 @@ class FakeBackend:
     def __init__(self) -> None:
         self.presence: list[int] = []
         self.get_result: list[int] | None = []
-        self.put_result = BackendStoreEvidence((), True, True)
+        self.put_result: list[int] | None | Exception = []
         self.session_start_result: list[int] = []
         self.session_copy_result: list[int] = []
         self.session_end_result = 0
         self.store_session_start_result: list[int] = []
-        self.store_session_copy_evidence = BackendStoreEvidence((), True, True)
+        self.store_session_copy_result: list[int] | None | Exception = []
         self.store_session_commit_result: list[int] = []
         self.store_session_revoke_result: list[int] = []
         self.calls = []
@@ -184,7 +183,9 @@ class FakeBackend:
 
     def put(self, keys, addresses, sizes):
         self.calls.append(("put", tuple(keys), tuple(map(tuple, addresses)), tuple(map(tuple, sizes))))
-        return self.put_result
+        if isinstance(self.put_result, Exception):
+            raise self.put_result
+        return self.put_result or [0] * len(keys)
 
     def set_device(self):
         self.calls.append(("set_device",))
@@ -192,14 +193,14 @@ class FakeBackend:
     def validate_layerwise_support(self):
         self.calls.append(("validate_layerwise_support",))
 
-    def start_load_sessions(self, keys):
-        self.calls.append(("start_load_sessions", tuple(keys)))
+    def batch_get_start(self, keys):
+        self.calls.append(("batch_get_start", tuple(keys)))
         return tuple(self.session_start_result or [0] * len(keys))
 
-    def load_session_ranges(self, keys, addresses, sizes, remote_offsets):
+    def batch_copy_get(self, keys, addresses, sizes, remote_offsets):
         self.calls.append(
             (
-                "load_session_ranges",
+                "batch_copy_get",
                 tuple(keys),
                 tuple(map(tuple, addresses)),
                 tuple(map(tuple, sizes)),
@@ -208,35 +209,34 @@ class FakeBackend:
         )
         return tuple(self.session_copy_result or [0] * len(keys))
 
-    def finish_load_sessions(self, keys):
-        self.calls.append(("finish_load_sessions", tuple(keys)))
+    def batch_get_end(self, keys):
+        self.calls.append(("batch_get_end", tuple(keys)))
         return self.session_end_result
 
-    def start_store_sessions(self, keys, object_sizes):
-        self.calls.append(("start_store_sessions", tuple(keys), tuple(object_sizes)))
+    def batch_put_start(self, keys, object_sizes):
+        self.calls.append(("batch_put_start", tuple(keys), tuple(object_sizes)))
         return tuple(self.store_session_start_result or [0] * len(keys))
 
-    def store_session_ranges(self, keys, addresses, sizes, remote_offsets):
+    def batch_copy_put(self, keys, addresses, sizes, remote_offsets):
         self.calls.append(
             (
-                "store_session_ranges",
+                "batch_copy_put",
                 tuple(keys),
                 tuple(map(tuple, addresses)),
                 tuple(map(tuple, sizes)),
                 tuple(map(tuple, remote_offsets)),
             )
         )
-        evidence = self.store_session_copy_evidence
-        if evidence.result_codes == ():
-            return replace(evidence, result_codes=(0,) * len(keys))
-        return evidence
+        if isinstance(self.store_session_copy_result, Exception):
+            raise self.store_session_copy_result
+        return self.store_session_copy_result or [0] * len(keys)
 
-    def commit_store_sessions(self, keys):
-        self.calls.append(("commit_store_sessions", tuple(keys)))
+    def batch_commit(self, keys):
+        self.calls.append(("batch_commit", tuple(keys)))
         return tuple(self.store_session_commit_result or [0] * len(keys))
 
-    def revoke_store_sessions(self, keys):
-        self.calls.append(("revoke_store_sessions", tuple(keys)))
+    def batch_revoke(self, keys):
+        self.calls.append(("batch_revoke", tuple(keys)))
         return tuple(self.store_session_revoke_result or [0] * len(keys))
 
 
@@ -270,13 +270,14 @@ class FakeLoadStartGate:
 
 class FakeResources:
     def __init__(self, database, backend, memory_geometry) -> None:
-        self.token_database = database
+        del database
         self.backend = backend
+        self.backend_spec = make_backend_spec(type(backend))
         self.memory_geometry = memory_geometry
         self.registered = False
         self.closed = False
 
-    def register_kv_caches(self, kv_caches):
+    def bind_kv_caches(self, kv_caches):
         self.registered = bool(kv_caches)
         return self.memory_geometry
 
@@ -307,6 +308,7 @@ def make_topology(
     pcp_size=1,
     key_rank_count=None,
     physical_layers_by_group=None,
+    consumer_pipeline_partitions=None,
 ) -> KVPoolTopology:
     physical_layers_by_group = physical_layers_by_group or {}
     group_topologies = tuple(
@@ -339,8 +341,65 @@ def make_topology(
         partition,
         group_topologies,
         tuple(groups),
-        None,
+        consumer_pipeline_partitions,
     )
+
+
+def make_backend_spec(
+    backend_type=FakeBackend,
+    *,
+    name="fake",
+    backend_module=None,
+    supports_layerwise=True,
+    requires_exists_before_put=False,
+) -> BackendSpec:
+    return BackendSpec(
+        name,
+        backend_type,
+        backend_module or SimpleNamespace(),
+        supports_layerwise,
+        requires_exists_before_put,
+    )
+
+
+def compile_program(
+    monkeypatch,
+    topology: KVPoolTopology,
+    *,
+    use_layerwise=False,
+    async_load=False,
+    store_enabled=False,
+    supports_layerwise=True,
+    requires_exists_before_put=False,
+    kv_cache_groups: tuple[KVCacheGroupSpec, ...] = (),
+) -> KVPoolProgram:
+    monkeypatch.setattr(compiler_module, "resolve_kv_pool_topology", lambda *_: topology)
+    monkeypatch.setattr(
+        compiler_module,
+        "resolve_backend_spec",
+        lambda *_: make_backend_spec(
+            supports_layerwise=supports_layerwise,
+            requires_exists_before_put=requires_exists_before_put,
+        ),
+    )
+    monkeypatch.setattr(compiler_module, "resolve_dcp_kv_cache_spec", lambda spec, _: spec)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=64),
+        speculative_config=None,
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_producer" if store_enabled else "kv_consumer",
+            kv_connector_extra_config={
+                "backend": "fake",
+                "use_layerwise": use_layerwise,
+                "load_async": async_load,
+            },
+        ),
+    )
+    kv_cache_config = SimpleNamespace(
+        transfer_groups=kv_cache_groups,
+        prefix_cache_retention_interval=None,
+    )
+    return compile_kv_pool_program(config, kv_cache_config)
 
 
 @dataclass(frozen=True)
@@ -373,7 +432,7 @@ def make_projection(
 
 
 def compile_projection(nodes: ProjectionNodes, memory_geometry: KVMemoryGeometry) -> None:
-    nodes.bindings.compile_memory_mapping(memory_geometry)
+    nodes.bindings.bind_memory(memory_geometry)
 
 
 def project_remote_objects(nodes: ProjectionNodes, selection: KVSelection):
@@ -464,29 +523,11 @@ def test_group_topology_groups_cache_entries_by_physical_layer() -> None:
     )
 
 
-def test_resources_pass_consumer_partitions_to_token_database(monkeypatch) -> None:
-    topology = replace(make_topology(), consumer_pipeline_partitions=(2, 2))
-    monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.execution.resources.create_backend",
-        lambda *args, **kwargs: SimpleNamespace(),
-    )
-    resources = KVPoolResources.create(
-        SimpleNamespace(),
-        {"backend": "mooncake"},
-        topology.groups,
-        topology.hash_block_size,
-        8,
-        topology.consumer_pipeline_partitions,
-    )
-    assert resources.token_database.partitions == [2, 2]
-
-
-def test_resources_register_memory_geometry_once() -> None:
+def test_resources_bind_memory_geometry_once() -> None:
     registered_buffers = []
     backend = SimpleNamespace(
         register_buffer=lambda addresses, sizes: registered_buffers.append((addresses, sizes)),
     )
-    database = ChunkedTokenDatabase([KeyMetadata("model", 0, 0, 0, 0)], [4], None, hash_block_size=4)
     group = KVPoolGroupTopology(
         0,
         4,
@@ -496,36 +537,22 @@ def test_resources_register_memory_geometry_once() -> None:
         ),
         KeyMetadata("model", 0, 0, 0, 0),
     )
-    resources = KVPoolResources(backend, database, 2, (group,))
+    resources = KVPoolResources(backend, make_backend_spec(type(backend)), 2, (group,))
     kv_caches = {
         "layers.0": torch.zeros((2, 1)),
         "layers.1": torch.zeros((2, 1)),
     }
-    memory_geometry = resources.register_kv_caches(kv_caches)
-    assert database.group_num_layers["kv"] == {0: 2}
+    memory_geometry = resources.bind_kv_caches(kv_caches)
     assert [segment.physical_layer_id for segment in memory_geometry[0]] == [0, 1]
     assert len(registered_buffers) == 1
     assert len(registered_buffers[0][0]) == 2
-    with pytest.raises(RuntimeError, match="already registered"):
-        resources.register_kv_caches(kv_caches)
+    with pytest.raises(RuntimeError, match="already bound"):
+        resources.bind_kv_caches(kv_caches)
 
 
-def test_runtime_rejects_layerwise_gva_before_allocating_resources(monkeypatch) -> None:
-    config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(
-            kv_role="kv_consumer",
-            kv_connector_extra_config={"backend": "memcache", "use_layerwise": True},
-        )
-    )
-    monkeypatch.setattr(assembly, "resolve_kv_pool_topology", lambda *_: make_topology())
-    monkeypatch.setattr(
-        assembly.KVPoolResources,
-        "create",
-        lambda *_: pytest.fail("Layerwise GVA reached resource allocation"),
-    )
-
-    with pytest.raises(ValueError, match="requires a block-key Backend"):
-        assembly.build_kv_pool_runtime(config, SimpleNamespace())
+def test_program_rejects_layerwise_backend_before_resource_binding(monkeypatch) -> None:
+    with pytest.raises(ProgramCompilationError, match="requires a block-key Backend"):
+        compile_program(monkeypatch, make_topology(), use_layerwise=True, supports_layerwise=False)
 
 
 def make_kv_pool_runtime(
@@ -543,12 +570,10 @@ def make_kv_pool_runtime(
     topology = make_topology(groups=groups, tp_mismatch=tp_mismatch, key_rank_count=key_rank_count)
     memory_geometry = make_memory_geometry(database, topology)
     resources = FakeResources(database, backend, memory_geometry)
-    backend_io = BackendIO(backend)
-    load_timeline = AsyncLoadTimeline(backend.set_device) if async_load else LoadTimeline()
     projection = make_projection(database, topology)
     consumer_projection = IdentityConsumerProjection()
     missing_filter = BackendExistenceMissingFilter() if backend.requires_exists_before_put else IdentityMissingFilter()
-    graph = KVPoolGraph(
+    program = KVPoolProgram(
         topology,
         UnitaryReachability(groups[0], 64, 4)
         if len(groups) == 1
@@ -572,18 +597,18 @@ def make_kv_pool_runtime(
         projection.store_ownership,
         consumer_projection,
         missing_filter,
+        "fake",
+        KVPoolSchedule(
+            LoadScheduleKind.ASYNC if async_load else LoadScheduleKind.SYNC,
+            StoreScheduleKind.ASYNC if store else None,
+            2,
+        ),
     )
-    runtime = KVPoolRuntime(
-        graph,
-        resources,
-        backend_io,
-        load_timeline,
-        StoreTimeline(backend.set_device) if store else None,
-    )
+    runtime = KVPoolRuntime(program, resources)
     if registered:
-        runtime.register_kv_caches({"cache": object()})
+        runtime.bind_kv_caches({"cache": object()})
     else:
-        graph.compile_memory_mapping(memory_geometry)
+        program.bind_memory(memory_geometry)
     return runtime, resources
 
 
@@ -600,7 +625,6 @@ def make_layerwise_load_runtime(
     topology = make_topology(groups=groups, physical_layers_by_group=dict.fromkeys(groups, physical_layers))
     memory_geometry = make_memory_geometry(database, topology)
     resources = FakeResources(database, backend, memory_geometry)
-    backend_io = LayerwiseBackendIO(backend)
     projection = make_projection(database, topology, LayerwiseBindingProjection(topology))
     reachability = (
         UnitaryReachability(groups[0], 64, 4)
@@ -614,7 +638,7 @@ def make_layerwise_load_runtime(
             ),
         )
     )
-    graph = KVPoolGraph(
+    program = KVPoolProgram(
         topology,
         reachability,
         projection.chunks,
@@ -624,11 +648,12 @@ def make_layerwise_load_runtime(
         projection.store_ownership,
         IdentityConsumerProjection(),
         IdentityMissingFilter(),
+        "fake",
+        KVPoolSchedule(LoadScheduleKind.LAYERWISE, None, prefetch_layers),
     )
     start_gate_factory = start_gate_factory or FakeLoadStartGate
-    load_timeline = LayerwiseLoadTimeline(topology, backend_io, prefetch_layers, backend.set_device, start_gate_factory)
-    runtime = KVPoolRuntime(graph, resources, backend_io, load_timeline, None)
-    runtime.register_kv_caches({"cache": object()})
+    runtime = KVPoolRuntime(program, resources, start_gate_factory=start_gate_factory)
+    runtime.bind_kv_caches({"cache": object()})
     return runtime, resources
 
 
@@ -640,9 +665,8 @@ def make_layerwise_store_runtime(backend):
     topology = make_topology(physical_layers_by_group={0: (0, 1)})
     memory_geometry = make_memory_geometry(database, topology)
     resources = FakeResources(database, backend, memory_geometry)
-    backend_io = LayerwiseBackendIO(backend)
     projection = make_projection(database, topology, LayerwiseBindingProjection(topology))
-    graph = KVPoolGraph(
+    program = KVPoolProgram(
         topology,
         UnitaryReachability(0, 64, 4),
         projection.chunks,
@@ -652,10 +676,11 @@ def make_layerwise_store_runtime(backend):
         projection.store_ownership,
         IdentityConsumerProjection(),
         BackendExistenceMissingFilter() if backend.requires_exists_before_put else IdentityMissingFilter(),
+        "fake",
+        KVPoolSchedule(LoadScheduleKind.LAYERWISE, StoreScheduleKind.LAYERWISE, 2),
     )
-    store_timeline = LayerwiseStoreTimeline(topology, backend_io, backend.set_device)
-    runtime = KVPoolRuntime(graph, resources, backend_io, LoadTimeline(), store_timeline)
-    runtime.register_kv_caches({"cache": object()})
+    runtime = KVPoolRuntime(program, resources)
+    runtime.bind_kv_caches({"cache": object()})
     return runtime, resources
 
 
@@ -663,8 +688,8 @@ def begin_kv_pool_step(
     runtime: KVPoolRuntime,
     load: LoadCommandBatch | None = None,
     store: StoreCommandBatch | None = None,
-):
-    return runtime.begin_step(KVTransferStep(load or LoadCommandBatch(), store or StoreCommandBatch()))
+) -> None:
+    runtime.begin_step(KVTransferStep(load or LoadCommandBatch(), store or StoreCommandBatch()))
 
 
 @pytest.mark.parametrize(("start_token", "end_token"), [(-1, 0), (4, 3)])
@@ -704,6 +729,98 @@ def test_chunk_projection_splits_semantic_chunks_from_remote_object_keys() -> No
     assert assignments[0].assignments[0].chunk is chunk_batches[0].chunks[0]
     assert object_key_batches[0].keys[0].chunk is chunk_batches[0].chunks[0]
     assert "@group:0@" in object_key_batches[0].keys[0].base_key
+
+
+def test_graph_compiler_selects_fixed_graph_rules(monkeypatch) -> None:
+    topology = make_topology()
+    cases = (
+        (topology, {}, ContiguousBindingProjection, IdentityConsumerProjection, IdentityMissingFilter),
+        (
+            make_topology(tp_mismatch=True),
+            {},
+            StridedBindingProjection,
+            IdentityConsumerProjection,
+            IdentityMissingFilter,
+        ),
+        (
+            topology,
+            {"use_layerwise": True},
+            LayerwiseBindingProjection,
+            IdentityConsumerProjection,
+            IdentityMissingFilter,
+        ),
+        (
+            topology,
+            {"requires_exists_before_put": True},
+            ContiguousBindingProjection,
+            IdentityConsumerProjection,
+            BackendExistenceMissingFilter,
+        ),
+        (
+            make_topology(consumer_pipeline_partitions=(1, 1)),
+            {},
+            ContiguousBindingProjection,
+            PipelinePartitionConsumerProjection,
+            IdentityMissingFilter,
+        ),
+    )
+    for topology, options, binding_type, consumer_type, missing_filter_type in cases:
+        program = compile_program(monkeypatch, topology, **options)
+        assert isinstance(program._reachability, UnitaryReachability)
+        assert isinstance(program._binding_projection, binding_type)
+        assert isinstance(program._consumer_projection, consumer_type)
+        assert isinstance(program._missing_filter, missing_filter_type)
+
+
+def test_program_compiler_selects_hybrid_reachability(monkeypatch) -> None:
+    groups = tuple(
+        KVCacheGroupSpec(
+            [f"layers.{group_id}"],
+            FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
+        )
+        for group_id in range(2)
+    )
+    topology = make_topology(groups=(0, 1))
+    program = compile_program(monkeypatch, topology, kv_cache_groups=groups)
+    assert isinstance(program._reachability, HybridReachability)
+
+
+def test_program_compiler_freezes_backend_identity_and_schedule(monkeypatch) -> None:
+    program = compile_program(
+        monkeypatch,
+        make_topology(),
+        async_load=True,
+        store_enabled=True,
+        requires_exists_before_put=True,
+    )
+    assert program.backend_name == "fake"
+    assert program.schedule.load_kind is LoadScheduleKind.ASYNC
+    assert program.schedule.store_kind is StoreScheduleKind.ASYNC
+
+
+@pytest.mark.parametrize(
+    ("topology", "use_layerwise", "message"),
+    [
+        (
+            make_topology(tp_mismatch=True, consumer_pipeline_partitions=(1, 1)),
+            False,
+            "Consumer pipeline projection cannot yet be composed with TP mismatch",
+        ),
+        (
+            make_topology(tp_mismatch=True),
+            True,
+            "Layerwise binding projection cannot yet be composed with TP mismatch",
+        ),
+        (
+            make_topology(consumer_pipeline_partitions=(1, 1)),
+            True,
+            "Layerwise binding projection cannot yet be composed with consumer pipeline projection",
+        ),
+    ],
+)
+def test_program_compiler_rejects_conflicting_rules(monkeypatch, topology, use_layerwise, message) -> None:
+    with pytest.raises(ProgramCompilationError, match=message):
+        compile_program(monkeypatch, topology, use_layerwise=use_layerwise)
 
 
 def test_binding_projection_requires_a_remote_key_for_every_local_assignment() -> None:
@@ -840,7 +957,7 @@ def test_consumer_pipeline_projection_uses_compiled_layer_segments() -> None:
     topology = make_topology(physical_layers_by_group={0: (0, 1)})
     memory_geometry = make_memory_geometry(database, topology)
     consumer_projection = PipelinePartitionConsumerProjection((1, 1))
-    consumer_projection.compile_memory_mapping(memory_geometry)
+    consumer_projection.bind_memory(memory_geometry)
     projection = make_projection(database, topology)
     compile_projection(projection, memory_geometry)
     selection = KVSelection(TokenRange(0, 4), (b"a",), (GroupSelection(0, None),))
@@ -955,7 +1072,7 @@ def test_hybrid_lookup_and_store_share_retention_policy(monkeypatch) -> None:
         recorded.append(kwargs["retention_interval"])
         return None
 
-    import vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.reachability as module
+    import vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.reachability as module
 
     monkeypatch.setattr(module, "_reachable_block_mask", reachable_mask)
     reachability = HybridReachability(
@@ -990,7 +1107,7 @@ def test_lookup_codec_round_trip_preserves_token_coordinates_and_groups() -> Non
 def test_backend_io_keeps_results_attached_to_exact_bindings() -> None:
     backend = FakeBackend()
     backend.get_result = [0]
-    outcomes = BackendIO(backend).load(make_binding_batch().bindings)
+    outcomes = BackendIO(backend, make_backend_spec()).load(make_binding_batch().bindings)
     assert outcomes[0].binding == make_binding_batch().bindings[0]
     assert outcomes[0].result_code == 0
 
@@ -999,14 +1116,14 @@ def test_backend_io_keeps_results_attached_to_exact_bindings() -> None:
 def test_backend_io_marks_misaligned_load_results_unknown(native_result) -> None:
     backend = FakeBackend()
     backend.get_result = native_result
-    outcomes = BackendIO(backend).load(make_binding_batch().bindings)
+    outcomes = BackendIO(backend, make_backend_spec()).load(make_binding_batch().bindings)
     assert [outcome.result_code for outcome in outcomes] == [None]
 
 
 def test_synchronous_and_asynchronous_load_share_the_same_operation() -> None:
     backend = FakeBackend()
     backend.get_result = [0]
-    backend_io = BackendIO(backend)
+    backend_io = BackendIO(backend, make_backend_spec())
     binding_batch = make_binding_batch()
     transfer = LoadTransfer("request", binding_batch.bindings)
 
@@ -1014,12 +1131,12 @@ def test_synchronous_and_asynchronous_load_share_the_same_operation() -> None:
         return LoadCompletion(item.request_id, backend_io.load(item.traversal))
 
     synchronous = LoadTimeline()
-    synchronous.attach_operation(operation)
+    synchronous.bind_operation(operation)
     synchronous.start()
     assert tuple(synchronous.submit([transfer]))[0].binding_evidence[0].binding == binding_batch.bindings[0]
 
     asynchronous = AsyncLoadTimeline(backend.set_device)
-    asynchronous.attach_operation(operation)
+    asynchronous.bind_operation(operation)
     asynchronous.start()
     asynchronous.submit([transfer])
     asynchronous._executor._queue.join()
@@ -1040,7 +1157,7 @@ def test_asynchronous_load_failure_terminates_and_drains_pending_requests() -> N
         raise RuntimeError("backend get failed")
 
     timeline = AsyncLoadTimeline(backend.set_device)
-    timeline.attach_operation(fail_load)
+    timeline.bind_operation(fail_load)
     timeline.start()
     binding_batch = make_binding_batch()
     timeline.submit(
@@ -1068,7 +1185,8 @@ def test_kv_pool_runtime_filters_remote_objects_before_waiting_for_source(monkey
     runtime, _ = make_kv_pool_runtime(backend, registered=True)
     monkeypatch.setattr(torch.npu, "Event", lambda: event)
     store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
-    runtime.finish_step(begin_kv_pool_step(runtime, store=store))
+    begin_kv_pool_step(runtime, store=store)
+    runtime.finish_step()
     result = runtime.fence_previous_store()
     runtime.close()
     assert result[0].evidence.succeeded
@@ -1082,7 +1200,8 @@ def test_kv_pool_runtime_keeps_the_configured_missing_filter(monkeypatch) -> Non
     backend.requires_exists_before_put = True
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
     store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
-    runtime.finish_step(begin_kv_pool_step(runtime, store=store))
+    begin_kv_pool_step(runtime, store=store)
+    runtime.finish_step()
     runtime.fence_previous_store()
     runtime.close()
     assert "exists" not in [call[0] for call in backend.calls]
@@ -1090,23 +1209,23 @@ def test_kv_pool_runtime_keeps_the_configured_missing_filter(monkeypatch) -> Non
 
 def test_kv_pool_runtime_preserves_unknown_source_release_after_put_failure(monkeypatch) -> None:
     backend = FakeBackend()
-    backend.put_result = BackendStoreEvidence(None, False, False, RuntimeError("put failed"))
+    backend.put_result = RuntimeError("put failed")
     runtime, resources = make_kv_pool_runtime(backend, registered=True)
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
     store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
-    evaluation = begin_kv_pool_step(runtime, store=store)
-    runtime.finish_step(evaluation)
+    begin_kv_pool_step(runtime, store=store)
+    runtime.finish_step()
     with pytest.raises(RuntimeError, match="Store failed"):
         runtime.fence_previous_store()
-    batch = evaluation.pending_store
+    batch = runtime._pending_store_batch
     assert batch is not None
     result = batch.completions[0]
     assert not result.evidence.source_release_confirmed
     assert isinstance(result.evidence.error, RuntimeError)
     with pytest.raises(RuntimeError, match="previous Store failure"):
         runtime.close()
-    assert runtime._store_timeline is not None
-    assert not runtime._store_timeline._executor.is_alive()
+    assert runtime._timeline.store is not None
+    assert not runtime._timeline.store._executor.is_alive()
     assert not resources.closed
 
 
@@ -1115,7 +1234,8 @@ def test_kv_pool_runtime_loads_multiple_groups_in_one_backend_call() -> None:
     backend.get_result = [0, 0]
     runtime, _ = make_kv_pool_runtime(backend, FakeDatabase({0: 4, 1: 4}), groups=(0, 1), store=False)
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,), (2,)), (b"a",)),))
-    runtime.start_load(begin_kv_pool_step(runtime, load=load))
+    begin_kv_pool_step(runtime, load=load)
+    runtime.start_load()
     get_calls = [call for call in backend.calls if call[0] == "get"]
     assert len(get_calls) == 1
     assert len(get_calls[0][1]) == 2
@@ -1126,8 +1246,9 @@ def test_kv_pool_runtime_reports_grouped_load_failure_at_request_scope() -> None
     backend.get_result = [0, -1]
     runtime, _ = make_kv_pool_runtime(backend, FakeDatabase({0: 4, 1: 4}), groups=(0, 1), store=False)
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,), (2,)), (b"a",)),))
+    begin_kv_pool_step(runtime, load=load)
     with pytest.raises(RuntimeError, match="Hybrid KV Load failed"):
-        runtime.start_load(begin_kv_pool_step(runtime, load=load))
+        runtime.start_load()
 
 
 def test_kv_pool_runtime_preserves_nonzero_single_group_failure_identity() -> None:
@@ -1136,25 +1257,25 @@ def test_kv_pool_runtime_preserves_nonzero_single_group_failure_identity() -> No
     runtime, _ = make_kv_pool_runtime(backend, FakeDatabase({3: 4}), groups=(3,), store=False)
     block_ids = ((), (), (), (7,))
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), block_ids, (b"a",)),))
-    evaluation = begin_kv_pool_step(runtime, load=load)
-    runtime.start_load(evaluation)
-    assert runtime.collect_load_result(evaluation).failed_block_ids == {7}
+    begin_kv_pool_step(runtime, load=load)
+    runtime.start_load()
+    assert runtime.collect_load_result().failed_block_ids == {7}
 
 
 def test_layerwise_load_advances_one_physical_layer_per_hook() -> None:
     backend = FakeBackend()
     runtime, resources = make_layerwise_load_runtime(backend)
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",)),))
-    evaluation = begin_kv_pool_step(runtime, load=load)
+    begin_kv_pool_step(runtime, load=load)
 
-    runtime.start_load(evaluation)
-    runtime.wait_for_layer_load(evaluation, "layers.0.group.0")
-    runtime.wait_for_layer_load(evaluation, "layers.1.group.0")
+    runtime.start_load()
+    runtime.wait_for_layer_load("layers.0.group.0")
+    runtime.wait_for_layer_load("layers.1.group.0")
     runtime.close()
 
-    session_calls = [call for call in backend.calls if call[0].endswith("load_sessions")]
-    range_calls = [call for call in backend.calls if call[0] == "load_session_ranges"]
-    assert [call[0] for call in session_calls] == ["start_load_sessions", "finish_load_sessions"]
+    session_calls = [call for call in backend.calls if call[0] in ("batch_get_start", "batch_get_end")]
+    range_calls = [call for call in backend.calls if call[0] == "batch_copy_get"]
+    assert [call[0] for call in session_calls] == ["batch_get_start", "batch_get_end"]
     assert session_calls[0][1] == session_calls[1][1]
     assert len(session_calls[0][1]) == 1
     assert [call[2] for call in range_calls] == [((1064,),), ((2064,),)]
@@ -1166,11 +1287,11 @@ def test_layerwise_load_maintains_a_bounded_prefetch_window(monkeypatch) -> None
     backend = FakeBackend()
     second_layer_loaded = threading.Event()
     gates = []
-    load_session_ranges = backend.load_session_ranges
+    batch_copy_get = backend.batch_copy_get
 
     def observe_load_window(keys, addresses, sizes, remote_offsets):
-        result = load_session_ranges(keys, addresses, sizes, remote_offsets)
-        if len([call for call in backend.calls if call[0] == "load_session_ranges"]) == 2:
+        result = batch_copy_get(keys, addresses, sizes, remote_offsets)
+        if len([call for call in backend.calls if call[0] == "batch_copy_get"]) == 2:
             second_layer_loaded.set()
         return result
 
@@ -1179,7 +1300,7 @@ def test_layerwise_load_maintains_a_bounded_prefetch_window(monkeypatch) -> None
         gates.append(gate)
         return gate
 
-    monkeypatch.setattr(backend, "load_session_ranges", observe_load_window)
+    monkeypatch.setattr(backend, "batch_copy_get", observe_load_window)
     runtime, _ = make_layerwise_load_runtime(
         backend,
         physical_layers=(0, 1, 2),
@@ -1187,21 +1308,21 @@ def test_layerwise_load_maintains_a_bounded_prefetch_window(monkeypatch) -> None
         start_gate_factory=make_start_gate,
     )
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",)),))
-    evaluation = begin_kv_pool_step(runtime, load=load)
+    begin_kv_pool_step(runtime, load=load)
 
-    runtime.start_load(evaluation)
+    runtime.start_load()
 
-    assert not any(call[0] == "load_session_ranges" for call in backend.calls)
-    runtime.wait_for_layer_load(evaluation, "layers.0.group.0")
-    assert len([call for call in backend.calls if call[0] == "load_session_ranges"]) == 1
+    assert not any(call[0] == "batch_copy_get" for call in backend.calls)
+    runtime.wait_for_layer_load("layers.0.group.0")
+    assert len([call for call in backend.calls if call[0] == "batch_copy_get"]) == 1
     gates[0].open()
     assert second_layer_loaded.wait(timeout=2)
-    runtime.wait_for_layer_load(evaluation, "layers.1.group.0")
-    assert len([call for call in backend.calls if call[0] == "load_session_ranges"]) == 2
+    runtime.wait_for_layer_load("layers.1.group.0")
+    assert len([call for call in backend.calls if call[0] == "batch_copy_get"]) == 2
     gates[1].open()
-    runtime.wait_for_layer_load(evaluation, "layers.2.group.0")
+    runtime.wait_for_layer_load("layers.2.group.0")
     runtime.close()
-    assert len([call for call in backend.calls if call[0] == "load_session_ranges"]) == 3
+    assert len([call for call in backend.calls if call[0] == "batch_copy_get"]) == 3
 
 
 def test_layerwise_load_surfaces_background_range_failure_and_closes_sessions(monkeypatch) -> None:
@@ -1211,16 +1332,16 @@ def test_layerwise_load_surfaces_background_range_failure_and_closes_sessions(mo
         del args
         raise RuntimeError("range get failed")
 
-    monkeypatch.setattr(backend, "load_session_ranges", fail_load_range)
+    monkeypatch.setattr(backend, "batch_copy_get", fail_load_range)
     runtime, resources = make_layerwise_load_runtime(backend)
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",)),))
-    evaluation = begin_kv_pool_step(runtime, load=load)
+    begin_kv_pool_step(runtime, load=load)
 
-    runtime.start_load(evaluation)
+    runtime.start_load()
 
     with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
-        runtime.wait_for_layer_load(evaluation, "layers.0.group.0")
-    assert [call[0] for call in backend.calls].count("finish_load_sessions") == 1
+        runtime.wait_for_layer_load("layers.0.group.0")
+    assert [call[0] for call in backend.calls].count("batch_get_end") == 1
     with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
         runtime.close()
     assert resources.closed
@@ -1230,19 +1351,20 @@ def test_layerwise_load_closes_attempted_sessions_after_start_exception(monkeypa
     backend = FakeBackend()
 
     def fail_session_start(keys):
-        backend.calls.append(("start_load_sessions", tuple(keys)))
+        backend.calls.append(("batch_get_start", tuple(keys)))
         raise RuntimeError("session start failed")
 
-    monkeypatch.setattr(backend, "start_load_sessions", fail_session_start)
+    monkeypatch.setattr(backend, "batch_get_start", fail_session_start)
     runtime, resources = make_layerwise_load_runtime(backend)
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",)),))
 
+    begin_kv_pool_step(runtime, load=load)
     with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
-        runtime.start_load(begin_kv_pool_step(runtime, load=load))
-    assert [call[0] for call in backend.calls].count("finish_load_sessions") == 1
+        runtime.start_load()
+    assert [call[0] for call in backend.calls].count("batch_get_end") == 1
     with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
         runtime.close()
-    assert [call[0] for call in backend.calls].count("finish_load_sessions") == 1
+    assert [call[0] for call in backend.calls].count("batch_get_end") == 1
     assert resources.closed
 
 
@@ -1251,15 +1373,15 @@ def test_layerwise_load_attempts_session_end_only_once_after_failure() -> None:
     backend.session_end_result = -1
     runtime, resources = make_layerwise_load_runtime(backend, physical_layers=(0,))
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",)),))
-    evaluation = begin_kv_pool_step(runtime, load=load)
+    begin_kv_pool_step(runtime, load=load)
 
-    runtime.start_load(evaluation)
+    runtime.start_load()
     with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
-        runtime.wait_for_layer_load(evaluation, "layers.0.group.0")
-    assert [call[0] for call in backend.calls].count("finish_load_sessions") == 1
+        runtime.wait_for_layer_load("layers.0.group.0")
+    assert [call[0] for call in backend.calls].count("batch_get_end") == 1
     with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
         runtime.close()
-    assert [call[0] for call in backend.calls].count("finish_load_sessions") == 1
+    assert [call[0] for call in backend.calls].count("batch_get_end") == 1
     assert resources.closed
 
 
@@ -1269,9 +1391,10 @@ def test_layerwise_hybrid_start_failure_aborts_open_sessions() -> None:
     runtime, resources = make_layerwise_load_runtime(backend, groups=(0, 1))
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,), (2,)), (b"a",)),))
 
+    begin_kv_pool_step(runtime, load=load)
     with pytest.raises(RuntimeError, match="Hybrid KV Load failed"):
-        runtime.start_load(begin_kv_pool_step(runtime, load=load))
-    finish_calls = [call for call in backend.calls if call[0] == "finish_load_sessions"]
+        runtime.start_load()
+    finish_calls = [call for call in backend.calls if call[0] == "batch_get_end"]
     assert len(finish_calls) == 1
     assert len(finish_calls[0][1]) == 1
     runtime.close()
@@ -1283,12 +1406,12 @@ def test_layerwise_hybrid_range_failure_aborts_open_sessions() -> None:
     backend.session_copy_result = [0, -1]
     runtime, resources = make_layerwise_load_runtime(backend, groups=(0, 1), prefetch_layers=1)
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,), (2,)), (b"a",)),))
-    evaluation = begin_kv_pool_step(runtime, load=load)
+    begin_kv_pool_step(runtime, load=load)
 
-    runtime.start_load(evaluation)
+    runtime.start_load()
     with pytest.raises(RuntimeError, match="Hybrid KV Load failed"):
-        runtime.wait_for_layer_load(evaluation, "layers.0.group.0")
-    assert [call[0] for call in backend.calls].count("finish_load_sessions") == 1
+        runtime.wait_for_layer_load("layers.0.group.0")
+    assert [call[0] for call in backend.calls].count("batch_get_end") == 1
     runtime.close()
     assert resources.closed
 
@@ -1298,12 +1421,12 @@ def test_layerwise_load_reports_session_start_failure_by_block() -> None:
     backend.session_start_result = [-1]
     runtime, _ = make_layerwise_load_runtime(backend)
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((7,),), (b"a",)),))
-    evaluation = begin_kv_pool_step(runtime, load=load)
+    begin_kv_pool_step(runtime, load=load)
 
-    runtime.start_load(evaluation)
+    runtime.start_load()
 
-    assert runtime.collect_load_result(evaluation).failed_block_ids == {7}
-    assert not any(call[0] == "load_session_ranges" for call in backend.calls)
+    assert runtime.collect_load_result().failed_block_ids == {7}
+    assert not any(call[0] == "batch_copy_get" for call in backend.calls)
     runtime.close()
 
 
@@ -1311,14 +1434,14 @@ def test_layerwise_load_closes_an_incomplete_session_before_reporting_it() -> No
     backend = FakeBackend()
     runtime, _ = make_layerwise_load_runtime(backend)
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",)),))
-    evaluation = begin_kv_pool_step(runtime, load=load)
+    begin_kv_pool_step(runtime, load=load)
 
-    runtime.start_load(evaluation)
-    runtime.wait_for_layer_load(evaluation, "layers.0.group.0")
+    runtime.start_load()
+    runtime.wait_for_layer_load("layers.0.group.0")
 
     with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
-        runtime.collect_load_result(evaluation)
-    assert [call[0] for call in backend.calls].count("finish_load_sessions") == 1
+        runtime.collect_load_result()
+    assert [call[0] for call in backend.calls].count("batch_get_end") == 1
     with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
         runtime.close()
 
@@ -1335,24 +1458,24 @@ def test_layerwise_store_publishes_ranges_before_committing_shared_objects(monke
     monkeypatch.setattr(torch.npu, "Event", make_event)
     runtime, resources = make_layerwise_store_runtime(backend)
     store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
-    evaluation = begin_kv_pool_step(runtime, store=store)
+    begin_kv_pool_step(runtime, store=store)
 
-    runtime.save_layer(evaluation, "layers.0.group.0")
-    runtime.save_layer(evaluation, "layers.1.group.0")
-    runtime.finish_step(evaluation)
+    runtime.save_layer("layers.0.group.0")
+    runtime.save_layer("layers.1.group.0")
+    runtime.finish_step()
     runtime.close()
 
-    store_calls = [call for call in backend.calls if "store_session" in call[0]]
+    store_calls = [call for call in backend.calls if call[0] in ("batch_put_start", "batch_copy_put", "batch_commit")]
     assert [call[0] for call in store_calls] == [
-        "start_store_sessions",
-        "store_session_ranges",
-        "store_session_ranges",
-        "commit_store_sessions",
+        "batch_put_start",
+        "batch_copy_put",
+        "batch_copy_put",
+        "batch_commit",
     ]
     assert store_calls[0][2] == (64,)
     assert [call[4] for call in store_calls[1:3]] == [((0,),), ((32,),)]
     assert all(event.synchronized for event in events)
-    assert evaluation.pending_store is None
+    assert runtime._pending_store_batch is None
     assert resources.closed
 
 
@@ -1362,9 +1485,9 @@ def test_layerwise_store_runs_session_lifecycle_on_its_executor(monkeypatch) -> 
     backend.presence = [0]
     executor_threads = set()
     observe_presence = backend.exists
-    start_store_sessions = backend.start_store_sessions
-    store_session_ranges = backend.store_session_ranges
-    commit_store_sessions = backend.commit_store_sessions
+    batch_put_start = backend.batch_put_start
+    batch_copy_put = backend.batch_copy_put
+    batch_commit = backend.batch_commit
 
     def track_presence(keys):
         executor_threads.add(threading.current_thread().name)
@@ -1372,28 +1495,28 @@ def test_layerwise_store_runs_session_lifecycle_on_its_executor(monkeypatch) -> 
 
     def track_start(keys, object_sizes):
         executor_threads.add(threading.current_thread().name)
-        return start_store_sessions(keys, object_sizes)
+        return batch_put_start(keys, object_sizes)
 
     def track_range(keys, addresses, sizes, remote_offsets):
         executor_threads.add(threading.current_thread().name)
-        return store_session_ranges(keys, addresses, sizes, remote_offsets)
+        return batch_copy_put(keys, addresses, sizes, remote_offsets)
 
     def track_commit(keys):
         executor_threads.add(threading.current_thread().name)
-        return commit_store_sessions(keys)
+        return batch_commit(keys)
 
     monkeypatch.setattr(backend, "exists", track_presence)
-    monkeypatch.setattr(backend, "start_store_sessions", track_start)
-    monkeypatch.setattr(backend, "store_session_ranges", track_range)
-    monkeypatch.setattr(backend, "commit_store_sessions", track_commit)
+    monkeypatch.setattr(backend, "batch_put_start", track_start)
+    monkeypatch.setattr(backend, "batch_copy_put", track_range)
+    monkeypatch.setattr(backend, "batch_commit", track_commit)
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
     runtime, _ = make_layerwise_store_runtime(backend)
     store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
-    evaluation = begin_kv_pool_step(runtime, store=store)
+    begin_kv_pool_step(runtime, store=store)
 
-    runtime.save_layer(evaluation, "layers.0.group.0")
-    runtime.save_layer(evaluation, "layers.1.group.0")
-    runtime.finish_step(evaluation)
+    runtime.save_layer("layers.0.group.0")
+    runtime.save_layer("layers.1.group.0")
+    runtime.finish_step()
     runtime.close()
 
     assert executor_threads == {"KVPoolLayerwiseStoreExecutor"}
@@ -1403,20 +1526,20 @@ def test_layerwise_store_revokes_attempted_sessions_after_start_exception(monkey
     backend = FakeBackend()
 
     def fail_session_start(keys, object_sizes):
-        backend.calls.append(("start_store_sessions", tuple(keys), tuple(object_sizes)))
+        backend.calls.append(("batch_put_start", tuple(keys), tuple(object_sizes)))
         raise RuntimeError("session start failed")
 
-    monkeypatch.setattr(backend, "start_store_sessions", fail_session_start)
+    monkeypatch.setattr(backend, "batch_put_start", fail_session_start)
     runtime, resources = make_layerwise_store_runtime(backend)
     store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
-    evaluation = begin_kv_pool_step(runtime, store=store)
+    begin_kv_pool_step(runtime, store=store)
 
-    assert [call[0] for call in backend.calls].count("revoke_store_sessions") == 1
+    assert [call[0] for call in backend.calls].count("batch_revoke") == 1
     with pytest.raises(RuntimeError, match="Store failed"):
-        runtime.finish_step(evaluation)
+        runtime.finish_step()
     with pytest.raises(RuntimeError, match="previous Store failure"):
         runtime.close()
-    assert [call[0] for call in backend.calls].count("revoke_store_sessions") == 1
+    assert [call[0] for call in backend.calls].count("batch_revoke") == 1
     assert resources.closed
 
 
@@ -1425,11 +1548,11 @@ def test_layerwise_store_revokes_attempted_sessions_after_mismatched_start_resul
     backend.store_session_start_result = [0, 0]
     runtime, resources = make_layerwise_store_runtime(backend)
     store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
-    evaluation = begin_kv_pool_step(runtime, store=store)
+    begin_kv_pool_step(runtime, store=store)
 
-    assert [call[0] for call in backend.calls].count("revoke_store_sessions") == 1
+    assert [call[0] for call in backend.calls].count("batch_revoke") == 1
     with pytest.raises(RuntimeError, match="Store failed"):
-        runtime.finish_step(evaluation)
+        runtime.finish_step()
     with pytest.raises(RuntimeError, match="previous Store failure"):
         runtime.close()
     assert resources.closed
@@ -1437,21 +1560,21 @@ def test_layerwise_store_revokes_attempted_sessions_after_mismatched_start_resul
 
 def test_layerwise_store_preserves_unknown_source_release_after_range_failure(monkeypatch) -> None:
     backend = FakeBackend()
-    backend.store_session_copy_evidence = BackendStoreEvidence(None, False, False, RuntimeError("put failed"))
+    backend.store_session_copy_result = RuntimeError("put failed")
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
     runtime, resources = make_layerwise_store_runtime(backend)
     store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
-    evaluation = begin_kv_pool_step(runtime, store=store)
+    begin_kv_pool_step(runtime, store=store)
 
-    runtime.save_layer(evaluation, "layers.0.group.0")
-    runtime.save_layer(evaluation, "layers.1.group.0")
+    runtime.save_layer("layers.0.group.0")
+    runtime.save_layer("layers.1.group.0")
     with pytest.raises(RuntimeError, match="Store failed"):
-        runtime.finish_step(evaluation)
+        runtime.finish_step()
 
-    assert evaluation.pending_store is not None
-    assert not evaluation.pending_store.completions[0].evidence.source_release_confirmed
-    assert "commit_store_sessions" not in [call[0] for call in backend.calls]
-    assert "revoke_store_sessions" in [call[0] for call in backend.calls]
+    assert runtime._pending_store_batch is not None
+    assert not runtime._pending_store_batch.completions[0].evidence.source_release_confirmed
+    assert "batch_commit" not in [call[0] for call in backend.calls]
+    assert "batch_revoke" in [call[0] for call in backend.calls]
     with pytest.raises(RuntimeError, match="previous Store failure"):
         runtime.close()
     assert not resources.closed
@@ -1464,16 +1587,16 @@ def test_layerwise_store_does_not_open_sessions_for_existing_objects(monkeypatch
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
     runtime, _ = make_layerwise_store_runtime(backend)
     store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
-    evaluation = begin_kv_pool_step(runtime, store=store)
+    begin_kv_pool_step(runtime, store=store)
 
-    runtime.save_layer(evaluation, "layers.0.group.0")
-    runtime.save_layer(evaluation, "layers.1.group.0")
-    runtime.finish_step(evaluation)
+    runtime.save_layer("layers.0.group.0")
+    runtime.save_layer("layers.1.group.0")
+    runtime.finish_step()
     runtime.close()
 
-    assert evaluation.pending_store is None
+    assert runtime._pending_store_batch is None
     assert [call[0] for call in backend.calls].count("exists") == 1
-    assert not any("store_session" in call[0] for call in backend.calls)
+    assert not any(call[0] in ("batch_put_start", "batch_copy_put", "batch_commit") for call in backend.calls)
 
 
 def test_layerwise_store_revokes_objects_when_a_selected_layer_is_not_reached(monkeypatch) -> None:
@@ -1481,14 +1604,14 @@ def test_layerwise_store_revokes_objects_when_a_selected_layer_is_not_reached(mo
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
     runtime, resources = make_layerwise_store_runtime(backend)
     store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
-    evaluation = begin_kv_pool_step(runtime, store=store)
+    begin_kv_pool_step(runtime, store=store)
 
-    runtime.save_layer(evaluation, "layers.0.group.0")
+    runtime.save_layer("layers.0.group.0")
     with pytest.raises(RuntimeError, match="Store failed"):
-        runtime.finish_step(evaluation)
+        runtime.finish_step()
 
-    assert "commit_store_sessions" not in [call[0] for call in backend.calls]
-    assert "revoke_store_sessions" in [call[0] for call in backend.calls]
+    assert "batch_commit" not in [call[0] for call in backend.calls]
+    assert "batch_revoke" in [call[0] for call in backend.calls]
     with pytest.raises(RuntimeError, match="previous Store failure"):
         runtime.close()
     assert resources.closed
@@ -1499,21 +1622,52 @@ def test_kv_pool_runtime_async_load_publishes_only_after_backend_completion() ->
     backend.get_result = [0]
     runtime, _ = make_kv_pool_runtime(backend, async_load=True, store=False, registered=True)
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",)),))
-    evaluation = begin_kv_pool_step(runtime, load=load)
-    runtime.start_load(evaluation)
-    runtime._load_timeline._executor._queue.join()
-    assert runtime.collect_load_result(evaluation).completed_request_ids == {"request"}
+    begin_kv_pool_step(runtime, load=load)
+    runtime.start_load()
+    runtime._timeline.load._executor._queue.join()
+    assert runtime.collect_load_result().completed_request_ids == {"request"}
+    runtime.close()
+
+
+def test_kv_pool_runtime_owns_active_step_lifecycle() -> None:
+    runtime, _ = make_kv_pool_runtime(FakeBackend(), store=False)
+    step = KVTransferStep()
+
+    with pytest.raises(RuntimeError, match="has not begun"):
+        runtime.start_load()
+    runtime.begin_step(step)
+    with pytest.raises(RuntimeError, match="has not ended"):
+        runtime.begin_step(step)
+    runtime.end_step()
+    with pytest.raises(RuntimeError, match="has not begun"):
+        runtime.end_step()
+
+
+def test_kv_pool_runtime_retains_async_load_owner_across_steps() -> None:
+    backend = FakeBackend()
+    backend.get_result = [0]
+    runtime, _ = make_kv_pool_runtime(backend, async_load=True, store=False, registered=True)
+    load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",)),))
+
+    begin_kv_pool_step(runtime, load=load)
+    runtime.start_load()
+    runtime.end_step()
+    begin_kv_pool_step(runtime)
+    runtime._timeline.load._executor._queue.join()
+
+    assert runtime.collect_load_result().completed_request_ids == {"request"}
     runtime.close()
 
 
 def test_kv_pool_runtime_store_projects_then_fences_one_step(monkeypatch) -> None:
     backend = FakeBackend()
-    backend.put_result = BackendStoreEvidence((0,), True, True)
+    backend.put_result = [0]
     runtime, resources = make_kv_pool_runtime(backend, registered=True)
     event = FakeEvent()
     monkeypatch.setattr(torch.npu, "Event", lambda: event)
     store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
-    runtime.finish_step(begin_kv_pool_step(runtime, store=store))
+    begin_kv_pool_step(runtime, store=store)
+    runtime.finish_step()
     results = runtime.fence_previous_store()
     runtime.close()
     assert results[0].evidence.succeeded
@@ -1525,9 +1679,7 @@ def test_kv_pool_runtime_store_projects_then_fences_one_step(monkeypatch) -> Non
 def test_kv_pool_runtime_close_keeps_resources_when_store_source_release_is_unknown() -> None:
     backend = FakeBackend()
     runtime, resources = make_kv_pool_runtime(backend, store=True)
-    evaluation = begin_kv_pool_step(runtime)
-    evaluation.pending_store = SimpleNamespace()
-    runtime._pending_store_evaluation = evaluation
+    runtime._pending_store_batch = SimpleNamespace()
     runtime._store_error = RuntimeError("unknown source release")
     with pytest.raises(RuntimeError):
         runtime.close()
@@ -1707,10 +1859,11 @@ def test_chunk_continuation_keeps_layerwise_load_session_step_local() -> None:
             num_scheduled_tokens={"request": 4},
         )
     )
-    first_evaluation = runtime.begin_step(first_step)
-    runtime.start_load(first_evaluation)
-    runtime.wait_for_layer_load(first_evaluation, "layers.0.group.0")
-    runtime.wait_for_layer_load(first_evaluation, "layers.1.group.0")
+    runtime.begin_step(first_step)
+    runtime.start_load()
+    runtime.wait_for_layer_load("layers.0.group.0")
+    runtime.wait_for_layer_load("layers.1.group.0")
+    runtime.end_step()
 
     request.num_computed_tokens = 8
     request.block_hashes = [b"a", b"b", b"c"]
@@ -1723,14 +1876,14 @@ def test_chunk_continuation_keeps_layerwise_load_session_step_local() -> None:
             num_scheduled_tokens={"request": 4},
         )
     )
-    continued_evaluation = runtime.begin_step(continued_step)
-    runtime.start_load(continued_evaluation)
+    runtime.begin_step(continued_step)
+    runtime.start_load()
     runtime.close()
 
     assert continued_step.load.commands == ()
     assert planner.request_progress["request"].block_ids_by_group == ((1, 2, 3),)
-    assert [call[0] for call in backend.calls].count("start_load_sessions") == 1
-    assert [call[0] for call in backend.calls].count("finish_load_sessions") == 1
+    assert [call[0] for call in backend.calls].count("batch_get_start") == 1
+    assert [call[0] for call in backend.calls].count("batch_get_end") == 1
 
 
 def test_preemption_reloads_prefix_into_replacement_blocks() -> None:
@@ -1755,10 +1908,11 @@ def test_preemption_reloads_prefix_into_replacement_blocks() -> None:
             num_scheduled_tokens={"request": 4},
         )
     )
-    first_evaluation = runtime.begin_step(first_step)
-    runtime.start_load(first_evaluation)
-    runtime.wait_for_layer_load(first_evaluation, "layers.0.group.0")
-    runtime.wait_for_layer_load(first_evaluation, "layers.1.group.0")
+    runtime.begin_step(first_step)
+    runtime.start_load()
+    runtime.wait_for_layer_load("layers.0.group.0")
+    runtime.wait_for_layer_load("layers.1.group.0")
+    runtime.end_step()
 
     planner.build_step(
         SimpleNamespace(
@@ -1779,17 +1933,17 @@ def test_preemption_reloads_prefix_into_replacement_blocks() -> None:
             num_scheduled_tokens={"request": 4},
         )
     )
-    resumed_evaluation = runtime.begin_step(resumed_step)
-    runtime.start_load(resumed_evaluation)
-    runtime.wait_for_layer_load(resumed_evaluation, "layers.0.group.0")
-    runtime.wait_for_layer_load(resumed_evaluation, "layers.1.group.0")
+    runtime.begin_step(resumed_step)
+    runtime.start_load()
+    runtime.wait_for_layer_load("layers.0.group.0")
+    runtime.wait_for_layer_load("layers.1.group.0")
     runtime.close()
 
     assert resumed_step.load.commands[0].block_ids_by_group == ((7,),)
     assert resumed_step.store.commands == ()
     assert planner.request_progress["request"].block_ids_by_group == ((7,),)
-    assert [call[0] for call in backend.calls].count("start_load_sessions") == 2
-    assert [call[0] for call in backend.calls].count("finish_load_sessions") == 2
+    assert [call[0] for call in backend.calls].count("batch_get_start") == 2
+    assert [call[0] for call in backend.calls].count("batch_get_end") == 2
 
 
 def test_planner_rebuilds_progress_from_new_blocks_after_preemption() -> None:
@@ -1872,20 +2026,20 @@ def test_connector_routes_only_step_commands_to_kv_pool_runtime() -> None:
     received = []
     step = KVTransferStep(LoadCommandBatch(), StoreCommandBatch())
     instance = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
-    evaluation = object()
     instance.runtime = SimpleNamespace(
-        begin_step=lambda value: evaluation,
-        start_load=lambda value: received.append(value),
-        wait_for_layer_load=lambda value, layer_name: received.append((value, layer_name)),
+        begin_step=lambda value: received.append(("begin", value)),
+        end_step=lambda: received.append(("end",)),
+        start_load=lambda: received.append(("load",)),
+        wait_for_layer_load=lambda layer_name: received.append(("layer", layer_name)),
     )
-    instance._step_evaluation = None
     instance.bind_connector_metadata(step)
     instance.start_load_kv(SimpleNamespace())
     instance.wait_for_layer_load("layers.0")
-    assert received == [evaluation, (evaluation, "layers.0")]
+    instance.clear_connector_metadata()
+    assert received == [("begin", step), ("load",), ("layer", "layers.0"), ("end",)]
 
 
-def test_backend_adapter_keeps_source_release_unknown_after_native_put_error() -> None:
+def test_backend_io_keeps_source_release_unknown_after_native_put_error() -> None:
     class Store:
         def batch_put_from_multi_buffers(self, keys, addresses, sizes, replicate_config):
             raise RuntimeError("native put failed")
@@ -1895,23 +2049,25 @@ def test_backend_adapter_keeps_source_release_unknown_after_native_put_error() -
         ensure_initialized=lambda: None,
         _build_replicate_config=lambda: object(),
     )
-    result = BackendAdapter("mooncake", backend, SimpleNamespace()).put(["key"], [[100]], [[16]])
+    backend_spec = make_backend_spec(type(backend), name="mooncake")
+    result = BackendIO(backend, backend_spec).store((make_binding_batch(),))
     assert not result.succeeded
     assert not result.source_release_confirmed
     assert isinstance(result.error, RuntimeError)
 
 
-def test_backend_adapter_confirms_source_safety_before_native_handoff() -> None:
+def test_backend_io_confirms_source_safety_before_native_handoff() -> None:
     backend = SimpleNamespace(
         store=None,
         ensure_initialized=lambda: (_ for _ in ()).throw(RuntimeError("init failed")),
     )
-    result = BackendAdapter("mooncake", backend, SimpleNamespace()).put(["key"], [[100]], [[16]])
+    backend_spec = make_backend_spec(type(backend), name="mooncake")
+    result = BackendIO(backend, backend_spec).store((make_binding_batch(),))
     assert not result.succeeded
     assert result.source_release_confirmed
 
 
-def test_backend_adapter_preserves_layerwise_load_session_results() -> None:
+def test_backend_io_preserves_layerwise_load_session_results() -> None:
     calls = []
 
     class Backend:
@@ -1939,10 +2095,11 @@ def test_backend_adapter_preserves_layerwise_load_session_results() -> None:
             return 0
 
     backend = Backend()
-    adapter = BackendAdapter("mooncake", backend, SimpleNamespace())
+    backend_io = LayerwiseBackendIO(backend, make_backend_spec(Backend, name="mooncake"))
 
-    adapter.validate_layerwise_support()
-    assert adapter.start_load_sessions(["key"]) == (0,)
-    assert adapter.load_session_ranges(["key"], [[100]], [[16]], [[8]]) == (0,)
-    assert adapter.finish_load_sessions(["key"]) == 0
+    backend_io.validate_support()
+    assert backend_io.start_load_sessions(["key"]) == (0,)
+    binding = make_binding_batch().bindings[0]
+    assert backend_io.load((binding,))[0].result_code == 0
+    backend_io.finish_load_sessions(["key"])
     assert [call[0] for call in calls] == ["validate", "start", "copy", "finish"]

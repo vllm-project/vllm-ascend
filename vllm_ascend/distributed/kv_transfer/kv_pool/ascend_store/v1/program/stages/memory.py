@@ -1,4 +1,4 @@
-"""Project block assignments into remote-object and local-memory bindings."""
+"""Project semantic chunks through local Block IDs into memory bindings."""
 
 from __future__ import annotations
 
@@ -6,11 +6,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..elements import (
+from ..representation import (
     BindingBatch,
     KVBinding,
+    KVBlockAssignment,
     KVBlockAssignmentBatch,
     KVChunk,
+    KVChunkBatch,
     KVMemoryGeometry,
     KVMemorySegment,
     KVMemoryView,
@@ -19,14 +21,48 @@ from ..elements import (
     RemoteKVObject,
     RemoteObjectKeyBatch,
 )
-from ..topology import KVPoolGroupTopology, KVPoolTopology
-from .object import replace_key_rank
+from ..spec.topology import KVPoolGroupTopology, KVPoolTopology
+from .remote import replace_key_rank
+
+
+class KVBlockProjection:
+    """Align semantic chunks with the Block IDs supplied for one scheduler step."""
+
+    def __init__(self, topology: KVPoolTopology) -> None:
+        self.group_ids = topology.transfer_group_ids
+        self._minimum_block_ids = {
+            group.group_id: 0 if topology.tp_partition.tp_mismatch or not group.uses_align_state else 1
+            for group in topology.groups
+            if group.group_id in topology.transfer_group_ids
+        }
+
+    def project(
+        self,
+        batches: tuple[KVChunkBatch, ...],
+        block_ids_by_group: tuple[tuple[int, ...], ...],
+    ) -> tuple[KVBlockAssignmentBatch, ...]:
+        group_ids = tuple(batch.group_id for batch in batches)
+        if group_ids != self.group_ids:
+            raise ValueError(f"KV chunk groups {group_ids} do not match compiled groups {self.group_ids}")
+        return tuple(self._project_batch(batch, block_ids_by_group[batch.group_id]) for batch in batches)
+
+    def _project_batch(self, batch: KVChunkBatch, block_ids: Sequence[int]) -> KVBlockAssignmentBatch:
+        block_offset = max(batch.logical_block_count - len(block_ids), 0)
+        assignments = []
+        minimum_block_id = self._minimum_block_ids[batch.group_id]
+        for chunk in batch.chunks:
+            local_block_index = chunk.block_index - block_offset
+            if 0 <= local_block_index < len(block_ids):
+                block_id = block_ids[local_block_index]
+                if block_id >= minimum_block_id:
+                    assignments.append(KVBlockAssignment(chunk, block_id))
+        return KVBlockAssignmentBatch(batch.group_id, tuple(assignments))
 
 
 class BindingProjection(Protocol):
     """Join Block assignments and remote identities into one fixed representation."""
 
-    def compile_memory_mapping(self, memory_geometry: KVMemoryGeometry) -> None: ...
+    def bind_memory(self, memory_geometry: KVMemoryGeometry) -> None: ...
 
     def project(self, assignments: KVBlockAssignmentBatch, object_keys: RemoteObjectKeyBatch) -> BindingBatch: ...
 
@@ -38,7 +74,7 @@ class ContiguousBindingProjection:
         self._groups = _transfer_groups(topology)
         self._segments_by_group: dict[int, tuple[KVMemorySegment, ...]] | None = None
 
-    def compile_memory_mapping(self, memory_geometry: KVMemoryGeometry) -> None:
+    def bind_memory(self, memory_geometry: KVMemoryGeometry) -> None:
         if self._segments_by_group is not None:
             raise RuntimeError("Contiguous binding projection is already bound")
         self._segments_by_group = _select_group_memory(self._groups, memory_geometry)
@@ -85,7 +121,7 @@ class LayerwiseBindingProjection:
         self._groups = _transfer_groups(topology)
         self._regions_by_group: dict[int, tuple[_LayerRegionTemplate, ...]] | None = None
 
-    def compile_memory_mapping(self, memory_geometry: KVMemoryGeometry) -> None:
+    def bind_memory(self, memory_geometry: KVMemoryGeometry) -> None:
         if self._regions_by_group is not None:
             raise RuntimeError("Layerwise binding projection is already bound")
         segments_by_group = _select_group_memory(self._groups, memory_geometry)
@@ -163,7 +199,7 @@ class StridedBindingProjection:
         )
         self._bound_representations: tuple[_BoundStridedRepresentation, ...] | None = None
 
-    def compile_memory_mapping(self, memory_geometry: KVMemoryGeometry) -> None:
+    def bind_memory(self, memory_geometry: KVMemoryGeometry) -> None:
         if self._bound_representations is not None:
             raise RuntimeError("Strided binding projection is already bound")
         segments = _select_group_memory(self._groups, memory_geometry)[self._group_id]

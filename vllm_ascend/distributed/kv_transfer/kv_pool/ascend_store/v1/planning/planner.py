@@ -9,11 +9,19 @@ from vllm.utils.math_utils import cdiv
 from ..coordinates import TokenRange
 from ..protocol.transfer import KVTransferStep, LoadCommand, LoadCommandBatch, StoreCommand, StoreCommandBatch
 from .availability import ExternalPrefixPlan, LookupQuery, RemoteAvailabilityProbe
-from .progress import LoadCandidate, LoadPublication, RequestSnapshot
-from .spec import TransferPlanningSpec
+from .progress import (
+    AllocationLoadPublication,
+    LoadCandidate,
+    LoadPublication,
+    RequestSnapshot,
+    ScheduledLoadPublication,
+)
+from .spec import TransferPlanningSpec, resolve_transfer_planning_spec
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 
@@ -38,6 +46,41 @@ class TransferPlanner:
         self.request_progress: dict[str, RequestSnapshot] = {}
         self.requests: dict[str, Request] = {}
         self.preempted_request_ids: set[str] = set()
+
+    @classmethod
+    def from_config(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
+        lookup_address: str,
+    ) -> TransferPlanner:
+        """Construct the Scheduler planner from vLLM's immutable KV configuration."""
+
+        spec = resolve_transfer_planning_spec(vllm_config, kv_cache_config)
+        transfer_config = vllm_config.kv_transfer_config
+        extra_config = transfer_config.kv_connector_extra_config
+        load_publication: LoadPublication
+        if extra_config.get("load_async", False) and not extra_config.get("use_layerwise", False):
+            load_publication = AllocationLoadPublication()
+        else:
+            load_publication = ScheduledLoadPublication()
+        consumer_is_to_load = extra_config.get("consumer_is_to_load", False)
+        availability_probe = RemoteAvailabilityProbe(
+            lookup_address,
+            group_ids=spec.transfer_group_ids,
+            transfer_granularity=spec.cache_transfer_granularity,
+            discard_partial_chunks=spec.discard_partial_chunks,
+            enabled=transfer_config.kv_role != "kv_consumer" or consumer_is_to_load,
+        )
+        consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
+        store_enabled = transfer_config.kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
+        return cls(
+            spec,
+            availability_probe,
+            load_publication,
+            store_enabled=store_enabled,
+            save_decode_cache=extra_config.get("save_decode_cache", False),
+        )
 
     def lookup(self, query: LookupQuery) -> ExternalPrefixPlan:
         availability = self._availability_probe.query(query)
