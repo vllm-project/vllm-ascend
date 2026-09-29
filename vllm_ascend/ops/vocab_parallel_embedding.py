@@ -26,7 +26,6 @@ from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
 from vllm.distributed import divide
 from vllm.distributed.parallel_state import get_pcp_group, get_tp_group
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -583,36 +582,21 @@ class AscendLogitsProcessor(LogitsProcessor):
     def _get_lmhead_tp_capacity(self, lm_head: AscendParallelLMHead) -> int | None:
         """Group-agreed row capacity for the lmhead-TP collectives.
 
-        Prefers the DP-synced token count from the current forward context,
-        which is identical on every rank of the DP group (produced by the same
-        ``coordinate_batch_across_dp`` all-reduce), so the lm-head collectives
-        stay shape-aligned without an extra communication. The resolved value
-        is cached on the head so an idle rank can reuse it from ``execute_model``
-        after the forward context has been torn down. Falls back to the static
-        ``lmhead_tp_capacity`` (or None for heads without a capacity).
+        The per-step capacity is computed upstream from the DP-synced token
+        count and published explicitly: the target side stores it on the runner
+        (``_lmhead_tp_step_capacity``) and the DSpark draft side writes it on
+        the head (``_lmhead_tp_dynamic_capacity``) before the draft head runs.
+        Here we read that explicit value first so every rank uses the same
+        per-step bound, falling back to the static ``lmhead_tp_capacity`` (or
+        None for heads without a capacity).
         """
+        dynamic_capacity = getattr(lm_head, "_lmhead_tp_dynamic_capacity", None)
+        if isinstance(dynamic_capacity, int):
+            return dynamic_capacity
         static_capacity = getattr(lm_head, "lmhead_tp_capacity", None)
-        if not isinstance(static_capacity, int):
-            static_capacity = None
-        num_tokens_across_dp = None
-        try:
-            forward_context = get_forward_context()
-            num_tokens_across_dp = getattr(forward_context, "num_tokens_across_dp", None)
-            if num_tokens_across_dp is None:
-                num_tokens_across_dp = forward_context.additional_kwargs.get("num_tokens_across_dp")
-        except Exception:
-            num_tokens_across_dp = None
-        if num_tokens_across_dp is not None and num_tokens_across_dp.numel() > 0:
-            capacity = int(num_tokens_across_dp.max().item())
-            lm_head._lmhead_tp_dynamic_capacity = capacity
-            return capacity
-        # No live forward context (e.g. the idle-rank join runs after the
-        # parent forward tore it down): reuse the value the head cached during
-        # that forward so the collectives stay aligned with the busy ranks.
-        cached_capacity = getattr(lm_head, "_lmhead_tp_dynamic_capacity", None)
-        if isinstance(cached_capacity, int):
-            return cached_capacity
-        return static_capacity
+        if isinstance(static_capacity, int):
+            return static_capacity
+        return None
 
     def _get_logits_lmheadtp(
         self,

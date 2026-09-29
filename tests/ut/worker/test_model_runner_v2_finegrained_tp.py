@@ -11,9 +11,11 @@ is validated on real hardware.
 from types import SimpleNamespace
 from unittest.mock import MagicMock, create_autospec, patch
 
+import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.cudagraph_utils import BatchDescriptor
 from vllm.v1.worker.gpu.eplb_utils import step_eplb_after
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -280,11 +282,11 @@ def test_execute_model_dummy_joins_target_lmhead_collectives():
 
 
 def test_execute_model_dummy_join_uses_dynamic_capacity():
-    """When the parent forward cached the DP-synced capacity on the lm_head,
-    the idle join must use it instead of the static bound so it stays aligned
-    with the busy ranks' dynamic capacity."""
+    """When ``_determine_batch_execution_and_padding`` captured the DP-synced
+    capacity on the runner, the idle join must use it instead of the static
+    bound so it stays aligned with the busy ranks' dynamic capacity."""
     runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
-    runner.model.lm_head._lmhead_tp_dynamic_capacity = 12  # dynamic cap this step
+    runner._lmhead_tp_step_capacity = 12  # DP-synced capacity this step
     hidden_states = torch.randn(20, 6)
     runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states)
     runner.kvpp = MagicMock()
@@ -349,3 +351,86 @@ def test_finegrained_tp_guard_contract():
         NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.NONE)
     NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.FULL_DECODE_ONLY)
     NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.FULL)
+
+
+def test_determine_batch_execution_captures_step_capacity():
+    """``_determine_batch_execution_and_padding`` must publish the DP-synced
+    target capacity on the runner every step, capped by the static bound, and
+    refresh it (never reuse a stale previous-step value)."""
+    runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
+    runner._lmhead_tp_step_capacity = 99  # stale from a previous step
+
+    def fake_determine(num_tokens, num_reqs, num_scheduled_tokens_np, **kwargs):
+        # upstream returns (mode, batch_desc, should_ubatch, num_tokens_across_dp, stats)
+        return (
+            CUDAGraphMode.NONE,
+            BatchDescriptor(num_tokens=num_tokens),
+            False,
+            np.array([3, 5, 4], dtype=np.int32),
+            None,
+        )
+
+    with patch.object(
+        NPUModelRunner.__bases__[0], "_determine_batch_execution_and_padding", side_effect=fake_determine
+    ):
+        runner._determine_batch_execution_and_padding(
+            num_tokens=5, num_reqs=3, num_scheduled_tokens_np=np.array([1, 2, 2]), max_num_scheduled_tokens=2
+        )
+    assert runner._lmhead_tp_step_capacity == 5  # max(3,5,4)=5, min(16, 5)
+
+    # A next step with a smaller DP max must refresh, not keep 5.
+    with patch.object(
+        NPUModelRunner.__bases__[0], "_determine_batch_execution_and_padding", side_effect=fake_determine
+    ):
+        runner._determine_batch_execution_and_padding(
+            num_tokens=2, num_reqs=2, num_scheduled_tokens_np=np.array([1, 1]), max_num_scheduled_tokens=1
+        )
+    assert runner._lmhead_tp_step_capacity == 5  # same DP max
+
+    def fake_determine2(num_tokens, num_reqs, num_scheduled_tokens_np, **kwargs):
+        return (
+            CUDAGraphMode.NONE,
+            BatchDescriptor(num_tokens=num_tokens),
+            False,
+            np.array([2, 2], dtype=np.int32),
+            None,
+        )
+
+    with patch.object(
+        NPUModelRunner.__bases__[0], "_determine_batch_execution_and_padding", side_effect=fake_determine2
+    ):
+        runner._determine_batch_execution_and_padding(
+            num_tokens=2, num_reqs=2, num_scheduled_tokens_np=np.array([1, 1]), max_num_scheduled_tokens=1
+        )
+    assert runner._lmhead_tp_step_capacity == 2  # max(2,2)=2, refreshed down
+
+    # No DP sync (num_tokens_across_dp None) -> static bound.
+    def fake_determine3(num_tokens, num_reqs, num_scheduled_tokens_np, **kwargs):
+        return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens=num_tokens), False, None, None)
+
+    with patch.object(
+        NPUModelRunner.__bases__[0], "_determine_batch_execution_and_padding", side_effect=fake_determine3
+    ):
+        runner._determine_batch_execution_and_padding(
+            num_tokens=4, num_reqs=2, num_scheduled_tokens_np=np.array([2, 2]), max_num_scheduled_tokens=2
+        )
+    assert runner._lmhead_tp_step_capacity == 16  # static fallback
+
+
+def test_sample_uses_step_capacity():
+    """``sample()`` must use the runner's per-step capacity (dynamic when the
+    DP sync published one, static otherwise) so the padded rows match the
+    lm-head forward."""
+    runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
+    hidden_states = torch.randn(10, 4)
+    indices = torch.tensor([0, 3, 5])
+    input_batch = _make_input_batch(indices)
+    runner._lmhead_tp_step_capacity = 12
+
+    with patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=True):
+        runner.sample(hidden_states, input_batch, None)
+
+    compute_input = runner.model.compute_logits.call_args.args[0]
+    assert compute_input.shape == (12, 4)
+    torch.testing.assert_close(compute_input[:3], hidden_states[indices])
+    assert torch.all(compute_input[3:] == 0)

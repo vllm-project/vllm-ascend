@@ -304,3 +304,38 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 mm_inputs,
                 is_profile=is_profile,
             )
+
+    def _run_model(
+        self,
+        num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the draft backbone and publish the draft LM-head capacity.
+
+        The draft's ``num_tokens_across_dp`` is synchronized with one token per
+        request (see upstream ``_build_uniform_batch_dp_sync``), so its max is
+        the group-agreed request count. The draft LM-head emits
+        ``num_speculative_steps`` rows per request, so every rank (including
+        idle ones) must feed the draft-head collectives
+        ``max_reqs_across_dp * num_speculative_steps`` rows. Publish that value
+        on the head before ``_sample_sequential`` computes draft logits in this
+        same step.
+        """
+        hidden_states = super()._run_model(
+            num_tokens,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            mm_inputs=mm_inputs,
+        )
+        if num_tokens_across_dp is not None and num_tokens_across_dp.numel() > 0:
+            max_reqs_across_dp = int(num_tokens_across_dp.max().item())
+            self.model.lm_head._lmhead_tp_dynamic_capacity = (
+                max_reqs_across_dp * self.num_speculative_steps
+            )
+        return hidden_states

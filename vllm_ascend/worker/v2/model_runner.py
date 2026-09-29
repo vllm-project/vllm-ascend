@@ -358,7 +358,7 @@ class NPUModelRunner(GPUModelRunner):
                 raise RuntimeError(
                     "lmhead TP dummy join expects execute_model_state published by the upstream dummy execute_model."
                 )
-            capacity = self._lmhead_tp_dynamic_capacity()
+            capacity = self._lmhead_tp_step_capacity()
             dummy_indices = torch.zeros(
                 capacity,
                 dtype=torch.int64,
@@ -690,22 +690,63 @@ class NPUModelRunner(GPUModelRunner):
                 block_table[:, 0].copy_(state_slots)
         return block_tables, slot_mappings
 
-    def _lmhead_tp_dynamic_capacity(self) -> int:
+    def _lmhead_tp_step_capacity(self) -> int:
         """Group-agreed lmhead-TP capacity for this step.
 
-        Reads the dynamic value captured by the lm-head forward from the
-        DP-synced ``num_tokens_across_dp`` (cached on the head), falling back
-        to the static group-agreed bound when no forward ran or the head does
-        not carry a cached value. The static bound is derived purely from
-        global config so all ranks compute the identical value, matching
-        upstream's own logits capacity bound
-        (``max_num_reqs * decode_query_len``, see StructuredOutputsWorker init).
+        The target side resolves the capacity from the DP-synced token count
+        captured in ``_determine_batch_execution_and_padding`` and stores it on
+        the runner (``_lmhead_tp_step_capacity``) so ``sample()``, the idle-rank
+        dummy join, and the lm-head forward all read the same per-step value.
+        ``_determine_batch_execution_and_padding`` refreshes it every
+        ``execute_model``; before the first sync (or when no DP sync ran) it
+        falls back to the static ``max_num_reqs * decode_query_len`` bound,
+        which is derived purely from global config so all ranks agree.
         """
-        lm_head = getattr(self.model, "lm_head", None)
-        dynamic_capacity = getattr(lm_head, "_lmhead_tp_dynamic_capacity", None)
-        if isinstance(dynamic_capacity, int):
-            return dynamic_capacity
-        return self.max_num_reqs * self.decode_query_len
+        return getattr(self, "_lmhead_tp_step_capacity", None) or self.max_num_reqs * self.decode_query_len
+
+    def _determine_batch_execution_and_padding(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        num_scheduled_tokens_np: np.ndarray,
+        max_num_scheduled_tokens: int,
+        use_cascade_attn: bool,
+        allow_microbatching: bool = True,
+        force_eager: bool = False,
+        force_uniform_decode: bool | None = None,
+        force_has_lora: bool | None = None,
+        force_num_active_loras: int | None = None,
+        num_encoder_reqs: int = 0,
+    ):
+        """Capture the DP-synced token count and publish the lmhead-TP capacity.
+
+        ``execute_model`` (and the dummy run) call this once per step; the
+        returned ``num_tokens_across_dp`` is the agreed per-rank token count,
+        identical on every rank of the DP group. The lmhead-TP target capacity
+        for this step is ``min(static bound, max token count)`` so all ranks
+        (busy and idle) feed the same row count to the target LM-head
+        collectives, without padding small batches up to the static maximum.
+        """
+        result = super()._determine_batch_execution_and_padding(
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            num_scheduled_tokens_np=num_scheduled_tokens_np,
+            max_num_scheduled_tokens=max_num_scheduled_tokens,
+            use_cascade_attn=use_cascade_attn,
+            allow_microbatching=allow_microbatching,
+            force_eager=force_eager,
+            force_uniform_decode=force_uniform_decode,
+            force_has_lora=force_has_lora,
+            force_num_active_loras=force_num_active_loras,
+            num_encoder_reqs=num_encoder_reqs,
+        )
+        _, _, _, num_tokens_across_dp, _ = result
+        static = self.max_num_reqs * self.decode_query_len
+        if num_tokens_across_dp is not None and num_tokens_across_dp.numel() > 0:
+            self._lmhead_tp_step_capacity = min(static, int(num_tokens_across_dp.max().item()))
+        else:
+            self._lmhead_tp_step_capacity = static
+        return result
 
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP.
@@ -722,7 +763,7 @@ class NPUModelRunner(GPUModelRunner):
             return super().sample(hidden_states, input_batch, grammar_output)
 
         num_logits = input_batch.logits_indices.shape[0]
-        capacity = self._lmhead_tp_dynamic_capacity()
+        capacity = self._lmhead_tp_step_capacity()
         # A mismatch would desync the LM-head all_gather/all_to_all across the
         # group and hang the collectives. Fail fast instead.
         assert num_logits <= capacity, (
