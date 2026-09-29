@@ -391,9 +391,7 @@ def test_init_decode_draft_attn_metadatas_gqa():
         ]
     )
     metadata = SimpleNamespace(attn_state=None, seq_lens_cpu=None)
-    speculator._build_uniform_attn_metadata = MagicMock(
-        return_value={"draft": metadata}
-    )
+    speculator._build_uniform_attn_metadata = MagicMock(return_value={"draft": metadata})
 
     result = speculator._init_decode_draft_attn_metadatas(
         {"draft": metadata},
