@@ -331,9 +331,10 @@ class TestKVCacheSendingThread(unittest.TestCase):
 @pytest.mark.parametrize("pulls", [2, 4, 8])
 @pytest.mark.parametrize("strided", [False, True])
 def test_hybrid_reformat_bounded_buffers(monkeypatch, budget, pulls, strided):
-    monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.KV_REFORMAT_BUFFER_BYTES", budget
-    )
+    # Full-suite module mocks can detach package attributes from the imported
+    # class. Patch the globals used by the actual method, not a dotted lookup.
+    method = inspect.unwrap(KVCacheRecvingThread.reformat_kv_cache_hybrid_linear_torch)
+    monkeypatch.setitem(method.__globals__, "KV_REFORMAT_BUFFER_BYTES", budget)
     caches = []
     expected = []
     ids = torch.tensor([4, 1, 3, 0])
