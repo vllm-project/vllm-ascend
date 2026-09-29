@@ -15,6 +15,11 @@
 #ifndef BUFFER_POLICY_SFA_H
 #define BUFFER_POLICY_SFA_H
 
+#if __has_include("../../../../common/op_kernel/attn_buffer.h")
+#include "../../../../common/op_kernel/attn_buffer.h"
+#include "../../../../common/op_kernel/attn_buffer_manager.h"
+#endif
+
 #if __has_include("../../../../common/op_kernel/buffers_policy.h")
 #include "../../../../common/op_kernel/buffers_policy.h"
 #elif __has_include("../../../common/buffers_policy.h")

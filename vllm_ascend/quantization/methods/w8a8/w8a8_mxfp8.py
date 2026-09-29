@@ -185,7 +185,10 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
             layer._mxfp8_weight_buf = padded_weight.transpose(0, 1).contiguous()
-            if not getattr(layer, "_fused_preprocess_managed", False):
+            keeps_nd = getattr(layer, "_fused_preprocess_managed", False) or getattr(
+                layer, "skip_weight_nz_conversion", False
+            )
+            if not keeps_nd:
                 layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, customize_dtype=torch.float8_e4m3fn)
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
@@ -618,8 +621,26 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         else:
             layer.weight_scale.data = layer.weight_scale.data.view(torch.int32) >> 23 & 0xFF
             layer.weight_scale.data = layer.weight_scale.data.to(torch.uint8)
-        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(4, dim=1).repeat_interleave(128, dim=0)
+        mx_group = 32
+        if self.block_size % mx_group != 0:
+            raise ValueError(
+                f"DeepSeek native FP8 block size {self.block_size} is not a multiple of MX group {mx_group}"
+            )
+        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(
+            self.block_size // mx_group, dim=1
+        ).repeat_interleave(self.block_size, dim=0)
         n_dim, k_dim = layer.weight_scale.data.shape
+        # The kernel reads scales in pairs, so K has to cover an even number of
+        # MX groups. A TP shard that lands on an odd count (2304 // 8 = 288 for
+        # the shared expert) needs one more group of weight columns too: padding
+        # the scale alone would make the kernel read weight columns that do not
+        # exist. Zero columns contribute nothing once ``apply`` pads the
+        # activation to match.
+        if k_dim % 2 != 0:
+            layer.weight_scale.data = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
+            layer.weight.data = F.pad(layer.weight.data, (0, mx_group), mode="constant", value=0)
+            layer.mxfp8_tp_padding = (0, mx_group)
+            k_dim += 1
         layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)

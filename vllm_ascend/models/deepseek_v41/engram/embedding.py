@@ -252,7 +252,14 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         start, end = (self.vocab_start_idx, self.vocab_end_idx)
         with safe_open(root / index[key], framework="pt", device="cpu") as file:
             tensor = file.get_slice(key)
-            quantized = tensor.get_dtype() in ("I8", "INT8")
+            source_dtype = tensor.get_dtype()
+            quantized = source_dtype in ("I8", "INT8")
+            # Released DeepSeek-V4.1-Flash ships the table as F8_E4M3 with an
+            # F8_E8M0 companion scale. Those payloads carry their magnitude in
+            # the scale, so they have to be decoded before requantizing:
+            # treating them as plain values loads a table that is wrong by
+            # whatever each group's exponent was.
+            scaled_fp8 = source_dtype in ("F8_E4M3", "F8_E4M3FN")
             if quantized:
                 with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
                     scale = sf.get_slice(scale_key)
@@ -262,6 +269,19 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                         target_end = offset + (stop - chunk_start)
                         self.weight.data[offset:target_end].copy_(tensor[chunk_start:stop])
                         self.weight_scale_inv.data[offset:target_end].copy_(scale[chunk_start:stop])
+            elif scaled_fp8:
+                with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
+                    scale = sf.get_slice(scale_key)
+                    for chunk_start in range(start, end, chunk_rows):
+                        stop = min(chunk_start + chunk_rows, end)
+                        offset = chunk_start - self.vocab_start_idx
+                        target_end = offset + (stop - chunk_start)
+                        payload = tensor[chunk_start:stop].to(torch.float32)
+                        groups = payload.unflatten(-1, (-1, self.block_size))
+                        decoded = groups.mul(scale[chunk_start:stop].to(torch.float32).unsqueeze(-1))
+                        codes, scales = quantize_engram_rows(decoded.flatten(-2))
+                        self.weight.data[offset:target_end].copy_(codes)
+                        self.weight_scale_inv.data[offset:target_end].copy_(scales)
             else:
                 for chunk_start in range(start, end, chunk_rows):
                     stop = min(chunk_start + chunk_rows, end)
@@ -366,8 +386,10 @@ def preflight_engram_checkpoint(root, layer_ids, embed_cls=AscendParallelEngramE
         if not shard.is_file():
             raise ValueError(f"Engram layer {layer_id}: the checkpoint index points at {shard}, which does not exist.")
         with safe_open(shard, framework="pt", device="cpu") as file:
-            quantized = file.get_slice(key).get_dtype() in ("I8", "INT8")
-        if not quantized:
+            source_dtype = file.get_slice(key).get_dtype()
+        # Both storage forms carry their magnitude in a companion scale, so
+        # neither can be served without one.
+        if source_dtype not in ("I8", "INT8", "F8_E4M3", "F8_E4M3FN"):
             continue
         scale_key = key.removesuffix(".weight") + ".scale"
         # The loader resolves scales from the weight's selected index too.

@@ -142,7 +142,10 @@ class DeepseekV41DSparkModel(torch.nn.Module):
     """Three serial draft blocks matching the checkpoint's ``mtp.*`` tree."""
 
     def __init__(self, *, vllm_config, prefix="") -> None:
+        from vllm_ascend.models.deepseek_v41.cache_config import pin_v41_attn_kv_dtype
+
         super().__init__()
+        pin_v41_attn_kv_dtype(vllm_config)
         self.vllm_config = vllm_config
         draft_model_config = vllm_config.speculative_config.draft_model_config
         config = normalize_deepseek_v41_config(draft_model_config.hf_text_config)
@@ -479,9 +482,32 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
             # for the draft model.
             process_eagle_weight(self, name)
 
-            # Expert scale parameters use Ascend's ``weight_scale`` convention.
+            # Block-FP8 linears expose weight_scale_inv while fused experts keep
+            # weight_scale, so which name a layer owns depends on the checkpoint
+            # block size. Routed experts resolve through expert_mapping and the
+            # fused gate/up projections through stacked_params_mapping, so a
+            # scale missing under its own name may still land through those.
             if name.endswith(".scale"):
-                name = name.replace(".scale", ".weight_scale")
+                base = name[: -len(".scale")]
+                resolved = None
+                for suffix in (".weight_scale_inv", ".weight_scale"):
+                    candidate = base + suffix
+                    if candidate in params_dict:
+                        resolved = candidate
+                        break
+                    if any(
+                        f".{weight_name}." in candidate and candidate.replace(weight_name, param_name) in params_dict
+                        for param_name, weight_name, _ in stacked_params_mapping
+                    ):
+                        resolved = candidate
+                        break
+                if resolved is None:
+                    if ".experts." not in base:
+                        if base.endswith("main_proj"):
+                            logger.info_once("Ignoring the checkpoint scale for the BF16 DSpark main_proj")
+                        continue
+                    resolved = base + ".weight_scale"
+                name = resolved
 
             # The multimodal checkpoint also contains one vision-router bias
             # for each MTP/DSpark layer.  DSpark runs only during text decode,

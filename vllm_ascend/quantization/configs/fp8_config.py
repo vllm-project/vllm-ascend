@@ -117,6 +117,19 @@ class AscendDeepseekV4FP8Config(DeepseekV4FP8Config):
         super().__init__(*args, **kwargs)
         self.quant_description = {}
 
+    @classmethod
+    def override_quantization_method(cls, hf_quant_cfg, user_quant, hf_config=None):
+        """Released V4.1 Flash uses the same native FP8 + expert FP4 layout as V4."""
+        got = super().override_quantization_method(hf_quant_cfg, user_quant, hf_config)
+        if got is not None:
+            return got
+        if not (isinstance(hf_quant_cfg, dict) and hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")):
+            return None
+        model_type = getattr(hf_config, "model_type", None)
+        if model_type in ("deepseek_v41", "deepseek_v4.1") or user_quant == "deepseek_v4_fp8":
+            return "deepseek_v4_fp8"
+        return None
+
     def get_quant_method(
         self,
         layer: torch.nn.Module,
@@ -129,8 +142,12 @@ class AscendDeepseekV4FP8Config(DeepseekV4FP8Config):
         )
 
         if isinstance(layer, LinearBase):
-            scheme_class = get_scheme_class(FP8_METHOD, "ds_linear")
-            assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/ds_linear"
+            # ds_linear reorganizes 128x128 scales into 32x1; checkpoints that already
+            # ship 32-wide blocks (released V4.1 Flash) must skip that reorganization.
+            block = self.weight_block_size or (128, 128)
+            linear_scheme = "linear" if block[0] == 32 else "ds_linear"
+            scheme_class = get_scheme_class(FP8_METHOD, linear_scheme)
+            assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/{linear_scheme}"
             quant_method = AscendLinearMethod(scheme_class(self.weight_block_size))
             return quant_method
         if is_fused_moe_layer(layer):

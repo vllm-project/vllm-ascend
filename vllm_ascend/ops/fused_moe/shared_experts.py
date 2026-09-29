@@ -49,6 +49,9 @@ class SharedExpertParallelMode(Enum):
     SEQUENCE_PARALLEL_SEDP = auto()  # Sharded activations, replicated weights (SP + DP).
 
 
+MXFP_FUSED_ACT_ALIGNMENT = 128
+
+
 class SharedExpertMLPPath(Enum):
     """Shared MLP implementation selected for a quantization scenario."""
 
@@ -545,7 +548,16 @@ class AscendSharedExperts:
         if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
             return SharedExpertMLPPath.A8_INT_FUSED
         if has_quantized_shared_without_lora and self.quant_type == QuantType.W4A8MXFP:
-            return SharedExpertMLPPath.A8_MXFP_FUSED
+            # A5's fused activation quant reads 128-wide groups, so a shared
+            # intermediate that TP splits below that alignment must stay on the
+            # wrapper path there.
+            gate_up_width = getattr(self.layer.gate_up_proj, "output_size_per_partition", None)
+            if (
+                not isinstance(gate_up_width, int)
+                or gate_up_width % MXFP_FUSED_ACT_ALIGNMENT == 0
+                or not get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            ):
+                return SharedExpertMLPPath.A8_MXFP_FUSED
         return SharedExpertMLPPath.LINEAR_WRAPPER
 
     def wait_for_output(self) -> None:

@@ -3,12 +3,22 @@
 """FP32 C2 ring compressor, ratio-1 path, and fused RMS normalization."""
 
 import torch
+import torch_npu
 from torch import nn
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
+
+
+class DeepseekV41RMSNorm(nn.Module):
+    def __init__(self, width, eps):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(width, dtype=torch.bfloat16))
+        self.eps = eps
+
+    def forward(self, x):
+        return torch_npu.npu_rms_norm(x, self.weight, epsilon=self.eps)[0]
 
 
 class DeepseekV41Compressor(nn.Module):
@@ -18,7 +28,7 @@ class DeepseekV41Compressor(nn.Module):
         self.width = config.head_dim
         dim = config.hidden_size
         self.wkv = nn.Linear(dim, self.width, bias=False, dtype=torch.float32 if ratio == 2 else torch.bfloat16)
-        self.norm = RMSNorm(self.width, eps=config.rms_norm_eps, dtype=torch.bfloat16)
+        self.norm = DeepseekV41RMSNorm(self.width, config.rms_norm_eps)
         if ratio == 2:
             self.wgate = nn.Linear(dim, self.width, bias=False, dtype=torch.float32)
             # Allocate persistent output before memory profiling, so its footprint
@@ -62,7 +72,8 @@ class DeepseekV41Compressor(nn.Module):
             max_query_len=metadata.max_query_len,
             num_cores=self._ring_num_cores,
         )
-        return self.norm(pooled)
+        out = self.norm(pooled)
+        return out
 
     def forward(self, x):
         """Project an uncompressed source; ratio-2 uses ``pool_projected``."""

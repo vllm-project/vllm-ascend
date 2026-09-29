@@ -128,6 +128,14 @@ class DsaAttnKvPlan:
         )
 
 
+def _sparse_attn_sharedkv(*args, **kwargs):
+    return torch.ops._C_ascend.npu_sparse_attn_sharedkv(*args, **kwargs)
+
+
+def _sparse_attn_sharedkv_metadata(*args, **kwargs):
+    return torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(*args, **kwargs)
+
+
 def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
     """Return the explicit A5 BF16 or upstream-compatible FP8 DSA plan."""
     if not _supports_dsv4_compressed_cache():
@@ -137,8 +145,10 @@ def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
             layout_kv="PA_ND",
             compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
             requires_block_offset_slots=True,
-            sparse_attn_op=torch.ops._C_ascend.npu_sparse_attn_sharedkv,
-            sparse_attn_metadata_op=torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata,
+            # Resolved at call time: V4.1 builds the plan while configuring the
+            # KV cache, and these ops only exist in SoC packages that ship them.
+            sparse_attn_op=_sparse_attn_sharedkv,
+            sparse_attn_metadata_op=_sparse_attn_sharedkv_metadata,
             sparse_attn_base_kwargs={},
             sparse_attn_metadata_kwargs={},
             include_metadata_device=True,
