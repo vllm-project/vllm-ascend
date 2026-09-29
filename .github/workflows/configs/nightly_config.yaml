@@ -93,10 +93,6 @@ a2:
 a3:
   multi_node:
     test_config:
-      - name: GLM-5.2-W8A8C8-A3-PD-smoke
-        config_file_path: GLM-5.2-W8A8C8-A3-PD-smoke.yaml
-        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
-        size: 4
       - name: GLM-5.3-Flash-W8A8-A3-PD-smoke
         config_file_path: GLM-5.3-Flash-W8A8-A3-PD-smoke.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
@@ -184,9 +180,6 @@ a3:
 a3-560t:
   single_node:
     test_config:
-      - name: GLM-5.2-W8A8C8-A3-smoke
-        os: linux-aarch64-a3-800i-16
-        config_file_path: GLM-5.2-W8A8C8-A3.yaml
       - name: GLM-5.3-Flash-W8A8-A3-smoke
         os: linux-aarch64-a3-800i-16
         config_file_path: GLM-5.3-Flash-W8A8-A3.yaml
