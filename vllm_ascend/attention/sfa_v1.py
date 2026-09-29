@@ -444,6 +444,8 @@ class AscendSFAMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
     pcp_slot_mapping: torch.Tensor | None = None
+    pcp_hidden_restore_indices: torch.Tensor | None = None
+    pcp_cache_write_slots: torch.Tensor | None = None
     pcp_prolog_local_slots: torch.Tensor | None = None
     pcp_prolog_global_slots: torch.Tensor | None = None
     # All PCP ranks must join prefill KV gathers even when a rank has only padding.
@@ -723,6 +725,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
             pcp_slot_mapping=pcp_slot_mapping,
+            pcp_hidden_restore_indices=(
+                None if pcp_context is None else getattr(pcp_context, "hidden_restore_idx", None)
+            ),
             pcp_has_global_prefill=bool(pcp_context is not None and pcp_context.global_batch.is_prefilling_np.any()),
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
@@ -1766,9 +1771,16 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert packed_kv.shape[-1] == packed_head_dim
             assert kv_cache is not None
             packed_kv = packed_kv.view(-1, packed_head_dim)
+            write_slots = getattr(attn_metadata, "pcp_cache_write_slots", None)
+            if write_slots is None:
+                write_slots = slot_mapping_sfa[: packed_kv.shape[0]]
+            assert write_slots.numel() == packed_kv.shape[0], (
+                "SFA packed cache write requires one slot per token: "
+                f"tokens={packed_kv.shape[0]}, slots={write_slots.numel()}."
+            )
             DeviceOperator.scatter_cache(
                 kv_cache[0].view(-1, packed_head_dim),
-                slot_mapping_sfa[: packed_kv.shape[0]].view(-1, 1),
+                write_slots.view(-1, 1),
                 packed_kv,
             )
 

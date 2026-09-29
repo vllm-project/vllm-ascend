@@ -167,3 +167,50 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager):
                 tokens = output.outputs[0].token_ids
                 assert len(tokens) == OUTPUT_TOKENS
                 assert all(0 <= token < config["text_config"]["vocab_size"] for token in tokens)
+
+
+@pytest.mark.parametrize("dcp_size", [2, 4])
+def test_glm53flash_kda_tp_with_sfa_pcp_dcp(tmp_path, monkeypatch, dcp_size):
+    for name, value in {
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "HCCL_OP_EXPANSION_MODE": "AIV",
+        "HCCL_BUFFSIZE": "400",
+    }.items():
+        monkeypatch.setenv(name, value)
+    model = tmp_path / "model"
+    config = _write_model(model)
+    with VllmRunner(
+        str(model),
+        load_format=LOADER,
+        dtype="bfloat16",
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=dcp_size,
+        quantization="ascend",
+        distributed_executor_backend="mp",
+        max_model_len=4096,
+        max_num_seqs=4,
+        max_num_batched_tokens=512,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        block_size=128,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.8,
+        seed=1024,
+        enforce_eager=True,
+        additional_config={"enable_cpu_binding": False, "enable_fused_mc2": 0},
+    ) as runner:
+        params = SamplingParams(temperature=0, max_tokens=OUTPUT_TOKENS, ignore_eos=True, detokenize=False)
+        for lengths in ((129,), (127, 128, 129)):
+            outputs = runner.model.generate(
+                [{"prompt_token_ids": [10 + i % 1000 for i in range(length)]} for length in lengths],
+                params,
+                use_tqdm=False,
+            )
+            assert len(outputs) == len(lengths)
+            for output in outputs:
+                assert output.finished and len(output.outputs) == 1
+                tokens = output.outputs[0].token_ids
+                assert len(tokens) == OUTPUT_TOKENS
+                assert all(0 <= token < config["text_config"]["vocab_size"] for token in tokens)

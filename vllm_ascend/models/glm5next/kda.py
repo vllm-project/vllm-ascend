@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import divide
+from vllm.distributed import divide, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -36,6 +36,14 @@ from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
+
+
+class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        # The GLM KDA layer gathers PCP prefill tokens before its TP-sharded
+        # recurrent update and restores the PCP-local output afterward.
+        return True
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -269,13 +277,25 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._conv_state_dim_first = is_conv_state_dim_first()
 
     def get_attn_backend(self):
-        return AscendGDNHostMetadataBackend
+        return Glm5NextGDNHostMetadataBackend
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        attn_metadata_raw = get_forward_context().attn_metadata
+        attn_metadata = attn_metadata_raw.get(self.prefix) if isinstance(attn_metadata_raw, dict) else None
+        pcp_context = getattr(attn_metadata, "pcp_context", None)
+        has_pcp_prefill = pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any())
+        local_num_tokens = hidden_states.size(0)
+        if has_pcp_prefill:
+            assert pcp_context is not None
+            assert pcp_context.padded_gather_idx is not None
+            # PCP assigns the first and last chunks of a prefill to the same
+            # rank. Reconstruct causal order before advancing the TP-sharded
+            # recurrent state on every PCP replica.
+            hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)[pcp_context.hidden_restore_idx]
         num_tokens = hidden_states.size(0)
         # One merged GEMM for q, k, v, b, f_a, g_a (replaces 6 separate GEMMs).
         projected = self.in_proj_qkvbfg_a(hidden_states)[0]
@@ -316,7 +336,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
-        return self.o_proj(core_attn_out)[0]
+        output = self.o_proj(core_attn_out)[0]
+        if has_pcp_prefill:
+            assert pcp_context is not None
+            pcp_group = get_pcp_group()
+            if pcp_context.padded_gather_idx.numel() != pcp_group.world_size * local_num_tokens:
+                raise RuntimeError("KDA PCP token mapping does not match the rank-local model input.")
+            local_start = pcp_group.rank_in_group * local_num_tokens
+            local_indices = pcp_context.padded_gather_idx[local_start : local_start + local_num_tokens]
+            output = output[local_indices]
+        return output
 
     @eager_break_during_capture
     def _forward(

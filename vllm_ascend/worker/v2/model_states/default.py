@@ -100,6 +100,34 @@ class AscendModelState(DefaultModelState):
         if self._offload_request_states is not None:
             self._offload_request_states.remove_request(req_id)
 
+    def prepare_inputs_embeds(
+        self, scheduled_encoder_inputs, input_batch: AscendInputBatch, req_states
+    ) -> torch.Tensor:
+        # Upstream strips PCP's rank-local padding before embedding multimodal
+        # models. Sharded PCP embeddings need the common padded token span on
+        # every rank for all-gather and reduce-scatter.
+        if (
+            self.pcp_manager is None
+            or not self.supports_mm_inputs
+            or input_batch.num_tokens == input_batch.num_tokens_after_padding
+        ):
+            return super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
+
+        self.execute_mm_encoder(scheduled_encoder_inputs)
+        mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
+        if self.mm_pruner is not None and mm_embeds:
+            mm_embeds = self.mm_pruner.recompute(mm_embeds, input_batch, req_states)
+            self.apply_staged_writes()
+
+        padded_num_tokens = input_batch.num_tokens_after_padding
+        is_mm_embed = torch.nn.functional.pad(is_mm_embed, (0, padded_num_tokens - input_batch.num_tokens), value=False)
+        inputs_embeds = self.encoder_runner.get_inputs_embeds(
+            input_batch.input_ids[:padded_num_tokens], mm_embeds, is_mm_embed
+        )
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.apply(input_batch, req_states.num_computed_tokens.gpu, inputs_embeds)
+        return inputs_embeds[:padded_num_tokens]
+
     def _get_engram_device_inputs(self, input_batch: AscendInputBatch) -> dict[str, torch.Tensor]:
         """Device request coordinates for upstream NgramHashState."""
         layer_name = getattr(self.model, "engram_cache_layer_name", None)

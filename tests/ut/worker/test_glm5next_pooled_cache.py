@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
+    AscendKPoolIndexerCacheSpec,
     AscendMLAAttentionSpec,
     requires_padded_page_layout,
 )
@@ -79,7 +80,7 @@ def _make_config():
     )
 
 
-def _make_specs(main_head_size=4):
+def _make_specs(main_head_size=4, dcp_size=1):
     return {
         MAIN: AscendMLAAttentionSpec(
             block_size=8,
@@ -89,13 +90,14 @@ def _make_specs(main_head_size=4):
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
         ),
-        INDEXER: AscendMLAAttentionSpec(
+        INDEXER: AscendKPoolIndexerCacheSpec(
             block_size=8,
             num_kv_heads=1,
             head_size=4,
             dtype=torch.bfloat16,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
+            dcp_replication_size=dcp_size,
             **_ratio_kwargs(2),
         ),
         STATE: AscendIndexerKPoolTailSpec(
@@ -143,7 +145,7 @@ def _make_runner(config, main_cache_dims=(4, 0)):
     # model_version marker, not on model_config.
     runner.model_config = SimpleNamespace()
 
-    specs = _make_specs()
+    specs = _make_specs(dcp_size=config.parallel_config.decode_context_parallel_size)
     attn_groups = [
         SimpleNamespace(
             backend=_AttentionBackend,
@@ -175,11 +177,12 @@ def _make_runner(config, main_cache_dims=(4, 0)):
     return runner
 
 
-def _make_plan(num_blocks=3, main_head_size=4):
+def _make_plan(num_blocks=3, main_head_size=4, dcp_size=1):
     # Match production: vLLM registers built-in specs before the Ascend hook.
     register_all_kvcache_specs(None)
     config = _make_config()
-    specs = _make_specs(main_head_size)
+    config.parallel_config.decode_context_parallel_size = dcp_size
+    specs = _make_specs(main_head_size, dcp_size)
     groups = get_glm5_next_kv_cache_groups(config, specs)
     bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
     plan = get_glm5_next_kv_cache_config(
@@ -237,6 +240,20 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     assert caches[MAMBA][1].data_ptr() - raw_caches[MAMBA].data_ptr() == mamba_second_offset
     mamba_payload_size = sum(cache.numel() * cache.element_size() for cache in caches[MAMBA])
     assert mamba_payload_size < descriptors[MAMBA].size
+
+
+def test_glm5_next_runner_views_dcp_replicated_kpool_cache():
+    config, _, plan = _make_plan(dcp_size=2)
+    runner = _make_runner(config)
+
+    raw_caches = runner._allocate_kv_cache_tensors(plan)
+    caches = runner._reshape_kv_cache_tensors(plan, raw_caches)
+    (indexer_cache,) = caches[INDEXER]
+    (tail_cache,) = caches[STATE]
+
+    assert indexer_cache.shape == (6, 4, 1, 4)
+    assert tail_cache.shape == (3, 2, 2, 1)
+    assert indexer_cache.data_ptr() == tail_cache.data_ptr()
 
 
 def test_glm5_next_runner_splits_main_mla_components_within_each_page():

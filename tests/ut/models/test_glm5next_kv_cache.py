@@ -4,8 +4,9 @@
 
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
@@ -20,7 +21,7 @@ from vllm_ascend.attention.indexer_kpool import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
-    AscendMLAAttentionSpec,
+    AscendKPoolIndexerCacheSpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
     is_prefix_cacheable,
@@ -42,6 +43,19 @@ def default_dsa_cp_disabled(monkeypatch):
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     return {"tokens_per_state": ratio}
+
+
+@pytest.mark.parametrize("builder_cls", [AscendIndexerKPoolMetadataBuilder, AscendIndexerKPoolTailMetadataBuilder])
+def test_kpool_metadata_capture_accepts_pcp_context(builder_cls):
+    builder = builder_cls.__new__(builder_cls)
+    builder.build = Mock(return_value=object())
+    common = object()
+    pcp_context = object()
+
+    metadata = builder.build_for_cudagraph_capture(common, pcp_context=pcp_context, pcp_cache_group_idx=1)
+
+    assert metadata is builder.build.return_value
+    builder.build.assert_called_once_with(0, common, pcp_context=pcp_context, pcp_cache_group_idx=1)
 
 
 @pytest.mark.parametrize(("pool", "lookahead", "capacity"), [(4, 0, 4), (4, 3, 7), (16, 5, 21)])
@@ -188,8 +202,12 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
         cache_config=SimpleNamespace(block_size=logical_size),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=1),
         model_config=SimpleNamespace(max_model_len=logical_size * 3),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
     )
-    spec = AscendMLAAttentionSpec(
+    spec = AscendKPoolIndexerCacheSpec(
         block_size=logical_size,
         num_kv_heads=1,
         head_size=128,
@@ -244,8 +262,9 @@ def test_dsacp_indexer_shards_queries_and_keeps_global_cache_metadata(monkeypatc
         cache_config=SimpleNamespace(block_size=128),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=5, max_num_seqs=2),
         model_config=SimpleNamespace(max_model_len=256),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
     )
-    spec = AscendMLAAttentionSpec(
+    spec = AscendKPoolIndexerCacheSpec(
         block_size=128,
         num_kv_heads=1,
         head_size=128,
@@ -321,7 +340,8 @@ def test_model_cache_layers_publish_source_compatible_specs():
     indexer_spec = indexer.get_kv_cache_spec(None)
     state_spec = state.get_kv_cache_spec(None)
     assert len(indexer.kv_cache) == len(state.kv_cache) == 2
-    assert isinstance(indexer_spec, AscendMLAAttentionSpec)
+    assert isinstance(indexer_spec, AscendKPoolIndexerCacheSpec)
+    assert indexer_spec.dcp_replication_size == 1
     assert indexer_spec.block_size == 256
     assert get_storage_block_size(indexer_spec) == 16
     assert get_kv_cache_compression_ratio(indexer_spec) == 16
@@ -348,9 +368,13 @@ def test_indexer_metadata_preserves_raw_request_boundaries():
             max_num_seqs=2,
         ),
         model_config=SimpleNamespace(max_model_len=512),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
     )
     builder = AscendIndexerKPoolMetadataBuilder(
-        AscendMLAAttentionSpec(
+        AscendKPoolIndexerCacheSpec(
             block_size=256,
             num_kv_heads=1,
             head_size=128,
@@ -385,6 +409,154 @@ def test_indexer_metadata_preserves_raw_request_boundaries():
     assert metadata.num_actual_tokens == 5
 
 
+def test_dcp_kpool_metadata_replicates_before_compression():
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=128),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=2),
+        model_config=SimpleNamespace(max_model_len=512),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=2,
+            prefill_context_parallel_size=1,
+        ),
+    )
+    spec = AscendKPoolIndexerCacheSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        model_version="glm5_next",
+        dcp_replication_size=2,
+        **_ratio_kwargs(4),
+    )
+    builder = AscendIndexerKPoolMetadataBuilder(
+        spec,
+        ["model.layers.0.indexer.k_cache"],
+        config,
+        torch.device("cpu"),
+    )
+    common = AscendCommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 3], dtype=torch.int32),
+        seq_lens=torch.tensor([260], dtype=torch.int32),
+        _seq_lens_cpu=torch.tensor([260], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=3,
+        max_query_len=3,
+        num_input_tokens=3,
+        max_seq_len=260,
+        block_table_tensor=torch.tensor([[5, 6]], dtype=torch.int32),
+        slot_mapping=torch.full((3,), -1, dtype=torch.int64),
+        positions=torch.tensor([3, 131, 259]),
+    )
+
+    metadata = builder.build(0, common)
+
+    assert metadata.block_table.tolist() == [[10, 11, 12, 13]]
+    assert metadata.slot_mapping.tolist() == [320, 352, 384]
+    assert metadata.seq_lens.tolist() == [65]
+
+
+def test_pcp_dcp_kpool_metadata_writes_global_token_order():
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=128),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=2),
+        model_config=SimpleNamespace(max_model_len=512),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=2,
+            prefill_context_parallel_size=2,
+        ),
+    )
+    builder = AscendIndexerKPoolMetadataBuilder(
+        AscendKPoolIndexerCacheSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            dcp_replication_size=2,
+            **_ratio_kwargs(4),
+        ),
+        ["model.layers.0.indexer.k_cache"],
+        config,
+        torch.device("cpu"),
+    )
+    common = AscendCommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 4], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 4], dtype=torch.int32),
+        seq_lens=torch.tensor([8], dtype=torch.int32),
+        _seq_lens_cpu=torch.tensor([8], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=4,
+        max_query_len=4,
+        num_input_tokens=4,
+        max_seq_len=8,
+        block_table_tensor=torch.tensor([[5, 6]], dtype=torch.int32),
+        slot_mapping=torch.full((4,), -1, dtype=torch.int64),
+        positions=torch.tensor([0, 2, 4, 6]),
+    )
+    global_positions = torch.arange(8)
+    global_slots = 5 * 128 + global_positions
+    restore = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7])
+    pcp_context = SimpleNamespace(
+        global_batch=SimpleNamespace(
+            num_reqs=1,
+            num_tokens=8,
+            query_start_loc=torch.tensor([0, 8], dtype=torch.int32),
+            query_start_loc_np=np.array([0, 8], dtype=np.int32),
+            seq_lens=torch.tensor([8], dtype=torch.int32),
+            positions=global_positions,
+            is_prefilling_np=np.array([True]),
+        ),
+        global_block_tables=(torch.tensor([[5, 6]], dtype=torch.int32),),
+        global_slot_mappings=global_slots.unsqueeze(0),
+        hidden_restore_idx=restore,
+        padded_gather_idx=torch.arange(8),
+    )
+
+    metadata = builder.build(0, common, pcp_context=pcp_context, pcp_cache_group_idx=0)
+
+    assert metadata.block_table.tolist() == [[10, 11, 12, 13]]
+    assert metadata.write_slot_mapping.tolist() == [-1, -1, -1, 320, -1, -1, -1, 321]
+    assert metadata.write_positions.tolist() == list(range(8))
+    assert metadata.write_cum_query_lens.tolist() == [8]
+    assert metadata.write_raw_seq_lens.tolist() == [8]
+    torch.testing.assert_close(metadata.pcp_hidden_restore_indices, restore)
+    assert metadata.pcp_local_token_count == 4
+
+    tail_builder = AscendIndexerKPoolTailMetadataBuilder(
+        AscendIndexerKPoolTailSpec(
+            block_size=4,
+            sliding_window=4,
+            compress_ratio=4,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.float32,
+        ),
+        ["model.layers.0.indexer.tail_cache"],
+        config,
+        torch.device("cpu"),
+    )
+    tail_metadata = tail_builder.build(0, common, pcp_context=pcp_context, pcp_cache_group_idx=0)
+    torch.testing.assert_close(tail_metadata.write_block_table, pcp_context.global_block_tables[0])
+    torch.testing.assert_close(tail_metadata.write_slot_mapping, global_slots)
+
+
+def test_kpool_spec_accounts_for_dcp_replicas():
+    spec = AscendKPoolIndexerCacheSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        model_version="glm5_next",
+        dcp_replication_size=8,
+        **_ratio_kwargs(4),
+    )
+
+    assert get_storage_block_size(spec) == 32
+    assert spec.real_page_size_bytes == 8 * 32 * 128 * 2
+    assert AscendKPoolIndexerCacheSpec.merge([spec, replace(spec)]) == spec
+
+
 def test_indexer_metadata_request_buffers_cover_graph_token_padding():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=256),
@@ -393,9 +565,13 @@ def test_indexer_metadata_request_buffers_cover_graph_token_padding():
             max_num_seqs=2,
         ),
         model_config=SimpleNamespace(max_model_len=512),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
     )
     builder = AscendIndexerKPoolMetadataBuilder(
-        AscendMLAAttentionSpec(
+        AscendKPoolIndexerCacheSpec(
             block_size=256,
             num_kv_heads=1,
             head_size=128,
@@ -435,9 +611,13 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
             max_num_seqs=2,
         ),
         model_config=SimpleNamespace(max_model_len=512),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
     )
     builder = AscendIndexerKPoolMetadataBuilder(
-        AscendMLAAttentionSpec(
+        AscendKPoolIndexerCacheSpec(
             block_size=256,
             num_kv_heads=1,
             head_size=128,

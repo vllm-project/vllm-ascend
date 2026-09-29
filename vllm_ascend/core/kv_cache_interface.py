@@ -245,6 +245,46 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class AscendKPoolIndexerCacheSpec(AscendMLAAttentionSpec):
+    """Compressed GLM-Next indexer cache replicated across DCP ranks.
+
+    One scheduler block still represents ``block_size`` global tokens. Its
+    physical page stores ``dcp_replication_size`` compressed block replicas,
+    ordered by DCP owner rank. This keeps the scheduler's block IDs shared with
+    the DCP-sharded main MLA cache while giving every rank a complete indexer.
+    """
+
+    dcp_replication_size: int = 1
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.dcp_replication_size <= 0:
+            raise ValueError("KPool DCP replication size must be positive.")
+        if self.tokens_per_state <= 1 or self.block_size % self.tokens_per_state:
+            raise ValueError("KPool cache requires block_size divisible by tokens_per_state > 1.")
+
+    @property
+    def unpadded_page_size_bytes(self) -> int:
+        return self.dcp_replication_size * super().real_page_size_bytes
+
+    @property
+    def real_page_size_bytes(self) -> int:
+        return self.unpadded_page_size_bytes
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, cls) for spec in specs), (
+            "All KPool indexer layers in the same KV cache group must use AscendKPoolIndexerCacheSpec."
+        )
+        replication_sizes = {spec.dcp_replication_size for spec in specs}
+        assert len(replication_sizes) == 1, (
+            "All KPool indexer cache layers in the same group must use the same DCP replication size."
+        )
+        merged = super().merge(specs)
+        return replace(merged, dcp_replication_size=replication_sizes.pop())
+
+
+@dataclass(frozen=True, kw_only=True)
 class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     """Sliding window attention with MLA cache format."""
 
@@ -384,6 +424,11 @@ def register_ascend_kv_cache_specs() -> None:
     )
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendSFAIndexerCacheSpec,
+        manager_class=FullAttentionManager,
+        uniform_type_base_spec=FullAttentionSpec,
+    )
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendKPoolIndexerCacheSpec,
         manager_class=FullAttentionManager,
         uniform_type_base_spec=FullAttentionSpec,
     )

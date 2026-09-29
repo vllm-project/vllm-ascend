@@ -556,7 +556,9 @@ class BaseDeviceAdaptor:
                 return_lse=return_lse,
             )
         else:
-            key_rope = kv_cache[1]
+            # NoPE sparse MLA has one latent KV cache and no RoPE inputs.
+            nope = sfa_impl.qk_rope_head_dim == 0
+            key_rope = None if nope else kv_cache[1]
             result = torch.ops._C_ascend.npu_sparse_flash_attention(
                 query=ql_nope,
                 key=kv,
@@ -567,7 +569,7 @@ class BaseDeviceAdaptor:
                 block_table=block_table,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_kv=actual_seq_lengths_key,
-                query_rope=q_pe,
+                query_rope=None if nope else q_pe,
                 key_rope=key_rope,
                 layout_query="TND",
                 layout_kv="PA_BSND",
