@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..representation import KVBlockAssignment, KVBlockAssignmentBatch
-from ..spec.topology import KVPoolGroupTopology, KVPoolTopology
+from ..spec.topology import KVPoolTopology
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,22 +44,25 @@ class StoreOwnershipSelection:
         return KVBlockAssignmentBatch(batch.group_id, ownership.select(batch.assignments))
 
 
-def compile_store_ownership(topology: KVPoolTopology) -> StoreOwnershipSelection:
+def compile_store_ownership(
+    topology: KVPoolTopology,
+    align_state_group_ids: frozenset[int],
+) -> StoreOwnershipSelection:
     """Compile each group's Store replication rule into one deterministic shard selection."""
 
-    groups_by_id = {group.group_id: group for group in topology.groups}
     ownership_by_group = {
-        group_id: _compile_group_ownership(topology, groups_by_id[group_id]) for group_id in topology.transfer_group_ids
+        group_id: _compile_group_ownership(topology, group_id in align_state_group_ids)
+        for group_id in topology.transfer_group_ids
     }
     return StoreOwnershipSelection(topology.transfer_group_ids, ownership_by_group)
 
 
 def _compile_group_ownership(
     topology: KVPoolTopology,
-    group: KVPoolGroupTopology,
+    uses_align_state: bool,
 ) -> _GroupStoreOwnership:
     replica_count = topology.put_step
-    if topology.tp_partition.tp_mismatch or topology.dcp_size > 1 or group.uses_align_state:
+    if topology.tp_partition.tp_mismatch or topology.dcp_size > 1 or uses_align_state:
         replica_count = 1
     return _GroupStoreOwnership(
         shard_rank=topology.pcp_rank * replica_count + topology.tp_rank % replica_count,

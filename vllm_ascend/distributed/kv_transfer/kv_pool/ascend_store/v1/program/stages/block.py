@@ -97,12 +97,15 @@ class CheckpointBlockResolution:
         return KVBlockAssignmentBatch(batch.group_id, assignments)
 
 
-def compile_block_resolutions(topology: KVPoolTopology) -> tuple[LocalBlockResolution, CheckpointBlockResolution]:
+def compile_block_resolutions(
+    topology: KVPoolTopology,
+    checkpoint_group_ids: frozenset[int],
+) -> tuple[LocalBlockResolution, CheckpointBlockResolution]:
     """Compile normal and checkpoint Block rules from the static group topology."""
 
     transfer_groups = tuple(group for group in topology.groups if group.group_id in topology.transfer_group_ids)
     minimum_block_ids = {
-        group.group_id: 0 if topology.tp_partition.tp_mismatch or not group.uses_align_state else 1
+        group.group_id: 0 if topology.tp_partition.tp_mismatch or group.group_id not in checkpoint_group_ids else 1
         for group in transfer_groups
     }
     block_sizes = {group.group_id: group.block_size for group in transfer_groups}

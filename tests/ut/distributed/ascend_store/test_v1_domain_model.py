@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, KVCacheSpec, MambaSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
@@ -72,7 +73,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.represe
     TransferRegionBatch,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.compilation import (
-    KVGroupReachabilitySpec,
     KVPoolCompilationSpec,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.schedule import (
@@ -372,15 +372,11 @@ def make_topology(
     physical_layers_by_group = physical_layers_by_group or {}
     block_sizes_by_group = block_sizes_by_group or {}
     group_topologies = tuple(
-        KVPoolGroupTopology(
+        make_group_topology(
             group_id,
-            block_sizes_by_group.get(group_id, 4),
-            tuple(
-                KVPoolLayerTopology(physical_layer_id, (f"layers.{physical_layer_id}.group.{group_id}",))
-                for physical_layer_id in physical_layers_by_group.get(group_id, (group_id,))
-            ),
-            KeyMetadata("model", 0, 0, 0, group_id),
-            group_id in align_state_groups,
+            block_size=block_sizes_by_group.get(group_id, 4),
+            physical_layer_ids=physical_layers_by_group.get(group_id, (group_id,)),
+            uses_align_state=group_id in align_state_groups,
         )
         for group_id in range(max(groups) + 1)
     )
@@ -403,6 +399,46 @@ def make_topology(
         group_topologies,
         tuple(groups),
         consumer_pipeline_partitions,
+    )
+
+
+def make_group_topology(
+    group_id: int,
+    *,
+    block_size: int = 4,
+    physical_layer_ids: tuple[int, ...] | None = None,
+    uses_align_state: bool = False,
+    kv_cache_spec: KVCacheSpec | None = None,
+    is_eagle_group: bool = False,
+) -> KVPoolGroupTopology:
+    if kv_cache_spec is None:
+        if uses_align_state:
+            kv_cache_spec = make_align_state_spec(block_size)
+        else:
+            kv_cache_spec = FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            )
+    return KVPoolGroupTopology(
+        group_id=group_id,
+        kv_cache_spec=kv_cache_spec,
+        layers=tuple(
+            KVPoolLayerTopology(physical_layer_id, (f"layers.{physical_layer_id}.group.{group_id}",))
+            for physical_layer_id in physical_layer_ids or (group_id,)
+        ),
+        key_metadata=KeyMetadata("model", 0, 0, 0, group_id),
+        is_eagle_group=is_eagle_group,
+    )
+
+
+def make_align_state_spec(block_size: int = 4) -> MambaSpec:
+    return MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
     )
 
 
@@ -451,18 +487,26 @@ def compile_program(
     store_kind = None
     if store_enabled:
         store_kind = StoreScheduleKind.LAYERWISE if use_layerwise else StoreScheduleKind.ASYNC
-    reachability_groups = ()
     if kv_cache_groups:
-        reachability_groups = tuple(
-            KVGroupReachabilitySpec(group_id, group.kv_cache_spec, group.is_eagle_group)
-            for group_id, group in zip(topology.transfer_group_ids, kv_cache_groups, strict=True)
+        upstream_groups = dict(zip(topology.transfer_group_ids, kv_cache_groups, strict=True))
+        topology = replace(
+            topology,
+            groups=tuple(
+                replace(
+                    group,
+                    kv_cache_spec=upstream_groups[group.group_id].kv_cache_spec,
+                    is_eagle_group=upstream_groups[group.group_id].is_eagle_group,
+                )
+                if group.group_id in upstream_groups
+                else group
+                for group in topology.groups
+            ),
         )
     compilation_spec = KVPoolCompilationSpec(
-        topology,
-        "fake",
-        KVPoolSchedule(load_kind, store_kind, 2),
-        64,
-        reachability_groups,
+        topology=topology,
+        backend_name="fake",
+        schedule=KVPoolSchedule(load_kind, store_kind, 2),
+        max_model_len=64,
     )
     return compile_kv_pool_program(compilation_spec)
 
@@ -484,21 +528,36 @@ def make_projection(
     topology: KVPoolTopology,
     region_projection: TransferRegionProjection | None = None,
 ) -> ProjectionNodes:
+    transfer_groups = topology.transfer_groups
+    align_state_group_ids = frozenset(group.group_id for group in transfer_groups if group.uses_align_state)
     if region_projection is None:
         region_projection = (
             StridedRegionProjection(topology)
             if topology.tp_partition.tp_mismatch
             else ContiguousRegionProjection(topology)
         )
-    blocks, checkpoint_blocks = compile_block_resolutions(topology)
+    blocks, checkpoint_blocks = compile_block_resolutions(topology, align_state_group_ids)
+    lookup_rank_counts = {
+        group.group_id: topology.tp_size
+        if group.group_id in align_state_group_ids
+        else topology.tp_partition.key_rank_count
+        for group in transfer_groups
+    }
     return ProjectionNodes(
         topology,
-        SemanticChunkProjection(database, topology),
-        CheckpointChunkProjection(database, topology),
-        RemoteObjectProjection(topology),
+        SemanticChunkProjection(
+            database,
+            transfer_groups,
+            any(
+                group.group_id in align_state_group_ids and group.block_size > database.hash_block_size
+                for group in transfer_groups
+            ),
+        ),
+        CheckpointChunkProjection(database, transfer_groups, align_state_group_ids),
+        RemoteObjectProjection(topology, lookup_rank_counts),
         blocks,
         checkpoint_blocks,
-        compile_store_ownership(topology),
+        compile_store_ownership(topology, align_state_group_ids),
         region_projection,
     )
 
@@ -691,6 +750,7 @@ def test_vllm_adapter_captures_authoritative_parallel_coordinates(monkeypatch) -
     assert spec.topology.pcp_rank == 3
     assert spec.topology.groups[0].key_metadata.pp_rank == 1
     assert spec.topology.groups[0].key_metadata.dcp_rank == 2
+    assert spec.topology.groups[0].kv_cache_spec is cache_group.kv_cache_spec
     assert pickle.loads(pickle.dumps(spec)) == spec
 
 
@@ -770,19 +830,11 @@ def test_resources_bind_memory_geometry_once() -> None:
     backend = SimpleNamespace(
         register_buffer=lambda addresses, sizes: registered_buffers.append((addresses, sizes)),
     )
-    group = KVPoolGroupTopology(
-        0,
-        4,
-        (
-            KVPoolLayerTopology(0, ("layers.0",)),
-            KVPoolLayerTopology(1, ("layers.1",)),
-        ),
-        KeyMetadata("model", 0, 0, 0, 0),
-    )
+    group = make_group_topology(0, physical_layer_ids=(0, 1))
     resources = KVPoolResources(backend, make_backend_spec(type(backend)), 2, (group,))
     kv_caches = {
-        "layers.0": torch.zeros((2, 1)),
-        "layers.1": torch.zeros((2, 1)),
+        "layers.0.group.0": torch.zeros((2, 1)),
+        "layers.1.group.0": torch.zeros((2, 1)),
     }
     memory_geometry = resources.bind_kv_caches(kv_caches)
     assert [segment.physical_layer_id for segment in memory_geometry[0]] == [0, 1]
@@ -1182,7 +1234,7 @@ def test_single_lookup_representation_rewrites_a_nonzero_base_rank() -> None:
     topology = make_topology()
     topology = replace(
         topology,
-        groups=(replace(topology.groups[0], key_metadata=metadata, uses_align_state=True),),
+        groups=(replace(topology.groups[0], key_metadata=metadata, kv_cache_spec=make_align_state_spec()),),
     )
     projection = make_projection(database, topology)
     selection = KVSelection(TokenRange(0, 4), (b"a",), (GroupSelection(0, None),))
@@ -1392,7 +1444,7 @@ def test_strided_store_ownership_does_not_drop_chunks_as_tp_replicas() -> None:
 def test_strided_mapping_keeps_align_state_null_blocks() -> None:
     database = FakeDatabase()
     topology = make_topology(tp_mismatch=True)
-    topology = replace(topology, groups=(replace(topology.groups[0], uses_align_state=True),))
+    topology = replace(topology, groups=(replace(topology.groups[0], kv_cache_spec=make_align_state_spec()),))
     projection = make_projection(database, topology)
     compile_projection(projection, make_memory_geometry(database, topology))
     selection = KVSelection(TokenRange(0, 4), (b"a",), (GroupSelection(0, None),))
@@ -1429,18 +1481,15 @@ def test_unitary_reachability_resolves_only_contiguous_available_chunks() -> Non
 
 def test_hybrid_reachability_preserves_partial_tail_object_identity() -> None:
     groups = (
-        KVGroupReachabilitySpec(
+        make_group_topology(
             0,
-            FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
+            block_size=16,
+            kv_cache_spec=FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
         ),
-        KVGroupReachabilitySpec(
+        make_group_topology(
             1,
-            MambaSpec(
-                block_size=16,
-                shapes=((1, 1),),
-                dtypes=(torch.float32,),
-                mamba_cache_mode="align",
-            ),
+            block_size=16,
+            kv_cache_spec=make_align_state_spec(16),
         ),
     )
     reachability = HybridReachability(
@@ -1469,9 +1518,9 @@ def test_hybrid_reachability_preserves_partial_tail_object_identity() -> None:
 
 
 def test_eagle_lookup_drops_the_unstable_trailing_block() -> None:
-    group = KVGroupReachabilitySpec(
+    group = make_group_topology(
         0,
-        FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
+        kv_cache_spec=FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
         is_eagle_group=True,
     )
     reachability = HybridReachability(
@@ -1568,18 +1617,16 @@ def test_hybrid_lookup_and_store_share_retention_policy(monkeypatch) -> None:
         recorded.append(kwargs["retention_interval"])
         return None
 
-    import vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.reachability as module
-
-    monkeypatch.setattr(module, "_reachable_block_mask", reachable_mask)
+    monkeypatch.setattr(FullAttentionManager, "reachable_block_mask", classmethod(reachable_mask))
     reachability = HybridReachability(
         (
-            KVGroupReachabilitySpec(
+            make_group_topology(
                 0,
-                FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
+                kv_cache_spec=FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
             ),
-            KVGroupReachabilitySpec(
+            make_group_topology(
                 1,
-                FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
+                kv_cache_spec=FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
             ),
         ),
         scheduler_block_size=4,
