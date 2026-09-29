@@ -15,12 +15,15 @@ import csv
 import json
 import platform
 import statistics
+import time
 from pathlib import Path
 
 import torch
 import torch_npu
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.glm5next.ops.mhc_ops import hc_expand
+from vllm_ascend.ops.mhc import mhc_expand
 from vllm_ascend.utils import enable_custom_op
 
 WARMUP = 5
@@ -56,11 +59,86 @@ def profile_case(fn, trace_dir):
     return sum(times) / ACTIVE
 
 
+def wall_case(fn, iterations):
+    """Amortized wall time including Python enqueue and final device completion."""
+    for _ in range(WARMUP):
+        result = fn()
+    torch.npu.synchronize()
+    start = time.perf_counter_ns()
+    for _ in range(iterations):
+        result = fn()
+    torch.npu.synchronize()
+    elapsed_us = (time.perf_counter_ns() - start) / iterations / 1000
+    del result
+    return elapsed_us
+
+
+def capture_case(fn):
+    for _ in range(WARMUP):
+        fn()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True):
+        result = fn()
+
+    def replay():
+        graph.replay()
+        return result
+
+    return replay
+
+
+def summarize(samples):
+    lines = [
+        "\n## Repeated-round summary\n",
+        "| Case | Dtype | Custom median (us) | Expand median (us) | Repeat median (us) | "
+        "Expand/custom median | Ratio min-max |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    ratios_by_dtype = {}
+    for index, (dtype, rounds) in samples.items():
+        medians = {name: statistics.median(row[name] for row in rounds) for name in rounds[0]}
+        ratios = [row["expand"] / row["custom"] for row in rounds]
+        ratio = statistics.median(ratios)
+        ratios_by_dtype.setdefault(dtype, []).append(ratio)
+        lines.append(
+            f"| {index} | {dtype} | {medians['custom']:.3f} | {medians['expand']:.3f} | "
+            f"{medians['repeat']:.3f} | {ratio:.3f} | {min(ratios):.3f}-{max(ratios):.3f} |"
+        )
+    all_ratios = [ratio for ratios in ratios_by_dtype.values() for ratio in ratios]
+    lines += [
+        "\n## Summary\n",
+        "| Dtype | Cases | Mean speedup | Geomean speedup | Custom faster | Native faster |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for dtype, ratios in [*ratios_by_dtype.items(), ("all", all_ratios)]:
+        lines.append(
+            f"| {dtype} | {len(ratios)} | {statistics.mean(ratios):.3f} | "
+            f"{statistics.geometric_mean(ratios):.3f} | "
+            f"{sum(r > 1 for r in ratios)} | {sum(r < 1 for r in ratios)} |"
+        )
+    lines += [
+        "\n## Observations\n",
+        "- Ratios compare the same case/round; medians and min-max expose run variation.",
+        "- Profiler measures device time; wall and graph measure amortized enqueue-to-completion time.",
+        "- Small per-forward savings do not establish full-model throughput gains.",
+    ]
+    return lines
+
+
 def main():
+    # Keep source selection, correctness and timing together so each reported
+    # row is tied to the exact production entry point and baseline used.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cases", type=Path, default=Path(__file__).with_name("mhc_expand_cases.jsonl"))
+    parser.add_argument("--path", choices=["raw", "helper", "glm"], default="raw")
+    parser.add_argument("--timing", choices=["profiler", "wall", "graph"], default="profiler")
+    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--iterations", type=int, default=100, help="Calls per wall/graph measurement")
     args = parser.parse_args()
+    if args.rounds < 1 or args.iterations < 1:
+        parser.error("rounds and iterations must be positive")
     if not torch.npu.is_available():
         raise RuntimeError("A real NPU is required")
     if not get_current_hardware_profile().supports(HardwareCapability.MHC_EXPAND):
@@ -69,75 +147,60 @@ def main():
         raise RuntimeError("The compiled vLLM Ascend extension is required")
     args.output.mkdir(parents=True, exist_ok=False)
     cases = [json.loads(line) for line in args.cases.read_text().splitlines() if line.strip()]
+    custom = {"raw": torch.ops._C_ascend.npu_mhc_expand, "helper": mhc_expand, "glm": hc_expand}[args.path]
     report = [
         "# mHC Expand NPU measurements\n",
         f"- Device: {torch.npu.get_device_name(0)}",
         f"- Host: {platform.platform()}",
         f"- PyTorch: {torch.__version__}; torch_npu: {torch_npu.__version__}",
-        f"- warmup={WARMUP}, active={ACTIVE}, repeat=1; separate trace per case and implementation.",
-        "- Metric: sum of every Total Time(us) row divided by five active invocations.",
+        f"- Path: {args.path}; timing: {args.timing}; independent rounds: {args.rounds}.",
+        f"- Profiler: warmup={WARMUP}, active={ACTIVE}, repeat=1; separate trace per implementation.",
+        f"- Wall/graph: {args.iterations} calls, with synchronization before and after the timed batch.",
+        "- Profiler metric: sum of all Total Time(us) rows / five active invocations.",
+        "- Alternate implementation order each round; graph capture and correctness are outside timing.",
         "- Cases are independently designed (用例为自行设计，非 testcase-gen 产出).",
-        "- Device operator latency only; no end-to-end model speedup is inferred.\n",
-        "| Case | Shape | Dtype | Custom (us) | Expand contiguous (us) | Repeat (us) | Expand/custom | Repeat/custom |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "- No end-to-end model speedup is inferred.\n",
+        "| Round | Case | Shape | Dtype | Custom (us) | Expand (us) | Repeat (us) | Expand/custom |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: |",
     ]
-    ratios = []
-    for index, case in enumerate(cases):
-        inputs = {item["name"]: item for item in case["inputs"]}
-        dtype_name = inputs["x"]["dtype"]
-        dtype = getattr(torch, dtype_name)
-        x = torch.randn(*inputs["x"]["shape"], dtype=dtype, device="npu")
-        mult = inputs["mult"]["value"]
-        functions = {
-            "custom": lambda x=x, mult=mult: torch.ops._C_ascend.npu_mhc_expand(x, mult),
-            "expand": lambda x=x, mult=mult: x.unsqueeze(1).expand(-1, mult, -1).contiguous(),
-            "repeat": lambda x=x, mult=mult: x.unsqueeze(1).repeat(1, mult, 1),
-        }
-        expected = functions["repeat"]().cpu().view(torch.int16)
-        for fn in functions.values():
-            assert torch.equal(fn().cpu().view(torch.int16), expected)
-        times = {name: profile_case(fn, args.output / f"case_{index:03d}" / name) for name, fn in functions.items()}
-        expand_ratio, repeat_ratio = times["expand"] / times["custom"], times["repeat"] / times["custom"]
-        ratios.append((dtype_name, expand_ratio, repeat_ratio))
-        row = (
-            f"| {index} | {tuple(x.shape)}, mult={mult} | {dtype_name} | {times['custom']:.3f} | "
-            f"{times['expand']:.3f} | {times['repeat']:.3f} | {expand_ratio:.3f} | {repeat_ratio:.3f} |"
-        )
-        report.append(row)
-        print(row, flush=True)
-        (args.output / "report.md").write_text("\n".join(report) + "\n")
-    report += [
-        "\n## Summary\n",
-        "| Metric | Value |",
-        "| --- | ---: |",
-        f"| Cases | {len(ratios)} |",
-        f"| Mean expand/custom | {statistics.mean(item[1] for item in ratios):.3f} |",
-        f"| Custom faster | {sum(item[1] > 1 for item in ratios)} |",
-        f"| Baseline faster | {sum(item[1] < 1 for item in ratios)} |",
-        "\n### By dtype\n",
-        "| Dtype | Cases | Mean expand/custom | Geomean expand/custom | "
-        "Geomean repeat/custom | Custom faster | Baseline faster |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
-    ]
-    for dtype in ["float16", "bfloat16", "all"]:
-        selected = [item for item in ratios if dtype == "all" or item[0] == dtype]
-        if selected:
-            report.append(
-                f"| {dtype} | {len(selected)} | "
-                f"{statistics.mean(item[1] for item in selected):.3f} | "
-                f"{statistics.geometric_mean(item[1] for item in selected):.3f} | "
-                f"{statistics.geometric_mean(item[2] for item in selected):.3f} | "
-                f"{sum(item[1] > 1 for item in selected)} | {sum(item[1] < 1 for item in selected)} |"
-            )
-    wins = sum(item[1] > 1 for item in ratios)
-    report += [
-        "\n## Observations\n",
-        f"- Custom is faster than expand/contiguous in {wins}/{len(ratios)} measured cases.",
-        f"- Expand/custom ratios range from {min(item[1] for item in ratios):.3f} "
-        f"to {max(item[1] for item in ratios):.3f}; inspect decode and prefill separately.",
-        "- Expansion is an initialization operation; these kernel results do not establish model throughput gains.",
-        "- Raw traces are stored in case_NNN/{custom,expand,repeat}/ below this report.\n",
-    ]
+    samples = {}
+    with torch.inference_mode():
+        for round_index in range(args.rounds):
+            for index, case in enumerate(cases):
+                inputs = {item["name"]: item for item in case["inputs"]}
+                dtype_name = inputs["x"]["dtype"]
+                x = torch.randn(*inputs["x"]["shape"], dtype=getattr(torch, dtype_name), device="npu")
+                mult = inputs["mult"]["value"]
+                functions = {
+                    "custom": lambda x=x, mult=mult: custom(x, mult),
+                    "expand": lambda x=x, mult=mult: x.unsqueeze(1).expand(-1, mult, -1).contiguous(),
+                    "repeat": lambda x=x, mult=mult: x.unsqueeze(1).repeat(1, mult, 1),
+                }
+                expected = functions["repeat"]().cpu().view(torch.int16)
+                for fn in functions.values():
+                    assert torch.equal(fn().cpu().view(torch.int16), expected)
+                order = list(functions) if round_index % 2 == 0 else list(reversed(functions))
+                times = {}
+                for name in order:
+                    fn = functions[name]
+                    if args.timing == "graph":
+                        fn = capture_case(fn)
+                        x.fill_(-2)
+                        assert torch.equal(fn().cpu().view(torch.int16), functions["repeat"]().cpu().view(torch.int16))
+                    if args.timing == "profiler":
+                        trace_dir = args.output / f"round_{round_index:02d}" / f"case_{index:03d}" / name
+                        times[name] = profile_case(fn, trace_dir)
+                    else:
+                        times[name] = wall_case(fn, args.iterations)
+                samples.setdefault(index, (dtype_name, []))[1].append(times)
+                report.append(
+                    f"| {round_index} | {index} | {tuple(x.shape)}, mult={mult} | {dtype_name} | "
+                    f"{times['custom']:.3f} | {times['expand']:.3f} | {times['repeat']:.3f} | "
+                    f"{times['expand'] / times['custom']:.3f} |"
+                )
+                print(report[-1], flush=True)
+                (args.output / "report.md").write_text("\n".join(report) + "\n")
+    report += summarize(samples)
     (args.output / "report.md").write_text("\n".join(report) + "\n")
 
 

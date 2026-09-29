@@ -35,6 +35,8 @@ private:
             const DataCopyExtParams load{1, rows * d * 2, 0, 0, 0};
             DataCopyPad(in, input_[token * d], load, pad);
             Sync<HardEvent::MTE2_MTE3>();
+            // DataCopyPad supports UB -> GM; a GM destination stride is in bytes.
+            // The local source stride uses 32-byte blocks and is zero here.
             const DataCopyExtParams store{static_cast<uint16_t>(rows), d * 2, 0, (m - 1) * d * 2, 0};
             for (uint32_t stream = 0; stream < m; ++stream)
                 DataCopyPad(output_[(token * m + stream) * d], in, store);
@@ -59,6 +61,7 @@ private:
             const DataCopyPadExtParams<T> pad{false, 0, 0, static_cast<T>(0)};
             DataCopyPad(in, input_[flat], copy, pad);
             Sync<HardEvent::MTE2_MTE3>();
+            // UB -> GM DataCopyPad discards padding instead of overwriting a tail.
             for (uint64_t stream = 0; stream < p_.mhcMult; ++stream) {
                 const auto offset = (token * p_.mhcMult + stream) * p_.hidden + column;
                 DataCopyPad(output_[offset], in, copy);
@@ -83,6 +86,7 @@ private:
             const DataCopyPadExtParams<T> pad{false, 0, 0, static_cast<T>(0)};
             DataCopyPad(in, input_[token * p_.hidden], load, pad);
             Sync<HardEvent::MTE2_MTE3>();
+            // dstStride is measured in bytes for GM, not in 32-byte UB blocks.
             const DataCopyExtParams store{static_cast<uint16_t>(rows), rowBytes, 0,
                 static_cast<uint32_t>((p_.mhcMult - 1) * rowBytes), 0};
             for (uint64_t stream = 0; stream < p_.mhcMult; ++stream) {
