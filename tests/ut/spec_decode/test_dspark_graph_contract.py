@@ -59,7 +59,8 @@ def test_set_attn_preserves_cache_group_order(monkeypatch):
     monkeypatch.setattr(speculator_module.DSparkSpeculator, "set_attn", parent_set_attn)
     monkeypatch.setattr(speculator_module, "get_layers_from_vllm_config", get_layers)
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: draft_config))
-    speculator = _speculator(vllm_config=object(), draft_attn_layer_names={"draft.2", "draft.0"})
+    vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
+    speculator = _speculator(vllm_config=vllm_config, draft_attn_layer_names={"draft.2", "draft.0"})
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["draft.2", "target.0", "draft.0"])])
 
     speculator.set_attn(None, cache, None, None, None)
