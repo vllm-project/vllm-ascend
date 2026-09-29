@@ -32,5 +32,5 @@ group-list types 0 (cumulative) or 1 (counts), and positive `linear_beta`.
 W13 is loaded with native FP4 metadata; scales use E8M0 metadata and N-major
 views without copying storage. W2 and the existing GMM2 path are unchanged.
 
-Focused CPU tests are in `tests/ut/device/test_grouped_matmul_situ_quant.py` and
-`tests/ut/quantization/methods/w4a8/test_w4a8_mxfp4.py`.
+The Ascend 950 end-to-end case is in
+`tests/e2e/nightly/single_node/ops/singlecard_ops/test_gmm_situ_small_experts.py`.

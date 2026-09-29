@@ -1230,7 +1230,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if mxfp_quant_dtype != QuantType.W4A8MXFP:
             raise RuntimeError("GMM-SiTU quant fusion requires W4A8 MXFP quantization.")
 
-        weight = A5DeviceAdaptor._restore_mxfp_semantic_dtype(weight, torch.float4_e2m1fn_x2)
         weight_scale = A5DeviceAdaptor._restore_mxfp_semantic_dtype(weight_scale, torch.float8_e8m0fnu)
         x_scale = A5DeviceAdaptor._restore_mxfp_semantic_dtype(x_scale, torch.float8_e8m0fnu)
 
