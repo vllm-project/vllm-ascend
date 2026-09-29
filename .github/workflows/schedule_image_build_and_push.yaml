@@ -152,7 +152,7 @@ jobs:
       # path as quay.io; the sync tool then mirrors them to quay.io.
       swr_registry: 'swr.cn-north-12.myhuaweicloud.com'
       swr_repo: ${{ needs.setup-matrix.outputs.build_type == 'daily' && 'swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-ascend' || 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend' }}
-      swr_temp_repo: 'swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-atlas-temp'
+      swr_temp_repo: ${{ needs.setup-matrix.outputs.build_type == 'daily' && 'swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-atlas-temp' || 'swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-atlas-temp' }}
       # ======================================================================
       
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
@@ -199,7 +199,7 @@ jobs:
       cann_image_version: ${{ needs.setup-matrix.outputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1] || (fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "2026.08.03", "9.1.0"]')[2] || '9.1.0') }}
       cann_swr_url: ${{ needs.setup-matrix.outputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[0] || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann' }}
       swr_registry: 'swr.cn-north-12.myhuaweicloud.com'
-      swr_temp_repo: 'swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-atlas-temp'
+      swr_temp_repo: ${{ needs.setup-matrix.outputs.build_type == 'daily' && 'swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-atlas-temp' || 'swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-atlas-temp' }}
       should_push: true
       temp_only: ${{ needs.setup-matrix.outputs.build_type == 'daily' && !inputs.publish_nightly_main }}
       publish_nightly_main: ${{ inputs.publish_nightly_main }}
