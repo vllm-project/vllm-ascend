@@ -70,16 +70,19 @@ def test_mhc_expand_unaligned_output_ownership(dtype, mult, hidden):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_mhc_expand_npu_graph(dtype):
-    x = torch.randn(16, 7168, dtype=dtype, device="npu")
+@pytest.mark.parametrize("tokens,hidden", [(16, 7168), (3, 8193), (5, 32769)])
+def test_mhc_expand_npu_graph(dtype, tokens, hidden):
+    x = torch.randn(tokens, hidden, dtype=dtype, device="npu")
     for _ in range(3):
         torch.ops._C_ascend.npu_mhc_expand(x, 4)
     torch.npu.synchronize()
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True):
         y = torch.ops._C_ascend.npu_mhc_expand(x, 4)
-    for value in (1.0, -3.0, 0.0):
-        x.fill_(value)
+    for seed in (7, 19, 43):
+        torch.manual_seed(seed)
+        # Distinct row/column values also detect incorrect input mapping.
+        x.normal_()
         graph.replay()
         assert_bits_equal(y, x.unsqueeze(1).repeat(1, 4, 1))
 
