@@ -89,6 +89,30 @@ def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
     return any(getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs)
 
 
+def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
+    """Whether PD transfer can preserve a component-major MLA cache layout.
+
+    A component-major MLA page packs NoPE and RoPE into one physical slot:
+    ``[all NoPE][all RoPE][padding]``.  MooncakeV2 pull connectors transfer
+    that page as one raw block when the published base address, block length,
+    and block stride describe the complete slot.  Other connectors still use
+    the legacy separate NoPE/RoPE protocol.
+    """
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return True
+
+    # Connectors loaded through a custom module path are not identified by the
+    # registry name, so conservatively fall back to the legacy layout.
+    if getattr(kv_transfer_config, "kv_connector_module_path", None) is not None:
+        return False
+
+    return getattr(kv_transfer_config, "kv_connector", None) in {
+        "MooncakeConnectorV2",
+        "MooncakePullConnector",
+    }
+
+
 @dataclass(frozen=True, kw_only=True)
 class AscendMLAAttentionSpec(MLAAttentionSpec):
     """MLA cache spec with Ascend-specific layout metadata.
@@ -120,6 +144,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             get_kv_cache_compression_ratio(self) == 1
             and self.model_version is None
             and not self.indexes_kv_by_block_stride
+            and not self.cache_sparse_sfa_c8
         )
 
     @property
