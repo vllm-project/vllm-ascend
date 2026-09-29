@@ -1814,7 +1814,7 @@ ge::graphStatus SMLATilingCheck::CheckSingleParaTopkLength() const
         // same contract for this input; the index path below states it against
         // the index list instead, because there the two are written together.
         const gert::Shape &bandTopkShape = opParamInfo_.oriTopkLength.tensor->GetStorageShape();
-        const gert::Shape &bandQueryShape = opParamInfo_.q.tensor->GetStorageShape();
+        const gert::Shape &bandQueryShape = opParamInfo_.q.shape->GetStorageShape();
         if (qLayout_ == SMLALayout::BSND) {
             OP_CHECK_IF(bandTopkShape.GetDimNum() != DIM_NUM_THREE ||
                             bandTopkShape.GetDim(0) != bandQueryShape.GetDim(0) ||
