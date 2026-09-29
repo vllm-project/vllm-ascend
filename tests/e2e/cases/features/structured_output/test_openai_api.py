@@ -21,7 +21,6 @@ from typing import Any
 import pytest
 import requests
 
-from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.cases.features.structured_output.api import (
     create_plain_chat_completion,
     create_structured_chat_completion,
@@ -37,6 +36,7 @@ from tests.e2e.cases.features.structured_output.cases import (
     STRUCTURED_OUTPUT_CASES,
     StructuredOutputCase,
 )
+from tests.e2e.conftest import RemoteOpenAIServer
 
 CONCURRENT_REQUEST_COUNT = 32
 CONCURRENT_WORKERS = 8

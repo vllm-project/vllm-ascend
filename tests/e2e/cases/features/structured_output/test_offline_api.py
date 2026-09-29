@@ -17,12 +17,12 @@
 import pytest
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
-from tests.e2e.conftest import VllmRunner
 from tests.e2e.cases.features.structured_output.assertions import assert_structured_output
 from tests.e2e.cases.features.structured_output.cases import (
     STRUCTURED_OUTPUT_CASES,
     StructuredOutputCase,
 )
+from tests.e2e.conftest import VllmRunner
 
 
 @pytest.mark.parametrize("case", STRUCTURED_OUTPUT_CASES, ids=lambda case: case.case_id)

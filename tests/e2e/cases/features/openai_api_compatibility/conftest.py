@@ -1,9 +1,9 @@
 import pytest
 
-from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.cases.features.openai_api_compatibility.utility.http_client import (
     HTTPClient,
 )
+from tests.e2e.conftest import RemoteOpenAIServer
 
 env_dict: dict = {}
 

@@ -23,11 +23,11 @@ from unittest.mock import patch
 import pytest
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner
 from tests.e2e.cases.features.structured_output.cases import (
     MODEL_NAME,
     SERVED_MODEL_NAME,
 )
+from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner
 
 SERVER_ENV = {
     "VLLM_USE_V1": "1",
