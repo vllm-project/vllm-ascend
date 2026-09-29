@@ -637,6 +637,75 @@ class TestPadDraftBuffersBeforeBuild(_DSparkProposerTestBase):
         assert torch.equal(proposer.positions, snapshot)
 
 
+class TestDummySlotMappingCleanup(_DSparkProposerTestBase):
+    def test_first_non_profile_dummy_sets_context_before_dp_padding(self, monkeypatch):
+        proposer = self._make_proposer(max_num_tokens=32, num_reqs=1, block_size=5)
+        del proposer._dflash_num_context
+
+        @contextmanager
+        def forward_context(*args, **kwargs):
+            yield
+
+        def runnable(**kwargs):
+            # One local request contributes five query tokens, while DP sync pads the draft input to eight tokens.
+            assert proposer._dflash_num_context == 8
+            proposer._pad_draft_buffers(num_actual_tokens=5, num_input_tokens=8)
+
+        monkeypatch.setattr("vllm_ascend.spec_decode.dspark_proposer.set_ascend_forward_context", forward_context)
+        proposer.runner = SimpleNamespace(
+            _sync_metadata_across_dp=lambda num_tokens, **kwargs: (8, None, None),
+            dynamic_eplb=False,
+        )
+        proposer.vllm_config = SimpleNamespace()
+        proposer.use_cuda_graph = False
+        proposer.uses_mrope = False
+        proposer.hidden_states = torch.zeros((32, 8), dtype=torch.float32)
+        proposer.token_indices_to_sample = torch.zeros(5, dtype=torch.int32)
+        proposer._runnable = MagicMock(side_effect=runnable)
+
+        proposer.dummy_run(num_tokens=5, num_reqs=1, is_profile=False)
+
+        assert proposer._dflash_num_context == 8
+        proposer._runnable.assert_called_once()
+
+    def test_dspark_dummy_run_clears_all_group_buffers_before_forward(self, monkeypatch):
+        proposer = self._make_proposer(max_num_tokens=32, num_reqs=1, block_size=5)
+        for buf in proposer._per_group_query_slot_mapping_buffers.values():
+            buf.fill_(456)
+        for buf in proposer._per_group_context_slot_mapping_buffers.values():
+            buf.fill_(789)
+
+        @contextmanager
+        def forward_context(*args, **kwargs):
+            yield
+
+        def runnable(**kwargs):
+            for buf in proposer._per_group_query_slot_mapping_buffers.values():
+                assert torch.all(buf == -1)
+            for buf in proposer._per_group_context_slot_mapping_buffers.values():
+                assert torch.all(buf == -1)
+
+        monkeypatch.setattr("vllm_ascend.spec_decode.dspark_proposer.set_ascend_forward_context", forward_context)
+        proposer.runner = SimpleNamespace(
+            _sync_metadata_across_dp=lambda num_tokens, **kwargs: (num_tokens, None, None),
+            dynamic_eplb=False,
+        )
+        proposer.vllm_config = SimpleNamespace()
+        proposer.use_cuda_graph = False
+        proposer.uses_mrope = False
+        proposer.hidden_states = torch.zeros((32, 8), dtype=torch.float32)
+        proposer.token_indices_to_sample = torch.zeros(5, dtype=torch.int32)
+        proposer._runnable = MagicMock(side_effect=runnable)
+
+        proposer.dummy_run(num_tokens=5, num_reqs=1, is_profile=False)
+
+        for buf in proposer._per_group_query_slot_mapping_buffers.values():
+            assert torch.all(buf == -1)
+        for buf in proposer._per_group_context_slot_mapping_buffers.values():
+            assert torch.all(buf == -1)
+        proposer._runnable.assert_called_once()
+
+
 class TestDSparkInitialization(_DSparkProposerTestBase):
     """Tests for DSpark initialization configuration."""
 

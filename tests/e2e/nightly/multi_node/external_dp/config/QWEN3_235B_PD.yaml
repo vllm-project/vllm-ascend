@@ -2,6 +2,7 @@ test_name: "QWEN3_235B_PD"
 model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
 num_nodes: 3
 npu_per_node: 16
+dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"

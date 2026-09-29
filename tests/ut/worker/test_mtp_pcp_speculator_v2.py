@@ -11,6 +11,7 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu import dp_utils
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
@@ -43,6 +44,7 @@ def _make_padded_input_batch() -> MagicMock:
     input_batch.positions = torch.arange(8, dtype=torch.int64)
     input_batch.is_padding = torch.zeros(8, dtype=torch.bool)
     input_batch.seq_lens_np = np.arange(4, dtype=np.int32)
+    input_batch.is_prefilling_np = np.zeros(4, dtype=np.bool_)
     return input_batch
 
 
@@ -282,7 +284,7 @@ def test_prepare_replicated_prefill_attn_uses_global_batch(attn_architecture, cu
     speculator.attn_architecture = attn_architecture
     speculator.block_tables = MagicMock()
     speculator.kv_cache_config = object()
-    speculator._build_draft_attn_metadata = MagicMock(return_value={"draft.layer": object()})
+    speculator._build_attn_metadata = MagicMock(return_value={"draft.layer": object()})
     input_batch = _make_padded_input_batch()
     input_batch.is_dummy = False
     speculator.input_batch = input_batch
@@ -306,7 +308,7 @@ def test_prepare_replicated_prefill_attn_uses_global_batch(attn_architecture, cu
             cudagraph_runtime_mode=cudagraph_runtime_mode,
         )
 
-    assert attn_metadata == speculator._build_draft_attn_metadata.return_value
+    assert attn_metadata == speculator._build_attn_metadata.return_value
     assert actual_slot_mappings is slot_mappings
     speculator.block_tables.gather_block_tables.assert_called_once_with(
         input_batch.idx_mapping,
@@ -322,13 +324,16 @@ def test_prepare_replicated_prefill_attn_uses_global_batch(attn_architecture, cu
         global_slot_mapping,
         speculator.kv_cache_config,
     )
-    speculator._build_draft_attn_metadata.assert_called_once_with(
+    speculator._build_attn_metadata.assert_called_once_with(
         num_reqs=input_batch.num_reqs,
-        num_reqs_padded=input_batch.num_reqs_after_padding,
-        num_tokens_padded=input_batch.num_tokens_after_padding,
+        batch_desc=BatchExecutionDescriptor(
+            cg_mode=cudagraph_runtime_mode,
+            num_tokens=input_batch.num_tokens_after_padding,
+            num_reqs=input_batch.num_reqs_after_padding,
+        ),
+        query_start_loc_np=input_batch.query_start_loc_np,
         seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
         step=0,
-        query_start_loc_np=input_batch.query_start_loc_np,
     )
 
 
@@ -397,7 +402,7 @@ def test_graph_prefill_builds_draft_metadata(attn_architecture: str, replicated_
     speculator.model_state = SimpleNamespace(
         attn_metadata={"draft.layer": local_draft_metadata, "target.layer": object()},
     )
-    speculator._build_draft_attn_metadata = MagicMock(
+    speculator._build_attn_metadata = MagicMock(
         return_value={"draft.layer": global_draft_metadata},
     )
 
@@ -412,7 +417,7 @@ def test_graph_prefill_builds_draft_metadata(attn_architecture: str, replicated_
     expected_metadata = global_draft_metadata if rebuild_metadata else local_draft_metadata
     assert actual == [{"draft.layer": expected_metadata}]
     assert actual[0]["draft.layer"] is expected_metadata
-    assert speculator._build_draft_attn_metadata.call_count == int(rebuild_metadata)
+    assert speculator._build_attn_metadata.call_count == int(rebuild_metadata)
     assert build_slots.call_count == int(rebuild_metadata)
     assert speculator.block_tables.gather_block_tables.call_count == int(replicated_pcp)
     assert speculator.block_tables.compute_slot_mappings.call_count == int(replicated_pcp)
@@ -428,7 +433,7 @@ def test_graph_prefill_refreshes_captured_cache_buffers(attn_architecture: str) 
     metadata = SimpleNamespace(actual_seq_lengths_q=[4, 8])
     speculator.model_state = SimpleNamespace(attn_metadata={"draft.layer": metadata})
     speculator.kv_cache_config = object()
-    speculator._build_draft_attn_metadata = MagicMock()
+    speculator._build_attn_metadata = MagicMock()
 
     # These views stand in for the persistent buffers bound during capture.
     captured_blocks = torch.zeros((2, 3), dtype=torch.int32)
@@ -477,7 +482,7 @@ def test_graph_prefill_refreshes_captured_cache_buffers(attn_architecture: str) 
             result = speculator.build_draft_attn_metadatas(2, 8, is_draft_model_prefill=True)
 
         assert result[0]["draft.layer"] is metadata
-        speculator._build_draft_attn_metadata.assert_not_called()
+        speculator._build_attn_metadata.assert_not_called()
         build_slots.assert_not_called()
         assert metadata.actual_seq_lengths_q == [4, 8]
         assert captured_slots.tolist() == [expected_slots + [-1] * 4]
@@ -493,7 +498,7 @@ def test_prepare_replicated_prefill_preserves_bypass(guard: str) -> None:
     if speculator.input_batch is not None:
         speculator.input_batch.is_dummy = guard == "dummy"
     speculator.block_tables = MagicMock()
-    speculator._build_draft_attn_metadata = MagicMock()
+    speculator._build_attn_metadata = MagicMock()
     metadata = None if guard == "no_metadata" else {"draft.layer": object()}
     slots = {"draft.layer": object()}
 
@@ -505,7 +510,7 @@ def test_prepare_replicated_prefill_preserves_bypass(guard: str) -> None:
     assert actual_slots is slots
     speculator.block_tables.gather_block_tables.assert_not_called()
     speculator.block_tables.compute_slot_mappings.assert_not_called()
-    speculator._build_draft_attn_metadata.assert_not_called()
+    speculator._build_attn_metadata.assert_not_called()
 
 
 @pytest.mark.parametrize("attn_architecture", ["GQA", "MLA", "DSA", "SFA"])
@@ -518,7 +523,7 @@ def test_graph_prefill_without_real_batch_preserves_metadata(attn_architecture: 
     if speculator.input_batch is not None:
         speculator.input_batch.is_dummy = True
     speculator.block_tables = MagicMock()
-    speculator._build_draft_attn_metadata = MagicMock()
+    speculator._build_attn_metadata = MagicMock()
     metadata = object()
     speculator.draft_attn_layer_names = {"draft.layer"}
     speculator.model_state = SimpleNamespace(attn_metadata={"draft.layer": metadata})
@@ -528,7 +533,7 @@ def test_graph_prefill_without_real_batch_preserves_metadata(attn_architecture: 
     assert actual["draft.layer"] is metadata
     speculator.block_tables.gather_block_tables.assert_not_called()
     speculator.block_tables.compute_slot_mappings.assert_not_called()
-    speculator._build_draft_attn_metadata.assert_not_called()
+    speculator._build_attn_metadata.assert_not_called()
 
 
 @pytest.mark.parametrize(
