@@ -235,10 +235,12 @@ def test_fused_router_dispatches_local_physical_domain_and_marks_record_active(
         local_expert_start = 0
         should_record_tensor = torch.tensor(True)
 
-    state = RecordingState()
-    state.local_expert_count = local_count
-    state.expert_replica_routing_table = torch.zeros((1, experts), dtype=torch.int32)
-    state.expert_load_view = torch.zeros(experts, dtype=torch.int32)
+        def __init__(self, local_count: int, experts: int):
+            self.local_expert_count = local_count
+            self.expert_replica_routing_table = torch.zeros((1, experts), dtype=torch.int32)
+            self.expert_load_view = torch.zeros(experts, dtype=torch.int32)
+
+    state = RecordingState(local_count, experts)
     router = AscendFusedTopKRouter(top_k=8, global_num_experts=experts, eplb_state=state)
     context = SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER)
     monkeypatch.setattr("vllm_ascend.ops.fused_moe.router.fused_topk_router._EXTRA_CTX", context)

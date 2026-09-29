@@ -76,3 +76,12 @@ The AscendC implementation in private PR #3 targets ASCEND950 and was not
 run on this 910B4 host. PR #17574 was used as a design/performance reference,
 not as the correctness oracle. Neither cross-device published numbers nor
 host-enqueue event timings are mixed into the table above.
+
+## CI type-check follow-up
+
+The follow-up to `49e49f0f0` only moves three mocked `RecordingState`
+attributes into its initializer so mypy can see them. It does not change
+operator code, routing behavior, test inputs, or the profiling configuration.
+The existing NPU accuracy and `msprof op` results above remain the applicable
+evidence; no new performance number is claimed for this test-only change.
+Targeted mypy reports no issues in the updated test file.
