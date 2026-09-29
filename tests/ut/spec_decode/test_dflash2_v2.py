@@ -17,6 +17,7 @@
 #
 """Unit tests for the V2 DFlash2 speculator (worker/v2/spec_decode/dflash2)."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 

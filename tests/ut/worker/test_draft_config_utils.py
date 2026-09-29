@@ -57,9 +57,7 @@ def test_disable_profiling_chunk_for_draft_leaves_effectively_disabled_config_un
     ("nested_enabled", "legacy_enabled", "expect_rewrite"),
     [(False, True, False), (True, False, True)],
 )
-def test_disable_profiling_chunk_for_draft_uses_nested_precedence(
-    nested_enabled, legacy_enabled, expect_rewrite
-):
+def test_disable_profiling_chunk_for_draft_uses_nested_precedence(nested_enabled, legacy_enabled, expect_rewrite):
     additional_config = {
         "scheduler_config": {"profiling_chunk_config": {"enabled": nested_enabled}},
         "profiling_chunk_config": {"enabled": legacy_enabled},
@@ -81,13 +79,12 @@ def test_disable_profiling_chunk_for_draft_restores_after_failure(pp_size):
     config = _config(additional_config, pp_size=pp_size)
     expected_context = pytest.raises(RuntimeError, match="draft failed")
 
-    with expected_context:
-        with disable_profiling_chunk_for_draft(config):
-            if pp_size > 1:
-                assert config.additional_config is not additional_config
-            else:
-                assert config.additional_config is additional_config
-            raise RuntimeError("draft failed")
+    with expected_context, disable_profiling_chunk_for_draft(config):
+        if pp_size > 1:
+            assert config.additional_config is not additional_config
+        else:
+            assert config.additional_config is additional_config
+        raise RuntimeError("draft failed")
 
     assert config.additional_config is additional_config
 
