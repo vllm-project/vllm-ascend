@@ -68,9 +68,18 @@ class LoadCommandBatch:
 
 @dataclass(frozen=True, slots=True)
 class StoreCommandBatch:
-    """Store commands approved for one Worker step."""
+    """Store commands grouped by whether their source is already ready."""
 
-    commands: tuple[StoreCommand, ...] = ()
+    source_pending_commands: tuple[StoreCommand, ...] = ()
+    source_ready_commands: tuple[StoreCommand, ...] = ()
+
+    @property
+    def commands(self) -> tuple[StoreCommand, ...]:
+        return self.source_pending_commands + self.source_ready_commands
+
+    @property
+    def all_sources_ready(self) -> bool:
+        return bool(self.source_ready_commands) and not self.source_pending_commands
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 from ...program.spec.schedule import KVPoolSchedule, LoadScheduleKind, StoreScheduleKind
 from ...program.spec.topology import KVPoolTopology
@@ -32,6 +32,9 @@ class KVPoolTimelineRuntime:
         self._topology = topology
         self._load: LoadTimelineProtocol | None = None
         self._store: StoreTimelineProtocol | LayerwiseStoreTimelineProtocol | None = None
+        self._layerwise_load: LayerwiseLoadTimelineProtocol | None = None
+        self._bulk_store: StoreTimelineProtocol | None = None
+        self._layerwise_store: LayerwiseStoreTimelineProtocol | None = None
         self._source_ready_event_factory: Callable[[], Any] | None = None
 
     @property
@@ -72,30 +75,35 @@ class KVPoolTimelineRuntime:
         if self._schedule.requires_layerwise_backend and layerwise_backend is None:
             raise TypeError("Layerwise timeline requires layerwise Backend operations")
 
+        load_timeline: LoadTimelineProtocol
         if self._schedule.load_kind is LoadScheduleKind.LAYERWISE:
             assert layerwise_backend is not None
-            self._load = LayerwiseLoadTimeline(
+            load_timeline = LayerwiseLoadTimeline(
                 self._topology,
                 layerwise_backend,
                 self._schedule.layerwise_prefetch_layers,
                 thread_initializer,
                 start_gate_factory,
             )
+            self._layerwise_load = load_timeline
         elif self._schedule.load_kind is LoadScheduleKind.ASYNC:
-            self._load = AsyncLoadTimeline(thread_initializer)
+            load_timeline = AsyncLoadTimeline(thread_initializer)
         else:
-            self._load = LoadTimeline()
-        self._load.bind_operation(load_operation)
+            load_timeline = LoadTimeline()
+        load_timeline.bind_operation(load_operation)
+        self._load = load_timeline
 
         if self._schedule.store_kind is StoreScheduleKind.LAYERWISE:
             assert layerwise_backend is not None
             layerwise_store = LayerwiseStoreTimeline(self._topology, layerwise_backend, thread_initializer)
             layerwise_store.bind_admission(store_admission)
             layerwise_store.bind_operation(store_transfer_operation)
+            self._layerwise_store = layerwise_store
             self._store = layerwise_store
         elif self._schedule.store_kind is StoreScheduleKind.ASYNC:
             store = StoreTimeline(thread_initializer)
             store.bind_operation(store_operation)
+            self._bulk_store = store
             self._store = store
         self._source_ready_event_factory = source_ready_event_factory
 
@@ -111,28 +119,30 @@ class KVPoolTimelineRuntime:
         return tuple(self.load.collect())
 
     def wait_for_load_layer(self, layer_name: str) -> tuple[LoadCompletion, ...]:
-        if self._schedule.load_kind is not LoadScheduleKind.LAYERWISE:
+        if self._layerwise_load is None:
             return ()
-        return tuple(cast(LayerwiseLoadTimelineProtocol, self.load).wait_for_layer(layer_name))
+        return tuple(self._layerwise_load.wait_for_layer(layer_name))
 
     def abort_load(self) -> None:
         self.load.abort()
 
     def prepare_store(self, transfers: list[StoreTransfer]) -> None:
-        if self._schedule.store_kind is StoreScheduleKind.LAYERWISE:
-            cast(LayerwiseStoreTimelineProtocol, self._store).prepare(transfers)
+        if self._layerwise_store is not None:
+            self._layerwise_store.prepare(transfers)
 
     def submit_store_layer(self, layer_name: str) -> None:
-        if self._schedule.store_kind is not StoreScheduleKind.LAYERWISE:
+        if self._layerwise_store is None:
             return
-        cast(LayerwiseStoreTimelineProtocol, self._store).submit_layer(layer_name, self._record_source_ready())
+        self._layerwise_store.submit_layer(layer_name, self._record_source_ready())
 
     def finish_store(self, transfers: list[StoreTransfer]) -> StoreBatch:
         if self._store is None:
             raise RuntimeError("KV Pool program has no Store timeline")
-        if self._schedule.store_kind is StoreScheduleKind.LAYERWISE:
-            return cast(LayerwiseStoreTimelineProtocol, self._store).finalize()
-        return cast(StoreTimelineProtocol, self._store).submit(transfers, self._record_source_ready())
+        if self._layerwise_store is not None:
+            return self._layerwise_store.finalize()
+        if self._bulk_store is None:
+            raise RuntimeError("KV Pool program has no bulk Store timeline")
+        return self._bulk_store.submit(transfers, self._record_source_ready())
 
     def wait_store(self, batch: StoreBatch) -> tuple[StoreCompletion, ...]:
         if self._store is None:
