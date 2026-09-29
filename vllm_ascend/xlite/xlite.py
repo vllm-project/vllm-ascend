@@ -124,6 +124,10 @@ class XliteModelBase(ABC):
         self.xlite_model.init(self.xlite_config, torch.distributed.get_rank())
         self.cossin_cache = self._precompute_freqs_cis()
 
+        if torch.distributed.get_rank() == 0:
+            logger.info_once("xlite: built model config: %s", self.xlite_config)
+            logger.info_once("xlite: built model weights: %s", self.xlite_model)
+
     def extract_kv_cache(self, kv_caches: list[tuple[torch.Tensor, ...]], /) -> list[tuple[torch.Tensor, ...]]:
         """Extract xlite-compatible KV cache from the vLLM-ascend KV cache.
 
