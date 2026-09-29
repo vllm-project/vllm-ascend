@@ -59,6 +59,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     HostSeqLensRequirement,
+    HostSeqLensRequirements,
     resolve_host_seq_lens_requirements,
 )
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
@@ -214,7 +215,7 @@ class NPUModelRunner(GPUModelRunner):
         # https://github.com/vllm-project/vllm-ascend/issues/17479). Resolved
         # over the instantiated target/draft metadata builders in
         # initialize_kv_cache; EXACT is the conservative default before that.
-        self._host_seq_lens_requirements = None
+        self._host_seq_lens_requirements: HostSeqLensRequirements | None = None
         self._host_seq_lens_requirement = HostSeqLensRequirement.EXACT
 
         # NOTE: In GPUModelRunner, decode_query_len is initialized in load_model(),
