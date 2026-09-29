@@ -111,12 +111,8 @@ class AscendKimiRoutedOutputTransform(KimiRoutedOutputTransform):
             and isinstance(scheme, AscendW8A8MXFP8DynamicLinearMethod)
             and scheme.group_size == 32
             and hidden_states.dtype == torch.bfloat16
-            and hidden_states.ndim == 2
             and hidden_states.shape[-1] % 64 == 0
             and getattr(self.norm, "bias", None) is None
-            and getattr(self.norm, "variance_size_override", None) is None
-            and getattr(self.up_proj, "custom_op", None) is None
-            and not any(getattr(self.up_proj, "mxfp8_tp_padding", (0, 0)))
         ):
             quantized, scale, _ = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
                 hidden_states,
