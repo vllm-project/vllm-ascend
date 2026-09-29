@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed import get_dcp_group, get_pcp_group, get_pp_group, get_tp_group
 from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_cache_spec
-from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     KeyMetadata,
@@ -27,15 +26,13 @@ from .planning.step import (
     TransferPlanningStep,
 )
 from .program.compiler import compile_kv_pool_program
-from .program.spec.compilation import (
-    KVGroupReachabilitySpec,
-    KVPoolCompilationSpec,
-)
+from .program.spec.compilation import KVPoolCompilationSpec
 from .program.spec.schedule import KVPoolSchedule, LoadScheduleKind, StoreScheduleKind
 from .program.spec.topology import (
     KVPoolGroupTopology,
     KVPoolTopology,
     TPPartitionSpec,
+    kv_cache_spec_uses_align_state,
     resolve_group_layers,
 )
 from .protocol.transfer import StateCheckpointSource
@@ -45,7 +42,7 @@ from .runtime.runtime import KVPoolRuntime
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 
@@ -211,36 +208,14 @@ def resolve_kv_pool_compilation_spec(
 
     topology = _resolve_kv_pool_topology(vllm_config, kv_cache_config)
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-    reachability_groups = tuple(
-        KVGroupReachabilitySpec(
-            group_id,
-            resolve_dcp_kv_cache_spec(kv_cache_config.kv_cache_groups[group_id].kv_cache_spec, topology.dcp_size),
-            kv_cache_config.kv_cache_groups[group_id].is_eagle_group,
-        )
-        for group_id in topology.transfer_group_ids
-    )
     return KVPoolCompilationSpec(
         topology=topology,
         backend_name=extra_config.get("backend", "mooncake").strip().lower(),
         schedule=_resolve_schedule(vllm_config, extra_config),
         max_model_len=vllm_config.model_config.max_model_len,
-        reachability_groups=reachability_groups,
         use_eagle=_uses_eagle_block_drop(vllm_config),
         retention_interval=kv_cache_config.prefix_cache_retention_interval,
     )
-
-
-def group_uses_align_state(group: KVCacheGroupSpec) -> bool:
-    """Whether a cache group uses vLLM's mutable Mamba align-state table."""
-
-    kv_cache_spec = group.kv_cache_spec
-    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        return any(
-            isinstance(kv_cache_spec.kv_cache_specs[layer_name], MambaSpec)
-            and kv_cache_spec.kv_cache_specs[layer_name].mamba_cache_mode == "align"
-            for layer_name in group.layer_names
-        )
-    return isinstance(kv_cache_spec, MambaSpec) and kv_cache_spec.mamba_cache_mode == "align"
 
 
 def resolve_consumer_pipeline_partitions(vllm_config: VllmConfig) -> tuple[int, ...] | None:
@@ -288,15 +263,16 @@ def _resolve_kv_pool_topology(vllm_config: VllmConfig, kv_cache_config: KVCacheC
     base_layer_count = model_config.get_total_num_hidden_layers()
     groups = []
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-        uses_align_state = group_uses_align_state(group)
+        kv_cache_spec = resolve_dcp_kv_cache_spec(group.kv_cache_spec, dcp_size)
+        uses_align_state = kv_cache_spec_uses_align_state(kv_cache_spec)
         key_tp_rank = tp_rank if uses_align_state else head_or_tp_rank
         groups.append(
             KVPoolGroupTopology(
-                group_id,
-                kv_cache_utils.resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_size),
-                resolve_group_layers(group.layer_names, base_layer_count),
-                KeyMetadata(model_name, key_tp_rank, dcp_rank, pp_rank, group_id),
-                uses_align_state,
+                group_id=group_id,
+                kv_cache_spec=kv_cache_spec,
+                layers=resolve_group_layers(group.layer_names, base_layer_count),
+                key_metadata=KeyMetadata(model_name, key_tp_rank, dcp_rank, pp_rank, group_id),
+                is_eagle_group=group.is_eagle_group,
             )
         )
     return KVPoolTopology(

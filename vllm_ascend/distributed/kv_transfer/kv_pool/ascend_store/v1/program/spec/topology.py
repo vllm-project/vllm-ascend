@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec, UniformTypeKVCacheSpecs
+
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import KeyMetadata
 
 
@@ -30,14 +32,22 @@ class KVPoolGroupTopology:
     """Instance-lifetime topology for one vLLM KV cache group."""
 
     group_id: int
-    block_size: int
+    kv_cache_spec: KVCacheSpec
     layers: tuple[KVPoolLayerTopology, ...]
     key_metadata: KeyMetadata
-    uses_align_state: bool = False
+    is_eagle_group: bool = False
+
+    @property
+    def block_size(self) -> int:
+        return self.kv_cache_spec.block_size
 
     @property
     def layer_names(self) -> tuple[str, ...]:
         return tuple(layer_name for layer in self.layers for layer_name in layer.layer_names)
+
+    @property
+    def uses_align_state(self) -> bool:
+        return kv_cache_spec_uses_align_state(self.kv_cache_spec)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +67,24 @@ class KVPoolTopology:
     groups: tuple[KVPoolGroupTopology, ...]
     transfer_group_ids: tuple[int, ...]
     consumer_pipeline_partitions: tuple[int, ...] | None
+
+    @property
+    def transfer_groups(self) -> tuple[KVPoolGroupTopology, ...]:
+        groups_by_id = {group.group_id: group for group in self.groups}
+        try:
+            return tuple(groups_by_id[group_id] for group_id in self.transfer_group_ids)
+        except KeyError as error:
+            raise ValueError(f"Unknown transferable KV cache group {error.args[0]}") from error
+
+
+def kv_cache_spec_uses_align_state(kv_cache_spec: KVCacheSpec) -> bool:
+    """Whether an upstream cache spec contains mutable Mamba align state."""
+
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        specs = kv_cache_spec.kv_cache_specs.values()
+    else:
+        specs = (kv_cache_spec,)
+    return any(isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align" for spec in specs)
 
 
 def resolve_group_layers(layer_names: list[str], base_layer_count: int) -> tuple[KVPoolLayerTopology, ...]:

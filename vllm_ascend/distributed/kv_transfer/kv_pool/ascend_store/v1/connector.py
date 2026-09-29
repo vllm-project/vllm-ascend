@@ -19,6 +19,7 @@ from vllm.v1.core import kv_cache_utils
 from .planning.availability import LookupQuery
 from .planning.ownership import StoreSourceLeases
 from .planning.planner import TransferPlanner
+from .program.spec.topology import kv_cache_spec_uses_align_state
 from .protocol.rpc import LookupServer
 from .protocol.transfer import (
     CheckpointStoreCommand,
@@ -33,7 +34,6 @@ from .vllm_adapter import (
     adapt_scheduler_output,
     create_kv_pool_runtime,
     create_transfer_planner,
-    group_uses_align_state,
 )
 
 if TYPE_CHECKING:
@@ -68,7 +68,7 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         self._align_state_group_ids = frozenset(
             group_id
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if group_id in kv_cache_config.transfer_group_ids and group_uses_align_state(group)
+            if group_id in kv_cache_config.transfer_group_ids and kv_cache_spec_uses_align_state(group.kv_cache_spec)
         )
         self._transfer_group_ids = frozenset(kv_cache_config.transfer_group_ids)
         self._store_source_leases = StoreSourceLeases(

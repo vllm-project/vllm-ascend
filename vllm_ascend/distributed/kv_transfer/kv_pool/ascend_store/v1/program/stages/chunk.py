@@ -16,25 +16,23 @@ from ...coordinates import TokenRange
 from ...protocol.lookup import TailKeyBoundary
 from ...protocol.transfer import CheckpointStoreCommand
 from ..representation import KVChunk, KVChunkBatch
-from ..spec.topology import KVPoolGroupTopology, KVPoolTopology
+from ..spec.topology import KVPoolGroupTopology
 from .reachability import GroupSelection, KVSelection
 
 
 class SemanticChunkProjection:
     """Materialize selected token regions as content-identified KV chunks."""
 
-    def __init__(self, token_database: ChunkedTokenDatabase, topology: KVPoolTopology) -> None:
+    def __init__(
+        self,
+        token_database: ChunkedTokenDatabase,
+        groups: tuple[KVPoolGroupTopology, ...],
+        fine_grained_lookup: bool,
+    ) -> None:
         self._token_database = token_database
-        groups_by_id = {group.group_id: group for group in topology.groups}
-        try:
-            groups = tuple(groups_by_id[group_id] for group_id in topology.transfer_group_ids)
-        except KeyError as error:
-            raise ValueError(f"Unknown transferable KV cache group {error.args[0]}") from error
         self.group_ids = tuple(group.group_id for group in groups)
         self._groups = {group.group_id: group for group in groups}
-        self._fine_grained_lookup = any(
-            group.uses_align_state and group.block_size > token_database.hash_block_size for group in groups
-        )
+        self._fine_grained_lookup = fine_grained_lookup
 
     def project(self, selection: KVSelection) -> tuple[KVChunkBatch, ...]:
         self._validate_groups(selection)
@@ -167,11 +165,16 @@ class SemanticChunkProjection:
 class CheckpointChunkProjection:
     """Project explicit Mamba state checkpoints and their companion KV chunks."""
 
-    def __init__(self, token_database: ChunkedTokenDatabase, topology: KVPoolTopology) -> None:
+    def __init__(
+        self,
+        token_database: ChunkedTokenDatabase,
+        groups: tuple[KVPoolGroupTopology, ...],
+        checkpoint_group_ids: frozenset[int],
+    ) -> None:
         self._token_database = token_database
-        self._groups = {
-            group.group_id: group for group in topology.groups if group.group_id in topology.transfer_group_ids
-        }
+        self._groups = {group.group_id: group for group in groups}
+        self._checkpoint_group_ids = checkpoint_group_ids
+        self._companion_groups = tuple(group for group in groups if group.group_id not in checkpoint_group_ids)
 
     def project(self, command: CheckpointStoreCommand) -> tuple[KVChunkBatch, ...]:
         boundary_tokens = {source.boundary_token for source in command.sources}
@@ -191,8 +194,7 @@ class CheckpointChunkProjection:
                 command.published_store_end_token,
                 command.block_hashes,
             )
-            for group in self._groups.values()
-            if not group.uses_align_state
+            for group in self._companion_groups
         )
         return batches + companions
 
@@ -205,7 +207,7 @@ class CheckpointChunkProjection:
         group = self._groups.get(group_id)
         if group is None:
             raise ValueError(f"State checkpoint belongs to non-transferable cache group {group_id}")
-        if not group.uses_align_state:
+        if group_id not in self._checkpoint_group_ids:
             raise ValueError(f"Cache group {group_id} does not use Mamba align state")
         block_index = cdiv(boundary_token, group.block_size) - 1
         chunk = KVChunk(

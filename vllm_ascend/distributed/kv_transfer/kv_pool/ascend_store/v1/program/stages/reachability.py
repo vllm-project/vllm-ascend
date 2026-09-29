@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import inspect
 from collections.abc import Sequence
 from dataclasses import dataclass
-from importlib import import_module
-from typing import Any, Protocol, cast
+from typing import Protocol, cast
 
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -17,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_bytes,
@@ -25,17 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 from ...coordinates import TokenRange
 from ...protocol.lookup import TailKeyBoundary
-from ..spec.compilation import KVGroupReachabilitySpec
-
-_CACHE_MISSING = object()
-_MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
-
-# kwargs every reachable_block_mask implementation must accept. Used when the
-# manager's signature cannot be introspected.
-_REACHABLE_MASK_BASE_KWARGS = frozenset(("start_block", "end_block", "alignment_tokens", "kv_cache_spec", "use_eagle"))
-_REACHABLE_MASK_OPTIONAL_KWARGS = frozenset(("retention_interval", "reachable_boundaries", "dcp_world_size"))
-# manager class -> accepted reachable_block_mask parameter names.
-_REACHABLE_MASK_KWARGS_CACHE: dict[type[SingleTypeKVCacheManager], frozenset[str]] = {}
+from ..spec.topology import KVPoolGroupTopology
 
 ChunkMask = tuple[bool, ...] | None
 BlockHashes = Sequence[BlockHash | str]
@@ -183,7 +172,7 @@ class HybridReachability:
 
     def __init__(
         self,
-        groups: tuple[KVGroupReachabilitySpec, ...],
+        groups: tuple[KVPoolGroupTopology, ...],
         scheduler_block_size: int,
         hash_block_size: int,
         max_model_len: int,
@@ -224,13 +213,18 @@ class HybridReachability:
     def _verify_and_split_kv_cache_groups(self) -> None:
         spec_groups: list[tuple[KVCacheSpec, list[int], type[SingleTypeKVCacheManager]]] = []
         self.effective_specs: list[KVCacheSpec] = []
+        self.manager_classes: list[type[SingleTypeKVCacheManager] | None] = []
 
         for group_index, group in enumerate(self.groups):
             spec = _unwrap_spec(group.kv_cache_spec)
             self.effective_specs.append(spec)
             if not group.kv_cache_spec.prefix_cacheable:
+                self.manager_classes.append(None)
                 continue
-            manager_cls = _get_manager_class(spec)
+            manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+            if manager_cls is None:
+                raise ValueError(f"No vLLM KV cache manager is registered for {type(spec).__name__}")
+            self.manager_classes.append(manager_cls)
 
             for existing_spec, group_indices, existing_cls in spec_groups:
                 if existing_spec == spec:
@@ -405,7 +399,7 @@ class HybridReachability:
             f"aligned_token_len ({aligned_token_len}) must be a multiple of lcm_block_size ({self.lcm_block_size})"
         )
         masks: list[tuple[int, list[bool] | None]] = []
-        for group_index, spec in enumerate(self.effective_specs):
+        for group_index, (spec, manager_cls) in enumerate(zip(self.effective_specs, self.manager_classes, strict=True)):
             num_chunks = aligned_token_len // self.effective_block_sizes[group_index]
             group = self.groups[group_index]
             if not group.kv_cache_spec.prefix_cacheable:
@@ -414,9 +408,8 @@ class HybridReachability:
             if isinstance(spec, MambaSpec) and num_prompt_tokens is not None:
                 masks.append((num_chunks, [False] * num_chunks))
                 continue
-            manager_cls = _get_manager_class(spec)
-            mask = _reachable_block_mask(
-                manager_cls,
+            assert manager_cls is not None
+            mask = manager_cls.reachable_block_mask(
                 start_block=0,
                 end_block=num_chunks,
                 alignment_tokens=self.lcm_block_size,
@@ -540,88 +533,3 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
-
-
-def _get_manager_class_cache() -> dict[str, Any]:
-    cache = getattr(_get_manager_class, _MANAGER_CLASS_CACHE_ATTR, None)
-    if not isinstance(cache, dict):
-        cache = {}
-        setattr(_get_manager_class, _MANAGER_CLASS_CACHE_ATTR, cache)
-    return cast(dict[str, Any], cache)
-
-
-def _get_manager_class(spec: KVCacheSpec) -> type[SingleTypeKVCacheManager]:
-    cache = _get_manager_class_cache()
-    registry = cache.get("registry", _CACHE_MISSING)
-    if registry is _CACHE_MISSING:
-        try:
-            registry_module = import_module("vllm.v1.kv_cache_spec_registry")
-            registry = getattr(registry_module, "KVCacheSpecRegistry", None)
-        except ImportError:
-            registry = None
-        cache["registry"] = registry
-
-    if registry is not None:
-        manager_cls = registry.get_manager_class(spec)
-        if manager_cls is not None:
-            return manager_cls
-
-    spec_manager_map = cache.get("spec_manager_map", _CACHE_MISSING)
-    if spec_manager_map is _CACHE_MISSING:
-        try:
-            manager_module = import_module("vllm.v1.core.single_type_kv_cache_manager")
-            spec_manager_map = vars(manager_module)["spec_manager_map"]
-        except Exception as exc:
-            raise AssertionError(f"No manager registered for KVCacheSpec {type(spec)}") from exc
-        cache["spec_manager_map"] = spec_manager_map
-
-    try:
-        manager_cls = spec_manager_map[type(spec)]
-    except Exception as exc:
-        raise AssertionError(f"No manager registered for KVCacheSpec {type(spec)}") from exc
-    return manager_cls
-
-
-def _reachable_mask_accepted_kwargs(
-    manager_cls: type[SingleTypeKVCacheManager], reachable_block_mask: Any
-) -> frozenset[str]:
-    """Parameter names a manager's ``reachable_block_mask`` accepts.
-
-    Falls back to the base contract when introspection is unavailable or the
-    implementation swallows everything via ``**kwargs``.
-    """
-    cached = _REACHABLE_MASK_KWARGS_CACHE.get(manager_cls, _CACHE_MISSING)
-    if cached is not _CACHE_MISSING:
-        return cast(frozenset[str], cached)
-
-    accepted = _REACHABLE_MASK_BASE_KWARGS
-    try:
-        parameters = inspect.signature(reachable_block_mask).parameters
-    except (TypeError, ValueError):
-        pass
-    else:
-        if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
-            accepted = _REACHABLE_MASK_BASE_KWARGS | _REACHABLE_MASK_OPTIONAL_KWARGS
-        else:
-            accepted = frozenset(parameters)
-    _REACHABLE_MASK_KWARGS_CACHE[manager_cls] = accepted
-    return accepted
-
-
-def _reachable_block_mask(manager_cls: type[SingleTypeKVCacheManager], **kwargs: Any) -> list[bool] | None:
-    reachable_block_mask = getattr(manager_cls, "reachable_block_mask", None)
-    if reachable_block_mask is None:
-        return None
-    # Filter by signature instead of sniffing TypeError text: the old fallback
-    # keyed on a keyword no manager accepts and therefore dropped
-    # retention_interval on every call, silently degrading every sparse-retention
-    # mask to the dense default.
-    accepted = _reachable_mask_accepted_kwargs(manager_cls, reachable_block_mask)
-    unsupported = set(kwargs) - accepted
-    if unsupported:
-        logger.debug(
-            "KV cache manager %s does not accept reachable_block_mask kwargs %s; ignoring them.",
-            manager_cls.__name__,
-            sorted(unsupported),
-        )
-    return reachable_block_mask(**{name: value for name, value in kwargs.items() if name in accepted})
