@@ -532,7 +532,6 @@ class KVTransferThread(threading.Thread):
         # consumer has drained the queue, leaving work with no live consumer.
         self._request_submit_lock = threading.Lock()
         self.request_queue: queue.Queue[Any] = queue.Queue()
-        self.stored_requests: defaultdict[str, int] = defaultdict(int)
         self.finished_requests: set[str] = set()
         self.kv_event_lock = threading.Lock()
         self.kv_events: list[BlockStored] = []
@@ -579,24 +578,6 @@ class KVTransferThread(threading.Thread):
     def set_finished_request(self, req_id):
         with self.done_task_lock:
             self.finished_requests.add(req_id)
-
-    def add_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            self.stored_requests[req_id] += 1
-
-    def dec_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self.stored_requests[req_id] -= 1
-                return self.stored_requests[req_id]
-            return None
-
-    def try_finish_and_delete_stored_request(self, req_id: str) -> bool:
-        with self.done_task_lock:
-            if req_id in self.stored_requests and self.stored_requests[req_id] == 0:
-                del self.stored_requests[req_id]
-                return True
-            return False
 
     @staticmethod
     def _split_transfer_packets(
@@ -954,7 +935,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if self.kv_role != "kv_consumer" or not keys or partitions is None or len(partitions) <= 1:
             return [bool(value) for value in self.lookup(keys)]
 
-        empty_buffers = [[] for _ in keys]
+        empty_buffers: list[list[int]] = [[] for _ in keys]
         expanded_keys, _, _ = self._decode_adaptor_prefill_pp(
             keys,
             empty_buffers,
@@ -978,7 +959,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             for start in range(0, len(expanded_exists), partitions_per_key)
         ]
 
-    def add_stored_request(self, req_meta: ReqMeta):
+    def add_stored_request(self, req_meta: ReqMeta) -> None:
         with self.done_task_lock:
             if req_meta.store_job_id is None:
                 req_meta.store_job_id = self._next_local_store_job_id
@@ -1582,7 +1563,43 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             self.request_queue.task_done()
 
 
-class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
+class KVCacheStoreLayerSendingThreadBase(KVTransferThread):
+    """Track pending layer saves by request ID for both layerwise paths."""
+
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int | list[int],
+        tp_rank: int,
+        tp_size: int = 1,
+        dcp_size: int = 1,
+        ready_event: threading.Event | None = None,
+        name: str = "KVCacheStoreLayerSendingThreadBase",
+    ):
+        super().__init__(m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name=name)
+        self.stored_requests: defaultdict[str, int] = defaultdict(int)
+
+    def add_stored_request(self, req_id: str) -> None:
+        with self.done_task_lock:
+            self.stored_requests[req_id] += 1
+
+    def dec_stored_request(self, req_id: str) -> int | None:
+        with self.done_task_lock:
+            if req_id in self.stored_requests:
+                self.stored_requests[req_id] -= 1
+                return self.stored_requests[req_id]
+            return None
+
+    def try_finish_and_delete_stored_request(self, req_id: str) -> bool:
+        with self.done_task_lock:
+            if req_id in self.stored_requests and self.stored_requests[req_id] == 0:
+                del self.stored_requests[req_id]
+                return True
+            return False
+
+
+class KVCacheStoreKeyLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
     def __init__(
         self,
         m_store: Backend,
@@ -1841,7 +1858,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         self.get_event.set()
 
 
-class KVCacheStoreLayerSendingThread(KVTransferThread):
+class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
     def __init__(
         self,
         m_store: Backend,
