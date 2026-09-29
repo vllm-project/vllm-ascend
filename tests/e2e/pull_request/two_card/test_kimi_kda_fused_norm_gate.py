@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
+from vllm_ascend.ops.triton.kda.kda import layer_norm_gated_fwd, rms_norm_gated
 
 
 @torch.inference_mode()
@@ -19,9 +19,13 @@ def test_kimi_kda_fused_rms_norm_sigmoid_gate(dtype, tokens, heads, head_dim, st
     output_gate = torch.randn(tokens, heads, head_dim, dtype=dtype, device="npu")
     if strided_gate:
         # K3's packed projection leaves gaps between consecutive gate rows.
-        packed_gate = torch.full((tokens, 2 * heads, head_dim), torch.nan, dtype=dtype, device="npu")
-        packed_gate[:, :heads].copy_(output_gate)
-        output_gate = packed_gate[:, :heads]
+        beta_width = heads
+        gate_width = heads * head_dim
+        packed_row_width = beta_width + gate_width + gate_width
+        output_gate_start = beta_width + gate_width
+        packed_gate = torch.full((tokens, packed_row_width), torch.nan, dtype=dtype, device="npu")
+        packed_gate[:, output_gate_start:].copy_(output_gate.reshape(tokens, -1))
+        output_gate = packed_gate[:, output_gate_start:].view(tokens, heads, head_dim)
     core_attn_out_before = core_attn_out.clone()
     output_gate_before = output_gate.clone()
 
@@ -65,3 +69,112 @@ def test_fused_rms_norm_silu_gate_preserves_prenorm_contract(residual_dtype, ele
     assert residual_out.dtype == expected_residual_dtype
     torch.testing.assert_close(residual_out, summed.to(expected_residual_dtype), rtol=0, atol=0)
     torch.testing.assert_close(x, before, rtol=0, atol=0)
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("tokens", [1, 4, 8, 16, 32, 37, 64, 768])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("inplace", [False, True])
+def test_kimi_norm_gate_strides_and_direct_output(tokens, dtype, inplace):
+    """Read a packed gate and preserve caller-owned padding across replays."""
+    heads, dim = 12, 128
+    x_storage = torch.randn(1, tokens + 2, heads, dim, dtype=dtype, device="npu")
+    x = x_storage[:, :tokens]
+    beta_width = heads
+    gate_width = heads * dim
+    packed_row_width = beta_width + gate_width + gate_width
+    projection = torch.randn(tokens, packed_row_width, dtype=dtype, device="npu")
+    gate = projection[:, beta_width + gate_width :].view(tokens, heads, dim)
+    weight = torch.randn(dim, dtype=dtype, device="npu")
+    output_storage = torch.full_like(x_storage, 7)
+    out = x if inplace else output_storage[:, :tokens]
+
+    def reference():
+        value = x.float()
+        value = value * torch.rsqrt(value.square().mean(-1, keepdim=True) + 1e-6)
+        return (value * weight.float() * gate.float().sigmoid()).to(dtype)
+
+    expected = reference()
+    legacy, *_ = layer_norm_gated_fwd(
+        x.contiguous().reshape(-1, dim),
+        gate.contiguous().reshape(-1, dim),
+        weight,
+        None,
+        activation="sigmoid",
+        eps=1e-6,
+        out_dtype=x.dtype,
+        is_rms_norm=True,
+    )
+    actual = rms_norm_gated(x, gate, weight, None, "sigmoid", out=out)
+    assert actual is out
+    torch.testing.assert_close(actual, legacy.reshape(x.shape), rtol=0, atol=0)
+    # BF16 rounding at a midpoint may differ by one ULP from the torch FP32
+    # reference, while the original and strided Triton paths must agree exactly.
+    torch.testing.assert_close(actual, expected, rtol=8e-3, atol=2e-3)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        rms_norm_gated(x, gate, weight, None, "sigmoid", out=out)
+    for step in range(3):
+        x.fill_(0.25 * (step + 1))
+        gate.fill_(0.5 * step)
+        expected = reference()
+        graph.replay()
+        torch.npu.synchronize()
+        torch.testing.assert_close(out, expected, rtol=2e-3, atol=2e-3)
+    if not inplace:
+        torch.testing.assert_close(output_storage[:, tokens:], torch.full_like(output_storage[:, tokens:], 7))
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("tokens,heads", [(257, 6), (65, 12)])
+@pytest.mark.parametrize("dim", [384, 512])
+def test_kimi_norm_gate_wide_feature_tile(tokens, heads, dim):
+    """Keep packed-gate tiles within the A3/A5 UB limit for wide features."""
+    dtype = torch.bfloat16
+    x = torch.randn(1, tokens, heads, dim, dtype=dtype, device="npu")
+    weight = torch.randn(dim, dtype=dtype, device="npu")
+    beta_width = heads
+    gate_width = heads * dim
+    projection = torch.randn(tokens, beta_width + gate_width + gate_width, dtype=dtype, device="npu")
+    gate = projection[:, beta_width + gate_width :].view(tokens, heads, dim)
+
+    actual = rms_norm_gated(x, gate, weight, None, "sigmoid")
+    baseline, *_ = layer_norm_gated_fwd(
+        x.reshape(-1, dim),
+        gate.contiguous().reshape(-1, dim),
+        weight,
+        None,
+        activation="sigmoid",
+        eps=1e-6,
+        out_dtype=dtype,
+        is_rms_norm=True,
+    )
+    torch.testing.assert_close(actual, baseline.reshape(x.shape), rtol=0, atol=0)
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("dim", [128, 1024])
+@pytest.mark.parametrize("layout", ["row_gap", "feature_gap"])
+def test_norm_gate_fallback_strided_gate(dim, layout):
+    """A noncontiguous fallback gate must use its actual row/feature strides."""
+    tokens = 3
+    x = torch.randn(1, tokens, 1, dim, dtype=torch.bfloat16, device="npu")
+    weight = torch.randn(dim, dtype=x.dtype, device="npu")
+    if layout == "row_gap":
+        gate = torch.randn(tokens, 2, dim, dtype=x.dtype, device="npu")[:, :1]
+    else:
+        gate = torch.randn(tokens, 1, 2 * dim, dtype=x.dtype, device="npu")[..., ::2]
+    assert not gate.reshape(-1, dim).is_contiguous()
+
+    expected, *_ = layer_norm_gated_fwd(
+        x.reshape(-1, dim),
+        gate.contiguous().reshape(-1, dim),
+        weight,
+        None,
+        activation="sigmoid",
+        eps=1e-6,
+        out_dtype=x.dtype,
+        is_rms_norm=True,
+    )
+    actual = rms_norm_gated(x, gate, weight, None, "sigmoid")
+    torch.testing.assert_close(actual, expected.reshape(x.shape), rtol=0, atol=0)
