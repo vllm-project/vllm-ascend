@@ -358,10 +358,9 @@ def test_publish_lmhead_tp_step_capacity():
     runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
     runner._lmhead_tp_step_capacity_value = 99  # stale from a previous step
 
-    # DP sync: num_reqs=3 -> capacity 3 * 2 = 6.
+    # Fresh DP sync: num_reqs=3 -> capacity 3 * 2 = 6 (replaces stale 99).
     runner.execute_model_state = SimpleNamespace(
         dp_sync=SimpleNamespace(num_reqs=3),
-        input_batch=SimpleNamespace(num_reqs=3),
     )
     runner._publish_lmhead_tp_step_capacity()
     assert runner._lmhead_tp_step_capacity() == 6
@@ -369,23 +368,21 @@ def test_publish_lmhead_tp_step_capacity():
     # A next step with a different req count must refresh, not keep 6.
     runner.execute_model_state = SimpleNamespace(
         dp_sync=SimpleNamespace(num_reqs=2),
-        input_batch=SimpleNamespace(num_reqs=2),
     )
     runner._publish_lmhead_tp_step_capacity()
     assert runner._lmhead_tp_step_capacity() == 4
 
-    # DP=1: no dp_sync -> fall back to the local request count.
-    runner.execute_model_state = SimpleNamespace(
-        dp_sync=None,
-        input_batch=SimpleNamespace(num_reqs=5),
-    )
+    # No DP sync this step: keep the previously published value (4), do not
+    # overwrite it or fall back to static.
+    runner.execute_model_state = SimpleNamespace(dp_sync=None)
     runner._publish_lmhead_tp_step_capacity()
-    assert runner._lmhead_tp_step_capacity() == 10
+    assert runner._lmhead_tp_step_capacity() == 4
 
-    # No state published -> static bound.
-    runner.execute_model_state = None
-    runner._publish_lmhead_tp_step_capacity()
-    assert runner._lmhead_tp_step_capacity() == 16
+    # No DP sync and nothing ever published -> static bound.
+    runner2 = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
+    runner2.execute_model_state = SimpleNamespace(dp_sync=None)
+    runner2._publish_lmhead_tp_step_capacity()
+    assert runner2._lmhead_tp_step_capacity() == 16
 
 
 def test_sample_uses_step_capacity():

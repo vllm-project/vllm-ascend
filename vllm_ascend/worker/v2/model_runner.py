@@ -728,27 +728,27 @@ class NPUModelRunner(GPUModelRunner):
     def _publish_lmhead_tp_step_capacity(self) -> None:
         """Publish the per-step target lmhead-TP capacity from the DP sync.
 
-        ``execute_model`` calls this after ``super().execute_model`` returns,
-        when ``execute_model_state.dp_sync`` holds the group-agreed request
+        ``execute_model`` calls this after ``super().execute_model`` returns.
+        When ``execute_model_state.dp_sync`` holds a fresh DP-synced request
         count (``DPSyncState.num_reqs``, identical on every DP rank; includes
-        request padding in FULL graph). The target LM-head emits
-        ``decode_query_len`` rows per request, so the per-step capacity is
-        ``num_reqs * decode_query_len``. Falls back to the static
-        ``max_num_reqs * decode_query_len`` bound when no DP sync ran (DP=1) or
-        the state was not published.
+        request padding in FULL graph), the target capacity is
+        ``num_reqs * decode_query_len`` and replaces any previous value. When no
+        fresh DP sync is available this step (e.g. an idle dummy run that did
+        not re-sync), the previously published value is kept so a busy rank's
+        value is inherited; only when nothing was ever published is the static
+        ``max_num_reqs * decode_query_len`` bound used as a fallback.
         """
         state = self.execute_model_state
-        static = self.max_num_reqs * self.decode_query_len
         dp_sync = getattr(state, "dp_sync", None) if state is not None else None
         num_reqs = None
         if dp_sync is not None:
             num_reqs = getattr(dp_sync, "num_reqs", None)
-        if num_reqs is None and state is not None:
-            num_reqs = getattr(getattr(state, "input_batch", None), "num_reqs", None)
         if num_reqs is not None:
             self._lmhead_tp_step_capacity_value = num_reqs * self.decode_query_len
-        else:
-            self._lmhead_tp_step_capacity_value = static
+        elif getattr(self, "_lmhead_tp_step_capacity_value", None) is None:
+            # No DP sync and no value published yet: use the static bound.
+            self._lmhead_tp_step_capacity_value = self.max_num_reqs * self.decode_query_len
+        # Otherwise keep the previously published dynamic value.
 
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP.
