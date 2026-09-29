@@ -61,8 +61,7 @@ if TYPE_CHECKING:
 
 
 def _is_sfa_parent_binding(spec: KVCacheSpec, caches: tuple[torch.Tensor, ...]) -> bool:
-    """Whether the layer binds the SFA parent form: the NoPE and RoPE
-    components as 4-D views of one storage, token-interleaved."""
+    """Whether NoPE and RoPE are 4-D views of one token-concatenated parent."""
     if not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
         return False
     if len(caches) != 2:

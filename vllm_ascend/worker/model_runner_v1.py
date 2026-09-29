@@ -5610,41 +5610,19 @@ class NPUModelRunner(GPUModelRunner):
                         continue
                     if self._uses_sfa_kv_parent(layer_name, current_kv_cache_spec):
                         raw = kv_cache_raw_tensors[layer_name]
-                        if not isinstance(raw, torch.Tensor):
-                            raise ValueError(f"SFA main cache for {layer_name} requires one parent raw tensor")
                         storage_block_size = get_storage_block_size(current_kv_cache_spec)
                         kernel_block_size = storage_block_size
                         if self.use_hybrid_blocks and hasattr(attn_backend, "get_supported_kernel_block_sizes"):
                             kernel_block_size = attn_backend.get_supported_kernel_block_sizes()[0]
-                        if (
-                            not isinstance(kernel_block_size, int)
-                            or kernel_block_size <= 0
-                            or storage_block_size % kernel_block_size
-                        ):
-                            raise ValueError(f"SFA storage block cannot be divided into kernel blocks for {layer_name}")
-                        page_bytes = current_kv_cache_spec.page_size_bytes
-                        if raw.numel() // page_bytes < kv_cache_config.num_blocks:
-                            raise ValueError(f"SFA main cache has fewer blocks than KVCacheManager for {layer_name}")
-                        num_blocks = raw.numel() // page_bytes
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
-                        dense_page_bytes = (
-                            storage_block_size * (k_dim + v_dim) * get_dtype_size(current_kv_cache_spec.dtype)
+                        shape = (
+                            kv_cache_config.num_blocks * (storage_block_size // kernel_block_size),
+                            kernel_block_size,
+                            1,
+                            k_dim + v_dim,
                         )
-                        if current_kv_cache_spec.num_kv_heads != 1 or page_bytes != dense_page_bytes:
-                            raise ValueError(
-                                f"SFA parent requires heads=1 and dense pages; padding is unsupported for {layer_name}"
-                            )
-                        shape = attn_backend.get_kv_cache_shape(
-                            num_blocks * (storage_block_size // kernel_block_size), kernel_block_size,
-                            current_kv_cache_spec.num_kv_heads, current_kv_cache_spec.head_size,
-                        )
-                        expected_shape = (
-                            num_blocks * (storage_block_size // kernel_block_size), kernel_block_size, 1, k_dim + v_dim,
-                        )
-                        if tuple(shape) != expected_shape:
-                            raise ValueError(f"Unsupported SFA backend parent shape for {layer_name}: {shape}")
                         kv_caches[layer_name] = split_sfa_kv_parent(
-                            raw, dtype=current_kv_cache_spec.dtype, shape=tuple(shape), nope_dim=k_dim,
+                            raw, dtype=current_kv_cache_spec.dtype, shape=shape, nope_dim=k_dim,
                         )
                         continue
                     raw_kv_is_combined = False

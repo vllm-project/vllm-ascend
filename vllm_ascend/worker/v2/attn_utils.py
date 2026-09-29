@@ -443,6 +443,7 @@ def _is_dsv4_model(vllm_config: VllmConfig) -> bool:
 
 
 def _uses_sfa_kv_parent(layer_name: str, spec: AttentionSpec, backend=None) -> bool:
+    """Whether this layer uses the token-concatenated parent layout."""
     config = get_current_vllm_config()
     if (
         not enable_sfa(config)
