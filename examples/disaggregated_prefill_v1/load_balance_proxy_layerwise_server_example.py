@@ -489,6 +489,14 @@ def get_api_request_ids(api, req_id, req_data):
 
 
 async def _handle_completions(api: str, request: Request):
+    # `generate_stream`'s `finally` releases the decoder's load and the request
+    # batch, but it only runs once the response body is iterated. Anything that
+    # fails between registering the request and handing the response back to the
+    # caller therefore has to roll those up itself - see the `except` below.
+    registered_request_id = None
+    decoder_idx = None
+    decoder_score = 0.0
+    request_handed_off = False
     try:
         req_data = await request.json()
         req_body = await request.body()
@@ -496,6 +504,7 @@ async def _handle_completions(api: str, request: Request):
         request_id = await proxy_state.next_req_id()
         request_ids_api = get_api_request_ids(api, request_id, req_data)
         proxy_state.register_request_batch(request_id, request_ids_api, req_data, request_length, api)
+        registered_request_id = request_id
         req_data["kv_transfer_params"] = {
             "do_remote_decode": False,
             "do_remote_prefill": True,
@@ -613,16 +622,29 @@ async def _handle_completions(api: str, request: Request):
                 await proxy_state.cleanup_request_batch(request_id)
 
         if stream_flag:
-            return StreamingResponse(generate_stream(), media_type="text/event-stream")
+            response = StreamingResponse(generate_stream(), media_type="text/event-stream")
         else:
-            return StreamingResponse(generate_stream(), media_type="application/json")
-    except Exception as e:
+            response = StreamingResponse(generate_stream(), media_type="application/json")
+        # From here on the generator owns the cleanup.
+        request_handed_off = True
+        return response
+    except BaseException as e:
         import traceback
 
         exc_info = sys.exc_info()
         print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
+        if not request_handed_off:
+            # `generate_stream` never started, so its `finally` will not run:
+            # release what has already been accounted for instead of leaking the
+            # decoder's load and the request records for the lifetime of the
+            # process. A malformed chat body (e.g. `{"messages": []}`) is enough
+            # to get here.
+            if decoder_idx is not None:
+                proxy_state.release_decoder(decoder_idx, decoder_score)
+            if registered_request_id is not None:
+                await proxy_state.cleanup_request_batch(registered_request_id)
         raise
 
 
