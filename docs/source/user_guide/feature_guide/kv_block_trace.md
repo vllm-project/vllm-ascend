@@ -37,10 +37,19 @@ integrity guarantee.
 DeepSeek-V2-Lite TP4+EP captured all 27 layers on all four ranks for the first
 request; a second prefix-hit request failed in native attention with tracing
 both enabled and disabled. PD also showed native shutdown errors in both arms.
-These limited runs do not establish production stability or reproduce the PPT
-faults. Performance, PD content checksums, device completion tracking, offload
+Those initial runs did not establish production stability or reproduce the PPT
+faults. Broad performance validation, PD content checksums, device completion tracking, offload
 adapters, ring-buffer checkpoints and hot reload remain future work. The writer
 still performs synchronous JSONL I/O.
+
+Subsequent [original Case 4 validation](../../../design/kv-block-trace-case4-validation-20260929.md)
+reproduced the dummy overwrite in DP2 graph mode. A separate
+[Case 4 latency comparison](../../../design/kv-block-trace-performance-20260929.md)
+measured no material default-trace slowdown for its concurrency-2 workload;
+last-layer snapshots increased spring-request P50 by 44.4% and reduced output
+throughput by 31.7%. Those bounded samples do not establish production overhead.
+The snapshot arm reached the per-writer byte limit in its final round, so all
+arms use the same first 19 intact rounds for the comparison.
 
 ## Enable tracing
 
