@@ -173,8 +173,9 @@
 #       supplies missing defaults and checks its model, topology and loader limits.
 #       Skip this patch when vLLM does not provide EngramConfig.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/issues/59169
-#       Propose Platform.supports_engram() for both model validation and defaults.
+#       https://github.com/vllm-project/vllm/pull/59171
+#       Tracks https://github.com/vllm-project/vllm/issues/59169.
+#       Adds Platform.supports_engram() for both model validation and defaults.
 #    Future Plan:
 #       Once the pinned vLLM includes that capability, opt in on NPUPlatform and
 #       remove this patch plus platform-side default creation. Keep Ascend's
