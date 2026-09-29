@@ -49,7 +49,11 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups, unify_hybrid_kv_cache_specs
+from vllm.v1.core.kv_cache_utils import (
+    _pool_bytes_per_block,
+    get_kv_cache_groups,
+    unify_hybrid_kv_cache_specs,
+)
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -90,6 +94,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     build_layerwise_reuse_layout,
     get_layerwise_physical_layer_index,
     get_layerwise_reuse_config,
+    iter_layerwise_buffer_lanes,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
@@ -1109,20 +1114,21 @@ class NPUWorker(WorkerBase):
         )
         if not reuse_layout.has_layer_reuse:
             return num_layers, num_layers, 0, 0, 0
-        num_buffer_assignments = len(reuse_layout.component_lanes)
+        buffer_lanes = iter_layerwise_buffer_lanes(reuse_layout)
+        num_buffer_assignments = len(buffer_lanes)
 
         logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
         if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in kv_cache_spec.values()):
             kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
             # The DSV4 planner packs page-size buckets into shared tuples, so
             # its bytes-per-block divisor is not necessarily the sum above.
-            logical_page_bytes = kv_cache_utils._pool_bytes_per_block(kv_cache_groups)
+            logical_page_bytes = _pool_bytes_per_block(kv_cache_groups)
         physical_page_bytes = sum(
-            max(component.spec.page_size_bytes for component in components)
-            for components in reuse_layout.component_lanes.values()
+            max(named_spec.spec.page_size_bytes for named_spec in lane)
+            for lane in buffer_lanes
         )
         alignment_reserve_bytes = 0
-        for components in reuse_layout.component_lanes.values():
+        for components in buffer_lanes:
             spec = components[0].spec
             num_raw_allocations = (
                 2
