@@ -34,11 +34,25 @@ def _npu_parallel_config_platform():
         proxy._platform = original_platform
 
 
+@contextmanager
+def _without_any_hixl_binding():
+    """Make both the official package and the ctypes fallback unavailable."""
+    with (
+        patch.dict("sys.modules", {"hixl": None}),
+        patch(
+            "vllm_ascend.distributed.eplb.hixl_compat.ensure_available",
+            side_effect=RuntimeError("No CANN HIXL libraries found"),
+        ),
+    ):
+        yield
+
+
 def test_parallel_and_vllm_config_keep_upstream_validation():
     with (
         _npu_parallel_config_platform(),
         patch("vllm_ascend.logger.configure_ascend_file_logging"),
         patch("vllm_ascend.logger.configure_ascend_logging"),
+        _without_any_hixl_binding(),
         patch("vllm.distributed.nixl_utils.is_nixl_available", return_value=False),
     ):
         parallel_config = ParallelConfig(
@@ -50,7 +64,7 @@ def test_parallel_and_vllm_config_keep_upstream_validation():
         vllm_config = VllmConfig(parallel_config=parallel_config)
 
     assert vllm_config.parallel_config.enable_eplb
-    assert vllm_config.parallel_config.eplb_config.communicator == "hixl"
+    assert vllm_config.parallel_config.eplb_config.communicator == "torch_gloo"
 
 
 def test_eplb_policy_config_supports_stair_and_default():
@@ -68,7 +82,7 @@ def test_eplb_policy_config_supports_stair_and_default():
 
 
 def test_eplb_communicator_config_supports_hixl():
-    assert EPLBConfig().communicator == "hixl"
+    assert EPLBConfig().communicator is None
     assert EPLBConfig(communicator="hixl").communicator == "hixl"
     assert EPLBConfig(communicator="torch_gloo").communicator == "torch_gloo"
 
@@ -76,13 +90,15 @@ def test_eplb_communicator_config_supports_hixl():
     assert EPLBConfig(communicator="hixl").communicator == "hixl"
 
 
-def test_parallel_config_keeps_ascend_hixl_default():
+def test_parallel_config_auto_selects_hixl():
     with (
         _npu_parallel_config_platform(),
+        patch.dict("sys.modules", {"hixl": SimpleNamespace(Hixl=object())}),
         patch(
             "vllm.distributed.nixl_utils.is_nixl_available",
             return_value=True,
         ) as is_nixl_available,
+        patch.object(patch_eplb.logger, "info") as info,
     ):
         parallel_config = ParallelConfig(
             tensor_parallel_size=2,
@@ -93,6 +109,57 @@ def test_parallel_config_keeps_ascend_hixl_default():
 
     assert parallel_config.eplb_config.communicator == "hixl"
     is_nixl_available.assert_not_called()
+    assert any("selected hixl" in call.args[0] for call in info.call_args_list)
+
+
+def test_parallel_config_auto_selects_gloo_without_hixl():
+    with (
+        _npu_parallel_config_platform(),
+        _without_any_hixl_binding(),
+        patch.object(patch_eplb.logger, "info") as info,
+    ):
+        parallel_config = ParallelConfig(
+            tensor_parallel_size=2,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            eplb_config=EPLBConfig(use_async=True),
+        )
+
+    assert parallel_config.eplb_config.communicator == "torch_gloo"
+    assert any("HIXL is unavailable" in call.args[0] for call in info.call_args_list)
+
+
+def test_parallel_config_auto_selects_hixl_through_ctypes_fallback():
+    with (
+        _npu_parallel_config_platform(),
+        patch.dict("sys.modules", {"hixl": None}),
+        patch("vllm_ascend.distributed.eplb.hixl_compat.ensure_available"),
+        patch.object(patch_eplb.logger, "info") as info,
+    ):
+        parallel_config = ParallelConfig(
+            tensor_parallel_size=2,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            eplb_config=EPLBConfig(use_async=True),
+        )
+
+    assert parallel_config.eplb_config.communicator == "hixl"
+    assert any("selected hixl" in call.args[0] for call in info.call_args_list)
+
+
+def test_parallel_config_preserves_explicit_communicator():
+    with (
+        _npu_parallel_config_platform(),
+        patch.dict("sys.modules", {"hixl": None}),
+    ):
+        for backend in ("torch_gloo", "hixl"):
+            parallel_config = ParallelConfig(
+                tensor_parallel_size=2,
+                enable_expert_parallel=True,
+                enable_eplb=True,
+                eplb_config=EPLBConfig(use_async=True, communicator=backend),
+            )
+            assert parallel_config.eplb_config.communicator == backend
 
 
 def test_parallel_config_platform_patch_is_idempotent():

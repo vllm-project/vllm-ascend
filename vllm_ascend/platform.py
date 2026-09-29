@@ -985,10 +985,22 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                     "action: forcing asynchronous EPLB."
                 )
                 upstream_eplb_config.use_async = True
-                if upstream_eplb_config.communicator is None:
-                    upstream_eplb_config.communicator = "hixl"
             if vllm_config.parallel_config.enable_elastic_ep:
                 raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
+            if upstream_eplb_config.communicator == "torch_gloo" and upstream_eplb_config.policy == "stair":
+                stair_config = eplb_config.get("stair_config", {})
+                if not isinstance(stair_config, dict):
+                    raise TypeError("additional_config.eplb_config.stair_config must be a dictionary.")
+                eplb_config = {
+                    **eplb_config,
+                    "stair_config": {
+                        **stair_config,
+                        "rank_transfer_limit": 1,
+                        "cross_node_transfer_limit": 1,
+                    },
+                }
+                vllm_config.additional_config = {**additional_config, "eplb_config": eplb_config}
+                logger.info("Ascend EPLB uses torch_gloo; STAIR rank and cross-node transfer limits are both 1.")
     elif {"load_collection_phase", "stair_config"} & eplb_config.keys():
         raise ValueError(
             "stair_config and load_collection_phase are only supported by Model Runner V2; "
