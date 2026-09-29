@@ -315,6 +315,30 @@ def _prepare_chunk_indices_list(cu_seqlens: torch.Tensor, chunk_size: int) -> li
     return chunk_indices
 
 
+def _invert_strict_lower(strict_lower: torch.Tensor) -> torch.Tensor:
+    """Inverse of ``I - L`` for a strictly lower-triangular ``L``.
+
+    ``L`` to the power of its width is zero, so
+
+        (I - L)^{-1} = (I + L) (I + L^2) (I + L^4) ... (I + L^{n/2})
+
+    The factors are contiguous matmuls on the same device as ``L``. The
+    previous per-row update cloned non-contiguous slices and reduced them
+    with ``sum``, which ran on the host and stalled the NPU between rows.
+    """
+    width = strict_lower.shape[-1]
+    if width <= 0 or width & (width - 1):
+        raise ValueError(f"strict-lower width must be a power of two, got {width}.")
+    eye = torch.eye(width, dtype=strict_lower.dtype, device=strict_lower.device)
+    inverse = eye + strict_lower
+    power = strict_lower @ strict_lower
+    # width == 2**k contributes k factors; inverse already holds (I + L).
+    for _ in range(width.bit_length() - 2):
+        inverse = inverse @ (eye + power)
+        power = power @ power
+    return inverse
+
+
 def _compute_kernel_inputs_from_torch_wy(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -350,11 +374,7 @@ def _compute_kernel_inputs_from_torch_wy(
         diagonal=0,
     )
     attn = attn.masked_fill(mask_diag, 0)
-    for row_idx in range(1, chunk_size):
-        row = attn[..., row_idx, :row_idx].clone()
-        sub = attn[..., :row_idx, :row_idx].clone()
-        attn[..., row_idx, :row_idx] = row + (row.unsqueeze(-1) * sub).sum(-2)
-    attn = attn + torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
+    attn = _invert_strict_lower(attn)
 
     value = attn @ (value * beta.unsqueeze(-1))
     k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
