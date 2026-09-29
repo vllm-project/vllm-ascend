@@ -231,12 +231,19 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # CPU tensor of sequence lengths for host-side operations.
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
+    # NPU-only optimistic seq_lens mirror; separate from seq_lens_cpu
+    # (None in async spec decode) so NPU backends can read CPU seq_lens
+    # without a GPU->CPU sync.
+    _seq_lens_cpu: torch.Tensor = None
+    dcp_local_seq_lens_cpu: torch.Tensor = None
 
     # Host mirror of this cache group's block table, including padded rows.
 
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
+    # NPU-only optimistic num_computed_tokens mirror; see _seq_lens_cpu.
+    _num_computed_tokens_cpu: torch.Tensor = None
 
     # Number of decode tokens per request, used for speculative decoding.
     # E.g., 1 for normal decoding, >1 for speculative decoding.

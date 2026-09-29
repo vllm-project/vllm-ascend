@@ -794,9 +794,24 @@ class KVCacheRecvingThread(threading.Thread):
                 continue
             cur_remote_block_ids = remote_block_ids[i]
             cur_local_block_ids = local_block_ids[i]
-            if not isinstance(self.kv_cache_specs[i], MambaSpec) and len(cur_local_block_ids) < len(
-                cur_remote_block_ids
-            ):
+            if isinstance(self.kv_cache_specs[i], MambaSpec):
+                # Mamba/GDN groups reserve extra local blocks
+                # (1 committed + num_speculative_blocks draft slots) for MTP
+                # speculative decoding. The Prefiller never runs speculative
+                # decode, so it only ever reports the single committed state
+                # block, while the Decoder's local allocation always includes
+                # the (unfilled) draft slots. Align both sides to the shorter
+                # length instead of feeding mismatched lengths into
+                # group_concurrent_contiguous, whose np.diff-based grouping
+                # assumes equal-length inputs and raises a broadcast error
+                # otherwise. The untransferred draft slots are populated by
+                # the Decoder's own speculative-decode logic, not by KV
+                # transfer, so trimming them here is semantically correct.
+                if len(cur_local_block_ids) > len(cur_remote_block_ids):
+                    cur_local_block_ids = cur_local_block_ids[: len(cur_remote_block_ids)]
+                elif len(cur_local_block_ids) < len(cur_remote_block_ids):
+                    cur_remote_block_ids = cur_remote_block_ids[-len(cur_local_block_ids) :]
+            elif len(cur_local_block_ids) < len(cur_remote_block_ids):
                 cur_remote_block_ids = cur_remote_block_ids[-len(cur_local_block_ids) :]
             grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
                 cur_remote_block_ids, cur_local_block_ids
