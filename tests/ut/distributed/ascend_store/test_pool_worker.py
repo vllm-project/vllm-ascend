@@ -1954,6 +1954,31 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker._process_save_for_layer_batch([req], 0)
         self.assertEqual(len(worker.layer_save_tasks[0]), 0)
 
+    def test_masked_block_runs_cached_across_layers(self):
+        worker = self._make_worker()
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=48,
+            block_ids=[0, 1, 2],
+            block_hashes=["h0", "h1", "h2"],
+            can_save=True,
+            save_start_token=0,
+            save_end_token=48,
+        )
+        req.store_masks = ([True, False, True],)
+
+        worker._process_save_for_layer_batch([req], 0)
+        worker._process_save_for_layer_batch([req], 1)
+
+        expected_runs = [(0, 1), (2, 3)]
+        for layer in (0, 1):
+            runs = [(r.start_block, r.end_block) for r in worker.layer_save_tasks[layer][0].block_ranges]
+            self.assertEqual(runs, expected_runs)
+        self.assertEqual(len(worker._masked_runs_cache), 1)
+
+        worker.process_layer_data([])
+        self.assertEqual(worker._masked_runs_cache, {})
+
     def test_process_load_for_layer_batch_skips(self):
         for load_spec in (None, LoadSpec(0, 0, can_load=False, token_len=0)):
             with self.subTest(load_spec=load_spec):
