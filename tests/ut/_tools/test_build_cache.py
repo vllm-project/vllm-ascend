@@ -1820,6 +1820,15 @@ def test_snapshot_compatibility_aliases_share_identity(monkeypatch):
     assert different_image != canonical
 
 
+def test_snapshot_compatibility_keeps_a3_560t_separate_from_generic_a3():
+    engine = _load_engine("build_cache_engine_a3_560t_snapshot_test")
+    image = "quay.io/ascend/vllm-ascend:nightly-main-a3"
+
+    a3_560t = engine._snapshot_compatibility("arm64", "a3-560t", image)
+    assert a3_560t == engine._snapshot_compatibility("aarch64", "A3-560T", image)
+    assert a3_560t != engine._snapshot_compatibility("arm64", "a3", image)
+
+
 def test_snapshot_compatibility_explicit_image_overrides_outer_runtime(monkeypatch):
     engine = _load_engine("build_cache_engine_snapshot_image_test")
     ubuntu_image = "quay.io/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12"

@@ -276,6 +276,8 @@ def _snapshot_compatibility(
         "ascend910b1": "ascend910b1",
         "a3": "ascend910_9391",
         "ascend910_9391": "ascend910_9391",
+        # Keep the 560T nightly snapshot separate until its compiler target is verified.
+        "a3-560t": "a3-560t",
         "310p": "ascend310p1",
         "ascend310p1": "ascend310p1",
         "a5": "ascend950dt_9582",
