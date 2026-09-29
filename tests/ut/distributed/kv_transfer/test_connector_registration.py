@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-import logging
 import sys
 import types
+from unittest.mock import Mock
 
 import pytest
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
@@ -195,23 +195,20 @@ def test_alias_override_pops_existing_entry_and_warns(
     keys, so the pop is what makes the re-registration succeed, and the
     override is only a one-time warning.
     """
-    from vllm.logger import logger as vllm_logger
-
     from vllm_ascend.distributed.kv_transfer import _register_with_class_name_alias
     from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
         AscendOffloadingConnector,
     )
 
-    # Capture the warning directly on the vllm logger: in this environment
-    # caplog.records stays empty (the live-logs plugin keeps a second
-    # LogCaptureHandler on root).
-    captured: list[logging.LogRecord] = []
-
-    class _Capture(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            captured.append(record)
-
-    monkeypatch.setattr(vllm_logger, "handlers", [_Capture()])
+    # Spy on the logger object the function actually resolves. Two traps here:
+    # a logging handler never sees the warning because CI runs the CPU UT with
+    # VLLM_LOGGING_LEVEL=ERROR, and `import vllm_ascend.distributed.kv_transfer
+    # as kv_transfer` can bind a different module object than the function's
+    # globals -- sibling kv_offload tests pop and re-import that package during
+    # collection, leaving a stale attribute on the parent package. Patching the
+    # function's own globals sidesteps both.
+    logger = Mock()
+    monkeypatch.setitem(_register_with_class_name_alias.__globals__, "logger", logger)
 
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector"
     # A different connector claims the class name as its config name.
@@ -222,7 +219,11 @@ def test_alias_override_pops_existing_entry_and_warns(
 
     _register_with_class_name_alias("OffloadingConnector", module, "AscendOffloadingConnector")
 
-    assert any("already registered" in record.getMessage() for record in captured)
+    logger.warning.assert_called_once()
+    message, class_name, module_path = logger.warning.call_args.args
+    assert "already registered" in message
+    assert class_name == "AscendOffloadingConnector"
+    assert module_path == module
     # The stale closure was replaced and the key now resolves to the alias.
     assert KVConnectorFactory._registry["AscendOffloadingConnector"] is not old_entry
     assert KVConnectorFactory._registry["AscendOffloadingConnector"]() is AscendOffloadingConnector
