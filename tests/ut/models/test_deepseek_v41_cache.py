@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock
 
 import pytest
+
+pytest.importorskip(
+    "vllm.transformers_utils.configs.deepseek_v41",
+    reason="DeepSeek V4.1 is unavailable on this vLLM release",
+)
+
 import torch
 import torch_npu
 from vllm.config import set_current_vllm_config
@@ -114,6 +121,9 @@ def runtime(config):
         speculative_config=None,
         kv_transfer_config=None,
         use_v2_model_runner=False,
+        # vLLM main reads attention_config.hisparse_config in the KV cache
+        # config helpers; Ascend does not enable HiSparse.
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
 
 

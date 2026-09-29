@@ -13,6 +13,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
+from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
 
 
@@ -36,6 +37,43 @@ def _as_positive_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def infer_dcp_mismatch_info(
+    kv_role: str,
+    extra_config: Mapping[str, Any] | object,
+    local_dcp_size: int | object,
+    local_pcp_size: int | object = 1,
+) -> bool:
+    """Whether the peer P/D stage disagrees with this stage on CP layout.
+
+    Both the layerwise GVA shard stride and the per-shard save-leader rule
+    derive from the local dcp size/rank. In PD-disaggregation the producer
+    and consumer are separate worker groups, so when they are started with
+    unequal decode-context-parallel sizes they compute different shard
+    layouts for the SAME pool region and silently corrupt the KV pool.
+
+    The peer topology is carried through the flat peer keys used by the
+    store connector path (``prefill_dcp_size`` / ``decode_dcp_size``),
+    mirroring the existing ``prefill_tp_size`` / ``decode_tp_size``
+    convention. When the key is absent the single-group path is assumed and
+    the local layout is authoritative.
+    """
+    local_dcp_size = _as_positive_int(local_dcp_size, 1)
+    local_pcp_size = _as_positive_int(local_pcp_size, 1)
+    if not isinstance(extra_config, Mapping):
+        return False
+    if kv_role == "kv_consumer":
+        peer_dcp_key = "prefill_dcp_size"
+        peer_pcp_key = "prefill_pcp_size"
+    elif kv_role == "kv_producer":
+        peer_dcp_key = "decode_dcp_size"
+        peer_pcp_key = "decode_pcp_size"
+    else:
+        return False
+    peer_dcp_size = _as_positive_int(extra_config.get(peer_dcp_key, local_dcp_size), local_dcp_size)
+    peer_pcp_size = _as_positive_int(extra_config.get(peer_pcp_key, local_pcp_size), local_pcp_size)
+    return peer_dcp_size != local_dcp_size or peer_pcp_size != local_pcp_size
 
 
 def infer_tp_mismatch_info(
@@ -265,6 +303,14 @@ def infer_group_block_sizes(
             spec = next(iter(spec.kv_cache_specs.values()))
         block_sizes.append(spec.block_size)
     return block_sizes
+
+
+def infer_cacheable_group_ids(kv_cache_groups: Sequence[Any] | None) -> list[int]:
+    if not kv_cache_groups:
+        return [0]
+    group_ids = [i for i, group in enumerate(kv_cache_groups) if is_prefix_cacheable(group.kv_cache_spec)]
+    assert group_ids, "AscendStore requires at least one prefix-cacheable KV cache group"
+    return group_ids
 
 
 def get_group_block_size(group_block_sizes: Sequence[int], group_id: int) -> int:
@@ -500,6 +546,10 @@ class ChunkedTokenDatabase:
         shard_rank: int | None = None,
         shard_size: int | None = None,
     ) -> Iterable[tuple[int, int, BlockHash | str, int | None]]:
+        # Private circular state has no prefix key, even when its block size
+        # happens to be divisible by the request's hashing unit.
+        if self.cache_coordinator is not None and kv_cache_group_id not in self.cache_coordinator.cacheable_group_ids:
+            return
         if not block_hashes:
             return
         logical_block_size = self.get_block_size(kv_cache_group_id)
@@ -1074,7 +1124,9 @@ class ReqMeta:
             and target_token_len % cache_transfer_granularity == 0
             and full_block_count > available_full_block_count
         )
-        if boundary_without_hash:
+        # Scheduled draft tokens can cross a page before that page has a
+        # committed request hash. Do not mark an unsent page as saved.
+        if boundary_without_hash or (not save_partial_block and full_block_count > available_full_block_count):
             num_tokens_to_save = available_full_block_count * cache_transfer_granularity
         if tracker.last_block_gva is not None and (
             target_token_len % cache_transfer_granularity != 0 or boundary_without_hash

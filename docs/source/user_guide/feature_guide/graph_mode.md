@@ -13,7 +13,7 @@ This document focuses on the Ascend-specific view: how graph mode works on Ascen
 
 ## Current Status on Ascend
 
-- Graph mode is currently available only on the **V1 Engine**.
+- Graph mode is currently available on both Model Runner V1/V2.
 - **ACLGraph** (capture/replay via `torch.npu.NPUGraph`) is the runtime graph execution mechanism used by the default graph path on Ascend.
 - **Npugraph_ex** is a compile-time FX graph optimization layer, enabled by default in FULL/FULL_DECODE_ONLY modes. It optimizes the graph before ACLGraph captures it.
 - **XliteGraph** is an optional graph path for selected model families and environments.
@@ -43,6 +43,8 @@ The default graph path on Ascend involves two stages: **compile-time optimizatio
 | FULL / FULL_DECODE_ONLY | Npugraph_ex FX optimization | ACLGraph capture/replay | Enabled |
 | PIECEWISE | Fusion pass only | ACLGraph capture/replay | Disabled |
 | NONE | None | Eager execution | Disabled |
+
+Ascend sets `use_inductor=False` and selects its own compilation backend. That backend applies npugraph_ex optimizations or FX fusion passes according to the configuration.
 
 Additionally, **XliteGraph** is available as an optional alternative graph path for selected model families (see [Using XliteGraph](#using-xlitegraph)).
 
@@ -129,15 +131,15 @@ As introduced in the [RFC](https://github.com/vllm-project/vllm-ascend/issues/47
 
 ### Default behavior
 
-Npugraph_ex is **enabled by default** when `cudagraph_mode` is `FULL` or `FULL_DECODE_ONLY`. It is automatically disabled in `PIECEWISE` or `NONE` modes.
+Npugraph_ex is **enabled by default** on supported hardware when `cudagraph_mode` is `FULL` or `FULL_DECODE_ONLY`. It is automatically disabled in `FULL_AND_PIECEWISE`, `PIECEWISE`, and `NONE` modes.
 
-This means for most users, Npugraph_ex is active without any explicit configuration:
+Select a full graph mode to use this default:
 
 ```python
 from vllm import LLM
 
 # Npugraph_ex is enabled by default in FULL/FULL_DECODE_ONLY mode
-llm = LLM(model="path/to/Qwen2-7B-Instruct")
+llm = LLM(model="path/to/Qwen2-7B-Instruct", compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"})
 outputs = llm.generate("Hello, how are you?")
 ```
 
@@ -183,8 +185,6 @@ Static kernel compilation is an **optional** feature that pre-compiles operator 
 
     Enabling static kernel triggers a compilation pass during the graph capture phase at service startup. This may add **several minutes to tens of minutes** to the startup time depending on the number of operators to compile and model complexity. Once completed, subsequent request processing is not affected.
 
-    [Super kernel](https://www.hiascend.com/document/detail/zh/Pytorch/latest/devguide/TorchAir/docs/zh/npugraph_ex/advanced/superkernel.md) optimization follows `enable_static_kernel` by default. To use static kernel without super kernel, set `enable_super_kernel` to `false` explicitly. Super kernel cannot be enabled when static kernel is disabled.
-
 Offline example:
 
 ```python
@@ -209,13 +209,6 @@ vllm serve Qwen/Qwen2-7B-Instruct \
   --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
 ```
 
-To keep static kernel enabled while disabling Super Kernel explicitly:
-
-```bash
-vllm serve Qwen/Qwen2-7B-Instruct \
-  --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true, "enable_super_kernel":false}}'
-```
-
 #### Verifying static kernel is active
 
 The recommended way to verify static kernel is in effect is through **Ascend Profiling**:
@@ -231,6 +224,66 @@ Starting static kernel compilation, the build directory is <path>
 ```
 
 This confirms that compilation has been triggered. The absence of this message means static kernel was not enabled or the cached result was reused directly.
+
+### Super Kernel optimization
+
+[Super Kernel](https://www.hiascend.com/document/detail/zh/Pytorch/latest/devguide/TorchAir/docs/zh/npugraph_ex/advanced/superkernel.md) is an **optional** operator-binary fusion optimization. Unlike source-level fusion, it works on compiled kernel binaries: eligible subgraphs are identified, their child kernels are combined into a larger kernel, and synchronization is inserted according to graph dependencies. Compared with launching operators individually, this can reduce task scheduling waits, launch overhead, and operator-head overhead.
+
+In vLLM Ascend, Super Kernel optimization is applied during ACLGraph capture. It depends on both static kernel and Npugraph_ex:
+
+```text
+Super Kernel -> static kernel -> Npugraph_ex
+```
+
+!!! note
+
+    Static kernel is disabled by default, so Super Kernel is also disabled under the default configuration. When `enable_static_kernel` is explicitly set to `true` and `enable_super_kernel` is omitted, Super Kernel follows static kernel and is enabled. Set `enable_super_kernel` explicitly to override this inherited behavior. Super Kernel cannot be enabled when static kernel is disabled.
+
+    Not every operator is eligible for Super Kernel fusion. An unsupported operator may split the fusion range, so the actual coverage and performance benefit depend on the model and operator sequence. Changing the Super Kernel setting also changes the static-kernel compilation configuration and may cause the static-kernel cache to be rebuilt.
+
+Offline example:
+
+```python
+from vllm import LLM
+
+model = LLM(
+    model="path/to/Qwen2-7B-Instruct",
+    additional_config={
+        "ascend_compilation_config": {
+            "enable_npugraph_ex": True,
+            "enable_static_kernel": True,
+            # `enable_super_kernel` is automatically enabled with `enable_static_kernel=True`.
+            # It can also be set explicitly if preferred.
+            # "enable_super_kernel": True,
+        }
+    }
+)
+outputs = model.generate("Hello, how are you?")
+```
+
+Online example:
+
+```bash
+vllm serve Qwen/Qwen2-7B-Instruct \
+  --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
+```
+
+To use static kernel without Super Kernel:
+
+```bash
+vllm serve Qwen/Qwen2-7B-Instruct \
+  --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true, "enable_super_kernel":false}}'
+```
+
+#### Verifying Super Kernel is active
+
+When Super Kernel optimization is applied during ACLGraph capture, vLLM Ascend emits:
+
+```text
+Super kernel optimization is enabled for ACL graph capture.
+```
+
+This message confirms that the optimization step was invoked. To verify the resulting fusion coverage and performance benefit, collect an **Ascend Profiling** trace and inspect `kernel_details.csv`. Compare the kernel/task entries and latency with Super Kernel disabled; the profiler also reports the launch core count for generated Super Kernels in the `Block Dim` field.
 
 For more details about Npugraph_ex, see the [npugraph_ex guide](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/overview.md).
 

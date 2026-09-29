@@ -458,11 +458,16 @@ class AscendDSAV41Impl:
             candidate_topk_blocks=self.topology.candidate_topk_blocks,
             candidate_block_size=self.topology.candidate_block_size,
             candidates=shared.candidates[: hidden_states.shape[0]],
+            output_indices=shared.topk_indices[: hidden_states.shape[0]],
         )
-        shared.topk_indices[: selected.shape[0]].copy_(selected)
+        # An empty long-context cache returns a [tokens, 0] sentinel without
+        # writing output_indices. Publish "no slot" for FULL graph capture;
+        # nonempty selections are written directly into the shared buffer.
+        if selected.shape[1] == 0:
+            shared.topk_indices[: selected.shape[0]].fill_(-1)
         if self.role.is_candidate_source:
             shared.candidates[: candidates.shape[0]].copy_(candidates)
-        return shared.topk_indices[: selected.shape[0]]
+        return shared.topk_indices[: hidden_states.shape[0]]
 
     def _forward_attention(self, attn, q, metadata, compressed_indices, *, source_cache=None):
         """Run SparseFlashMla with the same PA metadata for both operator stages."""

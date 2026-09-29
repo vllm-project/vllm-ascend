@@ -35,7 +35,7 @@ from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
-from vllm_ascend.utils import enable_custom_op, vllm_version_is
+from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.worker.dcp_utils import DCPSpecDecodeFirstPassInputs
 
 enable_custom_op()
@@ -1403,29 +1403,32 @@ class TestEagleProposerPropose:
             assert captured_common_attn_metadata.max_query_len == 1
             assert captured_common_attn_metadata.max_seq_len == 0
             assert captured_common_attn_metadata._seq_lens_cpu is None
+            # Later draft steps consume the exact NPU seq_lens with rejected
+            # tokens removed. The CPU mirror intentionally remains an
+            # optimistic upper bound to avoid an NPU-to-CPU synchronization.
             if model_type == 'qwen_dense':
                 if graphmode == 'full':
-                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([23, 19, 19] + [0]*13))
+                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([21, 19, 19] + [0]*13))
                     assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([23, 19, 19] + [0]*13))
                     assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([19, 15, 15] + [0]*13))
                     assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([20, 18, 18, 20, 13, 14, 15, 16, 13, 14, 15, 16, 0, 0, 0, 0, 12, 0, 1,
                                                                                             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
                 else:
-                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([23, 19, 19]))
+                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([21, 19, 19]))
                     assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([23, 19, 19]))
                     assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([19, 15, 15]))
                     assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([20, 18, 18, 20, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1,
                                                                                             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
                 assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([148, 274, 402]), torch.full((8701,), -1)]))
             if model_type == 'qwen_moe':
-                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([21, 19, 19]))
+                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([18, 17, 17]))
                 assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([145, 272, 400]), torch.full((8701,), -1)]))
                 assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([21, 19, 19]))
                 assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([17, 15, 15]))
                 assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([17, 16, 16, 18, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1,
                                                                                           2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
             if model_type == 'deepseek':
-                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([16, 15, 16]))
+                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([15, 13, 13]))
                 assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([142, 268, 396]), torch.full((8701,), -1)]))
                 assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([16, 15, 16]))
                 assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([12, 11, 12]))
@@ -1527,7 +1530,7 @@ class TestEagleProposerPropose:
         assert isinstance(
             inspect.getattr_static(
                 vllm.config.ModelConfig,
-                "uses_xdrope_dim" if vllm_version_is("0.29.0") else "mrope_num_dims",
+                "mrope_num_dims",
             ),
             property
         )
@@ -1568,7 +1571,7 @@ class TestEagleProposerPropose:
         assert hasattr(RunnerCls, "_sync_metadata_across_dp")
         sig = inspect.signature(RunnerCls._sync_metadata_across_dp)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'num_tokens', 'is_draft_model', 'cudagraph_mode', 'allow_dp_padding']
+        assert sig_name == ['self', 'num_tokens', 'is_draft_model', 'cudagraph_mode']
 
         assert hasattr(RunnerCls, "_pad_query_start_loc_for_fia")
         sig = inspect.signature(RunnerCls._pad_query_start_loc_for_fia)
@@ -1644,7 +1647,6 @@ class TestEagleProposerPropose:
             'num_actual_tokens', 'max_query_len', 'max_seq_len', 'block_table_tensor', \
             'slot_mapping', 'causal', 'logits_indices_padded', 'num_logits_indices', \
             'encoder_seq_lens', 'encoder_seq_lens_cpu', 'dcp_local_seq_lens', \
-            'dcp_local_seq_lens_cpu', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
             '_num_computed_tokens_cache'
         }
 
@@ -1660,7 +1662,8 @@ class TestEagleProposerPropose:
             'positions', 'seq_lens_cpu', 'decode_token_per_req', \
             'context_parallel_metadata', 'actual_seq_lengths_q', \
             'attn_state', 'num_computed_tokens_cpu', 'num_input_tokens', \
-            'graph_pad_size'
+            'graph_pad_size', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
+            'dcp_local_seq_lens_cpu'
         }
 
         actual = set(vllm_ascend.attention.utils.AscendCommonAttentionMetadata.__dataclass_fields__)
@@ -2338,7 +2341,7 @@ class TestRunMergedDraft(TestBase):
         actual = set(vllm.config.ModelConfig.__dataclass_fields__)
         missing = fields - actual
         assert not missing, f"Missing dataclass fields: {missing}"
-        rope_dims_field = "uses_xdrope_dim" if vllm_version_is("0.29.0") else "mrope_num_dims"
+        rope_dims_field = "mrope_num_dims"
         for field in ("uses_mrope", rope_dims_field, "use_mla", "is_multimodal_model"):
             assert isinstance(inspect.getattr_static(vllm.config.ModelConfig, field), property)
         for method in ("get_hidden_size", "get_inputs_embeds_size"):
@@ -4244,13 +4247,16 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         # Construct several submodules: some have topk_indices_buffer, some don't
         mod1 = MagicMock()
         mod1.topk_indices_buffer = MagicMock()  # This should be replaced
+        mod1.uses_lim_topk_metadata = False
         mod2 = MagicMock()
         del mod2.topk_indices_buffer  # This doesn't have the attribute, shouldn't throw an error
+        mod2.uses_lim_topk_metadata = False
         mod3 = MagicMock()
         mod3.topk_indices_buffer = MagicMock()  # This should also be replaced
+        mod3.uses_lim_topk_metadata = True
 
-        # Mock the return value of named_modules
-        draft_model_mock.model.named_modules.return_value = [("layer.0", mod1), ("layer.1", mod2), ("layer.2", mod3)]
+        # Mock the module traversal used for buffer sharing and fused_copy_sfa discovery.
+        draft_model_mock.model.modules.return_value = [mod1, mod2, mod3]
         proposer.model = draft_model_mock
 
         # Execute the target method
@@ -4263,6 +4269,19 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         self.assertEqual(mod1.topk_indices_buffer, target_buffer_mock, "Module 1 buffer should be updated.")
         self.assertEqual(mod3.topk_indices_buffer, target_buffer_mock, "Module 3 buffer should be updated.")
         self.assertFalse(hasattr(mod2, "topk_indices_buffer"), "Module 2 should not have a buffer added.")
+        self.assertEqual(proposer._lim_topk_compactors, [mod3])
+
+    def test_maybe_collects_lim_compactor_without_target_buffer(self):
+        proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+        copy_sfa_attention = SimpleNamespace(uses_lim_topk_metadata=True)
+        draft_model = MagicMock()
+        draft_model.modules.return_value = [copy_sfa_attention]
+        proposer.model = SimpleNamespace(model=draft_model)
+        target_model = SimpleNamespace(model=SimpleNamespace())
+
+        proposer._maybe_share_topk_indices(target_model)
+
+        self.assertEqual(proposer._lim_topk_compactors, [copy_sfa_attention])
 
     def _run_index_sharing_draft(self, share=True, supports_compact=True, dsa_cp=False):
         """Run the real proposer and MLA hooks with known rows in place of model compute."""
@@ -4291,6 +4310,8 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
 
         buffer = torch.full((8, 4), -1, dtype=torch.int32)
         impl = SimpleNamespace(skip_topk=False, topk_indices_buffer=buffer)
+        impl.use_fused_copy_sfa = True
+        impl.compact_lim_topk_metadata = MagicMock()
         attention = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
         torch.nn.Module.__init__(attention)
         attention.mla_attn = SimpleNamespace(impl=impl)
@@ -4302,6 +4323,7 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         layer.mtp_block.self_attn = torch.nn.Module()
         layer.mtp_block.self_attn.mla_attn = attention
         predictor.layers = torch.nn.ModuleDict({"80": layer})
+        proposer._lim_topk_compactors = [attention]
         if not supports_compact:
             predictor = SimpleNamespace(set_skip_topk=predictor.set_skip_topk)
 
@@ -4350,24 +4372,27 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         self.assertEqual(len(observed), 2)
         if dsa_cp:
             group.all_reduce.assert_called_once()
-        return observed, step0_rows, indices
+        return observed, step0_rows, indices, impl
 
     def test_run_merge_draft_mtp_skip_topk(self):
-        observed, original, indices = self._run_index_sharing_draft()
+        observed, original, indices, impl = self._run_index_sharing_draft()
         self.assertEqual([skip for skip, _ in observed], [False, True])
         torch.testing.assert_close(observed[1][1][:2], original[indices])
+        impl.compact_lim_topk_metadata.assert_called_once_with(indices)
 
     def test_run_merge_draft_mtp_skip_topk_without_compact(self):
-        observed, original, _ = self._run_index_sharing_draft(supports_compact=False)
+        observed, original, _, _ = self._run_index_sharing_draft(supports_compact=False)
         self.assertEqual([skip for skip, _ in observed], [False, True])
         torch.testing.assert_close(observed[1][1], original)
 
     def test_run_merge_draft_mtp_dsa_cp_compacts_remote_rows(self):
-        observed, original, indices = self._run_index_sharing_draft(dsa_cp=True)
+        observed, original, indices, impl = self._run_index_sharing_draft(dsa_cp=True)
         self.assertEqual([skip for skip, _ in observed], [False, True])
         torch.testing.assert_close(observed[1][1][:2], original[indices])
+        impl.compact_lim_topk_metadata.assert_not_called()
 
     def test_run_merge_draft_mtp_sharing_disabled(self):
-        observed, original, _ = self._run_index_sharing_draft(share=False)
+        observed, original, _, impl = self._run_index_sharing_draft(share=False)
         self.assertEqual([skip for skip, _ in observed], [False, False])
         torch.testing.assert_close(observed[1][1], original)
+        impl.compact_lim_topk_metadata.assert_not_called()

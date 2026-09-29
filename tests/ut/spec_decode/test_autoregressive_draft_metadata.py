@@ -26,6 +26,8 @@ def test_gqa_draft_block_table_matches_padded_batch():
         "Any": Any,
         "copy": copy,
         "AscendAttentionState": SimpleNamespace(DecodeOnly="decode_only"),
+        "BatchExecutionDescriptor": lambda **kwargs: SimpleNamespace(**kwargs),
+        "CUDAGraphMode": SimpleNamespace(FULL="full"),
     }
     module = ast.Module(body=[method], type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(SPECULATOR_PATH), "exec"), namespace)
@@ -41,8 +43,10 @@ def test_gqa_draft_block_table_matches_padded_batch():
         attn_architecture="GQA",
         input_batch=SimpleNamespace(num_reqs=num_reqs, seq_lens_cpu_upper_bound=[14]),
         input_buffers=SimpleNamespace(draft_seq_lens_cpus=[[0] * num_reqs_padded]),
-        _build_draft_attn_metadata=lambda **kwargs: {
-            "draft_layer": SimpleNamespace(block_tables=SimpleNamespace(shape=(kwargs["num_reqs_padded"], max_blocks)))
+        _build_uniform_attn_metadata=lambda **kwargs: {
+            "draft_layer": SimpleNamespace(
+                block_tables=SimpleNamespace(shape=(kwargs["batch_desc"].num_reqs, max_blocks))
+            )
         },
     )
 

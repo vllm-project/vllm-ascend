@@ -5,7 +5,6 @@ import pytest
 from transformers import Qwen3Config
 from vllm.config.model_arch import ModelArchitectureConfig
 from vllm.config.speculative import SpeculativeConfig
-from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
 from vllm_ascend.patch.platform import patch_speculative_config
 from vllm_ascend.patch.platform.patch_speculative_config import (
@@ -195,6 +194,8 @@ def test_deepseek_v41_dspark_selects_v41_drafter_and_expert_shape(flattened):
     )
     hf_config.update = lambda values: hf_config.__dict__.update(values)
     if flattened:
+        from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+
         hf_config = DeepseekV41Config(
             text_config={
                 "dspark_target_layer_ids": [37, 38, 39],

@@ -7,9 +7,12 @@ from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
-from tests.e2e.common.kvpp import MODEL, PROMPTS, complete, output_texts, server_args
+from tests.e2e.common.kvpp import PROMPTS, complete, output_texts, server_args
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
 from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import SingleNodeMemcacheManager
+
+MODEL = "Eco-Tech/GLM-5.2-w4a8"
+TP_SIZE = 8
 
 pytestmark = pytest.mark.e2e_model(MODEL)
 
@@ -17,14 +20,15 @@ pytestmark = pytest.mark.e2e_model(MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="kvpp,chunked_prefill,prefix_caching",
-    parallel="TP,EP",
+    parallel="TP,EP,PCP",
     deploy="pd_mix",
     hardware="A3",
-    quantization="W8A8",
+    quantization="W4A8",
     graph_mode="eager",
 )
+@pytest.mark.parametrize("pcp_size", [1, 2])
 @wait_until_npu_memory_free()
-def test_kvpp_memcache_reload(tmp_path):
+def test_kvpp_memcache_reload(tmp_path, pcp_size):
     pytest.importorskip("memcache_hybrid")
     config = MemcacheKVPoolConfig(
         meta_service_port=get_open_port(),
@@ -36,7 +40,7 @@ def test_kvpp_memcache_reload(tmp_path):
             },
             "local": {
                 "ock.mmc.log_level": "info",
-                "ock.mmc.local_service.world_size": 2,
+                "ock.mmc.local_service.world_size": TP_SIZE * pcp_size,
                 "ock.mmc.local_service.protocol": "device_sdma",
                 "ock.mmc.local_service.dram.size": "1GB",
             },
@@ -44,7 +48,9 @@ def test_kvpp_memcache_reload(tmp_path):
     )
     with SingleNodeMemcacheManager(config, tmp_path.name) as pool:
         port = get_open_port()
-        args = server_args() + [
+        args = server_args(tp_size=TP_SIZE, gpu_memory_utilization=0.9) + [
+            "--prefill-context-parallel-size",
+            str(pcp_size),
             "--port",
             str(port),
             "--additional-config",
@@ -68,7 +74,7 @@ def test_kvpp_memcache_reload(tmp_path):
             args,
             server_port=port,
             auto_port=False,
-            env_dict={**pool.server_envs, "VLLM_USE_V2_MODEL_RUNNER": "0", "VLLM_SERVER_DEV_MODE": "1"},
+            env_dict={**pool.server_envs, "VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_SERVER_DEV_MODE": "1"},
         ) as server:
             # Use a prompt spanning cache blocks so the replay exercises pool loading.
             prompt = PROMPTS[1]

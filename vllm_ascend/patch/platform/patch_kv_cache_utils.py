@@ -587,25 +587,36 @@ def _ascend_get_kv_cache_config_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """Restore Ascend's DSV4 shared-tuple planner removed by vLLM #51718."""
-    if is_deepseek_v41_cache(kv_cache_groups):
-        return get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
-    if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
-        return get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
-    if not _is_deepseek_v4_groups(kv_cache_groups):
-        return _orig_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
+    """Restore Ascend's DSV4 shared-tuple planner removed by vLLM #51718.
 
-    num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4_main(
-        vllm_config,
-        kv_cache_groups,
-        available_memory,
-    )
-    return KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=kv_cache_tensors,
-        kv_cache_groups=kv_cache_groups,
-        prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
-    )
+    Attach ``kv_transfer_config`` onto every built config: ``KVCacheConfig``
+    has no native field, and the PD prefill-producer role read back by the
+    kv-cache coordinator (see ``patch_kv_cache_coordinator.py``) must ride on
+    the config object - the coordinator factory receives ``KVCacheConfig``
+    but not ``VllmConfig``. The attribute survives the scheduler-side
+    ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
+    dropped by worker pickle IPC, which never reads it.
+    """
+    if is_deepseek_v41_cache(kv_cache_groups):
+        kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
+        kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif not _is_deepseek_v4_groups(kv_cache_groups):
+        kv_cache_config = _orig_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
+    else:
+        num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4_main(
+            vllm_config,
+            kv_cache_groups,
+            available_memory,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+        )
+    kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    return kv_cache_config
 
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes

@@ -1,5 +1,6 @@
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # isort: off
@@ -8,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, FusedMoEParallelConfig
 
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.eplb.core import eplb_utils
 from vllm_ascend.eplb.core.eplb_utils import generate_global_placement, generate_log2phy_map, init_eplb_config
 # isort: on
 
@@ -109,3 +111,59 @@ class TestAscendConfig(unittest.TestCase):
         self.assertIsNone(log2phy)
         self.assertTrue(torch.equal(expert_map, gt_expert_map))
         self.assertEqual(redundant_experts, 0)
+
+
+class TestLinearExpertMapCache(unittest.TestCase):
+    """Linear placement only depends on (ep_size, ep_rank, n_experts)."""
+
+    def setUp(self):
+        eplb_utils._LINEAR_EXPERT_MAP_CACHE.clear()
+        self.eplb_config = SimpleNamespace(expert_map_path=None, dynamic_eplb=False, num_redundant_experts=0)
+        self.moe_config = SimpleNamespace(num_experts=8, ep_size=2, ep_rank=0)
+
+    def tearDown(self):
+        eplb_utils._LINEAR_EXPERT_MAP_CACHE.clear()
+
+    def test_map_is_built_once_per_key(self):
+        base_map = torch.tensor([0, 1, 2, 3, -1, -1, -1, -1], dtype=torch.int32)
+
+        with patch.object(eplb_utils, "determine_expert_map", return_value=(4, base_map, None)) as mock_determine:
+            _, first, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
+            _, second, _, _ = init_eplb_config(self.eplb_config, 1, self.moe_config)
+
+        mock_determine.assert_called_once()
+        self.assertTrue(torch.equal(first, base_map))
+        self.assertTrue(torch.equal(second, base_map))
+
+    def test_each_layer_gets_its_own_copy(self):
+        base_map = torch.tensor([0, 1, 2, 3, -1, -1, -1, -1], dtype=torch.int32)
+
+        with patch.object(eplb_utils, "determine_expert_map", return_value=(4, base_map, None)):
+            _, first, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
+            _, second, _, _ = init_eplb_config(self.eplb_config, 1, self.moe_config)
+
+        self.assertIsNot(first, second)
+        first[0] = -1
+        self.assertEqual(int(second[0]), 0)
+        self.assertEqual(int(eplb_utils._LINEAR_EXPERT_MAP_CACHE[(2, 0, 8)][0]), 0)
+
+    def test_different_rank_is_a_different_entry(self):
+        rank0 = torch.tensor([0, 1, 2, 3, -1, -1, -1, -1], dtype=torch.int32)
+        rank1 = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3], dtype=torch.int32)
+
+        with patch.object(eplb_utils, "determine_expert_map", side_effect=[(4, rank0, None), (4, rank1, None)]):
+            _, first, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
+            self.moe_config.ep_rank = 1
+            _, second, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
+
+        self.assertTrue(torch.equal(first, rank0))
+        self.assertTrue(torch.equal(second, rank1))
+        self.assertEqual(len(eplb_utils._LINEAR_EXPERT_MAP_CACHE), 2)
+
+    def test_none_map_is_not_cloned(self):
+        with patch.object(eplb_utils, "determine_expert_map", return_value=(0, None, None)):
+            _, expert_map, log2phy, redundant = init_eplb_config(self.eplb_config, 0, self.moe_config)
+
+        self.assertIsNone(expert_map)
+        self.assertIsNone(log2phy)
+        self.assertEqual(redundant, 0)

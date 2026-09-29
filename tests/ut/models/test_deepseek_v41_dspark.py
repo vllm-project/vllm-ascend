@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 """Deferred torch checks for DeepSeek V4.1 DSpark model/cache integration."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+pytest.importorskip(
+    "vllm.transformers_utils.configs.deepseek_v41",
+    reason="DeepSeek V4.1 is unavailable on this vLLM release",
+)
+
 import torch
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry

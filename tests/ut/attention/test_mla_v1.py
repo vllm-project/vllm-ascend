@@ -30,6 +30,31 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8Dyna
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
+@pytest.mark.parametrize("num_tokens", [1, 3])
+@pytest.mark.parametrize(
+    "num_heads,kv_lora_rank",
+    [(1, 65535), (1, 65536), (1, 65537), (127, 512), (128, 512), (129, 512)],
+)
+def test_v_up_proj_transpose_bmm_limits(num_tokens, num_heads, kv_lora_rank):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.num_heads = num_heads
+    impl.kv_lora_rank = kv_lora_rank
+    impl.v_head_dim = 2
+    impl.W_UV = torch.randn(num_heads, kv_lora_rank, impl.v_head_dim)
+    x = torch.randn(num_tokens, num_heads, kv_lora_rank)
+    expected = torch.bmm(x.transpose(0, 1), impl.W_UV).transpose(0, 1).reshape(num_tokens, -1)
+
+    def fused_bmm(input, weight, *, perm_x1=(0, 1, 2), perm_y):
+        return torch.bmm(input.permute(perm_x1), weight).permute(perm_y)
+
+    with patch("vllm_ascend.attention.mla_v1.torch_npu.npu_transpose_batchmatmul", side_effect=fused_bmm) as fused:
+        result = impl._v_up_proj_batch_major(x)
+        use_fused = num_heads * kv_lora_rank < 65536
+
+    assert fused.call_count == int(use_fused)
+    torch.testing.assert_close(result, expected)
+
+
 @pytest.mark.parametrize("use_rope", [False, True])
 @pytest.mark.parametrize("weight_quant_mode", [0, 3])
 def test_mla_prolog_k3_and_cann_dispatch_are_isolated(use_rope, weight_quant_mode):
@@ -2353,6 +2378,103 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
+
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_keeps_runtime_weight_address(self, mock_format_cast):
+        """A weight update reload must refresh ``W_UV``/``W_UK_T`` in place.
+
+        In graph + RL scenario the graph is captured once, so the addresses of
+        ``W_UV``/``W_UK_T`` are baked into the captured graph. Re-triggering
+        ``process_weights_after_loading`` (which is exactly what vLLM does
+        after a layerwise weight update) therefore has to reuse the existing
+        storage instead of rebinding the attributes.
+        """
+        layer = MagicMock(spec=LinearBase)
+        layer.input_size_per_partition = 10
+        layer.quant_method = MagicMock(spec=UnquantizedLinearMethod)
+        kv_b_proj_shape = (
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim),
+            self.impl.kv_lora_rank,
+        )
+        layer.weight = torch.randn(*kv_b_proj_shape, dtype=torch.bfloat16)
+        self.impl.kv_b_proj = layer
+        mock_format_cast.return_value = layer.weight
+        self.impl.enable_mlapo = False
+        self.impl.fa_quant_layer = False
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+        w_uv_ptr = self.impl.W_UV.data_ptr()
+        w_uk_t_ptr = self.impl.W_UK_T.data_ptr()
+        old_w_uv = self.impl.W_UV.clone()
+
+        # A weight update replaces the raw kv_b_proj weight; the derived
+        # tensors must follow it while staying at the same address.
+        layer.weight = torch.randn(*kv_b_proj_shape, dtype=torch.bfloat16)
+        mock_format_cast.return_value = layer.weight
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        self.assertEqual(self.impl.W_UK_T.data_ptr(), w_uk_t_ptr)
+
+        # ... and the refreshed buffers must hold the new kv_b_proj split.
+        expected_w_uk, expected_w_uv = layer.weight.T.view(
+            self.impl.kv_lora_rank,
+            self.impl.num_heads,
+            self.impl.qk_nope_head_dim + self.impl.v_head_dim,
+        ).split([self.impl.qk_nope_head_dim, self.impl.v_head_dim], dim=-1)
+        torch.testing.assert_close(self.impl.W_UV, expected_w_uv.transpose(0, 1).contiguous())
+        torch.testing.assert_close(self.impl.W_UK_T, expected_w_uk.permute(1, 2, 0).contiguous())
+        self.assertFalse(torch.equal(self.impl.W_UV, old_w_uv))
+
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_rebinds_incompatible_value(self, mock_format_cast):
+        """An incompatible reload must rebind instead of raising from ``copy_``.
+
+        ``replace_parameter(..., prefer_copy=True)`` reuses the stored storage
+        only while shape, dtype and device still match. The hand-rolled
+        ``copy_`` it replaced was unconditional, so a re-derived value that
+        stopped being compatible aborted the whole weight-update transaction
+        with a ``RuntimeError``. That failure mode is the only behaviour this
+        change alters, so it is the part of the contract the unit tests have to
+        pin down.
+        """
+        layer = MagicMock(spec=LinearBase)
+        layer.input_size_per_partition = 10
+        layer.quant_method = MagicMock(spec=UnquantizedLinearMethod)
+        layer.weight = torch.randn(
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim),
+            self.impl.kv_lora_rank,
+            dtype=torch.bfloat16,
+        )
+        self.impl.kv_b_proj = layer
+        mock_format_cast.return_value = layer.weight
+        self.impl.enable_mlapo = False
+        self.impl.fa_quant_layer = False
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+        w_uv_ptr = self.impl.W_UV.data_ptr()
+
+        # Narrow the layer: the re-derived split is still a valid value, but it
+        # no longer fits the buffer that is already stored.
+        self.impl.num_heads //= 2
+        layer.weight = torch.randn(
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim),
+            self.impl.kv_lora_rank,
+            dtype=torch.bfloat16,
+        )
+        mock_format_cast.return_value = layer.weight
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        self.assertEqual(
+            self.impl.W_UV.shape,
+            (self.impl.num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim),
+        )
+        self.assertEqual(
+            self.impl.W_UK_T.shape,
+            (self.impl.num_heads, self.impl.qk_nope_head_dim, self.impl.kv_lora_rank),
+        )
 
     def test_compute_prefill_context_none(self):
         batch_size = 4

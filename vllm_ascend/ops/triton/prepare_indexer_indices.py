@@ -49,8 +49,17 @@ def _prepare_indexer_indices_kernel(
         tl.store(output_ptr + offsets, selected, mask)
 
 
-def prepare_indexer_indices(selected: torch.Tensor, positions: torch.Tensor, compress_ratio: int) -> torch.Tensor:
-    """Filter and sort [tokens, topk] INT32 indices, with invalid slots last."""
+def prepare_indexer_indices(
+    selected: torch.Tensor,
+    positions: torch.Tensor,
+    compress_ratio: int,
+    output: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Filter and sort [tokens, topk] INT32 indices, with invalid slots last.
+
+    ``output`` lets callers with a stable destination buffer avoid an
+    intermediate device-to-device copy after the Triton kernel completes.
+    """
     assert selected.ndim == 2 and selected.dtype == torch.int32
     assert positions.ndim == 1 and positions.shape[0] == selected.shape[0]
     assert positions.dtype in (torch.int32, torch.int64)
@@ -59,7 +68,13 @@ def prepare_indexer_indices(selected: torch.Tensor, positions: torch.Tensor, com
     assert 1 <= topk <= 2048
     selected = selected.contiguous()
     positions = positions.contiguous()
-    output = torch.empty_like(selected)
+    if output is None:
+        output = torch.empty_like(selected)
+    else:
+        assert output.shape == selected.shape
+        assert output.dtype == torch.int32
+        assert output.device == selected.device
+        assert output.is_contiguous()
     if num_rows == 0:
         return output
 

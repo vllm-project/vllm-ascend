@@ -132,34 +132,31 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Replay the draft ACL graph and update its attention parameters."""
         num_tokens = desc.num_tokens
-        if self.is_draft_model_prefill:
-            logger.info_once(
-                "AutoRegressiveAclGraphManager: draft prefill run_fullgraph with num_tokens=%s", num_tokens
-            )
-        else:
-            logger.info_once("AutoRegressiveAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
+        logger.info_once(
+            "ACL graph replay is active for the V2 draft model (%s, logged once per phase).",
+            "prefill" if self.is_draft_model_prefill else "decode",
+        )
         assert self.update_stream is not None
 
         attn_backend = self.speculator.attn_backend
         draft_vllm_config = self.speculator.draft_vllm_config
-
-        if use_updatable_graph(attn_backend):
-            return self._updatable_graph_replay(desc)
-        else:
-            # This will be removed once the refactoring is fully complete.
-            return self._graph_replay(desc, attn_backend, num_tokens, draft_vllm_config)
-
-    def _graph_replay(self, desc, attn_backend, num_tokens, draft_vllm_config):
-        self.update_stream.wait_stream(torch.npu.current_stream())
-        ret = super().run_fullgraph(desc)
-        # Mirror vLLM's DP graph-replay token-count metadata.
-        num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
-        attn_metadata = self.speculator.model_state.attn_metadata
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             desc.num_tokens,
             self.is_draft_model_prefill,
         )
+        if use_updatable_graph(attn_backend):
+            return self._updatable_graph_replay(desc, draft_attn_metadatas)
+        else:
+            # This will be removed once the refactoring is fully complete.
+            return self._graph_replay(desc, attn_backend, num_tokens, draft_vllm_config, draft_attn_metadatas)
+
+    def _graph_replay(self, desc, attn_backend, num_tokens, draft_vllm_config, draft_attn_metadatas):
+        self.update_stream.wait_stream(torch.npu.current_stream())
+        ret = super().run_fullgraph(desc)
+        # Mirror vLLM's DP graph-replay token-count metadata.
+        num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
+        attn_metadata = self.speculator.model_state.attn_metadata
         # sfa_v1.py:AscendSFABackend.get_impl_cls reaches
         # sfa_cp.py:resolve_sfa_impl, whose SFA CP selector reads the current
         # ModelConfig. Publish the draft config because set_forward_context()
@@ -196,11 +193,12 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             )
         return ret
 
-    def _updatable_graph_replay(self, desc):
+    def _updatable_graph_replay(self, desc, draft_attn_metadatas):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
         fia_params = self.speculator.build_fia_params(
             desc.num_reqs,
+            draft_attn_metadatas[0],
             self.is_draft_model_prefill,
         )
         resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))

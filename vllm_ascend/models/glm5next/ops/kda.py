@@ -6,6 +6,7 @@ import torch
 
 from vllm_ascend.models.glm5next.ops.state_ops import gather_initial_states, scatter_states
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.triton.kda.output_writeback import write_recurrent_output
 
 KDA_MAX_RECURRENT_TOKENS = 8
 
@@ -23,6 +24,7 @@ def recurrent_kda(
     dt_bias,
     lower_bound,
     num_accepted_tokens=None,
+    output_buffer=None,
 ):
     """Update the selected VK state slots, including MTP rejection rollback."""
     num_seqs = cu_seqlens.numel() - 1
@@ -44,6 +46,9 @@ def recurrent_kda(
         beta_is_preprocessed=False,
         num_accepted_tokens=num_accepted_tokens,
     )
+    if output_buffer is not None:
+        write_recurrent_output(output, output_buffer, cu_seqlens)
+        return output_buffer
     valid = torch.arange(q.shape[1], device=q.device) < cu_seqlens[-1]
     return output.masked_fill(~valid[None, :, None, None], 0)
 

@@ -2,6 +2,7 @@ test_name: "DeepSeek-V4-Flash-w8a8-PD-no-prefix"
 model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
 num_nodes: 2
 npu_per_node: 16
+dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"

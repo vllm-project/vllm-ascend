@@ -15,8 +15,6 @@ import vllm.envs as vllm_envs
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.utils import vllm_version_is
-
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -25,13 +23,13 @@ _PP_TRANSPORT_PREFIX = "pp_transport"
 
 
 def use_legacy_spec_pp() -> bool:
-    """Use the release workaround until the supported release has native PP.
+    """Whether Ascend's legacy Spec+PP transport workaround is required.
 
-    The fixed main has the upstream sampled-token protocol; v0.29.0 needs
-    Ascend's transport and loader bypasses. Remove this path when the release
-    also supports the native protocol.
+    The supported release (v0.30.0) and the pinned main commit share the
+    upstream sampled-token protocol, so the Ascend transport and loader
+    bypasses are no longer used.
     """
-    return vllm_version_is("0.29.0")
+    return False
 
 
 class _PPAuxHiddenStateModel(Protocol):

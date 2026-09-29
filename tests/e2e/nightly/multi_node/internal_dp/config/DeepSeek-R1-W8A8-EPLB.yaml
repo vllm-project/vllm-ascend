@@ -2,6 +2,7 @@ test_name: "test DeepSeek-R1-W8A8 disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
 num_nodes: 4
 npu_per_node: 16
+dp_load_balancing: internal
 env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 1024

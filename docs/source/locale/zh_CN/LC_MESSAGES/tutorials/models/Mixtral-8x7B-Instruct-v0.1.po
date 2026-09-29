@@ -21,9 +21,6 @@ msgstr ""
 msgid "# Mixtral-8x7B-Instruct-v0.1"
 msgstr "# Mixtral-8x7B-Instruct-v0.1"
 
-msgid "## Introduction"
-msgstr "## 简介"
-
 msgid ""
 "Mixtral-8x7B-Instruct-v0.1 is a state-of-the-art mixture-of-experts (MoE) "
 "language model developed by Mistral AI. It features 8 expert models, each "
@@ -56,12 +53,6 @@ msgstr "本文档将展示该模型的主要验证步骤，包括支持的特性
 msgid "The `Mixtral-8x7B-Instruct-v0.1` model is supported in vllm-ascend."
 msgstr "vllm-ascend 支持 `Mixtral-8x7B-Instruct-v0.1` 模型。"
 
-msgid "## Environment Preparation"
-msgstr "## 环境准备"
-
-msgid "### Model Weight"
-msgstr "### 模型权重"
-
 msgid ""
 "- `Mixtral-8x7B-Instruct-v0.1`(BF16 version): [Download model weight](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1)\n"
 "- Quantized versions may be available from third-party providers."
@@ -74,19 +65,10 @@ msgid ""
 " `/data/models/`."
 msgstr "建议将模型权重下载到本地目录，例如 `/data/models/`。"
 
-msgid "### Installation"
-msgstr "### 安装"
-
 msgid ""
 "You can use our official docker image to run `Mixtral-8x7B-Instruct-v0.1` "
 "directly."
 msgstr "您可以使用我们的官方 Docker 镜像直接运行 `Mixtral-8x7B-Instruct-v0.1`。"
-
-msgid "## Deployment"
-msgstr "## 部署"
-
-msgid "### Single-node Deployment"
-msgstr "### 单节点部署"
 
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
@@ -97,9 +79,6 @@ msgid ""
 msgstr ""
 "**注意：**\n"
 "参数说明如下："
-
-msgid "## Functional Verification"
-msgstr "## 功能验证"
 
 msgid ""
 "Once your server is started, you can query the model with input prompts. "
@@ -129,9 +108,6 @@ msgstr ""
 "2. 执行后即可获得结果。作为参考，Mixtral-8x7B-Instruct-v0.1 "
 "通常在包括推理、理解和指令遵循任务在内的各种基准测试中表现良好。"
 
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
-
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -140,9 +116,6 @@ msgstr ""
 "详情请参考[使用 AISBench "
 "进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
-
-msgid "### Using vLLM Benchmark"
-msgstr "### 使用 vLLM 基准测试"
 
 msgid ""
 "Run performance evaluation of `Mixtral-8x7B-Instruct-v0.1` as an example."
@@ -168,9 +141,6 @@ msgstr ""
 msgid "Take the `serve` as an example. First, start the server:"
 msgstr "以 `serve` 为例。首先，启动服务器："
 
-msgid "## Conclusion"
-msgstr "## 结论"
-
 msgid ""
 "Mixtral-8x7B-Instruct-v0.1 is a powerful MoE model that offers excellent "
 "performance for instruction following tasks. With proper deployment on "
@@ -191,12 +161,6 @@ msgid ""
 msgstr ""
 "- `Mixtral-8x7B-Instruct-v0.1` 可部署在 1 台 Atlas 800 A3（64GB × 16）或 1 台 Atlas "
 "800 A2（64GB × 8）上。"
-
-msgid "## Accuracy Evaluation"
-msgstr "## 精度评估"
-
-msgid "## Performance Evaluation"
-msgstr "## 性能评估"
 
 msgid ""
 "- Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios.\n"
@@ -222,3 +186,48 @@ msgid ""
 msgstr ""
 "根据您的机器类型选择镜像，并在您的节点上启动 docker 镜像，请参阅[使用 "
 "docker](../../getting_started/installation.md#installation-prebuilt-image)。"
+
+msgid "## 1 Introduction"
+msgstr "## 1 简介"
+
+msgid "## 2 Environment Preparation"
+msgstr "## 2 环境准备"
+
+msgid "### 2.1 Model Weight"
+msgstr "### 2.1 模型权重"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。请确保后续部署命令中的模型路径与此目录一致。"
+
+msgid "### 3 Installation"
+msgstr "### 3 安装"
+
+msgid "## 4 Deployment"
+msgstr "## 4 部署"
+
+msgid "### 4.1 Single-node Deployment"
+msgstr "### 4.1 单机部署"
+
+msgid "## 5 Functional Verification"
+msgstr "## 5 功能验证"
+
+msgid "## 6 Accuracy Evaluation"
+msgstr "## 6 精度评估"
+
+msgid "### 6.1 Using AISBench"
+msgstr "### 6.1 使用 AISBench"
+
+msgid "## 7 Performance Evaluation"
+msgstr "## 7 性能评估"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用 AISBench"
+
+msgid "### 7.2 Using vLLM Benchmark"
+msgstr "### 7.2 使用 vLLM Benchmark"
+
+msgid "## 8 Conclusion"
+msgstr "## 8 总结"

@@ -111,12 +111,6 @@ python -m tools.bisect.auto_bisect \
 - 所有节点切到同一 commit 后才会开跑(屏障同步)。
 
 > ⚠️ **常见坑(barrier timeout)**:报错 `Barrier timeout: only 1/2 nodes ready` 表示**只有 master 跑了 bisect、worker 节点没跑**。多机 bisect 要求**每个节点都启动 `auto_bisect.py --scene multi_node`**(worker 节点会自动进入 worker 循环:接收 commit→部署→上报 ready→等 master)。如果你的流水线只在 leader 上调了 bisect、worker pod 只跑了用例,worker 永远不会加入屏障,master 就会超时。修法:让流水线在**所有节点**(含 worker)都执行同一条 bisect 命令,且共享同一个 `--coord-dir`。
->
-> 相关行为说明:
->
-> - worker 仓库通常是 nightly 的 `--depth 1` 浅克隆,本地没有候选 commit;worker agent 启动时会先 `git fetch --unshallow` 恢复完整历史(把慢速网络操作挪出首轮屏障窗口),部署时再按需解析,无需手动处理。
-> - 若屏障超时且**从未有任何 worker 上报过 ready**,master 会**整体中止**(退出码 2)而不是逐轮空等屏障超时;迟到的 worker(其 ready 标记落在已结束的轮次)仍按单轮 SKIP 处理。已知限制:这是"曾加入"检查而非存活检查,worker 中途死亡后剩余轮次会退化为逐轮 SKIP(心跳检测为后续工作)。
-> - CI 里 leader 的"等待 worker 就绪"门槛读的是 `LOG_PREFIX/worker_ready_*`(每次运行唯一),协调目录也默认按运行隔离(`LOG_PREFIX/nightly_bisect_coord`,可用 `COORD_DIR` 覆盖),避免共享 PVC 上上一轮或并发运行的残留状态互相干扰;协调文件(command/verdict/ready)均以原子方式写入,避免 PVC 上的撕裂读。
 
 ---
 
@@ -149,8 +143,8 @@ python -m tools.bisect.auto_bisect \
 
 工具先比较 good 和 bad 两端的 vLLM、torch-npu 版本:
 
-- 两端版本相同**且环境实际版本与该 pin 一致**:该包后续不再检查;
-- 两端版本不同,**或环境实际版本与两端共同的 pin 不一致**(nightly 镜像自带构建,不保证跟随 pin):每次切换到候选 commit 后读取候选 commit 的版本文件,若运行环境版本不同则先切换依赖,再运行 nightly;
+- 两端版本相同:该包后续不再检查;
+- 两端版本不同:每次切换到候选 commit 后读取候选 commit 的版本文件,若运行环境版本不同则先切换依赖,再运行 nightly;
 
 vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspace/vllm`) checkout 对应 release tag 并重新 editable 安装;找不到源码目录时回退到 pip 安装对应 release。torch-npu 使用 pip 强制重装目标版本。切换失败会将本轮标记为 `SKIP`,不会把环境问题误判成测试失败。
 
@@ -193,7 +187,7 @@ vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspa
 - `state.json`:二分窗口 + 已判定结果(**被中断后原命令重跑会断点续跑**);
 - `report.json`:最终结论(首个 bad commit / PR + 完整试跑历史)。
 
-**退出码**:`0` = 成功定位首个 bad;`2` = 未定位(端点校验失败 / 区间无效 / 环境问题)或整体中止(如多机场景下从未有 worker 加入屏障)。
+**退出码**:`0` = 成功定位首个 bad;`2` = 未定位(端点校验失败 / 区间无效 / 环境问题)。
 
 ---
 

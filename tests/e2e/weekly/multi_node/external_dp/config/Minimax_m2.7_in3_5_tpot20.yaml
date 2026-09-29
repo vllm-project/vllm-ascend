@@ -2,6 +2,7 @@ test_name: "Minimax_m2.7_in3_5_tpot0"
 model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
 num_nodes: 3
 npu_per_node: 16
+dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"
