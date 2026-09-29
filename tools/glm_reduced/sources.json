@@ -1,0 +1,117 @@
+[
+  {
+    "model_id": "THUDM/chatglm3-6b",
+    "revision": "e9e0406d062cdb887444fe5bd546833920abd4ac",
+    "architecture": "ChatGLMModel",
+    "config_url": "https://huggingface.co/THUDM/chatglm3-6b/resolve/main/config.json",
+    "index_url": "https://huggingface.co/THUDM/chatglm3-6b/resolve/main/model.safetensors.index.json",
+    "tensor_count": 200,
+    "total_size_bytes": 12487168064
+  },
+  {
+    "model_id": "THUDM/glm-4-9b-chat",
+    "revision": "bd8234fe5e0c09c48637a92abb0c797cb5fa0e73",
+    "architecture": "ChatGLMModel",
+    "config_url": "https://huggingface.co/THUDM/glm-4-9b-chat/resolve/main/config.json",
+    "index_url": "https://huggingface.co/THUDM/glm-4-9b-chat/resolve/main/model.safetensors.index.json",
+    "tensor_count": 284,
+    "total_size_bytes": 18799902784
+  },
+  {
+    "model_id": "zai-org/GLM-4.1V-9B-Thinking",
+    "revision": "3c1471e51dc811b589d4d12b1c1c7c1c941267c2",
+    "architecture": "Glm4vForConditionalGeneration",
+    "config_url": "https://huggingface.co/zai-org/GLM-4.1V-9B-Thinking/resolve/main/config.json",
+    "index_url": "https://huggingface.co/zai-org/GLM-4.1V-9B-Thinking/resolve/main/model.safetensors.index.json",
+    "tensor_count": 704,
+    "total_size_bytes": 20585554944
+  },
+  {
+    "model_id": "zai-org/GLM-4.5",
+    "revision": "cbb2c7cfb52fa128a9660cb1a7a78e017899e115",
+    "architecture": "Glm4MoeForCausalLM",
+    "config_url": "https://huggingface.co/zai-org/GLM-4.5/resolve/main/config.json",
+    "index_url": "https://huggingface.co/zai-org/GLM-4.5/resolve/main/model.safetensors.index.json",
+    "tensor_count": 44691,
+    "total_size_bytes": 358337791296
+  },
+  {
+    "model_id": "zai-org/GLM-4.6",
+    "revision": "be72194883d968d7923a07e2f61681ea9a2826d1",
+    "architecture": "Glm4MoeForCausalLM",
+    "config_url": "https://huggingface.co/zai-org/GLM-4.6/resolve/main/config.json",
+    "index_url": "https://huggingface.co/zai-org/GLM-4.6/resolve/main/model.safetensors.index.json",
+    "tensor_count": 44689,
+    "total_size_bytes": 352797829024
+  },
+  {
+    "model_id": "zai-org/GLM-4.7",
+    "revision": "602d01efcdd332c5238ca4bcede555defbe83eb7",
+    "architecture": "Glm4MoeForCausalLM",
+    "config_url": "https://huggingface.co/zai-org/GLM-4.7/resolve/main/config.json",
+    "index_url": "https://huggingface.co/zai-org/GLM-4.7/resolve/main/model.safetensors.index.json",
+    "tensor_count": 44691,
+    "total_size_bytes": 358337791296
+  },
+  {
+    "model_id": "zai-org/GLM-5",
+    "revision": "c183ef8c61faee82855eca1ed9bb3a9a7ce3b0b2",
+    "architecture": "GlmMoeDsaForCausalLM",
+    "config_url": "https://huggingface.co/zai-org/GLM-5/resolve/main/config.json",
+    "index_url": "https://huggingface.co/zai-org/GLM-5/resolve/main/model.safetensors.index.json",
+    "tensor_count": 59870,
+    "total_size_bytes": 1507728316928
+  },
+  {
+    "model_id": "zai-org/GLM-4.7-Flash",
+    "revision": "7dd20894a642a0aa287e9827cb1a1f7f91386b67",
+    "architecture": "Glm4MoeLiteForCausalLM",
+    "config_url": "https://huggingface.co/zai-org/GLM-4.7-Flash/resolve/main/config.json",
+    "index_url": "https://huggingface.co/zai-org/GLM-4.7-Flash/resolve/main/model.safetensors.index.json",
+    "tensor_count": 9703
+  },
+  {
+    "model_id": "zai-org/GLM-5.1",
+    "revision": "26e1bd6e011feb778d25ae34b09b07074139d92d",
+    "architecture": "GlmMoeDsaForCausalLM",
+    "config_url": "https://huggingface.co/zai-org/GLM-5.1/resolve/main/config.json",
+    "index_url": "https://huggingface.co/zai-org/GLM-5.1/resolve/main/model.safetensors.index.json",
+    "tensor_count": 59870,
+    "total_size_bytes": 1507728316928
+  },
+  {
+    "model_id": "zai-org/GLM-5.2",
+    "revision": "cf457fa734ab149ffef225f80893eb38c6ff5cdc",
+    "architecture": "GlmMoeDsaForCausalLM",
+    "config_url": "https://huggingface.co/zai-org/GLM-5.2/resolve/main/config.json",
+    "index_url": "https://huggingface.co/zai-org/GLM-5.2/resolve/main/model.safetensors.index.json",
+    "tensor_count": 59585,
+    "total_size_bytes": 1506659919872
+  },
+  {
+    "model_id": "zai-org/GLM-5.3",
+    "revision": "aca966e4e02791568aa6a4ced368624b3d897f42",
+    "architecture": "GlmMoeDsaForCausalLM",
+    "config_url": "https://huggingface.co/zai-org/GLM-5.3/resolve/main/config.json",
+    "index_url": "https://huggingface.co/zai-org/GLM-5.3/resolve/main/model.safetensors.index.json",
+    "tensor_count": 118629,
+    "total_size_bytes": 755617140416
+  },
+  {
+    "model_id": "zai-org/GLM-5.3-Flash",
+    "revision": "eb9eb208eb0d988989d07a6a12d0fdeb5f52574a",
+    "architecture": "Glm5NextForConditionalGeneration",
+    "config_url": "https://huggingface.co/zai-org/GLM-5.3-Flash/resolve/main/config.json",
+    "index_url": "https://huggingface.co/zai-org/GLM-5.3-Flash/resolve/main/model.safetensors.index.json",
+    "tensor_count": 76108,
+    "total_size_bytes": 328326771576
+  },
+  {
+    "model_id": "zai-org/GLM-Image",
+    "revision": null,
+    "architecture": null,
+    "config_url": "https://huggingface.co/zai-org/GLM-Image/resolve/main/config.json",
+    "index_url": "https://huggingface.co/zai-org/GLM-Image/resolve/main/model.safetensors.index.json",
+    "note": "root config.json returned HTTP 404 at review time; likely component configs. Not a plain causal-LM checkpoint."
+  }
+]

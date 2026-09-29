@@ -1,0 +1,22 @@
+# Fixed 200 GSM8K samples; all 20,693 positions, including the first sample.
+# >=90% A1 argmax agreement is NOT GSM8K answer accuracy.
+test_cases:
+  - name: GLM-5.2-W4A8-A3-Logits11
+    model: Eco-Tech/GLM-5.2-w4a8
+    envs:
+      VLLM_USE_V2_MODEL_RUNNER: "0"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "256"
+      HCCL_TRANSFER_TIMEOUT: "600"
+      HCCL_EXEC_TIMEOUT: "3600"
+      HCCL_CONNECT_TIMEOUT: "3600"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      LCCL_DETERMINISTIC: "1"
+      HCCL_DETERMINISTIC: "true"
+      ATB_MATMUL_SHUFFLE_K_ENABLE: "0"
+      ATB_LLM_LCOC_ENABLE: "0"
+    # The dedicated offline runner owns the fixed engine settings; no server.
+    server_cmd: []
+    glm5x_logits_gate: {}

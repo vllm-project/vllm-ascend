@@ -1,0 +1,43 @@
+{
+ "model": "zai-org--GLM-4.7",
+ "tensor_count": 44691,
+ "patterns": [
+  "lm_head.weight",
+  "model.embed_tokens.weight",
+  "model.layers.{N}.eh_proj.weight",
+  "model.layers.{N}.embed_tokens.weight",
+  "model.layers.{N}.enorm.weight",
+  "model.layers.{N}.hnorm.weight",
+  "model.layers.{N}.input_layernorm.weight",
+  "model.layers.{N}.mlp.down_proj.weight",
+  "model.layers.{N}.mlp.experts.{N}.down_proj.weight",
+  "model.layers.{N}.mlp.experts.{N}.gate_proj.weight",
+  "model.layers.{N}.mlp.experts.{N}.up_proj.weight",
+  "model.layers.{N}.mlp.gate.e_score_correction_bias",
+  "model.layers.{N}.mlp.gate.weight",
+  "model.layers.{N}.mlp.gate_proj.weight",
+  "model.layers.{N}.mlp.shared_experts.down_proj.weight",
+  "model.layers.{N}.mlp.shared_experts.gate_proj.weight",
+  "model.layers.{N}.mlp.shared_experts.up_proj.weight",
+  "model.layers.{N}.mlp.up_proj.weight",
+  "model.layers.{N}.post_attention_layernorm.weight",
+  "model.layers.{N}.self_attn.k_norm.weight",
+  "model.layers.{N}.self_attn.k_proj.bias",
+  "model.layers.{N}.self_attn.k_proj.weight",
+  "model.layers.{N}.self_attn.o_proj.weight",
+  "model.layers.{N}.self_attn.q_norm.weight",
+  "model.layers.{N}.self_attn.q_proj.bias",
+  "model.layers.{N}.self_attn.q_proj.weight",
+  "model.layers.{N}.self_attn.v_proj.bias",
+  "model.layers.{N}.self_attn.v_proj.weight",
+  "model.layers.{N}.shared_head.head.weight",
+  "model.layers.{N}.shared_head.norm.weight",
+  "model.norm.weight"
+ ],
+ "shards": [
+  "model-00001-of-00092.safetensors",
+  "model-00002-of-00092.safetensors",
+  "model-00003-of-00092.safetensors"
+ ],
+ "shard_count": 93
+}

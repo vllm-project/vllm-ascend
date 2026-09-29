@@ -1,0 +1,2 @@
+# Preserve the exact hashed fixture bytes on all platforms.
+*.json -text

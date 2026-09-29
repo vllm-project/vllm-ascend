@@ -1,0 +1,28 @@
+{
+  "model": "Eco-Tech/GLM-5.2-w4a8",
+  "files": {
+    "dataset.json": "be742e5fe243eec4c2346e8e417f2ebc8228c58f0fe816ecf6b794331ed0a71d",
+    "A1.json": "f2faa51906df9dfec0fe1ee26e9220ceb799a44977326aaa6424a4eeb0d65f4b"
+  },
+  "source_metadata_sha256": {
+    "config.json": "817f5fb39ca5d4c4b5648de89ca00deaea7537d8c2f130172a459252a05c1073",
+    "quant_model_description.json": "fe2531095c6ff6e674c8f5e4a21c7ec354dd6d003e60aaf4450087a0e4344b70",
+    "quant_model_weights.safetensors.index.json": "0e69a90937d7b14d4c699bbfbe0d86f1c476f4ee90c38b2b91236f1a25cfed82"
+  },
+  "audited_model_metadata_sha256": {
+    "config.json": "a31e290384ed9c6cdb0f990610d2ecc6cb530ba9db278bee8881d02f1039c574",
+    "quant_model_description.json": "0a4c6bcc4258d04c6cbda59ac6c6250e065233d7b3c3a1614148365b3ebb772b",
+    "quant_model_weights.safetensors.index.json": "d36d1681fc5c13e4e080c942e5caf4ff8cade271d87ffcdc4d59f7ed718b37cf"
+  },
+  "baseline_sources": {
+    "vllm_sha": "84030bbe3d74d99bad477a3d2e37a973ccd8865c",
+    "ascend_sha": "cb79183b7c04467c7358fe568ee88e85603ee965"
+  },
+  "baseline_manifest_sha256": "8c549ec2ab5e42984128b855b99997c483569651c0115a5b6e0e18751c23a160",
+  "main_layers": 11,
+  "retained_mtp_layers": 1,
+  "mtp_execution": false,
+  "capture_layer_zero_based": 10,
+  "reference_run": "A1",
+  "threshold": 0.9
+}
