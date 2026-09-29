@@ -920,6 +920,15 @@ class AscendConfig:
                     "finegrained_tp_config.lmhead_tensor_parallel_size. "
                     "Please disable one of them."
                 )
+            if (
+                self.enable_pcp_embedding_lmhead_weight_sharding
+                and vc.parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "batch-sharded sampling is incompatible with "
+                    "enable_pcp_embedding_lmhead_weight_sharding when PCP is enabled. "
+                    "Please disable one of them."
+                )
 
         # mix_placement mutex
         self._check_mix_placement()
