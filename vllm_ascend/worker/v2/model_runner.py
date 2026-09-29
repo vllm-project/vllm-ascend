@@ -136,11 +136,10 @@ class NPUModelRunner(GPUModelRunner):
             )
             and not self.model_config.enforce_eager
         )
-        load_collection_phase = self.ascend_config.eplb_config.load_collection_phase
         self.eplb = AscendEPLBController(
             parallel_config,
             device,
-            load_collection_phase=(load_collection_phase if parallel_config.enable_eplb else "all"),
+            self.ascend_config.eplb_config if parallel_config.enable_eplb else None,
         )
 
         self.update_stream = None
@@ -285,6 +284,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
+                self.pcp_manager.kv_cache_config = kv_cache_config
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
@@ -345,6 +345,27 @@ class NPUModelRunner(GPUModelRunner):
             valid_dummy_state_slots=valid_dummy_state_slots,
         )
         self.model_state.kvpp_is_dummy_run = False
+        self._publish_lmhead_tp_step_capacity()
+        if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
+            # lmhead TP: idle DP ranks never call sample(), so they must join
+            # the target LM-head collectives here at the group-agreed capacity
+            # (V1: ``need_dummy_logits``). The parent's dummy forward already
+            # ran the draft LM-head collectives exactly once, so only the
+            # target side is joined -- joining the draft again would
+            # double-count it and hang HCCL. The capacity is the dynamic
+            # DP-synced value captured by the parent forward (cached on the
+            # lm_head), falling back to the static group-agreed bound.
+            if self.execute_model_state is None:
+                raise RuntimeError(
+                    "lmhead TP dummy join expects execute_model_state published by the upstream dummy execute_model."
+                )
+            capacity = self._lmhead_tp_step_capacity()
+            dummy_indices = torch.zeros(
+                capacity,
+                dtype=torch.int64,
+                device=self.device,
+            )
+            self.model.compute_logits(self.execute_model_state.hidden_states[dummy_indices])
         self.kvpp.complete_forward()
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
@@ -445,6 +466,7 @@ class NPUModelRunner(GPUModelRunner):
             num_reqs,
             num_scheduled_tokens_np,
             num_valid_tokens,
+            kv_cache_config=self.kv_cache_config,
         )
 
         # Get the number of draft tokens for each request.
@@ -539,8 +561,11 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
         self.eplb.set_batch_phase(batch_req_state.has_prefill)
 
-        # Get prefill tokens if any.
-        if batch_req_state.has_prefill:
+        # Graph dispatch may classify a PD prompt-tail step as decode, but
+        # its input still comes from all_token_ids rather than sampled tokens.
+        # Keep input preparation tied to the actual prefill progress so the
+        # prompt tail and MTP lookahead are populated even on a decode graph.
+        if np.any(batch_req_state.num_computed_prefill_tokens_np < batch_req_state.prefill_len_np):
             prepare_prefill_inputs(
                 self.input_buffers.input_ids,
                 self.req_states.next_prefill_tokens,
@@ -666,30 +691,62 @@ class NPUModelRunner(GPUModelRunner):
                 block_table[:, 0].copy_(state_slots)
         return block_tables, slot_mappings
 
-    def _lmhead_tp_max_num_logits(self) -> int:
-        """Logits row capacity shared by every rank of the lmhead-TP group.
+    def _lmhead_tp_step_capacity(self) -> int:
+        """Group-agreed lmhead-TP capacity for this step.
 
-        Derived purely from global config so all ranks compute the identical
-        value, matching upstream's own logits capacity bound
-        (``max_num_reqs * decode_query_len``, see StructuredOutputsWorker init).
+        The target side resolves the capacity from the DP sync in
+        ``_publish_lmhead_tp_step_capacity`` (called at the end of every
+        ``execute_model``) and stores it on the runner
+        (``_lmhead_tp_step_capacity_value``), so ``sample()``, the idle-rank
+        dummy join, and the lm-head forward all read the same per-step value.
+        Before the first sync (or when no DP sync ran) it falls back to the
+        static ``max_num_reqs * decode_query_len`` bound, which is derived
+        purely from global config so all ranks agree.
         """
-        return self.max_num_reqs * self.decode_query_len
+        value = getattr(self, "_lmhead_tp_step_capacity_value", None)
+        return value if value is not None else self.max_num_reqs * self.decode_query_len
+
+    def _publish_lmhead_tp_step_capacity(self) -> None:
+        """Publish the per-step target lmhead-TP capacity from the DP sync.
+
+        ``execute_model`` calls this after ``super().execute_model`` returns,
+        when ``execute_model_state.dp_sync`` holds the group-agreed request
+        count (``DPSyncState.num_reqs``, identical on every DP rank; includes
+        request padding in FULL graph). The target LM-head emits
+        ``decode_query_len`` rows per request, so the per-step capacity is
+        ``num_reqs * decode_query_len``. Falls back to the static
+        ``max_num_reqs * decode_query_len`` bound when no DP sync ran (DP=1) or
+        the state was not published.
+        """
+        state = self.execute_model_state
+        static = self.max_num_reqs * self.decode_query_len
+        dp_sync = getattr(state, "dp_sync", None) if state is not None else None
+        num_reqs = None
+        if dp_sync is not None:
+            num_reqs = getattr(dp_sync, "num_reqs", None)
+        if num_reqs is None and state is not None:
+            num_reqs = getattr(getattr(state, "input_batch", None), "num_reqs", None)
+        if num_reqs is not None:
+            self._lmhead_tp_step_capacity_value = num_reqs * self.decode_query_len
+        else:
+            self._lmhead_tp_step_capacity_value = static
 
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP.
 
         The LM-head collectives span the whole group, so every rank must feed
-        compute_logits the same number of rows: pad hidden states up to
-        ``_lmhead_tp_max_num_logits()`` and trim the logits back before
-        sampling. ``logits_indices`` stays real (the V2 sampler gathers
-        penalties by it). prompt_logprobs is not supported with lmhead TP
-        (same as V1).
+        compute_logits the same number of rows: pad hidden states up to the
+        group-agreed capacity (DP-synced dynamic value, falling back to the
+        static ``max_num_reqs * decode_query_len`` bound) and trim the logits
+        back before sampling. ``logits_indices`` stays real (the V2 sampler
+        gathers penalties by it). prompt_logprobs is not supported with lmhead
+        TP (same as V1).
         """
         if not lmhead_tp_enable():
             return super().sample(hidden_states, input_batch, grammar_output)
 
         num_logits = input_batch.logits_indices.shape[0]
-        capacity = self._lmhead_tp_max_num_logits()
+        capacity = self._lmhead_tp_step_capacity()
         # A mismatch would desync the LM-head all_gather/all_to_all across the
         # group and hang the collectives. Fail fast instead.
         assert num_logits <= capacity, (
@@ -743,7 +800,14 @@ class NPUModelRunner(GPUModelRunner):
         is_profile: bool = False,
         **kwargs,
     ):
-        """Join LM-head TP before stepping EPLB on an idle DP rank."""
+        """Pure passthrough to the parent dummy run for lmhead TP.
+
+        The target LM-head join happens in ``execute_model`` after the parent
+        returns, and the parent's dummy propose already runs the draft LM-head
+        collectives exactly once, so no join happens here (joining again would
+        double-count the collectives and hang HCCL). EPLB is stepped after the
+        LM-head join via ``step_eplb_after``.
+        """
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
         # synthetic router hotspot cannot exhaust one EP rank during startup.
@@ -766,13 +830,6 @@ class NPUModelRunner(GPUModelRunner):
                 is_profile=is_profile,
                 **kwargs,
             )
-        if lmhead_tp_enable() and not is_profile and hidden_states is not None:
-            dummy_indices = torch.zeros(
-                self._lmhead_tp_max_num_logits(),
-                dtype=torch.int64,
-                device=hidden_states.device,
-            )
-            self.model.compute_logits(hidden_states[dummy_indices])
         return hidden_states, sample_hidden_states
 
     def postprocess_sampled(

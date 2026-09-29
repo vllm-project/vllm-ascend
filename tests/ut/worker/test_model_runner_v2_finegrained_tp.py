@@ -34,8 +34,14 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     runner.adaptive_verification = None
     runner.max_num_reqs = max_num_reqs
     runner.decode_query_len = decode_query_len
+    runner.device = torch.device("cpu")
+    runner.is_last_pp_rank = True
+    runner.execute_model_state = None
     runner.model = MagicMock()
     runner.model.compute_logits.side_effect = lambda x: torch.zeros(x.shape[0], vocab)
+    # The head carries the dynamic capacity captured by the lm-head forward;
+    # None means "fall back to the static bound".
+    runner.model.lm_head._lmhead_tp_dynamic_capacity = None
     runner.sampler = create_autospec(Sampler, instance=True)
     runner.rejection_sampler = create_autospec(RejectionSampler, instance=True)
     runner.speculator = MagicMock()
@@ -84,7 +90,7 @@ def test_lmhead_tp_pads_to_capacity_then_trims(at_capacity):
     else:
         runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # capacity 16
         indices = torch.tensor([0, 3, 5])
-    capacity = runner._lmhead_tp_max_num_logits()
+    capacity = runner.max_num_reqs * runner.decode_query_len
     num_logits = indices.shape[0]
     hidden_dim = 4
     hidden_states = torch.randn(10, hidden_dim)
@@ -199,7 +205,11 @@ def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft):
     ],
 )
 def test_dummy_lmhead_collective_precedes_eplb(lmhead_enabled, is_profile, has_hidden_states, skip_eplb):
-    """An idle rank must join LM-head TP before its EPLB step can block it."""
+    """``_dummy_run`` is a pure passthrough: the target LM-head join now lives
+    in ``execute_model`` after the parent returns, and the parent's dummy
+    propose already runs the draft LM-head collectives exactly once, so no
+    join happens here (joining again would double-count and hang HCCL). EPLB
+    is still stepped after the parent via ``step_eplb_after``."""
     runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # capacity 16
     hidden_states = torch.randn(10, 6)
     sample_hidden = torch.randn(3, 6)
@@ -225,9 +235,8 @@ def test_dummy_lmhead_collective_precedes_eplb(lmhead_enabled, is_profile, has_h
     ):
         result = runner._dummy_run(4, uniform_decode=True, is_profile=is_profile, skip_eplb=skip_eplb)
 
+    # _dummy_run itself never joins: only forward (parent) and eplb (decorator).
     expected_events = ["forward"]
-    if lmhead_enabled and not is_profile and has_hidden_states:
-        expected_events.append("lmhead")
     if not skip_eplb:
         expected_events.append("eplb")
         runner.eplb.step.assert_called_once_with(is_dummy=True, is_profile=is_profile)
@@ -235,12 +244,100 @@ def test_dummy_lmhead_collective_precedes_eplb(lmhead_enabled, is_profile, has_h
         runner.eplb.step.assert_not_called()
     assert events == expected_events
     assert result == ((hidden_states, sample_hidden) if has_hidden_states else (None, None))
-    if lmhead_enabled and not is_profile and has_hidden_states:
-        dummy_input = runner.model.compute_logits.call_args.args[0]
-        assert dummy_input.shape == (16, 6)
-        torch.testing.assert_close(dummy_input, hidden_states[torch.zeros(16, dtype=torch.long)])
-    else:
+    runner.model.compute_logits.assert_not_called()
+
+
+def test_execute_model_dummy_joins_target_lmhead_collectives():
+    """Idle DP ranks join the target LM-head collectives at the end of a dummy
+    ``execute_model`` (the parent's dummy forward already ran the draft
+    collectives once, so only the target side is joined here). With no dynamic
+    value cached by the parent forward, the join falls back to the static
+    group-agreed bound."""
+    runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
+    hidden_states = torch.randn(20, 6)
+    runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states)
+    runner.kvpp = MagicMock()
+    runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
+    runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(profiling_chunk_config=None))
+
+    def super_execute(scheduler_output, intermediate_tensors=None, **kwargs):
+        return "upstream-output"
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=True),
+        patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing", return_value=None),
+        patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing", return_value=None),
+        patch.object(NPUModelRunner.__bases__[0], "execute_model", side_effect=super_execute),
+    ):
+        output = runner.execute_model(MagicMock(), dummy_run=True)
+
+    assert output == "upstream-output"
+    assert runner.model.compute_logits.call_count == 1
+    dummy_input = runner.model.compute_logits.call_args.args[0]
+    # zero-indexed rows at the static group-agreed target capacity
+    assert dummy_input.shape == (16, 6)
+    torch.testing.assert_close(dummy_input, hidden_states[torch.zeros(16, dtype=torch.long)])
+
+
+def test_execute_model_dummy_join_uses_dynamic_capacity():
+    """When ``_publish_lmhead_tp_step_capacity`` captured the per-step capacity
+    on the runner, the idle join must use it instead of the static bound so it
+    stays aligned with the busy ranks' dynamic capacity."""
+    runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
+    runner._lmhead_tp_step_capacity_value = 12  # DP-synced capacity this step
+    hidden_states = torch.randn(20, 6)
+    runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states)
+    runner.kvpp = MagicMock()
+    runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
+    runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(profiling_chunk_config=None))
+
+    def super_execute(scheduler_output, intermediate_tensors=None, **kwargs):
+        return "upstream-output"
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=True),
+        patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing", return_value=None),
+        patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing", return_value=None),
+        patch.object(NPUModelRunner.__bases__[0], "execute_model", side_effect=super_execute),
+    ):
+        output = runner.execute_model(MagicMock(), dummy_run=True)
+
+    assert output == "upstream-output"
+    assert runner.model.compute_logits.call_count == 1
+    dummy_input = runner.model.compute_logits.call_args.args[0]
+    assert dummy_input.shape == (12, 6)
+    torch.testing.assert_close(dummy_input, hidden_states[torch.zeros(12, dtype=torch.long)])
+
+
+def test_execute_model_dummy_skips_join_when_gated_off():
+    """Real runs, profiling runs, feature-off runs, and non-last PP ranks must
+    not add the dummy target join."""
+    runner = _make_runner()
+    hidden_states = torch.randn(20, 6)
+    runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states)
+    runner.kvpp = MagicMock()
+    runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
+    runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(profiling_chunk_config=None))
+
+    def super_execute(scheduler_output, intermediate_tensors=None, **kwargs):
+        return "upstream-output"
+
+    def _run(dummy_run, is_profile=False, lmhead=True, last_pp=True):
+        runner.is_last_pp_rank = last_pp
+        with (
+            patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=lmhead),
+            patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing", return_value=None),
+            patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing", return_value=None),
+            patch.object(NPUModelRunner.__bases__[0], "execute_model", side_effect=super_execute),
+        ):
+            runner.execute_model(MagicMock(), dummy_run=dummy_run, is_profile=is_profile)
         runner.model.compute_logits.assert_not_called()
+        runner.model.compute_logits.reset_mock()
+
+    _run(dummy_run=False)  # real run
+    _run(dummy_run=True, is_profile=True)  # profile run
+    _run(dummy_run=True, lmhead=False)  # feature off
+    _run(dummy_run=True, last_pp=False)  # non-last PP
 
 
 def test_finegrained_tp_guard_contract():
@@ -252,3 +349,94 @@ def test_finegrained_tp_guard_contract():
         NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.NONE)
     NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.FULL_DECODE_ONLY)
     NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.FULL)
+
+
+def test_publish_lmhead_tp_step_capacity():
+    """``_publish_lmhead_tp_step_capacity`` must derive the per-step target
+    capacity from ``execute_model_state.dp_sync.num_reqs`` (the group-agreed
+    request count) times ``decode_query_len``, and refresh it every step."""
+    runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
+    runner._lmhead_tp_step_capacity_value = 99  # stale from a previous step
+
+    # DP sync: num_reqs=3 -> capacity 3 * 2 = 6.
+    runner.execute_model_state = SimpleNamespace(
+        dp_sync=SimpleNamespace(num_reqs=3),
+        input_batch=SimpleNamespace(num_reqs=3),
+    )
+    runner._publish_lmhead_tp_step_capacity()
+    assert runner._lmhead_tp_step_capacity() == 6
+
+    # A next step with a different req count must refresh, not keep 6.
+    runner.execute_model_state = SimpleNamespace(
+        dp_sync=SimpleNamespace(num_reqs=2),
+        input_batch=SimpleNamespace(num_reqs=2),
+    )
+    runner._publish_lmhead_tp_step_capacity()
+    assert runner._lmhead_tp_step_capacity() == 4
+
+    # DP=1: no dp_sync -> fall back to the local request count.
+    runner.execute_model_state = SimpleNamespace(
+        dp_sync=None,
+        input_batch=SimpleNamespace(num_reqs=5),
+    )
+    runner._publish_lmhead_tp_step_capacity()
+    assert runner._lmhead_tp_step_capacity() == 10
+
+    # No state published -> static bound.
+    runner.execute_model_state = None
+    runner._publish_lmhead_tp_step_capacity()
+    assert runner._lmhead_tp_step_capacity() == 16
+
+
+def test_sample_uses_step_capacity():
+    """``sample()`` must use the runner's per-step capacity (dynamic when the
+    DP sync published one, static otherwise) so the padded rows match the
+    lm-head forward."""
+    runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
+    hidden_states = torch.randn(10, 4)
+    indices = torch.tensor([0, 3, 5])
+    input_batch = _make_input_batch(indices)
+    runner._lmhead_tp_step_capacity_value = 12
+
+    with patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=True):
+        runner.sample(hidden_states, input_batch, None)
+
+    compute_input = runner.model.compute_logits.call_args.args[0]
+    assert compute_input.shape == (12, 4)
+    torch.testing.assert_close(compute_input[:3], hidden_states[indices])
+    assert torch.all(compute_input[3:] == 0)
+
+
+def test_dspark_run_model_publishes_draft_capacity():
+    """``AscendDSparkSpeculator._run_model`` must publish the draft-head
+    capacity derived from the DP-synced query rows: query rows are
+    ``max_reqs_across_dp * num_query_per_req``, and the draft head emits
+    ``num_speculative_steps`` rows per request."""
+    from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
+
+    spec = object.__new__(AscendDSparkSpeculator)
+    spec.num_query_per_req = 4  # sample_from_anchor=False layout
+    spec.num_speculative_steps = 4
+    spec.model = MagicMock()
+    spec.model.lm_head = MagicMock()
+
+    def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, *a, **k):
+        return ("hidden", "sample_hidden")
+
+    with patch.object(AscendDSparkSpeculator.__bases__[0], "_run_model", side_effect=fake_run_model):
+        # query rows = 3 reqs * 4 = 12; draft capacity = 3 * 4 = 12
+        spec._run_model(12, None, None, torch.tensor([12, 8], dtype=torch.int32))
+    assert spec.model.lm_head._lmhead_tp_dynamic_capacity == 12
+
+    # No sync value this round -> the previous round's dynamic capacity is
+    # dropped so the static lmhead_tp_capacity stays authoritative.
+    with patch.object(AscendDSparkSpeculator.__bases__[0], "_run_model", side_effect=fake_run_model):
+        spec._run_model(4, None, None, None)
+    assert not hasattr(spec.model.lm_head, "_lmhead_tp_dynamic_capacity")
+
+    # Non-divisible query rows fail fast.
+    with (
+        patch.object(AscendDSparkSpeculator.__bases__[0], "_run_model", side_effect=fake_run_model),
+        pytest.raises(ValueError, match="num_query_per_req"),
+    ):
+        spec._run_model(5, None, None, torch.tensor([5], dtype=torch.int32))

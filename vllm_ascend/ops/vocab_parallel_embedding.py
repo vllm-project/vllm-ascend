@@ -325,19 +325,15 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         num_tokens = input_.shape[0]
         exchange_group = self.token_exchange_group
         assert exchange_group is not None
-        comm_size = exchange_group.world_size
+        exchange_group_size = exchange_group.world_size
 
-        # potential_max_tokens covers the uniform decode path. Fine-grained
-        # Embedding TP and DSA PCP also enter this path during prefill, including
-        # the max_num_batched_tokens profiling run, so their static buffers must
-        # cover the scheduler's full token capacity as well.
+        # The scheduler's token limit covers the static buffers for both
+        # prefill and decode.
         capacity = self.embedding_tp_capacity
         assert capacity is not None
         if num_tokens > capacity:
             raise ValueError(
-                f"embedding_tp static capacity {capacity} < num_tokens "
-                f"{num_tokens}; increase max_cudagraph_capture_size or "
-                f"max_num_batched_tokens."
+                f"embedding_tp static capacity {capacity} < num_tokens {num_tokens}; increase max_num_batched_tokens."
             )
 
         # Lazy init on first call (profiling run, which precedes ACL graph
@@ -351,27 +347,33 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             device = input_.device
             # all_gather buffers carry token IDs (int64).
             self._embed_ag_in_buf = torch.zeros((capacity,), dtype=input_.dtype, device=device)
-            self._embed_ag_out_buf = torch.empty((comm_size * capacity,), dtype=input_.dtype, device=device)
+            self._embed_ag_out_buf = torch.empty((exchange_group_size * capacity,), dtype=input_.dtype, device=device)
             # reduce_scatter buffers carry bf16 embeddings.
             self._embed_rs_in_buf = torch.empty(
-                (comm_size * capacity, self.embedding_dim), dtype=self.params_dtype, device=device
+                (exchange_group_size * capacity, self.embedding_dim), dtype=self.params_dtype, device=device
             )
             self._embed_rs_out_buf = torch.empty((capacity, self.embedding_dim), dtype=self.params_dtype, device=device)
 
-        # Pad input into the address-stable all_gather input buffer.
-        self._embed_ag_in_buf.zero_()
-        self._embed_ag_in_buf[:num_tokens].copy_(input_)
+        # PCP ranks have the same local token count. Fine-grained Embedding TP
+        # keeps the fixed capacity so all DP ranks exchange the same span.
+        exchange_tokens = capacity
+        if self.parallel_mode == VocabParallelMode.PCP_X_TP:
+            exchange_tokens = num_tokens
+        all_gather_input = self._embed_ag_in_buf[:exchange_tokens]
+        if exchange_tokens > num_tokens:
+            all_gather_input.zero_()
+        all_gather_input[:num_tokens].copy_(input_)
+        all_gather_output = self._embed_ag_out_buf[: exchange_group_size * exchange_tokens]
         dist.all_gather_into_tensor(
-            self._embed_ag_out_buf,
-            self._embed_ag_in_buf,
+            all_gather_output,
+            all_gather_input,
             group=exchange_group.device_group,
         )
-        complete_input = self._embed_ag_out_buf
 
-        # Masking unchanged; padding rows map to OOB and get masked to 0
-        # via masked_fill_ below (token_id=0 stays in-range after shift).
+        # Out-of-vocabulary rows are masked below. The DP exchange padding and
+        # PCP rank-local padding both use token ID 0, which is a valid token.
         masked_input, input_mask = self._mask_input_for_vocab_range(
-            complete_input,
+            all_gather_output,
             self.shard_indices.org_vocab_start_index,
             self.shard_indices.org_vocab_end_index,
             self.shard_indices.num_org_vocab_padding,
@@ -379,19 +381,21 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.shard_indices.added_vocab_end_index,
         )
         # Embedding lookup is a local op (F.embedding); its fresh allocation
-        # does not affect ACL graph replay. Copy into the static rs_in
+        # does not affect ACL graph replay. Copy into the static reduce_scatter input
         # buffer so reduce_scatter reads from a stable address.
         output_parallel = self.quant_method.embedding(self, masked_input.long())
-        self._embed_rs_in_buf.copy_(output_parallel)
-        self._embed_rs_in_buf.masked_fill_(input_mask.unsqueeze(-1), 0)
+        reduce_scatter_input = self._embed_rs_in_buf[: exchange_group_size * exchange_tokens]
+        reduce_scatter_input.copy_(output_parallel)
+        reduce_scatter_input.masked_fill_(input_mask.unsqueeze(-1), 0)
+        reduce_scatter_output = self._embed_rs_out_buf[:exchange_tokens]
         dist.reduce_scatter_tensor(
-            self._embed_rs_out_buf,
-            self._embed_rs_in_buf,
+            reduce_scatter_output,
+            reduce_scatter_input,
             group=exchange_group.device_group,
         )
 
-        # Strip padding rows; preserve the original return shape.
-        output = self._embed_rs_out_buf[:num_tokens].view(num_tokens, -1)
+        # Strip exchange padding and preserve the original return shape.
+        output = reduce_scatter_output[:num_tokens].view(num_tokens, -1)
         reduce_group = self.output_reduce_group
         if reduce_group is not None and reduce_group.world_size > 1:
             # PCP reduce-scatter reconstructs the TP-local contribution. This
@@ -445,6 +449,7 @@ class AscendParallelLMHead(ParallelLMHead):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        lmhead_tp_capacity: int | None = None,
     ):
         AscendVocabParallelEmbedding.__init__(
             self,
@@ -458,6 +463,12 @@ class AscendParallelLMHead(ParallelLMHead):
             disable_tp=disable_tp,
         )
         self.quant_config = quant_config
+        # Optional lmhead-TP row capacity for this head. When set (e.g. the
+        # DSpark draft LMHead, which emits num_speculative_steps rows per
+        # request and is vocab-sharded over the lmhead-TP group), every
+        # _get_logits_lmheadtp call pads the hidden states up to this capacity
+        # so all ranks feed the collectives the same row count (V1 parity).
+        self.lmhead_tp_capacity = lmhead_tp_capacity
         if bias:
             self.bias = Parameter(torch.empty(self.num_embeddings_per_partition, dtype=params_dtype))
             set_weight_attrs(
@@ -568,18 +579,58 @@ class AscendLogitsProcessor(LogitsProcessor):
             logits = tp_group.all_gather(logits, dim=-1)
         return logits[..., : self.org_vocab_size]
 
+    def _get_lmhead_tp_capacity(self, lm_head: AscendParallelLMHead) -> int | None:
+        """Group-agreed row capacity for the lmhead-TP collectives.
+
+        The per-step capacity is computed upstream from the DP-synced token
+        count and published explicitly: the target side stores it on the runner
+        (``_lmhead_tp_step_capacity``) and the DSpark draft side writes it on
+        the head (``_lmhead_tp_dynamic_capacity``) before the draft head runs.
+        Here we read that explicit value first so every rank uses the same
+        per-step bound, falling back to the static ``lmhead_tp_capacity`` (or
+        None for heads without a capacity).
+        """
+        dynamic_capacity = getattr(lm_head, "_lmhead_tp_dynamic_capacity", None)
+        if isinstance(dynamic_capacity, int):
+            return dynamic_capacity
+        static_capacity = getattr(lm_head, "lmhead_tp_capacity", None)
+        if isinstance(static_capacity, int):
+            return static_capacity
+        return None
+
     def _get_logits_lmheadtp(
         self,
         hidden_states: torch.Tensor,
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
+        # Optional head-level row capacity (e.g. the DSpark draft LMHead).
+        # Every rank must feed the lmhead-TP collectives the same row count;
+        # pad the hidden states up to the group-agreed capacity and trim the
+        # logits back (V1: the dspark branch of ``_run_merged_draft`` pads
+        # ``token_indices_to_sample`` to ``max_num_reqs_across_dp`` and trims
+        # ``raw_logits[:num_indices]``). The capacity is taken from the
+        # DP-synced ``num_tokens_across_dp`` when available (dynamic, identical
+        # on every rank of the DP group), else the static ``lmhead_tp_capacity``.
+        capacity = self._get_lmhead_tp_capacity(lm_head)
+        num_logits = hidden_states.shape[0]
+        if capacity is not None:
+            if num_logits > capacity:
+                raise ValueError(
+                    f"lmhead TP rows ({num_logits}) exceed the group-agreed "
+                    f"capacity ({capacity}); desyncs the LM-head collectives."
+                )
+            if num_logits < capacity:
+                hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, capacity - num_logits))
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
         # Gather logits for tensor parallel
         if not get_ascend_config().enable_reduce_sample:
             logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
+        if capacity is not None:
+            # Remove the group-agreed padding rows.
+            logits = logits[:num_logits]
 
         # Remove paddings in vocab (if any)
         if logits is not None:

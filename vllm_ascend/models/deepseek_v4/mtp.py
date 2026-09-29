@@ -36,7 +36,7 @@ from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV4MoE,
     get_spec_layer_idx_from_weight_name,
 )
-from vllm_ascend.utils import enable_dsa_cp
+from vllm_ascend.utils import enable_dsa_cp, lmhead_tp_max_num_logits
 
 
 class SharedHead(nn.Module):
@@ -45,14 +45,22 @@ class SharedHead(nn.Module):
         config: PretrainedConfig,
         prefix: str,
         quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
     ) -> None:
         super().__init__()
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        lmhead_tp_capacity = None
+        if vllm_config is not None:
+            lmhead_tp_capacity = lmhead_tp_max_num_logits(
+                vllm_config.scheduler_config.max_num_seqs,
+                vllm_config.speculative_config.num_speculative_tokens + 1,
+            )
         self.head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "head"),
+            lmhead_tp_capacity=lmhead_tp_capacity,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -92,7 +100,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         else:
             topk_indices_buffer = None
 
-        self.shared_head = SharedHead(config=config, prefix=prefix, quant_config=quant_config)
+        self.shared_head = SharedHead(config=config, prefix=prefix, quant_config=quant_config, vllm_config=vllm_config)
         self.mtp_block = DeepseekV4DecoderLayer(
             vllm_config,
             prefix,
@@ -265,6 +273,7 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 example_moe = layer.mlp
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
+        self.num_moe_layers = len(self.moe_layers)
         self.extract_moe_parameters(example_moe)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
