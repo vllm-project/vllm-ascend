@@ -216,10 +216,6 @@ class NPUModelRunner(GPUModelRunner):
         # initialize_kv_cache; EXACT is the conservative default before that.
         self._host_seq_lens_requirements = None
         self._host_seq_lens_requirement = HostSeqLensRequirement.EXACT
-        # Low-overhead counters for diagnostics: exact-host snapshots staged
-        # and waits performed.
-        self._dfx_exact_snapshots_staged = 0
-        self._dfx_exact_waits = 0
 
         # NOTE: In GPUModelRunner, decode_query_len is initialized in load_model(),
         # +1 is hardcoded here but not in vllm.
@@ -886,7 +882,6 @@ class NPUModelRunner(GPUModelRunner):
                 non_blocking=True,
             )
             self.num_computed_tokens_event.record()
-        self._dfx_exact_snapshots_staged += 1
 
     def _update_seq_lens_cpu(
         self,
@@ -902,7 +897,6 @@ class NPUModelRunner(GPUModelRunner):
         # consumer requires exact host seq lens.
         if self.speculator is not None and self._needs_exact_host_seq_lens():
             self.num_computed_tokens_event.synchronize()
-            self._dfx_exact_waits += 1
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
                 self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]

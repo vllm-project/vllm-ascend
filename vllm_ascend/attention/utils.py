@@ -59,25 +59,6 @@ class HostSeqLensRequirement(enum.IntEnum):
     EXACT = 2
 
 
-@lru_cache(maxsize=None)
-def _warn_undeclared_seq_lens_consumer(builder_cls: type) -> None:
-    logger.warning(
-        "Metadata builder %s does not declare HOST_SEQ_LENS_REQUIREMENT; "
-        "conservatively treating it as EXACT (see "
-        "https://github.com/vllm-project/vllm-ascend/issues/17479).",
-        f"{builder_cls.__module__}.{builder_cls.__qualname__}",
-    )
-
-
-def get_host_seq_lens_requirement(builder_cls: type) -> HostSeqLensRequirement:
-    """Return the declared host seq-lens requirement of a builder class."""
-    requirement = getattr(builder_cls, "HOST_SEQ_LENS_REQUIREMENT", None)
-    if requirement is None:
-        _warn_undeclared_seq_lens_consumer(builder_cls)
-        return HostSeqLensRequirement.EXACT
-    return requirement
-
-
 @dataclass(frozen=True)
 class HostSeqLensRequirements:
     """Aggregated host seq-lens requirement of one execution.
