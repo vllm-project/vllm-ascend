@@ -375,6 +375,16 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         # Full-vocab draft: base logits, no d2t scatter.
         return self.compute_logits(hidden_states)
 
+    def compute_local_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Compute the local vocabulary shard with the same logits transforms."""
+        processor = self.logits_processor
+        logits = processor._apply_head(self.lm_head, self.model.norm(hidden_states), None)
+        if processor.soft_cap is not None:
+            logits = torch.tanh(logits / processor.soft_cap) * processor.soft_cap
+        if processor.scale != 1.0:
+            logits *= processor.scale
+        return logits
+
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         return draft_ids  # full-vocab: draft ids are target ids
 

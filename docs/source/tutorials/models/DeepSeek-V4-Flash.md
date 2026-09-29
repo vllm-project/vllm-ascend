@@ -1176,6 +1176,37 @@ Please refer to the [Public Performance Tuning Documentation](../../developer_gu
 
 Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
+#### 9.2.2 Local Argmax for DSpark on Model Runner V1
+
+For DeepSeek-V4 DSpark with greedy drafting and the standard TP vocabulary
+layout, set `use_local_argmax_reduction` in `--speculative-config` to opt in:
+
+```json
+{
+  "method": "dspark",
+  "num_speculative_tokens": 7,
+  "use_local_argmax_reduction": true
+}
+```
+
+Each rank applies the original Markov correction to its local LMHead logits
+and exchanges a score/token-ID candidate per request and draft position.
+This avoids gathering the full LMHead logits. The full Markov-bias projection
+is unchanged. The existing draft buffer and dynamic verification-length update
+are preserved.
+
+This path supports the DeepSeek-V4 full-vocabulary drafter on Model Runner V1.
+Other draft models, PCP-sharded LM heads, and a separate LMHead TP group
+retain their existing sampling path. The existing configuration validation
+rejects combining local argmax with probabilistic drafting. This change does
+not add support to Model Runner V2.
+
+The candidate exchange runs once per draft position. Lower communication
+volume does not guarantee lower latency, particularly for small decode batches;
+compare throughput and latency on the intended workload before enabling it in
+production. The draft length still needs to satisfy the checkpoint and graph
+capture constraints described above.
+
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
