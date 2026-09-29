@@ -92,6 +92,8 @@ def test_disable_profiling_chunk_for_draft_restores_after_failure(pp_size):
 def test_disable_profiling_chunk_for_draft_rejects_invalid_boolean():
     config = _config({"profiling_chunk_config": {"enabled": "sometimes"}})
 
-    with pytest.raises(ValueError, match="additional_config.profiling_chunk_config.enabled must be a boolean"):
-        with disable_profiling_chunk_for_draft(config):
-            pass
+    with (
+        pytest.raises(ValueError, match="additional_config.profiling_chunk_config.enabled must be a boolean"),
+        disable_profiling_chunk_for_draft(config),
+    ):
+        pass
