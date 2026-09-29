@@ -12,19 +12,21 @@ from ..representation import (
     KVMemorySegment,
     KVMemoryView,
     KVRegion,
-    KVTransferRegion,
+    KVTransferLayout,
+    LocalKVRegion,
     PhysicalCoordinate,
-    TransferRegionBatch,
+    RemoteObjectLayout,
+    TransferLayoutBatch,
 )
 from ..spec.topology import KVPoolGroupTopology, KVPoolTopology
 
 
 class TransferRegionProjection(Protocol):
-    """Project local Block assignments into Backend-addressable transfer regions."""
+    """Project local Block assignments and their local-to-remote transfer relation."""
 
     def bind_memory(self, memory_geometry: KVMemoryGeometry) -> None: ...
 
-    def project(self, assignments: KVBlockAssignmentBatch) -> TransferRegionBatch: ...
+    def project(self, assignments: KVBlockAssignmentBatch) -> TransferLayoutBatch: ...
 
 
 class ContiguousRegionProjection:
@@ -39,28 +41,28 @@ class ContiguousRegionProjection:
             raise RuntimeError("Contiguous region projection is already bound")
         self._segments_by_group = _select_group_memory(self._groups, memory_geometry)
 
-    def project(self, assignments: KVBlockAssignmentBatch) -> TransferRegionBatch:
+    def project(self, assignments: KVBlockAssignmentBatch) -> TransferLayoutBatch:
         if self._segments_by_group is None:
             raise RuntimeError("KV transfer region projection is unavailable before cache registration")
         group = self._groups[assignments.group_id]
         segments = self._segments_by_group[assignments.group_id]
         remote_object_size = sum(segment.block_length for segment in segments)
         remote_offsets = _contiguous_offsets(tuple(segment.block_length for segment in segments))
-        regions = []
+        layouts = []
         for assignment in assignments.assignments:
             chunk = assignment.chunk
             addresses = tuple(segment.base_address + assignment.block_id * segment.block_stride for segment in segments)
             sizes = tuple(segment.bytes_per_token * assignment.memory_token_count for segment in segments)
-            regions.append(
-                KVTransferRegion(
-                    KVRegion(chunk, tuple(layer.physical_layer_id for layer in group.layers)),
-                    PhysicalCoordinate(),
-                    remote_object_size,
-                    remote_offsets,
-                    KVMemoryView(assignment.block_id, addresses, sizes),
+            layouts.append(
+                KVTransferLayout(
+                    LocalKVRegion(
+                        KVRegion(chunk, tuple(layer.physical_layer_id for layer in group.layers)),
+                        KVMemoryView(assignment.block_id, addresses, sizes),
+                    ),
+                    RemoteObjectLayout(PhysicalCoordinate(), remote_object_size, remote_offsets),
                 )
             )
-        return TransferRegionBatch(assignments.group_id, tuple(regions))
+        return TransferLayoutBatch(assignments.group_id, tuple(layouts))
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,10 +89,10 @@ class LayerwiseRegionProjection:
             for group_id, group in self._groups.items()
         }
 
-    def project(self, assignments: KVBlockAssignmentBatch) -> TransferRegionBatch:
+    def project(self, assignments: KVBlockAssignmentBatch) -> TransferLayoutBatch:
         if self._regions_by_group is None:
             raise RuntimeError("Layerwise transfer region projection is unavailable before cache registration")
-        regions = []
+        layouts = []
         for assignment in assignments.assignments:
             chunk = assignment.chunk
             for template in self._regions_by_group[assignments.group_id]:
@@ -98,16 +100,16 @@ class LayerwiseRegionProjection:
                     segment.base_address + assignment.block_id * segment.block_stride for segment in template.segments
                 )
                 sizes = tuple(segment.bytes_per_token * assignment.memory_token_count for segment in template.segments)
-                regions.append(
-                    KVTransferRegion(
-                        KVRegion(chunk, (template.physical_layer_id,)),
-                        PhysicalCoordinate(),
-                        template.remote_object_size,
-                        template.remote_offsets,
-                        KVMemoryView(assignment.block_id, addresses, sizes),
+                layouts.append(
+                    KVTransferLayout(
+                        LocalKVRegion(
+                            KVRegion(chunk, (template.physical_layer_id,)),
+                            KVMemoryView(assignment.block_id, addresses, sizes),
+                        ),
+                        RemoteObjectLayout(PhysicalCoordinate(), template.remote_object_size, template.remote_offsets),
                     )
                 )
-        return TransferRegionBatch(assignments.group_id, tuple(regions))
+        return TransferLayoutBatch(assignments.group_id, tuple(layouts))
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +169,7 @@ class StridedRegionProjection:
             for representation in self._representations
         )
 
-    def project(self, assignments: KVBlockAssignmentBatch) -> TransferRegionBatch:
+    def project(self, assignments: KVBlockAssignmentBatch) -> TransferLayoutBatch:
         if self._bound_representations is None:
             raise RuntimeError("KV transfer region projection is unavailable before cache registration")
         if assignments.group_id != self._group_id:
@@ -175,7 +177,7 @@ class StridedRegionProjection:
                 f"Strided region projection was bound for group {self._group_id}, received {assignments.group_id}"
             )
         group = self._groups[assignments.group_id]
-        regions = []
+        layouts = []
         for assignment in assignments.assignments:
             chunk = assignment.chunk
             region = KVRegion(chunk, tuple(layer.physical_layer_id for layer in group.layers))
@@ -192,16 +194,16 @@ class StridedRegionProjection:
                         sizes.append(segment.slice_size)
                         remote_offsets.append(segment_offset + token_index * segment.slice_size)
                     segment_offset += group.block_size * segment.slice_size
-                regions.append(
-                    KVTransferRegion(
-                        region,
-                        representation.coordinate,
-                        remote_object_size,
-                        tuple(remote_offsets),
-                        KVMemoryView(assignment.block_id, tuple(addresses), tuple(sizes)),
+                layouts.append(
+                    KVTransferLayout(
+                        LocalKVRegion(
+                            region,
+                            KVMemoryView(assignment.block_id, tuple(addresses), tuple(sizes)),
+                        ),
+                        RemoteObjectLayout(representation.coordinate, remote_object_size, tuple(remote_offsets)),
                     )
                 )
-        return TransferRegionBatch(assignments.group_id, tuple(regions))
+        return TransferLayoutBatch(assignments.group_id, tuple(layouts))
 
 
 def _transfer_groups(topology: KVPoolTopology) -> dict[int, KVPoolGroupTopology]:
