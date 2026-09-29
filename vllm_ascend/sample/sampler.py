@@ -9,7 +9,9 @@ from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.triton.v2.sample.topk_topp import apply_top_k_top_p_triton
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.utils import global_stream, npu_stream_switch
 
@@ -268,8 +270,37 @@ def _apply_top_k_top_p_torch_npu(
     return _apply_top_k_top_p_pytorch(logits, k, p)
 
 
-apply_top_k_top_p = (
-    _apply_top_k_top_p_torch_npu
-    if get_current_hardware_profile().supports(HardwareCapability.NPU_TOP_K_TOP_P)
-    else _apply_top_k_top_p_pytorch
-)
+def _apply_top_k_top_p_ascend(
+    logits: torch.Tensor,
+    k: torch.Tensor,
+    p: torch.Tensor,
+    top_k: int | None = None,
+) -> torch.Tensor:
+    """Non-reduce-sample path: Qrita Triton kernel on A2/A3.
+
+    The Triton kernel replaces the sort+mask chain (7-9 kernel launches
+    and an O(V log V) full-vocabulary sort, ~1ms/step) with a single
+    pivot-search launch. Reduce-sample mode returns gathered candidate
+    tensors that forward_native unpacks as a tuple, and A5 keeps its
+    pre-existing path, so both route back to the CANN-op wrapper before
+    the Triton kernel is considered.
+    """
+    if get_ascend_config().enable_reduce_sample or is_950():
+        return _apply_top_k_top_p_torch_npu(logits, k, p, top_k)
+    if p is None and k is None:
+        return logits
+    return apply_top_k_top_p_triton(logits, k, p)
+
+
+def _apply_top_k_top_p_dispatch():
+    # batch_invariant mode must keep vLLM's own top-k/top-p masking (see
+    # AscendTopKTopPSampler.forward_native), so the Triton kernel is
+    # bypassed entirely when it is active.
+    if HAS_TRITON and not envs.VLLM_BATCH_INVARIANT:
+        return _apply_top_k_top_p_ascend
+    if get_current_hardware_profile().supports(HardwareCapability.NPU_TOP_K_TOP_P):
+        return _apply_top_k_top_p_torch_npu
+    return _apply_top_k_top_p_pytorch
+
+
+apply_top_k_top_p = _apply_top_k_top_p_dispatch()
