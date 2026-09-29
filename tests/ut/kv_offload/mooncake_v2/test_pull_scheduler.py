@@ -815,12 +815,21 @@ def test_control_channel_dispatches_heartbeat_and_ack():
     socket.send_multipart.assert_called_once_with((b"decoder", b"", ACK_MSG))
 
 
-def test_legacy_producer_rejects_heartbeat_without_changing_deadline():
+def test_default_producer_accepts_heartbeat_and_renews_lease(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(heartbeat.time, "monotonic", lambda: now[0])
     thread = make_sending_thread()
     thread.add_delayed_request("p", time.monotonic())
-    before = dict(thread.delayed_free_requests)
-    assert not thread._handle_heartbeat("engine-p", ["p"])
-    assert dict(thread.delayed_free_requests) == before
+    assert thread.kv_lease_duration == 480
+    assert thread.delayed_free_requests["p"] == 480.0
+
+    now[0] = 80.0
+    assert thread._handle_heartbeat("engine-p", ["p"])
+    assert thread.delayed_free_requests["p"] == 480.0
+
+    now[0] = 240.0
+    assert thread._handle_heartbeat("engine-p", ["p"])
+    assert thread.delayed_free_requests["p"] == 560.0
 
 
 def test_same_engine_cannot_change_endpoint_or_lease_duration():
