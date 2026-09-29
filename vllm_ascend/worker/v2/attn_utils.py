@@ -48,6 +48,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+from vllm_ascend.attention.metadata_reuse import KVCacheGroupMetadataReuse
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -296,6 +297,8 @@ def build_attn_metadata(
         positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
 
     attn_metadata: dict[str, Any] = {}
+    # Local to one invocation: never retain request state across steps/captures.
+    metadata_reuse = KVCacheGroupMetadataReuse(enabled=pcp_context is None and dcp_local_seq_lens is None)
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
@@ -364,19 +367,16 @@ def build_attn_metadata(
                     pcp_cache_group_idx=i,
                 )
 
-            if for_cudagraph_capture:
-                metadata = attn_metadata_builder.build_for_cudagraph_capture(
-                    common_attn_metadata,
-                    **attn_metadata_extra_kwargs,
-                )
-            else:
-                if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
-                    attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
-                metadata = attn_metadata_builder.build(
-                    common_prefix_len=0,
-                    common_attn_metadata=common_attn_metadata,
-                    **attn_metadata_extra_kwargs,
-                )
+            if not for_cudagraph_capture and isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
+                attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
+            metadata = metadata_reuse.build(
+                attn_metadata_builder,
+                common_attn_metadata,
+                group_spec=kv_cache_spec.kv_cache_spec,
+                common_kwargs=dict(common_attn_metadata_extra_kwargs, is_prefilling=common_is_prefilling),
+                build_kwargs=attn_metadata_extra_kwargs,
+                for_capture=for_cudagraph_capture,
+            )
             if is_dsa_builder:
                 # Preserve sharing even if a builder replaces one of the
                 # dictionaries while constructing its metadata.

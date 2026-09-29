@@ -341,6 +341,15 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_reuse_kv_cache_groups_additional_config(self, mock_fix_incompatible_config):
+        self.assertFalse(init_ascend_config(VllmConfig()).reuse_kv_cache_groups)
+        for enabled in (True, False):
+            clear_ascend_config()
+            config = VllmConfig(additional_config={"reuse_kv_cache_groups": enabled})
+            self.assertIs(init_ascend_config(config).reuse_kv_cache_groups, enabled)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_without_additional_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         # No additional config given, check the default value here.
