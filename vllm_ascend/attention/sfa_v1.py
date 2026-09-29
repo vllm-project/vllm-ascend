@@ -1647,7 +1647,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             packed_head_dim = self.sfa_qsfa_packed_kv_head_dim
             assert packed_kv.shape[-1] == packed_head_dim
             assert kv_cache is not None
-            DeviceOperator.scatter_cache(packed_kv, kv_cache[0], slot_mapping_sfa, attn_metadata.num_actual_tokens)
+            DeviceOperator.scatter_cache(
+                kv_cache[0].view(-1, packed_head_dim),
+                slot_mapping_sfa.view(-1, 1),
+                packed_kv.view(-1, packed_head_dim),
+            )
 
         return k_pe, k_nope
 

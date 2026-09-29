@@ -57,10 +57,13 @@ class HardwareCapability(Enum):
     ATB_WARMUP = auto()
     # Register fake/meta implementations for the custom BGMV and SGMV LoRA ops.
     BGMV_SGMV_META_REGISTRATION = auto()
-    # Stride-aware scatter kernel for paged cache writes (A2/A3 ABI).
+    # SK scatter kernel for paged cache writes (A2/A3/A5 ABI).
     SCATTER_ND_CACHE_STORE = auto()
-    # CANN ScatterPaCache for contiguous paged caches (A5 ABI).
-    SCATTER_PA_CACHE_STORE = auto()
+    # Extend SK cache writes to non-overlapping row-strided destinations.
+    # A5 is excluded until arch35 handles their storage bounds correctly.
+    SCATTER_ND_STRIDED_CACHE_STORE = auto()
+    # Extend SK cache writes to FP8 E4M3FN/E5M2 (A5 ABI).
+    SCATTER_ND_FP8_CACHE_STORE = auto()
     # Allow the CANN MegaMoe fused-MC2 path when its model, EP, and config checks pass.
     CANN_MEGAMOE = auto()
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
@@ -249,6 +252,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SCATTER_ND_CACHE_STORE,
+        HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE,
         HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER,
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
@@ -326,7 +330,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=frozenset(
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
-                    HardwareCapability.SCATTER_PA_CACHE_STORE,
+                    HardwareCapability.SCATTER_ND_CACHE_STORE,
+                    HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
                     HardwareCapability.BGMV_SGMV_META_REGISTRATION,
                     HardwareCapability.CANN_MEGAMOE,
                     HardwareCapability.CANN_MEGAMOE_MXFP,
