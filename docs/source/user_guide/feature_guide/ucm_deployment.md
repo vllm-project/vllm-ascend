@@ -61,7 +61,7 @@ UCM currently provides the following capabilities:
 - vLLM-Ascend (main branch)
 - SGLang (main branch)
 
-> **Note**: For the complete and latest support matrix, refer to [UCM Support Matrix](https://ucm.readthedocs.io/en/latest/user-guide/support-matrix/support_matrix.html).
+> **Note**: For the complete and latest support matrix, refer to [UCM Support Matrix](https://ucm.readthedocs.io/en/latest/user-guide/support-matrix/).
 
 ## Deployment Guide
 
@@ -74,7 +74,7 @@ UCM currently provides the following capabilities:
 
 ### UCM Installation
 
-**Please refer to the [official UCM installation guide for Ascend NPU](https://ucm.readthedocs.io/en/latest/getting-started/quickstart_vllm_ascend.html)**
+**Please refer to the [official UCM installation guide for Ascend NPU](https://ucm.readthedocs.io/en/latest/user-guide/quick_start/#vllm-ascend)**
 
 ### PD Disaggregation Scenario
 
@@ -114,7 +114,7 @@ Key configuration parameters:
 
 - **storage_backends**: The shared storage directory accessible from all nodes (e.g., NFS-mounted path or 3FS). For cross-node PD disaggregation, this must be a shared storage path.
 
-> **Note**: PipelineStore is the recommended connector for UCM. It chains Cache Store (Device ↔ Host) and Posix Store (Host ↔ Storage backend) for optimal transfer performance. For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html).
+> **Note**: PipelineStore is the recommended connector for UCM. It chains Cache Store (Device ↔ Host) and Posix Store (Host ↔ Storage backend) for optimal transfer performance. For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/developer-guide/cache-configuration/pipeline/#pipeline-store).
 
 **Step 2: Run Prefill Servers**
 
