@@ -8,6 +8,7 @@ import threading
 import unittest
 from dataclasses import replace
 from types import MethodType, SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -233,7 +234,7 @@ class TestGLM53Store(unittest.TestCase):
     def test_memcache_layerwise_round_trip_keeps_each_tp_state(self):
         plan = make_glm53_plan()
         block_hash = bytes([1]) * 32
-        buffers = {}
+        buffers: dict[str, Any] = {}
         readable = set()
 
         def alloc(keys, sizes, ttl):
@@ -376,7 +377,7 @@ class TestGLM53Store(unittest.TestCase):
             make_worker(self, kv_cache_config=make_glm53_plan(), use_layerwise=True, use_mla=True)
 
     def test_empty_final_layer_waits_for_pending_save_before_reusing_events(self):
-        pending = queue.Queue()
+        pending: queue.Queue[str] = queue.Queue()
         pending.put("earlier-layer-save")
         entered = threading.Event()
         finished = threading.Event()
@@ -420,7 +421,7 @@ class TestGLM53Store(unittest.TestCase):
         self.assertEqual(worker.current_layer, 2)
 
     def test_empty_final_layer_propagates_pending_transfer_failure(self):
-        pending = queue.Queue()
+        pending: queue.Queue[str] = queue.Queue()
         pending.put("failed-save")
         worker = SimpleNamespace(
             use_block_key_layerwise=False,
