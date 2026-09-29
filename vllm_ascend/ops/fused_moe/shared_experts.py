@@ -545,7 +545,9 @@ class AscendSharedExperts:
         # A scale bias is part of the registered linear scheme's math, while
         # the direct A8 path below has no scale-bias input. Keep such formats on
         # their linear wrappers instead of silently dropping that correction.
-        has_scale_bias = hasattr(self.layer.gate_up_proj, "scale_bias") or hasattr(self.layer.down_proj, "scale_bias")
+        has_scale_bias = isinstance(getattr(self.layer.gate_up_proj, "scale_bias", None), torch.Tensor) or isinstance(
+            getattr(self.layer.down_proj, "scale_bias", None), torch.Tensor
+        )
         if has_scale_bias:
             return SharedExpertMLPPath.LINEAR_WRAPPER
         if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):

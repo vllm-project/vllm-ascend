@@ -224,6 +224,7 @@ class TestAscendModelSlimConfig(TestBase):
                 "vllm_ascend.quantization.methods.w4a8.w4a8.get_tensor_model_parallel_world_size",
                 return_value=1,
             ),
+            patch("vllm_ascend.quantization.methods.w4a8.w4a8.mlp_tp_enable", return_value=False),
         ):
             method = config.get_quant_method(linear_layer, prefix)
 
