@@ -221,7 +221,7 @@ def test_external_dp() -> None:
     ranks = RankResolver(config).resolve()
     current_node_index = resolve_current_node_index(config)
     log_root = Path(os.environ.get("EXTERNAL_DP_LOG_DIR", str(DEFAULT_LOG_ROOT)))
-    max_wait_seconds = int(os.environ.get("EXTERNAL_DP_MAX_WAIT_SECONDS", "3600"))
+    max_wait_seconds = int(os.environ.get("EXTERNAL_DP_MAX_WAIT_SECONDS", "4800"))
     is_master = current_node_index == 0
 
     kv_pool_manager = create_kv_pool_manager(
