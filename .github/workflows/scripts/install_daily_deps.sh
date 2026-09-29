@@ -76,7 +76,7 @@ esac
 # Set INSTALL_TRITON_ASCEND=true to enable triton-ascend daily installation.
 echo "Install triton-ascend..."
 TRITON_ASCEND_URL="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/triton-ascend/${TRITON_ASCEND_VERSION}/triton_ascend-${TRITON_ASCEND_PACKAGE_VERSION}-cp312-cp312-manylinux_2_27_${ARCH}.manylinux_2_28_${ARCH}.whl"
-python3 -m pip install "$TRITON_ASCEND_URL" --force-reinstall
+python3 -m pip install "$TRITON_ASCEND_URL"
 
 # ---- torch-npu ----
 echo "Download, extract and install torch-npu..."
