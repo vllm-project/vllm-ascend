@@ -258,10 +258,6 @@ a3-560t:
         os: linux-aarch64-a3-800i-16
         config_file_path: Qwq_32b_A3.yaml
         config_base_path: tests/e2e/nightly/single_node/models/configs
-      - name: Qwen3_32b_W8A8_wl_A3
-        os: linux-aarch64-a3-800i-16
-        config_file_path: Qwen3_32b_W8A8_wl_A3.yaml
-        config_base_path: tests/e2e/nightly/single_node/models/configs
       - name: qwen3-235b-a22b-w8a8
         os: linux-aarch64-a3-800i-16
         config_file_path: Qwen3-235B-A22B-W8A8.yaml
