@@ -13,39 +13,48 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import pytest
 import torch
 
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
 
-def test_zero_block_ids_supports_non_uniform_page_sizes() -> None:
-    """Each segment must use its own block stride when zeroing KV cache."""
-    # Serving initializes this once during worker startup. Standalone Triton
-    # tests must initialize it before AscendKVBlockZeroer queries vector cores.
+@pytest.fixture(scope="module", autouse=True)
+def init_triton_device_properties() -> None:
     init_device_properties_triton()
+
+
+@pytest.mark.parametrize(
+    ("page_sizes", "block_size"),
+    [
+        pytest.param((16384, 4096), 4096, id="non-uniform"),
+        pytest.param((16384, 16384), 8192, id="uniform"),
+    ],
+)
+def test_zero_block_ids(page_sizes: tuple[int, int], block_size: int) -> None:
+    """Only the requested blocks are zeroed for every KV cache segment."""
     device = torch.device("npu")
-    num_blocks = 4
-    k_cache = torch.ones((num_blocks, 16384), dtype=torch.int32, device=device)
-    v_cache = torch.ones((num_blocks, 4096), dtype=torch.int32, device=device)
+    num_blocks = 5
+    block_ids = [0, 2, num_blocks - 1]
+    caches = [torch.ones((num_blocks, page_size), dtype=torch.int32, device=device) for page_size in page_sizes]
     zeroer = AscendKVBlockZeroer(device, pin_memory=False)
     zeroer._meta = (
         torch.tensor(
-            [k_cache.data_ptr(), v_cache.data_ptr()],
+            [cache.data_ptr() for cache in caches],
             dtype=torch.uint64,
             device=device,
         ),
-        torch.tensor([16384, 4096], dtype=torch.int64, device=device),
-        4,
-        4096,
-        2,
+        torch.tensor(page_sizes, dtype=torch.int64, device=device),
+        max(page_sizes) // block_size,
+        block_size,
+        len(caches),
     )
 
-    zeroer.zero_block_ids([1, 2])
+    zeroer.zero_block_ids(block_ids)
     torch.npu.synchronize()
 
-    for cache in (k_cache, v_cache):
-        assert torch.all(cache[0] == 1)
-        assert torch.all(cache[1] == 0)
-        assert torch.all(cache[2] == 0)
-        assert torch.all(cache[3] == 1)
+    for cache in caches:
+        expected = torch.ones_like(cache)
+        expected[block_ids] = 0
+        assert torch.equal(cache, expected)

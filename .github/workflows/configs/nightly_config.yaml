@@ -42,6 +42,10 @@ a2:
       - name: Qwen3.8-27B-w8a8-A2
         os: linux-aarch64-a2b3-2
         config_file_path: Qwen3.8-27B-w8a8-A2.yaml
+      # Python-driven tests
+      - name: kv-block-zeroer
+        os: linux-aarch64-a2b3-1
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kv_block_zeroer.py
   multi_node:
     test_config:
       - name: multi-node-qwen3-235b-dp
