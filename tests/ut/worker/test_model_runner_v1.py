@@ -1300,7 +1300,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 )
                 with (
                     patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config", return_value=layers),
-                    patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=False),
                     patch(
                         "vllm_ascend.core.kv_cache_interface.get_ascend_device_type", return_value=AscendDeviceType.A5
                     ),
