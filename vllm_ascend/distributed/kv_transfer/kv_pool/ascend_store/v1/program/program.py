@@ -1,18 +1,13 @@
-"""Run the compiled KV Pool graph over request-local values.
+"""Evaluate request-local values through one compiled KV Pool program.
 
-Node labels describe two independent properties: ``D`` changes the domain representation,
-``V`` selects a configured variant, and ``F`` is fixed rather than variant. Compilation fixes
-every ``V`` node once; each request selects an existing subgraph without rebuilding the graph.
+Compilation fixes the stage implementations and legal edges. Lookup, Load, range Store and
+checkpoint Store select existing subpaths; they do not rebuild the program. The complete logical
+order is semantic selection, local Block resolution, Store ownership, transfer-region projection,
+consumer partition, remote-object formation, binding and Store admission. Runtime-owned timelines
+then schedule Backend I/O and return evidence.
 
-1. Lookup: Reachability[D,V] -> Chunk[D,F] -> Remote identity[D,F] -> Remote object[D,F]
-   -> observation -> Availability[D,F] -> reachable frontier[-,V].
-2. Load: Reachability[D,V] -> Chunk[D,F] -> Local Block[D,F] -> Transfer Layout[D,V]
-   -> Remote object[D,F] -> Binding[D,F] -> traversal[-,F].
-3. Range Store: Reachability[D,V] -> Chunk[D,F] -> Local Block[D,F] -> shared Store tail.
-4. Checkpoint Store: Checkpoint Chunk[D,F] -> Checkpoint Block[D,F] -> shared Store tail.
-
-The shared Store tail is Ownership[-,V] -> Transfer Layout[D,V] -> Partition[-,V]
--> Remote object[D,F] -> Binding[D,F] -> Admission[-,V].
+A logical stage does not require a dedicated class. Variant stages use compiled implementations;
+fixed transformations and joins remain plain functions.
 """
 
 from __future__ import annotations
