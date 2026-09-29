@@ -9,10 +9,19 @@ tracer observes the runtime; it does not mask writes or repair caches.
 
 This branch adds allocator generations, scheduler-to-worker context, and log
 completeness checks. These are diagnostic records, not a runtime KV guard.
-Validation for this increment is CPU-only; NPU execution, real PD integration
-and performance remain unverified. PD content checksums, device completion
-tracking, offload adapters, ring-buffer checkpoints and hot reload remain
-future work. The writer still performs synchronous JSONL I/O.
+Targeted Ascend 910B4 validation now covers v1 eager Qwen inference, prefix reuse
+and one real Mooncake 1P1D transfer with request/block correlation. Controlled
+NPU mutations confirmed both observed changes and missed changes outside the
+sampled blocks or before the observation window. Complete logging is not an
+integrity guarantee.
+
+DeepSeek-V2-Lite TP4+EP captured all 27 layers on all four ranks for the first
+request; a second prefix-hit request failed in native attention with tracing
+both enabled and disabled. PD also showed native shutdown errors in both arms.
+These limited runs do not establish production stability or reproduce the PPT
+faults. Performance, PD content checksums, device completion tracking, offload
+adapters, ring-buffer checkpoints and hot reload remain future work. The writer
+still performs synchronous JSONL I/O.
 
 ## Enable tracing
 

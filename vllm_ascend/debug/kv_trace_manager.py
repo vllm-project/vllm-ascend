@@ -235,7 +235,7 @@ class ManagerTrace:
                 for request_id in output.finished_req_ids:
                     self.revisions.pop(request_id, None)
                 computed = {
-                    req.request_id: req.num_computed_tokens for req in getattr(output, "scheduled_new_reqs", ())
+                    req.req_id: req.num_computed_tokens for req in getattr(output, "scheduled_new_reqs", ())
                 }
                 cached = getattr(output, "scheduled_cached_reqs", None)
                 if cached is not None:

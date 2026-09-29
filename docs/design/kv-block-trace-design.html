@@ -18,8 +18,8 @@ main{max-width:1440px;padding-top:40px}header{padding-bottom:24px}h1{font-size:4
 <main><header><div class="eyebrow">KV block tracing / Visual design</div><h1>七张图，讲清 KV Block 全链路 Trace</h1>
 <p class="lead">追踪<strong>哪块数据、归谁使用、经过哪里、何时变坏</strong>。</p>
 <p class="brief">核心方案：统一块身份，串起调度、实际读写和搬运事件，用边界校验定位首次差异。</p>
-<p class="brief"><strong>P0 初版已实现：</strong>BlockPool 分配代次、Scheduler→Worker 上下文、host 映射比对、pool/epoch 查询与日志完整性检查。图中 PD 内容校验、设备完成、外存适配及环形 checkpoint 仍属后续设计；尚未完成 NPU 验证。<a href="../source/user_guide/feature_guide/kv_block_trace.md">使用说明</a></p>
-<details class="baseline-summary"><summary>展开版本与参考信息</summary><p class="meta">分支 <code>codex/kv-block-trace-design</code> · 实现基线 <code>a331676c</code><br>上游参考 <code>dc68bd8c4199b00631fe71eb37313f406cc66ac1</code> · 输入 <code>debug_trace.pptx</code>（24 页）。图解基线保留；当前分支已增加 P0 初版实现，CPU 验证见使用说明，NPU 验证未执行。</p></details>
+<p class="brief"><strong>P0 初版已实现：</strong>BlockPool 分配代次、Scheduler→Worker 上下文、host 映射比对、pool/epoch 查询与日志完整性检查。图中 PD 内容校验、设备完成、外存适配及环形 checkpoint 仍属后续设计；已完成限定 NPU 验证；PPT 式数值与首次污染定位仍未闭环。<a href="../source/user_guide/feature_guide/kv_block_trace.md">使用说明</a></p>
+<details class="baseline-summary"><summary>展开版本与参考信息</summary><p class="meta">分支 <code>codex/kv-block-trace-design</code> · 实现基线 <code>a331676c</code><br>上游参考 <code>dc68bd8c4199b00631fe71eb37313f406cc66ac1</code> · 输入 <code>debug_trace.pptx</code>（24 页）。图解基线保留；当前分支已增加 P0 初版实现，CPU 和限定 NPU 验证见使用说明；真实 PD 关联已通过，native 异常与内容覆盖缺口已记录。</p></details>
 <p class="mobile-note">窄屏可横向滑动图示，或点“放大”。每张图都可单独下载为 SVG。</p></header>
 <section class="visual-section" id="fig-chain">
 <h2><span class="n">图 01</span>全链路：哪些环节需要看见</h2>
@@ -630,7 +630,7 @@ python tools/kv_block_trace.py /tmp/kv-traces/pd-case4-001 --engine ENGINE_ID --
 <h3>验证记录必须能复查</h3>
 <p>先跑 schema / 状态回放 / CLI 的 CPU 测试，再在目标 Ascend 环境验证 v1 eager、graph、PD 和对应 connector。每条结论保留：精确 commit、实际模块 <code>__file__</code>、启动命令、trace 配置、拓扑、触发用例、关键事件 ID、device completion 证据和输出差异。源码修改、安装包、实际加载模块分开记录。</p>
 <p>性能测量至少比较 off、当前实现、拟 trace、check、deep：吞吐、TTFT/TPOT 的 p50/p99、CPU、RSS/NPU 内存、D2H bytes、日志速率、丢事件和 snapshot 停顿。先 warmup，再做同一 workload 交错 A/B。建议把 off 的变化限于测量噪声、trace 模式吞吐与 p99 延迟劣化不超过 2% 作为首轮目标；这是待验证目标，不能据 PPT 的约 1% 直接宣布达标。check/deep 单列成本。</p>
-<p><strong>退出条件：</strong>选定 P0/P1 配置可还原完整生命周期，故障注入定位到对应第一条失败边，正常边界无误报，未覆盖路径不会给出安全结论。更大范围的“全链路”必须在 P2/P3 逐项验收后更新 capability。当前分支交付设计与 P0 初版 CPU 验证；完整 P0 checkpoint、P1 内容闭环及 NPU 性能、长稳实验仍待完成。</p>
+<p><strong>退出条件：</strong>选定 P0/P1 配置可还原完整生命周期，故障注入定位到对应第一条失败边，正常边界无误报，未覆盖路径不会给出安全结论。更大范围的“全链路”必须在 P2/P3 逐项验收后更新 capability。当前分支交付设计、P0 初版及限定 NPU 验证；详见 kv-block-trace-validation-20260929.md。完整 P0 checkpoint、P1 内容闭环、NPU 性能与长稳实验仍待完成。</p>
 <h3>实施前需要锁定的选择</h3>
 <p>以 <code>a331676c</code> 的 v1 + MooncakeConnectorV1 为首条链路；源码以仓库指定 upstream commit 为准。落地时先确定可交付的上游调度协议 observer 扩展、目标机器实际 runner / connector / layout，以及 incident 原始数据的本地保留预算。缺少前两项时可以完成部分 trace，不能声称端到端强校验。</p>
 </section>

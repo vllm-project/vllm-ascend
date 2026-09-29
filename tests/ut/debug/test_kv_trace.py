@@ -517,6 +517,22 @@ def test_mapping_revision_changes_only_for_new_mapping_or_epoch(tmp_path):
     assert third["requests"][0]["mapping_revision"] == 2
 
 
+def test_dispatch_reads_upstream_new_request_req_id(tmp_path):
+    trace = writer(tmp_path)
+    manager = AllocatorManager()
+    manager_module.attach_manager_trace(manager, trace)
+    request = NS(request_id="new-request", status="RUNNING", num_computed_tokens=0)
+    manager.allocate_slots(request, 1)
+    message = ScheduleMessage({"new-request": 3})
+    # vLLM NewRequestData uses req_id, whereas Request uses request_id.
+    message.scheduled_new_reqs = [NS(req_id="new-request", num_computed_tokens=0)]
+    scheduler = NS(schedule=lambda: message)
+    manager._ascend_kv_trace.wrap_schedule(scheduler)
+    output = scheduler.schedule()
+    assert output._ascend_kv_trace_context["requests"][0]["num_computed_tokens"] == 0
+    assert not any(row["event"] == "trace.observation_error" for row in events(tmp_path))
+
+
 def test_worker_mismatch_missing_context_and_dummy_do_not_inherit_owners(tmp_path):
     trace = writer(tmp_path, device_metadata=False)
     scheduler, _ = make_scheduler(writer(tmp_path))
