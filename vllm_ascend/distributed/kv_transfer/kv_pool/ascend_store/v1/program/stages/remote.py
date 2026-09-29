@@ -1,11 +1,23 @@
-"""Project canonical remote keys into Backend-visible object representations."""
+"""Project semantic chunks into canonical and physical Backend objects."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
-from ..representation import PhysicalCoordinate, RemoteKVObject, RemoteObjectBatch, RemoteObjectKeyBatch
-from ..spec.topology import KVPoolTopology
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import PoolKey, block_hash_to_str
+
+from ..representation import (
+    KVChunk,
+    KVChunkBatch,
+    PhysicalCoordinate,
+    RemoteKVObject,
+    RemoteObjectBatch,
+    RemoteObjectKey,
+    RemoteObjectKeyBatch,
+    TransferRegionBatch,
+)
+from ..spec.topology import KVPoolGroupTopology, KVPoolTopology
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,8 +64,29 @@ class _RemoteKeyTemplate:
         )
 
 
+def project_remote_identities(
+    batches: tuple[KVChunkBatch, ...],
+    groups_by_id: Mapping[int, KVPoolGroupTopology],
+    transfer_group_ids: tuple[int, ...],
+) -> tuple[RemoteObjectKeyBatch, ...]:
+    """Project semantic chunks into canonical Backend identities."""
+
+    group_ids = tuple(dict.fromkeys(batch.group_id for batch in batches))
+    if any(group_id not in transfer_group_ids for group_id in group_ids):
+        raise ValueError(f"KV chunk groups {group_ids} are not contained in compiled groups {transfer_group_ids}")
+    projected = []
+    for batch in batches:
+        metadata = groups_by_id[batch.group_id].key_metadata
+        keys = tuple(
+            RemoteObjectKey(chunk, PoolKey(metadata, block_hash_to_str(chunk.content_hash)).to_string())
+            for chunk in batch.chunks
+        )
+        projected.append(RemoteObjectKeyBatch(batch.group_id, keys))
+    return tuple(projected)
+
+
 class RemoteObjectProjection:
-    """Expand canonical Backend keys into every representation required by Lookup."""
+    """Materialize canonical identities as Backend objects at compiled physical coordinates."""
 
     def __init__(self, topology: KVPoolTopology) -> None:
         groups_by_id = {group.group_id: group for group in topology.groups}
@@ -67,25 +100,62 @@ class RemoteObjectProjection:
             )
             for group in groups
         }
-        self._representations = tuple(
-            _RemoteRepresentation(
-                PhysicalCoordinate(pp_rank=pp_rank, dcp_rank=dcp_rank, head_rank=head_rank),
-                (str(dcp_rank), str(head_rank), str(pp_rank)),
+        self._representations_by_group = {
+            group.group_id: tuple(
+                _RemoteRepresentation(
+                    PhysicalCoordinate(pp_rank=pp_rank, dcp_rank=dcp_rank, head_rank=head_rank),
+                    (str(dcp_rank), str(head_rank), str(pp_rank)),
+                )
+                for pp_rank in range(topology.pp_size)
+                for dcp_rank in range(topology.dcp_size)
+                for head_rank in range(
+                    topology.tp_size if group.uses_align_state else topology.tp_partition.key_rank_count
+                )
             )
-            for pp_rank in range(topology.pp_size)
-            for dcp_rank in range(topology.dcp_size)
-            for head_rank in range(topology.tp_partition.key_rank_count)
-        )
+            for group in groups
+        }
 
-    def project(self, batches: tuple[RemoteObjectKeyBatch, ...]) -> tuple[RemoteObjectBatch, ...]:
+    def project_lookup(self, batches: tuple[RemoteObjectKeyBatch, ...]) -> tuple[RemoteObjectBatch, ...]:
         group_ids = tuple(batch.group_id for batch in batches)
         if group_ids != self.group_ids:
             raise ValueError(f"Remote object key groups {group_ids} do not match compiled groups {self.group_ids}")
-        return tuple(self._project_batch(batch) for batch in batches)
+        return tuple(self._project_lookup_batch(batch) for batch in batches)
 
-    def _project_batch(self, batch: RemoteObjectKeyBatch) -> RemoteObjectBatch:
-        if len(self._representations) == 1:
-            representation = self._representations[0]
+    def project_transfer(
+        self,
+        regions: TransferRegionBatch,
+        object_keys: RemoteObjectKeyBatch,
+    ) -> RemoteObjectBatch:
+        if regions.group_id != object_keys.group_id:
+            raise ValueError(
+                f"Transfer region group {regions.group_id} does not match remote object key group "
+                f"{object_keys.group_id}"
+            )
+        templates = {item.chunk: _RemoteKeyTemplate.compile(item.base_key) for item in object_keys.keys}
+        projected: dict[tuple[KVChunk, PhysicalCoordinate], RemoteKVObject] = {}
+        remote_objects = []
+        for region in regions.regions:
+            chunk = region.region.chunk
+            try:
+                template = templates[chunk]
+            except KeyError as error:
+                raise ValueError(f"KV transfer region has no remote object key: {chunk}") from error
+            object_identity = chunk, region.coordinate
+            remote_object = projected.get(object_identity)
+            if remote_object is None:
+                remote_object = RemoteKVObject(
+                    chunk,
+                    template.render(self._rank_values(regions.group_id, region.coordinate)),
+                    region.coordinate,
+                )
+                projected[object_identity] = remote_object
+            remote_objects.append(remote_object)
+        return RemoteObjectBatch(regions.group_id, tuple(remote_objects))
+
+    def _project_lookup_batch(self, batch: RemoteObjectKeyBatch) -> RemoteObjectBatch:
+        representations = self._representations_by_group[batch.group_id]
+        if len(representations) == 1:
+            representation = representations[0]
             if representation.rank_values == self._base_rank_values[batch.group_id]:
                 objects = tuple(
                     RemoteKVObject(item.chunk, item.base_key, representation.coordinate) for item in batch.keys
@@ -95,24 +165,24 @@ class RemoteObjectProjection:
         templates = tuple(_RemoteKeyTemplate.compile(item.base_key) for item in batch.keys)
         objects = tuple(
             RemoteKVObject(item.chunk, template.render(representation.rank_values), representation.coordinate)
-            for representation in self._representations
+            for representation in representations
             for item, template in zip(batch.keys, templates, strict=True)
         )
         return RemoteObjectBatch(batch.group_id, objects)
 
-
-def replace_key_rank(key: str, field: str, rank: int) -> str:
-    """Replace one rank component in an AscendStore Backend key."""
-
-    marker = f"@{field}:"
-    marker_start = key.find(marker)
-    if marker_start < 0:
-        return key
-    value_start = marker_start + len(marker)
-    value_end = key.find("@", value_start)
-    if value_end < 0:
-        value_end = len(key)
-    return f"{key[:value_start]}{rank}{key[value_end:]}"
+    def _rank_values(self, group_id: int, coordinate: PhysicalCoordinate) -> tuple[str, str, str]:
+        dcp_rank, head_rank, pp_rank = self._base_rank_values[group_id]
+        if coordinate.dcp_rank is not None:
+            dcp_rank = str(coordinate.dcp_rank)
+        if coordinate.head_rank is not None:
+            head_rank = str(coordinate.head_rank)
+        if coordinate.effective_tp_rank is not None:
+            head_rank = str(coordinate.effective_tp_rank)
+        if coordinate.pp_rank is not None:
+            pp_rank = str(coordinate.pp_rank)
+        if coordinate.consumer_pp_slice is not None:
+            pp_rank = str(coordinate.consumer_pp_slice)
+        return dcp_rank, head_rank, pp_rank
 
 
 def _required_rank_span(key: str, field: str) -> tuple[int, int]:

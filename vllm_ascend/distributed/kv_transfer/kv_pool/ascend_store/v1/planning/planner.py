@@ -2,27 +2,29 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.kv_cache_utils import BlockHash
 
 from ..coordinates import TokenRange
-from ..protocol.transfer import KVTransferStep, LoadCommand, LoadCommandBatch, StoreCommand, StoreCommandBatch
-from .availability import ExternalPrefixPlan, LookupQuery, RemoteAvailabilityProbe
-from .progress import (
-    AllocationLoadPublication,
-    LoadCandidate,
-    LoadPublication,
-    RequestSnapshot,
-    ScheduledLoadPublication,
+from ..protocol.transfer import (
+    CheckpointStoreCommand,
+    KVTransferStep,
+    LoadCommand,
+    LoadCommandBatch,
+    RangeStoreCommand,
+    StateCheckpointSource,
+    StoreCommand,
+    StoreCommandBatch,
 )
-from .spec import TransferPlanningSpec, resolve_transfer_planning_spec
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-    from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
-    from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.request import Request
+from .availability import ExternalPrefixPlan, LookupQuery, RemoteAvailabilityProbe
+from .progress import LoadCandidate, LoadPublication, RequestSnapshot
+from .spec import TransferPlanningSpec
+from .step import (
+    ScheduledRequest,
+    ScheduledRequestKind,
+    StateCheckpointHandoff,
+    TransferPlanningStep,
+)
 
 
 class TransferPlanner:
@@ -44,49 +46,16 @@ class TransferPlanner:
         self._save_decode_cache = save_decode_cache
         self._pending_loads: dict[str, LoadCandidate] = {}
         self.request_progress: dict[str, RequestSnapshot] = {}
-        self.requests: dict[str, Request] = {}
-        self.preempted_request_ids: set[str] = set()
-
-    @classmethod
-    def from_config(
-        cls,
-        vllm_config: VllmConfig,
-        kv_cache_config: KVCacheConfig,
-        lookup_address: str,
-    ) -> TransferPlanner:
-        """Construct the Scheduler planner from vLLM's immutable KV configuration."""
-
-        spec = resolve_transfer_planning_spec(vllm_config, kv_cache_config)
-        transfer_config = vllm_config.kv_transfer_config
-        extra_config = transfer_config.kv_connector_extra_config
-        load_publication: LoadPublication
-        if extra_config.get("load_async", False) and not extra_config.get("use_layerwise", False):
-            load_publication = AllocationLoadPublication()
-        else:
-            load_publication = ScheduledLoadPublication()
-        consumer_is_to_load = extra_config.get("consumer_is_to_load", False)
-        availability_probe = RemoteAvailabilityProbe(
-            lookup_address,
-            group_ids=spec.transfer_group_ids,
-            transfer_granularity=spec.cache_transfer_granularity,
-            discard_partial_chunks=spec.discard_partial_chunks,
-            enabled=transfer_config.kv_role != "kv_consumer" or consumer_is_to_load,
-        )
-        consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
-        store_enabled = transfer_config.kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
-        return cls(
-            spec,
-            availability_probe,
-            load_publication,
-            store_enabled=store_enabled,
-            save_decode_cache=extra_config.get("save_decode_cache", False),
-        )
 
     def lookup(self, query: LookupQuery) -> ExternalPrefixPlan:
         availability = self._availability_probe.query(query)
         if availability is None:
             return ExternalPrefixPlan(0, False)
-        candidate = LoadCandidate(availability.load_range, availability.matched_end_token)
+        candidate = LoadCandidate(
+            availability.load_range,
+            availability.matched_end_token,
+            availability.tail_key_boundaries,
+        )
         self._pending_loads[query.request_id] = candidate
         return ExternalPrefixPlan(
             availability.matched_end_token - query.local_cached_tokens,
@@ -94,10 +63,13 @@ class TransferPlanner:
         )
 
     def confirm_allocation(
-        self, request: Request, blocks: tuple[list[int], ...], allocated_external_tokens: int
+        self,
+        request_id: str,
+        block_ids_by_group: tuple[tuple[int, ...], ...],
+        block_hashes: tuple[BlockHash, ...],
+        num_prompt_tokens: int,
+        allocated_external_tokens: int,
     ) -> None:
-        request_id = request.request_id
-        self.requests[request_id] = request
         candidate = self._pending_loads.get(request_id)
         if candidate is None or allocated_external_tokens == 0:
             return
@@ -111,71 +83,90 @@ class TransferPlanner:
         self.request_progress[request_id] = RequestSnapshot(
             request_id,
             candidate.load_range.end_token,
-            tuple(tuple(group_block_ids) for group_block_ids in blocks),
-            tuple(request.block_hashes),
-            len(request.prompt_token_ids),
+            block_ids_by_group,
+            block_hashes,
+            num_prompt_tokens,
         )
 
-    def build_step(self, scheduler_output: SchedulerOutput) -> KVTransferStep:
-        self._discard_finished_and_preempted(scheduler_output)
-        load_commands, store_commands = self._plan_scheduled_requests(scheduler_output)
+    def build_step(self, planning_step: TransferPlanningStep) -> KVTransferStep:
+        self._discard_finished_and_preempted(planning_step)
+        load_commands, planned_store_commands = self._plan_scheduled_requests(planning_step.scheduled_requests)
+        store_commands: list[StoreCommand] = list(planned_store_commands)
         load_commands.extend(self._publish_allocation_ready_load_commands())
+        store_commands.extend(self._plan_checkpoint_stores(planning_step.checkpoint_handoffs))
         return KVTransferStep(
             LoadCommandBatch(tuple(load_commands)),
             StoreCommandBatch(tuple(store_commands)),
         )
 
+    def _plan_checkpoint_stores(self, handoffs: tuple[StateCheckpointHandoff, ...]) -> list[CheckpointStoreCommand]:
+        if not self._store_enabled:
+            return []
+
+        commands = []
+        for handoff in handoffs:
+            snapshot = self.request_progress.get(handoff.request_id)
+            if snapshot is None:
+                continue
+            entries_by_boundary: dict[int, list[tuple[int, int]]] = {}
+            for source in handoff.sources:
+                if (
+                    source.group_id in self._spec.transfer_group_ids
+                    and source.block_id > 0
+                    and 0 < source.boundary_token <= snapshot.request_token_len
+                ):
+                    entries_by_boundary.setdefault(source.boundary_token, []).append((source.group_id, source.block_id))
+            for boundary_token, boundary_entries in sorted(entries_by_boundary.items()):
+                commands.append(
+                    CheckpointStoreCommand(
+                        handoff.request_id,
+                        snapshot.block_ids_by_group,
+                        handoff.block_hashes,
+                        snapshot.published_store_end_token,
+                        tuple(
+                            StateCheckpointSource(group_id, block_id, boundary_token)
+                            for group_id, block_id in boundary_entries
+                        ),
+                    )
+                )
+        return commands
+
     def close(self) -> None:
         self._availability_probe.close()
 
-    def _discard_finished_and_preempted(self, scheduler_output: SchedulerOutput) -> None:
-        for request_id in scheduler_output.finished_req_ids:
+    def _discard_finished_and_preempted(self, planning_step: TransferPlanningStep) -> None:
+        for request_id in planning_step.finished_request_ids:
             self._discard_request(request_id)
-        for request_id in scheduler_output.preempted_req_ids:
-            self.preempted_request_ids.add(request_id)
-            self.request_progress.pop(request_id, None)
-            self.requests.pop(request_id, None)
-            self._pending_loads.pop(request_id, None)
-            self._load_publication.discard(request_id)
+        for request_id in planning_step.preempted_request_ids:
+            self._discard_request(request_id)
 
     def _discard_request(self, request_id: str) -> None:
         self.request_progress.pop(request_id, None)
-        self.requests.pop(request_id, None)
-        self.preempted_request_ids.discard(request_id)
         self._pending_loads.pop(request_id, None)
         self._load_publication.discard(request_id)
 
     def _plan_scheduled_requests(
-        self, scheduler_output: SchedulerOutput
-    ) -> tuple[list[LoadCommand], list[StoreCommand]]:
+        self, scheduled_requests: tuple[ScheduledRequest, ...]
+    ) -> tuple[list[LoadCommand], list[RangeStoreCommand]]:
         load_commands: list[LoadCommand] = []
-        store_commands: list[StoreCommand] = []
-        for scheduled_request in scheduler_output.scheduled_new_reqs:
-            self._append_commands(
-                self._plan_new_request(scheduled_request, scheduler_output),
-                load_commands,
-                store_commands,
-            )
-        if not self._store_enabled:
-            return load_commands, store_commands
-        cached = scheduler_output.scheduled_cached_reqs
-        for index, request_id in enumerate(cached.req_ids):
-            new_block_ids = cached.new_block_ids[index]
-            if request_id in self.preempted_request_ids:
-                if not new_block_ids:
-                    continue
-                commands = self._plan_resumed_request(request_id, new_block_ids, scheduler_output)
+        store_commands: list[RangeStoreCommand] = []
+        for scheduled_request in scheduled_requests:
+            if scheduled_request.kind is not ScheduledRequestKind.NEW and not self._store_enabled:
+                continue
+            if scheduled_request.kind is ScheduledRequestKind.NEW:
+                commands = self._plan_new_request(scheduled_request)
+            elif scheduled_request.kind is ScheduledRequestKind.RESUMED:
+                commands = self._plan_resumed_request(scheduled_request)
             else:
-                commands = self._plan_running_request(request_id, new_block_ids, scheduler_output)
+                commands = self._plan_running_request(scheduled_request)
             self._append_commands(commands, load_commands, store_commands)
         return load_commands, store_commands
 
     def _publish_allocation_ready_load_commands(self) -> list[LoadCommand]:
         commands = []
         for request_id, candidate in self._load_publication.take_ready():
-            request = self.requests.get(request_id)
             snapshot = self.request_progress.get(request_id)
-            if request is None or snapshot is None:
+            if snapshot is None:
                 raise ValueError(f"Request {request_id} is ready for asynchronous Load without allocated blocks")
             load_command, store_command = self._plan_commands(snapshot, candidate)
             if load_command is None or store_command is not None:
@@ -183,60 +174,50 @@ class TransferPlanner:
             commands.append(load_command)
         return commands
 
-    def _plan_new_request(
-        self, scheduled_request: NewRequestData, scheduler_output: SchedulerOutput
-    ) -> tuple[LoadCommand | None, StoreCommand | None]:
-        request_id = scheduled_request.req_id
-        candidate = self._take_scheduled_load(request_id)
-        request = self.requests.get(request_id)
-        if request is None:
-            raise ValueError(f"Request {request_id} is not in request progress, but it is scheduled as a new request")
+    def _plan_new_request(self, request: ScheduledRequest) -> tuple[LoadCommand | None, RangeStoreCommand | None]:
+        if request.block_ids_by_group is None:
+            raise ValueError(f"New request {request.request_id} has no allocated blocks")
+        scheduled_end_token = request.num_computed_tokens + request.num_scheduled_tokens
         snapshot = RequestSnapshot(
-            request_id,
-            scheduled_request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request_id],
-            tuple(tuple(group_block_ids) for group_block_ids in scheduled_request.block_ids),
-            tuple(request.block_hashes),
-            len(request.prompt_token_ids),
-        )
-        self.request_progress[request_id] = snapshot
-        return self._plan_commands(snapshot, candidate)
-
-    def _plan_resumed_request(
-        self, request_id: str, new_block_ids: tuple[list[int], ...], scheduler_output: SchedulerOutput
-    ) -> tuple[LoadCommand | None, StoreCommand | None]:
-        self.preempted_request_ids.discard(request_id)
-        candidate = self._take_scheduled_load(request_id)
-        request = self.requests.get(request_id)
-        if request is None:
-            raise ValueError(f"Request {request_id} is not in request progress, but it is scheduled after preemption")
-        snapshot = RequestSnapshot(
-            request_id,
-            request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request_id],
-            tuple(tuple(group_block_ids) for group_block_ids in new_block_ids),
-            tuple(request.block_hashes),
-            len(request.prompt_token_ids),
-        )
-        self.request_progress[request_id] = snapshot
-        return self._plan_commands(snapshot, candidate)
-
-    def _plan_running_request(
-        self, request_id: str, new_block_ids: tuple[list[int], ...] | None, scheduler_output: SchedulerOutput
-    ) -> tuple[LoadCommand | None, StoreCommand | None]:
-        request = self.requests.get(request_id)
-        is_decoding = request is not None and request.num_computed_tokens >= request.num_prompt_tokens
-        if is_decoding and not self._save_decode_cache:
-            return None, None
-        snapshot = self.request_progress.get(request_id)
-        if snapshot is None:
-            raise ValueError(f"Request {request_id} has no progress snapshot")
-        if request is None:
-            raise ValueError(f"Request {request_id} has no active vLLM request")
-        snapshot = snapshot.advance(
-            scheduler_output.num_scheduled_tokens[request_id],
-            new_block_ids,
+            request.request_id,
+            scheduled_end_token,
+            request.block_ids_by_group,
             request.block_hashes,
+            request.num_prompt_tokens,
+            committable_end_token=min(scheduled_end_token, request.current_token_count),
         )
-        self.request_progress[request_id] = snapshot
+        self.request_progress[request.request_id] = snapshot
+        return self._plan_commands(snapshot, self._take_scheduled_load(request.request_id))
+
+    def _plan_resumed_request(self, request: ScheduledRequest) -> tuple[LoadCommand | None, RangeStoreCommand | None]:
+        if request.block_ids_by_group is None:
+            raise ValueError(f"Resumed request {request.request_id} has no replacement blocks")
+        scheduled_end_token = request.num_computed_tokens + request.num_scheduled_tokens
+        snapshot = RequestSnapshot(
+            request.request_id,
+            scheduled_end_token,
+            request.block_ids_by_group,
+            request.block_hashes,
+            request.num_prompt_tokens,
+            committable_end_token=min(scheduled_end_token, request.current_token_count),
+        )
+        self.request_progress[request.request_id] = snapshot
+        return self._plan_commands(snapshot, self._take_scheduled_load(request.request_id))
+
+    def _plan_running_request(self, request: ScheduledRequest) -> tuple[LoadCommand | None, RangeStoreCommand | None]:
+        snapshot = self.request_progress.get(request.request_id)
+        if snapshot is None:
+            raise ValueError(f"Request {request.request_id} has no progress snapshot")
+        if request.num_computed_tokens >= snapshot.num_prompt_tokens and not self._save_decode_cache:
+            return None, None
+        scheduled_end_token = request.num_computed_tokens + request.num_scheduled_tokens
+        snapshot = snapshot.with_position(
+            scheduled_end_token,
+            request.block_ids_by_group,
+            request.block_hashes,
+            min(scheduled_end_token, request.current_token_count),
+        )
+        self.request_progress[request.request_id] = snapshot
         return self._plan_commands(snapshot, None)
 
     def _take_scheduled_load(self, request_id: str) -> LoadCandidate | None:
@@ -245,7 +226,7 @@ class TransferPlanner:
 
     def _plan_commands(
         self, snapshot: RequestSnapshot, candidate: LoadCandidate | None
-    ) -> tuple[LoadCommand | None, StoreCommand | None]:
+    ) -> tuple[LoadCommand | None, RangeStoreCommand | None]:
         if candidate is not None:
             return (
                 LoadCommand(
@@ -253,14 +234,15 @@ class TransferPlanner:
                     candidate.load_range,
                     snapshot.block_ids_by_group,
                     snapshot.block_hashes,
+                    candidate.tail_key_boundaries,
                 ),
                 None,
             )
-        transfer_end = self._resolve_transfer_end(snapshot.request_token_len, len(snapshot.block_hashes))
+        transfer_end = self._resolve_transfer_end(snapshot.store_end_token, len(snapshot.block_hashes))
         store_range = TokenRange(snapshot.published_store_end_token, transfer_end)
         if not self._should_store(store_range):
             return None, None
-        store_command = StoreCommand(
+        store_command = RangeStoreCommand(
             snapshot.request_id,
             store_range,
             snapshot.block_ids_by_group,
@@ -294,9 +276,9 @@ class TransferPlanner:
 
     @staticmethod
     def _append_commands(
-        commands: tuple[LoadCommand | None, StoreCommand | None],
+        commands: tuple[LoadCommand | None, RangeStoreCommand | None],
         load_commands: list[LoadCommand],
-        store_commands: list[StoreCommand],
+        store_commands: list[RangeStoreCommand],
     ) -> None:
         load_command, store_command = commands
         if load_command is not None:

@@ -108,6 +108,11 @@ class KVBlockAssignment:
 
     chunk: KVChunk
     block_id: int
+    memory_token_count: int
+
+    def __post_init__(self) -> None:
+        if self.memory_token_count <= 0:
+            raise ValueError("A KV block assignment must select a positive number of local tokens")
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +158,7 @@ class KVMemoryView:
 
 
 # ===============================
-# Executable Binding
+# Transfer Region
 # ===============================
 
 
@@ -169,6 +174,45 @@ class KVRegion:
             raise ValueError("A KV region must contain at least one physical layer")
         if tuple(sorted(set(self.physical_layer_ids))) != self.physical_layer_ids:
             raise ValueError("KV region physical layers must be unique and ordered")
+
+
+@dataclass(frozen=True, slots=True)
+class KVTransferRegion:
+    """A physical transfer region before it is joined to a remote object identity."""
+
+    region: KVRegion
+    coordinate: PhysicalCoordinate
+    remote_object_size: int
+    remote_offsets: tuple[int, ...]
+    memory: KVMemoryView
+
+    def __post_init__(self) -> None:
+        if self.remote_object_size <= 0:
+            raise ValueError("A KV transfer region must identify a positive remote object size")
+        if len(self.remote_offsets) != len(self.memory.addresses):
+            raise ValueError("A KV transfer region must align every remote offset, local address and size")
+        if any(
+            offset < 0 or size <= 0 or offset + size > self.remote_object_size
+            for offset, size in zip(self.remote_offsets, self.memory.sizes, strict=True)
+        ):
+            raise ValueError("A KV transfer region must fit inside its remote object")
+
+
+@dataclass(frozen=True, slots=True)
+class TransferRegionBatch:
+    """Physical transfer regions selected for one cache group and one invocation."""
+
+    group_id: int
+    regions: tuple[KVTransferRegion, ...]
+
+    def __post_init__(self) -> None:
+        if any(region.region.chunk.group_id != self.group_id for region in self.regions):
+            raise ValueError(f"Transfer region batch contains regions outside cache group {self.group_id}")
+
+
+# ===============================
+# Executable Binding
+# ===============================
 
 
 @dataclass(frozen=True, slots=True)

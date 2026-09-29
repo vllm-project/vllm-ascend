@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import pickle
 import threading
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
@@ -17,6 +18,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     RequestTracker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import vllm_adapter
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
     BackendSpec,
 )
@@ -27,6 +29,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.availa
     LookupQuery,
     RemoteAvailability,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.ownership import StoreSourceLeases
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.planner import TransferPlanner
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.progress import (
     AllocationLoadPublication,
@@ -35,6 +38,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.progre
     ScheduledLoadPublication,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.spec import TransferPlanningSpec
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.step import (
+    ScheduledRequestKind,
+    TransferPlanningStep,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program import compiler as compiler_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.compiler import (
     ProgramCompilationError,
@@ -43,8 +50,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.compile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.invocation import (
     LoadCompletion,
     LoadTransfer,
+    StoreTransfer,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.program import KVPoolProgram
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.program import (
+    KVPoolProgram,
+    _bind_transfer_regions,
+    _order_load_traversal,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.representation import (
     BindingBatch,
     KVBinding,
@@ -53,9 +65,15 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.represe
     KVMemorySegment,
     KVMemoryView,
     KVRegion,
+    KVTransferRegion,
     PhysicalCoordinate,
     RemoteKVObject,
     RemoteObjectKeyBatch,
+    TransferRegionBatch,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.compilation import (
+    KVGroupReachabilitySpec,
+    KVPoolCompilationSpec,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.schedule import (
     KVPoolSchedule,
@@ -67,16 +85,28 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.to
     KVPoolLayerTopology,
     KVPoolTopology,
     TPPartitionSpec,
-    _resolve_group_layers,
-    resolve_consumer_pipeline_partitions,
+    resolve_group_layers,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.chunk import KVChunkProjection
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.memory import (
-    BindingProjection,
-    ContiguousBindingProjection,
-    KVBlockProjection,
-    LayerwiseBindingProjection,
-    StridedBindingProjection,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.admission import (
+    BackendExistenceStoreAdmission,
+    UnconditionalStoreAdmission,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.block import (
+    CheckpointBlockResolution,
+    LocalBlockResolution,
+    compile_block_resolutions,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.chunk import (
+    CheckpointChunkProjection,
+    SemanticChunkProjection,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.ownership import (
+    StoreOwnershipSelection,
+    compile_store_ownership,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.partition import (
+    IdentityRegionPartition,
+    PipelineRegionPartition,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.reachability import (
     ChunkAvailability,
@@ -84,29 +114,34 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.
     GroupSelection,
     HybridReachability,
     KVSelection,
+    ReachablePrefix,
     UnitaryReachability,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.region import (
+    ContiguousRegionProjection,
+    LayerwiseRegionProjection,
+    StridedRegionProjection,
+    TransferRegionProjection,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.remote import (
     RemoteObjectProjection,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.store import (
-    BackendExistenceMissingFilter,
-    IdentityConsumerProjection,
-    IdentityMissingFilter,
-    PipelinePartitionConsumerProjection,
-    StoreOwnershipProjection,
+    project_remote_identities,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import (
     LookupCodec,
     LookupRequest,
     LookupResult,
+    TailKeyBoundary,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
+    CheckpointStoreCommand,
     KVTransferStep,
     LoadCommand,
     LoadCommandBatch,
-    StoreCommand,
+    RangeStoreCommand,
+    StateCheckpointSource,
     StoreCommandBatch,
+    StoreSourceReleaseMetadata,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.io import BackendIO, LayerwiseBackendIO
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.resources import KVPoolResources
@@ -114,6 +149,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.runtime
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.timeline.bulk import (
     AsyncLoadTimeline,
     LoadTimeline,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.vllm_adapter import (
+    resolve_consumer_pipeline_partitions,
 )
 
 
@@ -285,6 +323,25 @@ class FakeResources:
         self.closed = True
 
 
+class FakeBlockPool:
+    def __init__(self, size=32) -> None:
+        self.blocks = [SimpleNamespace(block_id=block_id, ref_cnt=1) for block_id in range(size)]
+        self.touched = []
+        self.freed = []
+
+    def touch(self, blocks) -> None:
+        blocks = tuple(blocks)
+        self.touched.append(tuple(block.block_id for block in blocks))
+        for block in blocks:
+            block.ref_cnt += 1
+
+    def free_blocks(self, blocks) -> None:
+        blocks = tuple(blocks)
+        self.freed.append(tuple(block.block_id for block in blocks))
+        for block in blocks:
+            block.ref_cnt -= 1
+
+
 class FakeAvailabilityProbe:
     def __init__(self, availability: RemoteAvailability | None) -> None:
         self.availability = availability
@@ -309,17 +366,21 @@ def make_topology(
     key_rank_count=None,
     physical_layers_by_group=None,
     consumer_pipeline_partitions=None,
+    align_state_groups=(),
+    block_sizes_by_group=None,
 ) -> KVPoolTopology:
     physical_layers_by_group = physical_layers_by_group or {}
+    block_sizes_by_group = block_sizes_by_group or {}
     group_topologies = tuple(
         KVPoolGroupTopology(
             group_id,
-            4,
+            block_sizes_by_group.get(group_id, 4),
             tuple(
                 KVPoolLayerTopology(physical_layer_id, (f"layers.{physical_layer_id}.group.{group_id}",))
                 for physical_layer_id in physical_layers_by_group.get(group_id, (group_id,))
             ),
             KeyMetadata("model", 0, 0, 0, group_id),
+            group_id in align_state_groups,
         )
         for group_id in range(max(groups) + 1)
     )
@@ -373,7 +434,6 @@ def compile_program(
     requires_exists_before_put=False,
     kv_cache_groups: tuple[KVCacheGroupSpec, ...] = (),
 ) -> KVPoolProgram:
-    monkeypatch.setattr(compiler_module, "resolve_kv_pool_topology", lambda *_: topology)
     monkeypatch.setattr(
         compiler_module,
         "resolve_backend_spec",
@@ -382,62 +442,80 @@ def compile_program(
             requires_exists_before_put=requires_exists_before_put,
         ),
     )
-    monkeypatch.setattr(compiler_module, "resolve_dcp_kv_cache_spec", lambda spec, _: spec)
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=64),
-        speculative_config=None,
-        kv_transfer_config=SimpleNamespace(
-            kv_role="kv_producer" if store_enabled else "kv_consumer",
-            kv_connector_extra_config={
-                "backend": "fake",
-                "use_layerwise": use_layerwise,
-                "load_async": async_load,
-            },
-        ),
+    if use_layerwise:
+        load_kind = LoadScheduleKind.LAYERWISE
+    elif async_load:
+        load_kind = LoadScheduleKind.ASYNC
+    else:
+        load_kind = LoadScheduleKind.SYNC
+    store_kind = None
+    if store_enabled:
+        store_kind = StoreScheduleKind.LAYERWISE if use_layerwise else StoreScheduleKind.ASYNC
+    reachability_groups = ()
+    if kv_cache_groups:
+        reachability_groups = tuple(
+            KVGroupReachabilitySpec(group_id, group.kv_cache_spec, group.is_eagle_group)
+            for group_id, group in zip(topology.transfer_group_ids, kv_cache_groups, strict=True)
+        )
+    compilation_spec = KVPoolCompilationSpec(
+        topology,
+        "fake",
+        KVPoolSchedule(load_kind, store_kind, 2),
+        64,
+        reachability_groups,
     )
-    kv_cache_config = SimpleNamespace(
-        transfer_groups=kv_cache_groups,
-        prefix_cache_retention_interval=None,
-    )
-    return compile_kv_pool_program(config, kv_cache_config)
+    return compile_kv_pool_program(compilation_spec)
 
 
 @dataclass(frozen=True)
 class ProjectionNodes:
-    chunks: KVChunkProjection
+    topology: KVPoolTopology
+    chunks: SemanticChunkProjection
+    checkpoint_chunks: CheckpointChunkProjection
     remote_objects: RemoteObjectProjection
-    blocks: KVBlockProjection
-    bindings: BindingProjection
-    store_ownership: StoreOwnershipProjection
+    blocks: LocalBlockResolution
+    checkpoint_blocks: CheckpointBlockResolution
+    store_ownership: StoreOwnershipSelection
+    regions: TransferRegionProjection
 
 
 def make_projection(
     database,
     topology: KVPoolTopology,
-    binding_projection: BindingProjection | None = None,
+    region_projection: TransferRegionProjection | None = None,
 ) -> ProjectionNodes:
-    if binding_projection is None:
-        binding_projection = (
-            StridedBindingProjection(topology)
+    if region_projection is None:
+        region_projection = (
+            StridedRegionProjection(topology)
             if topology.tp_partition.tp_mismatch
-            else ContiguousBindingProjection(topology)
+            else ContiguousRegionProjection(topology)
         )
+    blocks, checkpoint_blocks = compile_block_resolutions(topology)
     return ProjectionNodes(
-        KVChunkProjection(database, topology),
+        topology,
+        SemanticChunkProjection(database, topology),
+        CheckpointChunkProjection(database, topology),
         RemoteObjectProjection(topology),
-        KVBlockProjection(topology),
-        binding_projection,
-        StoreOwnershipProjection(topology),
+        blocks,
+        checkpoint_blocks,
+        compile_store_ownership(topology),
+        region_projection,
     )
 
 
 def compile_projection(nodes: ProjectionNodes, memory_geometry: KVMemoryGeometry) -> None:
-    nodes.bindings.bind_memory(memory_geometry)
+    nodes.regions.bind_memory(memory_geometry)
 
 
 def project_remote_objects(nodes: ProjectionNodes, selection: KVSelection):
-    _, object_keys = nodes.chunks.project(selection)
-    return nodes.remote_objects.project(object_keys)
+    chunks = nodes.chunks.project(selection)
+    object_keys = project_object_identities(nodes, chunks)
+    return nodes.remote_objects.project_lookup(object_keys)
+
+
+def project_object_identities(nodes: ProjectionNodes, chunks):
+    groups_by_id = {group.group_id: group for group in nodes.topology.groups}
+    return project_remote_identities(chunks, groups_by_id, nodes.topology.transfer_group_ids)
 
 
 def project_bindings(
@@ -447,13 +525,19 @@ def project_bindings(
     *,
     owned: bool = False,
 ) -> tuple[BindingBatch, ...]:
-    chunks, object_keys = nodes.chunks.project(selection)
-    block_assignments = nodes.blocks.project(chunks, block_ids_by_group)
+    chunks = nodes.chunks.project(selection)
+    object_keys = project_object_identities(nodes, chunks)
+    block_assignments = nodes.blocks.resolve(chunks, block_ids_by_group)
     if owned:
-        block_assignments = nodes.store_ownership.project(block_assignments)
+        block_assignments = nodes.store_ownership.select(block_assignments)
+    transfer_regions = tuple(nodes.regions.project(assignments) for assignments in block_assignments)
+    remote_objects = tuple(
+        nodes.remote_objects.project_transfer(regions, keys)
+        for regions, keys in zip(transfer_regions, object_keys, strict=True)
+    )
     return tuple(
-        nodes.bindings.project(assignments, keys)
-        for assignments, keys in zip(block_assignments, object_keys, strict=True)
+        _bind_transfer_regions(regions, objects)
+        for regions, objects in zip(transfer_regions, remote_objects, strict=True)
     )
 
 
@@ -495,6 +579,46 @@ def make_binding_batch(group_id=0, *, coordinate=None) -> BindingBatch:
     return BindingBatch(group_id, (binding,))
 
 
+def test_load_traversal_ordering_rotates_final_bindings_by_rank() -> None:
+    first = make_binding_batch().bindings[0]
+    second = replace(first, remote_object=replace(first.remote_object, key="second"))
+
+    traversal = _order_load_traversal((BindingBatch(0, (first, second)),), 1)
+
+    assert [binding.remote_object.key for binding in traversal] == ["second", "key"]
+
+
+def test_backend_existence_admission_selects_final_store_bindings() -> None:
+    existing_batch = make_binding_batch()
+    missing_binding = replace(
+        existing_batch.bindings[0],
+        remote_object=replace(existing_batch.bindings[0].remote_object, key="missing"),
+    )
+    transfers = [
+        StoreTransfer("existing", (existing_batch,)),
+        StoreTransfer("missing", (BindingBatch(0, (missing_binding,)),)),
+    ]
+    observed_keys = []
+
+    def observe_presence(keys):
+        observed_keys.extend(keys)
+        return (1, 0)
+
+    admitted = BackendExistenceStoreAdmission().select(transfers, observe_presence)
+
+    assert observed_keys == ["key", "missing"]
+    assert admitted[0].batches[0].bindings == ()
+    assert admitted[1].batches[0].bindings == (missing_binding,)
+
+
+@pytest.mark.parametrize("presence", [(), (2,)])
+def test_backend_existence_admission_rejects_invalid_observations(presence) -> None:
+    transfers = [StoreTransfer("request", (make_binding_batch(),))]
+
+    with pytest.raises(RuntimeError, match="Store exists returned"):
+        BackendExistenceStoreAdmission().select(transfers, lambda _keys: presence)
+
+
 def make_partition_config(*, role="kv_consumer", layers=10, **extra_config):
     return SimpleNamespace(
         kv_transfer_config=SimpleNamespace(kv_role=role, kv_connector_extra_config=extra_config),
@@ -513,7 +637,7 @@ def test_consumer_pipeline_preserves_default_partition_distribution() -> None:
 
 
 def test_group_topology_groups_cache_entries_by_physical_layer() -> None:
-    layers = _resolve_group_layers(
+    layers = resolve_group_layers(
         ["model.layers.1.v", "mtp.layers.0.attn", "model.layers.1.k"],
         base_layer_count=4,
     )
@@ -521,6 +645,124 @@ def test_group_topology_groups_cache_entries_by_physical_layer() -> None:
         KVPoolLayerTopology(1, ("model.layers.1.k", "model.layers.1.v")),
         KVPoolLayerTopology(4, ("mtp.layers.0.attn",)),
     )
+
+
+def test_vllm_adapter_captures_authoritative_parallel_coordinates(monkeypatch) -> None:
+    monkeypatch.setattr(vllm_adapter, "get_tp_group", lambda: SimpleNamespace(rank_in_group=2))
+    monkeypatch.setattr(vllm_adapter, "get_pp_group", lambda: SimpleNamespace(rank_in_group=1))
+    monkeypatch.setattr(vllm_adapter, "get_pcp_group", lambda: SimpleNamespace(rank_in_group=3))
+    monkeypatch.setattr(vllm_adapter, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=2))
+    monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_: (4, 4))
+    monkeypatch.setattr(vllm_adapter.kv_cache_utils, "resolve_dcp_kv_block_size", lambda *_: 4)
+    monkeypatch.setattr(vllm_adapter, "resolve_dcp_kv_cache_spec", lambda cache_spec, _: cache_spec)
+
+    cache_group = KVCacheGroupSpec(
+        ["model.layers.0.attn"],
+        FullAttentionSpec(block_size=4, num_kv_heads=8, head_size=1, dtype=torch.float32),
+    )
+    parallel_config = SimpleNamespace(
+        tensor_parallel_size=4,
+        pipeline_parallel_size=2,
+        prefill_context_parallel_size=4,
+        decode_context_parallel_size=4,
+    )
+    model_config = SimpleNamespace(
+        model="org/model",
+        max_model_len=64,
+        use_mla=False,
+        get_total_num_kv_heads=lambda: 8,
+        get_total_num_hidden_layers=lambda: 1,
+    )
+    vllm_config = SimpleNamespace(
+        parallel_config=parallel_config,
+        model_config=model_config,
+        speculative_config=None,
+        kv_transfer_config=SimpleNamespace(kv_role="kv_consumer", kv_connector_extra_config={"backend": "fake"}),
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[cache_group],
+        transfer_group_ids=(0,),
+        prefix_cache_retention_interval=None,
+    )
+
+    spec = vllm_adapter.resolve_kv_pool_compilation_spec(vllm_config, kv_cache_config)
+
+    assert spec.topology.tp_rank == 2
+    assert spec.topology.pcp_rank == 3
+    assert spec.topology.groups[0].key_metadata.pp_rank == 1
+    assert spec.topology.groups[0].key_metadata.dcp_rank == 2
+    assert pickle.loads(pickle.dumps(spec)) == spec
+
+
+def test_vllm_adapter_uses_scheduler_resumption_as_authoritative_request_kind() -> None:
+    request = SimpleNamespace(
+        request_id="request",
+        prompt_token_ids=[0] * 4,
+        num_prompt_tokens=4,
+        num_tokens=7,
+        block_hashes=[b"a", b"b"],
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["request"],
+            resumed_req_ids={"request"},
+            new_block_ids=[([3, 4],)],
+            num_computed_tokens=[4],
+        ),
+        num_scheduled_tokens={"request": 3},
+        finished_req_ids=set(),
+        preempted_req_ids=None,
+        kv_connector_block_state=None,
+    )
+
+    step = vllm_adapter.adapt_scheduler_output(
+        scheduler_output,
+        {"request": request},
+        store_enabled=True,
+    )
+
+    assert isinstance(step, TransferPlanningStep)
+    assert step.scheduled_requests[0].kind is ScheduledRequestKind.RESUMED
+    assert step.scheduled_requests[0].block_ids_by_group == ((3, 4),)
+    assert step.scheduled_requests[0].num_prompt_tokens == 4
+
+
+def test_vllm_adapter_constructs_backend_before_binding_runtime_resources(monkeypatch) -> None:
+    backend_arguments = []
+
+    class Backend:
+        def __init__(self, parallel_config, *, extra_config):
+            backend_arguments.append((parallel_config, extra_config))
+
+    backend_spec = make_backend_spec(Backend)
+    program = SimpleNamespace(
+        backend_name="fake",
+        topology=SimpleNamespace(groups=("group",)),
+    )
+    parallel_config = object()
+    extra_config = {"backend": "fake"}
+    vllm_config = SimpleNamespace(
+        parallel_config=parallel_config,
+        kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra_config),
+    )
+    kv_cache_config = SimpleNamespace(num_blocks=8)
+    monkeypatch.setattr(vllm_adapter, "resolve_kv_pool_compilation_spec", lambda *_: "compilation")
+    monkeypatch.setattr(vllm_adapter, "compile_kv_pool_program", lambda spec: program)
+    monkeypatch.setattr(vllm_adapter, "resolve_backend_spec", lambda name: backend_spec)
+    monkeypatch.setattr(
+        vllm_adapter,
+        "KVPoolRuntime",
+        lambda compiled_program, resources: SimpleNamespace(program=compiled_program, resources=resources),
+    )
+
+    runtime = vllm_adapter.create_kv_pool_runtime(vllm_config, kv_cache_config)
+
+    assert backend_arguments == [(parallel_config, extra_config)]
+    assert runtime.program is program
+    assert runtime.resources.backend_spec is backend_spec
+    assert runtime.resources.num_blocks == 8
+    assert runtime.resources._groups == ("group",)
 
 
 def test_resources_bind_memory_geometry_once() -> None:
@@ -555,6 +797,28 @@ def test_program_rejects_layerwise_backend_before_resource_binding(monkeypatch) 
         compile_program(monkeypatch, make_topology(), use_layerwise=True, supports_layerwise=False)
 
 
+def test_program_uses_hybrid_reachability_to_exclude_positional_mamba_store(monkeypatch) -> None:
+    topology = make_topology(align_state_groups=(0,))
+    mamba_spec = MambaSpec(
+        block_size=4,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=2,
+    )
+    program = compile_program(
+        monkeypatch,
+        topology,
+        store_enabled=True,
+        kv_cache_groups=(KVCacheGroupSpec(["layers.0"], mamba_spec),),
+    )
+
+    selection = program._reachable_region_selection.select_for_store((b"a",), TokenRange(0, 2), 2)
+
+    assert isinstance(program._reachable_region_selection, HybridReachability)
+    assert selection.groups == (GroupSelection(0, ()),)
+
+
 def make_kv_pool_runtime(
     backend,
     database=None,
@@ -565,16 +829,23 @@ def make_kv_pool_runtime(
     store=True,
     registered=False,
     key_rank_count=None,
+    align_state_groups=(),
 ):
     database = database or FakeDatabase({group_id: 4 for group_id in groups})
-    topology = make_topology(groups=groups, tp_mismatch=tp_mismatch, key_rank_count=key_rank_count)
+    topology = make_topology(
+        groups=groups,
+        tp_mismatch=tp_mismatch,
+        key_rank_count=key_rank_count,
+        align_state_groups=align_state_groups,
+    )
     memory_geometry = make_memory_geometry(database, topology)
     resources = FakeResources(database, backend, memory_geometry)
     projection = make_projection(database, topology)
-    consumer_projection = IdentityConsumerProjection()
-    missing_filter = BackendExistenceMissingFilter() if backend.requires_exists_before_put else IdentityMissingFilter()
-    program = KVPoolProgram(
-        topology,
+    region_partition = IdentityRegionPartition()
+    store_admission = (
+        BackendExistenceStoreAdmission() if backend.requires_exists_before_put else UnconditionalStoreAdmission()
+    )
+    reachability = (
         UnitaryReachability(groups[0], 64, 4)
         if len(groups) == 1
         else SimpleNamespace(
@@ -589,14 +860,20 @@ def make_kv_pool_runtime(
                 tuple(hashes),
                 tuple(GroupSelection(group_id, None) for group_id in groups),
             ),
-        ),
+        )
+    )
+    program = KVPoolProgram(
+        topology,
+        reachability,
         projection.chunks,
+        projection.checkpoint_chunks,
         projection.remote_objects,
         projection.blocks,
-        projection.bindings,
+        projection.checkpoint_blocks,
         projection.store_ownership,
-        consumer_projection,
-        missing_filter,
+        projection.regions,
+        region_partition,
+        store_admission,
         "fake",
         KVPoolSchedule(
             LoadScheduleKind.ASYNC if async_load else LoadScheduleKind.SYNC,
@@ -625,7 +902,7 @@ def make_layerwise_load_runtime(
     topology = make_topology(groups=groups, physical_layers_by_group=dict.fromkeys(groups, physical_layers))
     memory_geometry = make_memory_geometry(database, topology)
     resources = FakeResources(database, backend, memory_geometry)
-    projection = make_projection(database, topology, LayerwiseBindingProjection(topology))
+    projection = make_projection(database, topology, LayerwiseRegionProjection(topology))
     reachability = (
         UnitaryReachability(groups[0], 64, 4)
         if len(groups) == 1
@@ -642,12 +919,14 @@ def make_layerwise_load_runtime(
         topology,
         reachability,
         projection.chunks,
+        projection.checkpoint_chunks,
         projection.remote_objects,
         projection.blocks,
-        projection.bindings,
+        projection.checkpoint_blocks,
         projection.store_ownership,
-        IdentityConsumerProjection(),
-        IdentityMissingFilter(),
+        projection.regions,
+        IdentityRegionPartition(),
+        UnconditionalStoreAdmission(),
         "fake",
         KVPoolSchedule(LoadScheduleKind.LAYERWISE, None, prefetch_layers),
     )
@@ -665,17 +944,20 @@ def make_layerwise_store_runtime(backend):
     topology = make_topology(physical_layers_by_group={0: (0, 1)})
     memory_geometry = make_memory_geometry(database, topology)
     resources = FakeResources(database, backend, memory_geometry)
-    projection = make_projection(database, topology, LayerwiseBindingProjection(topology))
+    projection = make_projection(database, topology, LayerwiseRegionProjection(topology))
+    reachability = UnitaryReachability(0, 64, 4)
     program = KVPoolProgram(
         topology,
-        UnitaryReachability(0, 64, 4),
+        reachability,
         projection.chunks,
+        projection.checkpoint_chunks,
         projection.remote_objects,
         projection.blocks,
-        projection.bindings,
+        projection.checkpoint_blocks,
         projection.store_ownership,
-        IdentityConsumerProjection(),
-        BackendExistenceMissingFilter() if backend.requires_exists_before_put else IdentityMissingFilter(),
+        projection.regions,
+        IdentityRegionPartition(),
+        BackendExistenceStoreAdmission() if backend.requires_exists_before_put else UnconditionalStoreAdmission(),
         "fake",
         KVPoolSchedule(LoadScheduleKind.LAYERWISE, StoreScheduleKind.LAYERWISE, 2),
     )
@@ -719,57 +1001,74 @@ def test_projection_preserves_original_group_identity() -> None:
     assert "@group:3@" in batch.remote_objects[0].key
 
 
-def test_chunk_projection_splits_semantic_chunks_from_remote_object_keys() -> None:
+def test_chunk_and_identity_projections_keep_separate_edges() -> None:
     projection = make_projection(FakeDatabase(), make_topology())
     selection = KVSelection(TokenRange(0, 4), (b"a",), (GroupSelection(0, None),))
 
-    chunk_batches, object_key_batches = projection.chunks.project(selection)
-    assignments = projection.blocks.project(chunk_batches, ((1,),))
+    chunk_batches = projection.chunks.project(selection)
+    object_key_batches = project_object_identities(projection, chunk_batches)
+    assignments = projection.blocks.resolve(chunk_batches, ((1,),))
 
     assert assignments[0].assignments[0].chunk is chunk_batches[0].chunks[0]
     assert object_key_batches[0].keys[0].chunk is chunk_batches[0].chunks[0]
     assert "@group:0@" in object_key_batches[0].keys[0].base_key
 
 
+def test_object_identity_projection_preserves_existing_backend_keys() -> None:
+    topology = make_topology()
+    database = ChunkedTokenDatabase([topology.groups[0].key_metadata], [4], None, hash_block_size=4)
+    projection = make_projection(database, topology)
+    selection = KVSelection(TokenRange(0, 4), (b"a",), (GroupSelection(0, None),))
+
+    chunks = projection.chunks.project(selection)
+    key = project_object_identities(projection, chunks)[0].keys[0].base_key
+    existing_records = database.process_token_key_strings(
+        4, [b"a"], mask_num=0, kv_cache_group_id=0, chunk_filter=lambda _: True
+    )
+    existing_key = next(iter(existing_records))[2]
+
+    assert key == existing_key
+
+
 def test_graph_compiler_selects_fixed_graph_rules(monkeypatch) -> None:
     topology = make_topology()
     cases = (
-        (topology, {}, ContiguousBindingProjection, IdentityConsumerProjection, IdentityMissingFilter),
+        (topology, {}, ContiguousRegionProjection, IdentityRegionPartition, UnconditionalStoreAdmission),
         (
             make_topology(tp_mismatch=True),
             {},
-            StridedBindingProjection,
-            IdentityConsumerProjection,
-            IdentityMissingFilter,
+            StridedRegionProjection,
+            IdentityRegionPartition,
+            UnconditionalStoreAdmission,
         ),
         (
             topology,
             {"use_layerwise": True},
-            LayerwiseBindingProjection,
-            IdentityConsumerProjection,
-            IdentityMissingFilter,
+            LayerwiseRegionProjection,
+            IdentityRegionPartition,
+            UnconditionalStoreAdmission,
         ),
         (
             topology,
             {"requires_exists_before_put": True},
-            ContiguousBindingProjection,
-            IdentityConsumerProjection,
-            BackendExistenceMissingFilter,
+            ContiguousRegionProjection,
+            IdentityRegionPartition,
+            BackendExistenceStoreAdmission,
         ),
         (
             make_topology(consumer_pipeline_partitions=(1, 1)),
             {},
-            ContiguousBindingProjection,
-            PipelinePartitionConsumerProjection,
-            IdentityMissingFilter,
+            ContiguousRegionProjection,
+            PipelineRegionPartition,
+            UnconditionalStoreAdmission,
         ),
     )
-    for topology, options, binding_type, consumer_type, missing_filter_type in cases:
+    for topology, options, region_type, partition_type, admission_type in cases:
         program = compile_program(monkeypatch, topology, **options)
-        assert isinstance(program._reachability, UnitaryReachability)
-        assert isinstance(program._binding_projection, binding_type)
-        assert isinstance(program._consumer_projection, consumer_type)
-        assert isinstance(program._missing_filter, missing_filter_type)
+        assert isinstance(program._reachable_region_selection, UnitaryReachability)
+        assert isinstance(program._transfer_region_projection, region_type)
+        assert isinstance(program._region_partition, partition_type)
+        assert isinstance(program._store_admission, admission_type)
 
 
 def test_program_compiler_selects_hybrid_reachability(monkeypatch) -> None:
@@ -782,7 +1081,7 @@ def test_program_compiler_selects_hybrid_reachability(monkeypatch) -> None:
     )
     topology = make_topology(groups=(0, 1))
     program = compile_program(monkeypatch, topology, kv_cache_groups=groups)
-    assert isinstance(program._reachability, HybridReachability)
+    assert isinstance(program._reachable_region_selection, HybridReachability)
 
 
 def test_program_compiler_freezes_backend_identity_and_schedule(monkeypatch) -> None:
@@ -809,12 +1108,17 @@ def test_program_compiler_freezes_backend_identity_and_schedule(monkeypatch) -> 
         (
             make_topology(tp_mismatch=True),
             True,
-            "Layerwise binding projection cannot yet be composed with TP mismatch",
+            "Layerwise region projection cannot yet be composed with TP mismatch",
+        ),
+        (
+            make_topology(tp_mismatch=True, align_state_groups=(0,)),
+            False,
+            "Mamba align-state transfer cannot yet be composed with TP mismatch",
         ),
         (
             make_topology(consumer_pipeline_partitions=(1, 1)),
             True,
-            "Layerwise binding projection cannot yet be composed with consumer pipeline projection",
+            "Layerwise region projection cannot yet be composed with consumer pipeline projection",
         ),
     ],
 )
@@ -823,17 +1127,18 @@ def test_program_compiler_rejects_conflicting_rules(monkeypatch, topology, use_l
         compile_program(monkeypatch, topology, use_layerwise=use_layerwise)
 
 
-def test_binding_projection_requires_a_remote_key_for_every_local_assignment() -> None:
+def test_transfer_binding_requires_a_remote_key_for_every_region() -> None:
     database = FakeDatabase()
     topology = make_topology()
     projection = make_projection(database, topology)
     compile_projection(projection, make_memory_geometry(database, topology))
     selection = KVSelection(TokenRange(0, 4), (b"a",), (GroupSelection(0, None),))
-    chunk_batches, _ = projection.chunks.project(selection)
-    assignments = projection.blocks.project(chunk_batches, ((1,),))[0]
+    chunk_batches = projection.chunks.project(selection)
+    assignments = projection.blocks.resolve(chunk_batches, ((1,),))[0]
+    regions = projection.regions.project(assignments)
 
     with pytest.raises(ValueError, match="no remote object key"):
-        projection.bindings.project(assignments, RemoteObjectKeyBatch(0, ()))
+        projection.remote_objects.project_transfer(regions, RemoteObjectKeyBatch(0, ()))
 
 
 def test_projection_reuses_every_lookup_coordinate() -> None:
@@ -862,11 +1167,12 @@ def test_projection_keeps_lookup_rank_major_key_order() -> None:
         for _ in range(2)
     ]
     assert [remote.key for remote in remote_objects] == [
-        f"@model:test@head_or_tp_rank:{head_rank}@dcp:{dcp_rank}@pp_rank:{pp_rank}@group:0@chunk:{chunk_index}@"
+        f"model@dcp:{dcp_rank}@head_or_tp_rank:{head_rank}@pp_rank:{pp_rank}"
+        f"@group:0@cache_role:kv@cache_family:default@{chunk_hash.hex()}"
         for pp_rank in range(2)
         for dcp_rank in range(2)
         for head_rank in range(2)
-        for chunk_index in range(2)
+        for chunk_hash in (b"a", b"b")
     ]
 
 
@@ -949,30 +1255,100 @@ def test_binding_rejects_misaligned_memory_segments() -> None:
         )
 
 
-def test_consumer_pipeline_projection_uses_compiled_layer_segments() -> None:
+def test_pipeline_region_partition_precedes_transfer_binding() -> None:
     database = FakeDatabase()
     database.group_kv_caches_base_addr[0] = [1000, 2000]
     database.group_block_len[0] = [32, 32]
     database.group_block_stride[0] = [32, 32]
     topology = make_topology(physical_layers_by_group={0: (0, 1)})
     memory_geometry = make_memory_geometry(database, topology)
-    consumer_projection = PipelinePartitionConsumerProjection((1, 1))
-    consumer_projection.bind_memory(memory_geometry)
+    region_partition = PipelineRegionPartition((1, 1))
+    region_partition.bind_memory(memory_geometry)
     projection = make_projection(database, topology)
     compile_projection(projection, memory_geometry)
     selection = KVSelection(TokenRange(0, 4), (b"a",), (GroupSelection(0, None),))
-    batches = project_bindings(projection, selection, ((1,),), owned=True)
-    projected = consumer_projection.project(batches)[0].bindings
+    chunks = projection.chunks.project(selection)
+    object_keys = project_object_identities(projection, chunks)
+    assignments = projection.store_ownership.select(projection.blocks.resolve(chunks, ((1,),)))
+    regions = tuple(projection.regions.project(batch) for batch in assignments)
+    regions = region_partition.project(regions)
+    remote_objects = projection.remote_objects.project_transfer(regions[0], object_keys[0])
+    projected = _bind_transfer_regions(regions[0], remote_objects).bindings
     assert [binding.memory.addresses for binding in projected] == [(1032,), (2032,)]
     assert [binding.remote_object.coordinate.consumer_pp_slice for binding in projected] == [0, 1]
     assert [binding.region.physical_layer_ids for binding in projected] == [(0,), (1,)]
     assert "@pp_rank:1@" in projected[1].remote_object.key
 
 
+def test_pipeline_region_partition_projects_sparse_hybrid_groups_by_physical_layer() -> None:
+    database = FakeDatabase({0: 4, 1: 4})
+    database.group_kv_caches_base_addr = {0: [1000, 2000], 1: [3000, 4000]}
+    database.group_block_len = {0: [32, 32], 1: [32, 32]}
+    database.group_block_stride = {0: [32, 32], 1: [32, 32]}
+    topology = make_topology(
+        groups=(0, 1),
+        physical_layers_by_group={0: (0, 2), 1: (1, 3)},
+    )
+    memory_geometry = make_memory_geometry(database, topology)
+    region_partition = PipelineRegionPartition((2, 2))
+    region_partition.bind_memory(memory_geometry)
+    projection = make_projection(database, topology)
+    compile_projection(projection, memory_geometry)
+    selection = KVSelection(
+        TokenRange(0, 4),
+        (b"a",),
+        (GroupSelection(0, None), GroupSelection(1, None)),
+    )
+    chunks = projection.chunks.project(selection)
+    assignments = projection.blocks.resolve(chunks, ((1,), (2,)))
+    regions = tuple(projection.regions.project(batch) for batch in assignments)
+
+    projected = region_partition.project(regions)
+
+    assert [[region.region.physical_layer_ids for region in batch.regions] for batch in projected] == [
+        [(0,), (2,)],
+        [(1,), (3,)],
+    ]
+    assert [[region.coordinate.consumer_pp_slice for region in batch.regions] for batch in projected] == [
+        [0, 1],
+        [0, 1],
+    ]
+
+
+def test_pipeline_region_partition_assigns_mtp_layers_to_the_final_rank() -> None:
+    partition = PipelineRegionPartition((2, 2))
+    partition.bind_memory(
+        {
+            0: (
+                KVMemorySegment("layers.0", 0, 1000, 32, 32, 8),
+                KVMemorySegment("mtp.layers.0", 4, 2000, 32, 32, 8),
+            )
+        }
+    )
+    chunk = KVChunk(0, 0, TokenRange(0, 4), b"a")
+    batch = TransferRegionBatch(
+        0,
+        (
+            KVTransferRegion(
+                KVRegion(chunk, (0, 4)),
+                PhysicalCoordinate(),
+                64,
+                (0, 32),
+                KVMemoryView(1, (1032, 2032), (32, 32)),
+            ),
+        ),
+    )
+
+    projected = partition.project((batch,))[0]
+
+    assert [region.region.physical_layer_ids for region in projected.regions] == [(0,), (4,)]
+    assert [region.coordinate.consumer_pp_slice for region in projected.regions] == [0, 1]
+
+
 def test_layerwise_projection_splits_regions_inside_one_remote_object() -> None:
     database = FakeDatabase()
     topology = make_topology(physical_layers_by_group={0: (0, 1)})
-    projection = make_projection(database, topology, LayerwiseBindingProjection(topology))
+    projection = make_projection(database, topology, LayerwiseRegionProjection(topology))
     memory_geometry: KVMemoryGeometry = {
         0: (
             KVMemorySegment("layers.0.k", 0, 1000, 32, 64, 8),
@@ -1025,14 +1401,16 @@ def test_strided_mapping_keeps_align_state_null_blocks() -> None:
     assert all(binding.memory.block_id == 0 for binding in batch.bindings)
 
 
-def test_identity_consumer_projection_preserves_strided_bindings() -> None:
+def test_identity_region_partition_preserves_strided_regions() -> None:
     database = FakeDatabase()
     topology = make_topology(tp_mismatch=True)
     projection = make_projection(database, topology)
     compile_projection(projection, make_memory_geometry(database, topology))
     selection = KVSelection(TokenRange(0, 4), (b"a",), (GroupSelection(0, None),))
-    batches = project_bindings(projection, selection, ((1,),), owned=True)
-    assert IdentityConsumerProjection().project(batches) is batches
+    chunks = projection.chunks.project(selection)
+    assignments = projection.store_ownership.select(projection.blocks.resolve(chunks, ((1,),)))
+    regions = tuple(projection.regions.project(batch) for batch in assignments)
+    assert IdentityRegionPartition().project(regions) is regions
 
 
 def test_unitary_reachability_resolves_only_contiguous_available_chunks() -> None:
@@ -1046,7 +1424,125 @@ def test_unitary_reachability_resolves_only_contiguous_available_chunks() -> Non
             ChunkAvailability(TokenRange(8, 12), b"c", True),
         ),
     )
-    assert reachability.resolve_available_end(selection, (availability,)) == 4
+    assert reachability.resolve_available_end(selection, (availability,)) == ReachablePrefix(4)
+
+
+def test_hybrid_reachability_preserves_partial_tail_object_identity() -> None:
+    groups = (
+        KVGroupReachabilitySpec(
+            0,
+            FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
+        ),
+        KVGroupReachabilitySpec(
+            1,
+            MambaSpec(
+                block_size=16,
+                shapes=((1, 1),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        ),
+    )
+    reachability = HybridReachability(
+        groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        max_model_len=64,
+    )
+    selection = reachability.select_for_lookup((b"a", b"b", b"c"), TokenRange(0, 12))
+    availability = tuple(
+        GroupAvailability(
+            group_id,
+            (
+                ChunkAvailability(TokenRange(0, 4), b"a", False),
+                ChunkAvailability(TokenRange(0, 8), b"b", False),
+                ChunkAvailability(TokenRange(0, 12), b"c", True),
+            ),
+        )
+        for group_id in (0, 1)
+    )
+
+    assert reachability.resolve_available_end(selection, availability) == ReachablePrefix(
+        12,
+        (TailKeyBoundary(0, 12), TailKeyBoundary(1, 12)),
+    )
+
+
+def test_eagle_lookup_drops_the_unstable_trailing_block() -> None:
+    group = KVGroupReachabilitySpec(
+        0,
+        FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
+        is_eagle_group=True,
+    )
+    reachability = HybridReachability(
+        (group,),
+        scheduler_block_size=4,
+        hash_block_size=4,
+        max_model_len=64,
+        use_eagle=True,
+    )
+    selection = reachability.select_for_lookup((b"a", b"b"), TokenRange(0, 8))
+    availability = (
+        GroupAvailability(
+            0,
+            (
+                ChunkAvailability(TokenRange(0, 4), b"a", True),
+                ChunkAvailability(TokenRange(4, 8), b"b", True),
+            ),
+        ),
+    )
+
+    assert reachability.resolve_available_end(selection, availability) == ReachablePrefix(4)
+
+
+def test_partial_tail_identity_projects_full_local_blocks_for_load() -> None:
+    topology = make_topology(
+        groups=(0, 1),
+        align_state_groups=(1,),
+        block_sizes_by_group={0: 16, 1: 16},
+    )
+    database = FakeDatabase({0: 16, 1: 16})
+    projection = make_projection(database, topology)
+    compile_projection(projection, make_memory_geometry(database, topology))
+    selection = KVSelection(
+        TokenRange(0, 12),
+        (b"a", b"b", b"c"),
+        (GroupSelection(0, None), GroupSelection(1, None)),
+    )
+    boundaries = (TailKeyBoundary(0, 12), TailKeyBoundary(1, 12))
+
+    chunks = projection.chunks.project_load(selection, boundaries)
+    assignments = projection.blocks.resolve(chunks, ((3,), (7,)))
+    object_keys = project_object_identities(projection, chunks)
+
+    assert [batch.chunks[0].content_hash for batch in chunks] == [b"c", b"c"]
+    assert [batch.assignments[0].memory_token_count for batch in assignments] == [16, 16]
+    assert [batch.keys[0].base_key.rsplit("@", 1)[-1] for batch in object_keys] == ["63", "63"]
+
+
+def test_mamba_lookup_uses_its_tp_rank_namespace() -> None:
+    topology = replace(
+        make_topology(
+            groups=(0, 1),
+            align_state_groups=(1,),
+            block_sizes_by_group={0: 16, 1: 16},
+        ),
+        tp_size=2,
+    )
+    projection = make_projection(FakeDatabase({0: 16, 1: 16}), topology)
+    selection = KVSelection(
+        TokenRange(0, 4),
+        (b"a",),
+        (GroupSelection(0, None), GroupSelection(1, None)),
+    )
+    chunks = projection.chunks.project_lookup(selection)
+    object_keys = project_object_identities(projection, chunks)
+
+    remote_objects = projection.remote_objects.project_lookup(object_keys)
+
+    assert len(remote_objects[0].remote_objects) == 1
+    assert len(remote_objects[1].remote_objects) == 2
+    assert {item.coordinate.head_rank for item in remote_objects[1].remote_objects} == {0, 1}
 
 
 def test_kv_pool_runtime_lookup_requires_every_physical_representation() -> None:
@@ -1076,17 +1572,16 @@ def test_hybrid_lookup_and_store_share_retention_policy(monkeypatch) -> None:
 
     monkeypatch.setattr(module, "_reachable_block_mask", reachable_mask)
     reachability = HybridReachability(
-        (0, 1),
-        [
-            KVCacheGroupSpec(
-                ["layers.0"],
+        (
+            KVGroupReachabilitySpec(
+                0,
                 FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
             ),
-            KVCacheGroupSpec(
-                ["layers.1"],
+            KVGroupReachabilitySpec(
+                1,
                 FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32),
             ),
-        ],
+        ),
         scheduler_block_size=4,
         hash_block_size=4,
         max_model_len=64,
@@ -1101,7 +1596,8 @@ def test_lookup_codec_round_trip_preserves_token_coordinates_and_groups() -> Non
     codec = LookupCodec()
     request = LookupRequest(TokenRange(4, 12), (1, 3), (b"a", b"b"))
     assert codec.decode_request(codec.encode_request(request)) == request
-    assert codec.decode_result(codec.encode_result(LookupResult(8))) == LookupResult(8)
+    result = LookupResult(8, (TailKeyBoundary(1, 12), TailKeyBoundary(3, 8)))
+    assert codec.decode_result(codec.encode_result(result)) == result
 
 
 def test_backend_io_keeps_results_attached_to_exact_bindings() -> None:
@@ -1184,7 +1680,7 @@ def test_kv_pool_runtime_filters_remote_objects_before_waiting_for_source(monkey
     event = FakeEvent()
     runtime, _ = make_kv_pool_runtime(backend, registered=True)
     monkeypatch.setattr(torch.npu, "Event", lambda: event)
-    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
     begin_kv_pool_step(runtime, store=store)
     runtime.finish_step()
     result = runtime.fence_previous_store()
@@ -1194,12 +1690,12 @@ def test_kv_pool_runtime_filters_remote_objects_before_waiting_for_source(monkey
     assert [call[0] for call in backend.calls] == ["set_device", "exists"]
 
 
-def test_kv_pool_runtime_keeps_the_configured_missing_filter(monkeypatch) -> None:
+def test_kv_pool_runtime_keeps_the_compiled_store_admission(monkeypatch) -> None:
     backend = FakeBackend()
     runtime, _ = make_kv_pool_runtime(backend, registered=True)
     backend.requires_exists_before_put = True
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
-    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
     begin_kv_pool_step(runtime, store=store)
     runtime.finish_step()
     runtime.fence_previous_store()
@@ -1212,7 +1708,7 @@ def test_kv_pool_runtime_preserves_unknown_source_release_after_put_failure(monk
     backend.put_result = RuntimeError("put failed")
     runtime, resources = make_kv_pool_runtime(backend, registered=True)
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
-    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 7),))
     begin_kv_pool_step(runtime, store=store)
     runtime.finish_step()
     with pytest.raises(RuntimeError, match="Store failed"):
@@ -1222,10 +1718,31 @@ def test_kv_pool_runtime_preserves_unknown_source_release_after_put_failure(monk
     result = batch.completions[0]
     assert not result.evidence.source_release_confirmed
     assert isinstance(result.evidence.error, RuntimeError)
+    assert runtime.take_released_store_job_ids() == set()
     with pytest.raises(RuntimeError, match="previous Store failure"):
         runtime.close()
     assert runtime._timeline.store is not None
     assert not runtime._timeline.store._executor.is_alive()
+    assert not resources.closed
+
+
+def test_kv_pool_runtime_preserves_source_after_native_failure_result(monkeypatch) -> None:
+    backend = FakeBackend()
+    backend.put_result = [-1]
+    runtime, resources = make_kv_pool_runtime(backend, registered=True)
+    monkeypatch.setattr(torch.npu, "Event", FakeEvent)
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 7),))
+    begin_kv_pool_step(runtime, store=store)
+    runtime.finish_step()
+
+    with pytest.raises(RuntimeError, match="result codes"):
+        runtime.fence_previous_store()
+
+    assert runtime._pending_store_batch is not None
+    assert not runtime._pending_store_batch.completions[0].evidence.source_release_confirmed
+    assert runtime.take_released_store_job_ids() == set()
+    with pytest.raises(RuntimeError, match="previous Store failure"):
+        runtime.close()
     assert not resources.closed
 
 
@@ -1457,7 +1974,7 @@ def test_layerwise_store_publishes_ranges_before_committing_shared_objects(monke
 
     monkeypatch.setattr(torch.npu, "Event", make_event)
     runtime, resources = make_layerwise_store_runtime(backend)
-    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
     begin_kv_pool_step(runtime, store=store)
 
     runtime.save_layer("layers.0.group.0")
@@ -1511,7 +2028,7 @@ def test_layerwise_store_runs_session_lifecycle_on_its_executor(monkeypatch) -> 
     monkeypatch.setattr(backend, "batch_commit", track_commit)
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
     runtime, _ = make_layerwise_store_runtime(backend)
-    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
     begin_kv_pool_step(runtime, store=store)
 
     runtime.save_layer("layers.0.group.0")
@@ -1531,7 +2048,7 @@ def test_layerwise_store_revokes_attempted_sessions_after_start_exception(monkey
 
     monkeypatch.setattr(backend, "batch_put_start", fail_session_start)
     runtime, resources = make_layerwise_store_runtime(backend)
-    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
     begin_kv_pool_step(runtime, store=store)
 
     assert [call[0] for call in backend.calls].count("batch_revoke") == 1
@@ -1547,7 +2064,7 @@ def test_layerwise_store_revokes_attempted_sessions_after_mismatched_start_resul
     backend = FakeBackend()
     backend.store_session_start_result = [0, 0]
     runtime, resources = make_layerwise_store_runtime(backend)
-    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
     begin_kv_pool_step(runtime, store=store)
 
     assert [call[0] for call in backend.calls].count("batch_revoke") == 1
@@ -1563,7 +2080,7 @@ def test_layerwise_store_preserves_unknown_source_release_after_range_failure(mo
     backend.store_session_copy_result = RuntimeError("put failed")
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
     runtime, resources = make_layerwise_store_runtime(backend)
-    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
     begin_kv_pool_step(runtime, store=store)
 
     runtime.save_layer("layers.0.group.0")
@@ -1586,7 +2103,7 @@ def test_layerwise_store_does_not_open_sessions_for_existing_objects(monkeypatch
     backend.presence = [1]
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
     runtime, _ = make_layerwise_store_runtime(backend)
-    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
     begin_kv_pool_step(runtime, store=store)
 
     runtime.save_layer("layers.0.group.0")
@@ -1603,7 +2120,7 @@ def test_layerwise_store_revokes_objects_when_a_selected_layer_is_not_reached(mo
     backend = FakeBackend()
     monkeypatch.setattr(torch.npu, "Event", FakeEvent)
     runtime, resources = make_layerwise_store_runtime(backend)
-    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
     begin_kv_pool_step(runtime, store=store)
 
     runtime.save_layer("layers.0.group.0")
@@ -1665,7 +2182,7 @@ def test_kv_pool_runtime_store_projects_then_fences_one_step(monkeypatch) -> Non
     runtime, resources = make_kv_pool_runtime(backend, registered=True)
     event = FakeEvent()
     monkeypatch.setattr(torch.npu, "Event", lambda: event)
-    store = StoreCommandBatch((StoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
     begin_kv_pool_step(runtime, store=store)
     runtime.finish_step()
     results = runtime.fence_previous_store()
@@ -1674,6 +2191,30 @@ def test_kv_pool_runtime_store_projects_then_fences_one_step(monkeypatch) -> Non
     assert event.synchronized
     assert [call[0] for call in backend.calls].count("put") == 1
     assert resources.closed
+
+
+def test_kv_pool_runtime_submits_handed_off_checkpoint_without_forward(monkeypatch) -> None:
+    backend = FakeBackend()
+    backend.put_result = [0]
+    runtime, _ = make_kv_pool_runtime(backend, registered=True, align_state_groups=(0,))
+    monkeypatch.setattr(torch.npu, "Event", FakeEvent)
+    command = CheckpointStoreCommand(
+        "request",
+        ((7,),),
+        (b"a",),
+        0,
+        (StateCheckpointSource(0, 7, 4),),
+        store_job_id=9,
+    )
+
+    runtime.begin_step(KVTransferStep(store=StoreCommandBatch((command,))))
+    runtime.end_step()
+    completions = runtime.fence_previous_store()
+    runtime.close()
+
+    assert completions[0].evidence.succeeded
+    assert runtime.take_released_store_job_ids() == {9}
+    assert [call[0] for call in backend.calls].count("put") == 1
 
 
 def test_kv_pool_runtime_close_keeps_resources_when_store_source_release_is_unknown() -> None:
@@ -1698,6 +2239,39 @@ def make_planner(availability, *, async_load=False, save_decode=False, store_ena
     return planner
 
 
+def confirm_planner_allocation(planner, request, blocks, allocated_external_tokens):
+    planner.confirm_allocation(
+        request.request_id,
+        tuple(tuple(block_ids) for block_ids in blocks),
+        tuple(request.block_hashes),
+        getattr(request, "num_prompt_tokens", len(request.prompt_token_ids)),
+        allocated_external_tokens,
+    )
+
+
+def build_planner_step(planner, scheduler_output, requests=None, *, resumed_request_ids=()):
+    requests = requests or {}
+    for request in requests.values():
+        if not hasattr(request, "prompt_token_ids"):
+            request.prompt_token_ids = [0] * getattr(request, "num_prompt_tokens", 0)
+        if not hasattr(request, "num_prompt_tokens"):
+            request.num_prompt_tokens = len(request.prompt_token_ids)
+    cached = scheduler_output.scheduled_cached_reqs
+    cached.resumed_req_ids = set(resumed_request_ids)
+    if not hasattr(scheduler_output, "kv_connector_block_state"):
+        scheduler_output.kv_connector_block_state = None
+    if not hasattr(scheduler_output, "num_scheduled_tokens"):
+        scheduler_output.num_scheduled_tokens = {}
+    if not hasattr(scheduler_output, "preempted_req_ids"):
+        scheduler_output.preempted_req_ids = set()
+    planning_step = vllm_adapter.adapt_scheduler_output(
+        scheduler_output,
+        requests,
+        store_enabled=planner._store_enabled,
+    )
+    return planner.build_step(planning_step)
+
+
 def test_planner_full_hit_keeps_one_token_for_vllm_but_loads_allocated_chunk() -> None:
     planner = make_planner(RemoteAvailability(TokenRange(0, 12), 11))
     request = SimpleNamespace(
@@ -1707,15 +2281,17 @@ def test_planner_full_hit_keeps_one_token_for_vllm_but_loads_allocated_chunk() -
         block_hashes=[b"a", b"b", b"c"],
     )
     result = planner.lookup(LookupQuery("request", 12, 12, request.block_hashes, 0))
-    planner.confirm_allocation(request, ([1, 2, 3],), 11)
-    step = planner.build_step(
+    confirm_planner_allocation(planner, request, ([1, 2, 3],), 11)
+    step = build_planner_step(
+        planner,
         SimpleNamespace(
             finished_req_ids=set(),
             preempted_req_ids=set(),
             scheduled_new_reqs=[SimpleNamespace(req_id="request", num_computed_tokens=11, block_ids=([1, 2, 3],))],
             scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
             num_scheduled_tokens={"request": 1},
-        )
+        ),
+        {"request": request},
     )
     assert result == ExternalPrefixPlan(11, False)
     assert step.load.commands[0].load_range == TokenRange(0, 12)
@@ -1792,16 +2368,23 @@ def test_planner_transfer_ranges_match_legacy_standard_operation(
 
 def test_planner_async_load_is_published_after_allocation() -> None:
     planner = make_planner(RemoteAvailability(TokenRange(4, 8), 8), async_load=True)
-    request = SimpleNamespace(request_id="request", prompt_token_ids=[0] * 8, block_hashes=[b"a", b"b"])
+    request = SimpleNamespace(
+        request_id="request",
+        prompt_token_ids=[0] * 8,
+        num_tokens=8,
+        block_hashes=[b"a", b"b"],
+    )
     assert planner.lookup(LookupQuery("request", 8, 9, request.block_hashes, 4)).load_is_deferred
-    planner.confirm_allocation(request, ([1, 2],), 4)
-    step = planner.build_step(
+    confirm_planner_allocation(planner, request, ([1, 2],), 4)
+    step = build_planner_step(
+        planner,
         SimpleNamespace(
             finished_req_ids=set(),
             preempted_req_ids=set(),
             scheduled_new_reqs=[],
             scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
-        )
+        ),
+        {"request": request},
     )
     assert step.load.commands[0].load_range == TokenRange(4, 8)
 
@@ -1813,9 +2396,10 @@ def test_planner_running_request_publishes_monotonic_store_frontier() -> None:
         num_computed_tokens=0,
         num_prompt_tokens=8,
         prompt_token_ids=[0] * 8,
+        num_tokens=8,
         block_hashes=[b"a"],
     )
-    planner.confirm_allocation(request, ([1],), 0)
+    confirm_planner_allocation(planner, request, ([1],), 0)
     first = SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
@@ -1823,18 +2407,105 @@ def test_planner_running_request_publishes_monotonic_store_frontier() -> None:
         scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
         num_scheduled_tokens={"request": 2},
     )
-    assert planner.build_step(first).store.commands == ()
+    assert build_planner_step(planner, first, {"request": request}).store.commands == ()
     request.num_computed_tokens = 2
     second = SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
         scheduled_new_reqs=[],
-        scheduled_cached_reqs=SimpleNamespace(req_ids=["request"], new_block_ids=[None]),
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["request"],
+            new_block_ids=[None],
+            num_computed_tokens=[2],
+        ),
         num_scheduled_tokens={"request": 2},
     )
-    store = planner.build_step(second).store.commands[0]
+    store = build_planner_step(planner, second, {"request": request}).store.commands[0]
     assert store.store_range == TokenRange(0, 4)
     assert planner.request_progress["request"].published_store_end_token == 4
+
+
+def test_planner_uses_step_coordinate_to_distinguish_prefill_from_decode() -> None:
+    planner = make_planner(None)
+    request = SimpleNamespace(
+        request_id="request",
+        num_computed_tokens=8,
+        num_prompt_tokens=8,
+        num_tokens=8,
+        block_hashes=[b"a", b"b"],
+    )
+    planner.request_progress["request"] = RequestSnapshot("request", 4, ((1, 2),), (b"a", b"b"), 8)
+    scheduler_output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["request"],
+            new_block_ids=[None],
+            num_computed_tokens=[4],
+        ),
+        num_scheduled_tokens={"request": 4},
+    )
+
+    step = build_planner_step(planner, scheduler_output, {"request": request})
+
+    assert step.store.commands[0].store_range == TokenRange(0, 8)
+
+
+def test_planner_never_publishes_speculative_draft_positions() -> None:
+    planner = make_planner(None, save_decode=True)
+    request = SimpleNamespace(
+        request_id="request",
+        num_computed_tokens=8,
+        num_prompt_tokens=8,
+        num_tokens=9,
+        block_hashes=[b"a", b"b", b"c"],
+    )
+    planner.request_progress["request"] = RequestSnapshot(
+        "request",
+        8,
+        ((1, 2, 3),),
+        (b"a", b"b"),
+        8,
+        published_store_end_token=8,
+        committable_end_token=8,
+    )
+    scheduler_output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["request"],
+            new_block_ids=[None],
+            num_computed_tokens=[8],
+        ),
+        num_scheduled_tokens={"request": 4},
+    )
+
+    step = build_planner_step(planner, scheduler_output, {"request": request})
+
+    assert step.store.commands == ()
+    assert planner.request_progress["request"].published_store_end_token == 8
+    assert planner.request_progress["request"].request_token_len == 12
+    assert planner.request_progress["request"].store_end_token == 9
+
+    request.num_computed_tokens = 9
+    request.num_tokens = 10
+    next_step = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["request"],
+            new_block_ids=[None],
+            num_computed_tokens=[9],
+        ),
+        num_scheduled_tokens={"request": 1},
+    )
+    build_planner_step(planner, next_step, {"request": request})
+
+    assert planner.request_progress["request"].request_token_len == 10
+    assert planner.request_progress["request"].store_end_token == 10
 
 
 def test_chunk_continuation_keeps_layerwise_load_session_step_local() -> None:
@@ -1846,18 +2517,21 @@ def test_chunk_continuation_keeps_layerwise_load_session_step_local() -> None:
         num_computed_tokens=4,
         num_prompt_tokens=12,
         prompt_token_ids=[0] * 12,
+        num_tokens=12,
         block_hashes=[b"a", b"b"],
     )
     planner.lookup(LookupQuery("request", 12, 12, request.block_hashes, 0))
-    planner.confirm_allocation(request, ([1],), 4)
-    first_step = planner.build_step(
+    confirm_planner_allocation(planner, request, ([1],), 4)
+    first_step = build_planner_step(
+        planner,
         SimpleNamespace(
             finished_req_ids=set(),
             preempted_req_ids=set(),
             scheduled_new_reqs=[SimpleNamespace(req_id="request", num_computed_tokens=4, block_ids=([1, 2],))],
             scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
             num_scheduled_tokens={"request": 4},
-        )
+        ),
+        {"request": request},
     )
     runtime.begin_step(first_step)
     runtime.start_load()
@@ -1867,14 +2541,20 @@ def test_chunk_continuation_keeps_layerwise_load_session_step_local() -> None:
 
     request.num_computed_tokens = 8
     request.block_hashes = [b"a", b"b", b"c"]
-    continued_step = planner.build_step(
+    continued_step = build_planner_step(
+        planner,
         SimpleNamespace(
             finished_req_ids=set(),
             preempted_req_ids=set(),
             scheduled_new_reqs=[],
-            scheduled_cached_reqs=SimpleNamespace(req_ids=["request"], new_block_ids=[([3],)]),
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["request"],
+                new_block_ids=[([3],)],
+                num_computed_tokens=[8],
+            ),
             num_scheduled_tokens={"request": 4},
-        )
+        ),
+        {"request": request},
     )
     runtime.begin_step(continued_step)
     runtime.start_load()
@@ -1895,18 +2575,22 @@ def test_preemption_reloads_prefix_into_replacement_blocks() -> None:
         num_computed_tokens=0,
         num_prompt_tokens=8,
         prompt_token_ids=[0] * 8,
+        all_token_ids=[0] * 8,
+        num_tokens=8,
         block_hashes=[b"a", b"b"],
     )
     planner.lookup(LookupQuery("request", 8, 8, request.block_hashes, 0))
-    planner.confirm_allocation(request, ([1],), 4)
-    first_step = planner.build_step(
+    confirm_planner_allocation(planner, request, ([1],), 4)
+    first_step = build_planner_step(
+        planner,
         SimpleNamespace(
             finished_req_ids=set(),
             preempted_req_ids=set(),
             scheduled_new_reqs=[SimpleNamespace(req_id="request", num_computed_tokens=4, block_ids=([1],))],
             scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
             num_scheduled_tokens={"request": 4},
-        )
+        ),
+        {"request": request},
     )
     runtime.begin_step(first_step)
     runtime.start_load()
@@ -1914,24 +2598,32 @@ def test_preemption_reloads_prefix_into_replacement_blocks() -> None:
     runtime.wait_for_layer_load("layers.1.group.0")
     runtime.end_step()
 
-    planner.build_step(
+    build_planner_step(
+        planner,
         SimpleNamespace(
             finished_req_ids=set(),
             preempted_req_ids={"request"},
             scheduled_new_reqs=[],
             scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
-        )
+        ),
     )
     planner.lookup(LookupQuery("request", 8, 8, request.block_hashes, 0))
-    planner.confirm_allocation(request, ([7],), 4)
-    resumed_step = planner.build_step(
+    confirm_planner_allocation(planner, request, ([7],), 4)
+    resumed_step = build_planner_step(
+        planner,
         SimpleNamespace(
             finished_req_ids=set(),
             preempted_req_ids=set(),
             scheduled_new_reqs=[],
-            scheduled_cached_reqs=SimpleNamespace(req_ids=["request"], new_block_ids=[([7],)]),
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["request"],
+                new_block_ids=[([7],)],
+                num_computed_tokens=[0],
+            ),
             num_scheduled_tokens={"request": 4},
-        )
+        ),
+        {"request": request},
+        resumed_request_ids={"request"},
     )
     runtime.begin_step(resumed_step)
     runtime.start_load()
@@ -1953,59 +2645,275 @@ def test_planner_rebuilds_progress_from_new_blocks_after_preemption() -> None:
         num_computed_tokens=4,
         num_prompt_tokens=8,
         prompt_token_ids=[0] * 8,
+        all_token_ids=[0] * 8,
+        num_tokens=8,
         block_hashes=[b"a", b"b"],
     )
-    planner.requests["request"] = request
     planner.request_progress["request"] = RequestSnapshot("request", 4, ((1,),), (b"a",), 8, 4)
-    planner.build_step(
+    build_planner_step(
+        planner,
         SimpleNamespace(
             finished_req_ids=set(),
             preempted_req_ids={"request"},
             scheduled_new_reqs=[],
             scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
-        )
+        ),
     )
-    planner.confirm_allocation(request, ([3, 4],), 0)
-    step = planner.build_step(
+    confirm_planner_allocation(planner, request, ([3, 4],), 0)
+    request.num_computed_tokens = 8
+    step = build_planner_step(
+        planner,
         SimpleNamespace(
             finished_req_ids=set(),
             preempted_req_ids=set(),
             scheduled_new_reqs=[],
-            scheduled_cached_reqs=SimpleNamespace(req_ids=["request"], new_block_ids=[([3, 4],)]),
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["request"],
+                new_block_ids=[([3, 4],)],
+                num_computed_tokens=[4],
+            ),
             num_scheduled_tokens={"request": 4},
-        )
+        ),
+        {"request": request},
+        resumed_request_ids={"request"},
     )
     assert step.store.commands[0].block_ids_by_group == ((3, 4),)
     assert planner.request_progress["request"].published_store_end_token == 8
+    assert planner.request_progress["request"].request_token_len == 8
 
 
 def test_planner_finished_request_discards_pending_load_state() -> None:
     planner = make_planner(RemoteAvailability(TokenRange(0, 4), 4))
     planner.lookup(LookupQuery("request", 4, 5, [b"a"], 0))
-    planner.build_step(
+    build_planner_step(
+        planner,
         SimpleNamespace(
             finished_req_ids={"request"},
             preempted_req_ids=set(),
             scheduled_new_reqs=[],
             scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
-        )
+        ),
     )
     assert "request" not in planner._pending_loads
 
 
-def test_request_snapshot_is_immutable_and_advances_every_group() -> None:
+def test_request_snapshot_replaces_authoritative_position_and_advances_every_group() -> None:
     snapshot = RequestSnapshot("request", 4, ((1,), (10,)), (b"a",), 8)
-    advanced = snapshot.advance(4, ([2], [11]), [b"a", b"b"])
+    advanced = snapshot.with_position(8, ([2], [11]), [b"a", b"b"], 8)
     assert snapshot.block_ids_by_group == ((1,), (10,))
     assert advanced.block_ids_by_group == ((1, 2), (10, 11))
 
 
 def test_transfer_step_keeps_load_and_store_commands_separate() -> None:
     load = LoadCommand("load", TokenRange(0, 4), ((1,),), (b"a",))
-    store = StoreCommand("store", TokenRange(0, 4), ((2,),), (b"b",), 4)
+    store = RangeStoreCommand("store", TokenRange(0, 4), ((2,),), (b"b",), 4)
     step = KVTransferStep(LoadCommandBatch((load,)), StoreCommandBatch((store,)))
     assert step.load.commands == (load,)
     assert step.store.commands == (store,)
+
+
+def test_planner_publishes_boundary_state_beyond_the_normal_store_frontier() -> None:
+    planner = TransferPlanner(
+        TransferPlanningSpec(4, 4, (0, 1), True),
+        FakeAvailabilityProbe(None),
+        ScheduledLoadPublication(),
+        store_enabled=True,
+        save_decode_cache=False,
+    )
+    request = SimpleNamespace(block_hashes=[b"a", b"b"])
+    planner.request_progress["request"] = RequestSnapshot(
+        "request",
+        8,
+        ((1, 2), (10, 11)),
+        (b"a", b"b"),
+        8,
+        published_store_end_token=4,
+    )
+    scheduler_output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
+        kv_connector_block_state=SimpleNamespace(boundary_state_offloads={"request": [(1, 11, 8)]}),
+    )
+
+    command = build_planner_step(planner, scheduler_output, {"request": request}).store.commands[0]
+
+    assert command == CheckpointStoreCommand(
+        "request",
+        ((1, 2), (10, 11)),
+        (b"a", b"b"),
+        4,
+        (StateCheckpointSource(1, 11, 8),),
+    )
+
+
+def test_planner_publishes_each_boundary_state_as_one_remote_object_version() -> None:
+    planner = TransferPlanner(
+        TransferPlanningSpec(4, 4, (0, 1), True),
+        FakeAvailabilityProbe(None),
+        ScheduledLoadPublication(),
+        store_enabled=True,
+        save_decode_cache=False,
+    )
+    request = SimpleNamespace(block_hashes=[b"a", b"b", b"c"])
+    planner.request_progress["request"] = RequestSnapshot(
+        "request",
+        12,
+        ((1,), (10, 11)),
+        (b"a", b"b", b"c"),
+        8,
+    )
+    scheduler_output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
+        kv_connector_block_state=SimpleNamespace(boundary_state_offloads={"request": [(1, 10, 8), (1, 11, 12)]}),
+    )
+
+    commands = build_planner_step(planner, scheduler_output, {"request": request}).store.commands
+
+    assert [command.sources[0].boundary_token for command in commands] == [8, 12]
+    assert [command.sources[0].block_id for command in commands] == [10, 11]
+
+
+def test_program_projects_boundary_state_from_the_exact_handed_off_block() -> None:
+    topology = make_topology(align_state_groups=(0,), block_sizes_by_group={0: 8})
+    database = FakeDatabase({0: 8})
+    projection = make_projection(database, topology)
+    compile_projection(projection, make_memory_geometry(database, topology))
+    reachability = UnitaryReachability(0, 64, 4)
+    program = KVPoolProgram(
+        topology,
+        reachability,
+        projection.chunks,
+        projection.checkpoint_chunks,
+        projection.remote_objects,
+        projection.blocks,
+        projection.checkpoint_blocks,
+        projection.store_ownership,
+        projection.regions,
+        IdentityRegionPartition(),
+        UnconditionalStoreAdmission(),
+        "fake",
+        KVPoolSchedule(LoadScheduleKind.SYNC, StoreScheduleKind.ASYNC, 2),
+    )
+    command = CheckpointStoreCommand("request", ((7,),), (b"a",), 0, (StateCheckpointSource(0, 7, 4),), store_job_id=3)
+    frame = SimpleNamespace(step=KVTransferStep(store=StoreCommandBatch((command,))))
+
+    transfer = program.build_store_transfers(frame)[0]
+
+    assert transfer.store_job_id == 3
+    assert transfer.batches[0].bindings[0].memory.block_id == 7
+    assert transfer.batches[0].bindings[0].memory.sizes == (64,)
+    assert transfer.batches[0].bindings[0].remote_object.key.endswith("@61")
+
+
+def test_program_projects_other_groups_needed_by_a_sub_block_mamba_boundary() -> None:
+    topology = make_topology(groups=(0, 1), align_state_groups=(1,), block_sizes_by_group={0: 8, 1: 8})
+    database = FakeDatabase({0: 8, 1: 8})
+    projection = make_projection(database, topology)
+    compile_projection(projection, make_memory_geometry(database, topology))
+    reachability = UnitaryReachability(0, 64, 4)
+    program = KVPoolProgram(
+        topology,
+        reachability,
+        projection.chunks,
+        projection.checkpoint_chunks,
+        projection.remote_objects,
+        projection.blocks,
+        projection.checkpoint_blocks,
+        projection.store_ownership,
+        projection.regions,
+        IdentityRegionPartition(),
+        UnconditionalStoreAdmission(),
+        "fake",
+        KVPoolSchedule(LoadScheduleKind.SYNC, StoreScheduleKind.ASYNC, 2),
+    )
+    command = CheckpointStoreCommand("request", ((3,), (11,)), (b"a",), 0, (StateCheckpointSource(1, 11, 4),))
+    frame = SimpleNamespace(step=KVTransferStep(store=StoreCommandBatch((command,))))
+
+    transfer = program.build_store_transfers(frame)[0]
+
+    bindings_by_group = {batch.group_id: batch.bindings for batch in transfer.batches}
+    assert set(bindings_by_group) == {0, 1}
+    assert bindings_by_group[0][0].memory.block_id == 3
+    assert bindings_by_group[1][0].memory.block_id == 11
+    assert bindings_by_group[0][0].memory.sizes == (64,)
+    assert bindings_by_group[1][0].memory.sizes == (64,)
+
+
+def test_connector_store_leases_exclude_mamba_position_table_and_release_after_every_worker() -> None:
+    pool = FakeBlockPool()
+    leases = StoreSourceLeases(frozenset({0, 1}), frozenset({1}), 2)
+    leases.bind_block_pool(pool)
+    normal = RangeStoreCommand("request", TokenRange(0, 4), ((1, 2), (10, 11, 12)), (b"a",), 4)
+    checkpoint = CheckpointStoreCommand(
+        "request", ((1, 2), (10, 11, 12)), (b"a",), 0, (StateCheckpointSource(1, 11, 4),)
+    )
+
+    leased_normal = leases.acquire(normal)
+    leased_checkpoint = leases.acquire(checkpoint)
+
+    assert pool.touched == [(1, 2), (11, 1, 2)]
+    leases.release({leased_normal.store_job_id: 1})
+    assert pool.freed == []
+    leases.release({leased_normal.store_job_id: 1})
+    leases.release({leased_checkpoint.store_job_id: 2})
+    assert pool.freed == [(2, 1), (2, 1, 11)]
+
+
+def test_store_source_release_metadata_aggregates_worker_counts() -> None:
+    metadata = StoreSourceReleaseMetadata({3: 1})
+
+    metadata.aggregate(StoreSourceReleaseMetadata({3: 2, 4: 1}))
+
+    assert metadata.released_store_jobs == {3: 3, 4: 1}
+
+
+def test_connector_finished_partial_tail_pins_exact_source_without_delaying_request_free() -> None:
+    pool = FakeBlockPool()
+    connector = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
+    connector._store_enabled = True
+    connector._hash_block_size = 4
+    connector._transfer_group_ids = frozenset({0, 1})
+    connector._align_state_group_ids = frozenset({1})
+    connector._store_source_leases = StoreSourceLeases(frozenset({0, 1}), frozenset({1}), 1)
+    connector._store_source_leases.bind_block_pool(pool)
+    connector._finished_checkpoint_stores = []
+    snapshot = RequestSnapshot("request", 8, ((1, 2), (10, 11)), (b"a", b"b"), 8, 4)
+    connector.planner = SimpleNamespace(request_progress={"request": snapshot})
+    request = SimpleNamespace(request_id="request", block_hashes=[b"a", b"b"])
+
+    delay_free = connector.register_finished_partial_tail(request, ([1, 2], [10, 11]), [(1, 11, 8)])
+
+    assert not delay_free
+    assert pool.touched == [(11, 1, 2)]
+    assert connector._finished_checkpoint_stores[0].sources == (StateCheckpointSource(1, 11, 8),)
+    assert pool.blocks[11].ref_cnt == 2
+
+    pool.free_blocks(pool.blocks[block_id] for block_id in (1, 2, 10, 11))
+
+    assert pool.blocks[11].ref_cnt == 1
+    store_job_id = connector._finished_checkpoint_stores[0].store_job_id
+    assert store_job_id is not None
+    connector._store_source_leases.release({store_job_id: 1})
+    assert pool.blocks[11].ref_cnt == 0
+
+
+def test_runtime_reports_store_job_only_after_source_release_is_confirmed(monkeypatch) -> None:
+    backend = FakeBackend()
+    runtime, _ = make_kv_pool_runtime(backend, registered=True)
+    monkeypatch.setattr(torch.npu, "Event", FakeEvent)
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 9),))
+    begin_kv_pool_step(runtime, store=store)
+    runtime.finish_step()
+
+    runtime.fence_previous_store()
+
+    assert runtime.take_released_store_job_ids() == {9}
+    assert runtime.take_released_store_job_ids() == set()
 
 
 def test_connector_translates_vllm_lookup_into_planner_query() -> None:
@@ -2014,12 +2922,57 @@ def test_connector_translates_vllm_lookup_into_planner_query() -> None:
     instance.planner = SimpleNamespace(lookup=lambda query: queries.append(query) or ExternalPrefixPlan(4, True))
     request = SimpleNamespace(
         request_id="request",
-        prompt_token_ids=[0] * 8,
+        prompt_token_ids=None,
+        num_prompt_tokens=8,
         num_tokens=9,
         block_hashes=[b"a", b"b"],
     )
     assert instance.get_num_new_matched_tokens(request, 4) == (4, True)
     assert queries == [LookupQuery("request", 8, 9, request.block_hashes, 4)]
+
+
+def test_connector_translates_vllm_allocation_into_planner_facts() -> None:
+    confirmations = []
+    instance = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
+    instance.planner = SimpleNamespace(confirm_allocation=lambda *args: confirmations.append(args))
+    instance._requests = {}
+    request = SimpleNamespace(
+        request_id="request",
+        prompt_token_ids=None,
+        num_prompt_tokens=8,
+        block_hashes=[b"a", b"b"],
+    )
+    blocks = SimpleNamespace(get_block_ids=lambda: ([1, 2],))
+
+    instance.update_state_after_alloc(request, blocks, 4)
+
+    assert instance._requests == {"request": request}
+    assert confirmations == [("request", ((1, 2),), (b"a", b"b"), 8, 4)]
+
+
+def test_connector_discards_tracked_requests_after_planning_lifecycle() -> None:
+    planning_steps = []
+    instance = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
+    instance.planner = SimpleNamespace(
+        build_step=lambda planning_step: planning_steps.append(planning_step) or KVTransferStep()
+    )
+    instance._requests = {"request": SimpleNamespace()}
+    instance._store_enabled = False
+    instance._finished_checkpoint_stores = []
+    instance._store_source_leases = SimpleNamespace(acquire=lambda command: command)
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        num_scheduled_tokens={},
+        finished_req_ids={"request"},
+        preempted_req_ids=None,
+        kv_connector_block_state=None,
+    )
+
+    instance.build_connector_meta(scheduler_output)
+
+    assert planning_steps[0].finished_request_ids == {"request"}
+    assert instance._requests == {}
 
 
 def test_connector_routes_only_step_commands_to_kv_pool_runtime() -> None:
@@ -2054,6 +3007,22 @@ def test_backend_io_keeps_source_release_unknown_after_native_put_error() -> Non
     assert not result.succeeded
     assert not result.source_release_confirmed
     assert isinstance(result.error, RuntimeError)
+
+
+@pytest.mark.parametrize("native_result", [None, [-1], [0, 0]])
+def test_backend_io_requires_complete_success_to_release_source(native_result) -> None:
+    class Store:
+        def batch_put_from_multi_buffers(self, keys, addresses, sizes, replicate_config):
+            return native_result
+
+    backend = SimpleNamespace(
+        store=Store(),
+        ensure_initialized=lambda: None,
+        _build_replicate_config=lambda: object(),
+    )
+    result = BackendIO(backend, make_backend_spec(type(backend), name="mooncake")).store((make_binding_batch(),))
+    assert not result.succeeded
+    assert not result.source_release_confirmed
 
 
 def test_backend_io_confirms_source_safety_before_native_handoff() -> None:
@@ -2103,3 +3072,13 @@ def test_backend_io_preserves_layerwise_load_session_results() -> None:
     assert backend_io.load((binding,))[0].result_code == 0
     backend_io.finish_load_sessions(["key"])
     assert [call[0] for call in calls] == ["validate", "start", "copy", "finish"]
+
+
+def test_layerwise_backend_io_requires_complete_success_to_release_source() -> None:
+    backend = SimpleNamespace(batch_copy_put=lambda *args: [-1])
+    backend_io = LayerwiseBackendIO(backend, make_backend_spec(type(backend), name="mooncake"))
+
+    result = backend_io.store((make_binding_batch(),))
+
+    assert not result.succeeded
+    assert not result.source_release_confirmed

@@ -1,4 +1,4 @@
-"""Project semantic chunks through local Block IDs into memory bindings."""
+"""Project local Block assignments into physical transfer regions."""
 
 from __future__ import annotations
 
@@ -7,68 +7,28 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ..representation import (
-    BindingBatch,
-    KVBinding,
-    KVBlockAssignment,
     KVBlockAssignmentBatch,
-    KVChunk,
-    KVChunkBatch,
     KVMemoryGeometry,
     KVMemorySegment,
     KVMemoryView,
     KVRegion,
+    KVTransferRegion,
     PhysicalCoordinate,
-    RemoteKVObject,
-    RemoteObjectKeyBatch,
+    TransferRegionBatch,
 )
 from ..spec.topology import KVPoolGroupTopology, KVPoolTopology
-from .remote import replace_key_rank
 
 
-class KVBlockProjection:
-    """Align semantic chunks with the Block IDs supplied for one scheduler step."""
-
-    def __init__(self, topology: KVPoolTopology) -> None:
-        self.group_ids = topology.transfer_group_ids
-        self._minimum_block_ids = {
-            group.group_id: 0 if topology.tp_partition.tp_mismatch or not group.uses_align_state else 1
-            for group in topology.groups
-            if group.group_id in topology.transfer_group_ids
-        }
-
-    def project(
-        self,
-        batches: tuple[KVChunkBatch, ...],
-        block_ids_by_group: tuple[tuple[int, ...], ...],
-    ) -> tuple[KVBlockAssignmentBatch, ...]:
-        group_ids = tuple(batch.group_id for batch in batches)
-        if group_ids != self.group_ids:
-            raise ValueError(f"KV chunk groups {group_ids} do not match compiled groups {self.group_ids}")
-        return tuple(self._project_batch(batch, block_ids_by_group[batch.group_id]) for batch in batches)
-
-    def _project_batch(self, batch: KVChunkBatch, block_ids: Sequence[int]) -> KVBlockAssignmentBatch:
-        block_offset = max(batch.logical_block_count - len(block_ids), 0)
-        assignments = []
-        minimum_block_id = self._minimum_block_ids[batch.group_id]
-        for chunk in batch.chunks:
-            local_block_index = chunk.block_index - block_offset
-            if 0 <= local_block_index < len(block_ids):
-                block_id = block_ids[local_block_index]
-                if block_id >= minimum_block_id:
-                    assignments.append(KVBlockAssignment(chunk, block_id))
-        return KVBlockAssignmentBatch(batch.group_id, tuple(assignments))
-
-
-class BindingProjection(Protocol):
-    """Join Block assignments and remote identities into one fixed representation."""
+class TransferRegionProjection(Protocol):
+    """Project local Block assignments into Backend-addressable transfer regions."""
 
     def bind_memory(self, memory_geometry: KVMemoryGeometry) -> None: ...
 
-    def project(self, assignments: KVBlockAssignmentBatch, object_keys: RemoteObjectKeyBatch) -> BindingBatch: ...
+    def project(self, assignments: KVBlockAssignmentBatch) -> TransferRegionBatch: ...
 
 
-class ContiguousBindingProjection:
-    """Bind each logical KV chunk to contiguous segments in one local block."""
+class ContiguousRegionProjection:
+    """Project each assigned KV chunk onto contiguous memory segments."""
 
     def __init__(self, topology: KVPoolTopology) -> None:
         self._groups = _transfer_groups(topology)
@@ -76,34 +36,31 @@ class ContiguousBindingProjection:
 
     def bind_memory(self, memory_geometry: KVMemoryGeometry) -> None:
         if self._segments_by_group is not None:
-            raise RuntimeError("Contiguous binding projection is already bound")
+            raise RuntimeError("Contiguous region projection is already bound")
         self._segments_by_group = _select_group_memory(self._groups, memory_geometry)
 
-    def project(self, assignments: KVBlockAssignmentBatch, object_keys: RemoteObjectKeyBatch) -> BindingBatch:
+    def project(self, assignments: KVBlockAssignmentBatch) -> TransferRegionBatch:
         if self._segments_by_group is None:
-            raise RuntimeError("KV memory projection is unavailable before cache registration")
-        base_keys = _join_object_keys(assignments, object_keys)
+            raise RuntimeError("KV transfer region projection is unavailable before cache registration")
         group = self._groups[assignments.group_id]
         segments = self._segments_by_group[assignments.group_id]
         remote_object_size = sum(segment.block_length for segment in segments)
         remote_offsets = _contiguous_offsets(tuple(segment.block_length for segment in segments))
-        bindings = []
+        regions = []
         for assignment in assignments.assignments:
             chunk = assignment.chunk
-            token_count = chunk.token_range.end_token - chunk.token_range.start_token
             addresses = tuple(segment.base_address + assignment.block_id * segment.block_stride for segment in segments)
-            sizes = tuple(segment.bytes_per_token * token_count for segment in segments)
-            region = KVRegion(chunk, tuple(layer.physical_layer_id for layer in group.layers))
-            bindings.append(
-                KVBinding(
-                    region,
-                    RemoteKVObject(chunk, base_keys[chunk]),
+            sizes = tuple(segment.bytes_per_token * assignment.memory_token_count for segment in segments)
+            regions.append(
+                KVTransferRegion(
+                    KVRegion(chunk, tuple(layer.physical_layer_id for layer in group.layers)),
+                    PhysicalCoordinate(),
                     remote_object_size,
                     remote_offsets,
                     KVMemoryView(assignment.block_id, addresses, sizes),
                 )
             )
-        return BindingBatch(assignments.group_id, tuple(bindings))
+        return TransferRegionBatch(assignments.group_id, tuple(regions))
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,8 +71,8 @@ class _LayerRegionTemplate:
     remote_offsets: tuple[int, ...]
 
 
-class LayerwiseBindingProjection:
-    """Split every assigned chunk into physical-layer regions of one packed remote object."""
+class LayerwiseRegionProjection:
+    """Project every assigned chunk into physical-layer transfer regions."""
 
     def __init__(self, topology: KVPoolTopology) -> None:
         self._groups = _transfer_groups(topology)
@@ -123,43 +80,39 @@ class LayerwiseBindingProjection:
 
     def bind_memory(self, memory_geometry: KVMemoryGeometry) -> None:
         if self._regions_by_group is not None:
-            raise RuntimeError("Layerwise binding projection is already bound")
+            raise RuntimeError("Layerwise region projection is already bound")
         segments_by_group = _select_group_memory(self._groups, memory_geometry)
         self._regions_by_group = {
             group_id: _compile_layer_regions(group, segments_by_group[group_id])
             for group_id, group in self._groups.items()
         }
 
-    def project(self, assignments: KVBlockAssignmentBatch, object_keys: RemoteObjectKeyBatch) -> BindingBatch:
+    def project(self, assignments: KVBlockAssignmentBatch) -> TransferRegionBatch:
         if self._regions_by_group is None:
-            raise RuntimeError("Layerwise binding projection is unavailable before cache registration")
-        base_keys = _join_object_keys(assignments, object_keys)
-        bindings = []
+            raise RuntimeError("Layerwise transfer region projection is unavailable before cache registration")
+        regions = []
         for assignment in assignments.assignments:
             chunk = assignment.chunk
-            token_count = chunk.token_range.end_token - chunk.token_range.start_token
-            remote_object = RemoteKVObject(chunk, base_keys[chunk])
             for template in self._regions_by_group[assignments.group_id]:
                 addresses = tuple(
                     segment.base_address + assignment.block_id * segment.block_stride for segment in template.segments
                 )
-                sizes = tuple(segment.bytes_per_token * token_count for segment in template.segments)
-                bindings.append(
-                    KVBinding(
+                sizes = tuple(segment.bytes_per_token * assignment.memory_token_count for segment in template.segments)
+                regions.append(
+                    KVTransferRegion(
                         KVRegion(chunk, (template.physical_layer_id,)),
-                        remote_object,
+                        PhysicalCoordinate(),
                         template.remote_object_size,
                         template.remote_offsets,
                         KVMemoryView(assignment.block_id, addresses, sizes),
                     )
                 )
-        return BindingBatch(assignments.group_id, tuple(bindings))
+        return TransferRegionBatch(assignments.group_id, tuple(regions))
 
 
 @dataclass(frozen=True, slots=True)
 class _StridedRepresentation:
     coordinate: PhysicalCoordinate
-    effective_rank: int
     slice_index: int
 
 
@@ -175,12 +128,11 @@ class _StridedMemorySegment:
 @dataclass(frozen=True, slots=True)
 class _BoundStridedRepresentation:
     coordinate: PhysicalCoordinate
-    effective_rank: int
     segments: tuple[_StridedMemorySegment, ...]
 
 
-class StridedBindingProjection:
-    """Split each assigned KV chunk into fixed effective-rank memory slices."""
+class StridedRegionProjection:
+    """Project each assigned KV chunk into fixed effective-rank transfer regions."""
 
     def __init__(self, topology: KVPoolTopology) -> None:
         if len(topology.transfer_group_ids) != 1:
@@ -192,7 +144,6 @@ class StridedBindingProjection:
                 PhysicalCoordinate(
                     effective_tp_rank=topology.tp_rank * topology.tp_partition.key_slices_per_rank + slice_index
                 ),
-                topology.tp_rank * topology.tp_partition.key_slices_per_rank + slice_index,
                 slice_index,
             )
             for slice_index in range(topology.tp_partition.key_slices_per_rank)
@@ -201,14 +152,13 @@ class StridedBindingProjection:
 
     def bind_memory(self, memory_geometry: KVMemoryGeometry) -> None:
         if self._bound_representations is not None:
-            raise RuntimeError("Strided binding projection is already bound")
+            raise RuntimeError("Strided region projection is already bound")
         segments = _select_group_memory(self._groups, memory_geometry)[self._group_id]
         if not segments:
             raise RuntimeError(f"KV cache group {self._group_id} registered no local memory segments")
         self._bound_representations = tuple(
             _BoundStridedRepresentation(
                 representation.coordinate,
-                representation.effective_rank,
                 tuple(
                     _compile_strided_segment(segment, len(self._representations), representation.slice_index)
                     for segment in segments
@@ -217,19 +167,17 @@ class StridedBindingProjection:
             for representation in self._representations
         )
 
-    def project(self, assignments: KVBlockAssignmentBatch, object_keys: RemoteObjectKeyBatch) -> BindingBatch:
+    def project(self, assignments: KVBlockAssignmentBatch) -> TransferRegionBatch:
         if self._bound_representations is None:
-            raise RuntimeError("KV memory projection is unavailable before cache registration")
+            raise RuntimeError("KV transfer region projection is unavailable before cache registration")
         if assignments.group_id != self._group_id:
             raise ValueError(
-                f"Strided binding projection was bound for group {self._group_id}, received {assignments.group_id}"
+                f"Strided region projection was bound for group {self._group_id}, received {assignments.group_id}"
             )
-        base_keys = _join_object_keys(assignments, object_keys)
         group = self._groups[assignments.group_id]
-        bindings = []
+        regions = []
         for assignment in assignments.assignments:
             chunk = assignment.chunk
-            token_count = chunk.token_range.end_token - chunk.token_range.start_token
             region = KVRegion(chunk, tuple(layer.physical_layer_id for layer in group.layers))
             for representation in self._bound_representations:
                 addresses = []
@@ -239,42 +187,21 @@ class StridedBindingProjection:
                 segment_offset = 0
                 for segment in representation.segments:
                     block_address = segment.base_address + assignment.block_id * segment.block_stride
-                    for token_index in range(token_count):
+                    for token_index in range(assignment.memory_token_count):
                         addresses.append(block_address + token_index * segment.bytes_per_token + segment.head_offset)
                         sizes.append(segment.slice_size)
                         remote_offsets.append(segment_offset + token_index * segment.slice_size)
                     segment_offset += group.block_size * segment.slice_size
-                remote_object = RemoteKVObject(
-                    chunk,
-                    replace_key_rank(base_keys[chunk], "head_or_tp_rank", representation.effective_rank),
-                    representation.coordinate,
-                )
-                bindings.append(
-                    KVBinding(
+                regions.append(
+                    KVTransferRegion(
                         region,
-                        remote_object,
+                        representation.coordinate,
                         remote_object_size,
                         tuple(remote_offsets),
                         KVMemoryView(assignment.block_id, tuple(addresses), tuple(sizes)),
                     )
                 )
-        return BindingBatch(assignments.group_id, tuple(bindings))
-
-
-def _join_object_keys(
-    assignments: KVBlockAssignmentBatch,
-    object_keys: RemoteObjectKeyBatch,
-) -> dict[KVChunk, str]:
-    if assignments.group_id != object_keys.group_id:
-        raise ValueError(
-            f"KV block assignment group {assignments.group_id} does not match remote object key group "
-            f"{object_keys.group_id}"
-        )
-    base_keys = {item.chunk: item.base_key for item in object_keys.keys}
-    for assignment in assignments.assignments:
-        if assignment.chunk not in base_keys:
-            raise ValueError(f"KV block assignment has no remote object key: {assignment.chunk}")
-    return base_keys
+        return TransferRegionBatch(assignments.group_id, tuple(regions))
 
 
 def _transfer_groups(topology: KVPoolTopology) -> dict[int, KVPoolGroupTopology]:

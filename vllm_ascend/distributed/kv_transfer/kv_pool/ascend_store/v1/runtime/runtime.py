@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar
+from typing import Any, Concatenate, ParamSpec, TypeVar
 
 import torch
 from vllm.logger import logger
 
 from ...attention_fence import reset_attention_compute_start_gate
-from ..program.compiler import compile_kv_pool_program
 from ..program.invocation import (
     KVPoolStepFrame,
     LoadCompletion,
@@ -21,16 +20,12 @@ from ..program.invocation import (
 )
 from ..program.program import KVPoolProgram
 from ..protocol.lookup import LookupRequest, LookupResult
-from ..protocol.transfer import KVTransferStep
+from ..protocol.transfer import CheckpointStoreCommand, KVTransferStep
 from .io import BackendIO, LayerwiseBackendIO
 from .resources import KVPoolResources
 from .result import LoadResult
 from .timeline import StoreBatch
 from .timeline.composition import KVPoolTimelineRuntime
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 _Parameters = ParamSpec("_Parameters")
 _Result = TypeVar("_Result")
@@ -56,6 +51,7 @@ class KVPoolRuntime:
         self._active_frame: KVPoolStepFrame | None = None
         self._load_frames: dict[str, KVPoolStepFrame] = {}
         self._pending_store_batch: StoreBatch | None = None
+        self._released_store_job_ids: set[int] = set()
         self._store_error: Exception | None = None
         self._timeline.bind_resources(
             thread_initializer=backend_io.initialize_thread,
@@ -63,32 +59,10 @@ class KVPoolRuntime:
             load_operation=self._execute_load,
             store_operation=self._execute_store,
             store_transfer_operation=self._execute_store_transfer,
-            store_filter=self._filter_store_bindings,
+            store_admission=self._admit_store_transfers,
             layerwise_backend=backend_io if isinstance(backend_io, LayerwiseBackendIO) else None,
             start_gate_factory=start_gate_factory,
         )
-
-    @classmethod
-    def from_config(
-        cls,
-        vllm_config: VllmConfig,
-        kv_cache_config: KVCacheConfig,
-    ) -> KVPoolRuntime:
-        """Compile one program and bind its process-owned execution resources."""
-
-        program = compile_kv_pool_program(vllm_config, kv_cache_config)
-        resources = KVPoolResources.bind(
-            program.backend_name,
-            vllm_config.parallel_config,
-            vllm_config.kv_transfer_config.kv_connector_extra_config,
-            program.topology.groups,
-            kv_cache_config.num_blocks,
-        )
-        try:
-            return cls(program, resources)
-        except BaseException:
-            resources.close()
-            raise
 
     def bind_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         try:
@@ -111,6 +85,10 @@ class KVPoolRuntime:
             try:
                 frame.store_transfers = self._program.build_store_transfers(frame)
                 self._timeline.prepare_store(frame.store_transfers)
+                # Checkpoint sources were completed and handed off before this step;
+                # they must also run in vLLM's connector-only path, which has no forward fence.
+                if all(isinstance(command, CheckpointStoreCommand) for command in step.store.commands):
+                    self._submit_store(frame)
             except Exception as error:
                 self._store_error = error
                 raise
@@ -185,17 +163,21 @@ class KVPoolRuntime:
     @_with_active_frame
     def finish_step(self, frame: KVPoolStepFrame) -> None:
         self._raise_store_error()
-        if not self._timeline.store_enabled or not frame.step.store.commands:
+        if not self._timeline.store_enabled or not frame.step.store.commands or frame.store_submitted:
             return
-        if self._pending_store_batch is not None:
-            raise RuntimeError("Previous Store invocation has not reached its fence")
         try:
-            self._pending_store_batch = self._timeline.finish_store(frame.store_transfers)
+            self._submit_store(frame)
             if self._timeline.fences_store_on_finish:
                 self.fence_previous_store()
         except Exception as error:
             self._store_error = error
             raise
+
+    def _submit_store(self, frame: KVPoolStepFrame) -> None:
+        if self._pending_store_batch is not None:
+            raise RuntimeError("Previous Store invocation has not reached its fence")
+        self._pending_store_batch = self._timeline.finish_store(frame.store_transfers)
+        frame.store_submitted = True
 
     def fence_previous_store(self) -> tuple[StoreCompletion, ...]:
         self._raise_store_error()
@@ -207,6 +189,9 @@ class KVPoolRuntime:
         except Exception as error:
             self._store_error = error
             raise
+        for completion in completions:
+            if completion.evidence.source_release_confirmed and completion.store_job_id is not None:
+                self._released_store_job_ids.add(completion.store_job_id)
         if all(completion.evidence.source_release_confirmed for completion in completions):
             self._pending_store_batch = None
         for completion in completions:
@@ -216,6 +201,13 @@ class KVPoolRuntime:
                 self._store_error = error
                 raise
         return completions
+
+    def take_released_store_job_ids(self) -> set[int]:
+        """Drain jobs whose Backend call can no longer read Worker memory."""
+
+        released = self._released_store_job_ids
+        self._released_store_job_ids = set()
+        return released
 
     def close(self) -> None:
         close_error: BaseException | None = None
@@ -237,19 +229,19 @@ class KVPoolRuntime:
     def _execute_load(self, transfer: LoadTransfer) -> LoadCompletion:
         return self._program.execute_load(transfer, self._backend_io.load)
 
-    def _filter_store_bindings(self, transfers: list[StoreTransfer]) -> list[StoreTransfer]:
+    def _admit_store_transfers(self, transfers: list[StoreTransfer]) -> list[StoreTransfer]:
         try:
-            return self._program.filter_store_bindings(transfers, self._backend_io.observe_presence)
+            return self._program.admit_store_transfers(transfers, self._backend_io.observe_presence)
         except Exception as error:
-            logger.error("Layerwise Store existence check failed; treating all keys as missing: %s", error)
+            logger.error("Layerwise Store admission failed; preserving all transfers: %s", error)
             return transfers
 
     def _execute_store(self, transfer: StoreTransfer, source_ready_event: Any) -> StoreCompletion:
         try:
-            filtered_transfers = self._program.filter_store_bindings([transfer], self._backend_io.observe_presence)
+            admitted_transfers = self._program.admit_store_transfers([transfer], self._backend_io.observe_presence)
         except Exception as error:
-            return StoreCompletion(transfer.request_id, StoreEvidence((), False, True, error))
-        return self._execute_store_transfer(filtered_transfers[0], source_ready_event)
+            return StoreCompletion(transfer.request_id, StoreEvidence((), False, True, error), transfer.store_job_id)
+        return self._execute_store_transfer(admitted_transfers[0], source_ready_event)
 
     def _execute_store_transfer(self, transfer: StoreTransfer, source_ready_event: Any) -> StoreCompletion:
         return self._program.execute_store(transfer, source_ready_event.synchronize, self._backend_io.store)

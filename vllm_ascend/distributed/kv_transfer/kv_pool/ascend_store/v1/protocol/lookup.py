@@ -14,6 +14,7 @@ from ..coordinates import TokenRange
 WireFrame: TypeAlias = bytes | bytearray | memoryview
 _TOKEN_COUNT_BYTES = 4
 _REQUEST_FRAME_COUNT = 4
+_TAIL_KEY_BOUNDARY_BYTES = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,10 +27,19 @@ class LookupRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class TailKeyBoundary:
+    """Hash boundary that identifies one cache group's remote tail object."""
+
+    group_id: int
+    boundary_token: int
+
+
+@dataclass(frozen=True, slots=True)
 class LookupResult:
     """Contiguous token prefix available from the KV pool."""
 
     available_end_token: int
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
 class LookupCodec:
@@ -64,8 +74,24 @@ class LookupCodec:
 
     @staticmethod
     def encode_result(result: LookupResult) -> bytes:
-        return result.available_end_token.to_bytes(_TOKEN_COUNT_BYTES, byteorder="big")
+        payload = bytearray(result.available_end_token.to_bytes(_TOKEN_COUNT_BYTES, byteorder="big"))
+        for boundary in result.tail_key_boundaries:
+            payload.extend(boundary.group_id.to_bytes(_TOKEN_COUNT_BYTES, byteorder="big"))
+            payload.extend(boundary.boundary_token.to_bytes(_TOKEN_COUNT_BYTES, byteorder="big"))
+        return bytes(payload)
 
     @staticmethod
     def decode_result(frame: WireFrame) -> LookupResult:
-        return LookupResult(int.from_bytes(frame, byteorder="big"))
+        payload = bytes(frame)
+        if len(payload) < _TOKEN_COUNT_BYTES or (len(payload) - _TOKEN_COUNT_BYTES) % _TAIL_KEY_BOUNDARY_BYTES:
+            raise ValueError("Invalid Lookup result payload")
+        boundaries = tuple(
+            TailKeyBoundary(
+                int.from_bytes(payload[offset : offset + _TOKEN_COUNT_BYTES], byteorder="big"),
+                int.from_bytes(
+                    payload[offset + _TOKEN_COUNT_BYTES : offset + _TAIL_KEY_BOUNDARY_BYTES], byteorder="big"
+                ),
+            )
+            for offset in range(_TOKEN_COUNT_BYTES, len(payload), _TAIL_KEY_BOUNDARY_BYTES)
+        )
+        return LookupResult(int.from_bytes(payload[:_TOKEN_COUNT_BYTES], byteorder="big"), boundaries)

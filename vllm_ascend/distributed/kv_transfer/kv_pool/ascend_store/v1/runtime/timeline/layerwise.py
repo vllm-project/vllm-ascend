@@ -119,7 +119,7 @@ class LayerwiseLoadTimelineProtocol(LoadTimelineProtocol, Protocol):
 class LayerwiseStoreTimelineProtocol(Protocol):
     """Publish Store work through one session and its ordered layer ranges."""
 
-    def bind_filter(self, binding_filter: Callable[[list[StoreTransfer]], list[StoreTransfer]]) -> None: ...
+    def bind_admission(self, admission: Callable[[list[StoreTransfer]], list[StoreTransfer]]) -> None: ...
 
     def bind_operation(self, operation: Callable[[StoreTransfer, Any], StoreCompletion]) -> None: ...
 
@@ -198,7 +198,7 @@ class _StoreSession:
 
     def open(
         self,
-        filtered_transfers: tuple[StoreTransfer, ...],
+        admitted_transfers: tuple[StoreTransfer, ...],
         object_sizes_by_key: dict[str, int],
         backend_io: LayerwiseBackendOperations,
     ) -> None:
@@ -207,7 +207,7 @@ class _StoreSession:
         missing_keys = tuple(
             dict.fromkeys(
                 binding.remote_object.key
-                for transfer in filtered_transfers
+                for transfer in admitted_transfers
                 for batch in transfer.batches
                 for binding in batch.bindings
             )
@@ -216,7 +216,7 @@ class _StoreSession:
         if missing_keys:
             self._start_sessions(missing_keys, object_sizes_by_key, backend_io)
         self.pending_transfers_by_layer = _group_layerwise_store_transfers(
-            list(filtered_transfers), set(self.pending_finalization_keys)
+            list(admitted_transfers), set(self.pending_finalization_keys)
         )
 
     def record_range(self, transfer: StoreTransfer, completion: StoreCompletion) -> None:
@@ -339,6 +339,7 @@ class _StoreSession:
                 StoreCompletion(
                     transfer.request_id,
                     StoreEvidence(evidence, not failed and error is None, source_release_confirmed, error),
+                    transfer.store_job_id,
                 )
             )
         return tuple(completions)
@@ -676,7 +677,7 @@ class LayerwiseStoreTimeline:
     ) -> None:
         self._backend_io = backend_io
         self._layer_ids_by_name = _compile_layer_ids_by_name(topology)
-        self._binding_filter: Callable[[list[StoreTransfer]], list[StoreTransfer]] | None = None
+        self._admission: Callable[[list[StoreTransfer]], list[StoreTransfer]] | None = None
         self._operation: Callable[[StoreTransfer, Any], StoreCompletion] | None = None
         self._lifecycle_lock = threading.Lock()
         self._session: _StoreSession | None = None
@@ -685,14 +686,11 @@ class LayerwiseStoreTimeline:
             "KVPoolLayerwiseStoreExecutor", thread_initializer, self._execute, self._complete
         )
 
-    def bind_filter(
-        self,
-        binding_filter: Callable[[list[StoreTransfer]], list[StoreTransfer]],
-    ) -> None:
+    def bind_admission(self, admission: Callable[[list[StoreTransfer]], list[StoreTransfer]]) -> None:
         with self._lifecycle_lock:
-            if self._binding_filter is not None:
-                raise RuntimeError("Layerwise Store timeline binding filter is already bound")
-            self._binding_filter = binding_filter
+            if self._admission is not None:
+                raise RuntimeError("Layerwise Store timeline admission is already bound")
+            self._admission = admission
 
     def bind_operation(self, operation: Callable[[StoreTransfer, Any], StoreCompletion]) -> None:
         with self._lifecycle_lock:
@@ -702,8 +700,8 @@ class LayerwiseStoreTimeline:
 
     def start(self) -> None:
         with self._lifecycle_lock:
-            if self._binding_filter is None:
-                raise RuntimeError("Layerwise Store timeline has no bound binding filter")
+            if self._admission is None:
+                raise RuntimeError("Layerwise Store timeline has no bound admission")
             if self._operation is None:
                 raise RuntimeError("Layerwise Store timeline has no bound operation")
             self._backend_io.validate_support()
@@ -777,11 +775,11 @@ class LayerwiseStoreTimeline:
     def _execute(self, command: _OpenStoreSession | _StoreLayerJob | _FinalizeStoreSession) -> None:
         try:
             if isinstance(command, _OpenStoreSession):
-                assert self._binding_filter is not None
+                assert self._admission is not None
                 session = _StoreSession(command.transfers)
                 command.session = session
-                filtered_transfers = tuple(self._binding_filter(list(command.transfers)))
-                session.open(filtered_transfers, command.object_sizes_by_key, self._backend_io)
+                admitted_transfers = tuple(self._admission(list(command.transfers)))
+                session.open(admitted_transfers, command.object_sizes_by_key, self._backend_io)
             elif isinstance(command, _StoreLayerJob):
                 self._execute_layer_job(command)
             else:
@@ -893,5 +891,5 @@ def _group_layerwise_store_transfers(
                 bindings_by_layer_and_group.setdefault(layer_id, {}).setdefault(group_id, []).append(binding)
         for layer_id, bindings_by_group in bindings_by_layer_and_group.items():
             batches = tuple(BindingBatch(group_id, tuple(bindings)) for group_id, bindings in bindings_by_group.items())
-            grouped.setdefault(layer_id, []).append(StoreTransfer(transfer.request_id, batches))
+            grouped.setdefault(layer_id, []).append(StoreTransfer(transfer.request_id, batches, transfer.store_job_id))
     return {layer_id: tuple(layer_transfers) for layer_id, layer_transfers in grouped.items()}

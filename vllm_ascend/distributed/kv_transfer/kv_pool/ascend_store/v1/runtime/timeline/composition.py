@@ -20,7 +20,7 @@ from .layerwise import (
 
 LoadOperation = Callable[[LoadTransfer], LoadCompletion]
 StoreOperation = Callable[[StoreTransfer, Any], StoreCompletion]
-StoreFilter = Callable[[list[StoreTransfer]], list[StoreTransfer]]
+StoreAdmission = Callable[[list[StoreTransfer]], list[StoreTransfer]]
 
 
 class KVPoolTimelineRuntime:
@@ -62,7 +62,7 @@ class KVPoolTimelineRuntime:
         load_operation: LoadOperation,
         store_operation: StoreOperation,
         store_transfer_operation: StoreOperation,
-        store_filter: StoreFilter,
+        store_admission: StoreAdmission,
         layerwise_backend: LayerwiseBackendOperations | None,
         start_gate_factory: Callable[[], Any],
     ) -> None:
@@ -89,7 +89,7 @@ class KVPoolTimelineRuntime:
         if self._schedule.store_kind is StoreScheduleKind.LAYERWISE:
             assert layerwise_backend is not None
             layerwise_store = LayerwiseStoreTimeline(self._topology, layerwise_backend, thread_initializer)
-            layerwise_store.bind_filter(store_filter)
+            layerwise_store.bind_admission(store_admission)
             layerwise_store.bind_operation(store_transfer_operation)
             self._store = layerwise_store
         elif self._schedule.store_kind is StoreScheduleKind.ASYNC:
