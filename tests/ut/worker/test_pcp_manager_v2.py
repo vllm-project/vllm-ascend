@@ -403,7 +403,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     ):
         result = manager.partition_batch(global_batch, padded_num_tokens=4)
 
-    upstream_partition.assert_called_once_with(global_batch, padded_num_tokens=4)
+    upstream_partition.assert_called_once_with(global_batch, padded_num_tokens=4, padded_num_reqs=None)
     assert result.num_reqs == 3
     assert result.num_reqs_after_padding == 4
     assert result.num_tokens == 3
@@ -447,7 +447,7 @@ def test_partition_batch_keeps_piecewise_request_extent():
     ):
         result = manager.partition_batch(batch, padded_num_tokens=4)
 
-    upstream_partition.assert_called_once_with(batch, padded_num_tokens=4)
+    upstream_partition.assert_called_once_with(batch, padded_num_tokens=4, padded_num_reqs=None)
     assert result.num_reqs_after_padding == 2
     assert torch.equal(result.query_start_loc, torch.tensor([0, 1, 2], dtype=torch.int32))
     np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 1, 2], dtype=np.int32))
@@ -1032,6 +1032,7 @@ def test_validate_config_pcp_dp_graph_modes(dp_size, cudagraph_mode, allowed):
 @pytest.mark.parametrize("has_stale_batch", [False, True])
 def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
     manager = AscendPCPManager(2, pcp_rank, torch.device("cpu"))
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE, pcp_shard_decode_requests=False)
     saved_batch = _make_global_pcp_batch() if has_stale_batch else None
     manager._global_batch = saved_batch
     manager._hidden_restore_idx = torch.tensor([99]) if has_stale_batch else None
