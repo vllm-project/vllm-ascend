@@ -44,8 +44,8 @@ class BackendIO:
             return ()
         native_result = self._backend.get(
             [binding.remote_object.key for binding in bindings],
-            [list(binding.memory.addresses) for binding in bindings],
-            [list(binding.memory.sizes) for binding in bindings],
+            [list(binding.local_region.memory.addresses) for binding in bindings],
+            [list(binding.local_region.memory.sizes) for binding in bindings],
         )
         if native_result is None:
             return self._unknown_binding_evidence(bindings)
@@ -60,8 +60,8 @@ class BackendIO:
             return StoreEvidence((), True, source_release_confirmed=True)
 
         keys = [binding.remote_object.key for binding in bindings]
-        addresses = [list(binding.memory.addresses) for binding in bindings]
-        sizes = [list(binding.memory.sizes) for binding in bindings]
+        addresses = [list(binding.local_region.memory.addresses) for binding in bindings]
+        sizes = [list(binding.local_region.memory.sizes) for binding in bindings]
         source_addresses_handed_off = False
         try:
             native_put, native_args = self._prepare_put(keys, addresses, sizes)
@@ -133,10 +133,10 @@ class BackendIO:
         if result_codes is None:
             return None, RuntimeError(f"{self._backend_spec.name} Store returned no per-key results")
         if len(result_codes) != expected_count:
-            error = RuntimeError(
+            result_error = RuntimeError(
                 f"{self._backend_spec.name} Store returned {len(result_codes)} results for {expected_count} keys"
             )
-            return None, error
+            return None, result_error
         return result_codes, None
 
     @staticmethod
@@ -163,9 +163,12 @@ class LayerwiseBackendIO(BackendIO):
         keys = list(bindings_by_key)
         native_result = self._backend.batch_copy_get(
             keys,
-            [[address for binding in bindings_by_key[key] for address in binding.memory.addresses] for key in keys],
-            [[size for binding in bindings_by_key[key] for size in binding.memory.sizes] for key in keys],
-            [[offset for binding in bindings_by_key[key] for offset in binding.remote_offsets] for key in keys],
+            [
+                [address for binding in bindings_by_key[key] for address in binding.local_region.memory.addresses]
+                for key in keys
+            ],
+            [[size for binding in bindings_by_key[key] for size in binding.local_region.memory.sizes] for key in keys],
+            [[offset for binding in bindings_by_key[key] for offset in binding.remote_layout.offsets] for key in keys],
         )
         result_codes = self._require_result_codes("batch_copy_get", keys, native_result)
         codes_by_key = dict(zip(keys, result_codes, strict=True))
@@ -189,9 +192,18 @@ class LayerwiseBackendIO(BackendIO):
             source_addresses_handed_off = True
             native_result = self._backend.batch_copy_put(
                 keys,
-                [[address for binding in bindings_by_key[key] for address in binding.memory.addresses] for key in keys],
-                [[size for binding in bindings_by_key[key] for size in binding.memory.sizes] for key in keys],
-                [[offset for binding in bindings_by_key[key] for offset in binding.remote_offsets] for key in keys],
+                [
+                    [address for binding in bindings_by_key[key] for address in binding.local_region.memory.addresses]
+                    for key in keys
+                ],
+                [
+                    [size for binding in bindings_by_key[key] for size in binding.local_region.memory.sizes]
+                    for key in keys
+                ],
+                [
+                    [offset for binding in bindings_by_key[key] for offset in binding.remote_layout.offsets]
+                    for key in keys
+                ],
             )
         except Exception as error:
             return StoreEvidence(
@@ -201,7 +213,7 @@ class LayerwiseBackendIO(BackendIO):
                 error,
             )
 
-        result_codes, error = self._interpret_store_results(len(keys), native_result)
+        result_codes, result_error = self._interpret_store_results(len(keys), native_result)
         succeeded = result_codes is not None and all(code == 0 for code in result_codes)
         codes_by_key = None if result_codes is None else dict(zip(keys, result_codes, strict=True))
         binding_evidence = tuple(
@@ -212,7 +224,7 @@ class LayerwiseBackendIO(BackendIO):
             binding_evidence,
             succeeded,
             source_release_confirmed=succeeded,
-            error=error,
+            error=result_error,
         )
 
     def commit_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
