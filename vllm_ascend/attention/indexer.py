@@ -316,9 +316,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
-        k_li_pe, k_li_nope = torch.split(
-            k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-        )
+        k_li_pe, k_li_nope = torch.split(k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)
 
         cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
         sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
@@ -452,9 +450,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         else:
             q_li, _ = self.wq_b(q_c)
         q_li = q_li.view(-1, self.n_head, self.head_dim)
-        q_li_pe, q_li_nope = torch.split(
-            q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-        )
+        q_li_pe, q_li_nope = torch.split(q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)
 
         q_li_pe = q_li_pe.unsqueeze(2)
         q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)

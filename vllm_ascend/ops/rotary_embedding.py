@@ -238,7 +238,7 @@ def rope_forward_oot(
         # npu_mrope handles both full and partial rotary internally:
         # it splits query into queryRot[..., :rotary_dim] and queryPass[..., rotary_dim:],
         # where rotary_dim is inferred from cos_sin_cache.shape[-1].
-        rotary_mode = "half" if is_neox_style else "interleaved"
+        rotary_mode = "half" if is_neox_style else "interleave"
         query, key = torch_npu.npu_mrope(
             positions,
             query.contiguous().view(query.shape[0], -1),

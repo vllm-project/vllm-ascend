@@ -48,6 +48,7 @@ def _rope_fp8_pytorch_native(
 
     return apply_rope(query), apply_rope(key)
 
+
 @pytest.mark.parametrize(
     "num_tokens,num_q_heads,num_k_heads,head_size,rotary_dim",
     FP8_ROPE_CASES,

@@ -108,7 +108,7 @@ class TestRopeForwardOOT:
         assert query_out.dtype == torch.float8_e4m3fn
         assert key_out.dtype == torch.float8_e4m3fn
 
-    @pytest.mark.parametrize("is_neox_style,rotary_mode", [(True, "half"), (False, "interleaved")])
+    @pytest.mark.parametrize("is_neox_style,rotary_mode", [(True, "half"), (False, "interleave")])
     @patch("vllm_ascend.ops.rotary_embedding.torch_npu.npu_mrope")
     def test_non_fp8_always_uses_asc(self, mock_npu_mrope, is_neox_style, rotary_mode):
         positions, query, key = _make_tensors()
