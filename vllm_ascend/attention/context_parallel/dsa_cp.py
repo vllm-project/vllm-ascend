@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
@@ -2241,11 +2242,13 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         )
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         self._pcp_rank = get_pcp_group().rank_in_group
+        self._shard_decode_requests = is_pcp_decode_sharding_enabled(vllm_config)
         self._hidden_restore_idx_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.int64,
             device=device,
         )
+        self._global_rope_buffers: dict[tuple[str, str], tuple[torch.Tensor, torch.Tensor]] = {}
 
     @classmethod
     def get_cudagraph_support(
@@ -2268,10 +2271,10 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         hidden_restore_idx[:num_actual_tokens].copy_(pcp_context.hidden_restore_idx[:num_actual_tokens])
         hidden_restore_idx[num_actual_tokens:].zero_()
 
-        # The upstream dummy path only invalidates gathered slot mappings.
-        # DSA also consumes the scheduler-global mapping, so clear it here.
-        if global_batch.is_dummy:
-            pcp_context.global_slot_mappings.fill_(-1)
+        # DSA also reads the global mapping: invalidate the entire dummy
+        # batch, or just the graph padding after real tokens.
+        padding_start = 0 if global_batch.is_dummy else num_actual_tokens
+        pcp_context.global_slot_mappings[:, padding_start : global_batch.num_tokens_after_padding].fill_(-1)
 
         return replace(
             pcp_context,
@@ -2408,7 +2411,9 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         num_actual_reqs: int | None,
         common_ratio_to_sas_metadata: dict[Any, Any],
     ) -> dsa_v1.AscendDSAMetadata:
-        if local_common_attn_metadata.num_actual_tokens > 0:
+        # Padded decode queries still execute in a captured graph. Refresh
+        # their metadata even when this rank owns no actual tokens.
+        if local_common_attn_metadata.query_start_loc_cpu[-1] > 0:
             return super().build(
                 common_prefix_len,
                 local_common_attn_metadata,
@@ -2428,8 +2433,30 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             num_prefills=0,
             attn_state=local_common_attn_metadata.attn_state,
             req_metadata=None,
-            hadamard=dsa_v1.AscendDSAMetadataBuilder.hadamard,
+            hadamard=self.hadamard,
         )
+
+    def _update_global_rope_buffers(self, metadata: dsa_v1.AscendDSAMetadata) -> None:
+        """Copy global cos/sin into reusable buffers and attach them to metadata."""
+        req_metadata = metadata.req_metadata
+        assert req_metadata is not None
+        rope_data = {}
+        for config_key, groups in req_metadata.cos._data.items():
+            rope_data[config_key] = {}
+            for group_name, (cos, sin) in groups.items():
+                key = (config_key, group_name)
+                if key not in self._global_rope_buffers:
+                    capacity = self._hidden_restore_idx_buffer.numel()
+                    self._global_rope_buffers[key] = (
+                        torch.empty((capacity, *cos.shape[1:]), dtype=cos.dtype, device=cos.device),
+                        torch.empty((capacity, *sin.shape[1:]), dtype=sin.dtype, device=sin.device),
+                    )
+                cos_buffer, sin_buffer = self._global_rope_buffers[key]
+                cos_buffer[: cos.shape[0]].copy_(cos)
+                sin_buffer[: sin.shape[0]].copy_(sin)
+                rope_data[config_key][group_name] = (cos_buffer[: cos.shape[0]], sin_buffer[: sin.shape[0]])
+        req_metadata.cos = RopeDataProxy(rope_data, is_cos=True)
+        req_metadata.sin = RopeDataProxy(rope_data, is_cos=False)
 
     def build(
         self,
@@ -2446,6 +2473,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         assert pcp_cache_group_idx is not None
         assert common_ratio_to_sas_metadata is not None
         pcp_context = self._prepare_graph_pcp_context(pcp_context)
+        is_prefilling = bool(pcp_context.global_batch.is_prefilling_np.any())
         global_common_attn_metadata = self._build_global_common_attn_metadata(
             pcp_context,
             pcp_cache_group_idx,
@@ -2455,9 +2483,11 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             global_common_attn_metadata,
             pcp_context.global_batch.num_reqs,
         )
-        # num_prefills can miss short prefills; prevent local PCP RoPE from
-        # overwriting the global RoPE buffer whenever a request is prefilling.
-        can_use_rope_cache = not bool(pcp_context.global_batch.is_prefilling_np.any())
+        # Owner-local decode positions differ from the global cache-update
+        # positions. The local builder must not overwrite the global RoPE
+        # tensors through the shared runtime buffer. Short prefills also
+        # require separate storage, even when num_prefills reports zero.
+        can_use_rope_cache = not self._shard_decode_requests and not is_prefilling
         global_dsa_metadata = self._global_metadata_builder.build(
             common_prefix_len,
             global_common_attn_metadata,
@@ -2466,10 +2496,18 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             common_ratio_to_sas_metadata={},
             can_use_rope_cache=can_use_rope_cache,
         )
+        if (
+            self._shard_decode_requests
+            and not is_prefilling
+            and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            self._update_global_rope_buffers(global_dsa_metadata)
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,
             common_attn_metadata,
         )
+        if local_common_attn_metadata.num_actual_tokens == 0:
+            num_actual_reqs = 0
         local_common_attn_metadata = self._build_graph_common_attn_metadata(
             local_common_attn_metadata,
             num_actual_reqs,

@@ -1266,7 +1266,15 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_attn_metadata_factory(
-    positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None
+    positions,
+    pad,
+    is_prefilling,
+    seq_lens_cpu=None,
+    *,
+    attn_state=None,
+    parallel_config=None,
+    num_actual_reqs=None,
+    num_actual_tokens=None,
 ):
     """Wrap build_attn_metadata with Ascend draft-model context.
 
@@ -1275,6 +1283,8 @@ def build_attn_metadata_factory(
     speculator path does not forward them. Attention state is left to the
     caller/backend instead of forcing the legacy speculative state. Must run inside
     ``build_attn_metadata_wrapper()``.
+    Optional actual counts distinguish active rows from graph padding without
+    changing the padded input shape.
     """
     raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
 
@@ -1285,6 +1295,10 @@ def build_attn_metadata_factory(
         kwargs["parallel_config"] = parallel_config
         if seq_lens_cpu is not None:
             kwargs["seq_lens_np"] = seq_lens_cpu.numpy()
+        if num_actual_reqs is not None:
+            kwargs["num_actual_reqs"] = num_actual_reqs
+        if num_actual_tokens is not None:
+            kwargs["num_actual_tokens"] = num_actual_tokens
         return raw(*args, **kwargs)
 
     try:

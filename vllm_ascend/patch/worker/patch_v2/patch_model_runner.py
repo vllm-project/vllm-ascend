@@ -5,8 +5,28 @@ from contextlib import AbstractContextManager
 
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
+from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
+
+
+# Remove once upstream GPUModelRunner passes PCP-local request counts to dispatch.
+def dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs):
+    if cudagraph_manager is not None and uniform_token_count:
+        parallel_config = cudagraph_manager.vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1:
+            # Decode requests stay whole on each PCP rank. Tokens are already
+            # local, so divide by the query length for both ordinary decode
+            # and uniform K+1 speculative verification.
+            num_reqs = num_tokens // uniform_token_count
+    return _dispatch_cg_and_sync_dp(
+        cudagraph_manager,
+        num_reqs,
+        num_tokens,
+        uniform_token_count,
+        *args,
+        **kwargs,
+    )
 
 
 # Adapted from vLLM ced6857afa GPUModelRunner.initialize_kv_cache.
@@ -192,5 +212,7 @@ def initialize_kv_cache(
 
 
 upstream.copy_kv_cache_blocks_inplace = copy_kv_cache_blocks_inplace
+
+upstream.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp
 
 upstream.GPUModelRunner.initialize_kv_cache = initialize_kv_cache

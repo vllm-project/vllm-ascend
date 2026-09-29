@@ -3,9 +3,35 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import get_dcp_group
+from vllm.config import VllmConfig
+from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs as _upstream_gather_prefill_cache_inputs
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+
+
+def is_pcp_decode_sharding_enabled(vllm_config: VllmConfig) -> bool:
+    """Select PCP decode request sharding without DCP."""
+    parallel_config = vllm_config.parallel_config
+    return parallel_config.prefill_context_parallel_size > 1 and parallel_config.decode_context_parallel_size == 1
+
+
+def _gather_prefill_cache_inputs(
+    tensors: tuple[torch.Tensor, ...],
+    slot_mapping: torch.Tensor,
+    num_decode_tokens: int,
+    shard_decode_requests: bool = False,
+) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+    # vLLM 0.30.0 gathers only prefills. Remove this wrapper once #52162
+    # provides the same all-token gather through the upstream helper.
+    if not shard_decode_requests:
+        return _upstream_gather_prefill_cache_inputs(tensors, slot_mapping, num_decode_tokens)
+    local_num_tokens = tensors[0].shape[0]
+    assert all(tensor.shape[0] == local_num_tokens for tensor in tensors)
+    assert 0 <= num_decode_tokens <= local_num_tokens
+    group = get_pcp_group()
+    gathered_inputs = tuple(group.all_gather(tensor.contiguous(), dim=0) for tensor in tensors)
+    return gathered_inputs, slot_mapping[: group.world_size * local_num_tokens]
 
 
 def get_cp_local_query_key_lens(

@@ -38,12 +38,15 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
 )
-from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.context_parallel.common_cp import (
+    _gather_prefill_cache_inputs,
+    is_pcp_decode_sharding_enabled,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
@@ -517,6 +520,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             type(self) is AscendAttentionBackendImpl
             and self.vllm_config.parallel_config.prefill_context_parallel_size > 1
         )
+        self.pcp_shard_decode_requests = is_pcp_decode_sharding_enabled(self.vllm_config)
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -1166,6 +1170,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         kv_cache: tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        *,
+        shard_decode_requests: bool = False,
     ):
         if len(kv_cache) <= 1:
             return query, key, value, output
@@ -1185,6 +1191,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             ),
             expanded_slot_mapping,
             attn_metadata.num_decode_tokens,
+            shard_decode_requests=shard_decode_requests,
         )
         local_num_actual_tokens = attn_metadata.num_actual_tokens
         try:
@@ -1272,7 +1279,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output_padded = output
             if self.pcp_enabled:
                 query, key, value, output_padded = self._reshape_and_cache_pcp(
-                    query, key, value, kv_cache, attn_metadata, output
+                    query,
+                    key,
+                    value,
+                    kv_cache,
+                    attn_metadata,
+                    output,
+                    shard_decode_requests=self.pcp_shard_decode_requests,
                 )
             else:
                 query, key, value, output_padded = self.reshape_and_cache(

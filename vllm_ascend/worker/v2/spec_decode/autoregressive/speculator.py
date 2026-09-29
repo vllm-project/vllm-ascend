@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
@@ -217,28 +218,34 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             input_batch.positions,
             num_tokens_padded=num_tokens_padded,
         )
-        # TODO: Remove this early return once FIA supports padded Query tensors
-        # whose token count exceeds the cumulative query length. Keep the
-        # mapping refresh above when unifying metadata construction.
-        if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA"):
-            return attn_metadata, slot_mappings
-
         slot_mappings = build_slot_mappings_by_layer(
             slot_mappings_tensor,
             self.kv_cache_config,
         )
-        # This is draft prefill, not the later one-token-per-request decode.
-        # Query lengths may differ, so do not use _build_uniform_attn_metadata.
+        num_reqs = input_batch.num_reqs
+        query_start_loc_np = input_batch.query_start_loc_np
+        seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            # The draft graph runs the global batch. Give padding requests the
+            # captured query width. Actual request/token counts are passed
+            # separately so the metadata builders can identify padding.
+            query_len = num_tokens_padded // num_reqs_padded
+            query_start_loc_np = self.arange_np[: num_reqs_padded + 1] * query_len
+            self.input_buffers.query_start_loc[: num_reqs_padded + 1].copy_(
+                torch.from_numpy(query_start_loc_np), non_blocking=True
+            )
+            seq_lens_cpu_upper_bound = F.pad(seq_lens_cpu_upper_bound[:num_reqs], (0, num_reqs_padded - num_reqs))
+            num_reqs = num_reqs_padded
         attn_metadata = self._build_attn_metadata(
-            num_reqs=input_batch.num_reqs,
+            num_reqs=num_reqs,
             batch_desc=BatchExecutionDescriptor(
                 cg_mode=cudagraph_runtime_mode,
                 num_tokens=num_tokens_padded,
                 num_reqs=num_reqs_padded,
             ),
-            query_start_loc_np=input_batch.query_start_loc_np,
-            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             step=0,
+            query_start_loc_np=query_start_loc_np,
         )
         return attn_metadata, slot_mappings
 
@@ -368,7 +375,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             self.prefill_cudagraph_manager.capture(
                 self._prefill,
                 self.model_state,
-                self.target_input_buffers,
+                self.input_buffers if self.replicated_pcp else self.target_input_buffers,
                 self.block_tables,
                 self.draft_prefill_attn_groups,
                 self.kv_cache_config,
@@ -509,6 +516,9 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         """Build Ascend draft metadata for uniform and explicit query layouts."""
         assert self.input_batch is not None
         seq_lens_cpu = None
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        num_actual_reqs = self.input_batch.num_reqs if step == 0 else None
+        num_actual_tokens = self.input_batch.num_tokens if step == 0 else None
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
         if self.use_dcp:
             assert self.dcp_manager is not None
@@ -522,6 +532,9 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 max_model_len=self.max_model_len,
             )
 
+        elif num_actual_reqs is not None:
+            seq_lens_cpu = F.pad(self._get_seq_lens_cpu(num_actual_reqs), (0, num_reqs_padded - num_actual_reqs))
+
         # Upstream's uniform builder calls self._build_attn_metadata, so this
         # single hook also covers graph capture and eager draft decode.
         with build_attn_metadata_factory(
@@ -529,6 +542,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             batch_desc.num_tokens,
             is_prefilling,
             seq_lens_cpu=seq_lens_cpu,
+            num_actual_reqs=num_actual_reqs,
+            num_actual_tokens=num_actual_tokens,
             parallel_config=self.draft_vllm_config.parallel_config,
         ):
             attn_metadata = super()._build_attn_metadata(

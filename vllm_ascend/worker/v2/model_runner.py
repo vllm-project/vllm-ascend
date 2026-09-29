@@ -56,6 +56,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
@@ -276,6 +277,7 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
+        shard_decode_requests = is_pcp_decode_sharding_enabled(self.vllm_config)
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(
                 kv_cache_config,
@@ -285,6 +287,8 @@ class NPUModelRunner(GPUModelRunner):
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
                 self.pcp_manager.kv_cache_config = kv_cache_config
+                self.pcp_manager.shard_decode_requests = shard_decode_requests
+                self.pcp_manager.global_input_buffers = self.input_buffers
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
@@ -419,6 +423,20 @@ class NPUModelRunner(GPUModelRunner):
         self._check_finegrained_tp_graph_step(batch_desc.cg_mode)
         num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
+        global_graph_num_reqs = None
+        if (
+            self.pcp_manager is not None
+            and self.pcp_manager.shard_decode_requests
+            and batch_desc.cg_mode == CUDAGraphMode.FULL
+            and batch_desc.uniform_token_count is not None
+        ):
+            # The descriptor describes the largest PCP-local owner, while the
+            # runner retains all requests for cache updates and sampling.
+            assert batch_desc.num_reqs is not None
+            global_graph_num_reqs = self.pcp_manager.get_global_graph_num_reqs(
+                batch_desc.num_reqs, batch_desc.uniform_token_count
+            )
+            num_tokens_after_padding = global_graph_num_reqs * batch_desc.uniform_token_count
         assert num_tokens > 0
 
         req_ids = batch_req_state.req_ids
@@ -486,7 +504,8 @@ class NPUModelRunner(GPUModelRunner):
         # Get query_start_loc.
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
-        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        descriptor_num_reqs = global_graph_num_reqs or batch_desc.num_reqs
+        num_reqs_padded = max(num_reqs, descriptor_num_reqs or num_reqs)
         query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])
@@ -502,7 +521,8 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs,
                 query_start_loc_np,
                 batch_desc.cg_mode,
-                batch_desc.num_reqs,
+                descriptor_num_reqs,
+                uniform_query_len=batch_desc.uniform_token_count,
             )
 
         query_start_loc = self.input_buffers.query_start_loc
@@ -564,11 +584,13 @@ class NPUModelRunner(GPUModelRunner):
             self.input_buffers.seq_lens,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
+        if global_graph_num_reqs is not None:
+            self.input_buffers.positions[num_tokens:num_tokens_after_padding].zero_()
         if adaptive_verification_active and self.use_fia:
             self.input_buffers.seq_lens_np[:num_reqs] = seq_lens[:num_reqs].cpu().numpy()
 
         # Pad for full CUDA graph mode.
-        self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
+        self.input_buffers.seq_lens_np[num_reqs:] = 0
 
         dcp_local_seq_lens = None
         # Main computes DCP lengths in the inherited execute_model after PCP
@@ -847,6 +869,7 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np: np.ndarray,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         batch_desc_num_reqs: int | None = None,
+        uniform_query_len: int | None = None,
     ) -> tuple[np.ndarray, int]:
         """
         This function is only designed to satisfied the constraint that when the layout is TND,
@@ -857,9 +880,10 @@ class NPUModelRunner(GPUModelRunner):
         descriptor_num_reqs = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs_padded
         # This checks query lengths, not request phase: short prefills can also
         # match. Graph dispatch is responsible for excluding incompatible prefills.
-        has_uniform_decode_query_lens = np.all(np.diff(query_start_loc_np[: num_reqs + 1]) == self.decode_query_len)
+        query_len = uniform_query_len or self.decode_query_len
+        has_uniform_decode_query_lens = np.all(np.diff(query_start_loc_np[: num_reqs + 1]) == query_len)
         matches_uniform_decode_graph_shape = (
-            has_uniform_decode_query_lens and num_tokens_padded == descriptor_num_reqs * self.decode_query_len
+            has_uniform_decode_query_lens and num_tokens_padded == descriptor_num_reqs * query_len
         )
         if (
             cudagraph_runtime_mode == CUDAGraphMode.FULL
@@ -874,13 +898,13 @@ class NPUModelRunner(GPUModelRunner):
             # topology between capture and replay.
             num_reqs_padded = descriptor_num_reqs
 
-        if has_uniform_decode_query_lens and num_tokens_padded == num_reqs_padded * self.decode_query_len:
+        if has_uniform_decode_query_lens and num_tokens_padded == num_reqs_padded * query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
             last_loc = query_start_loc_np[num_reqs]
             query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
-                np.arange(1, num_reqs_padded + 1 - num_reqs) * self.decode_query_len + last_loc
+                np.arange(1, num_reqs_padded + 1 - num_reqs) * query_len + last_loc
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
