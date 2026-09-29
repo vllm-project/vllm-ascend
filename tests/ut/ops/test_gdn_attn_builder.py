@@ -35,6 +35,36 @@ from vllm_ascend.ops.triton.fla.utils import (
 )
 
 
+@pytest.mark.parametrize(
+    "values",
+    [[], [False], [True], [False] * 8, [True] * 8, [True, False, True, False, False, True]],
+)
+@pytest.mark.parametrize("strided", [False, True])
+def test_stable_argsort_boolean_partition(values, strided):
+    mask = torch.tensor(values, dtype=torch.bool)
+    if strided:
+        mask = torch.stack((mask, mask), dim=1)[:, 0]
+    expected = sorted(range(len(values)), key=values.__getitem__)
+
+    with patch.object(ascend_gdn_attn_builder.torch, "argsort", wraps=torch.argsort) as argsort:
+        indices = ascend_gdn_attn_builder._stable_argsort_for_npu(mask)
+
+    assert indices.tolist() == expected
+    assert indices.dtype == torch.int64
+    # Stable ordering alone also passes with the old AiCPU fallback. Check the
+    # dispatch dtype to prevent reintroducing integer sorting for boolean masks.
+    assert argsort.call_args.args[0].dtype == torch.float32
+    assert argsort.call_args.kwargs["stable"] is True
+
+
+def test_stable_argsort_preserves_integer_precision():
+    # These distinct integers collapse to the same float32 value. Only boolean
+    # masks may be cast; other callers must retain their original precision.
+    values = torch.tensor([2**40 + 1, 2**40, 2**40 + 1], dtype=torch.int64)
+    indices = ascend_gdn_attn_builder._stable_argsort_for_npu(values)
+    assert indices.tolist() == [1, 0, 2]
+
+
 @pytest.fixture(autouse=True)
 def _patch_triton_cdiv(monkeypatch):
     if not hasattr(_fla_index.triton, "cdiv"):
