@@ -1048,6 +1048,43 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(len(worker.group_kv_caches_base_addr[0]), 2)
         worker.m_store.register_buffer.assert_called_once()
 
+    def test_register_nope_cache_skips_empty_rope_view(self):
+        # A NoPE RoPE view is empty but retains its parent's backing storage.
+        # Registering its null data_ptr would corrupt the aligned region start.
+        alignment = 2 * 1024 * 1024
+        backing = torch.empty(alignment + 64, dtype=torch.uint8)
+        offset = -backing.data_ptr() % alignment
+        cache = backing[offset : offset + 64].view(4, 16)
+        empty_rope = cache[:, :0]
+        self.assertEqual(empty_rope.data_ptr(), 0)
+        self.assertEqual(empty_rope.untyped_storage().data_ptr(), backing.data_ptr())
+
+        for container in (tuple, list):
+            with self.subTest(container=container):
+                worker = self._make_worker()
+                worker.use_hybrid = True
+                worker._transfer_threads_started = True
+                worker.register_kv_caches({"layer.0": container((cache, empty_rope))})
+
+                worker.m_store.register_buffer.assert_called_once_with([cache.data_ptr()], [64])
+                self.assertEqual(worker.kv_caches_base_addr, [cache.data_ptr()])
+                self.assertEqual(worker.group_kv_caches_base_addr[0], [cache.data_ptr()])
+                self.assertEqual(worker.group_block_len[0], [16])
+                self.assertEqual(worker.group_block_stride[0], [16])
+
+    def test_as_cache_tuple_empty_and_nonempty_tensors(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        cache = torch.zeros(2, 4)
+        empty = cache[:, :0]
+        self.assertEqual(KVPoolWorker._as_cache_tuple(empty), ())
+        self.assertEqual(KVPoolWorker._as_cache_tuple((empty,)), ())
+        self.assertEqual(KVPoolWorker._as_cache_tuple([empty]), ())
+        for value in (cache, (cache,), [cache], (empty, cache)):
+            result = KVPoolWorker._as_cache_tuple(value)
+            self.assertEqual(len(result), 1)
+            self.assertIs(result[0], cache)
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")

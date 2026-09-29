@@ -41,9 +41,6 @@ def test_moe_tp_ep_eplb_full_decode_only():
     model = "Qwen/Qwen3-30B-A3B"
     port = get_open_port()
     env_dict = {
-        # Qwen3MoeForCausalLM now defaults to MRv2, which rejects V1 dynamic
-        # EPLB fields. Keep this two-card EPLB smoke test on V1.
-        "VLLM_USE_V2_MODEL_RUNNER": "0",
         "DYNAMIC_EPLB": "true",
         "HCCL_BUFFSIZE": "1024",
     }
