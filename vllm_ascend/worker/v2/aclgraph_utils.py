@@ -333,6 +333,19 @@ class ModelWithContext(nn.Module):
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor):
         return self.original_model.compute_confidence(head_hidden, markov_embed)
 
+    if not vllm_version_is("0.30.0"):
+
+        def __getattr__(self, name: str):
+            # vLLM #57632 moved the draft context-K/V precompute into the
+            # capture path, which reaches model methods through this wrapper.
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                original_model = self._modules.get("original_model")
+                if original_model is None:
+                    raise
+                return getattr(original_model, name)
+
 
 @contextmanager
 def model_capture_wrapper(speculator, is_draft_model_prefill):
