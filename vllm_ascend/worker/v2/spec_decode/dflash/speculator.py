@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from typing import Any, cast
 
 import torch
@@ -11,6 +12,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
@@ -18,6 +20,13 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
 )
+
+
+def prepare_dflash_inputs_factory(physical_block_size: int) -> Callable[..., None]:
+    def prepare_with_block_size(*args: Any, **kwargs: Any) -> None:
+        prepare_dflash_inputs(*args, **kwargs, physical_block_size=physical_block_size)
+
+    return prepare_with_block_size
 
 
 class AscendDFlashSpeculator(DFlashSpeculator):
@@ -117,6 +126,9 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
         self.attn_backends = attn_backends
+        dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
+            self.vllm_config.cache_config.block_size
+        )
 
     def propose(
         self,
@@ -196,6 +208,8 @@ def prepare_dflash_inputs(
     max_num_tokens: int,
     max_model_len: int,
     sample_from_anchor: bool = False,
+    *,
+    physical_block_size: int,
 ) -> None:
     prepare_dflash_inputs_triton(
         input_buffers,
@@ -226,4 +240,5 @@ def prepare_dflash_inputs(
         max_num_tokens,
         max_model_len,
         sample_from_anchor,
+        physical_block_size=physical_block_size,
     )

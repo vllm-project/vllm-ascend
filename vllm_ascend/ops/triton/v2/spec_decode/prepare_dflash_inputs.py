@@ -19,7 +19,6 @@
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
@@ -43,6 +42,44 @@ def _partition_work(num_items, worker_idx, num_workers):
     begin = worker_idx * base + tl.minimum(worker_idx, extra)
     count = base + tl.where(worker_idx < extra, 1, 0)
     return begin, count
+
+
+@triton.jit
+def _dflash_local_slot(
+    positions,
+    block_table_ptr,
+    block_table_stride,
+    req_idx,
+    valid,
+    physical_block_size,
+    block_size,
+    cp_rank,
+    CP_SIZE: tl.constexpr,
+    CP_INTERLEAVE: tl.constexpr,
+    PAD_SLOT_ID: tl.constexpr,
+):
+    # DCP ownership uses physical KV blocks; the table may use smaller kernel blocks.
+    if CP_SIZE == 1:
+        local_positions = positions
+        is_local = True
+    else:
+        virtual_block_size = physical_block_size * CP_SIZE
+        virtual_block_indices = positions // virtual_block_size
+        virtual_block_offsets = positions % virtual_block_size
+        is_local = virtual_block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
+        rounds = virtual_block_offsets // (CP_INTERLEAVE * CP_SIZE)
+        remainder = virtual_block_offsets % CP_INTERLEAVE
+        local_offsets = rounds * CP_INTERLEAVE + remainder
+        local_positions = virtual_block_indices * physical_block_size + local_offsets
+
+    block_indices = tl.minimum(local_positions // block_size, block_table_stride - 1)
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + block_indices,
+        mask=valid & is_local,
+        other=0,
+    ).to(tl.int64)
+    slot = block_numbers * block_size + local_positions % block_size
+    return tl.where(valid & is_local & (block_numbers != 0), slot, PAD_SLOT_ID)
 
 
 @triton.jit
@@ -76,6 +113,7 @@ def _prepare_dflash_inputs_kernel(
     block_table_stride,
     # Scalars
     parallel_drafting_token_id,
+    physical_block_size,
     block_size,
     num_query_per_req,
     num_speculative_steps,
@@ -120,14 +158,10 @@ def _prepare_dflash_inputs_kernel(
 
     ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=ctx_valid_mask, other=0)
     # Text-only: scalar positions are linear KV indices; multimodal/M-RoPE is unsupported.
-    ctx_block_num = tl.minimum(ctx_pos // (block_size * CP_SIZE), block_table_stride - 1)
-    ctx_block_id = tl.load(
-        block_table_ptr + req_idx * block_table_stride + ctx_block_num,
-        mask=ctx_valid_mask,
-        other=0,
-    ).to(tl.int64)
-    local_ctx_slot = cp_local_slot(ctx_pos, ctx_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID)
-    ctx_slot = tl.where(ctx_valid_mask & (ctx_block_id != 0), local_ctx_slot, PAD_SLOT_ID)
+    ctx_slot = _dflash_local_slot(
+        ctx_pos, block_table_ptr, block_table_stride, req_idx, ctx_valid_mask,
+        physical_block_size, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID,
+    )
 
     tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos, mask=ctx_mask)
     tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot, mask=ctx_mask)
@@ -161,14 +195,10 @@ def _prepare_dflash_inputs_kernel(
 
     input_id = tl.where(query_off == 0, bonus_token, parallel_drafting_token_id)
 
-    q_block_num = tl.minimum(query_pos // (block_size * CP_SIZE), block_table_stride - 1)
-    q_block_id = tl.load(
-        block_table_ptr + req_idx * block_table_stride + q_block_num,
-        mask=query_mask,
-        other=0,
-    ).to(tl.int64)
-    local_q_slot = cp_local_slot(query_pos, q_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID)
-    q_slot = tl.where(q_block_id != 0, local_q_slot, PAD_SLOT_ID)
+    q_slot = _dflash_local_slot(
+        query_pos, block_table_ptr, block_table_stride, req_idx, query_mask,
+        physical_block_size, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID,
+    )
 
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=query_mask)
     tl.store(out_query_positions_ptr + query_idx, tl.minimum(query_pos, max_model_len - 1), mask=query_mask)
@@ -278,6 +308,8 @@ def prepare_dflash_inputs_triton(
     max_num_tokens: int,
     max_model_len: int,
     sample_from_anchor: bool = False,
+    *,
+    physical_block_size: int,
 ) -> None:
     num_reqs = input_batch.num_reqs
     assert num_reqs > 0
@@ -304,6 +336,9 @@ def prepare_dflash_inputs_triton(
         triton.next_power_of_2(max(2, max_ctx_per_worker)),
     )
 
+    if physical_block_size % block_size != 0:
+        raise ValueError("The physical KV block size must be divisible by the kernel block size.")
+
     _prepare_dflash_inputs_kernel[(num_reqs, workers_per_req)](
         input_buffers.input_ids,
         input_buffers.positions,
@@ -329,6 +364,7 @@ def prepare_dflash_inputs_triton(
         block_table,
         block_table.stride(0),
         parallel_drafting_token_id,
+        physical_block_size,
         block_size,
         num_query_per_req,
         num_speculative_steps,
