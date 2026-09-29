@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from vllm.config import VllmConfig
 
@@ -30,3 +30,26 @@ class TestGraphFusionPassManagerConfig(TestBase):
         self.assertFalse(manager.ascend_compilation_config.fuse_qknorm_rope)
         self.assertFalse(manager.ascend_compilation_config.fuse_muls_add)
         self.assertEqual(manager.passes, [])
+
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_fuse_gemm_comms_registers_direct_graph_pass(self, mock_platform):
+        vllm_config = VllmConfig()
+        vllm_config.compilation_config.pass_config.fuse_gemm_comms = True
+        vllm_config.additional_config = {
+            "ascend_compilation_config": {
+                "fuse_norm_quant": "false",
+                "fuse_qknorm_rope": "false",
+                "fuse_muls_add": "false",
+            }
+        }
+        init_ascend_config(vllm_config)
+
+        profile = MagicMock()
+        profile.supports.side_effect = (
+            lambda capability: capability.name == "GRAPH_MM_REDUCE_SCATTER_FUSION"
+        )
+        with patch("vllm_ascend.compilation.graph_fusion_pass_manager.get_current_hardware_profile", return_value=profile):
+            manager = GraphFusionPassManager()
+            manager.configure(vllm_config)
+
+        self.assertEqual(len(manager.graph_passes), 1)
