@@ -39,10 +39,10 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
-from vllm_ascend.worker.v2.spec_decode.config_utils import (
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
+    prepare_replicated_pcp_config,
 )
-from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
 
 class AscendDSparkSpeculator(DSparkSpeculator):

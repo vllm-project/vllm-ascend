@@ -50,10 +50,8 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-from vllm_ascend.worker.v2.spec_decode.config_utils import (
-    disable_profiling_chunk_for_draft,
-)
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
+    disable_profiling_chunk_for_draft,
     disable_target_pcp_for_replicated_draft,
     prepare_replicated_pcp_config,
 )

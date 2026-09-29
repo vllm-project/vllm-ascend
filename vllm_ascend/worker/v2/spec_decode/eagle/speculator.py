@@ -22,7 +22,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
-from vllm_ascend.worker.v2.spec_decode.config_utils import (
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
 )
 
