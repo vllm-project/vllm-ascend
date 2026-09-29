@@ -267,6 +267,10 @@ nav:
     - faqs.md
   - User Guide:
     - user_guide/index.md
+    - Deployment Guide:
+        - user_guide/deployment_guide/index.md
+        - user_guide/deployment_guide/using_mindie_motor.md
+        - user_guide/deployment_guide/using_volcano_kthena.md
     - Features and Models:
         - user_guide/support_matrix/index.md
         - user_guide/support_matrix/supported_models.md
@@ -311,10 +315,6 @@ nav:
         - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/batch_job_aware_scheduler.md
         - user_guide/feature_guide/rl.md
-    - Deployment Guide:
-        - user_guide/deployment_guide/index.md
-        - user_guide/deployment_guide/using_volcano_kthena.md
-        - user_guide/deployment_guide/using_mindie_motor.md
     - user_guide/release_notes.md
   - Developer Guide:
     - developer_guide/index.md
