@@ -90,10 +90,59 @@ def _is_npu_platform(platform) -> bool:
     return getattr(platform, "device_type", None) == "npu"
 
 
+def _probe_hixl_binding() -> str | None:
+    """Return None when HIXL is usable, otherwise the reason it is not.
+
+    Two bindings qualify: the official ``hixl`` Python package shipped with
+    newer CANN distributions, and the vllm_ascend ctypes fallback that drives
+    ``libcann_hixl.so`` directly when the package is absent.
+    """
+    try:
+        import hixl
+
+        if hasattr(hixl, "Hixl"):
+            return None
+        package_reason = "the hixl package has no Hixl binding"
+    except ImportError as error:
+        package_reason = str(error) or "the hixl package is missing"
+
+    from vllm_ascend.distributed.eplb import hixl_compat
+
+    try:
+        hixl_compat.ensure_available()
+    except Exception as error:
+        return f"{package_reason}; ctypes fallback: {error}"
+    return None
+
+
 def _patch_parallel_config() -> None:
     platform = _parallel_config.current_platform
     if not isinstance(platform, _CudaAlikeEplbPlatformProxy):
         _parallel_config.current_platform = _CudaAlikeEplbPlatformProxy(platform)
+
+    original_post_init = _parallel_config.ParallelConfig.__post_init__
+    if getattr(original_post_init, _PATCH_MARKER, False):
+        return
+
+    @wraps(original_post_init)
+    def _post_init(config):
+        if (
+            _is_npu_platform(_parallel_config.current_platform)
+            and config.enable_eplb
+            and config.eplb_config.communicator is None
+        ):
+            unavailable = _probe_hixl_binding()
+            if unavailable is None:
+                config.eplb_config.communicator = "hixl"
+                logger.info("Ascend EPLB selected hixl: a HIXL binding is available.")
+            else:
+                config.eplb_config.communicator = "torch_gloo"
+                logger.info("Ascend EPLB selected torch_gloo: HIXL is unavailable (%s).", unavailable)
+        original_post_init(config)
+
+    setattr(_post_init, _PATCH_MARKER, True)
+    _parallel_config.ParallelConfig.__post_init__ = _post_init
+    rebuild_dataclass(_parallel_config.ParallelConfig, force=True)
 
 
 def _patch_eplb_policy_config() -> None:
@@ -131,20 +180,20 @@ def _patch_eplb_policy_config() -> None:
 
 
 def _patch_eplb_communicator_config() -> None:
-    """Add HIXL to the upstream selector and make it the Ascend default."""
+    """Add HIXL to the upstream selector while retaining automatic selection."""
     config_cls = _parallel_config.EPLBConfig
     communicator_field = getattr(config_cls, "__dataclass_fields__", {}).get("communicator")
     if communicator_field is None:
         raise RuntimeError("Unsupported vLLM EPLB contract: communicator field is missing.")
     communicator_type = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl", "hixl"] | None
-    if communicator_field.type == communicator_type and communicator_field.default == "hixl":
+    if communicator_field.type == communicator_type and communicator_field.default is None:
         return
 
     if communicator_field.type != communicator_type:
         _parallel_config.EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl", "hixl"]
         config_cls.__annotations__["communicator"] = communicator_type
         communicator_field.type = communicator_type
-    communicator_field.default = "hixl"
+    communicator_field.default = None
     rebuild_dataclass(config_cls, force=True)
     rebuild_dataclass(_parallel_config.ParallelConfig, force=True)
 
