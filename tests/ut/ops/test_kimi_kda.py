@@ -68,8 +68,6 @@ class _RecordingStreamSwitch:
 
 
 def test_kda_output_norm_uses_checkpoint_epsilon():
-    """Construction preserves checkpoint epsilon and marks Kimi layers."""
-
     def fake_upstream_init(attention, _config, _vllm_config, _prefix):
         nn.Module.__init__(attention)
         attention.o_norm = SimpleNamespace(eps=1e-5)
@@ -85,7 +83,7 @@ def test_kda_output_norm_uses_checkpoint_epsilon():
         model_config=SimpleNamespace(
             multimodal_config=None,
             enable_prompt_embeds=False,
-        ),
+        )
     )
     with patch(
         "vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__",
@@ -94,7 +92,6 @@ def test_kda_output_norm_uses_checkpoint_epsilon():
         attention = AscendKimiK3DeltaAttention(config, vllm_config)
 
     assert attention.o_norm.eps == config.rms_norm_eps
-    assert attention._requires_kda_state_copy
 
 
 def test_prepare_beta_slices_and_applies_sigmoid_in_fp32():
@@ -372,8 +369,7 @@ def test_fused_qkv_keeps_non_mxfp_quantization_in_linear_apply():
 
 
 @pytest.mark.parametrize("lower_bound", [None, -4.0])
-def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound, monkeypatch):
-    """Prepared state-copy dispatch preserves fused gate and cache updates."""
+def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.head_dim = 2
@@ -397,18 +393,9 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound, monkeypat
     )
     output = torch.randn_like(v)
     final_state = torch.randn(1, 1, 2, 2)
-    monkeypatch.setattr(
-        attention,
-        "_ascend_kda_state_copy",
-        SimpleNamespace(
-            gather=lambda state, indices, flags: state[indices].contiguous(),
-            scatter=lambda state, packed, indices: state.__setitem__(indices, packed.to(state.dtype)),
-        ),
-        raising=False,
-    )
-    attention._kda_state_copy_ready = True
 
     with (
+        patch("vllm_ascend.ops.kimi_kda.clear_ssm_states"),
         patch("vllm_ascend.ops.kda.l2norm_fwd", side_effect=lambda x: x),
         patch.object(
             torch.ops._C_ascend,
