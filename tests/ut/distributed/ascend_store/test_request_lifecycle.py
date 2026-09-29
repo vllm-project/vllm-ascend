@@ -75,7 +75,7 @@ class MemoryBackend(Backend):
             for addr, size in zip(row, lengths, strict=True):
                 self.check_address(addr, size)
             self.payloads[key] = [ctypes.string_at(addr, size) for addr, size in zip(row, lengths, strict=True)]
-        return [0] * len(keys)
+        return [True] * len(keys)
 
     def get(self, keys, addrs, sizes):
         for key, row, lengths in zip(keys, addrs, sizes, strict=True):
