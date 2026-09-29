@@ -497,10 +497,9 @@ class ExternalDPServerManager:
 
             # Engine master ranks expose an HTTP /health endpoint; non-engine-master
             # ranks (e.g. PP worker nodes) do not — we only need their process to stay alive.
-            engine_master_ranks = [rank for rank in local_ranks if rank.is_engine_master]
-            non_engine_master_ranks = [
-                rank for rank in local_ranks if not rank.is_engine_master
-            ]
+            #0929 修改
+            engine_master_ranks = [r for r in local_ranks if r.is_engine_master]
+            non_engine_master_ranks = [r for r in local_ranks if not r.is_engine_master]
 
             if non_engine_master_ranks:
                 _wait_processes_alive(
