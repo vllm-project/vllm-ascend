@@ -564,7 +564,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 state=ssm_state,
                 scale=key_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=spec_state_indices_tensor.flatten(),
+                # Preserve the per-request state rows. Their fixed stride lets
+                # the operator read the previously accepted state even when
+                # the current verification length changes between steps.
+                ssm_state_indices=spec_state_indices_tensor,
                 num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
             ).unsqueeze(0)
         else:

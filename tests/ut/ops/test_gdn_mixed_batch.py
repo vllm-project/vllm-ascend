@@ -17,6 +17,8 @@ from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNDecodeMetadata,
     GDNPrefillMetadata,
+    GDNSpecCausalConv1dMetadata,
+    GDNSpecDecodeMetadata,
 )
 
 
@@ -253,3 +255,101 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
             ]
         ),
     )
+
+
+def test_spec_recurrent_preserves_state_index_rows() -> None:
+    layer = _make_layer()
+    state_indices = torch.tensor(
+        [[6, 1, 7, 3], [5, 0, 4, 2]],
+        dtype=torch.int32,
+    )
+    actual_seq_lengths = torch.tensor([0, 2, 1], dtype=torch.int32)
+    num_accepted_tokens = torch.tensor([4, 2], dtype=torch.int32)
+    metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=2,
+        num_spec_decode_tokens=3,
+        num_actual_tokens=3,
+        spec_state_indices_tensor=state_indices,
+        non_spec_state_indices_tensor=None,
+        spec_sequence_masks=torch.ones(2, dtype=torch.bool),
+        num_accepted_tokens=num_accepted_tokens,
+    )
+    metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
+        spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
+            query_start_loc=torch.tensor([0, 2, 3], dtype=torch.int32),
+            cache_indices=state_indices,
+            num_accepted_tokens=num_accepted_tokens,
+        ),
+        actual_seq_lengths=actual_seq_lengths,
+    )
+
+    mixed_qkv = torch.arange(18, dtype=torch.float32).view(3, 6)
+    a = torch.zeros(3, 1)
+    b = torch.zeros(3, 1)
+    core_attn_out = torch.empty(3, 1, 2)
+    forward_context = ForwardContext(
+        no_compile_layers={layer.prefix: layer},
+        attn_metadata={layer.prefix: metadata},
+        slot_mapping={},
+    )
+    recurrent_calls: list[dict[str, torch.Tensor]] = []
+
+    def causal_conv1d(
+        output: torch.Tensor,
+        input_tensor: torch.Tensor,
+        conv_weights: torch.Tensor,
+        **kwargs,
+    ) -> None:
+        del conv_weights, kwargs
+        output.copy_(input_tensor)
+
+    def recurrent_gated_delta_rule(**kwargs) -> torch.Tensor:
+        recurrent_calls.append(kwargs)
+        return kwargs["value"].clone()
+
+    gating = (
+        torch.zeros(1, 3, 1),
+        torch.ones(1, 3, 1),
+    )
+    with (
+        override_forward_context(forward_context),
+        patch(
+            "vllm_ascend.ops.gdn.get_pcp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+        patch(
+            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            return_value=gating,
+        ),
+        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_causal_conv1d_custom",
+            side_effect=causal_conv1d,
+            create=True,
+        ),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_recurrent_gated_delta_rule",
+            side_effect=recurrent_gated_delta_rule,
+            create=True,
+        ),
+    ):
+        AscendGatedDeltaNetAttention._forward_core(
+            layer,
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+        )
+
+    assert len(recurrent_calls) == 1
+    recurrent_call = recurrent_calls[0]
+    assert recurrent_call["ssm_state_indices"] is state_indices
+    assert recurrent_call["actual_seq_lengths"] is actual_seq_lengths
+    assert recurrent_call["ssm_state_indices"].shape == (2, 4)

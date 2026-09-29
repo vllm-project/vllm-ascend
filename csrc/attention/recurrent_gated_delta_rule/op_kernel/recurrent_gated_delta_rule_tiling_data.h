@@ -36,6 +36,9 @@ struct alignas(8) RecurrentGatedDeltaRuleTilingData { // alignas(8)确保8字节
     uint32_t hasGama;
     uint32_t hasGamaK;
     uint32_t hasAcceptedTokens;
+    // Zero keeps the legacy packed [T] layout. A non-zero value is the
+    // per-request stride of the speculative [B, state_slots] layout.
+    uint32_t stateIndicesStride;
 };
 #pragma pack(pop)
 } // RecurrentGatedDeltaRule

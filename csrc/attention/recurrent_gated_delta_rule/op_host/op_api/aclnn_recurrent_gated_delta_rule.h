@@ -22,9 +22,10 @@ extern "C" {
  * @param [in] key: 数据类型支持：bfloat16。
  * @param [in] value: 数据类型支持：bfloat16。
  * @param [in] beta: 数据类型支持：bfloat16。
- * @param [in] state: 数据类型支持：bfloat16。
+ * @param [in] state: 数据类型支持：bfloat16、float32。
  * @param [in] actualSeqLengths: 数据类型支持：int32。
- * @param [in] ssmStateIndices: 数据类型支持：int32。
+ * @param [in] ssmStateIndices: 数据类型支持：int32。支持按 token 紧凑排列的 [T]，以及按请求固定槽位排列的
+ * [B, state_slots]；后者用于每个请求验证长度可变的推测解码。
  * @param [in] g: 数据类型支持：float32。
  * @param [in] gk: 数据类型支持：float32。
  * @param [in] numAcceptedTokens: 数据类型支持：int32。
