@@ -176,7 +176,7 @@ benchmarks:
     temperature: 1.0
     top_p: 1.0
     thinking: "true"
-    max_out_len: 65536
+    max_out_len: 32768
     batch_size: 32
     baseline: 90.40
     threshold: 10
