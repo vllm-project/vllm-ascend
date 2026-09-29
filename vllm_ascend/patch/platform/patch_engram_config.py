@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Allow Engram model validation on Ascend until upstream adds supports_engram."""
+"""Allow Engram on Ascend until the vLLM pin includes removal of the CUDA gate."""
 
 import importlib.util
 
