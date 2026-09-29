@@ -12,8 +12,7 @@ from vllm.distributed.parallel_state import (
     init_model_parallel_group,
 )
 
-import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
-from vllm_ascend.ops.triton import sfa_cp
+from vllm_ascend.ops.triton.dcp import dcp_a2a
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import enable_custom_op
 
@@ -45,7 +44,7 @@ def _worker(rank: int, world_size: int, port: int, result_queue: mp.SimpleQueue)
             [list(range(world_size))],
             local_rank=rank,
             backend="hccl",
-            group_name="sfa_dcp_a2a_test",
+            group_name="dcp_a2a_test",
             use_device_communicator=False,
         )
 
@@ -70,7 +69,7 @@ def _worker(rank: int, world_size: int, port: int, result_queue: mp.SimpleQueue)
             )
             sender_lses += torch.arange(world_size, dtype=torch.float32, device="npu").view(-1, 1, 1, 1)
 
-            actual = torch.ops.vllm.sfa_dcp_a2a_fused(
+            actual = torch.ops.vllm.dcp_a2a_fused(
                 sender_outputs[rank].contiguous(),
                 sender_lses[rank].contiguous(),
                 world_size,
@@ -96,7 +95,7 @@ def _worker(rank: int, world_size: int, port: int, result_queue: mp.SimpleQueue)
             torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
             # Deferred communication returns all history shards; current KV
             # is supplied once after the stream join.
-            recv = torch.ops.vllm.sfa_dcp_a2a_fused(
+            recv = torch.ops.vllm.dcp_a2a_fused(
                 sender_outputs[rank].float(),
                 sender_lses[rank].contiguous(),
                 world_size,
@@ -106,7 +105,7 @@ def _worker(rank: int, world_size: int, port: int, result_queue: mp.SimpleQueue)
             )
             local = torch.full_like(expected, 2.0, dtype=torch.float32)
             local_lse = torch.zeros((*expected.shape[:2], 1), device="npu")
-            combined = sfa_cp.fused_sfa_dcp_lse_combine(
+            combined = dcp_a2a.fused_dcp_lse_combine(
                 recv,
                 head_dim,
                 scatter_dim,
@@ -131,7 +130,7 @@ def _worker(rank: int, world_size: int, port: int, result_queue: mp.SimpleQueue)
         destroy_distributed_environment()
 
 
-def test_registered_sfa_dcp_a2a_fused_multi_rank() -> None:
+def test_registered_dcp_a2a_fused_multi_rank() -> None:
     world_size = 2
     mp.set_start_method("fork", force=True)
     result_queue = mp.SimpleQueue()

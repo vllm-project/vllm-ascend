@@ -27,7 +27,7 @@ def _builder(block_size, a5, monkeypatch, rope_dim=0):
             get_head_size=lambda: 512,
             hf_text_config=SimpleNamespace(num_attention_heads=4, kv_lora_rank=512),
         ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1, prefill_context_parallel_size=1),
         scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=4),
         speculative_config=None,
         compilation_config=SimpleNamespace(
@@ -66,6 +66,7 @@ def _common(block_size):
     expanded = (pages.unsqueeze(-1) * split + torch.arange(split, dtype=torch.int32)).reshape(2, -1)
     expanded[1, split:] = -1
     return SimpleNamespace(
+        context_parallel_metadata=None,
         num_reqs=2,
         num_actual_tokens=3,
         num_input_tokens=4,
@@ -99,6 +100,15 @@ def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, b
 
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla_metadata", plan)
     common = _common(block_size)
+    # The split helper consumes a decode-first batch. Reorder request and
+    # token metadata together; the original fixture is prefill-first.
+    common.query_start_loc = torch.tensor([0, 1, 3], dtype=torch.int32)
+    common.query_start_loc_cpu = common.query_start_loc.clone()
+    common.seq_lens = common.seq_lens.flip(0)
+    common.block_table_tensor = common.block_table_tensor.flip(0)
+    token_order = torch.tensor([2, 0, 1, 3])
+    common.slot_mapping = common.slot_mapping[token_order]
+    common.positions = common.positions[token_order]
     first = builder.build(0, common)
     assert type(first) is sfa.AscendSFAMetadata
     assert first.cos is None and first.sin is None and first.seq_lens_cpu is None
@@ -113,7 +123,7 @@ def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, b
     if a5:
         torch.testing.assert_close(
             seen[0],
-            torch.tensor([[7], [7], [1], [0]], dtype=torch.int32),
+            torch.tensor([[1], [7], [7], [0]], dtype=torch.int32),
         )
         assert second.smla_metadata.data_ptr() == first.smla_metadata.data_ptr()
         assert draft.smla_metadata.data_ptr() != first.smla_metadata.data_ptr()
@@ -126,7 +136,7 @@ def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, b
     builder.build(0, common)
     page_multiplier = builder.nope_states[None].split
     assert first.block_table[0, 0] == 3 * page_multiplier
-    assert draft.block_table[0, 0] == 7 * page_multiplier
+    assert draft.block_table[0, 0] == 5 * page_multiplier
 
 
 def test_a3_sparse_mla_preserves_storage_addresses(monkeypatch):
