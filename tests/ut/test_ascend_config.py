@@ -1644,6 +1644,16 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dsa_cp_and_pcp_are_mutually_exclusive(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"enable_dsa_cp": True}
+        vc.parallel_config.prefill_context_parallel_size = 4
+
+        with self.assertRaisesRegex(ValueError, "DSA-CP and PCP cannot be enabled at the same time.*Use PCP instead"):
+            init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_dsa_cp_enabled_auto_disabled_when_sp_conditions_not_met(self, mock_fix):
         """Case 4: dsa_cp on + SP conditions NOT met (tp=1) -> dsa auto-disabled."""
         with patch.dict(os.environ, {}, clear=False):
