@@ -783,9 +783,15 @@ class NPUModelRunner(GPUModelRunner):
                 "the profile-run marker, which makes XLite bypass its graph path."
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
+        # TODO: Remove this override and its finally restoration after main2main
+        # includes https://github.com/vllm-project/vllm/pull/56448. Before that
+        # fix, GPUModelRunner._dummy_run may create max_num_reqs synthetic
+        # requests while the speculator needs num_query_per_req input rows for
+        # each one. When their product exceeds the max_num_tokens-sized draft
+        # input buffer, profiling reads out of bounds. The upstream fix caps
+        # the dummy request count in vLLM, making this override redundant.
         original_max_num_reqs = self.max_num_reqs
         if self.speculator is not None and not uniform_decode:
-            # Cap synthetic parallel-draft requests on vLLM builds before #56448.
             self.max_num_reqs = min(original_max_num_reqs, self.max_num_tokens // self.speculator.num_query_per_req)
         try:
             with skip_ring_state_update(skip_ring), load_balance_ctx:
