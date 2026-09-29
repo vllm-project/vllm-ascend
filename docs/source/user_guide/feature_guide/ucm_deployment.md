@@ -246,7 +246,7 @@ enable_event_sync: true
 use_layerwise: true
 ```
 
-> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html).
+> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/developer-guide/cache-configuration/pipeline/#pipeline-store).
 
 **Step 2: Run Prefill Service**
 
@@ -389,7 +389,7 @@ Key configuration parameters:
 
 - **storage_backends**: Directory for KV cache storage. Can be local SSD or NFS-mounted path.
 
-> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html).
+> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/developer-guide/cache-configuration/pipeline/#pipeline-store).
 
 **Step 2: Run PD-Mixed Service**
 
@@ -514,7 +514,7 @@ Key configuration parameters:
 
 - **storage_backends**: The shared storage directory accessible from all nodes (e.g., NFS-mounted path or 3FS).
 
-> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html).
+> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/developer-guide/cache-configuration/pipeline/#pipeline-store).
 
 Prepare `prefill.sh` on Prefill nodes (192.168.10.1-4):
 
