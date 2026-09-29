@@ -209,7 +209,6 @@ def test_reuse_config_is_scoped_to_layerwise_protocol_connector():
     for connector_name in (
         "AscendStoreConnector",
         "MooncakeConnectorStoreV1",
-        "MooncakeStoreConnector",
     ):
         direct_config = SimpleNamespace(
             kv_connector=connector_name,

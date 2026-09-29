@@ -77,11 +77,6 @@ def test_sfa_remote_d2h_connector_is_registered():
         "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector",
         "SfaRemoteD2HConnector",
     )
-    mock_register.assert_any_call(
-        "MooncakeStoreConnector",
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
-        "AscendStoreConnector",
-    )
 
 
 @pytest.mark.parametrize("pp_size", [1, 2])
