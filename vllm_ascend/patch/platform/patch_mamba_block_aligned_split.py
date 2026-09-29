@@ -31,6 +31,12 @@ blocks are always verified prompt blocks there, while the backoff would leave
 the final full mamba-align state page unmaterialized across the chunk boundary
 (copy-on-write in MambaManager.allocate_new_blocks), pinning hybrid prefix
 hits one full page (or entirely) short.
+
+On 310P, a prefill that already fits in the scheduler budget is not split
+solely to cache a later mamba block. Each extra chunk is another full
+forward (linear attention plus splitfuse) and dominates TTFT when prefix
+caching forces align mode. Shared-prefix junctions and partial-tail
+boundaries are still honored, so a later request can reuse a cached prefix.
 """
 
 import functools
@@ -39,6 +45,7 @@ import inspect
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request
 
+from vllm_ascend.device.device_config import is_310p
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     _skips_eagle_block_drop,
 )
@@ -55,6 +62,43 @@ _EXPECTED_PARAMETERS = (
 )
 
 _original_mamba_block_aligned_split = Scheduler._mamba_block_aligned_split
+
+
+def _coalesce_310p_fitting_prefill(
+    self: Scheduler,
+    request: Request,
+    num_new_tokens: int,
+    num_new_local_computed_tokens: int,
+    num_external_computed_tokens: int,
+    split_tokens: int,
+) -> int:
+    """Keep a fitting 310P prefill in one step unless a prefix must be snapshotted.
+
+    Align mode otherwise stops at the last cacheable block even when the
+    whole prompt fits in ``num_new_tokens``. That second forward costs about
+    as much as the first on 310P. A shared-prefix junction still splits, so
+    the mamba state a later request needs is materialized.
+    """
+    if split_tokens >= num_new_tokens or not is_310p():
+        return split_tokens
+    if not _skips_eagle_block_drop(self.vllm_config.kv_transfer_config):
+        return split_tokens
+    start = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+    prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+    if start + num_new_tokens < prefill_end:
+        return split_tokens
+    block_size = self.cache_config.block_size
+    if block_size <= 0 or start % block_size != 0:
+        return split_tokens
+    unclipped_end = start + num_new_tokens
+    junction = request.shared_prefix_boundary
+    if start < junction < unclipped_end:
+        return split_tokens
+    if self.mamba_partial_cache_hit:
+        tail_boundary = request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
+        if start < tail_boundary < unclipped_end and tail_boundary < request.num_prompt_tokens:
+            return split_tokens
+    return num_new_tokens
 
 
 @functools.wraps(_original_mamba_block_aligned_split)
@@ -133,12 +177,19 @@ def _mamba_block_aligned_split(
         return num_new_tokens
 
     if not _skips_eagle_block_drop(kv_transfer_config):
-        return _original_mamba_block_aligned_split(
+        return _coalesce_310p_fitting_prefill(
             self,
             request,
             num_new_tokens,
             num_new_local_computed_tokens,
             num_external_computed_tokens,
+            _original_mamba_block_aligned_split(
+                self,
+                request,
+                num_new_tokens,
+                num_new_local_computed_tokens,
+                num_external_computed_tokens,
+            ),
         )
     # vLLM 0.28.x and newer revisions use different names.  Some
     # transitional scheduler implementations expose both and different
@@ -149,12 +200,19 @@ def _mamba_block_aligned_split(
     for name in drop_attrs:
         setattr(self, name, False)
     try:
-        return _original_mamba_block_aligned_split(
+        return _coalesce_310p_fitting_prefill(
             self,
             request,
             num_new_tokens,
             num_new_local_computed_tokens,
             num_external_computed_tokens,
+            _original_mamba_block_aligned_split(
+                self,
+                request,
+                num_new_tokens,
+                num_new_local_computed_tokens,
+                num_external_computed_tokens,
+            ),
         )
     finally:
         for name, value in original_drop_values.items():

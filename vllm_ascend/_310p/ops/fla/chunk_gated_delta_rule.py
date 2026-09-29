@@ -479,6 +479,7 @@ def chunk_gated_delta_rule_310(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    cu_seqlens_cpu: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """310P chunk GDN path backed by AscendC fwd_h/fwd_o kernels.
 
@@ -511,8 +512,17 @@ def chunk_gated_delta_rule_310(
         chunk_indices_list = None
         num_states = q.shape[0]
     else:
+        # Host cu_seqlens is built once per step. Copying the device tensor
+        # here syncs every linear-attention layer during prefill.
+        if cu_seqlens_cpu is None:
+            if cu_seqlens.device.type == "cpu":
+                cu_seqlens_cpu = cu_seqlens
+            else:
+                cu_seqlens_cpu = cu_seqlens.to(device="cpu")
+        if cu_seqlens_cpu.dtype != torch.int64:
+            cu_seqlens_cpu = cu_seqlens_cpu.to(torch.int64)
         q_pad, k_pad, v_pad, g_pad, beta_pad, seq_ranges, cu_kernel = _pad_varlen_to_chunk(
-            q, k, v, g, beta, cu_seqlens.to(torch.int64).cpu(), CHUNK_SIZE
+            q, k, v, g, beta, cu_seqlens_cpu, CHUNK_SIZE
         )
         assert cu_kernel is not None
         cu_list = cu_kernel.tolist()

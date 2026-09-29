@@ -284,6 +284,59 @@ def test_producer_restores_drop_knobs_on_exception(monkeypatch):
     assert scheduler.use_eagle_block_drop is True
 
 
+def test_310p_fitting_prefill_skips_last_cache_split(monkeypatch):
+    monkeypatch.setattr(mod, "is_310p", lambda: True)
+    monkeypatch.setattr(
+        mod,
+        "_original_mamba_block_aligned_split",
+        lambda self, request, num_new_tokens, nlc=0, nec=0: 768,
+    )
+    scheduler = _scheduler(is_kv_consumer=None)
+    request = _request(num_computed_tokens=0, num_prompt_tokens=1024, num_tokens=1024)
+    result = _mamba_block_aligned_split(scheduler, request, num_new_tokens=1024)
+    assert result == 1024
+
+
+def test_310p_keeps_shared_prefix_junction_split(monkeypatch):
+    monkeypatch.setattr(mod, "is_310p", lambda: True)
+    monkeypatch.setattr(
+        mod,
+        "_original_mamba_block_aligned_split",
+        lambda self, request, num_new_tokens, nlc=0, nec=0: 384,
+    )
+    scheduler = _scheduler(is_kv_consumer=None)
+    request = _request(num_computed_tokens=0, num_prompt_tokens=1024, num_tokens=1024)
+    request.shared_prefix_boundary = 384
+    result = _mamba_block_aligned_split(scheduler, request, num_new_tokens=1024)
+    assert result == 384
+
+
+def test_310p_coalesces_suffix_after_prefix_hit(monkeypatch):
+    monkeypatch.setattr(mod, "is_310p", lambda: True)
+    monkeypatch.setattr(
+        mod,
+        "_original_mamba_block_aligned_split",
+        lambda self, request, num_new_tokens, nlc=0, nec=0: 384,
+    )
+    scheduler = _scheduler(is_kv_consumer=None)
+    request = _request(num_computed_tokens=384, num_prompt_tokens=1024, num_tokens=1024)
+    result = _mamba_block_aligned_split(scheduler, request, num_new_tokens=640)
+    assert result == 640
+
+
+def test_non_310p_keeps_upstream_split(monkeypatch):
+    monkeypatch.setattr(mod, "is_310p", lambda: False)
+    monkeypatch.setattr(
+        mod,
+        "_original_mamba_block_aligned_split",
+        lambda self, request, num_new_tokens, nlc=0, nec=0: 768,
+    )
+    scheduler = _scheduler(is_kv_consumer=None)
+    request = _request(num_computed_tokens=0, num_prompt_tokens=1024, num_tokens=1024)
+    result = _mamba_block_aligned_split(scheduler, request, num_new_tokens=1024)
+    assert result == 768
+
+
 def test_producer_handles_missing_drop_attributes(monkeypatch):
     monkeypatch.setattr(
         mod,
