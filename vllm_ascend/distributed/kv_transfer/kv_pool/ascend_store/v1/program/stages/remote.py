@@ -88,7 +88,7 @@ def project_remote_identities(
 class RemoteObjectProjection:
     """Materialize canonical identities as Backend objects at compiled physical coordinates."""
 
-    def __init__(self, topology: KVPoolTopology) -> None:
+    def __init__(self, topology: KVPoolTopology, lookup_rank_counts: Mapping[int, int]) -> None:
         groups_by_id = {group.group_id: group for group in topology.groups}
         groups = tuple(groups_by_id[group_id] for group_id in topology.transfer_group_ids)
         self.group_ids = tuple(group.group_id for group in groups)
@@ -108,9 +108,7 @@ class RemoteObjectProjection:
                 )
                 for pp_rank in range(topology.pp_size)
                 for dcp_rank in range(topology.dcp_size)
-                for head_rank in range(
-                    topology.tp_size if group.uses_align_state else topology.tp_partition.key_rank_count
-                )
+                for head_rank in range(lookup_rank_counts[group.group_id])
             )
             for group in groups
         }
