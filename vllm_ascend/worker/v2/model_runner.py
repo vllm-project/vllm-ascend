@@ -119,6 +119,8 @@ class NPUModelRunner(GPUModelRunner):
         # Legacy Spec+PP transport (0.28/0.29 only); deleted when 0.30+ is the floor.
         self.use_spec_pp = spec_pp_support is not None and use_legacy_spec_pp()
         # These FIA models need post-rejection host counts on every PP stage.
+        # TODO: Remove this extra PP sync when FIA and its metadata builders
+        # use device lengths instead of exact CPU lengths.
         self.sync_spec_pp_cpu_counts = (
             self.use_pp
             and self.num_speculative_steps > 0
@@ -822,8 +824,9 @@ class NPUModelRunner(GPUModelRunner):
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
-        # npu attention backend still need to use seq_lens_cpu,
-        # we need to copy num_computed_tokens back to cpu.
+        # Attention metadata still needs exact CPU lengths. This non-blocking
+        # D2H is waited on in _update_seq_lens_cpu, introducing a host/device
+        # sync point that can break asynchronous scheduling overlap.
         default_stream = torch.cuda.current_stream()
         assert self.num_computed_tokens_stream is not None
         assert self.num_computed_tokens_cpu is not None
@@ -846,6 +849,7 @@ class NPUModelRunner(GPUModelRunner):
         # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
         # so this update also corrects the num_computed_tokens_np used by PCP.
         if self.speculator is not None or self.sync_spec_pp_cpu_counts:
+            # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
