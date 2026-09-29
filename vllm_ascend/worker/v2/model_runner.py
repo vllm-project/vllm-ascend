@@ -786,10 +786,7 @@ class NPUModelRunner(GPUModelRunner):
         original_max_num_reqs = self.max_num_reqs
         if self.speculator is not None and not uniform_decode:
             # Cap synthetic parallel-draft requests on vLLM builds before #56448.
-            self.max_num_reqs = min(
-                original_max_num_reqs,
-                self.max_num_tokens // self.speculator.num_query_per_req,
-            )
+            self.max_num_reqs = min(original_max_num_reqs, self.max_num_tokens // self.speculator.num_query_per_req)
         try:
             with skip_ring_state_update(skip_ring), load_balance_ctx:
                 hidden_states, sample_hidden_states = super()._dummy_run(
