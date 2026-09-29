@@ -75,6 +75,12 @@ logger.info_once(
 )
 
 _CUSTOM_OP_REGISTERED = False
+_MINIMAX_M3_ARCHITECTURES = frozenset(
+    {
+        "MiniMaxM3SparseForCausalLM",
+        "MiniMaxM3SparseForConditionalGeneration",
+    }
+)
 
 
 class NPUPlatform(Platform):
@@ -640,6 +646,50 @@ class NPUPlatform(Platform):
         }
 
 
+def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
+    """Keep MiniMax-M3 GQA KV cache in BF16 on the A5 FP8 path."""
+    model_config = vllm_config.model_config
+    cache_config = vllm_config.cache_config
+    if (
+        model_config is None
+        or cache_config is None
+        or cache_config.cache_dtype not in ("fp8", "fp8_e4m3")
+        or not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+    ):
+        return
+
+    # ModelConfig.architecture is populated later in vLLM initialization. Read
+    # the source-of-truth HF architectures here because this hook runs early.
+    hf_config = getattr(model_config, "hf_config", None)
+    architectures = getattr(hf_config, "architectures", None) or ()
+    if not _MINIMAX_M3_ARCHITECTURES.intersection(architectures):
+        return
+
+    text_config = getattr(model_config, "hf_text_config", None)
+    if text_config is None:
+        return
+    num_hidden_layers = getattr(text_config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int):
+        return
+
+    sparse_config = getattr(text_config, "sparse_attention_config", None) or {}
+    sparse_freq = sparse_config.get("sparse_attention_freq") or []
+    sparse_layer_ids = {layer_idx for layer_idx, freq in enumerate(sparse_freq) if freq != 0}
+    gqa_layer_ids = [str(layer_idx) for layer_idx in range(num_hidden_layers) if layer_idx not in sparse_layer_ids]
+    if not gqa_layer_ids:
+        return
+
+    skip_layers = list(dict.fromkeys(str(layer) for layer in (cache_config.kv_cache_dtype_skip_layers or [])))
+    known_skip_layers = set(skip_layers)
+    skip_layers.extend(layer for layer in gqa_layer_ids if layer not in known_skip_layers)
+    cache_config.kv_cache_dtype_skip_layers = skip_layers
+    logger.info_once(
+        "Using BF16 KV cache for MiniMax-M3 GQA layers %s on Ascend A5; other layers retain the configured %s policy.",
+        ", ".join(gqa_layer_ids),
+        cache_config.cache_dtype,
+    )
+
+
 def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
     """
     Check and correct parameters in VllmConfig that are incompatible with Ascend NPU.
@@ -673,6 +723,8 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
                 "Parameter is not supported on Ascend NPU. parameter=calculate_kv_scales, action: resetting to False."
             )
             vllm_config.cache_config.calculate_kv_scales = False
+
+        _configure_minimax_m3_a5_mixed_kv_cache(vllm_config)
 
     # ==================== 3. MultiModal Config ====================
     multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
@@ -879,12 +931,13 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
 
     use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
     if use_v2_model_runner:
-        legacy_eplb_fields = sorted(set(eplb_config) - {"load_collection_phase"})
-        if legacy_eplb_fields:
+        supported_eplb_fields = {"load_collection_phase", "stair_config"}
+        unsupported_eplb_fields = sorted(set(eplb_config) - supported_eplb_fields)
+        if unsupported_eplb_fields:
             raise ValueError(
-                "Model Runner V2 only accepts 'load_collection_phase' in "
-                "additional_config.eplb_config; legacy fields are not supported: "
-                f"{', '.join(legacy_eplb_fields)}."
+                "Model Runner V2 only accepts 'load_collection_phase' and 'stair_config' in "
+                "additional_config.eplb_config; unsupported fields: "
+                f"{', '.join(unsupported_eplb_fields)}."
             )
         if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
             "EXPERT_MAP_RECORD", "false"
@@ -914,10 +967,10 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                 upstream_eplb_config.communicator = "torch_gloo"
             if vllm_config.parallel_config.enable_elastic_ep:
                 raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
-    elif "load_collection_phase" in eplb_config:
+    elif {"load_collection_phase", "stair_config"} & eplb_config.keys():
         raise ValueError(
-            "additional_config.eplb_config.load_collection_phase is only supported by "
-            "Model Runner V2; use eplb_heat_collection_stage with Model Runner V1."
+            "stair_config and load_collection_phase are only supported by Model Runner V2; "
+            "use eplb_heat_collection_stage with Model Runner V1."
         )
     elif vllm_config.parallel_config.enable_eplb:
         raise ValueError("Upstream EPLB is only supported by Model Runner V2 on Ascend.")
@@ -952,8 +1005,9 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
 
     _validate_kv_load_failure_policy(vllm_config)
 
-    # short_request_first_config requires FCFS, excludes batch-job and
-    # kv-consumer paths, and only supports profiling-chunk synchronously.
+    # short_request_first_config requires FCFS and excludes batch-job and
+    # kv-consumer paths. When profiling-chunk is also enabled, the profiling
+    # chunk scheduler installs the SRF waiting queue itself.
     if scheduler_extension_config.short_request_first_config.enabled:
         kv_transfer_config = vllm_config.kv_transfer_config
         kv_role = getattr(kv_transfer_config, "kv_role", None)
@@ -967,11 +1021,6 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "ShortRequestFirst scheduling cannot be enabled with batch_job_sched_config. "
                 "Please disable one of them."
             )
-        if scheduler_extension_config.profiling_chunk_config.enabled and vllm_config.scheduler_config.async_scheduling:
-            raise ValueError(
-                "ShortRequestFirst with profiling_chunk_config requires synchronous scheduling. "
-                "Please disable async scheduling."
-            )
         if kv_role == "kv_consumer":
             raise ValueError(
                 "ShortRequestFirst scheduling is supported only on prefill or PD-mixed nodes, "
@@ -980,6 +1029,17 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
         if vllm_config.scheduler_config.async_scheduling:
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
+            )
+
+    # profiling_chunk (CPP) works with async scheduling only on the v2 model
+    # runner; the v1 PP execution path does not provide the same asynchronous
+    # sampled-token cadence and broadcast guarantees.
+    profiling_chunk_config = scheduler_extension_config.profiling_chunk_config
+    if profiling_chunk_config.enabled and vllm_config.scheduler_config.async_scheduling:
+        if not vllm_config.use_v2_model_runner:
+            raise ValueError(
+                "profiling_chunk_config with async scheduling requires the v2 model runner "
+                "(VLLM_USE_V2_MODEL_RUNNER=1). Please enable it or disable async scheduling."
             )
 
     dyntra_lb_config = scheduler_extension_config.dyntra_lb_config
@@ -1282,7 +1342,9 @@ def _setup_worker_and_scheduler(
     # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
     if scheduler_config.profiling_chunk_config.enabled:
         vllm_config.scheduler_config.scheduler_cls = (
-            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
+            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler"
+            if vllm_config.scheduler_config.async_scheduling
+            else "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
         )
         # Apply the EngineCore.__init__ patch here for the InprocClient (in-process).
         # And the EngineCore.__init__ patch for EngineCoreProc (the spawned child process)

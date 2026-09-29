@@ -50,7 +50,9 @@ from tools.bisect.version_compat import VersionAdaptationError, VersionAdapter, 
 
 logger = logging.getLogger(__name__)
 
-# Internal vs external DP pytest entries (mirrors run.sh selection logic).
+# Common entry for current configs. The legacy entries let bisect test commits
+# created before the common dispatcher existed.
+_MULTI_NODE_TEST = "tests/e2e/nightly/multi_node/scripts/test_multi_node.py"
 _INTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py"
 _EXTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py"
 
@@ -219,6 +221,9 @@ class MultiNodeRunner(BaseRunner):
         self.coord.publish_done()
 
     def _test_path(self) -> str:
+        if (self.repo / _MULTI_NODE_TEST).is_file():
+            return _MULTI_NODE_TEST
+
         base = self.inp.config_base_path or ""
         if "external_dp/config" in base or "external_dp/config" in self.inp.config_yaml:
             return _EXTERNAL_DP_TEST
