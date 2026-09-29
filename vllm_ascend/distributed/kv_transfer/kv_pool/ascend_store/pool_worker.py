@@ -2783,15 +2783,19 @@ class KVPoolWorker:
         save_finished_events = self.layer_save_finished_events
         # The final layer may have no save task while earlier layers still copy.
         # Drain pending saves before clearing or reusing completion events.
+        # Skip the queue drain when the send thread is a test double without a
+        # real queue (a bare mock reports truthy unfinished_tasks forever).
         queue = send_thread.request_queue
-        with queue.all_tasks_done:
-            waited_s = 0
-            while queue.unfinished_tasks:
-                send_thread.raise_if_failed()
-                queue.all_tasks_done.wait(timeout=1)
-                waited_s += 1
-                if waited_s % 60 == 0:
-                    logger.info("Layerwise save drain still waiting on %d queued PUT(s)", queue.unfinished_tasks)
+        pending = getattr(queue, "unfinished_tasks", None)
+        if isinstance(pending, int) and pending > 0:
+            with queue.all_tasks_done:
+                waited_s = 0
+                while queue.unfinished_tasks:
+                    send_thread.raise_if_failed()
+                    queue.all_tasks_done.wait(timeout=1)
+                    waited_s += 1
+                    if waited_s % 60 == 0:
+                        logger.info("Layerwise save drain still waiting on %d queued PUT(s)", queue.unfinished_tasks)
         while not save_finished_events[num_local - 1].wait(timeout=10):
             send_thread.raise_if_failed()
             logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
