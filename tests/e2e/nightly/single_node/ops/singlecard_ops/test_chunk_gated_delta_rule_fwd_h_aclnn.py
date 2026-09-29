@@ -20,11 +20,9 @@ import math
 import pytest
 import torch
 import torch_npu
-
-from vllm_ascend.utils import enable_custom_op
+from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd_h
 
 torch_npu.npu.config.allow_internal_format = True
-enable_custom_op()
 
 CHUNK_SIZE = 64
 DETERMINISM_REPEATS = 20
@@ -254,14 +252,13 @@ def test_chunk_gated_delta_rule_fwd_h_matches_reference(
         cu_seqlens,
     )
 
-    h_out, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+    h_out, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k.npu(),
         w.npu(),
         u.npu(),
         g=g.npu(),
         output_final_state=False,
         chunk_size=CHUNK_SIZE,
-        save_new_value=True,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
     )
@@ -309,7 +306,7 @@ def test_chunk_gated_delta_rule_fwd_h_kda_is_bitwise_deterministic():
     initial_state_npu = initial_state.npu()
 
     def run_fwd_h():
-        return torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+        return chunk_gated_delta_rule_fwd_h(
             k_npu,
             w_npu,
             u_npu,
@@ -317,7 +314,6 @@ def test_chunk_gated_delta_rule_fwd_h_kda_is_bitwise_deterministic():
             initial_state=initial_state_npu,
             output_final_state=True,
             chunk_size=CHUNK_SIZE,
-            save_new_value=True,
         )
 
     run_fwd_h()
