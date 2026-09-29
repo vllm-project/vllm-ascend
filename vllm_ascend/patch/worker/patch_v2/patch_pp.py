@@ -6,16 +6,10 @@ Reuses the 0.30 protocol for both speculative and non-speculative PP.
 Remove when upstream skips broadcasts for requests with no subsequent step.
 """
 
-from dataclasses import dataclass
-
-import numpy as np
 import torch
+from vllm.v1.worker.gpu.pp_utils import PendingRecv
 
-# vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
-# torch_utils.async_tensor_h2d (gaining out=/device=None support).
-from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
-
-_INSTALLED = "_vllm_ascend_upstream_spec_pp_installed"
+_INSTALLED = "_vllm_ascend_pp_token_transport_installed"
 
 
 def compute_need_sampled_mask(input_batch, req_states=None):
@@ -36,28 +30,13 @@ def compute_need_sampled_mask(input_batch, req_states=None):
     return produces_sample
 
 
-@dataclass
-class SpecPPPendingRecv:
-    """Per-step slot: release fields plus the received draft rows."""
-
-    event: torch.cuda.Event
-    sampled_tokens: torch.Tensor  # [num_reqs, max_sample_len]
-    num_sampled: torch.Tensor  # [num_reqs]
-    num_rejected: torch.Tensor  # [num_reqs]
-    idx_mapping: torch.Tensor  # [num_reqs]
-    idx_mapping_np: np.ndarray  # [num_reqs]
-    need_sampled_mask: np.ndarray  # [num_reqs]
-    gen_at_receive_np: np.ndarray  # [num_reqs]
-    draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
-
-
-def install_upstream_spec_pp_protocol(pp_handler, req_states, num_speculative_steps) -> None:
-    """Bind the 0.30 PP transport with a shared no-consumer participation gate."""
+def install_pp_token_transport(pp_handler, req_states) -> None:
+    """Override PP send/receive while retaining upstream deferred writeback."""
     if getattr(pp_handler, _INSTALLED, False):
         return
 
     device = pp_handler.device
-    captured_batch = [None]
+    num_speculative_steps = pp_handler.num_speculative_steps
 
     def receive(input_batch):
         assert not pp_handler.is_last_rank
@@ -84,7 +63,7 @@ def install_upstream_spec_pp_protocol(pp_handler, req_states, num_speculative_st
             combined.record_stream(pp_handler.main_stream)
             if draft_tokens is not None:
                 draft_tokens.record_stream(pp_handler.main_stream)
-        pp_handler.queue[-1] = SpecPPPendingRecv(
+        pp_handler.queue[-1] = PendingRecv(
             event,
             sampled_tokens,
             num_sampled,
@@ -100,9 +79,7 @@ def install_upstream_spec_pp_protocol(pp_handler, req_states, num_speculative_st
     def broadcast(sampled_token_ids, num_sampled, num_rejected, input_batch):
         assert pp_handler.is_last_rank
         if compute_need_sampled_mask(input_batch, req_states) is None:
-            captured_batch[0] = None
             return
-        captured_batch[0] = input_batch
 
         assert sampled_token_ids.dtype == torch.int64
         with torch.cuda.stream(pp_handler.broadcast_stream):
@@ -121,14 +98,10 @@ def install_upstream_spec_pp_protocol(pp_handler, req_states, num_speculative_st
             for tensor in (sampled_token_ids, num_sampled, num_rejected):
                 tensor.record_stream(pp_handler.broadcast_stream)
 
-    def broadcast_drafts(draft_tokens=None, input_batch=None):
+    def broadcast_drafts(draft_tokens, input_batch):
         assert pp_handler.is_last_rank
-        if input_batch is None:
-            input_batch = captured_batch[0]
-        if input_batch is None or compute_need_sampled_mask(input_batch, req_states) is None:
+        if compute_need_sampled_mask(input_batch, req_states) is None:
             return
-        if draft_tokens is None:
-            draft_tokens = req_states.draft_tokens
         with torch.cuda.stream(pp_handler.broadcast_stream):
             pp_handler.broadcast_stream.wait_stream(pp_handler.main_stream)
             # Native callers pass the full request-slot buffer, not batch rows.
@@ -136,46 +109,7 @@ def install_upstream_spec_pp_protocol(pp_handler, req_states, num_speculative_st
             input_batch.idx_mapping.record_stream(pp_handler.broadcast_stream)
             torch.distributed.broadcast(send, src=pp_handler.last_rank, group=pp_handler.broadcast_group)
 
-    def get_prev_sampled_outputs(draft_tokens_to_update=None):
-        if not pp_handler.queue:
-            return None
-        slot = pp_handler.queue.popleft()
-        pp_handler.queue.append(None)
-        if slot is None:
-            return None
-
-        freed = pp_handler.req_idx_gen_np[slot.idx_mapping_np] != slot.gen_at_receive_np
-        exclude_mask = freed | ~slot.need_sampled_mask
-        idx_mapping = slot.idx_mapping
-        if exclude_mask.any():
-            if exclude_mask.all():
-                return None
-            idx_mapping_np = np.where(exclude_mask, -1, slot.idx_mapping_np)
-            idx_mapping = async_copy_to_gpu(idx_mapping_np, device=device)
-
-        pp_handler.main_stream.wait_event(slot.event)
-        if draft_tokens_to_update is None:
-            draft_tokens_to_update = req_states.draft_tokens
-        if slot.draft_tokens is not None and draft_tokens_to_update is not None:
-            draft_tokens = slot.draft_tokens
-            draft_idx_mapping = slot.idx_mapping
-            if exclude_mask.any():
-                keep = ~exclude_mask
-                keep_t = torch.as_tensor(keep, device=device)
-                draft_tokens = draft_tokens[keep_t]
-                draft_idx_mapping = async_copy_to_gpu(slot.idx_mapping_np[keep], device=device)
-            draft_tokens_to_update[draft_idx_mapping] = draft_tokens
-
-        return dict(
-            sampled_tokens=slot.sampled_tokens,
-            num_sampled=slot.num_sampled,
-            num_rejected=slot.num_rejected,
-            idx_mapping=idx_mapping,
-        )
-
     pp_handler.receive = receive
     pp_handler.broadcast = broadcast
     pp_handler.broadcast_drafts = broadcast_drafts
-    pp_handler.broadcast_draft_tokens = broadcast_drafts
-    pp_handler.get_prev_sampled_outputs = get_prev_sampled_outputs
     setattr(pp_handler, _INSTALLED, True)

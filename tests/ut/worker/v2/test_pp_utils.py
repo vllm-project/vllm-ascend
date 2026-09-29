@@ -1,86 +1,55 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-import os
 from types import SimpleNamespace
 
 import pytest
-import vllm.envs as vllm_envs
-from vllm.distributed.utils import get_pp_indices
+import torch
+from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.worker.v2 import pp_utils
-from vllm_ascend.worker.v2.pp_utils import SpecPPSupport, bypass_upstream_spec_pp_guard
-
-
-@pytest.fixture(autouse=True)
-def _clear_partition_cache():
-    """Drop a cached VLLM_PP_LAYER_PARTITION left by other test modules."""
-    vllm_envs.__dict__.pop("VLLM_PP_LAYER_PARTITION", None)
-    yield
-    vllm_envs.__dict__.pop("VLLM_PP_LAYER_PARTITION", None)
-
-
-def test_spec_pp_uses_native_protocol():
-    """The supported release shares the upstream sampled-token protocol."""
-    assert pp_utils.use_legacy_spec_pp() is False
-
-
-@pytest.mark.parametrize("cached", [False, True])
-@pytest.mark.parametrize("partition", [None, "42,36"])
-@pytest.mark.parametrize("fail", [False, True])
-def test_unsharded_draft_preserves_target_partition(monkeypatch, cached, partition, fail):
-    monkeypatch.setattr(pp_utils, "use_legacy_spec_pp", lambda: True)
-    was_cached = vllm_envs._is_envs_cache_enabled()
-    vllm_envs.disable_envs_cache()
-    if partition is None:
-        monkeypatch.delenv("VLLM_PP_LAYER_PARTITION", raising=False)
-    else:
-        monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", partition)
-    config = SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=2))
-    support = SpecPPSupport(bypass_upstream_pp_guard=True)
-
-    def initialize():
-        with bypass_upstream_spec_pp_guard(config, support) as bypassed:
-            assert bypassed
-            assert config.parallel_config.pipeline_parallel_size == 1
-            assert vllm_envs.VLLM_PP_LAYER_PARTITION is None
-            assert os.environ.get("VLLM_PP_LAYER_PARTITION") == partition
-            assert get_pp_indices(78, 0, 1) == (0, 78)
-            with bypass_upstream_spec_pp_guard(config, support):
-                assert get_pp_indices(78, 0, 1) == (0, 78)
-            assert vllm_envs.VLLM_PP_LAYER_PARTITION is None
-            if fail:
-                raise RuntimeError("draft initialization failed")
-
-    try:
-        if cached:
-            vllm_envs.enable_envs_cache()
-        if fail:
-            with pytest.raises(RuntimeError, match="draft initialization failed"):
-                initialize()
-        else:
-            initialize()
-        assert config.parallel_config.pipeline_parallel_size == 2
-        assert partition == vllm_envs.VLLM_PP_LAYER_PARTITION
-        if partition is not None:
-            assert get_pp_indices(78, 0, 2) == (0, 42)
-            assert get_pp_indices(78, 1, 2) == (42, 78)
-    finally:
-        vllm_envs.disable_envs_cache()
-        monkeypatch.undo()
-        if was_cached:
-            vllm_envs.enable_envs_cache()
 
 
 @pytest.mark.parametrize(
-    "legacy,support",
-    [(True, None), (True, SpecPPSupport()), (False, SpecPPSupport(bypass_upstream_pp_guard=True))],
+    "method,architecture,needs_aux",
+    [
+        ("mtp", "Qwen3_5ForConditionalGeneration", False),
+        ("eagle3", "MiniMaxM3SparseForCausalLM", True),
+        ("eagle3", "MiniMaxM3SparseForConditionalGeneration", True),
+        ("dspark", "DeepseekV4ForCausalLM", True),
+        ("dspark", "GlmMoeDsaForCausalLM", True),
+    ],
 )
-def test_pp_guard_noop_preserves_partition(monkeypatch, legacy, support):
-    monkeypatch.setattr(pp_utils, "use_legacy_spec_pp", lambda: legacy)
-    monkeypatch.setattr(vllm_envs, "VLLM_PP_LAYER_PARTITION", "42,36")
-    config = SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=2))
-    with bypass_upstream_spec_pp_guard(config, support) as bypassed:
-        assert not bypassed
-        assert config.parallel_config.pipeline_parallel_size == 2
-        assert vllm_envs.VLLM_PP_LAYER_PARTITION == "42,36"
+@pytest.mark.parametrize("pp_size", [1, 2])
+def test_resolve_spec_pp_support(method, architecture, needs_aux, pp_size):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
+        model_config=SimpleNamespace(architecture=architecture),
+        speculative_config=SimpleNamespace(method=method),
+    )
+    support = pp_utils.resolve_spec_pp_support(config)
+    if pp_size == 1:
+        assert support is None
+    else:
+        assert support.needs_aux_hidden_states is needs_aux
+
+
+@pytest.mark.parametrize("method", [None, "ngram", "eagle3"])
+def test_unregistered_spec_pp_support(method):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=2),
+        model_config=SimpleNamespace(architecture="OtherModel"),
+        speculative_config=SimpleNamespace(method=method) if method else None,
+    )
+    assert pp_utils.resolve_spec_pp_support(config) is None
+
+
+def test_aux_buffer_includes_stage_boundary():
+    model = SimpleNamespace(config=SimpleNamespace(hidden_size=4), start_layer=2, aux_hidden_state_layers=(0, 2, 4))
+    factory = pp_utils.make_empty_intermediate_tensors(
+        model, lambda batch, dtype, device: IntermediateTensors({"hidden_states": torch.zeros(batch, 4)})
+    )
+    tensors = factory(3, torch.float32, torch.device("cpu"))
+    aux = pp_utils.get_pp_transport_tensors(tensors, pp_utils.PPTransportDataType.AUX_HIDDEN_STATES)
+    assert len(aux) == 2
+    assert all(t.shape == (3, 4) for t in aux)

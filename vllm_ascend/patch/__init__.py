@@ -1353,21 +1353,19 @@
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
 #
-# ** 27a. File: worker/patch_v2/patch_spec_pp.py**
+# ** 27a. File: worker/patch_v2/patch_pp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. PPHandler sampled-token broadcast methods
 #    Why:
-#       Target-driven speculative decoding generates next-step draft tokens
-#       after target sampling. Non-last PP ranks need both results for the same
-#       delayed request-state update.
+#       Final prefill chunks with max_tokens=1 have no consumer for their
+#       sampled-token broadcast, with or without speculative decoding.
 #    How:
-#       Defer the target-token broadcast until drafting finishes, then carry
-#       accepted target tokens and next-step draft tokens in the same V2 PP
-#       queue slot.
+#       Skip sampled/draft broadcasts when every sampling row finishes this
+#       step. Preserve the upstream PP queue and deferred result writeback.
 #    Related PR (if no, explain why):
-#       No, this enables the Ascend MRV2 implementation.
+#       https://github.com/vllm-project/vllm-ascend/pull/17500
 #    Future Plan:
-#       Remove when vLLM natively transports draft tokens through PP.
+#       Remove when upstream skips broadcasts with no subsequent consumer.
 #
 # ** 28. File: worker/patch_v2/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

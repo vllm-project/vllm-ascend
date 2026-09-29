@@ -30,6 +30,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     _get_llama_4_scaling,
     yarn_get_mscale,
 )
+from vllm.model_executor.models.interfaces import EagleModelMixin
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
@@ -304,14 +305,13 @@ def _deepseek_v2_mla_attention_init(
 DeepseekV2MLAAttention.__init__ = _deepseek_v2_mla_attention_init
 
 
-# TODO: Retire the legacy aux transport when vLLM 0.28/0.29 are no longer supported.
 _original_deepseek_v2_model_init = DeepseekV2Model.__init__
 
 
 def _patched_deepseek_v2_model_init(self, *args, **kwargs):
     _original_deepseek_v2_model_init(self, *args, **kwargs)
-    # Legacy Spec+PP (0.28/0.29 only): 0.30+ uses the upstream aux relay.
-    self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner and not pp_utils.use_legacy_spec_pp()
+    # V2 relays aux slots upstream; V1 still uses the Ascend tensor payload.
+    self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner
     if not self._use_upstream_aux_relay:
         self.make_empty_intermediate_tensors = pp_utils.make_empty_intermediate_tensors(
             self,
@@ -322,31 +322,28 @@ def _patched_deepseek_v2_model_init(self, *args, **kwargs):
 DeepseekV2Model.__init__ = _patched_deepseek_v2_model_init
 
 
-# Legacy Spec+PP (0.28/0.29 only); the upstream branch below is for 0.30+.
-if not pp_utils.use_legacy_spec_pp():
-    # Release versions do not expose this interface. Reuse only upstream's
-    # slot bookkeeping; the Ascend forward still owns capture and TP gathering.
-    from vllm.model_executor.models.interfaces import EagleModelMixin
+# Reuse upstream slot bookkeeping; Ascend owns capture and TP gathering.
+for _member in (
+    "AUX_HIDDEN_STATE_KEY",
+    "_aux_slot_base_cached",
+    "_aux_upstream_total_cached",
+    "_set_aux_hidden_state_layers",
+    "_cache_aux_pp_layout",
+    "pack_local_aux_hidden_states",
+    "collect_remote_aux_hidden_states",
+):
+    setattr(DeepseekV2Model, _member, getattr(EagleModelMixin, _member))
+DeepseekV2Model.supports_aux_hidden_states_over_pp = True
 
-    for _member in (
-        "AUX_HIDDEN_STATE_KEY",
-        "_aux_slot_base_cached",
-        "_aux_upstream_total_cached",
-        "_set_aux_hidden_state_layers",
-        "_cache_aux_pp_layout",
-        "pack_local_aux_hidden_states",
-        "collect_remote_aux_hidden_states",
-    ):
-        setattr(DeepseekV2Model, _member, getattr(EagleModelMixin, _member))
-    DeepseekV2Model.supports_aux_hidden_states_over_pp = True
 
-    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        if self.model._use_upstream_aux_relay:
-            self.model._set_aux_hidden_state_layers(layers)
-        else:
-            self.model.aux_hidden_state_layers = layers
+def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+    if self.model._use_upstream_aux_relay:
+        self.model._set_aux_hidden_state_layers(layers)
+    else:
+        self.model.aux_hidden_state_layers = layers
 
-    DeepseekV2ForCausalLM.set_aux_hidden_state_layers = _set_aux_hidden_state_layers
+
+DeepseekV2ForCausalLM.set_aux_hidden_state_layers = _set_aux_hidden_state_layers
 
 
 def _capture_aux_hidden_state(self, aux_hidden_states, layer_id, hidden_states, residual, positions):

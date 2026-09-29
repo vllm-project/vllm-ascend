@@ -2,17 +2,18 @@
 
 from collections import deque
 from dataclasses import dataclass
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
+from vllm.v1.worker.gpu import pp_utils
+from vllm.v1.worker.gpu.pp_utils import PendingRecv, PPHandler
 
-from vllm_ascend.patch.worker.patch_v2 import patch_spec_pp
-from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
-    SpecPPPendingRecv,
+from vllm_ascend.patch.worker.patch_v2 import patch_pp
+from vllm_ascend.patch.worker.patch_v2.patch_pp import (
     compute_need_sampled_mask,
-    install_upstream_spec_pp_protocol,
+    install_pp_token_transport,
 )
 
 
@@ -21,14 +22,13 @@ class _InputBatch:
     num_computed_tokens_np: np.ndarray
     num_scheduled_tokens: np.ndarray
     prefill_len_np: np.ndarray
-    # Rank-local bound consulted by the release gate; the vendored 0.30
-    # gate must ignore it entirely.
+    # The participation gate must ignore rank-local progress estimates.
     max_seq_len_np: np.ndarray | None = None
     is_prefilling_np: np.ndarray | None = None
 
 
 class TestPureParticipationGate:
-    def test_matches_release_gate_for_regular_decode(self):
+    def test_matches_upstream_gate_for_regular_decode(self):
         batch = _InputBatch(
             num_computed_tokens_np=np.array([56, 0], dtype=np.int32),
             num_scheduled_tokens=np.array([8, 25], dtype=np.int32),
@@ -40,9 +40,7 @@ class TestPureParticipationGate:
         )
 
     def test_ignores_rank_local_max_seq_len_bound(self):
-        """The release gate drops requests whose next token may hit
-        max_seq_len; two ranks with different views of that bound must
-        still compute the same mask here."""
+        """Ranks must agree despite different local progress estimates."""
         base = dict(
             num_computed_tokens_np=np.array([56], dtype=np.int32),
             num_scheduled_tokens=np.array([8], dtype=np.int32),
@@ -86,10 +84,11 @@ class _StreamCtx:
 
 class TestProtocolInstall:
     def _handler(self, num_speculative_steps=7):
-        return SimpleNamespace(
+        handler = SimpleNamespace(
             is_last_rank=False,
             device="cpu",
             max_sample_len=num_speculative_steps + 1,
+            num_speculative_steps=num_speculative_steps,
             last_rank=1,
             broadcast_group=object(),
             broadcast_stream=_StreamStub(),
@@ -97,14 +96,14 @@ class TestProtocolInstall:
             req_idx_gen_np=np.zeros(4, dtype=np.int64),
             queue=deque([None, None]),
         )
+        handler.get_prev_sampled_outputs = MethodType(PPHandler.get_prev_sampled_outputs, handler)
+        return handler
 
     def _patch_transport(self, monkeypatch, sent):
         """Swap the module-global ``torch`` for a stub namespace.  Patching
         ``torch.distributed`` attributes directly is unreliable once
         vllm-ascend has rebinded collectives onto torch_npu."""
         from types import SimpleNamespace as NS
-
-        import vllm_ascend.patch.worker.patch_v2.patch_spec_pp as mod
 
         def fake_broadcast(tensor, src=None, group=None):
             sent.append(tensor.clone())
@@ -119,22 +118,24 @@ class TestProtocolInstall:
             stack=torch.stack,
             as_tensor=torch.as_tensor,
         )
-        monkeypatch.setattr(mod, "torch", fake_torch)
+        monkeypatch.setattr(patch_pp, "torch", fake_torch)
         monkeypatch.setattr(torch.Tensor, "record_stream", lambda *args: None)
 
     def test_installs_and_is_idempotent(self, monkeypatch):
         handler = self._handler()
         req_states = SimpleNamespace()
-        install_upstream_spec_pp_protocol(handler, req_states, num_speculative_steps=7)
+        upstream_consumer = handler.get_prev_sampled_outputs
+        install_pp_token_transport(handler, req_states)
         installed = (handler.receive, handler.broadcast, handler.broadcast_drafts)
-        install_upstream_spec_pp_protocol(handler, req_states, num_speculative_steps=7)
+        install_pp_token_transport(handler, req_states)
         assert (handler.receive, handler.broadcast, handler.broadcast_drafts) == installed
-        assert handler.broadcast_draft_tokens is handler.broadcast_drafts
+        assert handler.get_prev_sampled_outputs is upstream_consumer
+        assert not hasattr(handler, "broadcast_draft_tokens")
 
     def test_receive_issues_three_broadcasts_and_reserves_slot(self, monkeypatch):
         handler = self._handler()
         req_states = SimpleNamespace(max_seq_len=np.full(4, 1024))
-        install_upstream_spec_pp_protocol(handler, req_states, num_speculative_steps=7)
+        install_pp_token_transport(handler, req_states)
 
         batch = _InputBatch(
             num_computed_tokens_np=np.array([56], dtype=np.int32),
@@ -154,13 +155,13 @@ class TestProtocolInstall:
         assert [tuple(t.shape) for t in sent] == [(1, 8), (2, 1), (1, 7)]
         assert gather_all is True
         slot = handler.queue[-1]
-        assert isinstance(slot, SpecPPPendingRecv)
+        assert isinstance(slot, PendingRecv)
         assert slot.draft_tokens is not None
 
     def test_receive_without_sample_needs_skips_transport(self, monkeypatch):
         handler = self._handler()
         req_states = SimpleNamespace()
-        install_upstream_spec_pp_protocol(handler, req_states, num_speculative_steps=7)
+        install_pp_token_transport(handler, req_states)
 
         batch = _InputBatch(
             num_computed_tokens_np=np.array([0], dtype=np.int32),
@@ -172,22 +173,6 @@ class TestProtocolInstall:
         assert handler.receive(batch) is False
         assert sent == []
         assert handler.queue[-1] is None
-
-    def test_pending_recv_extends_release_fields_with_drafts(self):
-        fields = SpecPPPendingRecv.__dataclass_fields__
-        release_fields = (
-            "event",
-            "sampled_tokens",
-            "num_sampled",
-            "num_rejected",
-            "idx_mapping",
-            "idx_mapping_np",
-            "need_sampled_mask",
-            "gen_at_receive_np",
-        )
-        for name in release_fields:
-            assert name in fields
-        assert fields["draft_tokens"].default is None
 
 
 def _make_batch(*, num_computed, num_scheduled, prefill_len, is_prefilling, idx_mapping):
@@ -264,7 +249,7 @@ def test_send_receive_agree_on_skip(monkeypatch, num_speculative_steps, max_toke
     fixture = TestProtocolInstall()
     handler = fixture._handler(num_speculative_steps)
     req_states = _make_req_states([8192 + max_tokens])
-    install_upstream_spec_pp_protocol(handler, req_states, num_speculative_steps)
+    install_pp_token_transport(handler, req_states)
     sent = []
     fixture._patch_transport(monkeypatch, sent)
     batch = _make_batch(
@@ -284,17 +269,16 @@ def test_send_receive_agree_on_skip(monkeypatch, num_speculative_steps, max_toke
         assert list(handler.queue) == [None, None]
     else:
         assert len(sent) == (3 if num_speculative_steps else 2)
-        assert isinstance(handler.queue[-1], SpecPPPendingRecv)
+        assert isinstance(handler.queue[-1], PendingRecv)
 
 
-@pytest.mark.parametrize("implicit_drafts", [False, True])
-def test_draft_broadcast_gathers_request_slots(monkeypatch, implicit_drafts):
+def test_draft_broadcast_gathers_request_slots(monkeypatch):
     fixture = TestProtocolInstall()
     handler = fixture._handler(3)
     handler.is_last_rank = True
     req_states = _make_req_states([1024] * 4)
     req_states.draft_tokens = torch.arange(12, dtype=torch.int64).reshape(4, 3)
-    install_upstream_spec_pp_protocol(handler, req_states, 3)
+    install_pp_token_transport(handler, req_states)
     sent = []
     fixture._patch_transport(monkeypatch, sent)
     batch = _make_batch(
@@ -304,23 +288,18 @@ def test_draft_broadcast_gathers_request_slots(monkeypatch, implicit_drafts):
         is_prefilling=[False, False],
         idx_mapping=[3, 1],
     )
-    if implicit_drafts:
-        handler.broadcast(torch.ones(2, 4, dtype=torch.int64), torch.ones(2), torch.zeros(2), batch)
-        sent.clear()
-        handler.broadcast_drafts()
-    else:
-        handler.broadcast_drafts(req_states.draft_tokens, batch)
+    handler.broadcast_drafts(req_states.draft_tokens, batch)
     assert len(sent) == 1
     torch.testing.assert_close(sent[0], req_states.draft_tokens[[3, 1]])
 
 
-def test_skipped_step_does_not_reuse_previous_draft_batch(monkeypatch):
+def test_draft_broadcast_uses_current_batch(monkeypatch):
     fixture = TestProtocolInstall()
     handler = fixture._handler(3)
     handler.is_last_rank = True
     req_states = _make_req_states([8193, 1024])
     req_states.draft_tokens = torch.ones(2, 3, dtype=torch.int64)
-    install_upstream_spec_pp_protocol(handler, req_states, 3)
+    install_pp_token_transport(handler, req_states)
     sent = []
     fixture._patch_transport(monkeypatch, sent)
     decode = _make_batch(num_computed=[20], num_scheduled=[4], prefill_len=[16], is_prefilling=[False], idx_mapping=[1])
@@ -330,7 +309,7 @@ def test_skipped_step_does_not_reuse_previous_draft_batch(monkeypatch):
     handler.broadcast(torch.ones(1, 4, dtype=torch.int64), torch.ones(1), torch.zeros(1), decode)
     sent.clear()
     handler.broadcast(None, None, None, finishing)
-    handler.broadcast_drafts()
+    handler.broadcast_drafts(req_states.draft_tokens, finishing)
     assert sent == []
 
 
@@ -339,10 +318,10 @@ def test_deferred_consumer_filters_freed_requests(monkeypatch):
     handler = fixture._handler(3)
     req_states = _make_req_states([1024] * 4)
     req_states.draft_tokens = torch.zeros(4, 3, dtype=torch.int64)
-    install_upstream_spec_pp_protocol(handler, req_states, 3)
+    install_pp_token_transport(handler, req_states)
     fixture._patch_transport(monkeypatch, [])
-    monkeypatch.setattr(patch_spec_pp, "async_copy_to_gpu", lambda data, device: torch.as_tensor(data))
-    slot = SpecPPPendingRecv(
+    monkeypatch.setattr(pp_utils, "async_tensor_h2d", lambda data, device: torch.as_tensor(data))
+    slot = PendingRecv(
         event=object(),
         sampled_tokens=torch.tensor([[10], [20]]),
         num_sampled=torch.tensor([1, 1]),
