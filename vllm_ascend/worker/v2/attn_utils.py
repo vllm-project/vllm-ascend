@@ -78,6 +78,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    supports_component_major_mla_pd,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import get_layerwise_reuse_config
@@ -893,7 +894,7 @@ def _uses_single_raw_mla_cache(
     attn_module = attn_layers.get(layer_name)
     return (
         isinstance(attn_module, MLAAttention)
-        and vllm_config.kv_transfer_config is None
+        and supports_component_major_mla_pd(vllm_config)
         and not enable_sfa(vllm_config)
         and getattr(attn_module, "indexer", None) is None
         and not getattr(attn_module.impl, "fa_quant_layer", False)

@@ -2,8 +2,7 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.compilation import breakable_cudagraph
@@ -20,6 +19,7 @@ from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.utils import super_kernel_scope, vllm_version_is, weak_ref_tensor, weak_ref_tensors
 from vllm_ascend.worker.v2.attn_utils import ring_state_update_skipped
+
 
 class AscendV2KVBlockZeroer(KVBlockZeroer):
     """Zero V2 caches whose forward-context binding is a tensor tuple/list.
