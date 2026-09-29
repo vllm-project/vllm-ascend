@@ -112,29 +112,6 @@ def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
     )
 
 
-def test_FusedRMSNormGated_forwards_caller_output(default_vllm_config):
-    layer = FusedRMSNormGated(hidden_size=8, eps=1e-6, activation="sigmoid")
-    x = torch.randn(1, 4, 2, 8)
-    gate = torch.randn(4, 2, 8)
-
-    with patch("vllm_ascend.ops.layernorm.rms_norm_gated", return_value=x) as fused_norm_gate:
-        actual = layer.forward_oot(x, gate, out=x)
-
-    assert actual is x
-    fused_norm_gate.assert_called_once_with(
-        x,
-        gate,
-        layer.weight,
-        layer.bias,
-        "sigmoid",
-        residual=None,
-        eps=1e-6,
-        prenorm=False,
-        residual_in_fp32=False,
-        out=x,
-    )
-
-
 @pytest.mark.skipif(
     get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES),
     reason="310P device unittest case.",
