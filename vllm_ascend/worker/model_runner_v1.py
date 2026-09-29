@@ -676,7 +676,7 @@ class NPUModelRunner(GPUModelRunner):
         self._offload_req_ids_tensor = None
         self._offload_token_to_req = None
         self._offload_pool_slots = None
-        self._offload_pool_generations = None
+        self._offload_pool_active = None
         self._offload_request_states = (
             CopySfaRequestStates()
             if self.sparse_kv_offload_enabled and self.sparse_kv_offload_config.use_fused_copy_sfa
@@ -688,7 +688,7 @@ class NPUModelRunner(GPUModelRunner):
             self._offload_token_to_req = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
             if self.sparse_kv_offload_config.use_fused_copy_sfa:
                 self._offload_pool_slots = self._make_buffer(self.max_num_reqs + 2, dtype=torch.int32)
-                self._offload_pool_generations = self._make_buffer(self.max_num_reqs + 2, dtype=torch.int64)
+                self._offload_pool_active = self._make_buffer(self.max_num_reqs + 2, dtype=torch.bool)
 
     @property
     def use_dcp(self) -> bool:
@@ -3552,20 +3552,30 @@ class NPUModelRunner(GPUModelRunner):
             )
         if self.sparse_kv_offload_config.use_fused_copy_sfa and self.sparse_kv_offload_enabled:
             assert self._offload_pool_slots is not None
-            assert self._offload_pool_generations is not None
+            assert self._offload_pool_active is not None
             assert self._offload_request_states is not None
-            self._copy_sfa_need_eager_tail_restore, dense_fills = self._offload_request_states.prepare(
+            groups = [group for cache_groups in self.attn_groups for group in cache_groups]
+            groups.extend(getattr(self.drafter, "draft_attn_groups", ()))
+            lim_cache_histories = [
+                history
+                for group in groups
+                for builder in group.metadata_builders
+                if (history := getattr(builder, "lim_last_cache", None)) is not None
+            ]
+            restore_tails, dense_fills, _ = self._offload_request_states.prepare(
                 req_ids=self.input_batch.req_ids[:num_reqs],
                 live_req_ids=self.input_batch.req_id_to_index,
                 slots=self._offload_pool_slots.np,
-                generations=self._offload_pool_generations.np,
+                active=self._offload_pool_active.np,
                 prebound_slots=get_prebound_copy_sfa_slots() if not offload_dummy else {},
                 computed_tokens=getattr(self.input_batch, "num_computed_tokens_cpu", None),
                 padded_reqs=num_reqs_padded,
                 block_size=self.cache_config.block_size,
                 hot_tokens=self.sparse_kv_offload_config.topk_buffer_size,
                 dummy=offload_dummy,
+                lim_cache_histories=lim_cache_histories,
             )
+            self._copy_sfa_need_eager_tail_restore = restore_tails
             if dense_fills:
                 assert self.sparse_kv_offload_manager is not None
                 self.sparse_kv_offload_manager.dense_fill_copy_sfa_rows(
@@ -3761,8 +3771,8 @@ class NPUModelRunner(GPUModelRunner):
             ),
             req_topk_buffer_slots=(self._offload_pool_slots.cpu[:num_reqs_padded]
                                    if self._offload_pool_slots is not None else None),
-            req_topk_buffer_generations=(self._offload_pool_generations.cpu[:num_reqs_padded]
-                                         if self._offload_pool_generations is not None else None),
+            req_topk_buffer_active=(self._offload_pool_active.cpu[:num_reqs_padded]
+                                         if self._offload_pool_active is not None else None),
             offload_dummy=offload_dummy,
             copy_sfa_restore_tails=self._copy_sfa_need_eager_tail_restore,
             mm_req_doc_ranges=req_doc_ranges,

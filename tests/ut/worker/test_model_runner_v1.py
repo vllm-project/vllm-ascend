@@ -2477,24 +2477,23 @@ class TestNPUModelRunnerEncoderCacheReset(unittest.TestCase):
     def test_request_removal_invalidates_offload_history_without_cached_request(self):
         runner = self._build_runner()
         slots = np.zeros(4, dtype=np.int32)
-        generations = np.zeros(4, dtype=np.int64)
+        active = np.zeros(4, dtype=np.bool_)
         args = dict(
             req_ids=["a"],
             live_req_ids=["a"],
             slots=slots,
-            generations=generations,
+            active=active,
             prebound_slots={"a": 0},
             padded_reqs=1,
             block_size=128,
             hot_tokens=8192,
             dummy=False,
+            lim_cache_histories=(),
         )
         runner._offload_request_states.prepare(computed_tokens=np.asarray([8320]), **args)
-        old_generation = generations[0]
         runner._on_request_state_removed("a", None)
         outcome = runner._offload_request_states.prepare(computed_tokens=np.asarray([512]), **args)
-        self.assertGreater(generations[0], old_generation)
-        self.assertEqual(outcome, (False, {}))
+        self.assertEqual(outcome, (False, {}, (0,)))
 
     def test_reset_clears_score_encoder_cache_state(self):
         runner = self._build_runner()
