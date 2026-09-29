@@ -51,6 +51,7 @@ from vllm_ascend.attention.utils import (
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
+    supports_kernel_block_spec,
     using_paged_attention,
 )
 from vllm_ascend.compilation.updatable_graph import (
@@ -139,7 +140,7 @@ class AscendAttentionBackend(AttentionBackend):
             key_caches[dst_indices] = key_caches[src_indices]
             value_caches[dst_indices] = value_caches[src_indices]
 
-    @staticmethod
+    @supports_kernel_block_spec
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
 
