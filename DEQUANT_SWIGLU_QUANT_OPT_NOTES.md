@@ -301,6 +301,30 @@ exp 的 ~1-2ulp 差在 RINT 边界翻转一格），scale=rtol 1e-5。补齐 gro
 - **负结果**：int32→int8 直转（见上）；初版门槛 proDimsx≤8（2H=2048 p=5
   回退 +3.5~8.6%，已修正）。
 
+### R4（2026-09-29）：group 路径环形核分派 — ✅ 完成
+
+审计 0.8#5 的真缺陷：非 cut group 路径里 `ProcessSingleGroup` 对每个组都从
+core 0 开始分派（`if (blockIdx_ < realCoreDim)`），组间不复用核序——64 组
+× 32 行时全部落在 core 0-31、32-39 闲死（实测 93µs vs cut 路径同工作量
+61µs）。修复：Process 维护环形核偏移 `coreBase`，每组的核区间
+{coreBase..coreBase+realCoreDim} 对 blockDim 取模轮转，组内行块按环内位置
+分配（每组仍按 maxCoreNum 均分行；块序与行序解耦，正确性不变——
+strict 全部 group 用例含 ragged/空组验证）。
+
+- **精度**：45/45 全绿。
+- **NPUGraph（µs，宿主 load 123 下采，大档差异远超噪声带）**：
+
+| shape | base | R3 | R4 | Δ vs base |
+|---|---:|---:|---:|---:|
+| g64 / T2048（MC2 prefill 型，32 行/组 > 16 不 cut） | 93.01 | 92.01 | **79.46** | **-14.6%** |
+| g64 / T512 | 23.91 | 23.35 | 23.39 | -2.2% |
+| g64 / T64 | 16.67 | — | 16.43 | -1.5% |
+| g256 / T2048（cut 路径，代码未动） | 61.37 | 58.60 | 57.51 | -6.3% |
+
+适用面：组数 < 32 或均摊 > 16 行/组的全部非 cut group 形态（EP 每卡
+专家数 < 32、MC2 prefill）；cut 条件内的 decode 形态走 cut_group 不受
+影响。
+
 ### R2（2026-09-29）：tile 间双缓冲 — ⛔ 负结果，已完全回退
 
 **假设**：xActQueue 单缓冲使下一 tile 的 MTE2 装载串行在 V 计算之后；DB_BUFFER=2

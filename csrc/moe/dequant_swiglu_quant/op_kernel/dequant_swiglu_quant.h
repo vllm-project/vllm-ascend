@@ -227,6 +227,12 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::Process()
     CreateOffsetLocalTensor(UbSingleOutSize_, tl_->swigluMode);
 
     groupOffset_ = 0;
+    // Ring-rotate the per-group core ranges: ProcessSingleGroup() always
+    // assigns a group to cores [0, realCoreDim), so without a running offset
+    // every group piles onto the same low-numbered cores while the tail of
+    // the block stays idle (e.g. 64 groups x 32 rows ran on cores 0-31 only,
+    // ~1.5x slower than the balanced cut-group path on the same work).
+    int32_t coreBase = 0;
     for (int32_t groupIdx = 0; groupIdx < tl_->inGroupNum; ++groupIdx) {
         int64_t realGroupIdx =
             tl_->speGroupType == 0 ? static_cast<int64_t>(groupIdx) : static_cast<int64_t>(groupIndexGm_(groupIdx * 2));
@@ -235,7 +241,16 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::Process()
         // do protect realDimx_ < 0, ignore this group
         realDimx_ = (realDimx_ < 0) ? 0 : realDimx_;
         if (realDimx_ > 0 && groupOffset_ < tl_->inDimx) {
-            ProcessSingleGroup(realGroupIdx, realDimx_, groupOffset_);
+            int32_t blockDimxFactor = (realDimx_ + tl_->maxCoreNum - 1) / tl_->maxCoreNum;
+            int32_t realCoreDim = (realDimx_ + blockDimxFactor - 1) / blockDimxFactor;
+            int32_t blockIdxInGroup = (static_cast<int32_t>(blockIdx_) - coreBase + tl_->maxCoreNum) % tl_->maxCoreNum;
+            if (blockIdxInGroup < realCoreDim) {
+                int32_t blockDimxTailFactor = realDimx_ - blockDimxFactor * (realCoreDim - 1);
+                int32_t dimxCore = blockIdxInGroup == (realCoreDim - 1) ? blockDimxTailFactor : blockDimxFactor;
+                int64_t coreDimxOffset = blockDimxFactor * blockIdxInGroup + groupOffset_;
+                ProcessSingleGroupPerCore(realGroupIdx, static_cast<int64_t>(dimxCore), coreDimxOffset);
+            }
+            coreBase = (coreBase + realCoreDim) % tl_->maxCoreNum;
             groupOffset_ += realDimx_;
         }
         // speGroupindex场景下出现异常值(realDimx_ < 0), 退出计算
