@@ -1003,7 +1003,7 @@ def qsa_fused_update_compressed_cache(
     is_mrope = bool(mrope_section)
     if is_mrope:
         # The helper uses the fixed Qwen interleaved [11, 11, 10] layout.
-        assert tuple(mrope_section) == (11, 11, 10)
+        assert mrope_section == (11, 11, 10)
         assert state_position_cache is not None
     cache_has_rope_positions = state_position_cache is not None
     if state_position_cache is None:

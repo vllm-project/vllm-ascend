@@ -267,6 +267,11 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             fused_positions = position_rows.reshape(-1, 3).transpose(0, 1).contiguous()
 
         section = getattr(self.rotary_emb, "mrope_section", None)
+        mrope_section = None
+        if section is not None:
+            if len(section) != 3:
+                raise ValueError("QSA M-RoPE requires exactly three sections")
+            mrope_section = (int(section[0]), int(section[1]), int(section[2]))
         qsa_fused_update_compressed_cache(
             token_k,
             fused_positions,
@@ -282,7 +287,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             compressed_metadata.slot_mapping,
             compressed_metadata.k_work_metadata,
             compress_ratio=self.compress_ratio,
-            mrope_section=tuple(int(value) for value in section) if section else None,
+            mrope_section=mrope_section,
         )
         # The fused kernel reads completed groups from the raw ring, so the ring
         # must hold the committed keys of every earlier step. Commits therefore
