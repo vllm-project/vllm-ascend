@@ -155,7 +155,8 @@ def test_kimi_norm_gate_wide_feature_tile(tokens, heads, dim):
 @torch.inference_mode()
 @pytest.mark.parametrize("dim", [128, 1024])
 @pytest.mark.parametrize("layout", ["row_gap", "feature_gap"])
-def test_norm_gate_fallback_strided_gate(dim, layout):
+@pytest.mark.parametrize("inplace", [False, True])
+def test_norm_gate_fallback_strided_gate(dim, layout, inplace):
     """A noncontiguous fallback gate must use its actual row/feature strides."""
     tokens = 3
     x = torch.randn(1, tokens, 1, dim, dtype=torch.bfloat16, device="npu")
@@ -176,5 +177,8 @@ def test_norm_gate_fallback_strided_gate(dim, layout):
         out_dtype=x.dtype,
         is_rms_norm=True,
     )
-    actual = rms_norm_gated(x, gate, weight, None, "sigmoid")
+    out = x if inplace else None
+    actual = rms_norm_gated(x, gate, weight, None, "sigmoid", out=out)
+    if inplace:
+        assert actual is x
     torch.testing.assert_close(actual, expected.reshape(x.shape), rtol=0, atol=0)

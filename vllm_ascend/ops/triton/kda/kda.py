@@ -551,10 +551,10 @@ def rms_norm_gated(
             )
         return y
     if out is not None:
-        raise ValueError(
-            "Direct norm output requires a K3-shaped input without a residual "
-            f"and head dim <= {_NORM_MULTIROW_MAX_FEATURES}."
-        )
+        if residual is not None or prenorm:
+            raise ValueError("Direct norm output does not support residual or prenorm.")
+        if out.shape != x.shape or out.dtype != x.dtype or out.device != x.device:
+            raise ValueError("The norm output must match the input shape, dtype and device.")
     # reshape input data into 2D tensor
     x = x.contiguous().reshape(-1, x.shape[-1])
     # Unsupported layouts may still need materialization during reshape.
@@ -577,6 +577,9 @@ def rms_norm_gated(
         return_stats=False,
     )
     y = y.reshape(x_shape_og)
+    if out is not None:
+        out.copy_(y)
+        return out
     return y if not prenorm else (y, residual_out.reshape(x_shape_og))
 
 
