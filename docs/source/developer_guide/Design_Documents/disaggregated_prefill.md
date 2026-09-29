@@ -164,7 +164,6 @@ read can continue renewing until cancellation. If a lease expires and P reuses
 its blocks, transfer success alone does not prove the KV still belongs to the
 request; lease-expiry failure handling remains follow-up work.
 
-
 D accepts these optional `kv_connector_extra_config` settings; omitted values
 preserve the defaults. All four values must be positive integers (not booleans).
 
