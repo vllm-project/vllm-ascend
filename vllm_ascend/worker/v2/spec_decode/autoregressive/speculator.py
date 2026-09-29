@@ -83,6 +83,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         seq_lens_cpu from input_batch), so we replace input_buffers with
         AscendInputBuffers after super().__init__.
         """
+        self._target_vllm_config = vllm_config
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
 
@@ -130,25 +131,27 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Build the runtime config used while executing the draft model."""
-        source_parallel_config = self.vllm_config.parallel_config
-        dcp_size = source_parallel_config.decode_context_parallel_size
-        parallel_config = replace(
-            source_parallel_config,
-            pipeline_parallel_size=1,
-            decode_context_parallel_size=1 if self.replicated_pcp else dcp_size,
-        )
+        # Validate model settings against the actual worker topology before
+        # deriving the replicated draft execution view.
+        source_config = self._target_vllm_config if self.replicated_pcp else self.vllm_config
+        parallel_config = replace(source_config.parallel_config, pipeline_parallel_size=1)
         draft_config = replace(
-            self.vllm_config,
+            source_config,
             model_config=self.draft_model_config,
             parallel_config=parallel_config,
-            cache_config=replace(self.vllm_config.cache_config),
+            cache_config=replace(source_config.cache_config),
         )
-        if self.replicated_pcp:
-            # TODO: Separate draft execution settings from worker topology.
-            # Restore DCP only after the complete draft config reconstruction;
-            # this does not rerun validation or recompute DCP-dependent settings.
-            draft_config.parallel_config.decode_context_parallel_size = dcp_size
+        draft_config, _ = prepare_replicated_pcp_config(draft_config)
         return draft_config
+
+    def _load_draft_model(self, target_model: torch.nn.Module) -> torch.nn.Module:
+        from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
+
+        return load_eagle_model(
+            target_model,
+            self._target_vllm_config,
+            config_transform=lambda config: prepare_replicated_pcp_config(config)[0],
+        )
 
     # TODO: Remove this method once vllm-project/vllm#53458 or an
     # equivalent upstream fix is merged.
