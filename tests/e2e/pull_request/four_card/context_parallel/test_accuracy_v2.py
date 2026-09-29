@@ -216,7 +216,7 @@ DSV3_2_SFA_PCP_CASE = InferenceCase(
 )
 
 DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
-    name="dsv3_2_sfa_pcp_dcp_mtp3_replicated_indexer_mrv2_tp2_pcp2_dcp4",
+    name="dsv3_2_sfa_pcp_dcp_mtp5_replicated_indexer_mrv2_tp2_pcp2_dcp4",
     model=DSV3_2_MODEL,
     prompts=ACCURACY_PROMPTS,
     expected_outputs=DSV3_2_SFA_DCP_GOLDENS,
@@ -235,16 +235,16 @@ DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
         "cp_kv_cache_interleave_size": 128,
         "block_size": 128,
         "quantization": "ascend",
-        # MTP3 verifies four target tokens per request; capture 1-4 requests.
+        # MTP5 verifies six target tokens per request; capture 1-4 requests.
         "compilation_config": {
             "cudagraph_mode": "FULL_DECODE_ONLY",
-            "cudagraph_capture_sizes": [4, 8, 12, 16],
+            "cudagraph_capture_sizes": [6, 12, 18, 24],
         },
         "additional_config": {
             "enable_dsa_cp": False,
             "enable_sparse_li_c8": False,
         },
-        "speculative_config": {"method": "mtp", "num_speculative_tokens": 3},
+        "speculative_config": {"method": "mtp", "num_speculative_tokens": 5},
     },
 )
 
