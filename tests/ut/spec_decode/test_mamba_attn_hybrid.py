@@ -226,18 +226,28 @@ def test_set_attn_mirrors_group_causal_and_preserves_group_order(monkeypatch):
     assert speculator._group_causal is True
 
 
-def test_propose_latent_seed_bridge(monkeypatch):
-    """propose fills the latent seed from fusion hidden states and hands the
-    dp_sync value through to the DSpark proposal path."""
+def test_propose_is_not_overridden_on_ascend_class():
+    """The latent-seed prefill lives in the upstream speculator (dp_sync
+    contract); the Ascend class must not shadow it."""
     from vllm_ascend.worker.v2.spec_decode.mamba_attn_hybrid.speculator import (
         AscendMambaAttnHybridSpeculator,
+    )
+
+    assert "propose" not in AscendMambaAttnHybridSpeculator.__dict__
+
+
+def test_propose_latent_seed_bridge(monkeypatch):
+    """The upstream mamba propose fills the latent seed from fusion hidden
+    states and forwards dp_sync to the DSpark proposal path."""
+    from vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator import (
+        MambaAttnHybridSpeculator,
     )
 
     captured = {}
 
     def fake_dspark_propose(self, *args, **kwargs):
         captured["last_hidden_states"] = args[3]
-        captured["dp_sync"] = args[11]
+        captured["dp_sync"] = kwargs.get("dp_sync")
         return "ok"
 
     monkeypatch.setattr(
@@ -245,13 +255,13 @@ def test_propose_latent_seed_bridge(monkeypatch):
         fake_dspark_propose,
     )
 
-    speculator = AscendMambaAttnHybridSpeculator.__new__(AscendMambaAttnHybridSpeculator)
+    speculator = MambaAttnHybridSpeculator.__new__(MambaAttnHybridSpeculator)
     speculator.latent_seed = torch.zeros(2, 4)
     input_batch = SimpleNamespace(num_reqs=2, query_start_loc=torch.tensor([0, 3, 6]))
     aux = [torch.arange(12, dtype=torch.float32).reshape(6, 2)]
     num_rejected = torch.tensor([0, 1])
 
-    result = AscendMambaAttnHybridSpeculator.propose(
+    result = MambaAttnHybridSpeculator.propose(
         speculator,
         input_batch,
         attn_metadata={},
@@ -275,8 +285,8 @@ def test_propose_latent_seed_bridge(monkeypatch):
 
 
 def test_propose_zero_hidden_states_without_aux(monkeypatch):
-    from vllm_ascend.worker.v2.spec_decode.mamba_attn_hybrid.speculator import (
-        AscendMambaAttnHybridSpeculator,
+    from vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator import (
+        MambaAttnHybridSpeculator,
     )
 
     captured = {}
@@ -290,10 +300,10 @@ def test_propose_zero_hidden_states_without_aux(monkeypatch):
         fake_dspark_propose,
     )
 
-    speculator = AscendMambaAttnHybridSpeculator.__new__(AscendMambaAttnHybridSpeculator)
+    speculator = MambaAttnHybridSpeculator.__new__(MambaAttnHybridSpeculator)
     speculator.latent_seed = torch.zeros(1, 4)
     speculator.hidden_states = torch.zeros(8, 4)
-    AscendMambaAttnHybridSpeculator.propose(
+    MambaAttnHybridSpeculator.propose(
         speculator,
         input_batch=SimpleNamespace(num_reqs=1, query_start_loc=torch.tensor([0, 3])),
         attn_metadata={},
