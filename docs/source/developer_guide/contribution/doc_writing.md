@@ -196,9 +196,8 @@ Known braced template variables are rewritten to the positional shell arguments
 that `run_dp_template.sh` receives from `launch_online_dp.py`:
 
 | Template variable | Rendered positional |
-
 | --- | --- |
-| `${VISIBLE_DEVICES}`  | `$1` |
+| `${VISIBLE_DEVICES}` | `$1` |
 | `${PORT}` | `$2` |
 | `${DP_SIZE}` | `$3` |
 | `${DP_RANK}` | `$4` |
