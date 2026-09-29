@@ -374,6 +374,8 @@ class TestGLM53Store(unittest.TestCase):
         events = [threading.Event(), threading.Event()]
         worker = SimpleNamespace(
             use_block_key_layerwise=False,
+            block_key_hybrid=False,
+            _attention_saved_layers=set(),
             num_layers=2,
             current_layer=1,
             sync_save_events=[MagicMock(), MagicMock()],
@@ -412,6 +414,8 @@ class TestGLM53Store(unittest.TestCase):
         pending.put("failed-save")
         worker = SimpleNamespace(
             use_block_key_layerwise=False,
+            block_key_hybrid=False,
+            _attention_saved_layers=set(),
             num_layers=1,
             current_layer=0,
             sync_save_events=[MagicMock()],
