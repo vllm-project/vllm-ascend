@@ -667,6 +667,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self._non_causal_swa_attn_mask = AttentionMaskBuilder(device).get_splitfuse_attn_mask()
             radius = self.sliding_window - 1
             return self._non_causal_swa_attn_mask, 4, radius, radius
+        # Decode-only graphs: every query token attends to all its cached
+        # keys, so causal masking is implicit. Passing the explicit mask with
+        # sparse_mode=3 forces FIA to build a redundant mask and costs ~10%
+        # end-to-end performance (issue #16889, same pattern as PR #10302).
+        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            return None, 0, SWA_INT_MAX, SWA_INT_MAX
         return (
             attn_metadata.attn_mask,
             4 if self.sliding_window else 3,
@@ -1067,11 +1073,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     return self._forward_fia_chunked_prefill_split(
                         query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
                     )
+                # Decode-only batches: causal masking is implicit (each query
+                # token attends to all its cached keys). Skip the explicit
+                # mask and use sparse_mode=0 to avoid redundant mask
+                # construction in FIA (issue #16889, same pattern as #10302).
+                is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
                 attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
                     value=value,
-                    atten_mask=attn_metadata.attn_mask,
+                    atten_mask=None if is_decode else attn_metadata.attn_mask,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
@@ -1087,7 +1098,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     current_value=passed_value,
                     attn_metadata=attn_metadata,
                     is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
-                    sparse_mode=3,
+                    sparse_mode=0 if is_decode else 3,
                 )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
@@ -1118,11 +1129,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # decode part
         if num_decode_tokens > 0:
+            # Each decode query token attends to all its cached keys, so no
+            # explicit mask is needed (issue #16889, same pattern as #10302).
             decode_out, _ = DeviceOperator.npu_fused_infer_attention_score(
                 query=query[:num_decode_tokens],
                 key=key,
                 value=value,
-                atten_mask=attn_metadata.attn_mask,
+                atten_mask=None,
                 block_table=block_table[:num_decodes],
                 input_layout="TND",
                 block_size=block_size,
@@ -1139,7 +1152,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 current_value=value,
                 attn_metadata=attn_metadata,
                 is_prefill_no_cache=False,
-                sparse_mode=3,
+                sparse_mode=0,
             )
             output[:num_decode_tokens] = decode_out.view(num_decode_tokens, self.num_heads, self.head_size)
 
