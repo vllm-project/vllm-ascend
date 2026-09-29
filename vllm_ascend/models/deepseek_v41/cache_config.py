@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
+    declared_kwarg,
 )
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
@@ -45,7 +46,7 @@ def uses_a5_packed_cache() -> bool:
     return get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
 
 
-def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtype):
+def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtype, bounded_replay=False):
     if uses_a5_packed_cache():
         head_size = A5_WIN_ROW_BYTES
         dtype = torch.uint8
@@ -59,6 +60,7 @@ def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtyp
         cache_dtype_str=cache_dtype,
         model_version="deepseek_v41",
         alignment=None,
+        **declared_kwarg(AscendSlidingWindowMLASpec, "bounded_replay", bounded_replay),
     )
 
 

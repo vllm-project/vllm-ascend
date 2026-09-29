@@ -89,6 +89,71 @@ def _config_value(config: Any, name: str, default: Any = None) -> Any:
     return getattr(config, name, default)
 
 
+def build_replay_swa_visible_lens(
+    window_size: int,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    replay_start: torch.Tensor,
+    num_tokens: int,
+) -> torch.Tensor:
+    """How many ori KV entries each query token may actually see.
+
+    Upstream's SWA kernels clamp the window per request (``start_pos =
+    max(start_pos, replay_start)``), and the clamp is a correctness requirement
+    rather than a refinement: a replayed request recomputes the hit's last
+    window, so the sliding-window group holds no KV of its own below
+    ``replay_start``. Those blocks were retired and replaced by the null block,
+    whose KV upstream documents as all-zero -- the window would not read another
+    request's data, it would read phantom keys that score zero and take weight
+    in the replayed token's softmax.
+
+    This operator bounds a window with one scalar for the whole call
+    (``ori_win_left``), which cannot express a per-token floor, so the floor
+    travels through ``ori_topk_length`` in band mode: "the number of ori KV
+    entries this query token may see". Entries are counted back from the token's
+    own right edge, so a count of ``position - floor + 1`` is exactly "keep the
+    window ending here, but not past the floor".
+
+    Positions are derived the way the operator derives its own, from
+    ``seqused_ori_kv - actS1Size + s1``, so the two coordinate systems cannot
+    drift. Device-side only: no ``.item()``, no host round trip. The caller
+    guarantees ``num_tokens`` is the sum of the query lengths, as
+    :func:`build_dspark_swa_indices` does for the other user of this channel.
+    """
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    req_ids = torch.repeat_interleave(
+        torch.arange(query_lens.shape[0], device=query_start_loc.device, dtype=torch.long),
+        query_lens,
+        output_size=num_tokens,
+    )
+    token_offsets = torch.arange(num_tokens, device=query_start_loc.device) - query_start_loc[req_ids]
+    positions = seq_lens[req_ids] - query_lens[req_ids] + token_offsets
+    lower = replay_start[: query_lens.shape[0]].to(positions.dtype)[req_ids]
+    start_positions = torch.maximum(positions - int(window_size) + 1, lower).clamp_min(0)
+    return (positions - start_positions + 1).to(torch.int32).unsqueeze(1)
+
+
+def clamp_replay_swa_indices(
+    positions: torch.Tensor,
+    indices: torch.Tensor,
+    lengths: torch.Tensor,
+    visible_lens: torch.Tensor,
+) -> None:
+    """Keep A5's explicit window indices within the rebuilt replay interval.
+
+    Lengths count a prefix of the index list, so shortening lengths alone would
+    retain the oldest keys. Rebuild the active rows from their new left edge in
+    the existing buffers, preserving stable addresses for ACL Graph replay.
+    """
+    num_tokens = visible_lens.shape[0]
+    visible_lens = visible_lens.clamp(min=0, max=indices.shape[-1])
+    columns = torch.arange(indices.shape[-1], device=indices.device)
+    start = positions[:num_tokens, None, None] + 1 - visible_lens.unsqueeze(-1)
+    active = columns < visible_lens.unsqueeze(-1)
+    indices[:num_tokens].copy_(torch.where(active, start + columns, -1))
+    lengths[:num_tokens].copy_(visible_lens)
+
+
 @dataclass
 class AscendDSAV41Metadata(AttentionMetadata):
     """Scheduler and cache-plane contract for one V4.1 cache resource.
@@ -1013,6 +1078,19 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             cos, sin = rope
         text_config = self.vllm_config.model_config.hf_text_config
         window_size = int(_config_value(text_config, "sliding_window", 0))
+        if cache_kind == "swa":
+            # The window the mask floors on (this one) and the window the replay
+            # padding writes out (the spec's, through ``prefix_replay_tokens``)
+            # have to be the same number: the padding decides which slots the
+            # replayed tokens skip, and the floor decides which positions they can
+            # see. A drift between the two sources -- the text config here, the
+            # cache spec there -- pads one window and bounds another, which is a
+            # silent precision loss rather than a failure, so it is checked.
+            spec_window = int(getattr(spec, "sliding_window", window_size))
+            assert spec_window == window_size, (
+                "SWA bounded replay pads the spec's sliding_window "
+                f"({spec_window}) while the mask floors on the text config's ({window_size})."
+            )
         n_local_heads = (
             int(_config_value(text_config, "num_attention_heads"))
             // self.vllm_config.parallel_config.tensor_parallel_size
@@ -1054,6 +1132,21 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             ori_sparse_indices, ori_topk_length = cached_window
         if ori_topk_length is None and ori_sparse_indices is not None and noncausal:
             ori_topk_length = (ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
+        replay_start = getattr(common, "replay_start", None)
+        if replay_start is not None and cache_kind == "swa" and not noncausal:
+            replay_visible_lens = build_replay_swa_visible_lens(
+                window_size,
+                common.query_start_loc[: num_reqs + 1],
+                seq_lens,
+                replay_start,
+                num_actual_tokens,
+            )
+            if self._uses_a5_packed_cache and ori_sparse_indices is not None:
+                clamp_replay_swa_indices(
+                    positions, ori_sparse_indices, ori_topk_length, replay_visible_lens
+                )
+            else:
+                ori_topk_length = replay_visible_lens
         ori_mask_mode = 0 if noncausal else 4
         ori_win_left = max(0, window_size - 1)
         ori_win_right = 0
