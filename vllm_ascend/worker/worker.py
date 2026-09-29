@@ -214,6 +214,7 @@ class NPUWorker(WorkerBase):
                     return
 
     def sleep(self, level: int = 1) -> None:
+        torch.npu.synchronize()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -223,7 +224,7 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
         if cleanup_enabled:
             self.sleep_wakeup_manager.sleep()
-
+        torch.npu.synchronize()
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
@@ -278,6 +279,7 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
+        torch.npu.synchronize()
 
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
