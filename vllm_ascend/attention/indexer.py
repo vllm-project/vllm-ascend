@@ -322,7 +322,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
 
         k_li_pe = k_li_pe.unsqueeze(2)
-        k_li_pe = torch_npu.npu_rotary_mul(k_li_pe, cos, sin)
+        rotary_mode = "half" if self.is_rope_neox_style else "interleave"
+        k_li_pe = torch_npu.npu_rotary_mul(k_li_pe, cos, sin, rotary_mode=rotary_mode)
         k_li_pe = k_li_pe.squeeze(2)
 
         k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)
@@ -453,7 +454,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         q_li_pe, q_li_nope = torch.split(q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)
 
         q_li_pe = q_li_pe.unsqueeze(2)
-        q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
+        rotary_mode = "half" if self.is_rope_neox_style else "interleave"
+        q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin, rotary_mode=rotary_mode)
         q_li_pe = q_li_pe.squeeze(2)
         q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)
 

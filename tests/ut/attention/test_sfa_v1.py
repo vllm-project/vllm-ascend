@@ -663,6 +663,7 @@ class TestAscendSFAKPathFusion(TestBase):
         k_li, k_li_scale, indexer_weights = indexer.forward_k(hidden_states, cos, sin)
 
         self.assertGreater(mock_rope.call_count, 0)
+        self.assertTrue(all(call.kwargs["rotary_mode"] == "interleave" for call in mock_rope.call_args_list))
         self.assertIsNone(k_li_scale)
         self.assertTrue(torch.equal(indexer_weights, kw[:, head_dim:]))
         self.assertEqual(wk_weights_proj.call_count, 1)
@@ -682,6 +683,7 @@ class TestAscendSFAKPathFusion(TestBase):
         )
 
         self.assertIs(topk, expected_topk)
+        self.assertTrue(all(call.kwargs["rotary_mode"] == "interleave" for call in mock_rope.call_args_list))
         self.assertEqual(wk_weights_proj.call_count, 1)
         self.assertTrue(torch.equal(mock_devop.call_args.args[3], kw[:, head_dim:]))
 

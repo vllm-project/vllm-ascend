@@ -1,5 +1,6 @@
 import pytest
 import torch
+import torch_npu
 
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 
@@ -59,3 +60,32 @@ def test_asc_rope_matches_reference(head_dim, rotary_dim, is_neox_style, num_tok
     tolerance = 1e-2 if dtype == torch.bfloat16 else 2e-3
     torch.testing.assert_close(actual_q.view_as(expected_q), expected_q, atol=tolerance, rtol=tolerance)
     torch.testing.assert_close(actual_k.view_as(expected_k), expected_k, atol=tolerance, rtol=tolerance)
+
+
+@pytest.mark.parametrize("is_neox_style,rotary_mode", [(True, "half"), (False, "interleave")])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_asc_indexer_rotary_mul_matches_reference(is_neox_style, rotary_mode, dtype):
+    """SFA's partial Q/K RoPE must preserve both pair layouts."""
+    num_tokens, head_dim, rotary_dim = 17, 128, 64
+    torch.manual_seed(0)
+    x = torch.randn(num_tokens, 8, head_dim, device="npu:0", dtype=dtype)
+    angles = torch.randn(num_tokens, rotary_dim // 2, device="npu:0")
+    cos, sin = angles.cos().to(dtype), angles.sin().to(dtype)
+    if is_neox_style:
+        expanded_cos = cos.repeat(1, 2)
+        expanded_sin = sin.repeat(1, 2)
+    else:
+        expanded_cos = cos.repeat_interleave(2, dim=-1)
+        expanded_sin = sin.repeat_interleave(2, dim=-1)
+
+    rotated = torch_npu.npu_rotary_mul(
+        x[..., :rotary_dim].unsqueeze(2),
+        expanded_cos.view(num_tokens, 1, 1, rotary_dim),
+        expanded_sin.view(num_tokens, 1, 1, rotary_dim),
+        rotary_mode=rotary_mode,
+    ).squeeze(2)
+    actual = torch.cat((rotated, x[..., rotary_dim:]), dim=-1)
+    expected = _reference_rope(x, cos, sin, rotary_dim, is_neox_style)
+    tolerance = 1e-2 if dtype == torch.bfloat16 else 2e-3
+    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
