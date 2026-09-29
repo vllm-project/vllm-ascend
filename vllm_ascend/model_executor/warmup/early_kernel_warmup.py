@@ -14,12 +14,15 @@ cannot walk sys.modules mid-registration.
 from __future__ import annotations
 
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.worker import NPUWorker
 
 _JOIN_TIMEOUT_S = 600.0
 
@@ -85,11 +88,12 @@ def _run(shim: _WarmupShim, device_index: int) -> None:
         logger.warning("Early kernel warmup set_device failed; regular warmup still runs", exc_info=True)
         return
 
+    worker = cast("NPUWorker", shim)
     items = (
-        ("rejection_sampler", lambda: rejection_sampler_triton_warmup(shim)),
-        ("penalties", lambda: penalties_triton_warmup(shim)),
-        ("rms", lambda: triton_rms_warmup(shim, assume_used=True)),
-        ("indexer", lambda: indexer_triton_warmup(shim)),
+        ("rejection_sampler", lambda: rejection_sampler_triton_warmup(worker)),
+        ("penalties", lambda: penalties_triton_warmup(worker)),
+        ("rms", lambda: triton_rms_warmup(worker, assume_used=True)),
+        ("indexer", lambda: indexer_triton_warmup(worker)),
     )
     for name, fn in items:
         try:
