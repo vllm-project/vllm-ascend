@@ -31,6 +31,15 @@ constexpr static int64_t MASK_NUM_T32 = 256 / sizeof(float);
 constexpr static int64_t MASK_BLK_STRIDE = 8;
 constexpr static int64_t SWI_FACTOR = 2;
 constexpr static float DYNAMIC_QUANT_FACTOR = 1.0 / 127.0;
+// Tiles with at most this many rows run SwiGLU directly on the interleaved
+// halves (no de-interleave copies) and multiply the row-uniform weight scale
+// row by row (no [proDimsx, 2H] broadcast copy). The per-row form trades
+// vector work for a few extra issued instructions, so it only pays off when
+// (a) the tile is small enough that the extra instructions stay bounded
+// (UbFactorDimx <= ROW_UNROLLED_MAX) and (b) the core processes several
+// tiles, i.e. the shape is vector-bound rather than issue-bound. Single-tile
+// cores (decode-style tiny groups) keep the original full-tile path.
+constexpr static int32_t ROW_UNROLLED_MAX = 4;
 
 __aicore__ inline void CopyLocalContiguousFloat(
     const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t count)
@@ -131,9 +140,7 @@ protected:
     TQue<QuePosition::VECOUT, 1> outQueue_;
 
     TBuf<TPosition::VECCALC> tmpBuf1_;
-    TBuf<TPosition::VECCALC> tmpBuf2_; // only use in swigluMode == 1
     TBuf<TPosition::VECCALC> scaleBuf_;
-
     uint32_t blockIdx_ = GetBlockIdx();
     int64_t realDimx_ = 0;
     int64_t groupOffset_ = 0;
@@ -143,6 +150,9 @@ protected:
     uint32_t UbSingleOutSize_ = 0;
     uint32_t TBufActSclInOfs_ = 0;
     uint32_t TBufXLocalInOfs_ = 0;
+    // Set per ProcessSingleGroupPerCore call: true when this core runs the
+    // row-unrolled SwiGLU/weight-scale path (see ROW_UNROLLED_MAX).
+    bool rowPath_ = false;
 
     int32_t actOffset_;
     int32_t gateOffset_;
@@ -201,11 +211,6 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::Init(
     pipe_->InitBuffer(tmpBuf1_, UbSingleOutSize_ * SWI_FACTOR * sizeof(float));
     pipe_->InitBuffer(scaleBuf_,
         ((tl_->UbFactorDimx + BLOCK_ELEM - 1) / BLOCK_ELEM) * BLOCK_ELEM * BLOCK_ELEM * sizeof(float));
-    if (tl_->swigluMode == 1) {
-        pipe_->InitBuffer(
-            tmpBuf2_,
-            UbSingleOutSize_ * sizeof(int32_t) + UbSingleOutSize_ * sizeof(uint8_t)); // for gather offset and clamp
-    }
 }
 
 TEMPLATE_DSQ_DECLARE
@@ -391,19 +396,32 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::ComputeDequant
             PipeBarrier<PIPE_V>();
         }
 
-        // Copy weight scale: [1,2H] -> [proDimsx,2H]
-        // params: dstStride: 1, srcStride: 1, dstRepStride: tl_->UbFactorDimy * 2 / 8, srcRepStride: 0
-        CopyReshape<float>(tmpUbF32, weightScaleLocal_, proDimsx, tl_->UbFactorDimy * SWI_FACTOR,
-            {1, 1, static_cast<uint16_t>((tl_->UbFactorDimy * SWI_FACTOR) / BLOCK_ELEM), 0});
+        if (!rowPath_) {
+            // Copy weight scale: [1,2H] -> [proDimsx,2H]
+            // params: dstStride: 1, srcStride: 1, dstRepStride: tl_->UbFactorDimy * 2 / 8, srcRepStride: 0
+            CopyReshape<float>(tmpUbF32, weightScaleLocal_, proDimsx, tl_->UbFactorDimy * SWI_FACTOR,
+                {1, 1, static_cast<uint16_t>((tl_->UbFactorDimy * SWI_FACTOR) / BLOCK_ELEM), 0});
+        }
     }
 
     // x 为 bf16时
     Cast(xLocalF32, xActLocal[TBufXLocalInOfs_], RoundMode::CAST_NONE, SWI_FACTOR * proDimsx * tl_->UbFactorDimy);
     PipeBarrier<PIPE_V>();
     if constexpr (std::is_same_v<TXGm, int32_t>) {
-        // Calc dequant: xLocalF32 = weightScaleLocal * xLocalF32
-        Mul(xLocalF32, tmpUbF32, xLocalF32, tl_->UbFactorDimy * SWI_FACTOR * proDimsx);
-        PipeBarrier<PIPE_V>();
+        if (!rowPath_) {
+            // Calc dequant: xLocalF32 = weightScaleLocal * xLocalF32
+            Mul(xLocalF32, tmpUbF32, xLocalF32, tl_->UbFactorDimy * SWI_FACTOR * proDimsx);
+            PipeBarrier<PIPE_V>();
+        } else {
+            // The weight scale is uniform across rows: multiply row by row
+            // straight against the [1, 2H] scale, skipping the broadcast
+            // copy. Bit-identical to the broadcast multiply.
+            for (int32_t row = 0; row < proDimsx; ++row) {
+                Mul(xLocalF32[row * tl_->inDimy], xLocalF32[row * tl_->inDimy], weightScaleLocal_,
+                    tl_->inDimy);
+            }
+            PipeBarrier<PIPE_V>();
+        }
         if (!tl_->activationScaleIsEmpty) {
             // Copy act scale: [proDimsx,8] -> [proDimsx,2H]
             CopyReshape<float>(tmpUbF32, activationScaleLocal, proDimsx, tl_->UbFactorDimy * SWI_FACTOR,
@@ -438,6 +456,32 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::ComputeSwiGLU(
     } else {
         uint32_t calEleNum = tl_->UbFactorDimy * proDimsx;
         LocalTensor<float> tmpUbF32 = tmpBuf1_.AllocTensor<float>();
+        if (rowPath_) {
+            // Same structure as the small-tile SwiGluGate path: silu in
+            // place on the act half, result materialized for the quant
+            // stage, no de-interleave copies.
+            LocalTensor<float> res = tmpUbF32;
+            LocalTensor<float> denom = tmpUbF32[calEleNum];
+            for (int32_t row = 0; row < proDimsx; ++row) {
+                LocalTensor<float> actRow = xLocalF32[row * tl_->inDimy + actOffset_];
+                LocalTensor<float> gateRow = xLocalF32[row * tl_->inDimy + gateOffset_];
+                LocalTensor<float> denomRow = denom[row * tl_->UbFactorDimy];
+                LocalTensor<float> resRow = res[row * tl_->UbFactorDimy];
+                Muls(denomRow, actRow, static_cast<float>(-1.0), tl_->UbFactorDimy);
+                PipeBarrier<PIPE_V>();
+                Exp(denomRow, denomRow, tl_->UbFactorDimy);
+                PipeBarrier<PIPE_V>();
+                Adds(denomRow, denomRow, static_cast<float>(1.0), tl_->UbFactorDimy);
+                PipeBarrier<PIPE_V>();
+                Div(actRow, actRow, denomRow, tl_->UbFactorDimy);
+                PipeBarrier<PIPE_V>();
+                Mul(resRow, gateRow, actRow, tl_->UbFactorDimy);
+                PipeBarrier<PIPE_V>();
+            }
+            // x compute done, free
+            xActQueue_.FreeTensor(xLocalF32);
+            return;
+        }
         // do normal swi pre
         LocalTensor<float> tmpUbF32Act = tmpUbF32;
         LocalTensor<float> tmpUbF32Gate = tmpUbF32[calEleNum];
@@ -557,6 +601,7 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::ProcessSingleG
 {
     // do ub tiling again
     int32_t ubDimxLoop = (dimxCore + tl_->UbFactorDimx - 1) / tl_->UbFactorDimx;
+    rowPath_ = (tl_->UbFactorDimx <= ROW_UNROLLED_MAX) && (ubDimxLoop >= 2);
     int32_t ubDimxTailFactor = dimxCore - tl_->UbFactorDimx * (ubDimxLoop - 1);
 
     // copyin 当前分组下使用的参数，weight scale, bias scale, quant scale+quant offset
@@ -632,6 +677,46 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::SwiGluGate(
 {
     uint32_t calEleNum = tl_->UbFactorDimy * proDimsx;
     LocalTensor<float> tmpUbF32 = tmpBuf1_.AllocTensor<float>();
+    if (rowPath_) {
+        // SwiGLU runs directly on the interleaved halves of the dequant
+        // result: no de-interleave copies, silu lands in place on the act
+        // half and the final multiply materializes the [proDimsx, H] result
+        // for the quant stage. res: [proDimsx, H] (quant input), denom:
+        // [proDimsx, H] (silu denominator scratch).
+        LocalTensor<float> res = tmpUbF32;
+        LocalTensor<float> denom = tmpUbF32[calEleNum];
+        for (int32_t row = 0; row < proDimsx; ++row) {
+            LocalTensor<float> actRow = xLocalF32[row * tl_->inDimy + actOffset_];
+            LocalTensor<float> gateRow = xLocalF32[row * tl_->inDimy + gateOffset_];
+            LocalTensor<float> denomRow = denom[row * tl_->UbFactorDimy];
+            LocalTensor<float> resRow = res[row * tl_->UbFactorDimy];
+            if (tl_->clampLimit > 0.0f) {
+                Mins(gateRow, gateRow, tl_->clampLimit, tl_->UbFactorDimy);
+                PipeBarrier<PIPE_V>();
+                Maxs(gateRow, gateRow, -(tl_->clampLimit), tl_->UbFactorDimy);
+                PipeBarrier<PIPE_V>();
+            }
+            if (tl_->gluBias != 0.0f) {
+                Adds(gateRow, gateRow, tl_->gluBias, tl_->UbFactorDimy);
+                PipeBarrier<PIPE_V>();
+            }
+            if (tl_->clampLimit > 0.0f) {
+                Mins(actRow, actRow, tl_->clampLimit, tl_->UbFactorDimy);
+                PipeBarrier<PIPE_V>();
+            }
+            Muls(denomRow, actRow, -(tl_->gluAlpha), tl_->UbFactorDimy);
+            PipeBarrier<PIPE_V>();
+            Exp(denomRow, denomRow, tl_->UbFactorDimy);
+            PipeBarrier<PIPE_V>();
+            Adds(denomRow, denomRow, static_cast<float>(1.0), tl_->UbFactorDimy);
+            PipeBarrier<PIPE_V>();
+            Div(actRow, actRow, denomRow, tl_->UbFactorDimy);
+            PipeBarrier<PIPE_V>();
+            Mul(resRow, gateRow, actRow, tl_->UbFactorDimy);
+            PipeBarrier<PIPE_V>();
+        }
+        return;
+    }
     LocalTensor<float> tmpUbF32Act = tmpUbF32;
     LocalTensor<float> tmpUbF32Gate = tmpUbF32[calEleNum];
     SetMaskCount();
@@ -654,8 +739,13 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::SwiGluGate(
         Maxs(tmpUbF32Gate, tmpUbF32Gate, -(tl_->clampLimit), calEleNum);
         PipeBarrier<PIPE_V>();
     }
-        Adds(tmpUbF32Gate, tmpUbF32Gate, tl_->gluBias, calEleNum);
-        PipeBarrier<PIPE_V>();
+        if (tl_->gluBias != 0.0f) {
+            // x + 0.0f is the identity for every finite/infinite value (and
+            // the -0.0 -> +0.0 flip cannot change the int8 product), so the
+            // pass is skippable when no bias is configured.
+            Adds(tmpUbF32Gate, tmpUbF32Gate, tl_->gluBias, calEleNum);
+            PipeBarrier<PIPE_V>();
+        }
     if (tl_->clampLimit > 0.0f) {
     // tmpUbF32Act
         Mins(tmpUbF32Act, tmpUbF32Act, tl_->clampLimit, calEleNum);
@@ -789,6 +879,11 @@ TEMPLATE_DSQ_DECLARE
 __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::CastFloatToInt8(
     const LocalTensor<float>& tmpUbF32Act, const LocalTensor<float>& tmpUbF32Gate, uint32_t proDimsx, LocalTensor<int8_t>& yOut)
 {
+    // NOTE: a direct Cast<int8_t, int32_t> (skipping the lossless half
+    // round-trip for the in-range [-127, 127] integers) does not compile on
+    // dav_c220 - CastIntrinsicsImpl has no such overload (only the MicroAPI
+    // exposes an int32->uint8 cast, cf. swiglu_group_quant). Keep the
+    // three-step chain.
     LocalTensor<int32_t> tmpUbF32ActI32 = tmpUbF32Act.ReinterpretCast<int32_t>();
     Cast(tmpUbF32ActI32, tmpUbF32Act, RoundMode::CAST_RINT, tl_->UbFactorDimy * proDimsx);
     SetDeqScale((half)1.000000e+00f);

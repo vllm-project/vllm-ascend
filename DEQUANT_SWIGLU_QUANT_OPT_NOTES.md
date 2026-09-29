@@ -227,3 +227,76 @@ tiling 公式按 db=2 预留 xActQueue 预算但代码只建 1 缓冲——**双
 ## 轮次结果记录
 
 （每轮：精度 / NPUGraph / msprof / 与上轮对比 / 教训）
+
+### R0（2026-09-29）：严格测试先行 — ✅ 完成
+
+`test_dequant_swiglu_quant_strict.py`（40 用例，不改原文件）：golden 按 kernel 精确
+fp32 数值链（(ws×x)×act → SwiGLU(α/β/clamp) → 行max×1/127 → 除 → RINT → int8，
+**无 bf16 预舍入**——原测试 golden 把 swiglu 转 bf16 再量化，atol=1 恰好把
+per-row/per-group scale 类缺陷全部吸收）。y=atol 1/rtol 0（c220 向量 Exp 与 CPU
+exp 的 ~1-2ulp 差在 RINT 边界翻转一格），scale=rtol 1e-5。补齐 group 路径
+（ragged/空组/cut/mode1+group/>16 行组）、mode0、clamp>0、α/β、activate_left
+翻转、act=None、2D ws、tile 尾、36 核边界、极值、全负行、9 条拒绝路径、
+零行钉死（scale==0, y==0，与 CANN npu_dynamic_quant 一致）。
+
+基线：**strict 40/40 + 原 5/5 全绿**。教训两条：
+1. 模块级 `enable_custom_op()` 忘调用 → 全部用例 AttributeError，拒绝路径用例
+   反而"通过"（任何异常都算拒绝）——拒绝路径必须与正常路径分开验证；
+2. 给 op 传 CPU 张量（group_index 忘 .npu()）→ 设备端 "scalar instruction
+   accesses an invalid GM address" 崩溃，表象像 kernel bug 实为 host 指针当 GM。
+
+### 侦察期假警报（留档避免重蹈）
+
+- **"act scale 被乘两次"**：uniform scale 探针 s_out 随 s² 变化（136×/13399×）
+  报警——实际 **SwiGLU 本身双线性**（silu(s·gate)×(s·up)∝s²），136=100×
+  sigmoid 饱和因子，属正确行为。golden 对比 5 个 shape 全部 maxdiff=1 证实。
+  strided CopyRepeatParams（srcStride=0 + [p,8] scale 布局）语义可疑但实证逐行
+  正确——**不动该路径**。
+- **int32→int8 直转 cast**：c220 classic API 无此类型对
+  （`CastIntrinsicsImpl` 无匹配重载，编译期失败；仅 MicroAPI 有
+  `castTraitU32toU8Even`，见 swiglu_group_quant）。RINT 后值域 [-127,127] 使
+  half 中转数学上无损，但无法跳过——**负结果，3-cast 链是 classic API 下限**。
+
+### R1（2026-09-29）：等价 pass 消除 — ✅ 完成
+
+对象：`DequantSwigluQuantBase`（两生产路径共用）。四项等价变换 + 一项门槛修正：
+
+1. **死分配 tmpBuf2 删除**（swigluMode=1 时分配 5B/输出元素却全仓无引用）：
+   mode1 @2H=4096 腾出 20.5KB UB（为 R2 双缓冲铺路），零风险。
+2. **weight scale 行乘**：[1,2H] 行均匀 → 逐行 `Mul(x_row, x_row, ws, 2H)`，
+   消除每 tile 的 [p,2H] 广播拷贝（位级一致：同操作数同乘法）。
+3. **去交错拷贝消除**：SwiGluGate（mode1）/ComputeSwiGLU（mode0）不再把
+   act/gate 半边拷到连续缓冲，clamp/β/silu 直接在 x 缓冲的半区上原地进行，
+   仅最终 Mul 物化 [p,H] 结果供量化段（res=[0,pH), denom=[pH,2pH)，位级一致）。
+4. **β=0 跳过**：`Adds(gate, β)` 在 gluBias==0 时跳过（x+0.0 恒等，-0.0→+0.0
+   翻转不影响 int8 乘积）。
+5. **门槛修正（R1b）**：初版门槛 `proDimsx ≤ 8` 使 2H=2048（p=5）回退
+   +3.5~8.6%、cut-group decode（每组单 tile）回退 +5.8%——per-row 形态用少量
+   额外指令换向量工作量，只在 **vec-bound** 形状赚回。修正为
+   `rowPath_ = (UbFactorDimx ≤ 4) && (ubDimxLoop ≥ 2)`（单 tile 核 = decode 型
+   issue-bound，回旧全宽路径）。
+
+- **精度**：原 5 + strict 40 = **45/45 两轮全绿**（门槛修正前后各一轮）。
+- **NPUGraph（最终版，µs；仅采信跨测量时段稳定的读数）**：
+
+| shape | base | R1 | Δ |
+|---|---:|---:|---:|
+| 2H=4096 @1024 | 32.96 | 31.86 | -3.3% |
+| 2H=4096 @2048 | 57.06 | 53.33 | **-6.6%** |
+| 2H=4096 @4096 | 106.01 | 98.46 | **-7.1%** |
+| 2H=2048 @4096（门槛修正后回旧路径） | 56.42 | 56.35 | -0.1%（修正前 +3.5% 已消除） |
+
+大档收益随 tokens 单调增大（-3.3→-7.1%），与 vec-bound 摊销模型一致；
+三轮独立测量时段（loadavg 45/80/92）读数稳定复现。
+
+- **测量环境警告（2026-09-29 下午）**：共享宿主 loadavg 从 45 持续升至 96+，
+  同一 shape 连续三次测量 37.7→41.3→43.9µs 单调漂移 +17%——小/中档与
+  group 档读数不可判（old-path 金丝雀形状代码与基线逐分支等价也出现
+  +6~14% 散布）。**小档与 group 档的 R1 判定留待环境安静后复测**；R2 开工
+  前先复测全表作为 R2 的对照基线。
+- **教训（门槛）**：per-row 等价变换不是免费午餐——它用少量指令数换向量
+  工作量，只在 vec-bound 形状赚回。**门槛判据要用运行时形态（ubDimxLoop）
+  而非静态 tile 参数**：单 tile 核（decode 型小 group）是 issue-bound，
+  +3~5 条指令直接上关键路径（cut-group decode 实测 +5.8%）。
+- **负结果**：int32→int8 直转（见上）；初版门槛 proDimsx≤8（2H=2048 p=5
+  回退 +3.5~8.6%，已修正）。
