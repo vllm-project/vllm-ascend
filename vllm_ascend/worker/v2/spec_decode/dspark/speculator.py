@@ -345,4 +345,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             self.model.lm_head._lmhead_tp_dynamic_capacity = (
                 max_reqs_across_dp * self.num_speculative_steps
             )
+        elif hasattr(self.model.lm_head, "_lmhead_tp_dynamic_capacity"):
+            # No DP sync this round: drop the previous round's dynamic value so
+            # the static lmhead_tp_capacity stays authoritative and a stale
+            # capacity cannot be reused.
+            del self.model.lm_head._lmhead_tp_dynamic_capacity
         return hidden_states

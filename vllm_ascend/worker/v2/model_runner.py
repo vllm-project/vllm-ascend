@@ -695,14 +695,15 @@ class NPUModelRunner(GPUModelRunner):
 
         The target side resolves the capacity from the DP-synced token count
         captured in ``_determine_batch_execution_and_padding`` and stores it on
-        the runner (``_lmhead_tp_step_capacity``) so ``sample()``, the idle-rank
-        dummy join, and the lm-head forward all read the same per-step value.
-        ``_determine_batch_execution_and_padding`` refreshes it every
+        the runner (``_lmhead_tp_step_capacity_value``) so ``sample()``, the
+        idle-rank dummy join, and the lm-head forward all read the same per-step
+        value. ``_determine_batch_execution_and_padding`` refreshes it every
         ``execute_model``; before the first sync (or when no DP sync ran) it
         falls back to the static ``max_num_reqs * decode_query_len`` bound,
         which is derived purely from global config so all ranks agree.
         """
-        return getattr(self, "_lmhead_tp_step_capacity", None) or self.max_num_reqs * self.decode_query_len
+        value = getattr(self, "_lmhead_tp_step_capacity_value", None)
+        return value if value is not None else self.max_num_reqs * self.decode_query_len
 
     def _determine_batch_execution_and_padding(
         self,
@@ -743,9 +744,9 @@ class NPUModelRunner(GPUModelRunner):
         _, _, _, num_tokens_across_dp, _ = result
         static = self.max_num_reqs * self.decode_query_len
         if num_tokens_across_dp is not None and num_tokens_across_dp.numel() > 0:
-            self._lmhead_tp_step_capacity = min(static, int(num_tokens_across_dp.max().item()))
+            self._lmhead_tp_step_capacity_value = min(static, int(num_tokens_across_dp.max().item()))
         else:
-            self._lmhead_tp_step_capacity = static
+            self._lmhead_tp_step_capacity_value = static
         return result
 
     def sample(self, hidden_states, input_batch, grammar_output):

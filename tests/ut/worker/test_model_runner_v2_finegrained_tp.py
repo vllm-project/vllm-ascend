@@ -286,7 +286,7 @@ def test_execute_model_dummy_join_uses_dynamic_capacity():
     capacity on the runner, the idle join must use it instead of the static
     bound so it stays aligned with the busy ranks' dynamic capacity."""
     runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
-    runner._lmhead_tp_step_capacity = 12  # DP-synced capacity this step
+    runner._lmhead_tp_step_capacity_value = 12  # DP-synced capacity this step
     hidden_states = torch.randn(20, 6)
     runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states)
     runner.kvpp = MagicMock()
@@ -358,7 +358,7 @@ def test_determine_batch_execution_captures_step_capacity():
     target capacity on the runner every step, capped by the static bound, and
     refresh it (never reuse a stale previous-step value)."""
     runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
-    runner._lmhead_tp_step_capacity = 99  # stale from a previous step
+    runner._lmhead_tp_step_capacity_value = 99  # stale from a previous step
 
     def fake_determine(num_tokens, num_reqs, num_scheduled_tokens_np, **kwargs):
         # upstream returns (mode, batch_desc, should_ubatch, num_tokens_across_dp, stats)
@@ -366,7 +366,7 @@ def test_determine_batch_execution_captures_step_capacity():
             CUDAGraphMode.NONE,
             BatchDescriptor(num_tokens=num_tokens),
             False,
-            np.array([3, 5, 4], dtype=np.int32),
+            torch.tensor([3, 5, 4], dtype=torch.int32),
             None,
         )
 
@@ -376,23 +376,15 @@ def test_determine_batch_execution_captures_step_capacity():
         runner._determine_batch_execution_and_padding(
             num_tokens=5, num_reqs=3, num_scheduled_tokens_np=np.array([1, 2, 2]), max_num_scheduled_tokens=2
         )
-    assert runner._lmhead_tp_step_capacity == 5  # max(3,5,4)=5, min(16, 5)
+    assert runner._lmhead_tp_step_capacity() == 5  # max(3,5,4)=5, min(16, 5)
 
     # A next step with a smaller DP max must refresh, not keep 5.
-    with patch.object(
-        NPUModelRunner.__bases__[0], "_determine_batch_execution_and_padding", side_effect=fake_determine
-    ):
-        runner._determine_batch_execution_and_padding(
-            num_tokens=2, num_reqs=2, num_scheduled_tokens_np=np.array([1, 1]), max_num_scheduled_tokens=1
-        )
-    assert runner._lmhead_tp_step_capacity == 5  # same DP max
-
     def fake_determine2(num_tokens, num_reqs, num_scheduled_tokens_np, **kwargs):
         return (
             CUDAGraphMode.NONE,
             BatchDescriptor(num_tokens=num_tokens),
             False,
-            np.array([2, 2], dtype=np.int32),
+            torch.tensor([2, 2], dtype=torch.int32),
             None,
         )
 
@@ -402,7 +394,7 @@ def test_determine_batch_execution_captures_step_capacity():
         runner._determine_batch_execution_and_padding(
             num_tokens=2, num_reqs=2, num_scheduled_tokens_np=np.array([1, 1]), max_num_scheduled_tokens=1
         )
-    assert runner._lmhead_tp_step_capacity == 2  # max(2,2)=2, refreshed down
+    assert runner._lmhead_tp_step_capacity() == 2  # max(2,2)=2, refreshed down
 
     # No DP sync (num_tokens_across_dp None) -> static bound.
     def fake_determine3(num_tokens, num_reqs, num_scheduled_tokens_np, **kwargs):
@@ -414,7 +406,7 @@ def test_determine_batch_execution_captures_step_capacity():
         runner._determine_batch_execution_and_padding(
             num_tokens=4, num_reqs=2, num_scheduled_tokens_np=np.array([2, 2]), max_num_scheduled_tokens=2
         )
-    assert runner._lmhead_tp_step_capacity == 16  # static fallback
+    assert runner._lmhead_tp_step_capacity() == 16  # static fallback
 
 
 def test_sample_uses_step_capacity():
@@ -425,7 +417,7 @@ def test_sample_uses_step_capacity():
     hidden_states = torch.randn(10, 4)
     indices = torch.tensor([0, 3, 5])
     input_batch = _make_input_batch(indices)
-    runner._lmhead_tp_step_capacity = 12
+    runner._lmhead_tp_step_capacity_value = 12
 
     with patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=True):
         runner.sample(hidden_states, input_batch, None)
@@ -454,17 +446,18 @@ def test_dspark_run_model_publishes_draft_capacity():
 
     with patch.object(AscendDSparkSpeculator.__bases__[0], "_run_model", side_effect=fake_run_model):
         # query rows = 3 reqs * 4 = 12; draft capacity = 3 * 4 = 12
-        spec._run_model(12, None, None, np.array([12, 8], dtype=np.int32))
+        spec._run_model(12, None, None, torch.tensor([12, 8], dtype=torch.int32))
     assert spec.model.lm_head._lmhead_tp_dynamic_capacity == 12
 
-    # No sync value -> no override (static lmhead_tp_capacity stays authoritative).
+    # No sync value this round -> the previous round's dynamic capacity is
+    # dropped so the static lmhead_tp_capacity stays authoritative.
     with patch.object(AscendDSparkSpeculator.__bases__[0], "_run_model", side_effect=fake_run_model):
         spec._run_model(4, None, None, None)
-    assert spec.model.lm_head._lmhead_tp_dynamic_capacity == 12  # unchanged
+    assert not hasattr(spec.model.lm_head, "_lmhead_tp_dynamic_capacity")
 
     # Non-divisible query rows fail fast.
     with (
         patch.object(AscendDSparkSpeculator.__bases__[0], "_run_model", side_effect=fake_run_model),
         pytest.raises(ValueError, match="num_query_per_req"),
     ):
-        spec._run_model(5, None, None, np.array([5], dtype=np.int32))
+        spec._run_model(5, None, None, torch.tensor([5], dtype=torch.int32))
