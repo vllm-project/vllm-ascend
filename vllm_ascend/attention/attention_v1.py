@@ -601,11 +601,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
-        # Decode-only graphs: every query token attends to all its cached
-        # keys, so causal masking is implicit. Passing the explicit mask with
-        # sparse_mode=3 forces FIA to build a redundant mask and costs ~10%
-        # end-to-end performance (issue #16889, same pattern as PR #10302).
-        is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+        # Decode-only graphs without a sliding window: every query token
+        # attends to all its cached keys, so causal masking is implicit.
+        # Passing the explicit mask with sparse_mode=3 forces FIA to build a
+        # redundant mask and costs ~10% end-to-end performance (issue #16889,
+        # same pattern as PR #10302). Sliding-window decode keeps the mask.
+        is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly and self.sliding_window is None
         attn_mask = None if is_decode else attn_metadata.attn_mask
         if self.sliding_window:
             sparse_mode = 4
