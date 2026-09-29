@@ -32,6 +32,7 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderA
 
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.encoder_acl_graph import (
+    EncoderGraphKey,
     get_encoder_forward_context,
     get_encoder_graph_params,
     maybe_compute_actual_seq_lengths,
@@ -260,7 +261,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         out = torch.empty_like(q)
         softmax_lse = torch.empty(1, dtype=q.dtype, device=q.device)
 
-        graph_key = (path, token_budget, axis_keys) if axis_keys else (path, token_budget)
+        graph_key: EncoderGraphKey = (path, token_budget, axis_keys) if axis_keys else (path, token_budget)
         workspace = params.workspaces.get(graph_key)
         if workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
