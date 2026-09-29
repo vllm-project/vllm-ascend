@@ -276,8 +276,9 @@ def _snapshot_compatibility(
         "ascend910b1": "ascend910b1",
         "a3": "ascend910_9391",
         "ascend910_9391": "ascend910_9391",
-        # Keep the 560T nightly snapshot separate until its compiler target is verified.
-        "a3-560t": "a3-560t",
+        # The 560T runner shares the A3 csrc target; toolchain identity still
+        # separates snapshots built in different compiler environments.
+        "a3-560t": "ascend910_9391",
         "310p": "ascend310p1",
         "ascend310p1": "ascend310p1",
         "a5": "ascend950dt_9582",

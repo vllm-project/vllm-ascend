@@ -1820,13 +1820,15 @@ def test_snapshot_compatibility_aliases_share_identity(monkeypatch):
     assert different_image != canonical
 
 
-def test_snapshot_compatibility_keeps_a3_560t_separate_from_generic_a3():
+def test_snapshot_compatibility_shares_a3_560t_target_with_generic_a3():
     engine = _load_engine("build_cache_engine_a3_560t_snapshot_test")
     image = "quay.io/ascend/vllm-ascend:nightly-main-a3"
 
     a3_560t = engine._snapshot_compatibility("arm64", "a3-560t", image)
     assert a3_560t == engine._snapshot_compatibility("aarch64", "A3-560T", image)
-    assert a3_560t != engine._snapshot_compatibility("arm64", "a3", image)
+    assert a3_560t == engine._snapshot_compatibility("arm64", "a3", image)
+    assert a3_560t == engine._snapshot_compatibility("arm64", "ascend910_9391", image)
+    assert a3_560t != engine._snapshot_compatibility("arm64", "a3", f"{image}-new")
 
 
 def test_snapshot_compatibility_explicit_image_overrides_outer_runtime(monkeypatch):
@@ -1866,11 +1868,15 @@ def test_snapshot_compatibility_separates_runtime_operating_systems(monkeypatch)
     monkeypatch.setattr(engine.platform, "machine", lambda: "aarch64")
     monkeypatch.setattr(engine.platform, "libc_ver", lambda: ("glibc", "2.35"))
     ubuntu = engine._snapshot_compatibility("arm64", "a2", "")
+    ubuntu_a3 = engine._snapshot_compatibility("arm64", "a3", "")
+    assert ubuntu_a3 == engine._snapshot_compatibility("arm64", "a3-560t", "")
 
     os_release_hash["value"] = "openeuler-24.03"
     openeuler = engine._snapshot_compatibility("arm64", "a2", "")
+    openeuler_a3_560t = engine._snapshot_compatibility("arm64", "a3-560t", "")
 
     assert ubuntu != openeuler
+    assert ubuntu_a3 != openeuler_a3_560t
 
 
 def test_snapshot_key_reports_unavailable_toolchain_without_weaker_identity(monkeypatch, capsys):
