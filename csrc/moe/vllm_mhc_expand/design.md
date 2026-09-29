@@ -9,8 +9,8 @@ Empty tensors return without launching a kernel. This is an inference-only op.
 The Python helper preserves the native path for gradients, other devices,
 unsupported dtypes, noncontiguous input, widths not divisible by 16, and
 empty expansion and stream counts other than the measured GLM multiplier 4.
-Nonaligned widths remain supported by the raw operator
-for correctness, but the helper avoids its measured single-core slowdown.
+Nonaligned widths remain supported by the raw operator. The helper retains
+native fallback pending hardware qualification of the output-partitioned path.
 
 ## Algorithm
 
