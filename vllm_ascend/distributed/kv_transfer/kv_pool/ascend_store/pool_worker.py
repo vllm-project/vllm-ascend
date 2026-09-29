@@ -1964,7 +1964,7 @@ class KVPoolWorker:
                 # current DRAM allocation until all layer copies finish.
                 if leased_keys:
                     leased_infos = self.m_store.batch_get_key_info(leased_keys)
-                    if len(leased_infos) != len(leased_keys):
+                    if leased_infos is None or len(leased_infos) != len(leased_keys):
                         self.m_store.batch_remove_lease([*all_group_load_keys, *leased_keys])
                         raise RuntimeError("Memcache leased key-info response length mismatch")
                     for key, info in zip(leased_keys, leased_infos, strict=True):
@@ -2783,9 +2783,13 @@ class KVPoolWorker:
         # Drain pending saves before clearing or reusing completion events.
         queue = send_thread.request_queue
         with queue.all_tasks_done:
+            waited_s = 0
             while queue.unfinished_tasks:
                 send_thread.raise_if_failed()
                 queue.all_tasks_done.wait(timeout=1)
+                waited_s += 1
+                if waited_s % 60 == 0:
+                    logger.info("Layerwise save drain still waiting on %d queued PUT(s)", queue.unfinished_tasks)
         while not save_finished_events[num_local - 1].wait(timeout=10):
             send_thread.raise_if_failed()
             logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
