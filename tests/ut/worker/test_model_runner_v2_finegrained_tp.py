@@ -434,3 +434,37 @@ def test_sample_uses_step_capacity():
     assert compute_input.shape == (12, 4)
     torch.testing.assert_close(compute_input[:3], hidden_states[indices])
     assert torch.all(compute_input[3:] == 0)
+
+
+def test_dspark_run_model_publishes_draft_capacity():
+    """``AscendDSparkSpeculator._run_model`` must publish the draft-head
+    capacity derived from the DP-synced query rows: query rows are
+    ``max_reqs_across_dp * num_query_per_req``, and the draft head emits
+    ``num_speculative_steps`` rows per request."""
+    from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
+
+    spec = object.__new__(AscendDSparkSpeculator)
+    spec.num_query_per_req = 4  # sample_from_anchor=False layout
+    spec.num_speculative_steps = 4
+    spec.model = MagicMock()
+    spec.model.lm_head = MagicMock()
+
+    def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, *a, **k):
+        return ("hidden", "sample_hidden")
+
+    with patch.object(AscendDSparkSpeculator.__bases__[0], "_run_model", side_effect=fake_run_model):
+        # query rows = 3 reqs * 4 = 12; draft capacity = 3 * 4 = 12
+        spec._run_model(12, None, None, np.array([12, 8], dtype=np.int32))
+    assert spec.model.lm_head._lmhead_tp_dynamic_capacity == 12
+
+    # No sync value -> no override (static lmhead_tp_capacity stays authoritative).
+    with patch.object(AscendDSparkSpeculator.__bases__[0], "_run_model", side_effect=fake_run_model):
+        spec._run_model(4, None, None, None)
+    assert spec.model.lm_head._lmhead_tp_dynamic_capacity == 12  # unchanged
+
+    # Non-divisible query rows fail fast.
+    with (
+        patch.object(AscendDSparkSpeculator.__bases__[0], "_run_model", side_effect=fake_run_model),
+        pytest.raises(ValueError, match="num_query_per_req"),
+    ):
+        spec._run_model(5, None, None, np.array([5], dtype=np.int32))

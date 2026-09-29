@@ -316,14 +316,14 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the draft backbone and publish the draft LM-head capacity.
 
-        The draft's ``num_tokens_across_dp`` is synchronized with one token per
-        request (see upstream ``_build_uniform_batch_dp_sync``), so its max is
-        the group-agreed request count. The draft LM-head emits
-        ``num_speculative_steps`` rows per request, so every rank (including
-        idle ones) must feed the draft-head collectives
-        ``max_reqs_across_dp * num_speculative_steps`` rows. Publish that value
-        on the head before ``_sample_sequential`` computes draft logits in this
-        same step.
+        ``num_tokens_across_dp`` is the group-agreed per-rank query token count
+        (``max_reqs_across_dp * num_query_per_req``, see upstream
+        ``_build_uniform_batch_dp_sync``). The draft LM-head emits
+        ``num_speculative_steps`` rows per request, so the row capacity every
+        rank must feed is ``(max query rows // num_query_per_req) *
+        num_speculative_steps``. Publish it on the head before
+        ``_sample_sequential`` computes draft logits in this same step; without
+        a sync value the static ``lmhead_tp_capacity`` stays authoritative.
         """
         hidden_states = super()._run_model(
             num_tokens,
@@ -334,7 +334,14 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             mm_inputs=mm_inputs,
         )
         if num_tokens_across_dp is not None and num_tokens_across_dp.numel() > 0:
-            max_reqs_across_dp = int(num_tokens_across_dp.max().item())
+            max_query_rows = int(num_tokens_across_dp.max().item())
+            if max_query_rows % self.num_query_per_req != 0:
+                raise ValueError(
+                    f"DSpark lmhead TP: synced draft query rows ({max_query_rows}) "
+                    f"are not divisible by num_query_per_req ({self.num_query_per_req}); "
+                    "the DP-synced capacity would desync the draft-head collectives."
+                )
+            max_reqs_across_dp = max_query_rows // self.num_query_per_req
             self.model.lm_head._lmhead_tp_dynamic_capacity = (
                 max_reqs_across_dp * self.num_speculative_steps
             )
