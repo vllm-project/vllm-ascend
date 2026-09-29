@@ -415,6 +415,25 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
 
+    @torch.inference_mode()
+    def _run_model(
+        self,
+        num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    ) -> torch.Tensor:
+        hidden_states = super()._run_model(
+            num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
+        )
+        # lmhead TP: publish the per-step draft-head capacity before this
+        # step's head call so the DSpark LM-head collectives use the
+        # group-agreed dynamic row bound. The PCP replica broadcast moved to
+        # the propose tail (upstream PCPManager.sync_drafts).
+        self._lmhead_tp_publish_draft_capacity(num_tokens_across_dp)
+        return hidden_states
+
     def propose(
         self,
         input_batch: InputBatch,
@@ -503,3 +522,31 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 pcp_group.broadcast(logits, src=0)
                 self.draft_logits[input_batch.idx_mapping] = logits
         return draft_tokens
+
+    def _lmhead_tp_publish_draft_capacity(self, num_tokens_across_dp: torch.Tensor | None) -> None:
+        """Publish the per-step DSpark draft LM-head capacity.
+
+        ``num_tokens_across_dp`` is the group-agreed per-rank query token count
+        (``max_reqs_across_dp * num_query_per_req``, see upstream
+        ``_build_uniform_batch_dp_sync``). The draft LM-head emits
+        ``num_speculative_steps`` rows per request, so the row capacity every
+        rank must feed is ``(max query rows // num_query_per_req) *
+        num_speculative_steps``. Publish it on the head before
+        ``_sample_sequential`` computes draft logits in this same step; without
+        a sync value the static ``lmhead_tp_capacity`` stays authoritative.
+        """
+        if num_tokens_across_dp is not None and num_tokens_across_dp.numel() > 0:
+            max_query_rows = int(num_tokens_across_dp.max().item())
+            if max_query_rows % self.num_query_per_req != 0:
+                raise ValueError(
+                    f"DSpark lmhead TP: synced draft query rows ({max_query_rows}) "
+                    f"are not divisible by num_query_per_req ({self.num_query_per_req}); "
+                    "the DP-synced capacity would desync the draft-head collectives."
+                )
+            max_reqs_across_dp = max_query_rows // self.num_query_per_req
+            self.model.lm_head._lmhead_tp_dynamic_capacity = max_reqs_across_dp * self.num_speculative_steps
+        elif hasattr(self.model.lm_head, "_lmhead_tp_dynamic_capacity"):
+            # No DP sync this round: drop the previous round's dynamic value so
+            # the static lmhead_tp_capacity stays authoritative and a stale
+            # capacity cannot be reused.
+            del self.model.lm_head._lmhead_tp_dynamic_capacity
