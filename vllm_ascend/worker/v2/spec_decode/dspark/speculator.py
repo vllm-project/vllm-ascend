@@ -341,9 +341,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                     "the DP-synced capacity would desync the draft-head collectives."
                 )
             max_reqs_across_dp = max_query_rows // self.num_query_per_req
-            self.model.lm_head._lmhead_tp_dynamic_capacity = (
-                max_reqs_across_dp * self.num_speculative_steps
-            )
+            self.model.lm_head._lmhead_tp_dynamic_capacity = max_reqs_across_dp * self.num_speculative_steps
             logger.info(
                 "[lmhead_tp] draft: query_rows=%s qpr=%s -> draft_capacity=%s",
                 max_query_rows,
