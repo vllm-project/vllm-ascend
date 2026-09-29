@@ -112,8 +112,10 @@ class VllmEplbAdaptor:
         self.init_buffer_tensor(num_buffer_tensor)
 
         self.log2phy_map_per_layer = dict()
+        self.log2phy_rank_independent_map_per_layer = dict()
         for local_idx, layer in enumerate(self.moe_layers):
             self.log2phy_map_per_layer[local_idx] = layer.get_log2phy_map()
+            self.log2phy_rank_independent_map_per_layer[local_idx] = layer.get_log2phy_rank_independent_map()
 
     def init_buffer_tensor(self, num_buffer_tensor):
         buffer_tensor_shapes: dict[Any, list[torch.Size]] = dict()
@@ -224,12 +226,15 @@ class VllmEplbAdaptor:
             expert_tensor.copy_(buffer_tensor)
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
-    def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
+    def do_update_log2phy_map(self, layer_id, updated_log2phy_map, updated_log2phy_rank_independent_map=None):
         log2phy = self.log2phy_map_per_layer[layer_id]
         if log2phy is not None:
             if updated_log2phy_map.device.type == "cpu":
                 updated_log2phy_map = updated_log2phy_map.to(dtype=log2phy.dtype).pin_memory()
             log2phy.copy_(updated_log2phy_map, non_blocking=True)
+        rank_independent = self.log2phy_rank_independent_map_per_layer.get(layer_id)
+        if rank_independent is not None and updated_log2phy_rank_independent_map is not None:
+            rank_independent.copy_(updated_log2phy_rank_independent_map)
 
     def get_global_expert_map(self):
         all_layer_global_expert_map = []
