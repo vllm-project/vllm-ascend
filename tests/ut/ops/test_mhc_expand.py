@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm_ascend.models.glm5next.ops import mhc_ops as glm_mhc
 from vllm_ascend.ops import mhc
 
 
@@ -54,7 +55,7 @@ def test_npu_routing(monkeypatch, supported, enabled):
         assert result is x.unsqueeze.return_value.expand.return_value.contiguous.return_value
 
 
-@pytest.mark.parametrize("reason", ["dtype", "noncontiguous", "unaligned", "gradient", "empty", "trivial"])
+@pytest.mark.parametrize("reason", ["dtype", "noncontiguous", "unaligned", "gradient", "empty", "trivial", "mult"])
 def test_npu_fallback_preconditions(monkeypatch, reason):
     x = MagicMock()
     x.device = SimpleNamespace(type="npu")
@@ -64,7 +65,7 @@ def test_npu_fallback_preconditions(monkeypatch, reason):
     x.requires_grad = reason == "gradient"
     x.numel.return_value = 0 if reason == "empty" else 64
     x.is_contiguous.return_value = reason != "noncontiguous"
-    mult = 1 if reason == "trivial" else 4
+    mult = {"trivial": 1, "mult": 8}.get(reason, 4)
     profile = MagicMock(side_effect=AssertionError("Unsupported inputs must use the native path"))
     monkeypatch.setattr(mhc, "get_current_hardware_profile", profile)
     kernel = MagicMock()
@@ -73,3 +74,18 @@ def test_npu_fallback_preconditions(monkeypatch, reason):
     kernel.assert_not_called()
     profile.assert_not_called()
     assert result is x.unsqueeze.return_value.expand.return_value.contiguous.return_value
+
+
+def test_glm_expand_delegates_to_helper(monkeypatch):
+    helper = MagicMock()
+    monkeypatch.setattr(glm_mhc, "mhc_expand", helper)
+    x = torch.randn(3, 64)
+    assert glm_mhc.hc_expand(x, 4) is helper.return_value
+    helper.assert_called_once_with(x, 4)
+
+
+def test_glm_expand_contract_preserved():
+    x = torch.randn(3, 64)
+    expanded = glm_mhc.hc_expand(x, 4)
+    torch.testing.assert_close(expanded, x.unsqueeze(1).repeat(1, 4, 1), rtol=0, atol=0)
+    torch.testing.assert_close(glm_mhc.hc_contract(expanded, 4), x, rtol=0, atol=0)

@@ -6,6 +6,8 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.glm5next.ops.mhc_ops import hc_expand
+from vllm_ascend.ops.mhc import mhc_expand
 from vllm_ascend.utils import enable_custom_op
 
 
@@ -94,3 +96,61 @@ def test_mhc_expand_compile_dynamic():
     for tokens in (3, 11):
         x = torch.randn(tokens, 17, device="npu", dtype=torch.bfloat16)
         assert_bits_equal(compiled(x, 4), x.unsqueeze(1).repeat(1, 4, 1))
+
+
+@pytest.mark.parametrize("expand", [mhc_expand, hc_expand], ids=["helper", "glm"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape", [(1, 4096), (16, 7168), (128, 4096), (3, 8193), (3, 17), (0, 17), (3, 0)])
+def test_mhc_expand_dispatch(expand, dtype, shape, monkeypatch):
+    x = torch.randn(shape, dtype=dtype, device="npu")
+    original = torch.ops._C_ascend.npu_mhc_expand
+    calls = []
+
+    def traced(x, mult):
+        calls.append((tuple(x.shape), mult))
+        return original(x, mult)
+
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_expand", traced)
+    assert_bits_equal(expand(x, 4), x.unsqueeze(1).repeat(1, 4, 1))
+    expected_calls = [(shape, 4)] if x.numel() > 0 and shape[1] % 16 == 0 else []
+    assert calls == expected_calls
+
+
+@pytest.mark.parametrize("expand", [mhc_expand, hc_expand], ids=["helper", "glm"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("mult", [2, 8])
+def test_mhc_expand_other_multipliers_use_native(expand, dtype, mult, monkeypatch):
+    def unexpected_custom(*args):
+        raise AssertionError("Only mult=4 has a measured custom path")
+
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_expand", unexpected_custom)
+    x = torch.randn(3, 64, dtype=dtype, device="npu")
+    assert_bits_equal(expand(x, mult), x.unsqueeze(1).repeat(1, mult, 1))
+
+
+@pytest.mark.parametrize("expand", [mhc_expand, hc_expand], ids=["helper", "glm"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_mhc_expand_gradient_fallback(expand, dtype, monkeypatch):
+    def unexpected_custom(*args):
+        raise AssertionError("Gradient-requiring input must use native expansion")
+
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_expand", unexpected_custom)
+    x = torch.randn(3, 64, dtype=dtype, device="npu", requires_grad=True)
+    expand(x, 4).sum().backward()
+    assert_bits_equal(x.grad, torch.full((3, 64), 4, dtype=dtype))
+
+
+@pytest.mark.parametrize("expand", [mhc_expand, hc_expand], ids=["helper", "glm"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_mhc_expand_helper_graph(expand, dtype):
+    x = torch.randn(16, 4096, dtype=dtype, device="npu")
+    for _ in range(3):
+        expand(x, 4)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True):
+        y = expand(x, 4)
+    for value in (2.0, -1.0):
+        x.fill_(value)
+        graph.replay()
+        assert_bits_equal(y, x.unsqueeze(1).repeat(1, 4, 1))
