@@ -17,7 +17,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import ensure_zmq
 
 HEARTBEAT_MSG = b"heartbeat_v1"
 HEARTBEAT_VERSION = 1
+DEFAULT_KV_LEASE_DURATION = 480
 LEASE_IO_TIMEOUT_MS = 1000
+HEARTBEAT_MAX_ATTEMPTS = 3
 
 
 def validate_positive_int(name: str, value: Any) -> int:
@@ -35,9 +37,9 @@ def validate_lease_duration(value: Any) -> float:
     return duration
 
 
-def renew_heartbeat_leases(deadlines: dict[str, float], request_ids: Any, duration: float | None) -> bool:
+def renew_heartbeat_leases(deadlines: dict[str, float], request_ids: Any, duration: float) -> bool:
     """Renew live leases under the caller's producer-state lock."""
-    if duration is None or not isinstance(request_ids, (tuple, list)):
+    if not isinstance(request_ids, (tuple, list)):
         return False
     if not all(isinstance(req_id, str) for req_id in request_ids):
         return False
@@ -52,14 +54,22 @@ def renew_heartbeat_leases(deadlines: dict[str, float], request_ids: Any, durati
 class MooncakeHeartbeatThread(threading.Thread):
     """Renew active requests independently of DONE; never hold the lock during I/O."""
 
-    def __init__(self, ready_event: threading.Event, *, io_timeout_ms: int = LEASE_IO_TIMEOUT_MS) -> None:
+    def __init__(
+        self,
+        ready_event: threading.Event,
+        *,
+        io_timeout_ms: int = LEASE_IO_TIMEOUT_MS,
+        max_attempts: int = HEARTBEAT_MAX_ATTEMPTS,
+    ) -> None:
         super().__init__(daemon=True, name="MooncakeHeartbeatThread")
         self.ready_event = ready_event
         self.io_timeout_ms = io_timeout_ms
+        self.max_attempts = max_attempts
         self._lock = threading.Lock()
         self._wakeup = threading.Event()
         self.requests: dict[str, tuple[str, str, int, str, float]] = {}
         self.last_sent: dict[str, float] = {}
+        self._failures: dict[str, int] = {}
 
     def start_request(self, request_id: str, params: dict[str, Any] | None) -> None:
         if not params or not params.get("do_remote_prefill") or not params.get("remote_block_ids"):
@@ -82,11 +92,13 @@ class MooncakeHeartbeatThread(threading.Thread):
                 if other_engine == engine and (host, port, duration) != (other_host, other_port, other_duration):
                     raise ValueError("Inconsistent Mooncake KV lease endpoint or duration for one engine")
             self.requests[request_id] = (engine, host, port, remote_id, duration)
+            self._failures.pop(request_id, None)
             self._wakeup.set()
 
     def stop_request(self, request_id: str) -> None:
         with self._lock:
             remote = self.requests.pop(request_id, None)
+            self._failures.pop(request_id, None)
             if remote is not None and not any(r[0] == remote[0] for r in self.requests.values()):
                 self.last_sent.pop(remote[0], None)
             self._wakeup.set()
@@ -121,16 +133,44 @@ class MooncakeHeartbeatThread(threading.Thread):
             # START/STOP between unlock and wait cannot lose their wakeup.
             self._wakeup.clear()
             snapshot, timeout = self._next_heartbeat()
+            attempted = {
+                req_id: state
+                for req_id, state in self.requests.items()
+                if snapshot is not None and state[0] == snapshot[0]
+            }
         if snapshot is None:
             self._wakeup.wait(timeout)
             return
         engine, host, port, request_ids = snapshot
+        succeeded = False
         try:
             self._send_control(host, port, (HEARTBEAT_MSG, engine, request_ids))
+            succeeded = True
         except Exception:
-            # Discard this snapshot; the next interval uses current membership.
-            # Heartbeat errors do not change the request's transfer result.
             logger.exception("Failed Mooncake heartbeat for engine %s", engine)
+        with self._lock:
+            for req_id, state in attempted.items():
+                # Ignore requests removed or registered again during network I/O.
+                if self.requests.get(req_id) is not state:
+                    continue
+                if succeeded:
+                    self._failures.pop(req_id, None)
+                    continue
+                failures = self._failures.get(req_id, 0) + 1
+                if failures < self.max_attempts:
+                    self._failures[req_id] = failures
+                    continue
+                del self.requests[req_id]
+                self._failures.pop(req_id, None)
+                # Stop renewal only; do not report transfer failure or send DONE.
+                logger.warning(
+                    "Stopping Mooncake heartbeat for request %s (engine %s) after %d consecutive failures",
+                    req_id,
+                    engine,
+                    failures,
+                )
+            if not any(state[0] == engine for state in self.requests.values()):
+                self.last_sent.pop(engine, None)
 
     def _send_control(self, host: str, port: int, message: tuple[Any, ...]) -> None:
         path = make_zmq_path("tcp", host, port)

@@ -80,7 +80,7 @@ def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     scheduler._sending_thread = None
     scheduler._recving_thread = None
     scheduler._heartbeat_thread = None
-    scheduler._kv_lease_duration = None
+    scheduler._kv_lease_duration = heartbeat.DEFAULT_KV_LEASE_DURATION
     return scheduler
 
 
@@ -275,11 +275,7 @@ def test_sending_thread_handles_early_and_normal_completion_once() -> None:
 
 def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPatch) -> None:
     thread = make_sending_thread()
-    monkeypatch.setattr(
-        pull_scheduler.envs,
-        "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT",
-        5,
-    )
+    thread.kv_lease_duration = 6
     monkeypatch.setattr(
         pull_scheduler.time,
         "monotonic",
@@ -1008,8 +1004,16 @@ def test_request_tracking_copies_params_before_scheduler_mutation():
 @pytest.mark.parametrize(
     "extra, expected",
     [
-        ({}, (1000, 3, 1000)),
-        ({"control_io_timeout_ms": 2500, "done_max_attempts": 5, "lease_io_timeout_ms": 1800}, (2500, 5, 1800)),
+        ({}, (1000, 3, 1000, 3)),
+        (
+            {
+                "control_io_timeout_ms": 2500,
+                "done_max_attempts": 5,
+                "lease_io_timeout_ms": 1800,
+                "heartbeat_max_attempts": 5,
+            },
+            (2500, 5, 1800, 5),
+        ),
     ],
 )
 def test_scheduler_passes_extra_config_to_threads(monkeypatch, extra, expected):
@@ -1028,10 +1032,19 @@ def test_scheduler_passes_extra_config_to_threads(monkeypatch, extra, expected):
     monkeypatch.setattr(pull_scheduler, "MooncakeHeartbeatThread", heartbeat_cls)
     MooncakePullConnectorScheduler(MagicMock(), "d", MagicMock())
     assert done_cls.call_args.kwargs == {"io_timeout_ms": expected[0], "max_attempts": expected[1]}
-    assert heartbeat_cls.call_args.kwargs == {"io_timeout_ms": expected[2]}
+    assert heartbeat_cls.call_args.kwargs == {"io_timeout_ms": expected[2], "max_attempts": expected[3]}
 
 
-@pytest.mark.parametrize("field", ["control_io_timeout_ms", "done_max_attempts", "lease_io_timeout_ms"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "control_io_timeout_ms",
+        "done_max_attempts",
+        "lease_io_timeout_ms",
+        "heartbeat_max_attempts",
+        "kv_lease_duration",
+    ],
+)
 @pytest.mark.parametrize("value", [0, -1, True, "1000", 1.5, None])
 def test_invalid_control_config_rejected_before_threads_start(monkeypatch, field, value):
     extra = {field: value}
@@ -1046,3 +1059,98 @@ def test_invalid_control_config_rejected_before_threads_start(monkeypatch, field
         MooncakePullConnectorScheduler(MagicMock(), "d", MagicMock())
     done_cls.assert_not_called()
     heartbeat_cls.assert_not_called()
+
+
+@pytest.mark.parametrize("extra, expected", [({}, 480.0), ({"kv_lease_duration": 60}, 60.0)])
+def test_default_lease_and_explicit_override(monkeypatch, extra, expected):
+    config = SimpleNamespace(is_kv_consumer=False, get_from_extra_config=lambda key, default: extra.get(key, default))
+    monkeypatch.setattr(
+        MooncakeBaseConnectorScheduler, "__init__", lambda self, *args: setattr(self, "kv_transfer_config", config)
+    )
+    scheduler = MooncakePullConnectorScheduler(MagicMock(), "p", MagicMock())
+    assert scheduler._kv_lease_duration == expected
+
+
+def test_default_lease_heartbeat_interval_and_renewal(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(heartbeat.time, "monotonic", lambda: now[0])
+    thread = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    thread._send_control = MagicMock(side_effect=RuntimeError("unreachable"))
+    start_heartbeat(thread, kv_lease_duration=heartbeat.DEFAULT_KV_LEASE_DURATION)
+    heartbeat_tick(thread)
+    assert thread._next_heartbeat() == (None, 80.0)
+    for timestamp in (80.0, 160.0, 240.0, 480.0):
+        now[0] = timestamp
+        heartbeat_tick(thread)
+    assert thread._send_control.call_count == 3
+    assert not thread.requests
+    assert not thread._failures
+    assert not thread.last_sent
+    deadlines = {"p": 500.0}
+    assert heartbeat.renew_heartbeat_leases(deadlines, ["p"], heartbeat.DEFAULT_KV_LEASE_DURATION)
+    assert deadlines["p"] == 800.0
+
+
+def test_heartbeat_success_resets_consecutive_failures(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(heartbeat.time, "monotonic", lambda: now[0])
+    thread = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    thread._send_control = MagicMock(
+        side_effect=[RuntimeError(), RuntimeError(), None, RuntimeError(), RuntimeError(), RuntimeError()]
+    )
+    start_heartbeat(thread)
+    for timestamp in (0.0, 5.0, 10.0, 15.0, 20.0):
+        now[0] = timestamp
+        heartbeat_tick(thread)
+        assert "d" in thread.requests
+        if timestamp == 10.0:
+            assert not thread._failures
+    now[0] = 25.0
+    heartbeat_tick(thread)
+    assert not thread.requests
+    assert not thread._failures
+    assert not thread.last_sent
+
+
+@pytest.mark.parametrize("replace_request", [False, True])
+def test_heartbeat_failure_does_not_charge_new_membership(monkeypatch, replace_request):
+    now = [0.0]
+    monkeypatch.setattr(heartbeat.time, "monotonic", lambda: now[0])
+    thread = heartbeat.MooncakeHeartbeatThread(threading.Event())
+    start_heartbeat(thread)
+    start_heartbeat(thread, local_id="other", remote_engine_id="other-engine")
+    thread._send_control = MagicMock(side_effect=RuntimeError())
+    heartbeat_tick(thread)
+    # Keep the other engine out of this test's next heartbeat round.
+    thread.last_sent["other-engine"] = 5.0
+
+    def fail_after_registering(*args):
+        if replace_request:
+            thread.stop_request("d")
+        start_heartbeat(thread, local_id="d" if replace_request else "new")
+        raise RuntimeError("unreachable")
+
+    thread._send_control.side_effect = fail_after_registering
+    now[0] = 5.0
+    heartbeat_tick(thread)
+    assert thread._failures == ({} if replace_request else {"d": 2})
+    assert "other" in thread.requests
+    assert ("d" if replace_request else "new") in thread.requests
+
+
+@pytest.mark.parametrize("attempts", [1, 3, 5])
+def test_configured_heartbeat_attempt_limit(monkeypatch, attempts):
+    now = [0.0]
+    monkeypatch.setattr(heartbeat.time, "monotonic", lambda: now[0])
+    thread = heartbeat.MooncakeHeartbeatThread(threading.Event(), max_attempts=attempts)
+    thread._send_control = MagicMock(side_effect=RuntimeError("unreachable"))
+    start_heartbeat(thread)
+    for attempt in range(attempts):
+        now[0] = attempt * 5.0
+        heartbeat_tick(thread)
+        assert ("d" in thread.requests) == (attempt + 1 < attempts)
+    now[0] += 5.0
+    heartbeat_tick(thread)
+    assert thread._send_control.call_count == attempts
+    assert not thread._failures
+    assert not thread.last_sent

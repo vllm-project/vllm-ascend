@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 import zmq
-from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
@@ -27,6 +26,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.heartbeat import (
+    DEFAULT_KV_LEASE_DURATION,
+    HEARTBEAT_MAX_ATTEMPTS,
     HEARTBEAT_MSG,
     HEARTBEAT_VERSION,
     LEASE_IO_TIMEOUT_MS,
@@ -78,7 +79,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         dcp_size: int,
         use_kv_pp: bool,
         ready_event: threading.Event,
-        kv_lease_duration: float | None = None,
+        kv_lease_duration: float = DEFAULT_KV_LEASE_DURATION,
     ) -> None:
         super().__init__(daemon=True, name="MooncakeSchedulerSendingThread")
         encoder = msgspec.msgpack.Encoder()
@@ -328,8 +329,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         with self.state_lock:
             if request_id in self.finished_request_ids:
                 return
-            duration = self.kv_lease_duration or envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
-            self.delayed_free_requests[request_id] = delay_start_time + duration
+            self.delayed_free_requests[request_id] = delay_start_time + self.kv_lease_duration
             if request_id in self.early_finished_requests:
                 self.early_finished_requests.remove(request_id)
                 self._mark_finished_locked(request_id)
@@ -416,7 +416,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             logger.error(
                 "Force freed expired Mooncake request %s (lease duration %s seconds)",
                 request_id,
-                self.kv_lease_duration or envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                self.kv_lease_duration,
             )
 
 
@@ -519,8 +519,8 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self._sending_thread: MooncakeSchedulerSendingThread | None = None
         self._recving_thread: MooncakeSchedulerRecvingThread | None = None
         self._heartbeat_thread: MooncakeHeartbeatThread | None = None
-        duration = self.kv_transfer_config.get_from_extra_config("kv_lease_duration", None)
-        self._kv_lease_duration = validate_lease_duration(duration) if duration is not None else None
+        duration = self.kv_transfer_config.get_from_extra_config("kv_lease_duration", DEFAULT_KV_LEASE_DURATION)
+        self._kv_lease_duration = validate_lease_duration(duration)
 
         if self.kv_transfer_config.is_kv_consumer:
             get_extra = self.kv_transfer_config.get_from_extra_config
@@ -534,6 +534,9 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             lease_timeout = validate_positive_int(
                 "lease_io_timeout_ms", get_extra("lease_io_timeout_ms", LEASE_IO_TIMEOUT_MS)
             )
+            heartbeat_attempts = validate_positive_int(
+                "heartbeat_max_attempts", get_extra("heartbeat_max_attempts", HEARTBEAT_MAX_ATTEMPTS)
+            )
             recving_ready_event = threading.Event()
             self._recving_thread = MooncakeSchedulerRecvingThread(
                 recving_ready_event, io_timeout_ms=control_timeout, max_attempts=done_attempts
@@ -541,7 +544,9 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             self._recving_thread.start()
             recving_ready_event.wait()
             heartbeat_ready_event = threading.Event()
-            self._heartbeat_thread = MooncakeHeartbeatThread(heartbeat_ready_event, io_timeout_ms=lease_timeout)
+            self._heartbeat_thread = MooncakeHeartbeatThread(
+                heartbeat_ready_event, io_timeout_ms=lease_timeout, max_attempts=heartbeat_attempts
+            )
             self._heartbeat_thread.start()
             heartbeat_ready_event.wait()
 
@@ -727,7 +732,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             "remote_port": self.side_channel_port,
             "last_token_id": request.output_token_ids[-1],
         }
-        if delay_free_blocks and self._kv_lease_duration is not None:
+        if delay_free_blocks:
             transfer_params.update(kv_lease_version=HEARTBEAT_VERSION, kv_lease_duration=self._kv_lease_duration)
         return delay_free_blocks, transfer_params
 

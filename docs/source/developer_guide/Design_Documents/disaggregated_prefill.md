@@ -106,16 +106,23 @@ Under non-symmetric PD scenarios, validate the P-to-D tp ratio against expected 
 
 ## Mooncake Connector V2 KV leases
 
-Enable renewable producer KV retention with `kv_connector_extra_config`:
+Renewable producer KV retention is enabled by default with a 480-second lease.
+Override it on P through `kv_connector_extra_config`:
 
 ```json
-{"kv_lease_duration": 30}
+{"kv_lease_duration": 480}
 ```
 
-The value must be a finite number of at least 6 seconds. Omitting it preserves
-`VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` (480 seconds by default). Upgrade P and D
-before enabling leases. The proxy must preserve `kv_lease_version` and
+The value must be a finite number of at least 6 seconds. Omission selects 480
+seconds; `null` is rejected. V2 always uses this lease for retention and no
+longer reads `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`. Upgrade P and D
+together when using renewal. The proxy must preserve `kv_lease_version` and
 `kv_lease_duration` along with the other transfer parameters. D uses P's duration.
+
+With the default lease, each P engine receives a heartbeat every 80 seconds
+after the initial heartbeat. Each renewal extends its deadline to at least
+320 seconds after receipt, without shortening the existing deadline. Socket
+I/O timeouts remain 1000 ms by default; they are separate from the lease.
 
 D uses two independent scheduler child threads:
 
@@ -130,7 +137,13 @@ D uses two independent scheduler child threads:
 
 The threads own separate sockets. Heartbeats use one send/receive attempt with
 `lease_io_timeout_ms` timeouts (default 1000 ms). A failed snapshot is discarded; the next interval uses the
-current active requests. An inaccessible P can still delay other P heartbeats.
+current active requests. After `heartbeat_max_attempts` consecutive failed
+heartbeat rounds (default 3: the initial attempt plus two retries at the regular
+interval), D stops renewing the
+affected requests. A successful ACK resets their failure counts. Requests added
+during an in-flight heartbeat do not inherit its failures. This only stops
+renewal; it does not fail D requests or send DONE. P eventually reclaims KV when
+the lease expires. An inaccessible P can still delay other P heartbeats.
 
 P uses monotonic deadlines and renews only existing, unexpired requests to
 `max(old_deadline, now + duration * 2 / 3)`. Expired, missing and completed
@@ -153,13 +166,14 @@ request; lease-expiry failure handling remains follow-up work.
 
 
 D accepts these optional `kv_connector_extra_config` settings; omitted values
-preserve the defaults. All three values must be positive integers (not booleans).
+preserve the defaults. All four values must be positive integers (not booleans).
 
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `control_io_timeout_ms` | 1000 | Each DONE socket send and receive timeout, in milliseconds |
 | `done_max_attempts` | 3 | Maximum attempts per DONE send/receive helper, including the first attempt |
 | `lease_io_timeout_ms` | 1000 | Each heartbeat socket send and receive timeout, in milliseconds |
+| `heartbeat_max_attempts` | 3 | Consecutive failed heartbeat rounds before stopping renewal, including the first attempt; a successful ACK resets the count |
 
 For example, configure the consumer with:
 
@@ -170,7 +184,8 @@ For example, configure the consumer with:
   "kv_connector_extra_config": {
     "control_io_timeout_ms": 2000,
     "done_max_attempts": 3,
-    "lease_io_timeout_ms": 1000
+    "lease_io_timeout_ms": 1000,
+    "heartbeat_max_attempts": 3
   }
 }
 ```
