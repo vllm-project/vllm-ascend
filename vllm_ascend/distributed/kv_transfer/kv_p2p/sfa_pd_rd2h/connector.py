@@ -147,6 +147,15 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
     # ------------------------------------------------------------------
     # Worker side
     # ------------------------------------------------------------------
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        if self.is_producer:
+            assert self.connector_worker is not None
+            # Producer layer hooks need the reset dispatch state and TP-mapped
+            # destination before forward. vLLM may call start_load_kv only
+            # after target forward, when resetting would also rewind MTP state.
+            self.connector_worker.bind_connector_metadata(connector_metadata)
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
@@ -163,7 +172,10 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        self.connector_worker.start_load_kv(self._get_connector_metadata())
+        # Keep consumer loads at the runner's ordered load hook. Producer
+        # preparation already ran at bind time, including its port adjustment.
+        if not self.is_producer:
+            self.connector_worker.start_load_kv(self._get_connector_metadata())
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Per-layer gate called before each layer's attention computation.
@@ -215,6 +227,13 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         # completion is tracked by READ_DONE/storage_send_done_events.
         if self.is_consumer and self.connector_worker is not None:
             self.connector_worker.wait_for_save()
+
+    def get_copy_sfa_slot_bindings(self) -> dict[str, int]:
+        """Return the early-bound fused_copy_sfa top-k rows for in-flight PD requests."""
+        worker = self.connector_worker
+        if worker is None:
+            return {}
+        return dict(getattr(worker, "copy_sfa_slots_by_req", {}))
 
     # Phase 3: real per-req CPU-block count for the solution-1 threshold.
     def get_num_cpu_blocks(self, req_ids: list[str]) -> dict[str, int] | None:

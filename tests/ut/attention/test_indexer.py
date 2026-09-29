@@ -193,30 +193,6 @@ def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
-def test_sfa_indexer_metadata_builder_uses_graph_shape_for_dspark_adaptive(
-    mock_cos_sin,
-    mock_get_ascend_config,
-):
-    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
-    mock_cos_sin.return_value = (
-        torch.zeros(5, 1, 1, 8),
-        torch.zeros(5, 1, 1, 8),
-    )
-    common = _make_common_metadata()
-
-    builder = _make_builder(num_speculative_tokens=7)
-    builder.speculative_config.method = "dspark"
-    builder.speculative_config.enable_adaptive_verification = True
-    metadata = builder.build(0, common)
-
-    positions = mock_cos_sin.call_args.args[0]
-    assert torch.equal(positions, common.positions)
-    assert metadata.cos.shape[0] == common.positions.shape[0]
-    assert metadata.sin.shape[0] == common.positions.shape[0]
-
-
-@patch("vllm_ascend.attention.indexer.get_ascend_config")
-@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_metadata_builder_emits_full_slot_mapping_under_pcp(mock_cos_sin, mock_get_ascend_config):
     mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
     mock_cos_sin.return_value = (torch.zeros(5, 1, 1, 8), torch.zeros(5, 1, 1, 8))

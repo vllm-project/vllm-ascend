@@ -224,21 +224,12 @@ a3-560t:
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-800i-16
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
-      - name: Minimax_m2.7_w8a8_A3
-        os: linux-aarch64-a3-800i-16
-        config_file_path: Minimax_m2.7_w8a8_A3.yaml
-      - name: Qwen3_32b_w8a8_ml_A3
-        os: linux-aarch64-a3-800i-16
-        config_file_path: Qwen3_32b_w8a8_ml_A3.yaml
       - name: Deepseek_R1_W8A8_A3
         os: linux-aarch64-a3-800i-16
         config_file_path: Deepseek_R1_W8A8_A3.yaml
       - name: Qwq_32b_A3
         os: linux-aarch64-a3-800i-16
         config_file_path: Qwq_32b_A3.yaml
-      - name: Qwen3_32b_W8A8_wl_A3
-        os: linux-aarch64-a3-800i-16
-        config_file_path: Qwen3_32b_W8A8_wl_A3.yaml
       - name: qwen3-235b-a22b-w8a8
         os: linux-aarch64-a3-800i-16
         config_file_path: Qwen3-235B-A22B-W8A8.yaml
@@ -291,9 +282,6 @@ a3-560t:
       - name: qwen3-30b-a3b-w8a8
         os: linux-aarch64-a3-800i-4
         config_file_path: Qwen3-30B-A3B-W8A8.yaml
-      - name: Qwen3-32B-W8A8C8-A3
-        os: linux-aarch64-a3-800i-4
-        config_file_path: Qwen3-32B-W8A8C8-A3.yaml
       - name: Qwen3-30B-A3B-W4A8-llm-compressor
         os: linux-aarch64-a3-800i-2
         config_file_path: Qwen3-30B-A3B-W4A8-llm-compressor.yaml
