@@ -33,6 +33,91 @@ class PreprocessType(enum.Enum):
     MLAPO = "mlapo"
 
 
+class HostSeqLensRequirement(enum.IntEnum):
+    """Host sequence-length data contract for metadata consumers.
+
+    See https://github.com/vllm-project/vllm-ascend/issues/17479 for the
+    design. Declared by the metadata consumer (normally the attention
+    metadata builder) via a ``HOST_SEQ_LENS_REQUIREMENT`` class attribute.
+    The model runner aggregates the strongest requirement across the
+    instantiated target and draft consumers:
+
+    * NONE: the consumer reads device-exact sequence lengths only and must
+      receive ``None`` for exact host lengths.
+    * UPPER_BOUND: the consumer only needs a conservative host bound for
+      shape/capacity decisions (e.g. workspace sizing).
+    * EXACT: the consumer requires rejection-corrected exact host sequence
+      lengths (e.g. legacy FIA builds ``actual_seq_lengths_kv`` host lists).
+
+    An undeclared consumer is conservatively treated as ``EXACT`` during
+    migration.
+    """
+
+    NONE = 0
+    UPPER_BOUND = 1
+    EXACT = 2
+
+
+@dataclass(frozen=True)
+class HostSeqLensRequirements:
+    """Aggregated host seq-lens requirement of one execution.
+
+    Attributes:
+        requirement: The strongest requirement across all consumers.
+        consumers: Builder names grouped by the requirement they declared.
+        undeclared: Builder names that fell back to the conservative EXACT.
+    """
+
+    requirement: HostSeqLensRequirement
+    consumers: dict[HostSeqLensRequirement, list[str]]
+    undeclared: list[str]
+
+
+def resolve_host_seq_lens_requirements(
+    attn_groups: list[list[Any]],
+    speculator: Any | None = None,
+) -> HostSeqLensRequirements:
+    """Aggregate host seq-lens requirements over target and draft consumers.
+
+    The runner must never derive this from model names or concrete backend
+    class tuples; it discovers the instantiated consumers after KV-cache and
+    attention-group initialization. A single EXACT consumer forces exact
+    materialization for the whole execution so hybrid models stay correct.
+    """
+    consumers: dict[HostSeqLensRequirement, list[str]] = {}
+    undeclared: list[str] = []
+
+    def _collect(builder_cls: type, backend_cls: type | None) -> None:
+        name = f"{backend_cls.__name__}:{builder_cls.__name__}" if backend_cls else builder_cls.__name__
+        declared = getattr(builder_cls, "HOST_SEQ_LENS_REQUIREMENT", None)
+        if declared is None:
+            undeclared.append(name)
+            declared = HostSeqLensRequirement.EXACT
+        names = consumers.setdefault(declared, [])
+        if name not in names:
+            names.append(name)
+
+    for groups in attn_groups:
+        for group in groups:
+            backend_cls = group.backend
+            _collect(backend_cls.get_builder_cls(), backend_cls)
+
+    if speculator is not None:
+        # Draft-model attention backends (e.g. MTP/EAGLE/DSpark/DFlash
+        # speculators expose ``attn_backends``) consume the same host views
+        # while drafting, so they participate in the aggregation.
+        draft_backends = getattr(speculator, "attn_backends", None) or {}
+        for backend_cls in draft_backends.values():
+            _collect(backend_cls.get_builder_cls(), backend_cls)
+
+    requirement = max(consumers.keys(), default=HostSeqLensRequirement.NONE)
+    return HostSeqLensRequirements(
+        requirement=requirement,
+        consumers=consumers,
+        undeclared=undeclared,
+    )
+
+
 def mark_fused_preprocess_weights(impl: MLAAttentionImpl) -> None:
     """Refresh NZ management after changing preprocessing policy, before loading weights."""
     resolve_type = getattr(impl, "_fused_preprocess_type", None)

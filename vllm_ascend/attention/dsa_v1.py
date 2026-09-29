@@ -27,6 +27,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    HostSeqLensRequirement,
     enable_pcp,
     get_or_register_attention_buffer,
     maybe_save_kv_layer_to_connector,
@@ -593,6 +594,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    # DSA kernels consume device-exact seq_lens; the only host view used is
+    # max_seqlen_kv, a workspace/tiling hint that tolerates a conservative
+    # upper bound.
+    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.UPPER_BOUND
 
     _request_capacity_factor: ClassVar[int] = 1
 
