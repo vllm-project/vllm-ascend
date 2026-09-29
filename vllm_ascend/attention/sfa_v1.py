@@ -532,6 +532,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             self.nope_indexer = layer.impl.indexer
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        self.pcp_shard_decode_requests = is_pcp_decode_sharding_enabled(vllm_config)
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         if self.speculative_config:
@@ -607,20 +608,21 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         if (
             self.use_pcp
             and kwargs.get("pcp_context") is not None
-            and (metadata.num_prefills or metadata.pcp_has_global_prefill)
+            and (self.pcp_shard_decode_requests or metadata.num_prefills or metadata.pcp_has_global_prefill)
         ):
             assert metadata.pcp_slot_mapping is not None
             group = get_pcp_group()
             num_tokens = metadata.num_input_tokens
             rank_slots = metadata.pcp_slot_mapping[: group.world_size * num_tokens].view(group.world_size, num_tokens)
-            num_decode_tokens = metadata.num_decode_tokens
+            # Only replicated decode rows can skip PCP cache synchronization.
+            num_replicated_tokens = 0 if self.pcp_shard_decode_requests else metadata.num_decode_tokens
             local_slots = rank_slots[group.rank_in_group].contiguous()
-            if num_decode_tokens and group.rank_in_group != 0:
+            if num_replicated_tokens and group.rank_in_group != 0:
                 # Replicated decode slots are masked outside rank 0, but each
                 # rank still writes its locally computed decode KV.
-                local_slots = torch.cat((rank_slots[0, :num_decode_tokens], local_slots[num_decode_tokens:]))
+                local_slots = torch.cat((rank_slots[0, :num_replicated_tokens], local_slots[num_replicated_tokens:]))
             metadata.pcp_prolog_local_slots = local_slots
-            metadata.pcp_prolog_global_slots = rank_slots[:, num_decode_tokens:].reshape(-1)
+            metadata.pcp_prolog_global_slots = rank_slots[:, num_replicated_tokens:].reshape(-1)
         return metadata
 
     def build_for_drafting(
@@ -1487,6 +1489,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         slot_mapping: torch.Tensor,
         *,
         num_input_tokens: int = 0,
+        attn_metadata: M | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -1880,6 +1883,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     sin=sin,
                     slot_mapping=slot_mapping_sfa,
                     num_input_tokens=num_input_tokens,
+                    attn_metadata=attn_metadata,
                 )
         # native
         else:

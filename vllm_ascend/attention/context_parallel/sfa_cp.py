@@ -186,22 +186,65 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     ]:
         assert attn_metadata is not None, "PCP PROLOG_V3 requires attention metadata."
         num_tokens = hidden_states.shape[0]
-        num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        # Graph padding is not included in num_decode_tokens.
-        if attn_metadata.num_prefills == 0 and not attn_metadata.pcp_has_global_prefill:
+        # Replicated decode needs no synchronization, including graph padding.
+        if (
+            not self.pcp_shard_decode_requests
+            and attn_metadata.num_prefills == 0
+            and not attn_metadata.pcp_has_global_prefill
+        ):
             return super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, slot_mapping[:num_tokens])
         local_slots = attn_metadata.pcp_prolog_local_slots
         assert local_slots is not None, "PCP PROLOG_V3 requires local slots prepared by the metadata builder."
-        global_slots = attn_metadata.pcp_prolog_global_slots
-        assert global_slots is not None, "PCP PROLOG_V3 requires global slots prepared by the metadata builder."
         result = super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, local_slots)
+        self._gather_kv_cache(kv_cache, attn_metadata)
+        return result
+
+    def _sfa_preprocess_mlapo(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        *,
+        num_input_tokens: int = 0,
+        attn_metadata: M | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
+    ]:
+        assert attn_metadata is not None, "PCP MLAPO requires attention metadata."
+        if (
+            not self.pcp_shard_decode_requests
+            and attn_metadata.num_prefills == 0
+            and not attn_metadata.pcp_has_global_prefill
+        ):
+            return super()._sfa_preprocess_mlapo(
+                hidden_states, kv_cache, cos, sin, slot_mapping[:num_input_tokens], num_input_tokens=num_input_tokens
+            )
+        local_slots = attn_metadata.pcp_prolog_local_slots
+        assert local_slots is not None, "PCP MLAPO requires local slots prepared by the metadata builder."
+        result = super()._sfa_preprocess_mlapo(
+            hidden_states, kv_cache, cos, sin, local_slots, num_input_tokens=num_input_tokens
+        )
+        self._gather_kv_cache(kv_cache, attn_metadata)
+        return result
+
+    def _gather_kv_cache(self, kv_cache: tuple[torch.Tensor, ...], attn_metadata: M) -> None:
+        """Synchronize KV written by either fused preprocessing operator."""
+        num_replicated_tokens = 0 if self.pcp_shard_decode_requests else (attn_metadata.num_decode_tokens or 0)
+        local_slots = attn_metadata.pcp_prolog_local_slots
+        global_slots = attn_metadata.pcp_prolog_global_slots
+        assert local_slots is not None and global_slots is not None
         if not global_slots.numel():
-            return result
+            return
         # Same stream orders the fused cache write, pack, collective and scatter.
         # C8 packs quantized K, BF16 RoPE and scales into the first cache.
         # The remaining tensors belong to the indexer and synchronize separately.
         main_cache = kv_cache[:1] if self.enable_sparse_sfa_c8 else kv_cache[:2]
-        packed = copy_pcp_kv_cache(main_cache, local_slots[num_decode_tokens:])
+        packed = copy_pcp_kv_cache(main_cache, local_slots[num_replicated_tokens:])
         group = get_pcp_group()
         gathered = group.all_gather(packed, dim=0)
         if self.enable_sparse_sfa_c8:
@@ -222,7 +265,6 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             value_cache=value_cache,
             slot_mapping=global_slots,
         )
-        return result
 
     def exec_kv(
         self,
@@ -233,7 +275,11 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
-        if attn_metadata.num_prefills == 0 and not attn_metadata.pcp_has_global_prefill:
+        if (
+            not self.pcp_shard_decode_requests
+            and attn_metadata.num_prefills == 0
+            and not attn_metadata.pcp_has_global_prefill
+        ):
             return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots[: kv_no_split.shape[0]], attn_metadata)
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
         (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
