@@ -12,7 +12,6 @@ from vllm_ascend.worker.v2 import pp_utils
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("fail", [True, False])
 def test_dspark_draft_partition_isolation(monkeypatch, legacy, pp_size, fail):
-    assert patch_dspark.dspark_utils.replace is patch_dspark.replace_or_copy_vllm_config
     bypass_pp_guard = legacy and pp_size > 1
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),

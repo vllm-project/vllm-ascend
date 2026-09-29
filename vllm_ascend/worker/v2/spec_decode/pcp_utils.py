@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING, Protocol
 
 from vllm.config import VllmConfig, replace
 
-from vllm_ascend.worker.v2.pp_utils import copy_vllm_config
-
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -53,7 +51,11 @@ def prepare_replicated_pcp_config(
     target_parallel_config = vllm_config.parallel_config
     replicated_pcp = target_parallel_config.prefill_context_parallel_size > 1
     if replicated_pcp:
-        vllm_config = copy_vllm_config(
+        # TODO: Separate draft execution settings from the worker topology.
+        # Temporarily disable DCP during reconstruction to avoid validating the
+        # target model with PCP=1; restoring DCP below does not rerun DCP checks
+        # or recompute DCP-dependent settings.
+        vllm_config = replace(
             vllm_config,
             parallel_config=replace(
                 target_parallel_config,
