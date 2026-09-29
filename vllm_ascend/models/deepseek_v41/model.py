@@ -8,7 +8,6 @@ import typing
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import islice
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -70,6 +69,7 @@ from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
     enable_custom_op,
     enable_dsa_cp,
+    get_rotation_path,
     normalize_deepseek_v41_config,
 )
 
@@ -967,7 +967,20 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
 
         self.hc_mult = config.hc_mult
-        self._mtp_hidden_buffer = None
+        spec_config = vllm_config.speculative_config
+        needs_mtp_hidden_states = spec_config is not None and (
+            spec_config.use_eagle() or spec_config.uses_draft_model()
+        )
+        self._mtp_hidden_buffer = (
+            torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                self.hc_mult * config.hidden_size,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
+            if get_pp_group().is_last_rank and needs_mtp_hidden_states
+            else None
+        )
         self.make_empty_intermediate_tensors = self._make_empty_intermediate_tensors
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
         topology = build_layer_plan(self.config)
@@ -989,8 +1002,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self.engram_root = vllm_config.model_config.model
         config = self.config
         self.engram_weight_root = self.engram_root
-        # The table is INT8 with group-32 scales; whether it lives in host
-        # memory is vLLM's EngramConfig choice.
+        # Preserve BF16 tables for non-quantized checkpoints. Host placement
+        # remains controlled by vLLM's EngramConfig.
         cpu_offload = engram_cpu_offload(vllm_config)
         self.engram_dp_shared_memory = bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
         self.engram_layout = EngramLayout.from_config(config) if engram_enabled(config) else None
@@ -1012,6 +1025,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     config.engram_head_dim,
                     head_sizes,
                     slot,
+                    storage_dtype=torch.bfloat16 if vllm_config.quant_config is None else torch.int8,
                     cpu_offload=cpu_offload,
                     dp_shared_memory=self.engram_dp_shared_memory,
                 )
@@ -1023,11 +1037,13 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.compilation_config.max_cudagraph_capture_size or 0,
         )
+        rotation_path = get_rotation_path(vllm_config)
+        self.engram_rotated = rotation_path is not None
         self.register_buffer("engram_rotation", torch.eye(32), persistent=False)
         if engram_enabled(config):
-            if vllm_config.load_config.load_format != "dummy":
+            if rotation_path is not None and vllm_config.load_config.load_format != "dummy":
                 with torch.device("cpu"):
-                    with safe_open(Path(self.engram_root) / "optional/quarot.safetensors", framework="pt") as file:
+                    with safe_open(rotation_path, framework="pt") as file:
                         rotation = file.get_tensor("global_rotation")
                     block = rotation[:32, :32].contiguous()
                 self.engram_rotation.copy_(block)
@@ -1247,12 +1263,20 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     hidden_states[:n],
                     lookup,
                     active_mask,
-                    self.engram_rotation,
+                    self.engram_rotation if self.engram_rotated else None,
                 )
             hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=moe_input_ids)
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
+        # MTP needs full HC states
+        if self._mtp_hidden_buffer is not None:
+            if use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+                pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
+            num_tokens = hidden_states.shape[0]
+            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+
         hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
-        if use_sequence_parallel:
+        if use_sequence_parallel and self._mtp_hidden_buffer is None:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         hidden_states = self.norm(hidden_states)
         if aux_hidden_states:

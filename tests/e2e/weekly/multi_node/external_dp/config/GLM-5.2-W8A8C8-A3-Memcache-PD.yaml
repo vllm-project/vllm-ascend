@@ -119,7 +119,7 @@ prefill_server_cmd: &prefill_server_cmd
   - "--attention_config.indexer_kv_dtype"
   - "int8"
   - "--additional-config"
-  - '{"fuse_muls_add": true, "enable_dsa_cp": true}'
+  - '{"ascend_compilation_config": {"fuse_muls_add": true}, "enable_dsa_cp": true}'
   - "--max-num-batched-tokens"
   - "8192"
   - "--trust-remote-code"
@@ -170,7 +170,7 @@ decode_server_cmd: &decode_server_cmd
   - "--attention_config.indexer_kv_dtype"
   - "int8"
   - "--additional-config"
-  - '{"fuse_muls_add": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true}'
+  - '{"ascend_compilation_config": {"fuse_muls_add": true}, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true}'
   - "--trust-remote-code"
   - "--max-num-seqs"
   - "32"

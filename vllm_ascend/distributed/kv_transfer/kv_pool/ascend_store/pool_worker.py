@@ -131,6 +131,7 @@ class KVPoolWorker:
         vllm_config: VllmConfig,
         use_layerwise: bool,
         kv_cache_config: KVCacheConfig | None = None,
+        memcache_dp_init_barrier: bool = True,
     ):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -158,7 +159,7 @@ class KVPoolWorker:
             tp_mismatch=self.use_block_key_layerwise and self.tp_mismatch,
         )
         self._init_metadata(model_config, vllm_config, extra_config)
-        self._init_backend(parallel_config, extra_config)
+        self._init_backend(parallel_config, extra_config, memcache_dp_init_barrier)
         self._init_kv_events(vllm_config)
         self._init_state_vars()
         self._init_layerwise_config()
@@ -422,7 +423,7 @@ class KVPoolWorker:
         self.cache_coordinator = self._build_cache_coordinator(vllm_config)
         self.token_database.cache_coordinator = self.cache_coordinator
 
-    def _init_backend(self, parallel_config, extra_config) -> None:
+    def _init_backend(self, parallel_config, extra_config, memcache_dp_init_barrier: bool = True) -> None:
         backend = backend_map.get(self.backend.lower())
         assert backend is not None
         backend_path = backend.get("path")
@@ -438,6 +439,8 @@ class KVPoolWorker:
         # The connector's extra_config (with MultiConnector the child's own
         # config, not the top-level one) carries the QoS the backends inject.
         backend_kwargs["extra_config"] = extra_config
+        if self.backend_name == "memcache":
+            backend_kwargs["dp_init_barrier"] = memcache_dp_init_barrier
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config,
             **backend_kwargs,
@@ -851,9 +854,7 @@ class KVPoolWorker:
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         use_eagle = bool(use_eagle_fn()) if callable(use_eagle_fn) else False
-        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
-        if not isinstance(retention_interval, int):
-            retention_interval = None
+        retention_interval = self.kv_cache_config.prefix_cache_retention_interval
         return AscendStoreCoordinator(
             self.kv_cache_config.kv_cache_groups,
             scheduler_block_size=self.cache_transfer_granularity,
