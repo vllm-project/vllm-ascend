@@ -352,9 +352,7 @@ def test_chat_completions_still_uses_choices_and_openai_cached_tokens(installed_
     async def run():
         response = await proxy.handle_completions_impl(
             "/chat/completions",
-            _request(
-                {"model": "m", "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}
-            ),
+            _request({"model": "m", "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}),
         )
         return json.loads(await _body(response))
 
