@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -24,7 +25,22 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _merge_qsa_composite_groups,
     _prepare_qsa_composite_groups,
 )
+from vllm_ascend.utils import kv_transfer_supports_shared_backing
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+@pytest.mark.parametrize(
+    ("connector", "expected"),
+    [
+        (None, True),
+        ("MooncakeHybridConnector", True),
+        ("MooncakePullConnector", True),
+        ("UnrecognizedConnector", False),
+    ],
+)
+def test_shared_backing_connector_gate(connector: str | None, expected: bool) -> None:
+    config = None if connector is None else SimpleNamespace(kv_connector=connector)
+    assert kv_transfer_supports_shared_backing(config) is expected
 
 
 def _groups() -> list[KVCacheGroupSpec]:
