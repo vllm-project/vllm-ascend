@@ -1546,79 +1546,6 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _decode_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
         return False
 
-    def _is_fused_mla_cache_views(self, kv_cache: tuple) -> bool:
-        """Whether nope/rope views alias one token-fused MLA cache.
-
-        A5 FlashMLA stores each BBND token as ``[nope | rope]``.  Slicing that
-        tensor gives two views with identical strides and adjacent storage
-        offsets.  Component-major A3/FIA views instead have component-sized
-        strides or a page-sized offset gap, so they must keep the legacy
-        RMSNorm/RoPE/cache operator.
-        """
-        if not isinstance(kv_cache, tuple) or len(kv_cache) != 2:
-            return False
-        nope, rope = kv_cache
-        if not isinstance(nope, torch.Tensor) or not isinstance(rope, torch.Tensor):
-            return False
-        if self.qk_rope_head_dim <= 0:
-            return False
-        if nope.ndim != 4 or rope.ndim != 4:
-            return False
-        if nope.shape[:-1] != rope.shape[:-1]:
-            return False
-        if nope.shape[-2] != self.num_kv_heads:
-            return False
-        if nope.shape[-1] != self.kv_lora_rank or rope.shape[-1] != self.qk_rope_head_dim:
-            return False
-        if nope.stride(-2) != self.kv_lora_rank + self.qk_rope_head_dim:
-            return False
-        if nope.stride() != rope.stride() or nope.stride(-1) != 1:
-            return False
-        if rope.storage_offset() - nope.storage_offset() != self.kv_lora_rank:
-            return False
-        return nope.untyped_storage().data_ptr() == rope.untyped_storage().data_ptr()
-
-    def _exec_kv_fused_cache(
-        self,
-        kv_no_split: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        kv_cache: tuple,
-        slots: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Write a token-fused MLA cache without assuming a component-major stride.
-
-        The legacy fused RMSNorm/RoPE/cache operator receives nope/rope views,
-        but a token-fused BBND cache gives those views the fused token stride.
-        Follow the A5 FlashMLA writer contract instead: normalize and rotate
-        the current KV first, then scatter each component into its strided
-        BBND view.
-        """
-        if self.fa_quant_layer or self.enable_kv_nz:
-            raise RuntimeError("Fused MLA cache scatter writer requires unquantized Norm-mode KV")
-
-        assert self.kv_a_layernorm is not None
-        tokens = kv_no_split.shape[0]
-        kv_no_split = kv_no_split.reshape(
-            tokens,
-            self.num_kv_heads,
-            self.kv_lora_rank + self.qk_rope_head_dim,
-        )
-        c_kv, k_pe = kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        c_kv = self.kv_a_layernorm(c_kv.contiguous()).view(tokens, self.num_kv_heads, self.kv_lora_rank)
-        if self.use_mla_rope:
-            k_pe = self.rope_single(k_pe, cos, sin)
-
-        torch_npu.npu_scatter_pa_kv_cache(
-            key=c_kv.contiguous(),
-            value=k_pe.contiguous(),
-            key_cache=kv_cache[0],
-            value_cache=kv_cache[1],
-            slot_mapping=slots.contiguous(),
-            cache_mode="Norm",
-        )
-        return k_pe, c_kv
-
     def exec_kv_decode(
         self,
         kv_no_split: torch.Tensor,
@@ -1628,18 +1555,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         slots: torch.Tensor,
         return_current_kv: bool = False,
     ):
-        if self._is_fused_mla_cache_views(kv_cache):
-            current_k_pe, current_k_nope = self._exec_kv_fused_cache(
-                kv_no_split,
-                cos,
-                sin,
-                kv_cache,
-                slots,
-            )
-            if return_current_kv:
-                return kv_cache[1], kv_cache[0], current_k_pe, current_k_nope
-            return kv_cache[1], kv_cache[0]
-
         if not self.use_mla_rope:
             current_k_pe, current_k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
             if return_current_kv:
@@ -1683,20 +1598,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        kv_cache: torch.Tensor | tuple,
+        kv_cache: tuple,
         slots: torch.Tensor,
         *,
         attn_metadata: AscendMLAMetadata | None = None,
     ):
-        # DSpark context precomputation calls this writer without forward(),
-        # so it may receive the runner's fused BBND tensor rather than the
-        # nope/rope views constructed by forward().
-        if isinstance(kv_cache, torch.Tensor):
-            kv_cache = (
-                kv_cache[..., : self.kv_lora_rank],
-                kv_cache[..., self.kv_lora_rank :],
-            )
-
         pcp_local_range = None
         if self.pcp_enabled:
             assert attn_metadata is not None
@@ -1732,14 +1638,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
             local_start = pcp_group.rank_in_group * local_capacity
             pcp_local_range = (local_start, local_start + attn_metadata.num_actual_tokens - num_replicated_tokens)
-
-        if self._is_fused_mla_cache_views(kv_cache):
-            k_pe, k_nope = self._exec_kv_fused_cache(kv_no_split, cos, sin, kv_cache, slots)
-            if pcp_local_range is not None:
-                local_start, local_end = pcp_local_range
-                k_pe = k_pe[local_start:local_end]
-                k_nope = k_nope[local_start:local_end]
-            return k_pe, k_nope
 
         if not self.use_mla_rope:
             k_pe, k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
