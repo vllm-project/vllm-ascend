@@ -137,6 +137,20 @@ def test_request_and_epoch_queries_retain_case4_dummy_without_assigning_ownershi
     assert next(e for e in reader.select_events(log.events) if e["event"] == "forward.begin")["request_ids"] == []
 
 
+@pytest.mark.parametrize("query", [{"block": 1}, {"pool_id": "pool", "block": 1, "epoch": "1"}])
+def test_block_queries_accept_cache_configuration_without_execution_slots(query):
+    log = case4()
+    config = log.emit(
+        "worker",
+        "cache.config",
+        groups=[{"group_id": 0, "block_size": 128, "layers": ["model.layers.26.self_attn.attn"]}],
+    )
+    assert list(reader.block_keys(config)) == []
+    selected = reader.select_events(log.events, **query)
+    assert len(diffs(selected)) == 1
+    assert diffs(selected)[0]["access_relations"][0]["alloc_epoch"] == "1"
+
+
 def test_reuse_does_not_attach_old_transfer_or_request_to_new_epoch():
     log = case4()
     log.emit("scheduler", "block.release", pool_id="pool", block_id=1, alloc_epoch="1", group_id=0, request_id="spring")

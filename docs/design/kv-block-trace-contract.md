@@ -46,11 +46,13 @@
 6. 日志有缺口时停止推断，保留 raw block 观察和 incomplete 信息。
 7. 已有差分、错误传播及关闭 trace 的行为不因关联查询改变。
 
-本轮关联逻辑主要位于离线 reader；运行时仅新增进程身份字段，无额外 tensor 采集。Case 4 原始 DP2 图模式是否可稳定采集仍需独立实机验证，不能用离线测试代替。
+本轮关联逻辑主要位于离线 reader；运行时仅新增进程身份字段，无额外 tensor 采集。后续已完成 [Case 4 原环境实机验收](kv-block-trace-case4-validation-20260929.md)：131 上原镜像复读 15/20；开启采集后复读 4/10，4 次均捕获传输完成后空 batch dummy 的 offset 14 改写，且请求/epoch 查询完整保留。该结果覆盖原 DP2 图模式的采样路径，不代表长稳或性能已验证。
 
-本轮检查结果：
+关联实现阶段检查结果（下列旧 workload 与后续 Case 4 实验分开记录）：
 
 - `python -m pytest --confcutdir=tests/ut/debug tests/ut/debug -q`：70 passed，包含请求/epoch 保留 dummy、复用、共享、跨作用域隔离、缺失日志、同时间戳、窗口中重分配和重复读取查询输出。
 - 修改的 Python 文件通过 Ruff 和格式检查；7 张 SVG 的放大、下载、锚点与窄屏检查通过。
 - 131 的 Linux 进程身份探针通过：同进程 worker/transfer 一致、子进程不同、日志字段与探针一致。没有运行新的 NPU workload。
 - 保存的 Qwen、PD、DeepSeek 实测日志共 152 / 2559 / 1205 条，经过新 reader 后原始字段不变，原有完整性结论分别保持 0 / 9 / 1 项问题。它们不是此次关联补充在原 Case 4 图模式上的新验证。
+
+Case 4 实机暴露的 `cache.config.groups` 无 slots 查询问题已修复，新增回归后为 72 passed。16 个 writer 缺少 stop，完整性检查如实报 incomplete；不能把窗口证据充足表述为整份日志闭合。

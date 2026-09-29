@@ -87,9 +87,10 @@ def block_keys(event):
         for group, blocks in enumerate(event.get(name, ())):
             yield from ((group, block) for block in blocks)
     for group in event.get("groups", ()):
+        # cache.config describes groups without execution slots or block tables.
         yield from (
             (group["group_id"], slot // group["block_size"])
-            for slot in group["slots"]
+            for slot in group.get("slots", ())
             if isinstance(slot, int) and slot >= 0
         )
         for row in group.get("block_table", ()):
