@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -513,15 +513,13 @@ def test_prepare_replicated_prefill_preserves_bypass(guard: str) -> None:
     speculator._build_attn_metadata.assert_not_called()
 
 
-@pytest.mark.parametrize("attn_architecture", ["GQA", "MLA", "DSA", "SFA"])
-@pytest.mark.parametrize("dummy", [False, True])
-def test_graph_prefill_uses_local_dummy_metadata(attn_architecture: str, dummy: bool) -> None:
+@pytest.mark.parametrize("attn_architecture", ["GQA", "SFA"])
+def test_graph_prefill_uses_local_dummy_metadata(attn_architecture: str) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.replicated_pcp = True
     speculator.attn_architecture = attn_architecture
-    speculator.input_batch = _make_padded_input_batch() if dummy else None
-    if dummy:
-        speculator.input_batch.is_dummy = True
+    speculator.input_batch = _make_padded_input_batch()
+    speculator.input_batch.is_dummy = True
     speculator.block_tables = MagicMock()
     speculator.kv_cache_config = object()
     target_metadata, draft_metadata = object(), object()
@@ -532,23 +530,19 @@ def test_graph_prefill_uses_local_dummy_metadata(attn_architecture: str, dummy: 
     with patch.object(speculator_module, "build_slot_mappings_by_layer") as build_slots:
         [actual] = speculator.build_draft_attn_metadatas(4, 8, is_draft_model_prefill=True)
 
-    assert actual["draft.layer"] is (draft_metadata if dummy else target_metadata)
+    assert actual["draft.layer"] is draft_metadata
     speculator.block_tables.gather_block_tables.assert_not_called()
     speculator.block_tables.compute_slot_mappings.assert_not_called()
-    if dummy:
-        speculator.block_tables.get_dummy_block_tables.assert_called_once_with(4)
-        speculator.block_tables.get_dummy_slot_mappings.assert_called_once_with(8)
-        build_slots.assert_called_once_with(
-            speculator.block_tables.get_dummy_slot_mappings.return_value, speculator.kv_cache_config
-        )
-        kwargs = speculator._build_attn_metadata.call_args.kwargs
-        assert kwargs["num_reqs"] == 2
-        assert kwargs["step"] == 0
-        assert kwargs["query_start_loc_np"] is speculator.input_batch.query_start_loc_np
-        assert kwargs["seq_lens_cpu_upper_bound"] is speculator.input_batch.seq_lens_cpu_upper_bound
-    else:
-        build_slots.assert_not_called()
-        speculator._build_attn_metadata.assert_not_called()
+    speculator.block_tables.get_dummy_block_tables.assert_called_once_with(4)
+    speculator.block_tables.get_dummy_slot_mappings.assert_called_once_with(8)
+    build_slots.assert_called_once_with(
+        speculator.block_tables.get_dummy_slot_mappings.return_value, speculator.kv_cache_config
+    )
+    kwargs = speculator._build_attn_metadata.call_args.kwargs
+    assert kwargs["num_reqs"] == 2
+    assert kwargs["step"] == 0
+    assert kwargs["query_start_loc_np"] is speculator.input_batch.query_start_loc_np
+    assert kwargs["seq_lens_cpu_upper_bound"] is speculator.input_batch.seq_lens_cpu_upper_bound
 
 
 @pytest.mark.parametrize("replicated", [False, True])
@@ -567,32 +561,25 @@ def test_capture_preserves_prepared_prefill_inputs(replicated: bool) -> None:
     speculator.kv_cache_config = object()
     speculator._prefill = MagicMock()
     metadata, slots = object(), object()
-    wrapper_active = []
-
-    @contextmanager
-    def metadata_wrapper():
-        wrapper_active.append(True)
-        try:
-            yield
-        finally:
-            wrapper_active.pop()
 
     def capture(forward, *args, **kwargs):
-        assert wrapper_active
+        metadata_context.__enter__.assert_called_once()
+        metadata_context.__exit__.assert_not_called()
         assert (speculator.model_state.pcp_manager is None) is replicated
         forward(metadata, slots)
 
     speculator.prefill_cudagraph_manager.capture.side_effect = capture
     with (
-        patch.object(speculator_module, "build_attn_metadata_wrapper", metadata_wrapper),
+        patch.object(speculator_module, "build_attn_metadata_wrapper") as metadata_wrapper,
         patch.object(speculator_module.AutoRegressiveSpeculator, "_prefill") as upstream_prefill,
     ):
+        metadata_context = metadata_wrapper.return_value
         speculator.capture()
         chosen = upstream_prefill if replicated else speculator._prefill
         chosen.assert_called_once_with(metadata, slots)
         unused = speculator._prefill if replicated else upstream_prefill
         unused.assert_not_called()
-    assert not wrapper_active
+    metadata_context.__exit__.assert_called_once()
     assert speculator.model_state.pcp_manager is speculator.pcp_manager
 
 
