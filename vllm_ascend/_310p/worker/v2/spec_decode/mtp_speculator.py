@@ -32,7 +32,6 @@ from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory
-from vllm_ascend.worker.v2.pp_utils import copy_vllm_config
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
@@ -57,7 +56,7 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             self.vllm_config.parallel_config,
             pipeline_parallel_size=1,
         )
-        draft_vllm_config = copy_vllm_config(
+        draft_vllm_config = replace(
             self.vllm_config,
             model_config=model_config_for_vllm,
             parallel_config=parallel_config,
@@ -67,7 +66,10 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         target_path = os.path.realpath(self.vllm_config.model_config.model)
         draft_path = os.path.realpath(draft_model_config.model)
         if target_path == draft_path and self.vllm_config.quant_config is not None:
-            draft_vllm_config.quant_config = self.vllm_config.quant_config
+            draft_vllm_config = replace(
+                draft_vllm_config,
+                quant_config=self.vllm_config.quant_config,
+            )
         return draft_vllm_config
 
     def load_draft_model(
