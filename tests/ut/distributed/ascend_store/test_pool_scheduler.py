@@ -840,6 +840,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             num_saved_tokens=0,
             num_prompt_tokens=32,
             prefill_end_tokens=32,
+            token_ids=list(range(47)),
         )
         output = self._make_running_chunk_output([], num_computed_tokens=47)
         output.num_scheduled_tokens = {"r1": 4}
@@ -850,6 +851,16 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertEqual(meta.requests[0].save_end_token, 32)
         self.assertEqual(meta.requests[0].target_token_len, 47)
         self.assertEqual(scheduler._request_trackers["r1"].token_len, 47)
+        self.assertEqual(meta.requests[0].token_ids, list(range(32)))
+
+        # A committed token fills the next block on a later step; drafts still
+        # must not advance the save target beyond the known request history.
+        request.all_token_ids = list(range(48))
+        meta = scheduler.build_connector_meta(output)
+        self.assertEqual(len(meta.requests), 1)
+        self.assertEqual(meta.requests[0].save_end_token, 48)
+        self.assertEqual(meta.requests[0].target_token_len, 48)
+        self.assertEqual(meta.requests[0].token_ids, list(range(32, 48)))
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_chunk_reloads_prefix_with_layer_reuse(self, mock_client_cls):
@@ -1162,31 +1173,35 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
                 scheduler._block_pool.free_blocks.assert_called_once()
                 self.assertNotIn(1, scheduler.sending_blocks)
 
-    def test_store_job_pins_dense_blocks_until_all_workers_finish(self):
+    def test_store_job_pins_mamba_blocks_until_all_workers_finish(self):
         scheduler = self._make_scheduler()
-        scheduler._block_pool.blocks = [MagicMock(), MagicMock()]
-        req_meta = MagicMock(
-            can_save=True,
-            block_ids_by_group=[[0, 1]],
-            event_id=None,
-            store_job_id=None,
+        scheduler.use_hybrid = True
+        scheduler.num_speculative_blocks_by_group = {0: 1}
+        scheduler._block_pool.blocks = [MagicMock() for _ in range(4)]
+        req_meta = ReqMeta(
+            "r1", token_len_chunk=16, block_ids_by_group=[[0, 1, 2, 3]], block_hashes=[b"h0"], can_save=True
         )
 
-        scheduler.reference_sending_blocks(req_meta)
+        scheduler.touch_sending_mamba_blocks(req_meta)
 
-        self.assertEqual((req_meta.event_id, req_meta.store_job_id), (0, 0))
-        scheduler._block_pool.touch.assert_called_once_with(scheduler._block_pool.blocks)
-        self.assertEqual(scheduler.sending_blocks, {0: [0, 1]})
+        self.assertEqual(req_meta.event_id, 0)
+        # Neither the null block nor speculative scratch may be pinned.
+        pinned_blocks = scheduler._block_pool.blocks[1:3]
+        scheduler._block_pool.touch.assert_called_once_with(pinned_blocks)
+        self.assertEqual(scheduler.sending_blocks, {0: [1, 2]})
         self.assertTrue(scheduler.has_pending_push_work())
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
             AscendStoreKVConnectorWorkerMetadata,
         )
 
-        output = MagicMock(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({0: 2}))
+        output = MagicMock(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({0: 1}))
+        scheduler.update_connector_output(output)
+        scheduler._block_pool.free_blocks.assert_not_called()
+        self.assertTrue(scheduler.has_pending_push_work())
         scheduler.update_connector_output(output)
         self.assertFalse(scheduler.has_pending_push_work())
-        scheduler._block_pool.free_blocks.assert_called_once_with(list(reversed(scheduler._block_pool.blocks)))
+        scheduler._block_pool.free_blocks.assert_called_once_with(list(reversed(pinned_blocks)))
 
     def test_invalid_event_id(self):
         scheduler = self._make_scheduler()
