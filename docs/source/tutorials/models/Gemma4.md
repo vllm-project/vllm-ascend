@@ -16,6 +16,8 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and 950PR&950DT Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported.
 
+Gemma4 also supports MTP (Multi-Token Prediction) speculative decoding on Ascend 950 (A5). It drafts multiple tokens per decode step with a Gemma4 assistant checkpoint and verifies them against the target model in a single forward pass. See Section 5.3 for the serving configuration and Section 9.3 for tuning.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
@@ -110,6 +112,7 @@ Common Issues Tip: If the service fails to start, HBM is insufficient, or reques
 - `--max-model-len`: sets the maximum input plus output length for a single request. Increase it only when enough KV cache is available.
 - `--enforce-eager`: enables eager execution for baseline verification.
 - `--compilation-config`: configures graph execution. `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, and `PIECEWISE` is also supported.
+- `--speculative-config`: enables MTP speculative decoding. Supported on Ascend 950 (A5) only. Unlike the MTP implementations of other models, it must name the Gemma4 assistant checkpoint explicitly in `model`. See Section 5.3.
 - `--trust-remote-code`: allows vLLM to load model-specific code when required by the model repository.
 
 #### Service Verification
@@ -132,6 +135,60 @@ Expected result: the HTTP status is 200 and the JSON response contains a `choice
 ### 5.2 Multi-Card Deployment
 
 This tutorial provides single-node multi-card deployment examples for Gemma4 on Atlas A2, Atlas A3, and 950PR&950DT Products. For different model sizes or device counts, adjust `ASCEND_RT_VISIBLE_DEVICES` and `--tensor-parallel-size` according to the available NPUs.
+
+### 5.3 MTP Speculative Decoding
+
+MTP (Multi-Token Prediction) speculative decoding is supported for Gemma4 on **Ascend 950 (A5) only**. An assistant checkpoint drafts several tokens per decode step, and the target model verifies them in a single forward pass.
+
+Two properties of the Gemma4 drafter affect how it is deployed:
+
+- **It is a separate assistant checkpoint**, not a draft head embedded in the target weight. Unlike the MTP configuration of other models, `--speculative-config` must therefore set `model` to the assistant checkpoint.
+- **Its layers do not share a uniform attention shape.** Sliding-window layers use `head_dim=256` and full-attention layers use `head_dim=512` (`global_head_dim` in the checkpoint configuration), so each KV cache group gets its own attention metadata. The drafter also reads K/V from the target model's cache (cross-model KV sharing) instead of maintaining its own.
+
+Both the target checkpoint and the assistant checkpoint must be available locally; in the example below they are `/root/.cache/path/to/gemma4` and `/root/.cache/path/to/gemma4-assistant`. The assistant is resolved through the same loader as the target model.
+
+The following example enables MTP together with `FULL_DECODE_ONLY` graph mode, serving three speculative tokens per step on a single Ascend 950 card (TP=1):
+
+```shell
+export ASCEND_RT_VISIBLE_DEVICES=0
+export MODEL_PATH=/root/.cache/path/to/gemma4
+
+vllm serve ${MODEL_PATH} \
+  --served-model-name gemma4-mtp \
+  --trust-remote-code \
+  --tensor-parallel-size 1 \
+  --speculative-config '{"method": "mtp", "model": "/root/.cache/path/to/gemma4-assistant", "num_speculative_tokens": 3}' \
+  --max-model-len 5500 \
+  --max-num-seqs 16 \
+  --max-num-batched-tokens 8192 \
+  --gpu-memory-utilization 0.85 \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+```
+
+The `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` values above are examples. Tune them for your workload and available NPU memory as described in Section 9. Data-parallel serving (`--data-parallel-size N`, one TP=1 replica per card) uses the same speculative configuration.
+
+**Readiness check.** When the service starts with MTP enabled, the log reports how many draft layers were wired to the target model's cache:
+
+```text
+Gemma4 MTP: propagated KV-sharing target to 4/4 draft layers.
+```
+
+The Gemma4 assistant checkpoint has four attention layers, so a correctly wired service reports `4/4`. A first number lower than the second means some draft layers would read their own (empty) cache instead of the target's, which collapses the acceptance rate.
+
+**Verify the acceptance rate.** The `/metrics` endpoint exposes the number of accepted draft tokens per position as `vllm:spec_decode_num_accepted_tokens_per_pos`, and the number of draft rounds as `vllm:spec_decode_num_drafts`. Scrape both before and after a batch of requests, then divide the deltas:
+
+```text
+acceptance[pos] = accepted_tokens_per_pos_delta[pos] / drafts_delta
+```
+
+Acceptance normally decreases with the draft position (`pos0` > `pos1` > `pos2`) and depends on the workload and prompting style, so measure it on your own traffic rather than assuming a target value. A collapse at `pos1` and `pos2` while `pos0` stays high is not a workload effect — it usually indicates that the draft attention metadata is misconfigured.
+
+**Limitations:**
+
+- MTP is supported on Ascend 950 (A5) only. It is not supported on Atlas A2 or Atlas A3.
+- The assistant checkpoint must be available in addition to the target checkpoint.
+- Centroid-based draft sampling runs eagerly and is not captured in an ACL graph. Decode graphs are still captured as usual with `FULL_DECODE_ONLY`.
+- The throughput benefit depends on the acceptance rate, which is workload-dependent. Compare against the configuration without MTP on your own traffic before enabling it in production.
 
 ## 6 Functional Verification
 
@@ -252,6 +309,7 @@ Recommended tuning order:
 
 | Optimization | Enablement | Benefit | Notes |
 | ------------ | ---------- | ------- | ----- |
+| MTP speculative decoding | `--speculative-config '{"method": "mtp", "model": "<ASSISTANT_PATH>", "num_speculative_tokens": 3}'` | Improves decode throughput when the acceptance rate is good. | Ascend 950 (A5) only; requires the assistant checkpoint. Measure the acceptance rate before tuning `num_speculative_tokens`. See Section 5.3. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` | Reduces decode dispatch overhead. | Recommended when decode tokens are generated. |
 | Piecewise ACLGraph | `--compilation-config '{"cudagraph_mode": "PIECEWISE"}'` | Enables segmented graph execution. | Supported when piecewise graph execution is required. |
 | Tensor parallelism | `--tensor-parallel-size` | Splits model computation across multiple NPUs. | Adjust according to model size and available devices. |
