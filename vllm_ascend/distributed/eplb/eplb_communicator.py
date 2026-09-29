@@ -38,6 +38,31 @@ class _HixlTransferTiming:
     transfer_bytes: int
 
 
+def _resolve_hixl_module() -> Any:
+    """Prefer the official CANN hixl package; fall back to the ctypes binding.
+
+    The fallback drives ``libcann_hixl.so`` directly so environments that ship
+    the toolkit library without the Python package (for example CANN 9.1.0)
+    keep the default HIXL transfer path.
+    """
+    try:
+        import hixl  # type: ignore[import-not-found]
+    except ImportError:
+        pass
+    else:
+        return hixl
+
+    from vllm_ascend.distributed.eplb import hixl_compat
+
+    try:
+        hixl_compat.ensure_available()
+    except Exception as error:
+        raise RuntimeError(
+            "HIXL EPLB requires the official hixl Python package or a CANN toolkit providing libcann_hixl.so"
+        ) from error
+    return hixl_compat
+
+
 class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
     """Gloo CPU-staging EPLB communicator for async mode on Ascend.
 
@@ -133,10 +158,7 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         all_expert_weights: Sequence[Sequence[Any]],
         expert_buffer: Sequence[Any],
     ) -> None:
-        try:
-            import hixl  # type: ignore[import-not-found]
-        except ImportError as error:
-            raise RuntimeError("HIXL EPLB requires the HIXL Python package from the CANN HIXL distribution") from error
+        self._hixl = _resolve_hixl_module()
 
         if not all_expert_weights or not all_expert_weights[0] or not expert_buffer:
             raise ValueError("HIXL EPLB requires expert weights and receive buffers")
@@ -147,7 +169,6 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         if first_tensor.device.type != "npu" or first_tensor.ndim == 0 or first_tensor.shape[0] == 0:
             raise ValueError("HIXL EPLB requires non-empty NPU expert tensors")
 
-        self._hixl = hixl
         self._cpu_group = cpu_group
         self._rank = cpu_group.rank()
         self._world_size = cpu_group.size()
