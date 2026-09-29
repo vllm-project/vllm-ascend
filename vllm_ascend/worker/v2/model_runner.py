@@ -448,15 +448,16 @@ class NPUModelRunner(GPUModelRunner):
                 "scheduled locally — a request sent directly to the decode node)."
             )
 
-    def prepare_inputs(  # type: ignore[misc]
+    def _prepare_inputs_impl(
         self,
         scheduler_output: SchedulerOutput,
         batch_req_state: BatchReqState,
         batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
-        """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
-        npu attention backends need seq_lens_cpu to work.
-        so we need to prepare seq_lens_cpu here.
+        """Shared implementation for GPUModelRunner.prepare_inputs on Ascend.
+
+        npu attention backends need seq_lens_cpu to work, so we prepare
+        seq_lens_cpu here.
         """
         self._check_finegrained_tp_graph_step(batch_desc.cg_mode)
         num_tokens = batch_req_state.num_tokens
@@ -683,18 +684,44 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-        # vLLM main (#53867) changed maybe_partition_pcp_batch to take the
-        # whole batch descriptor instead of padded_num_tokens.
-        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-            self.pcp_manager,
-            input_batch,
-            batch_desc=batch_desc,
-        )
+        # vLLM main (#57980) dropped the module-level maybe_partition_pcp_batch
+        # helper; PCPManager.partition_batch now takes the batch descriptor.
+        if vllm_version_is("0.30.0"):
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                batch_desc=batch_desc,
+            )
+        elif self.pcp_manager is not None:
+            input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
 
         return input_batch
+
+    if vllm_version_is("0.30.0"):
+
+        def prepare_inputs(  # type: ignore[misc]
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_req_state: BatchReqState,
+            batch_desc: BatchExecutionDescriptor,
+        ) -> AscendInputBatch:
+            return self._prepare_inputs_impl(scheduler_output, batch_req_state, batch_desc)
+
+    else:
+
+        def prepare_inputs(  # type: ignore[misc]
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_req_state: BatchReqState,
+            batch_desc: BatchExecutionDescriptor,
+            num_active_loras: int,  # noqa: ARG002
+        ) -> AscendInputBatch:
+            # vLLM #56456 added num_active_loras to prepare_inputs on main; it
+            # only feeds FastPrefillHelper, which this Ascend path does not use.
+            return self._prepare_inputs_impl(scheduler_output, batch_req_state, batch_desc)
 
     def prepare_dummy_attn(
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False
