@@ -28,7 +28,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 )
 
 from vllm_ascend.ascend_config import validate_additional_config_bool
-from vllm_ascend.ops.triton.v2.spec_decode.greedy import (
+from vllm_ascend.ops.triton.v2.greedy import (
     sample_greedy_markov,
     scratch_shape,
 )

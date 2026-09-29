@@ -2,7 +2,7 @@
 
 import pytest
 import torch
-from vllm_ascend.worker.v2.spec_decode.dspark.greedy import (
+from vllm_ascend.ops.triton.v2.greedy import (
     sample_greedy_markov,
     scratch_shape,
 )
