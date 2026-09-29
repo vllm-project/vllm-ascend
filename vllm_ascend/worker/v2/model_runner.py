@@ -711,17 +711,18 @@ class NPUModelRunner(GPUModelRunner):
         """Override GPUModelRunner.sample for lmhead TP.
 
         The LM-head collectives span the whole group, so every rank must feed
-        compute_logits the same number of rows: pad hidden states up to
-        ``max_num_reqs * decode_query_len`` and trim the logits back before
-        sampling. ``logits_indices`` stays real (the V2 sampler gathers
-        penalties by it). prompt_logprobs is not supported with lmhead TP
-        (same as V1).
+        compute_logits the same number of rows: pad hidden states up to the
+        group-agreed capacity (DP-synced dynamic value, falling back to the
+        static ``max_num_reqs * decode_query_len`` bound) and trim the logits
+        back before sampling. ``logits_indices`` stays real (the V2 sampler
+        gathers penalties by it). prompt_logprobs is not supported with lmhead
+        TP (same as V1).
         """
         if not lmhead_tp_enable():
             return super().sample(hidden_states, input_batch, grammar_output)
 
         num_logits = input_batch.logits_indices.shape[0]
-        capacity = self.max_num_reqs * self.decode_query_len
+        capacity = self._lmhead_tp_dynamic_capacity()
         # A mismatch would desync the LM-head all_gather/all_to_all across the
         # group and hang the collectives. Fail fast instead.
         assert num_logits <= capacity, (
