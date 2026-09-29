@@ -71,6 +71,8 @@ spec:
                 value: "{{ openlibing_secret | default("") }}"
               - name: VLLM_ASCEND_BRANCH
                 value: "{{ vllm_ascend_branch | default("") }}"
+              - name: TEST_FREQUENCY
+                value: "{{ test_frequency | default("nightly") }}"
             command:
               - sh
               - -c
@@ -143,6 +145,8 @@ spec:
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
               - name: CONFIG_BASE_PATH
                 value: "{{ config_base_path | default("") }}"
+              - name: TEST_FREQUENCY
+                value: "{{ test_frequency | default("nightly") }}"
               - name: LOG_PREFIX
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: WORKSPACE

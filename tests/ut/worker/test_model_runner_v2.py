@@ -34,6 +34,9 @@ def _make_runner(need_timing: bool = True):
     runner.use_fia = False
     # Set by NPUModelRunner.__init__ on real instances.
     runner._finegrained_tp_requires_graph = False
+    # Empty groups keep prepare_dummy_attn's V4.1 ring-state prep a no-op;
+    # these tests focus on buffer refresh / upstream passthrough only.
+    runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
     return runner
 
 
@@ -361,7 +364,8 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
 def test_prepare_dummy_attn_without_pcp_uses_upstream():
     runner = _make_runner()
     runner.pcp_manager = None
-    dummy = object()
+    # num_reqs feeds the V4.1 ring-state prep that runs after the upstream call.
+    dummy = SimpleNamespace(num_reqs=0)
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
         assert runner.prepare_dummy_attn(dummy) == ((), None)
     parent.assert_called_once_with(dummy, valid_state_slots=False)
@@ -542,7 +546,7 @@ def test_init_spec_pp_full_graph_and_speculator():
     ):
         runner = NPUModelRunner(vllm_config, torch.device("cpu"))
     restore_pp.assert_called_once()
-    assert eplb_cls.call_args.kwargs["load_collection_phase"] == "decode"
+    assert eplb_cls.call_args.args[2] is ascend_config.eplb_config
     assert runner.use_aclgraph is True
     assert runner.use_aux_hidden_state_outputs is True
     assert runner.speculator is speculator
@@ -581,7 +585,9 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler = MagicMock()
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
-    runner.pp_handler.broadcast_draft_tokens.assert_not_called()
+    # sample_tokens always calls broadcast_drafts when legacy spec PP is on.
+    # broadcast_draft_tokens is only an alias installed on the real PP handler.
+    runner.pp_handler.broadcast_drafts.assert_called_once_with()
 
 
 def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():

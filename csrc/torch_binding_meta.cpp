@@ -208,41 +208,6 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     return {out, expert_token_nums};
 }
 
-std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_meta(
-    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
-    const c10::optional<at::Tensor> &actual_seq_lengths_query,
-    const c10::optional<at::Tensor> &actual_seq_lengths_key,
-    const c10::optional<at::Tensor> &block_table, c10::string_view layout_query,
-    c10::string_view layout_key, int64_t sparse_count, int64_t sparse_mode,
-    int64_t pre_tokens, int64_t next_tokens, bool return_value)
-{
-    constexpr int64_t DIM_0 = 0;
-    constexpr int64_t DIM_1 = 1;
-    constexpr int64_t DIM_2 = 2;
-
-    TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
-
-    std::string query_layout_str = std::string(layout_query);
-    std::string key_layout_str = std::string(layout_key);
-    c10::SymDimVector output_size;
-    if (query_layout_str == "BSND") {
-        output_size = {query.sym_size(DIM_0), query.sym_size(DIM_1), key.sym_size(DIM_2), c10::SymInt(sparse_count)};
-    } else {
-        int n_dim_index = 0;
-        n_dim_index = (key_layout_str == "TND") ? DIM_1 : DIM_2;
-        output_size = {query.sym_size(DIM_0), key.sym_size(n_dim_index), c10::SymInt(sparse_count)};
-    }
-    // construct the output tensor
-    at::Tensor sparse_indices_out = at::empty_symint(output_size, query.options().dtype(at::kInt));
-    at::Tensor sparse_values_out;
-    if (return_value) {
-        sparse_values_out = at::empty_symint(output_size, query.options().dtype(query.dtype()));
-    } else {
-        sparse_values_out = at::empty_symint(c10::SymDimVector{c10::SymInt(0)}, query.options().dtype(query.dtype()));
-    }
-    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const at::Tensor &sparse_indices, double scale_value,
@@ -1787,7 +1752,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta
     }
 }
 
-at::Tensor chunk_fwd_o_meta(
+at::Tensor chunk_fwd_o_vllm_meta(
     const at::Tensor & q,
     const at::Tensor & k,
     const at::Tensor & v,
@@ -2080,8 +2045,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_recurrent_gated_delta_rule_310", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_310_meta);
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
-    // chunk_fwd_o
-    ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // chunk_fwd_o_vllm
+    ops.impl("chunk_fwd_o_vllm", &vllm_ascend::meta::chunk_fwd_o_vllm_meta);
     // chunk_kda_fwd
     ops.impl("chunk_kda_fwd", &vllm_ascend::meta::chunk_kda_fwd_meta);
     // kda_gate_cumsum
@@ -2123,8 +2088,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", &vllm_ascend::meta::grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta);
     // Grouped matmul swiglu quant v2
     ops.impl("grouped_matmul_swiglu_quant_v2", &vllm_ascend::meta::grouped_matmul_swiglu_quant_v2_meta);
-    // Lightning indexer
-    ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     ops.impl("npu_sparse_flash_mla_metadata", &vllm_ascend::meta::npu_sparse_flash_mla_metadata_meta);
@@ -2185,8 +2148,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_mla_prolog_v3_k3", &vllm_ascend::meta::npu_mla_prolog_v3_k3_meta);
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
-    // chunk_fwd_o
-    ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // chunk_fwd_o_vllm
+    ops.impl("chunk_fwd_o_vllm", &vllm_ascend::meta::chunk_fwd_o_vllm_meta);
     // chunk_kda_fwd
     ops.impl("chunk_kda_fwd", &vllm_ascend::meta::chunk_kda_fwd_meta);
     // kda_gate_cumsum

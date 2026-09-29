@@ -24,6 +24,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.ops.triton.linearnorm.fused_eh_norm import fused_eh_norm
 from vllm_ascend.utils import is_rot_weight_used
 
 from .model import (
@@ -33,7 +34,6 @@ from .model import (
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
-from .ops.fused_eh_norm import fused_eh_norm
 
 
 class Glm5NextMultiTokenPredictorLayer(nn.Module):

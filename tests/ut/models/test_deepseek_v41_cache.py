@@ -289,6 +289,24 @@ def test_view_with_nonzero_backing_storage_offset():
     assert not backing[:48].any()
 
 
+def test_v2_view_with_nonzero_initial_offset():
+    from vllm_ascend.worker.v2.attn_utils import _adjust_dsv4_kv_layout
+
+    backing = torch.zeros(16 + 2 * 256, dtype=torch.uint8)
+    raw = backing[16:]
+    cache = _adjust_dsv4_kv_layout(
+        raw,
+        [(2, 16, 1, 4)],
+        [torch.bfloat16],
+        256,
+        initial_offset_bytes=32,
+    )[0]
+    cache[1].fill_(7)
+    assert cache.data_ptr() == backing.data_ptr() + 48
+    torch.testing.assert_close(backing[304:432].view(torch.bfloat16), torch.full((64,), 7, dtype=torch.bfloat16))
+    assert not backing[:48].any()
+
+
 def test_view_accepts_latest_vllm_int8_backing_storage():
     from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -665,6 +683,23 @@ def test_slot_mapping_is_shared_per_compatible_cache_group(config, runtime):
         [1, 1],
         [-1, -1],
     ]
+
+
+def test_builder_restores_v41_logical_block_size(runtime):
+    spec = collect_specs(runtime)["model.layers.2.self_attn.indexer.k_cache"]
+    expected_storage_block_size = get_storage_block_size(spec)
+    physical_spec = spec.copy_with_new_block_size(expected_storage_block_size)
+    assert get_storage_block_size(physical_spec) < expected_storage_block_size
+
+    builder = AscendDSAV41MetadataBuilder(
+        physical_spec,
+        ["model.layers.2.self_attn.indexer.k_cache"],
+        runtime,
+        torch.device("cpu"),
+    )
+
+    assert builder.kv_cache_spec.block_size == runtime.cache_config.block_size
+    assert get_storage_block_size(builder.kv_cache_spec) == expected_storage_block_size
 
 
 def test_compressed_metadata_exposes_original_and_cache_coordinates(config, runtime):

@@ -325,6 +325,11 @@ class TestAscendConfig(TestBase):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 EplbConfig(stair_config={name: 0})
 
+    def test_eplb_config_rejects_policy_selection(self):
+        for policy in ("default", "stair"):
+            with self.subTest(policy=policy), self.assertRaises(ValueError):
+                EplbConfig(**{"policy": policy})
+
     def test_stair_config_rejects_unknown_option(self):
         with self.assertRaises(ValueError):
             EplbConfig(stair_config={"unknown_option": 0})
@@ -1636,6 +1641,16 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             self.assertTrue(enable_sp(vc))
             self.assertTrue(config.enable_dsa_cp)
             self.assertTrue(enable_dsa_cp())
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dsa_cp_and_pcp_are_mutually_exclusive(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"enable_dsa_cp": True}
+        vc.parallel_config.prefill_context_parallel_size = 4
+
+        with self.assertRaisesRegex(ValueError, "DSA-CP and PCP cannot be enabled at the same time.*Use PCP instead"):
+            init_ascend_config(vc)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

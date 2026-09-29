@@ -2,6 +2,7 @@ test_name: "QWEN3_235B_PD_3_5K_1_5k"
 model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
 num_nodes: 3
 npu_per_node: 16
+dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"

@@ -239,7 +239,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     "state_kwargs", [{}, {"attn_state": None}, {"attn_state": AscendAttentionState.ChunkedPrefill}]
 )
 @pytest.mark.parametrize("factory_state", [None, AscendAttentionState.ChunkedPrefill])
-def test_build_draft_attn_metadata_applies_factory_state(monkeypatch, state_kwargs, factory_state):
+def test_build_attn_metadata_factory_applies_state(monkeypatch, state_kwargs, factory_state):
     captured_kwargs = {}
 
     def raw_build_attn_metadata(*_args, **kwargs):
@@ -254,7 +254,7 @@ def test_build_draft_attn_metadata_applies_factory_state(monkeypatch, state_kwar
     positions = torch.arange(8, dtype=torch.int32)
     is_prefilling = torch.tensor([False, False])
 
-    with attn_utils.build_draft_attn_metadata_factory(
+    with attn_utils.build_attn_metadata_factory(
         positions,
         pad=5,
         is_prefilling=is_prefilling,
@@ -596,6 +596,32 @@ def _make_dsa_metadata_groups():
         ],
     )
     return layer_names, specs, calls, attn_groups, kv_cache_config
+
+
+def test_draft_metadata_uses_per_request_cpu_upper_bounds():
+    _, _, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
+    upper_bounds = torch.tensor([13, 27], dtype=torch.int32)
+
+    attn_utils.build_attn_metadata(
+        attn_groups=attn_groups,
+        num_reqs=2,
+        num_tokens=2,
+        query_start_loc_gpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([11, 25], dtype=torch.int32),
+        max_seq_len=27,
+        block_tables=(torch.zeros((2, 1), dtype=torch.int32),) * 2,
+        slot_mappings=(torch.zeros(2, dtype=torch.int32),) * 2,
+        kv_cache_config=kv_cache_config,
+        seq_lens_cpu_upper_bound=upper_bounds,
+    )
+
+    assert len(calls) == 2
+    for call in calls:
+        common_metadata = call["common_attn_metadata"]
+        torch.testing.assert_close(common_metadata.seq_lens_cpu, upper_bounds)
+        torch.testing.assert_close(common_metadata.seq_lens, torch.tensor([11, 25], dtype=torch.int32))
 
 
 def test_prepare_kernel_block_sizes_uses_logical_size_for_dsv4():
@@ -1108,9 +1134,9 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
         is state.PrefillCacheHit
     )
     assert attn_utils.build_attn_state(no_spec, seq, 2, seq, seq) is state.PrefillNoCache
-    assert attn_utils.build_attn_state(mtp, seq, 2, ones, ones) is state.SpecDecoding
+    assert attn_utils.build_attn_state(mtp, seq, 2, ones, ones) is state.DecodeOnly
     assert attn_utils.build_attn_state(no_spec, seq, 2, ones, ones) is state.DecodeOnly
-    assert attn_utils.build_attn_state(mtp, seq, 2, scheduled, ones) is state.SpecDecoding
+    assert attn_utils.build_attn_state(mtp, seq, 2, scheduled, ones) is state.ChunkedPrefill
     assert attn_utils.build_attn_state(eagle, seq, 2, scheduled, ones) is state.ChunkedPrefill
     assert attn_utils.build_attn_state(chunked, seq, 2, scheduled, scheduled) is state.ChunkedPrefill
     assert attn_utils.build_attn_state(no_spec, seq, 2, scheduled, scheduled) is state.PrefillCacheHit
@@ -1184,8 +1210,44 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     monkeypatch.setattr(attn_utils, "_BUILD_ATTN_METADATA_MODULE", module)
     with attn_utils.build_attn_metadata_wrapper():
         assert module.build_attn_metadata is attn_utils.build_attn_metadata
-    with attn_utils.build_draft_attn_metadata_factory(torch.arange(4), 2, True):
+    with attn_utils.build_attn_metadata_factory(torch.arange(4), 2, True):
         forwarded = module.build_attn_metadata()
     assert forwarded["positions"].tolist() == [0, 1]
     assert forwarded["is_prefilling"] is True
     assert module.build_attn_metadata is stub
+
+
+def test_mrv2_binding_wraps_only_v41_slots():
+    from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+    from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache_to_layers
+
+    vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
+    v41_layer = DeepseekV41CacheLayer(vllm_config, "model.layers.0.self_attn.attn", object())
+    v41_indexer = DeepseekV41CacheLayer(vllm_config, "model.layers.2.self_attn.indexer.k_cache", object())
+    other_layer = SimpleNamespace(kv_cache=None)
+    kv_caches = {
+        # V4.1 reshape output: one slot tensor per layer.
+        "model.layers.0.self_attn.attn": torch.zeros(4, 2),
+        # Non-V4.1 Ascend allocation: a (k, v) tuple.
+        "model.layers.1.self_attn.attn": (torch.zeros(2, 2), torch.zeros(2, 2)),
+        # V4.1 indexer reshape output: a (kv, scale) tuple slot view.
+        "model.layers.2.self_attn.indexer.k_cache": (torch.zeros(2, 2), torch.zeros(2, 1)),
+    }
+    forward_context = {
+        "model.layers.0.self_attn.attn": v41_layer,
+        "model.layers.1.self_attn.attn": other_layer,
+        "model.layers.2.self_attn.indexer.k_cache": v41_indexer,
+    }
+
+    bind_kv_cache_to_layers(kv_caches, forward_context)
+
+    # vLLM main (#53781) routes init_kv_cache through bind_kv_cache_to_layers:
+    # V4.1 slots dispatch to their own bind_kv_cache (kv_cache[0] contract)
+    # while other layers keep the raw (k, v) allocation.
+    assert isinstance(v41_layer.kv_cache, list)
+    assert v41_layer.kv_cache[0] is kv_caches["model.layers.0.self_attn.attn"]
+    assert other_layer.kv_cache is kv_caches["model.layers.1.self_attn.attn"]
+    # The indexer consumer unpacks kv_cache[0] into (kv, scale).
+    kv_view, scale_view = v41_indexer.kv_cache[0]
+    assert kv_view is kv_caches["model.layers.2.self_attn.indexer.k_cache"][0]
+    assert scale_view is kv_caches["model.layers.2.self_attn.indexer.k_cache"][1]
