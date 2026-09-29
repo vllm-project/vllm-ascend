@@ -166,6 +166,21 @@ def test_decode_sharding_does_not_add_a_parallel_config_field():
     assert is_pcp_decode_sharding_enabled(config) is True
 
 
+@pytest.mark.parametrize("speculative", [False, True])
+def test_kpool_decode_keeps_replicated_pcp_state(speculative: bool):
+    config = _make_pcp_config(CUDAGraphMode.NONE)
+    config.model_config.hf_text_config.index_kpool = 4
+    config.speculative_config = SimpleNamespace(method="mtp") if speculative else None
+    manager = AscendPCPManager(2, 1, torch.device("cpu"))
+    manager.vllm_config = config
+    counts = np.array([1, 1], dtype=np.int32)
+    prefilling = np.array([False, False])
+
+    assert not is_pcp_decode_sharding_enabled(config)
+    np.testing.assert_array_equal(manager.replicated_requests(counts, prefilling), [True, True])
+    assert list(manager._iter_rank_chunks(1, counts, prefilling)) == [(0, 0, 1), (1, 0, 1)]
+
+
 def test_validate_config_allows_sparse_mla_full_decode_only():
     vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
 
@@ -194,6 +209,13 @@ def test_validate_config_allows_pipeline_parallelism():
     )
 
     AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
+
+
+def test_validate_config_allows_kpool_model_registered_as_multimodal():
+    vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+    vllm_config.model_config.hf_text_config.index_kpool = 4
+
+    AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=True)
 
 
 @pytest.mark.parametrize(

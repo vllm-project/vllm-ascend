@@ -237,6 +237,19 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
     return model_uses_sfa_sparse(vllm_config.model_config) and parallel_config.decode_context_parallel_size > 1
 
 
+def enable_kpool_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> bool:
+    """Whether the GLM-Next KPool cache is replicated across DCP ranks."""
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+
+    parallel_config = vllm_config.parallel_config
+    model_config = getattr(vllm_config, "model_config", None)
+    dcp_size = getattr(parallel_config, "decode_context_parallel_size", 1)
+    return model_uses_kpool_indexer(model_config) and dcp_size > 1
+
+
 def clear_enable_sp():
     enable_dsa_cp.cache_clear()
     enable_dsa_cp_full_o_proj.cache_clear()

@@ -41,6 +41,7 @@ from vllm_ascend.attention.dsa_v1 import (
 )
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import (
+    AscendKPoolIndexerCacheSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     get_storage_block_size,
@@ -1745,6 +1746,75 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
     return layer
 
 
+def test_kpool_int8_main_cache_uses_packed_spec_and_view_without_sfa(monkeypatch):
+    layer_name = "model.layers.0.self_attn.attn"
+    layer = _make_mla_layer(sparse_c8=True)
+    layer.kv_lora_rank = 512
+    layer.qk_rope_head_dim = 0
+    source_spec = layer.get_kv_cache_spec(None)
+    layer.get_kv_cache_spec = lambda _cfg: SimpleNamespace(**{**vars(source_spec), "head_size": 512})
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        cache_config=SimpleNamespace(block_size=16, cache_dtype="int8"),
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(),
+            hf_text_config=SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=0),
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2),
+        quant_config=None,
+    )
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {layer_name: layer})
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _cfg: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _cfg: False)
+    monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
+    monkeypatch.setattr(
+        attn_utils,
+        "get_ascend_config",
+        lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
+    )
+
+    spec = attn_utils.get_kv_cache_spec(vllm_config)[layer_name]
+    assert isinstance(spec, AscendMLAAttentionSpec)
+    assert spec.cache_sparse_sfa_c8
+    assert spec.head_size == 528
+    assert spec.dtype == torch.int8
+
+    num_blocks = 2
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[_make_kv_cache_tensor(num_blocks * spec.page_size_bytes, [layer_name], spec.page_size_bytes)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+    )
+    raw = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device=torch.device("cpu"))
+    assert isinstance(raw[layer_name], torch.Tensor)
+    assert raw[layer_name].numel() == num_blocks * spec.page_size_bytes
+    backend = SimpleNamespace(
+        get_kv_cache_shape=lambda blocks, block_size, heads, head_size, _dtype: (
+            blocks,
+            block_size,
+            heads,
+            head_size,
+        )
+    )
+    caches = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[
+            SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, layer_names=[layer_name], backend=backend)
+        ],
+        kv_cache_raw_tensors=raw,
+        cache_dtype="int8",
+        kernel_block_sizes=[spec.block_size],
+        shared_kv_cache_layers={},
+        kv_cache_config=kv_cache_config,
+    )
+    assert len(caches[layer_name]) == 1
+    assert caches[layer_name][0].shape == (num_blocks, spec.block_size, 1, 528)
+
+
 def test_v2_sparse_offload_marks_main_mla_cache_host_resident(monkeypatch):
     layer_name = "model.layers.0.self_attn.attn"
     vllm_config = SimpleNamespace(
@@ -1907,6 +1977,69 @@ def test_sfa_indexer_li_c4_allocates_and_reshapes_scale_views(monkeypatch):
     assert indexer_k.dtype == torch.uint8
     assert indexer_scale.shape == (num_blocks, spec.block_size, 1, 2, 2)
     assert indexer_scale.dtype == torch.float8_e8m0fnu
+
+
+def test_mrv2_reshapes_dcp_replicated_kpool_cache(monkeypatch):
+    layer_name = "model.layers.0.indexer.k_cache"
+    spec = AscendKPoolIndexerCacheSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        model_version="glm5_next",
+        tokens_per_state=4,
+        dcp_replication_size=2,
+    )
+    num_blocks = 3
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(
+                num_blocks * spec.page_size_bytes,
+                [layer_name],
+                spec.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+    )
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _cfg: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
+
+    raw = {layer_name: torch.empty(num_blocks * spec.page_size_bytes, dtype=torch.int8)}
+    backend = SimpleNamespace(
+        get_kv_cache_shape=lambda num_blocks_, block_size, num_kv_heads, head_size, *_args: (
+            num_blocks_,
+            block_size,
+            num_kv_heads,
+            head_size,
+        )
+    )
+    caches = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=spec,
+                layer_names=[layer_name],
+                backend=backend,
+            )
+        ],
+        kv_cache_raw_tensors=raw,
+        cache_dtype="auto",
+        kernel_block_sizes=[32],
+        shared_kv_cache_layers={},
+        kv_cache_config=kv_cache_config,
+    )
+
+    (indexer_cache,) = caches[layer_name]
+    assert indexer_cache.shape == (num_blocks * 2, 32, 1, 128)
+    assert indexer_cache.numel() * indexer_cache.element_size() == raw[layer_name].numel()
 
 
 def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
