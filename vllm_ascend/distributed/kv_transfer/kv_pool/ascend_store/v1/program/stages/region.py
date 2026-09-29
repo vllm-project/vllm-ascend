@@ -6,7 +6,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..representation import (
+from ..spec.topology import KVPoolGroupTopology, KVPoolTopology
+from ..values.representation import (
     KVBlockAssignmentBatch,
     KVMemoryGeometry,
     KVMemorySegment,
@@ -18,7 +19,6 @@ from ..representation import (
     RemoteObjectLayout,
     TransferLayoutBatch,
 )
-from ..spec.topology import KVPoolGroupTopology, KVPoolTopology
 
 
 class TransferRegionProjection(Protocol):

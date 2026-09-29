@@ -23,36 +23,38 @@ from vllm.logger import logger
 
 from ..protocol.lookup import LookupRequest, LookupResult
 from ..protocol.transfer import CheckpointStoreCommand, LoadCommand, StoreCommand
-from .invocation import (
-    BindingEvidence,
-    KVPoolStepFrame,
-    LoadCompletion,
-    LoadTransfer,
-    RemoteObjectObservation,
-    StoreCompletion,
-    StoreEvidence,
-    StoreTransfer,
-)
-from .representation import (
-    BindingBatch,
-    KVBinding,
-    KVMemoryGeometry,
-    RemoteObjectBatch,
-    RemoteObjectKeyBatch,
-    TransferLayoutBatch,
-)
 from .spec.schedule import KVPoolSchedule
 from .spec.topology import KVPoolTopology
-from .stages.admission import ObjectPresenceObserver, StoreAdmission
+from .stages.admission import StoreAdmission
 from .stages.block import CheckpointBlockResolution, LocalBlockResolution
 from .stages.chunk import CheckpointChunkProjection, SemanticChunkProjection
 from .stages.ownership import StoreOwnershipSelection
 from .stages.partition import RegionPartition
-from .stages.reachability import ChunkAvailability, GroupAvailability, ReachableRegionSelection
+from .stages.reachability import ReachableRegionSelection
 from .stages.region import TransferRegionProjection
 from .stages.remote import RemoteObjectProjection, project_remote_identities
+from .values.evidence import (
+    BindingEvidence,
+    ChunkAvailability,
+    GroupAvailability,
+    LoadCompletion,
+    LoadFailure,
+    RemoteObjectObservation,
+    StoreCompletion,
+    StoreEvidence,
+)
+from .values.representation import (
+    BindingBatch,
+    KVBinding,
+    KVMemoryGeometry,
+    RemoteKVObject,
+    RemoteObjectBatch,
+    RemoteObjectKeyBatch,
+    TransferLayoutBatch,
+)
+from .values.selection import LoadTransfer, StoreTransfer
 
-ReadabilityObserver = Callable[[RemoteObjectBatch], tuple[RemoteObjectObservation, ...]]
+ReadabilityObserver = Callable[[tuple[RemoteKVObject, ...]], tuple[RemoteObjectObservation, ...]]
 LoadBindings = Callable[[tuple[KVBinding, ...]], tuple[BindingEvidence, ...]]
 StoreBindings = Callable[[tuple[BindingBatch, ...]], StoreEvidence]
 
@@ -112,7 +114,7 @@ class KVPoolProgram:
         remote_objects = self._remote_object_projection.project_lookup(object_keys)
         for key_batch, object_batch in zip(object_keys, remote_objects, strict=True):
             try:
-                observations = observe_readability(object_batch)
+                observations = observe_readability(object_batch.remote_objects)
             except Exception as error:
                 logger.error("Remote Lookup failed. type=%s, error=%s", type(error).__name__, error)
                 return LookupResult(0)
@@ -120,32 +122,36 @@ class KVPoolProgram:
         reachable_prefix = self._reachable_region_selection.resolve_available_end(selection, availability)
         return LookupResult(reachable_prefix.end_token, reachable_prefix.tail_key_boundaries)
 
-    def build_load_transfers(self, frame: KVPoolStepFrame) -> list[LoadTransfer]:
-        return [self._build_load_transfer(command) for command in frame.step.load.commands]
+    def select_load_transfers(self, commands: tuple[LoadCommand, ...]) -> list[LoadTransfer]:
+        return [self._build_load_transfer(command) for command in commands]
 
     def execute_load(self, transfer: LoadTransfer, load_bindings: LoadBindings) -> LoadCompletion:
         return LoadCompletion(transfer.request_id, load_bindings(transfer.traversal))
 
-    def record_load_completion(self, frame: KVPoolStepFrame, completion: LoadCompletion) -> None:
-        failed_block_ids = {
+    def reduce_load_completion(self, completion: LoadCompletion) -> LoadFailure:
+        failed_block_ids = frozenset(
             evidence.binding.local_region.memory.block_id
             for evidence in completion.binding_evidence
             if evidence.result_code != 0
-        }
+        )
         if not failed_block_ids:
-            return
+            return LoadFailure()
         if len(self._topology.transfer_group_ids) > 1:
-            frame.failed_request_ids.add(completion.request_id)
-        else:
-            frame.failed_block_ids.update(failed_block_ids)
+            return LoadFailure(failed_request_ids=frozenset({completion.request_id}))
+        return LoadFailure(failed_block_ids=failed_block_ids)
 
-    def build_store_transfers(self, frame: KVPoolStepFrame) -> list[StoreTransfer]:
-        return [self._build_store_transfer(command) for command in frame.step.store.commands]
+    def select_store_transfers(self, commands: tuple[StoreCommand, ...]) -> list[StoreTransfer]:
+        return [self._build_store_transfer(command) for command in commands]
+
+    def store_admission_targets(self, transfers: list[StoreTransfer]) -> tuple[RemoteKVObject, ...]:
+        return self._store_admission.observation_targets(transfers)
 
     def admit_store_transfers(
-        self, transfers: list[StoreTransfer], observe_presence: ObjectPresenceObserver
+        self,
+        transfers: list[StoreTransfer],
+        observations: tuple[RemoteObjectObservation, ...],
     ) -> list[StoreTransfer]:
-        return self._store_admission.select(transfers, observe_presence)
+        return self._store_admission.select(transfers, observations)
 
     def _build_load_transfer(self, command: LoadCommand) -> LoadTransfer:
         selection = self._reachable_region_selection.select_for_load(command.block_hashes, command.load_range)

@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from ...protocol.transfer import CheckpointStoreCommand
-from ..representation import KVBlockAssignment, KVBlockAssignmentBatch, KVChunkBatch
 from ..spec.topology import KVPoolTopology
+from ..values.representation import KVBlockAssignment, KVBlockAssignmentBatch, KVChunkBatch
 
 
 class LocalBlockResolution:

@@ -8,7 +8,7 @@ from typing import TypeAlias
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 
-from ..coordinates import TokenRange
+from ...coordinates import TokenRange
 
 # ===============================
 # Semantic KV

@@ -15,9 +15,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from ...coordinates import TokenRange
 from ...protocol.lookup import TailKeyBoundary
 from ...protocol.transfer import CheckpointStoreCommand
-from ..representation import KVChunk, KVChunkBatch
 from ..spec.topology import KVPoolGroupTopology
-from .reachability import GroupSelection, KVSelection
+from ..values.representation import KVChunk, KVChunkBatch
+from ..values.selection import GroupSelection, KVSelection
 
 
 class SemanticChunkProjection:
