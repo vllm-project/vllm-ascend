@@ -146,7 +146,7 @@ class Collectives:
 
 
 @pytest.fixture
-def runtime():
+def runtime(monkeypatch):
     from collections.abc import Sequence
     from enum import Enum
 
@@ -155,6 +155,7 @@ def runtime():
     context.pp = SimpleNamespace(is_first_rank=True, is_last_rank=True)
     namespace = {
         "torch": torch,
+        "F": torch.nn.functional,
         "nn": nn,
         "BaseModel": BaseModel,
         "BaseDecoder": BaseDecoder,
@@ -191,7 +192,14 @@ def runtime():
         namespace,
     )
     namespace["make_pp_empty_intermediate_tensors"] = namespace["make_empty_intermediate_tensors"]
-    load_definitions("vllm_ascend/models/common/ops/sequence_parallel.py", {"sp_shard", "sp_padding_mask"}, namespace)
+    load_definitions(
+        "vllm_ascend/models/common/ops/sequence_parallel.py",
+        {"sp_shard", "sp_padding_mask", "_ascend_sp_shard_impl", "_ascend_sp_padding_mask_impl"},
+        namespace,
+    )
+    # Exercise the real kernels on CPU without PrivateUse1 dispatch or NPU initialization.
+    for name in ("ascend_sp_shard_impl", "ascend_sp_padding_mask_impl"):
+        monkeypatch.setattr(torch.ops.vllm, name, namespace[f"_{name}"], raising=False)
     load_definitions(
         "vllm_ascend/models/kimi_k3.py",
         {"_apply_ascend_attn_res", "AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP"},
