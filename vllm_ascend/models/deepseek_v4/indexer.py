@@ -108,13 +108,20 @@ def get_indexer_k_dtype(vllm_config: VllmConfig) -> torch.dtype:
     supports_compressed_cache = get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
     default_kv_dtype = "fp8" if supports_compressed_cache else "int8"
     indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(default_kv_dtype)
-    k_dtype = kv_cache_dtype_str_to_dtype(indexer_kv_dtype, vllm_config.model_config)
     expected_dtype = torch.float8_e4m3fn if supports_compressed_cache else torch.int8
-    if k_dtype != expected_dtype:
-        raise ValueError(
-            f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the DeepSeek V4 "
-            f"indexer on this platform; expected {default_kv_dtype!r}."
-        )
+    error_msg = (
+        f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the DeepSeek V4 "
+        f"indexer on this platform; expected {default_kv_dtype!r}."
+    )
+    try:
+        k_dtype = kv_cache_dtype_str_to_dtype(indexer_kv_dtype, vllm_config.model_config)
+        dtype_is_supported = k_dtype == expected_dtype
+    except KeyError:
+        # Unknown indexer_kv_dtype string (e.g. not present in
+        # STR_DTYPE_TO_TORCH_DTYPE for this vllm version).
+        dtype_is_supported = False
+    if not dtype_is_supported:
+        raise ValueError(error_msg)
     return k_dtype
 
 
