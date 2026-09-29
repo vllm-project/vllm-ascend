@@ -771,6 +771,7 @@ class NPUModelRunner(GPUModelRunner):
         # a run without the feature pays nothing. ``initialize_kv_cache`` fills
         # it in once the groups are final.
         self.prefix_replay_tokens = 0
+        self._replay_starts: dict[str, int] = {}
         # Per-request replay start: 0 for every request that is not replaying,
         # else where that request's replayed run begins. Rebuilt on the CPU as
         # part of the step and copied with the same pinned, non-blocking rhythm
@@ -973,6 +974,7 @@ class NPUModelRunner(GPUModelRunner):
         ).unsqueeze(1)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        self._update_replay_requests(scheduler_output)
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
@@ -1292,58 +1294,54 @@ class NPUModelRunner(GPUModelRunner):
 
         self.maybe_save_ec_to_connector({mm_hash: output}, mm_hash)
 
-    def _fill_replay_start(self, scheduler_output: "SchedulerOutput", num_reqs: int) -> torch.Tensor | None:
-        """Per-request replay start for a step that replays.
+    def _update_replay_requests(self, scheduler_output: "SchedulerOutput") -> None:
+        """Keep replay boundaries across chunks, replacing them on readmission."""
+        if not self.prefix_replay_tokens:
+            return
+        for req_id in scheduler_output.finished_req_ids:
+            self._replay_starts.pop(req_id, None)
+        for req in scheduler_output.scheduled_new_reqs:
+            self._replay_starts.pop(req.req_id, None)
+            if req.replay_start:
+                self._replay_starts[req.req_id] = req.replay_start
+        cached = scheduler_output.scheduled_cached_reqs
+        for req_id in cached.resumed_req_ids:
+            # The resume payload omits zero boundaries. A resume without a
+            # fresh hit must discard the boundary from the previous admission.
+            self._replay_starts.pop(req_id, None)
+            start = cached.replay_start.get(req_id, 0)
+            if start:
+                self._replay_starts[req_id] = start
 
-        The value is the scheduler's, passed through unchanged: it is both the
-        lower bound a replayed request's sliding window gets clamped to and,
-        together with the window, where the cacheable groups stop writing KV. A
-        replayed request recomputes ``[replay_start, replay_start + window)`` so
-        the window KV can be rebuilt; past that everything is new, so the
-        cacheable groups pad their slots -- that KV already exists and is shared
-        with every other request that hit the same prefix (see
-        ``MultiGroupBlockTable.pad_replayed_slots``).
+    def _fill_replay_start(self, num_reqs: int) -> torch.Tensor | None:
+        """Gather saved boundaries for chunks still inside the replay window.
 
-        Returns None on every step that has nothing to replay, or when no KV
-        cache group declares a replay window at all -- the caller then skips the
-        PAD pass entirely. The device buffer is still what the step's attention
-        metadata reads, so it is rebuilt and copied either way.
+        The window can span multiple scheduled chunks. Once a chunk starts at
+        or beyond its end, no cached slots need padding and the natural SWA
+        lower bound is already at or beyond the replay start. Checking token
+        positions also covers replay of generated tokens after preemption.
         """
         if not self.prefix_replay_tokens:
             self._replay_active = False
             return None
 
-        def _replay_starts():
-            for req in scheduler_output.scheduled_new_reqs:
-                yield req.req_id, req.replay_start
-            # The V1 runner resumes a preempted request through
-            # CachedRequestData; the field is added there by
-            # patch_swa_bounded_replay.
-            yield from scheduler_output.scheduled_cached_reqs.replay_start.items()
-
-        # Rebuilt from zero every step rather than patched in place, so a
-        # request stops replaying the moment the scheduler stops naming it and a
-        # padded (graph) row cannot inherit a write start from an earlier step.
-        # That is also what replaces upstream's ``is_prefilling`` filter: only a
-        # freshly admitted request is ever named, and only when the scheduler
-        # rewound that admission.
         self.replay_start.np.fill(0)
         replaying = False
-        req_id_to_index = self.input_batch.req_id_to_index
-        for req_id, start in _replay_starts():
+        for req_id, index in self.input_batch.req_id_to_index.items():
+            if index >= num_reqs:
+                continue
+            start = self._replay_starts.get(req_id, 0)
             if not start:
                 continue
-            index = req_id_to_index.get(req_id)
-            # A request can leave the batch between the scheduler's decision and
-            # this step; it must not land its value on another request's row.
-            if index is not None and index < num_reqs:
+            computed = self.input_batch.num_computed_tokens_cpu[index]
+            if start <= computed < start + self.prefix_replay_tokens:
                 self.replay_start.np[index] = start
                 replaying = True
-        # Copy the whole buffer, not just num_reqs, for the reason above.
+            else:
+                # Finished replay, or a recompute rewound below its boundary.
+                self._replay_starts.pop(req_id, None)
+        # Clear padded rows too so batch reordering cannot retain an old bound.
         self.replay_start.copy_to_gpu()
-        # Host-side answer to "did this step replay", so that the attention
-        # metadata can say None instead of handing the builder a device tensor
-        # it would have to read back -- a synchronization on the prefill path.
         self._replay_active = replaying
         return self.replay_start.gpu[:num_reqs] if replaying else None
 
@@ -1701,7 +1699,7 @@ class NPUModelRunner(GPUModelRunner):
         if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
             self._correct_optimistic_seq_lens_cpu(num_reqs)
 
-        replay_start = self._fill_replay_start(scheduler_output, num_reqs)
+        replay_start = self._fill_replay_start(num_reqs)
 
         self.input_batch.block_table.compute_slot_mapping(
             num_reqs,
