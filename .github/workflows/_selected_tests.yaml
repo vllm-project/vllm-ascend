@@ -242,6 +242,19 @@ jobs:
             uv pip install -e . --no-build-isolation
           fi
 
+      - name: Prepare bundled MemFabric version for Copy-SFA offload test
+        if: ${{ matrix.group.npu_type == 'a3' && contains(matrix.group.tests, 'tests/e2e/pull_request/four_card/test_copy_sfa_pd_offload.py') }}
+        env:
+          # Match the prebuilt dependencies in the nightly A3 image. The
+          # source install above otherwise pins MemFabric back to 1.2.0.
+          MEMFABRIC_VERSION: "1.3.0"
+          MEMFABRIC_DATE: "20260923.6"
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+        run: |
+          python3 -m pip install --no-deps \
+            "https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/mf/master/${MEMFABRIC_DATE}/memfabric_hybrid-${MEMFABRIC_VERSION}-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl"
+          mfcli kernel install --soc-version A3
+
       - name: Verify required AscendC custom ops are registered (310p)
         if: ${{ matrix.group.npu_type == '310p' }}
         run: |

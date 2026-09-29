@@ -20,149 +20,89 @@ model families:
 
 Other sparse-attention models have not been validated.
 
-## 1. Install Dependencies
+## 1. Use the Bundled Dependencies
 
-The installation steps are grouped by hardware. A3 and 950PR&950DT Products are supported.
-On 950PR&950DT Products nodes, set the MemFabric transfer protocol to `device_urma` as described
-in sections 2 and 3.
+Use a current vLLM-Ascend image with **MemFabric Hybrid 1.3.0 and Memcache
+Hybrid 1.3.0**, such as `quay.nju.edu.cn/ascend/vllm-ascend:nightly-main-a3`
+for A3. The image includes the offload libraries and fused Copy-SFA operators.
+No additional source builds, dependency reinstalls, `set_env.sh` scripts, or
+manual `MEMFABRIC_HYBRID_EXTEND_LIB_PATH`/`LD_LIBRARY_PATH` overrides are needed.
 
-### Prefill Build Dependencies
+Check the packages **inside each running container**:
 
-=== "A3 series"
+```bash
+python -m pip show memfabric-hybrid memcache-hybrid
+```
 
-    Prefill requires MemFabric Hybrid and Memcache Hybrid. Install them in this
-    order.
+Use the same image version on Prefill and Decode. The nightly tag is mutable:
+pulling it does not update an existing container. Recreate containers from the
+new image and compare their image IDs when upgrading. Do not carry over
+library-path overrides from an older source-installed MemFabric environment.
 
-    #### MemFabric Hybrid
+MemFabric is required on both roles. Memcache is used only when Prefill
+layerwise offload is enabled through `AscendStoreConnector`. A regular Prefill
+worker paired with sparse Decode offload does not need a Memcache service.
 
-    Install MemFabric Hybrid release 1.2 on every Prefill node. This release
-    requires NPU driver `25.5.1` or later.
+On 950PR&950DT Products, use the corresponding image and select `device_urma`
+on both roles as described below; the A3 examples use `sdma`.
 
-    ```bash
-    pip uninstall -y memfabric_hybrid
-    git clone -b release/1.2 https://gitcode.com/Ascend/memfabric_hybrid.git
-    cd memfabric_hybrid
-    bash script/build_and_pack_run.sh
-    bash output/memfabric_hybrid-1.2.0_linux_aarch64.run
-    ```
+### Memcache Configuration for Layerwise Prefill Offload
 
-    #### Memcache Hybrid
+Skip this subsection when Prefill keeps its regular device KV cache.
+For layerwise Prefill offload, create `mmc-meta.conf`:
 
-    Install Memcache Hybrid after MemFabric Hybrid:
+```ini
+ock.mmc.meta_service_url = tcp://<META_HOST>:5000
+ock.mmc.meta_service.config_store_url = tcp://<CONFIG_STORE_HOST>:6000
+ock.mmc.meta.lease_ttl_ms = 30000
+ock.mmc.log_level = error
+```
 
-    ```bash
-    git clone https://gitcode.com/Ascend/memcache.git
-    cd memcache
-    git submodule update --recursive --init
-    git -c submodule.3rdparty/memfabric_hybrid.branch=release/1.2 \
-        submodule update --remote --recursive 3rdparty/memfabric_hybrid
-    bash script/build_and_pack_run.sh --build_mode RELEASE
-    bash output/memcache_hybrid-*_linux_aarch64.run
-    ```
+Create `mmc-local.conf` on every Prefill node:
 
-    Configure `mmc-meta.conf`:
+```ini
+ock.mmc.meta_service_url = tcp://<META_HOST>:5000
+ock.mmc.local_service.config_store_url = tcp://<CONFIG_STORE_HOST>:6000
+ock.mmc.log_level = error
+ock.mmc.local_service.world_size = 256
+ock.mmc.local_service.protocol = device_sdma
+ock.mmc.local_service.dram.size = 10GB
+```
 
-    ```ini
-    ock.mmc.meta_service_url = tcp://<META_HOST>:5000
-    ock.mmc.meta_service.config_store_url = tcp://<CONFIG_STORE_HOST>:6000
-    ock.mmc.meta.lease_ttl_ms = 30000
-    ock.mmc.log_level = error
-    ```
+The two files must use the same MetaService endpoint. The LocalService Config
+Store endpoint must match the MetaService Config Store endpoint.
 
-    Configure `mmc-local.conf` on every Prefill node:
+- Set `world_size` to the maximum supported LocalService rank count.
+- Use `device_sdma` with HCCS on A3.
+- Size `dram.size` for the required KV cache per Prefill rank, rounded up to GiB.
 
-    ```ini
-    ock.mmc.meta_service_url = tcp://<META_HOST>:5000
-    ock.mmc.local_service.config_store_url = tcp://<CONFIG_STORE_HOST>:6000
-    ock.mmc.log_level = error
-    ock.mmc.local_service.world_size = 256
-    ock.mmc.local_service.protocol = device_sdma
-    ock.mmc.local_service.dram.size = 10GB
-    ```
+Start MetaService in a separate process, using your configuration file:
 
-    The two files must use the same MetaService endpoint. The LocalService
-    Config Store endpoint must match the MetaService Config Store endpoint.
-
-    - Set `world_size` to the maximum supported LocalService rank count.
-    - Use `device_sdma` with HCCS.
-    - Set `dram.size` to at least the total KV cache size required by the target
-      sequence length and concurrency divided by the number of Prefill ranks.
-      Round the result up to a whole GiB.
-
-    > **Note:** The configuration paths below assume Python 3.11.10. If you use
-    > another Python version, replace the Python installation and
-    > `site-packages` directories with those of the active environment. Locate
-    > its `site-packages` directory with:
-    >
-    > `python -c "import site; print(site.getsitepackages())"`
-
-    Start MetaService in a separate process:
-
-    ```bash
-    source /usr/local/memcache_hybrid/set_env.sh
-    source /usr/local/memfabric_hybrid/set_env.sh
-    export MMC_META_CONFIG_PATH=/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/latest/config/mmc-meta.conf
+```bash
+MMC_META_CONFIG_PATH="$PWD/mmc-meta.conf" \
     python -c "from memcache_hybrid import MetaService; MetaService.main()"
-    ```
+```
 
-    Prepare every Prefill node before starting vLLM:
+Before starting each layerwise Prefill worker, select its configuration:
 
-    ```bash
-    source /usr/local/memcache_hybrid/set_env.sh
-    source /usr/local/memfabric_hybrid/set_env.sh
-    export MMC_LOCAL_CONFIG_PATH=/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/latest/config/mmc-local.conf
-    export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
-    export PYTHONHASHSEED=0
-    ```
+```bash
+export MMC_LOCAL_CONFIG_PATH="$PWD/mmc-local.conf"
+export PYTHONHASHSEED=0
+```
 
-### Decode Build Dependencies
+These variables configure the service; they do not replace the image's bundled
+libraries.
 
-=== "A3 series"
+### Fused Copy-SFA Operators
 
-    > **Important:** MemFabric Hybrid release 1.2 must be installed on both
-    > Prefill and Decode nodes. Memcache Hybrid is required only on Prefill.
+The image's `_C_ascend` extension provides `npu_fused_lightning_indexer_manage`
+and `npu_fused_scatter_copy_sparse_flash_attention`. No separate operator build
+is needed. Enable them with `fused_op_type="fused_copy_sfa"` as described in
+[Enable Fused LIM and Copy-SFA](#enable-fused-lim-and-copy-sfa).
 
-    Use the same MemFabric Hybrid build and installation commands shown above.
-    Decode also requires Clang and OpenMP. Prepare every Decode node:
-
-    ```bash
-    source /usr/local/memfabric_hybrid/set_env.sh
-    export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
-    clang --version
-    ls "$(clang --print-resource-dir)/include/omp.h"
-    ```
-
-    If Clang or OpenMP is missing:
-
-    ```bash
-    apt-get update
-    apt-get install -y clang libomp-dev
-    ```
-
-    If the image provides a specific Clang version, install the matching OpenMP
-    package, for example `libomp-17-dev` for Clang 17.
-
-### Optional Fused Copy-SFA Operators
-
-With `sparse_kv_offload_config.fused_op_type="fused_copy_sfa"`, the Python integration requires
-these operators in the installed `_C_ascend` extension:
-
-- `npu_fused_lightning_indexer_manage`
-- `npu_fused_scatter_copy_sparse_flash_attention`
-
-The expected interfaces are from
-[vLLM-Ascend PR #16640](https://github.com/vllm-project/vllm-ascend/pull/16640),
-revision `a9823977149172f1604d9f2a1937224d0b11646e`. This branch carries the
-Python integration; it does not bundle these native kernels, their bindings,
-or LIM C8. An operator-enabled native build is required to run the fused_copy_sfa path.
-
-Copy-SFA receives `dram_k_rope` and `dram_kv_cache` as CPU tensor views backed
-by registered MemFabric memory. Its native adapter must permit those CPU views;
-the referenced PR revision needs this device-check adjustment. The remaining
-inputs stay on NPU. Ordinary CPU allocations are not valid replacements for
-registered DRAM, and the Python integration does not move the host cache to NPU.
-
-For launch settings, see [Enable Fused LIM and Copy-SFA](#enable-fused-lim-and-copy-sfa).
+Copy-SFA consumes CPU views backed by registered MemFabric memory. Ordinary
+CPU allocations are not substitutes for this offload pool; the Python
+integration does not copy the full host cache back to NPU.
 
 ## 2. Layerwise KV Cache Offload on Prefill
 
@@ -230,6 +170,27 @@ The following log confirms that buffer reuse is enabled:
 Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... buffer assignments.
 ```
 
+### Regular Prefill with Decode-Only Offload
+
+To keep Prefill KV entirely on device, omit `AscendStoreConnector` and its
+shared-buffer settings. Use only:
+
+```bash
+--enforce-eager \
+--kv-transfer-config '{
+    "kv_connector": "SfaRemoteD2HConnector",
+    "kv_role": "kv_producer",
+    "kv_port": 20000,
+    "kv_connector_extra_config": {
+        "transfer_backend": "memfabric"
+    }
+}'
+```
+
+Do not enable `sparse_kv_offload_config` on Prefill. Pair this producer with the
+Decode configuration below and the layerwise proxy in section 4. No Memcache
+MetaService or LocalService configuration is required for this mode.
+
 ## 3. Sparse KV Cache Offload on Decode
 
 Requirements:
@@ -275,8 +236,7 @@ On 950PR&950DT Products nodes, add `"memfabric_transfer_protocol": "device_urma"
 
 ### Enable Fused LIM and Copy-SFA
 
-After installing the [optional native operators](#optional-fused-copy-sfa-operators),
-set the following fields in the Decode node's `--additional-config`. This
+With the [bundled native operators](#fused-copy-sfa-operators), set the following fields in the Decode node's `--additional-config`. This
 example supports MTP3:
 
 ```json
@@ -293,7 +253,7 @@ example supports MTP3:
 ```
 
 Merge this object with any existing additional settings and pass
-`--additional-config` once. Keep the Prefill configuration from section 2;
+`--additional-config` once. Choose either Prefill configuration from section 2;
 enable these fused operators only on Decode in a PD deployment.
 
 The fused path has these additional requirements:
@@ -318,7 +278,7 @@ The fused path has these additional requirements:
 For example, the following A3 Decode command uses GLM-5.2 W4A8 with DP2 TP8,
 MTP3, and `FULL_DECODE_ONLY` target graphs. Replace the model path and size
 the model length, concurrency and host-cache budget for your deployment.
-The command assumes the dependency environment from section 1 is already set.
+The command assumes the image and package versions from section 1.
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=0 vllm serve /path/to/GLM-5.2-w4a8 \
