@@ -103,8 +103,12 @@ c10::optional<at::Tensor> get_npu_view_from_cpu_tensor(const at::Tensor& cpu_ten
     }
     // Query the registered storage base, then apply the logical tensor offset.
     // torch_npu's host allocator remains the sole register/unregister owner.
-    void* mapped_base = nullptr;
     const auto* host_base = cpu_tensor.storage().data_ptr().get();
+    if (host_base == nullptr) {
+        return c10::nullopt;
+    }
+    c10_npu::NPUGuard guard(npu_device);
+    void* mapped_base = nullptr;
     const aclError ret = aclrtHostGetDevicePointer(const_cast<void*>(host_base), &mapped_base, 0);
     if (ret != ACL_SUCCESS || mapped_base == nullptr) {
         return c10::nullopt;
