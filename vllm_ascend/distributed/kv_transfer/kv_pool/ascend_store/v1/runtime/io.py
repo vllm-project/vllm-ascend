@@ -9,8 +9,8 @@ from typing import Any
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
 from ..backend import BackendSpec
-from ..program.invocation import BindingEvidence, RemoteObjectObservation, StoreEvidence
-from ..program.representation import BindingBatch, KVBinding, RemoteObjectBatch
+from ..program.values.evidence import BindingEvidence, RemoteObjectObservation, StoreEvidence
+from ..program.values.representation import BindingBatch, KVBinding, RemoteKVObject
 
 
 class BackendIO:
@@ -23,21 +23,18 @@ class BackendIO:
     def initialize_thread(self) -> None:
         self._backend.set_device()
 
-    def observe_readability(self, batch: RemoteObjectBatch) -> tuple[RemoteObjectObservation, ...]:
-        if not batch.remote_objects:
+    def observe_objects(self, remote_objects: tuple[RemoteKVObject, ...]) -> tuple[RemoteObjectObservation, ...]:
+        if not remote_objects:
             return ()
-        presence = tuple(self._backend.exists([remote_object.key for remote_object in batch.remote_objects]))
-        if len(presence) != len(batch.remote_objects):
-            raise ValueError(f"Lookup returned {len(presence)} results for {len(batch.remote_objects)} remote objects")
+        presence = tuple(self._backend.exists([remote_object.key for remote_object in remote_objects]))
+        if len(presence) != len(remote_objects):
+            raise ValueError(f"Backend returned {len(presence)} results for {len(remote_objects)} remote objects")
         if any(value not in (0, 1) for value in presence):
-            raise ValueError("Lookup returned states other than 0 or 1")
+            raise ValueError("Backend returned object states other than 0 or 1")
         return tuple(
             RemoteObjectObservation(remote_object, value == 1)
-            for remote_object, value in zip(batch.remote_objects, presence, strict=True)
+            for remote_object, value in zip(remote_objects, presence, strict=True)
         )
-
-    def observe_presence(self, keys: list[str]) -> tuple[int, ...]:
-        return tuple(self._backend.exists(keys))
 
     def load(self, bindings: tuple[KVBinding, ...]) -> tuple[BindingEvidence, ...]:
         if not bindings:

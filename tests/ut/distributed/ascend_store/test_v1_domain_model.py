@@ -48,31 +48,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.compile
     ProgramCompilationError,
     compile_kv_pool_program,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.invocation import (
-    LoadCompletion,
-    LoadTransfer,
-    StoreTransfer,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.program import (
     KVPoolProgram,
     _bind_transfer_layouts,
     _order_load_traversal,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.representation import (
-    BindingBatch,
-    KVBinding,
-    KVChunk,
-    KVMemoryGeometry,
-    KVMemorySegment,
-    KVMemoryView,
-    KVRegion,
-    KVTransferLayout,
-    LocalKVRegion,
-    PhysicalCoordinate,
-    RemoteKVObject,
-    RemoteObjectKeyBatch,
-    RemoteObjectLayout,
-    TransferLayoutBatch,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.compilation import (
     KVPoolCompilationSpec,
@@ -111,12 +90,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.
     PipelineRegionPartition,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.reachability import (
-    ChunkAvailability,
-    GroupAvailability,
-    GroupSelection,
     HybridReachability,
-    KVSelection,
-    ReachablePrefix,
     UnitaryReachability,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.region import (
@@ -128,6 +102,35 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.remote import (
     RemoteObjectProjection,
     project_remote_identities,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.evidence import (
+    ChunkAvailability,
+    GroupAvailability,
+    LoadCompletion,
+    ReachablePrefix,
+    RemoteObjectObservation,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.representation import (
+    BindingBatch,
+    KVBinding,
+    KVChunk,
+    KVMemoryGeometry,
+    KVMemorySegment,
+    KVMemoryView,
+    KVRegion,
+    KVTransferLayout,
+    LocalKVRegion,
+    PhysicalCoordinate,
+    RemoteKVObject,
+    RemoteObjectKeyBatch,
+    RemoteObjectLayout,
+    TransferLayoutBatch,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.selection import (
+    GroupSelection,
+    KVSelection,
+    LoadTransfer,
+    StoreTransfer,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import (
     LookupCodec,
@@ -663,25 +666,24 @@ def test_backend_existence_admission_selects_final_store_bindings() -> None:
         StoreTransfer("existing", (existing_batch,)),
         StoreTransfer("missing", (BindingBatch(0, (missing_binding,)),)),
     ]
-    observed_keys = []
+    admission = BackendExistenceStoreAdmission()
+    targets = admission.observation_targets(transfers)
+    observations = (
+        RemoteObjectObservation(targets[0], True),
+        RemoteObjectObservation(targets[1], False),
+    )
+    admitted = admission.select(transfers, observations)
 
-    def observe_presence(keys):
-        observed_keys.extend(keys)
-        return (1, 0)
-
-    admitted = BackendExistenceStoreAdmission().select(transfers, observe_presence)
-
-    assert observed_keys == ["key", "missing"]
+    assert [target.key for target in targets] == ["key", "missing"]
     assert admitted[0].batches[0].bindings == ()
     assert admitted[1].batches[0].bindings == (missing_binding,)
 
 
-@pytest.mark.parametrize("presence", [(), (2,)])
-def test_backend_existence_admission_rejects_invalid_observations(presence) -> None:
+def test_backend_existence_admission_rejects_mismatched_observations() -> None:
     transfers = [StoreTransfer("request", (make_binding_batch(),))]
 
-    with pytest.raises(RuntimeError, match="Store exists returned"):
-        BackendExistenceStoreAdmission().select(transfers, lambda _keys: presence)
+    with pytest.raises(RuntimeError, match="Store observations"):
+        BackendExistenceStoreAdmission().select(transfers, ())
 
 
 def make_partition_config(*, role="kv_consumer", layers=10, **extra_config):
@@ -1671,6 +1673,16 @@ def test_backend_io_keeps_results_attached_to_exact_bindings() -> None:
     outcomes = BackendIO(backend, make_backend_spec()).load(make_binding_batch().bindings)
     assert outcomes[0].binding == make_binding_batch().bindings[0]
     assert outcomes[0].result_code == 0
+
+
+@pytest.mark.parametrize("presence", [(), (2,)])
+def test_backend_io_rejects_invalid_object_observations(monkeypatch, presence) -> None:
+    backend = FakeBackend()
+    monkeypatch.setattr(backend, "exists", lambda _keys: presence)
+    remote_object = make_binding_batch().bindings[0].remote_object
+
+    with pytest.raises(ValueError, match="Backend returned"):
+        BackendIO(backend, make_backend_spec()).observe_objects((remote_object,))
 
 
 @pytest.mark.parametrize("native_result", [None, [0, 0]])
@@ -2865,9 +2877,7 @@ def test_program_projects_boundary_state_from_the_exact_handed_off_block() -> No
         KVPoolSchedule(LoadScheduleKind.SYNC, StoreScheduleKind.ASYNC, 2),
     )
     command = CheckpointStoreCommand("request", ((7,),), (b"a",), 0, (StateCheckpointSource(0, 7, 4),), store_job_id=3)
-    frame = SimpleNamespace(step=KVTransferStep(store=StoreCommandBatch((command,))))
-
-    transfer = program.build_store_transfers(frame)[0]
+    transfer = program.select_store_transfers((command,))[0]
 
     assert transfer.store_job_id == 3
     assert transfer.batches[0].bindings[0].local_region.memory.block_id == 7
@@ -2897,9 +2907,7 @@ def test_program_projects_other_groups_needed_by_a_sub_block_mamba_boundary() ->
         KVPoolSchedule(LoadScheduleKind.SYNC, StoreScheduleKind.ASYNC, 2),
     )
     command = CheckpointStoreCommand("request", ((3,), (11,)), (b"a",), 0, (StateCheckpointSource(1, 11, 4),))
-    frame = SimpleNamespace(step=KVTransferStep(store=StoreCommandBatch((command,))))
-
-    transfer = program.build_store_transfers(frame)[0]
+    transfer = program.select_store_transfers((command,))[0]
 
     bindings_by_group = {batch.group_id: batch.bindings for batch in transfer.batches}
     assert set(bindings_by_group) == {0, 1}
