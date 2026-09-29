@@ -1,7 +1,7 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 # isort: off
 import torch
@@ -55,7 +55,9 @@ class TestAscendConfig(unittest.TestCase):
 
     def test_init_eplb_config_with_eplb(self):
         eplb_config = init_ascend_config(self.vllm_config).eplb_config
-        _, expert_map, log2phy, redundant_experts, phys_to_logical = init_eplb_config(eplb_config, 0, self.moe_config)
+        _, expert_map, log2phy, redundant_experts, phys_to_logical, _ = init_eplb_config(
+            eplb_config, 0, self.moe_config
+        )
         # Full-length physical map: entry p is this rank's slot of physical
         # expert p (-1 when not owned), covering the redundant tail too.
         # rank 1 owns physical experts 5..9 in slots 0..4.
@@ -67,12 +69,49 @@ class TestAscendConfig(unittest.TestCase):
         self.assertTrue(torch.equal(phys_to_logical, gt_phys_to_logical))
         self.assertEqual(redundant_experts, 2)
 
+    def test_log2phy_rank_independent_keeps_exactly_once_execution(self):
+        # Bug 6: the ALLGATHER MoE all-reduces the per-rank partials, so every
+        # logical expert must be executed by exactly one rank. The rotated map
+        # (MC2/ALLTOALL) selects a copy per rank; the rank-independent map
+        # (ALLGATHER) must select the same copy on every rank.
+        eplb_config = init_ascend_config(self.vllm_config).eplb_config
+        per_rank = {}
+        for ep_rank in (0, 1):
+            with patch.object(type(self.moe_config), "ep_rank", new_callable=PropertyMock, return_value=ep_rank):
+                _, expert_map, _, _, _, log2phy_independent = init_eplb_config(eplb_config, 0, self.moe_config)
+            per_rank[ep_rank] = (expert_map.cpu(), log2phy_independent)
+
+        # The rank-independent map is identical on every rank ...
+        independent = per_rank[0][1]
+        self.assertTrue(torch.equal(per_rank[1][1], independent))
+        # ... and exactly one rank owns each selected physical expert.
+        for logical in range(8):
+            physical = int(independent[logical])
+            owners = sum(int(per_rank[rank][0][physical].item()) != -1 for rank in (0, 1))
+            self.assertEqual(owners, 1, f"logical expert {logical} -> physical {physical}")
+
+    def test_generate_log2phy_map_rank_independent_is_global(self):
+        # The rank-independent rule must not depend on the evaluating rank.
+        placement = torch.tensor([[0, 1, 2, 3, 4], [5, 6, 7, 0, 1]], dtype=torch.int32)
+        phys_to_logical = placement.reshape(-1)
+        rows = []
+        offset = 0
+        for row in placement:
+            physical_map = torch.full((10,), -1, dtype=torch.int32)
+            physical_map[offset : offset + row.shape[0]] = torch.arange(row.shape[0], dtype=torch.int32)
+            offset += row.shape[0]
+            rows.append(physical_map)
+
+        rank0 = generate_log2phy_map(rows, ep_rank=0, phys_to_logical=phys_to_logical, rank_independent_replica=True)
+        rank1 = generate_log2phy_map(rows, ep_rank=1, phys_to_logical=phys_to_logical, rank_independent_replica=True)
+        self.assertTrue(torch.equal(rank0, rank1))
+
     def test_allgather_mask_indexing_covers_physical_topk_ids(self):
         # Regression test for issue #14080: TokenDispatcherWithAllGather
         # indexes expert_map with log2phy-mapped (physical) topk_ids, so the
         # map must cover the whole physical ID range [0, num_experts).
         eplb_config = init_ascend_config(self.vllm_config).eplb_config
-        _, expert_map, log2phy, redundant_experts, _ = init_eplb_config(eplb_config, 0, self.moe_config)
+        _, expert_map, log2phy, redundant_experts, _, _ = init_eplb_config(eplb_config, 0, self.moe_config)
         logical_topk_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int64)
         # Index on the map's own device: the map is on the execution device
         # while log2phy may be CPU under the npu no-op patch.
@@ -100,7 +139,9 @@ class TestAscendConfig(unittest.TestCase):
         _TEST_DIR = os.path.dirname(__file__)
         self.vllm_config.additional_config["eplb_config"]["expert_map_path"] = _TEST_DIR + "/expert_map.json"
         eplb_config = init_ascend_config(self.vllm_config).eplb_config
-        _, expert_map, log2phy, redundant_experts, phys_to_logical = init_eplb_config(eplb_config, 0, self.moe_config)
+        _, expert_map, log2phy, redundant_experts, phys_to_logical, _ = init_eplb_config(
+            eplb_config, 0, self.moe_config
+        )
         # Static EPLB placement [7,2,0,3,5] / [6,1,4,7,2]: the redundant
         # physical tail (IDs 8,9) replicates logical experts 7 and 2. The map
         # is positional (rank 1 owns physical 5..9 in slots 0..4); the layout
@@ -179,7 +220,9 @@ class TestAscendConfig(unittest.TestCase):
     def test_init_eplb_config_without_eplb(self):
         self.vllm_config.additional_config = {"refresh": True}
         eplb_config = init_ascend_config(self.vllm_config).eplb_config
-        _, expert_map, log2phy, redundant_experts, phys_to_logical = init_eplb_config(eplb_config, 0, self.moe_config)
+        _, expert_map, log2phy, redundant_experts, phys_to_logical, _ = init_eplb_config(
+            eplb_config, 0, self.moe_config
+        )
         gt_expert_map = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3])
         self.assertIsNone(log2phy)
         self.assertIsNone(phys_to_logical)
@@ -202,8 +245,8 @@ class TestLinearExpertMapCache(unittest.TestCase):
         base_map = torch.tensor([0, 1, 2, 3, -1, -1, -1, -1], dtype=torch.int32)
 
         with patch.object(eplb_utils, "determine_expert_map", return_value=(4, base_map, None)) as mock_determine:
-            _, first, _, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
-            _, second, _, _, _ = init_eplb_config(self.eplb_config, 1, self.moe_config)
+            _, first, _, _, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
+            _, second, _, _, _, _ = init_eplb_config(self.eplb_config, 1, self.moe_config)
 
         mock_determine.assert_called_once()
         self.assertTrue(torch.equal(first.cpu(), base_map))
@@ -213,8 +256,8 @@ class TestLinearExpertMapCache(unittest.TestCase):
         base_map = torch.tensor([0, 1, 2, 3, -1, -1, -1, -1], dtype=torch.int32)
 
         with patch.object(eplb_utils, "determine_expert_map", return_value=(4, base_map, None)):
-            _, first, _, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
-            _, second, _, _, _ = init_eplb_config(self.eplb_config, 1, self.moe_config)
+            _, first, _, _, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
+            _, second, _, _, _, _ = init_eplb_config(self.eplb_config, 1, self.moe_config)
 
         self.assertIsNot(first, second)
         first[0] = -1
@@ -226,9 +269,9 @@ class TestLinearExpertMapCache(unittest.TestCase):
         rank1 = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3], dtype=torch.int32)
 
         with patch.object(eplb_utils, "determine_expert_map", side_effect=[(4, rank0, None), (4, rank1, None)]):
-            _, first, _, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
+            _, first, _, _, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
             self.moe_config.ep_rank = 1
-            _, second, _, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
+            _, second, _, _, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
 
         self.assertTrue(torch.equal(first.cpu(), rank0))
         self.assertTrue(torch.equal(second.cpu(), rank1))
@@ -236,7 +279,7 @@ class TestLinearExpertMapCache(unittest.TestCase):
 
     def test_none_map_is_not_cloned(self):
         with patch.object(eplb_utils, "determine_expert_map", return_value=(0, None, None)):
-            _, expert_map, log2phy, redundant, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
+            _, expert_map, log2phy, redundant, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
 
         self.assertIsNone(expert_map)
         self.assertIsNone(log2phy)
