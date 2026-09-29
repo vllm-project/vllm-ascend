@@ -3154,12 +3154,18 @@ class KVPoolWorker:
                 self.block_size,
                 self.token_database.hash_block_size,
             )
-            for relative_idx, (start, end, _base_key) in enumerate(
-                self.token_database.process_tokens(
-                    token_len,
-                    req_meta.block_hashes,
-                    mask_num=save_start_token,
-                )
+            # Match the block selection and ordering used to build PUT keys.
+            # PCP ranks own disjoint blocks, including when retrying a suffix.
+            store_chunks = self.token_database.process_token_key_strings_with_block_ids(
+                token_len,
+                req_meta.block_hashes,
+                block_ids,
+                mask_num=0,
+                shard_rank=self.pcp_rank,
+                shard_size=self.pcp_size,
+            )
+            for relative_idx, (start, end, _base_key, _hash, _block_id) in enumerate(
+                chunk for chunk in store_chunks if chunk[1] > save_start_token
             ):
                 if relative_idx not in completed_block_indices:
                     continue

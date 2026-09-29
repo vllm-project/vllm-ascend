@@ -950,10 +950,15 @@ class KVPoolScheduler:
             request = req_tuple[0]
             # The scheduler rolls this back when speculative tokens are rejected.
             num_current_tokens = request.num_computed_tokens
-            new_token_ids = request.all_token_ids[num_current_tokens : num_current_tokens + num_new_tokens]
+            target_token_len = num_current_tokens + num_new_tokens
+            if not self.layerwise_offload:
+                # Scheduled draft tokens are not committed request tokens yet.
+                # Layer reuse still needs the full scheduled partial state.
+                target_token_len = min(target_token_len, len(request.all_token_ids))
+            new_token_ids = request.all_token_ids[num_current_tokens:target_token_len]
             if request_tracker.token_ids is not None and new_token_ids:
                 request_tracker.token_ids.extend(new_token_ids)
-            request_tracker.token_len = num_current_tokens + num_new_tokens
+            request_tracker.token_len = target_token_len
         else:
             raise ValueError(f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached")
         if new_block_ids is not None:
