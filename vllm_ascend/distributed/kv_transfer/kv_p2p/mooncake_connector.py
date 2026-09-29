@@ -96,6 +96,8 @@ DONE_RECVING_MSG = b"done_recving_msg"
 # other peers already waiting in the global executor queue can make progress.
 MAX_REQUESTS_PER_PEER_HANDLER = 5
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
+# Target size for each selected/transposed buffer; always process at least one block.
+KV_REFORMAT_BUFFER_BYTES = 8 * 1024 * 1024
 
 
 class RemotePortInfo(TypedDict):
@@ -1167,26 +1169,30 @@ class KVCacheRecvingThread(threading.Thread):
     def reformat_kv_cache_hybrid_linear_torch(
         self, block_ids: list[list[int]], tp_num_need_pulls: int, group_kv_caches
     ):
-        flat_block_ids = [item for sublist in block_ids for item in sublist]
+        # A block appearing in multiple chunks must not be transposed twice.
+        flat_block_ids = list(dict.fromkeys(item for sublist in block_ids for item in sublist))
         if not flat_block_ids or tp_num_need_pulls == 1:
             return
         device = list(self.kv_caches.values())[0][0].device
         block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.long, device=device)
-        num_blocks = block_ids_tensor.numel()
 
         def _transpose_cache_by_block(cache: torch.Tensor):
             # The transferred cache is laid out as
             # [block, split, token, head_per_split, dim]. Restore it to
             # [block, token, split, head_per_split, dim] in the selected blocks.
-            selected = cache.index_select(0, block_ids_tensor)
             block_size = cache.shape[1]
-            transposed = (
-                selected.reshape(num_blocks, tp_num_need_pulls, block_size, -1)
-                .transpose(1, 2)
-                .contiguous()
-                .reshape_as(selected)
-            )
-            cache.index_copy_(0, block_ids_tensor, transposed)
+            bytes_per_block = cache[0].numel() * cache.element_size()
+            chunk_blocks = max(1, KV_REFORMAT_BUFFER_BYTES // bytes_per_block)
+            for chunk_indices in block_ids_tensor.split(chunk_blocks):
+                selected = cache.index_select(0, chunk_indices)
+                transposed = (
+                    selected.reshape(chunk_indices.numel(), tp_num_need_pulls, block_size, -1)
+                    .transpose(1, 2)
+                    .contiguous()
+                    .reshape_as(selected)
+                )
+                cache.index_copy_(0, chunk_indices, transposed)
+                del selected, transposed
 
         for _, (k_cache_layer, v_cache_layer) in group_kv_caches.items():
             _transpose_cache_by_block(k_cache_layer)
