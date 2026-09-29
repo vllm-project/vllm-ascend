@@ -679,6 +679,12 @@ class AscendConfig:
             and vc.model_config.is_moe
         ):
             raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
+        if self.enable_dsa_cp and vc.parallel_config.prefill_context_parallel_size > 1:
+            raise ValueError(
+                "DSA-CP and PCP cannot be enabled at the same time. "
+                "Use PCP instead: remove enable_dsa_cp from additional_config "
+                "when --prefill-context-parallel-size is greater than 1."
+            )
         self._check_mooncake_c8_kv_cache_quant(vc)
 
         # profiling_chunk vs min_chunk clamp
@@ -740,12 +746,7 @@ class AscendConfig:
 
         if self.enable_dsa_cp:
             tp_size = vc.parallel_config.tensor_parallel_size
-            pcp_size = vc.parallel_config.prefill_context_parallel_size
-            if pcp_size > 1:
-                migration = (
-                    "Prefill context parallelism is already enabled; remove enable_dsa_cp from additional_config."
-                )
-            elif tp_size > 1:
+            if tp_size > 1:
                 migration = (
                     "Consider trying prefill context parallelism with "
                     f"--tensor-parallel-size 1 --prefill-context-parallel-size {tp_size} "

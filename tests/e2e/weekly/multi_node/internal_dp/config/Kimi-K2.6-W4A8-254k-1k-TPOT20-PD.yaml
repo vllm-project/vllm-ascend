@@ -2,6 +2,7 @@ test_name: "Kimi-K2.6-W4A8-254k-1k-TPOT20-PD"
 model: "Eco-Tech/Kimi-K2.6-w4a8"
 num_nodes: 2
 npu_per_node: 16
+dp_load_balancing: internal
 env_common: &env_common
   VLLM_RPC_TIMEOUT: "3600000"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"

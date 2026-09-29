@@ -6,6 +6,7 @@ from vllm.v1.worker.gpu.sample import (
     bad_words,
     gumbel,
     logprob,
+    output,
     penalties,
     prompt_logprob,
     sampler,
@@ -22,6 +23,7 @@ from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_ke
 from vllm_ascend.ops.triton.v2.metrics.num_nans import get_num_nans
 from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
+from vllm_ascend.ops.triton.v2.sample.sampling_mask import sampling_mask_from_logits_npu
 from vllm_ascend.ops.triton.v2.sample.thinking_budget import (
     _load_effective_token_ascend,
     _update_committed_marker_cache_kernel_ascend,
@@ -32,7 +34,7 @@ from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
 from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs
 from vllm_ascend.worker.v2.sample.min_p import apply_min_p
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import _prepare_dflash_inputs_kernel_ascend
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (
     rejection_sample as npu_rejection_sample,
 )
@@ -51,7 +53,6 @@ states.apply_temperature = apply_temperature
 logprob.compute_token_logprobs = compute_token_logprobs
 rejection_sampler_utils.rejection_sample = npu_rejection_sample
 rejection_sampler.rejection_sample = npu_rejection_sample
-dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend
 # triton ops that filed in ops/triton
 gumbel.gumbel_sample = categorical_sample
 speculator.gumbel_sample = categorical_sample
@@ -61,6 +62,7 @@ sampler.gumbel_sample = categorical_sample
 topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p_npu
 structured_outputs._apply_grammar_bitmask_kernel = _apply_grammar_bitmask_kernel
 mamba_utils.precopy_mamba_align_fused_kernel = precopy_mamba_align_fused_kernel
+dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs
 # This patch may be revisited or reverted once the compiler and Triton Ascend toolkit
 # support the upstream implementation of fill_logprob_token_ids_kernel.
 # For now, use the Ascend-specific implementation.
@@ -70,6 +72,8 @@ logprob._fill_logprob_token_ids_kernel = _fill_logprob_token_ids_kernel
 # For now, use the Ascend-specific implementation.
 sampler.get_num_nans = get_num_nans
 rejection_sampler.get_num_nans = get_num_nans
+# Avoid excessive UB allocation for strided vocab-dimension loads.
+output.SamplingMaskTensors.from_logits = classmethod(sampling_mask_from_logits_npu)
 # TODO: Remove after the new Q4 Triton-Ascend release is available.
 thinking_budget._load_effective_token = _load_effective_token_ascend
 # TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported version.

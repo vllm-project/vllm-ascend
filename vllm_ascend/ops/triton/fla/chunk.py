@@ -77,12 +77,13 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices_bt=chunk_indices_chunk64,
         output_dtype=k.dtype,
     )
+    g_transpose = g.transpose(1, 2).contiguous()
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
         beta=beta,
         A=A,
-        g_cumsum=g,
+        g_cumsum=g_transpose,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices_chunk64,
     )
@@ -90,7 +91,6 @@ def chunk_gated_delta_rule_fwd(
     k_ascendc = k.to(torch.bfloat16).transpose(1, 2).contiguous()
     w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
     u_ascendc = u.to(torch.bfloat16).transpose(1, 2).contiguous()
-    g_ascendc = g.transpose(1, 2).contiguous()
     q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
     cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
@@ -116,7 +116,7 @@ def chunk_gated_delta_rule_fwd(
         k_ascendc,
         w_ascendc,
         u_ascendc,
-        g=g_ascendc,
+        g=g_transpose,
         gk=None,
         initial_state=initial_state_kern,
         output_final_state=True,
@@ -145,7 +145,7 @@ def chunk_gated_delta_rule_fwd(
             k=k,
             w=w,
             u=u,
-            g=g,
+            g=g_transpose,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices_chunk64,
             chunk_offsets=chunk_offsets_chunk64,
@@ -184,7 +184,7 @@ def chunk_gated_delta_rule_fwd(
                 k=k,
                 w=w,
                 u=u,
-                g=g,
+                g=g_transpose,
                 initial_state=rerun_initial_state,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
@@ -200,7 +200,7 @@ def chunk_gated_delta_rule_fwd(
         v_new,
         h,
         scale,
-        g=g_ascendc,
+        g=g_transpose,
         g_gamma=None,
         cu_seqlens=cu_seqlens_host,
         chunk_indices=chunk_indices_chunk64_host,
