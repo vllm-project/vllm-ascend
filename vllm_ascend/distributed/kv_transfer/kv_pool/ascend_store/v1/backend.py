@@ -5,13 +5,8 @@ from __future__ import annotations
 import importlib
 from dataclasses import dataclass
 from types import MappingProxyType, ModuleType
-from typing import TYPE_CHECKING, Any
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
-
-if TYPE_CHECKING:
-    from vllm.config import ParallelConfig
-
 
 _BACKEND_PACKAGE = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"
 
@@ -51,11 +46,3 @@ def resolve_backend_spec(backend_name: str) -> BackendSpec:
         backend_name in BLOCK_KEY_LAYERWISE_BACKENDS,
         bool(getattr(backend_type, "requires_exists_before_put", True)),
     )
-
-
-def create_backend(
-    backend_spec: BackendSpec,
-    parallel_config: ParallelConfig,
-    extra_config: dict[str, Any],
-) -> Backend:
-    return backend_spec.backend_type(parallel_config, extra_config=extra_config)

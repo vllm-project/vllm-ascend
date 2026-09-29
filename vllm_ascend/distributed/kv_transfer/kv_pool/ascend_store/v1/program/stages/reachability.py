@@ -13,7 +13,6 @@ from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -25,6 +24,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 from ...coordinates import TokenRange
+from ...protocol.lookup import TailKeyBoundary
+from ..spec.compilation import KVGroupReachabilitySpec
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
@@ -78,14 +79,24 @@ class GroupAvailability:
     chunks: tuple[ChunkAvailability, ...]
 
 
-class KVReachability(Protocol):
-    """Select semantic KV and resolve a common externally available frontier."""
+@dataclass(frozen=True, slots=True)
+class ReachablePrefix:
+    """Common reachable frontier and the remote identities needed to load its tail."""
+
+    end_token: int
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
+
+
+class ReachableRegionSelection(Protocol):
+    """Select reachable logical regions and reduce their observed common frontier."""
 
     group_ids: tuple[int, ...]
 
     def select_for_lookup(self, block_hashes: BlockHashes, query_range: TokenRange) -> KVSelection: ...
 
-    def resolve_available_end(self, selection: KVSelection, availability: Sequence[GroupAvailability]) -> int: ...
+    def resolve_available_end(
+        self, selection: KVSelection, availability: Sequence[GroupAvailability]
+    ) -> ReachablePrefix: ...
 
     def select_for_load(self, block_hashes: BlockHashes, load_range: TokenRange) -> KVSelection: ...
 
@@ -113,6 +124,11 @@ class ExternalCachedBlockPool:
             return [self._present_block] * len(group_indices)
         return None
 
+    def contains(self, group_index: int, block_hash: BlockHash | str) -> bool:
+        if self._cached_hashes is None:
+            return True
+        return (group_index, block_hash_to_bytes(block_hash)) in self._cached_hashes
+
 
 class UnitaryReachability:
     """Select reachable KV for one transferable cache group."""
@@ -130,7 +146,9 @@ class UnitaryReachability:
     def select_for_lookup(self, block_hashes: BlockHashes, query_range: TokenRange) -> KVSelection:
         return KVSelection(query_range, tuple(block_hashes), (GroupSelection(self.group_ids[0], None),))
 
-    def resolve_available_end(self, selection: KVSelection, availability: Sequence[GroupAvailability]) -> int:
+    def resolve_available_end(
+        self, selection: KVSelection, availability: Sequence[GroupAvailability]
+    ) -> ReachablePrefix:
         if len(availability) != 1 or availability[0].group_id != self.group_ids[0]:
             raise ValueError(f"Expected one Lookup observation for group {self.group_ids[0]}")
 
@@ -144,7 +162,7 @@ class UnitaryReachability:
                 break
             if chunk.token_range.end_token % self._cache_transfer_granularity == 0:
                 hit_end = chunk.token_range.end_token
-        return hit_end
+        return ReachablePrefix(hit_end)
 
     def select_for_load(self, block_hashes: BlockHashes, load_range: TokenRange) -> KVSelection:
         return KVSelection(load_range, tuple(block_hashes), (GroupSelection(self.group_ids[0], None),))
@@ -165,44 +183,49 @@ class HybridReachability:
 
     def __init__(
         self,
-        group_ids: tuple[int, ...],
-        kv_cache_groups: list[KVCacheGroupSpec],
+        groups: tuple[KVGroupReachabilitySpec, ...],
         scheduler_block_size: int,
         hash_block_size: int,
         max_model_len: int,
         use_eagle: bool = False,
         retention_interval: int | None = None,
     ) -> None:
-        assert len(group_ids) == len(kv_cache_groups)
         assert scheduler_block_size % hash_block_size == 0, (
             f"scheduler_block_size ({scheduler_block_size}) must be a multiple of hash_block_size ({hash_block_size})"
         )
 
-        self.group_ids = group_ids
-        self.kv_cache_groups = kv_cache_groups
+        self.groups = groups
+        self.group_ids = tuple(group.group_id for group in groups)
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
         self.max_model_len = max_model_len
         self.use_eagle = use_eagle
         self.retention_interval = retention_interval
-        self.effective_block_sizes = [group.kv_cache_spec.block_size for group in kv_cache_groups]
+        self.effective_block_sizes = [group.kv_cache_spec.block_size for group in groups]
         for effective_block_size in self.effective_block_sizes:
             assert effective_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
             assert scheduler_block_size % effective_block_size == 0, (
                 "scheduler_block_size must be a multiple of each group's effective block_size"
             )
 
-        self.eagle_group_indices = {index for index, group in enumerate(kv_cache_groups) if group.is_eagle_group}
+        self.eagle_group_indices = {index for index, group in enumerate(groups) if group.is_eagle_group}
         if use_eagle and not self.eagle_group_indices:
-            self.eagle_group_indices = set(range(len(kv_cache_groups)))
+            self.eagle_group_indices = set(range(len(groups)))
 
         self._verify_and_split_kv_cache_groups()
+        self.mamba_group_indices = {
+            index for index, spec in enumerate(self.effective_specs) if isinstance(spec, MambaSpec)
+        }
+        self.partial_hash_hits = any(
+            index in self.mamba_group_indices and block_size > hash_block_size
+            for index, block_size in enumerate(self.effective_block_sizes)
+        )
 
     def _verify_and_split_kv_cache_groups(self) -> None:
         spec_groups: list[tuple[KVCacheSpec, list[int], type[SingleTypeKVCacheManager]]] = []
         self.effective_specs: list[KVCacheSpec] = []
 
-        for group_index, group in enumerate(self.kv_cache_groups):
+        for group_index, group in enumerate(self.groups):
             spec = _unwrap_spec(group.kv_cache_spec)
             self.effective_specs.append(spec)
             if not group.kv_cache_spec.prefix_cacheable:
@@ -244,7 +267,9 @@ class HybridReachability:
         )
         return KVSelection(query_range, tuple(block_hashes), chunk_selections)
 
-    def resolve_available_end(self, selection: KVSelection, availability: Sequence[GroupAvailability]) -> int:
+    def resolve_available_end(
+        self, selection: KVSelection, availability: Sequence[GroupAvailability]
+    ) -> ReachablePrefix:
         observations_by_group = {observation.group_id: observation for observation in availability}
         if set(observations_by_group) != set(self.group_ids):
             raise ValueError(f"Lookup observations do not match configured groups {self.group_ids}")
@@ -257,8 +282,14 @@ class HybridReachability:
         for group_index, (group_id, group_block_size) in enumerate(
             zip(self.group_ids, self.effective_block_sizes, strict=True)
         ):
-            group_block_hashes = get_block_hashes(block_hashes_to_check, group_block_size, self.hash_block_size)
-            local_hit_count = query_range.start_token // group_block_size
+            group_block_hashes = (
+                block_hashes_to_check
+                if self.partial_hash_hits
+                else get_block_hashes(block_hashes_to_check, group_block_size, self.hash_block_size)
+            )
+            local_hit_count = query_range.start_token // (
+                self.hash_block_size if self.partial_hash_hits else group_block_size
+            )
             cached_hashes.update(
                 (group_index, block_hash_to_bytes(block_hash)) for block_hash in group_block_hashes[:local_hit_count]
             )
@@ -270,14 +301,48 @@ class HybridReachability:
             )
 
         if not cached_hashes:
-            return 0
+            return ReachablePrefix(0)
+        cached_block_pool = ExternalCachedBlockPool(self.hash_block_size, cached_hashes)
         _, hit_length = self.find_longest_cache_hit(
             block_hashes,
             max_hit_length,
-            ExternalCachedBlockPool(self.hash_block_size, cached_hashes),
-            apply_eagle=False,
+            cached_block_pool,
         )
-        return hit_length
+        return ReachablePrefix(
+            hit_length,
+            self._tail_key_boundaries(block_hashes, hit_length, cached_block_pool),
+        )
+
+    def _tail_key_boundaries(
+        self,
+        block_hashes: BlockHashes,
+        hit_length: int,
+        cached_block_pool: ExternalCachedBlockPool,
+    ) -> tuple[TailKeyBoundary, ...]:
+        if not self.partial_hash_hits or hit_length <= 0:
+            return ()
+
+        hit_hash_index = hit_length // self.hash_block_size - 1
+        boundaries = []
+        for group_index, (group_id, spec, block_size) in enumerate(
+            zip(self.group_ids, self.effective_specs, self.effective_block_sizes, strict=True)
+        ):
+            if not spec.prefix_cacheable:
+                continue
+            boundary_token = hit_length
+            if not cached_block_pool.contains(group_index, block_hashes[hit_hash_index]):
+                next_block_hash_index = min(
+                    cdiv(hit_length, block_size) * block_size // self.hash_block_size,
+                    len(block_hashes),
+                )
+                for hash_index in range(hit_hash_index + 1, next_block_hash_index):
+                    if cached_block_pool.contains(group_index, block_hashes[hash_index]):
+                        boundary_token = (hash_index + 1) * self.hash_block_size
+                        break
+                else:
+                    raise AssertionError(f"No remote tail key found for cache group {group_id} at {hit_length}")
+            boundaries.append(TailKeyBoundary(group_id, boundary_token))
+        return tuple(boundaries)
 
     def select_for_load(self, block_hashes: BlockHashes, load_range: TokenRange) -> KVSelection:
         selections = self._group_selections(self.load_mask(block_hashes, load_range.end_token))
@@ -290,7 +355,10 @@ class HybridReachability:
             selections = self._group_selections(self.store_mask(store_range.end_token, num_prompt_tokens))
         else:
             logger.debug("Use unfiltered Store chunks for unaligned end token %d", store_range.end_token)
-            selections = tuple(GroupSelection(group_id, None) for group_id in self.group_ids)
+            selections = tuple(
+                GroupSelection(group_id, () if group_index in self.mamba_group_indices else None)
+                for group_index, group_id in enumerate(self.group_ids)
+            )
         return KVSelection(store_range, tuple(block_hashes), selections)
 
     def _group_selections(self, masks: Sequence[Sequence[bool] | None]) -> tuple[GroupSelection, ...]:
@@ -339,7 +407,7 @@ class HybridReachability:
         masks: list[tuple[int, list[bool] | None]] = []
         for group_index, spec in enumerate(self.effective_specs):
             num_chunks = aligned_token_len // self.effective_block_sizes[group_index]
-            group = self.kv_cache_groups[group_index]
+            group = self.groups[group_index]
             if not group.kv_cache_spec.prefix_cacheable:
                 masks.append((num_chunks, [False] * num_chunks))
                 continue
@@ -381,8 +449,9 @@ class HybridReachability:
         apply_eagle: bool = True,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         eagle_spec_group_indices = self.eagle_spec_group_indices if apply_eagle else set()
+        alignment_tokens = self.hash_block_size if self.partial_hash_hits else self.lcm_block_size
         if not self.spec_groups:
-            return tuple([] for _ in self.kv_cache_groups), 0
+            return tuple([] for _ in self.groups), 0
         if len(self.spec_groups) == 1:
             spec, group_indices, manager_cls = self.spec_groups[0]
             hit_blocks, hit_length = manager_cls.find_longest_cache_hit(
@@ -392,16 +461,16 @@ class HybridReachability:
                 block_pool=cast(BlockPool, cached_block_pool),
                 kv_cache_spec=spec,
                 drop_eagle_block=0 in eagle_spec_group_indices,
-                alignment_tokens=spec.block_size,
+                alignment_tokens=alignment_tokens,
             )
-            blocks_by_group_index: list[list[KVCacheBlock]] = [[] for _ in range(len(self.kv_cache_groups))]
+            blocks_by_group_index: list[list[KVCacheBlock]] = [[] for _ in range(len(self.groups))]
             for group_index, blocks in zip(group_indices, hit_blocks, strict=True):
                 blocks_by_group_index[group_index] = blocks
             return tuple(blocks_by_group_index), hit_length
 
         hit_length = max_length
-        hit_blocks_by_group_index: list[list[KVCacheBlock] | None] = [None] * len(self.kv_cache_groups)
-        hit_lengths_by_group_index: list[int] = [0] * len(self.kv_cache_groups)
+        hit_blocks_by_group_index: list[list[KVCacheBlock] | None] = [None] * len(self.groups)
+        hit_lengths_by_group_index: list[int] = [0] * len(self.groups)
         is_simple_hybrid = len(self.spec_groups) == 2 and isinstance(self.spec_groups[0][0], FullAttentionSpec)
         verified_eagle_spec_groups: set[int] = set()
 
@@ -419,7 +488,14 @@ class HybridReachability:
                 drop_eagle_block = spec_group_index in eagle_spec_group_indices and is_unverified_eagle_group
                 max_spec_group_length = curr_hit_length
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
-                    max_spec_group_length = min(curr_hit_length + spec.block_size, max_length)
+                    eagle_margin = (
+                        self.hash_block_size
+                        if self.partial_hash_hits
+                        and getattr(manager_cls, "supports_fine_grained_hash_lookup", False)
+                        and spec.block_size > self.hash_block_size
+                        else spec.block_size
+                    )
+                    max_spec_group_length = min(curr_hit_length + eagle_margin, max_length)
                 hit_blocks, new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,
                     max_length=max_spec_group_length,
@@ -427,7 +503,7 @@ class HybridReachability:
                     block_pool=cast(BlockPool, cached_block_pool),
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
-                    alignment_tokens=self.lcm_block_size,
+                    alignment_tokens=alignment_tokens,
                 )
                 if drop_eagle_block:
                     verified_eagle_spec_groups.add(spec_group_index)

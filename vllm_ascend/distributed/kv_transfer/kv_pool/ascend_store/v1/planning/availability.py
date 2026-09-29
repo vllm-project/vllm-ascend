@@ -8,7 +8,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash
 
 from ..coordinates import TokenRange
-from ..protocol.lookup import LookupRequest
+from ..protocol.lookup import LookupRequest, TailKeyBoundary
 from ..protocol.rpc import LookupClient
 
 
@@ -29,6 +29,7 @@ class RemoteAvailability:
 
     load_range: TokenRange
     matched_end_token: int
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +88,7 @@ class RemoteAvailabilityProbe:
         return RemoteAvailability(
             TokenRange(query.local_cached_tokens, min(lookup_result.available_end_token, allocated_end)),
             matched_end,
+            lookup_result.tail_key_boundaries,
         )
 
     def close(self) -> None:

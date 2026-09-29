@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 
 from ..coordinates import TokenRange
+from ..protocol.lookup import TailKeyBoundary
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,13 +22,17 @@ class RequestSnapshot:
     block_hashes: tuple[BlockHash, ...]
     num_prompt_tokens: int
     published_store_end_token: int = 0
+    committable_end_token: int | None = None
 
-    def advance(
+    def with_position(
         self,
-        num_tokens: int,
-        new_block_ids: tuple[list[int], ...] | None,
-        block_hashes: list[BlockHash],
+        request_token_len: int,
+        new_block_ids: tuple[tuple[int, ...], ...] | None,
+        block_hashes: Sequence[BlockHash],
+        committable_end_token: int,
     ) -> RequestSnapshot:
+        """Replace optimistic progress with vLLM's current authoritative position."""
+
         block_ids_by_group = self.block_ids_by_group
         if new_block_ids:
             block_ids_by_group = tuple(
@@ -35,10 +41,17 @@ class RequestSnapshot:
             )
         return replace(
             self,
-            request_token_len=self.request_token_len + num_tokens,
+            request_token_len=request_token_len,
             block_ids_by_group=block_ids_by_group,
             block_hashes=tuple(block_hashes),
+            committable_end_token=committable_end_token,
         )
+
+    @property
+    def store_end_token(self) -> int:
+        if self.committable_end_token is None:
+            return self.request_token_len
+        return min(self.request_token_len, self.committable_end_token)
 
     def with_published_store_end(self, end_token: int) -> RequestSnapshot:
         if end_token < self.published_store_end_token:
@@ -55,6 +68,7 @@ class LoadCandidate:
 
     load_range: TokenRange
     matched_end_token: int
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
 class LoadPublication(Protocol):

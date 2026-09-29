@@ -109,6 +109,7 @@ class BackendIO:
         native_result: Any,
     ) -> StoreEvidence:
         result_codes, error = self._interpret_store_results(len(bindings), native_result)
+        succeeded = result_codes is not None and all(code == 0 for code in result_codes)
         if result_codes is None:
             binding_evidence = self._unknown_binding_evidence(bindings)
         else:
@@ -117,8 +118,8 @@ class BackendIO:
             )
         return StoreEvidence(
             binding_evidence,
-            result_codes is not None and all(code == 0 for code in result_codes),
-            source_release_confirmed=True,
+            succeeded,
+            source_release_confirmed=succeeded,
             error=error,
         )
 
@@ -201,6 +202,7 @@ class LayerwiseBackendIO(BackendIO):
             )
 
         result_codes, error = self._interpret_store_results(len(keys), native_result)
+        succeeded = result_codes is not None and all(code == 0 for code in result_codes)
         codes_by_key = None if result_codes is None else dict(zip(keys, result_codes, strict=True))
         binding_evidence = tuple(
             BindingEvidence(binding, None if codes_by_key is None else codes_by_key[binding.remote_object.key])
@@ -208,8 +210,8 @@ class LayerwiseBackendIO(BackendIO):
         )
         return StoreEvidence(
             binding_evidence,
-            result_codes is not None and all(code == 0 for code in result_codes),
-            source_release_confirmed=True,
+            succeeded,
+            source_release_confirmed=succeeded,
             error=error,
         )
 

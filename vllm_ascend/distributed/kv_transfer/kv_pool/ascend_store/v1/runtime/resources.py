@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
-from ..backend import BackendSpec, create_backend, resolve_backend_spec
+from ..backend import BackendSpec
 from ..program.representation import KVMemoryGeometry, KVMemorySegment
 
 if TYPE_CHECKING:
-    from vllm.config import ParallelConfig
-
     from ..program.spec.topology import KVPoolGroupTopology
 
 
@@ -34,19 +32,6 @@ class KVPoolResources:
         self.kv_caches: dict[str, torch.Tensor] | None = None
         self._memory_bound = False
         self._closed = False
-
-    @classmethod
-    def bind(
-        cls,
-        backend_name: str,
-        parallel_config: ParallelConfig,
-        extra_config: dict[str, Any],
-        groups: tuple[KVPoolGroupTopology, ...],
-        num_blocks: int,
-    ) -> KVPoolResources:
-        backend_spec = resolve_backend_spec(backend_name)
-        backend = create_backend(backend_spec, parallel_config, extra_config)
-        return cls(backend, backend_spec, num_blocks, groups)
 
     def bind_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> KVMemoryGeometry:
         if self._closed:
