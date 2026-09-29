@@ -88,8 +88,8 @@ multi-node-tests:
         - name: multi-node-deepseek-pd
           config_file_path: DeepSeek-V3.yaml
           size: 2
-        - name: multi-node-qwen3-dp
-          config_file_path: Qwen3-235B-A22B.yaml
+        - name: multi-node-qwen3-vl-dp
+          config_file_path: Qwen3-VL-235B-disagg-pd.yaml
           size: 2
         - name: GLM5_1-W8A8-EP-external
           config_file_path: GLM5_1-W8A8-EP-external.yaml

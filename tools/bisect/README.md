@@ -111,7 +111,7 @@ auto-enter the worker loop:
 ```bash
 python -m tools.bisect.auto_bisect \
     --scene multi_node \
-    --config-yaml Qwen3-235B-W8A8.yaml \
+    --config-yaml Qwen3-VL-235B-disagg-pd.yaml \
     --soc a3 \
     --bad-commit "$VLLM_ASCEND_REF" \
     --num-nodes 2 \
