@@ -111,7 +111,7 @@ class MooncakeHeartbeatThread(threading.Thread):
         for engine, host, port, remote_id, duration in self.requests.values():
             grouped[engine].add(remote_id)
             endpoints[engine] = (host, port, duration)
-        timeout = None
+        timeout: float | None = None
         for engine in sorted(grouped, key=lambda key: self.last_sent.get(key, float("-inf"))):
             host, port, duration = endpoints[engine]
             last_sent = self.last_sent.get(engine)
