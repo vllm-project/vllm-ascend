@@ -160,6 +160,7 @@ class TestAscendSFAIndexerBackend(TestBase):
             patch(
                 "vllm_ascend.attention.indexer.torch_npu.npu_rotary_mul",
                 side_effect=lambda x, *args, **kwargs: x,
+                create=True,
             ),
             patch(
                 "vllm_ascend.device.device_op.DeviceOperator.indexer_select_post_process",
