@@ -44,7 +44,7 @@ def _rope_fp8_pytorch_native(
         )
         if rope_dim < tensor.shape[-1]:
             rotated = torch.cat((rotated, tensor[..., rope_dim:]), dim=-1)
-        return rotated.clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+        return rotated.clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).cpu().to(torch.float8_e4m3fn)
 
     return apply_rope(query), apply_rope(key)
 
@@ -106,13 +106,13 @@ def test_rotary_embedding_triton_kernel_fp8(
     assert actual_key[0, 0, 0].to(torch.float32) == -FP8_E4M3_MAX
     torch.testing.assert_close(
         actual_query.to(torch.float32),
-        expected_query.to(torch.float32),
+        expected_query.to(torch.float32).to(device),
         atol=0.125,
         rtol=0.125,
     )
     torch.testing.assert_close(
         actual_key.to(torch.float32),
-        expected_key.to(torch.float32),
+        expected_key.to(torch.float32).to(device),
         atol=0.125,
         rtol=0.125,
     )
