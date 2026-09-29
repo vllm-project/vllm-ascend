@@ -406,6 +406,7 @@ def test_projector_applies_optional_modelslim_rotation():
 def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_path, monkeypatch):
     model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
     nn.Module.__init__(model)
+    model._owns_embed_tokens = False
     model.model = nn.Module()
     model.model.context_proj = nn.Linear(4, 2, bias=False)
     model.model.context_norm = nn.LayerNorm(2)
