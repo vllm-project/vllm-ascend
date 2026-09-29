@@ -226,6 +226,13 @@ class AscendRejectionSampler(RejectionSampler):
             # apply_logits_processors modifies the tensor in-place.
             target_logits = target_logits.clone()
         target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
+        greedy_token_ids = None
+        if (
+            not sampling_metadata.all_greedy
+            and not sampling_metadata.all_random
+            and get_ascend_config().enable_reduce_sample
+        ):
+            greedy_token_ids = greedy_sample(target_logits)
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `apply_sampling_constraints` function.
@@ -245,6 +252,7 @@ class AscendRejectionSampler(RejectionSampler):
             synthetic_mode=self.synthetic_mode,
             synthetic_conditional_rates=self.synthetic_conditional_rates,
             ori_target_logits=raw_target_logits,
+            greedy_token_ids=greedy_token_ids,
         )
 
         self._log_rejection_sampler_exit(output_token_ids, metadata)
@@ -439,6 +447,7 @@ def rejection_sample(
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
     ori_target_logits: torch.Tensor | None = None,
+    greedy_token_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Rejection sampling for speculative decoding in distributed setting.
@@ -566,7 +575,9 @@ def rejection_sample(
 
     # For greedy sampling, we need to do allgather first to get global argmax
     if not sampling_metadata.all_random:
-        if get_ascend_config().enable_reduce_sample:
+        if greedy_token_ids is not None:
+            target_argmax = greedy_token_ids
+        elif get_ascend_config().enable_reduce_sample:
             target_argmax = greedy_sample(target_logits)
         else:
             target_argmax = target_logits.argmax(dim=-1).view(-1)

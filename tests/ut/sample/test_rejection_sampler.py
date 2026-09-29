@@ -24,6 +24,7 @@ from vllm_ascend.sample.rejection_sampler import (
     sample_recovered_tokens_blockwise_pytorch,
     sample_recovered_tokens_pytorch,
 )
+from vllm_ascend.sample.sampler import _apply_top_k_top_p_pytorch
 
 # Global constants
 PLACEHOLDER_TOKEN_ID = -1
@@ -979,6 +980,82 @@ def _replace(obj, **kwargs):
     return SimpleNamespace(**data)
 
 
+@pytest.mark.parametrize("other_temperature", [0.0, 0.7])
+@pytest.mark.parametrize("draft_id", [0, 5])
+@pytest.mark.parametrize("logits_case", ["unique", "masked", "tied", "random-sentinel"])
+def test_forward_preserves_greedy_vocab_id_in_mixed_batch(other_temperature, draft_id, logits_case):
+    logits = torch.tensor([[-8.0, -3.0, -2.0, -1.0, 0.0, 9.0, 1.0, 2.0]]).repeat(4, 1)
+    allowed_token_ids_mask = None
+    expected_id = 5
+    if logits_case == "masked":
+        allowed_token_ids_mask = torch.zeros(2, 8, dtype=torch.bool)
+        allowed_token_ids_mask[0, 5] = True
+        expected_id = 7
+    if logits_case == "tied":
+        logits[0, 6] = logits[0, 5]
+    other_draft_id = 5
+    if logits_case == "random-sentinel":
+        logits[2, 4] = 8.5
+        other_draft_id = 4
+    metadata = SimpleNamespace(
+        max_spec_len=1,
+        bonus_logits_indices=torch.tensor([1, 3]),
+        target_logits_indices=torch.tensor([0, 2]),
+        draft_token_ids=torch.tensor([draft_id, other_draft_id], dtype=torch.int32),
+        num_draft_tokens=[1, 1],
+        cu_num_draft_tokens=torch.tensor([1, 2]),
+    )
+    sampling_metadata = SimpleNamespace(
+        all_greedy=other_temperature == 0.0,
+        all_random=False,
+        temperature=torch.tensor([0.0, other_temperature]),
+        top_k=torch.ones(2, dtype=torch.int32) if logits_case == "tied" else None,
+        top_p=None,
+        generators={},
+        max_num_logprobs=None,
+        no_penalties=True,
+        bad_words_token_ids={},
+        output_token_ids=[[], []],
+        allowed_token_ids_mask=allowed_token_ids_mask,
+        logitsprocs=SimpleNamespace(non_argmax_invariant=[]),
+        thinking_budget_state_holder=None,
+    )
+    rs = AscendRejectionSampler.__new__(AscendRejectionSampler)
+    rs.sampler = MagicMock()
+    rs.sampler.logprobs_mode = "raw_logprobs"
+    rs.sampler.return_value = SimpleNamespace(sampled_token_ids=torch.tensor([[7], [7]], dtype=torch.int32))
+    rs.top_k = 1 if logits_case == "tied" else None
+    rs.synthetic_mode = False
+    rs.synthetic_conditional_rates = None
+    rs.is_processed_logprobs_mode = False
+    config = _ascend_cfg(reduce_sample=True)
+    tp_group = _tp_group()
+
+    with (
+        _pin_memory_stack(),
+        patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
+        patch("vllm_ascend.sample.rejection_sampler.replace", _replace),
+        patch("vllm_ascend.sample.rejection_sampler.get_ascend_config", return_value=config),
+        patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=config),
+        patch("vllm_ascend.sample.rejection_sampler.get_tp_group", return_value=tp_group),
+        patch("vllm_ascend.sample.sampler.get_tp_group", return_value=tp_group),
+        patch("vllm_ascend.sample.rejection_sampler.apply_top_k_top_p", _apply_top_k_top_p_pytorch),
+        patch("vllm_ascend.sample.rejection_sampler.generate_uniform_probs", return_value=torch.tensor([0.01, 0.01])),
+        patch(
+            "vllm_ascend.sample.rejection_sampler.sample_recovered_tokens",
+            return_value=torch.tensor([5, 5], dtype=torch.int32),
+        ),
+    ):
+        output = rs.forward(metadata, None, logits, sampling_metadata)
+
+    expected = [expected_id, 7] if draft_id == expected_id else [expected_id, PLACEHOLDER_TOKEN_ID]
+    assert output.sampled_token_ids[0].tolist() == expected
+    expected_other = [5, 7]
+    if logits_case == "random-sentinel":
+        expected_other = [4, 7] if other_temperature else [5, PLACEHOLDER_TOKEN_ID]
+    assert output.sampled_token_ids[1].tolist() == expected_other
+
+
 def test_ascend_rejection_sampler_methods():
     logits = torch.tensor([[0.1, 0.8, 0.1]])
     with (
@@ -1068,7 +1145,7 @@ def test_ascend_rejection_sampler_methods():
         num_draft_tokens=[1],
         cu_num_draft_tokens=torch.tensor([1]),
     )
-    forward_sampling = SimpleNamespace(max_num_logprobs=1)
+    forward_sampling = SimpleNamespace(max_num_logprobs=1, all_greedy=True, all_random=False)
     with (
         patch("vllm_ascend.sample.rejection_sampler.replace", _replace),
         patch(
@@ -1096,7 +1173,10 @@ def test_ascend_rejection_sampler_methods():
         ),
     ):
         processed_output = rs.forward(
-            forward_meta, None, forward_logits.clone(), SimpleNamespace(max_num_logprobs=None)
+            forward_meta,
+            None,
+            forward_logits.clone(),
+            SimpleNamespace(max_num_logprobs=None, all_greedy=True, all_random=False),
         )
     assert processed_output.logprobs_tensors is None
 
