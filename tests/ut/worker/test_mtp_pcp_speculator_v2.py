@@ -94,12 +94,9 @@ def test_draft_runtime_config_preserves_target_worker_topology(
 
     def fake_replace(config, **changes):
         if "pipeline_parallel_size" in changes:
-            assert changes["decode_context_parallel_size"] == (1 if target_pcp_size > 1 else dcp_size)
+            assert config.decode_context_parallel_size == dcp_size
         if "model_config" in changes:
-            assert changes["parallel_config"].decode_context_parallel_size == (1 if target_pcp_size > 1 else dcp_size)
-        if config is target_config and "model_config" not in changes:
-            reconstructed_parallel = changes["parallel_config"]
-            captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
+            assert changes["parallel_config"].decode_context_parallel_size == dcp_size
         values = vars(config).copy()
         values.update(changes)
         return SimpleNamespace(**values)
@@ -123,10 +120,6 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             "replace",
             side_effect=fake_replace,
         ),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.pcp_utils.replace",
-            side_effect=fake_replace,
-        ),
         patch.object(
             speculator_module.AutoRegressiveSpeculator,
             "__init__",
@@ -148,10 +141,6 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     assert execution_parallel_config.cp_kv_cache_interleave_size == 128
     assert execution_parallel_config.decode_context_parallel_size == dcp_size
     assert target_parallel_config.decode_context_parallel_size == dcp_size
-    if target_pcp_size > 1:
-        assert captured["reconstruction_dcp_size"] == 1
-    else:
-        assert "reconstruction_dcp_size" not in captured
     assert execution_parallel_config.enable_expert_parallel
     assert execution_parallel_config.enable_eplb
     assert execution_parallel_config.rank == target_parallel_config.rank
@@ -628,3 +617,107 @@ def test_propose_preserves_dp_sync_state() -> None:
     ):
         speculator.propose(input_batch, *[MagicMock() for _ in range(10)], dp_sync)
     assert parent.call_args.args[11] is dp_sync
+
+
+@pytest.mark.parametrize("tp,pcp,dcp", [(1, 8, 1), (4, 2, 1), (1, 8, 8), (2, 4, 8), (2, 1, 2)])
+@pytest.mark.parametrize("override", [None, "moe_backend", "kv_cache_dtype", "attention_backend", "pp_load"])
+def test_mtp_load_validates_overrides_before_replicating(tmp_path, tp, pcp, dcp, override):
+    """Draft loading must validate real topology before constructing PCP=1 layers."""
+    import json
+    import sys
+
+    from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig, VllmConfig, replace
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
+
+    from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "deepseek_v3",
+                "architectures": ["DeepseekV3ForCausalLM"],
+                "hidden_size": 128,
+                "intermediate_size": 256,
+                "moe_intermediate_size": 64,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 8,
+                "n_routed_experts": 256,
+                "num_experts_per_tok": 2,
+                "num_nextn_predict_layers": 1,
+                "max_position_embeddings": 2048,
+                "vocab_size": 256,
+            }
+        )
+    )
+    with patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True):
+        model = ModelConfig(model=str(tmp_path), skip_tokenizer_init=True, enforce_eager=True)
+        parallel = ParallelConfig(
+            tensor_parallel_size=tp,
+            prefill_context_parallel_size=pcp,
+            decode_context_parallel_size=dcp,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            distributed_executor_backend="mp",
+        )
+        target = VllmConfig(model_config=model, parallel_config=parallel)
+        target.speculative_config = SpeculativeConfig(
+            method="mtp",
+            num_speculative_tokens=1,
+            target_model_config=model,
+            target_parallel_config=parallel,
+        )
+        if override == "pp_load":
+            target.load_config = replace(target.load_config, load_format="fastsafetensors")
+        elif override:
+            setattr(
+                target.speculative_config,
+                override,
+                {
+                    "moe_backend": "auto",
+                    "kv_cache_dtype": "auto",
+                    "attention_backend": AttentionBackendEnum.FLASH_ATTN,
+                }[override],
+            )
+        speculator = object.__new__(AscendMTPSpeculator)
+        speculator._target_vllm_config = target
+        speculator.vllm_config, speculator.replicated_pcp = prepare_replicated_pcp_config(target)
+        speculator.draft_model_config = target.speculative_config.draft_model_config
+        runtime = speculator._create_draft_vllm_config()
+        assert runtime.parallel_config.prefill_context_parallel_size == 1
+        assert runtime.parallel_config.decode_context_parallel_size == dcp
+
+        class LoadBoundary(Exception):
+            pass
+
+        def inspect_load(**kwargs):
+            config = kwargs["vllm_config"]
+            assert config.parallel_config.prefill_context_parallel_size == 1
+            assert config.parallel_config.decode_context_parallel_size == dcp
+            assert config.parallel_config.world_size == tp * pcp
+            assert config.parallel_config.enable_eplb
+            assert kwargs["model_config"] is speculator.draft_model_config
+            if override == "pp_load":
+                assert config.load_config.load_format == "auto"
+            raise LoadBoundary
+
+        with (
+            patch.dict(
+                sys.modules, {"vllm.compilation.backends": SimpleNamespace(set_model_tag=lambda tag: nullcontext())}
+            ),
+            patch(
+                "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
+                return_value=SimpleNamespace(world_size=2 if override == "pp_load" else 1),
+            ),
+            patch.object(eagle_utils, "get_model", side_effect=inspect_load),
+            pytest.raises(LoadBoundary),
+        ):
+            speculator.load_draft_model(SimpleNamespace(), set())
+
+        assert target.parallel_config is parallel
+        assert parallel.prefill_context_parallel_size == pcp
+        assert parallel.decode_context_parallel_size == dcp
+        assert parallel.world_size == tp * pcp
+        if override == "pp_load":
+            assert target.load_config.load_format == "fastsafetensors"
