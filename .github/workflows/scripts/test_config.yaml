@@ -44,6 +44,7 @@ curated_tests:
     - tests/e2e/pull_request/two_card/test_kvpp.py
   # A5 (Ascend 950) curated test suite
   a5:
+    - tests/e2e/pull_request/four_card/test_glm5_3_flash_a5.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/one_card/test_msa_index_score.py
 
@@ -107,6 +108,8 @@ accuracy_tests:
 # for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
+  'tests/e2e/pull_request/four_card/test_glm5_3_flash_a5\.py$':
+    default: a5-4
   tests/e2e/pull_request/one_card:
     default: a2-1
     310p: 310p-1
@@ -120,6 +123,9 @@ runner_mapping:
 # Maps logical test buckets to exact labels from runner_label.json and controls
 # how many load-balanced groups are created for each bucket.
 partition:
+  a5-4:
+    runner_label: linux-aarch64-a5-4
+    count: 1
   310p-1:
     runner_label: linux-aarch64-310p-1
     count: 1

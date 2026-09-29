@@ -68,29 +68,33 @@ class FlashDummyLoader(DummyModelLoader):
     def load_weights(self, model, model_config):
         with torch.no_grad():
             for name, value in model.named_parameters():
-                seed = int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "little")
-                generator = torch.Generator(device=value.device).manual_seed(seed)
-                if name.endswith("weight") and value.dtype == torch.int8:
-                    value.random_(-8, 9, generator=generator)
-                elif not value.is_floating_point() or "A_log" in name:
-                    value.zero_()
-                elif "dt_bias" in name:
-                    value.fill_(-2.0)
-                elif "hc_" in name:
-                    if name.endswith("scale"):
-                        value.fill_(1.0)
-                    elif name.endswith("base"):
-                        value.zero_()
-                    else:
-                        value.uniform_(-0.001, 0.001, generator=generator)
-                elif "scale" in name:
-                    value.fill_(0.01)
-                elif "offset" in name or name.endswith("bias"):
-                    value.zero_()
-                elif "norm" in name and name.endswith("weight"):
-                    value.fill_(1.0)
-                else:
-                    value.uniform_(-0.01, 0.01, generator=generator)
+                self.initialize_parameter(name, value)
+
+    @staticmethod
+    def initialize_parameter(name, value):
+        seed = int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "little")
+        generator = torch.Generator(device=value.device).manual_seed(seed)
+        if name.endswith("weight") and value.dtype == torch.int8:
+            value.random_(-8, 9, generator=generator)
+        elif not value.is_floating_point() or "A_log" in name:
+            value.zero_()
+        elif "dt_bias" in name:
+            value.fill_(-2.0)
+        elif "hc_" in name:
+            if name.endswith("scale"):
+                value.fill_(1.0)
+            elif name.endswith("base"):
+                value.zero_()
+            else:
+                value.uniform_(-0.001, 0.001, generator=generator)
+        elif "scale" in name:
+            value.fill_(0.01)
+        elif "offset" in name or name.endswith("bias"):
+            value.zero_()
+        elif "norm" in name and name.endswith("weight"):
+            value.fill_(1.0)
+        else:
+            value.uniform_(-0.01, 0.01, generator=generator)
 
 
 class FlashWorker:
