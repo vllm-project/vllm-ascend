@@ -3,6 +3,8 @@ import gc
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.rope import (
     rope_forward_triton,
     rope_forward_triton_siso,
@@ -155,7 +157,11 @@ def _rope_fp8_pytorch_native(
     positions: torch.Tensor,
     rope_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """PyTorch reference for NeoX RoPE with a direct E4M3 store."""
+    """Evaluate the E4M3 reference on CPU, independently of NPU cast support."""
+    query = query.cpu()
+    key = key.cpu()
+    cos_sin_cache = cos_sin_cache.cpu()
+    positions = positions.cpu()
     half = rope_dim // 2
     cos_sin = cos_sin_cache.index_select(0, positions).to(torch.float32)
     cos = cos_sin[:, :half].unsqueeze(-2)
@@ -273,6 +279,8 @@ def test_rotary_embedding_triton_kernel_fp8(
     rotary_dim: int,
     device: str,
 ) -> None:
+    if get_ascend_device_type() == AscendDeviceType.A2:
+        pytest.skip("A2 Triton backend cannot lower FP8 arith::TruncFOp to hfusion")
     torch.manual_seed(0)
     torch.set_default_device(device)
 
@@ -312,16 +320,20 @@ def test_rotary_embedding_triton_kernel_fp8(
     assert actual_key.dtype == torch.float8_e4m3fn
     assert actual_query.shape == query.shape
     assert actual_key.shape == key.shape
-    assert actual_query[0, 0, 0].to(torch.float32) == FP8_E4M3_MAX
-    assert actual_key[0, 0, 0].to(torch.float32) == -FP8_E4M3_MAX
+    # Copy raw storage before decoding FP8, since NPU dtype conversion support
+    # is separate from the Triton kernel's FP8 output contract.
+    actual_query_cpu = actual_query.view(torch.uint8).cpu().view(torch.float8_e4m3fn).float()
+    actual_key_cpu = actual_key.view(torch.uint8).cpu().view(torch.float8_e4m3fn).float()
+    assert actual_query_cpu[0, 0, 0] == FP8_E4M3_MAX
+    assert actual_key_cpu[0, 0, 0] == -FP8_E4M3_MAX
     torch.testing.assert_close(
-        actual_query.to(torch.float32),
+        actual_query_cpu,
         expected_query.to(torch.float32),
         atol=0.125,
         rtol=0.125,
     )
     torch.testing.assert_close(
-        actual_key.to(torch.float32),
+        actual_key_cpu,
         expected_key.to(torch.float32),
         atol=0.125,
         rtol=0.125,
@@ -371,3 +383,34 @@ def test_rotary_embedding_triton_kernel_siso(
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize("is_neox_style", [True, False])
+@pytest.mark.parametrize("rotary_dim", [96, 128])
+@pytest.mark.parametrize("use_cache", [False, True])
+@torch.inference_mode()
+def test_siso_head_tile_tail(is_neox_style, rotary_dim, use_cache):
+    torch.manual_seed(42)
+    # Nineteen heads exercise the masked final tile in both layout styles.
+    query = torch.randn(3, 19, 128, dtype=torch.float16, device="npu")
+    cos = torch.randn(5, rotary_dim // 2, dtype=query.dtype, device=query.device)
+    sin = torch.randn_like(cos)
+    positions = torch.tensor([2, 0, 4], dtype=torch.int64, device=query.device)
+    selected_cos = cos[positions]
+    selected_sin = sin[positions]
+    expected = _rope_siso_pytorch_native(
+        query.clone(), selected_cos, selected_sin, rope_dim=rotary_dim, is_neox_style=is_neox_style
+    )
+    if use_cache:
+        actual = rope_forward_triton_siso(
+            query,
+            cos_sin_cache=torch.cat((cos, sin), dim=-1),
+            positions=positions,
+            rope_dim=rotary_dim,
+            is_neox_style=is_neox_style,
+        )
+    else:
+        actual = rope_forward_triton_siso(
+            query, selected_cos, selected_sin, rope_dim=rotary_dim, is_neox_style=is_neox_style
+        )
+    torch.testing.assert_close(actual, expected, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)

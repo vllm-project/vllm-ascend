@@ -372,31 +372,32 @@ def _triton_rope_siso(
         # Load the left and right half of q and k for the current
         # program instance (i.e. for the current token) separately
         # ####################################################################
-        # left half of the head
-        if IS_NEOX_STYLE:
-            first_half_offsets = tl.arange(0, pad_n_h)[:, None] * hd + tl.arange(0, pad_rope_dim // 2)[None, :]
-        else:
-            first_half_offsets = tl.arange(0, pad_n_h)[:, None] * hd + (2 * tl.arange(0, pad_rope_dim // 2)[None, :])
-
-        first_mask = (tl.arange(0, pad_n_h)[:, None] < n_h) & (
-            tl.arange(0, pad_rope_dim // 2)[None, :] < (rope_dim // 2)
-        )
-        qk_tile_1 = tl.load(qk_start_ptr + first_half_offsets, mask=first_mask, other=0).to(sin_row.dtype)
-
-        # right half of the head
-        if IS_NEOX_STYLE:
-            second_half_offsets = first_half_offsets + (rope_dim // 2)
-        else:
-            second_half_offsets = first_half_offsets + 1
-        second_mask = first_mask
-        qk_tile_2 = tl.load(qk_start_ptr + second_half_offsets, mask=second_mask, other=0).to(sin_row.dtype)
-
-        # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
-        new_qk_tile_1 = qk_tile_1 * cos_row - qk_tile_2 * sin_row
-        tl.store(qk_start_ptr + first_half_offsets, new_qk_tile_1, mask=first_mask)
-
-        new_qk_tile_2 = qk_tile_2 * cos_row + qk_tile_1 * sin_row
-        tl.store(qk_start_ptr + second_half_offsets, new_qk_tile_2, mask=second_mask)
+        for head_base in tl.range(0, n_h, BLOCK_SIZE):
+            heads = head_base + tl.arange(0, BLOCK_SIZE)
+            half_offsets = tl.arange(0, pad_rope_dim // 2)
+            if IS_NEOX_STYLE:
+                first_half_offsets = heads[:, None] * hd + half_offsets[None, :]
+                first_mask = (heads[:, None] < n_h) & (half_offsets[None, :] < rope_dim // 2)
+                qk_tile_1 = tl.load(qk_start_ptr + first_half_offsets, mask=first_mask, other=0).to(sin_row.dtype)
+                second_half_offsets = first_half_offsets + rope_dim // 2
+                qk_tile_2 = tl.load(qk_start_ptr + second_half_offsets, mask=first_mask, other=0).to(sin_row.dtype)
+                new_qk_tile_1 = qk_tile_1 * cos_row - qk_tile_2 * sin_row
+                new_qk_tile_2 = qk_tile_2 * cos_row + qk_tile_1 * sin_row
+                tl.store(qk_start_ptr + first_half_offsets, new_qk_tile_1, mask=first_mask)
+                tl.store(qk_start_ptr + second_half_offsets, new_qk_tile_2, mask=first_mask)
+            else:
+                # Keep each even/odd pair in one masked load and store, as in
+                # the Q/K kernel. Separate strided stores can clobber the paired
+                # values when a non-power-of-two rotary dimension is padded.
+                pair_offsets = (
+                    heads[:, None, None] * hd + 2 * half_offsets[None, :, None] + tl.arange(0, 2)[None, None, :]
+                )
+                pair_mask = (heads[:, None, None] < n_h) & (half_offsets[None, :, None] < rope_dim // 2)
+                qk_tile = tl.load(qk_start_ptr + pair_offsets, mask=pair_mask, other=0).to(sin_row.dtype)
+                qk_tile_1, qk_tile_2 = tl.split(qk_tile)
+                new_qk_tile_1 = qk_tile_1 * cos_row - qk_tile_2 * sin_row
+                new_qk_tile_2 = qk_tile_2 * cos_row + qk_tile_1 * sin_row
+                tl.store(qk_start_ptr + pair_offsets, tl.join(new_qk_tile_1, new_qk_tile_2), mask=pair_mask)
 
 
 @triton.jit
@@ -676,7 +677,7 @@ def rope_forward_triton_siso(
     assert rope_dim <= head_dim
     pad_rope_dim = triton.next_power_of_2(rope_dim)
     pad_n_head = triton.next_power_of_2(n_head)
-    BLOCK_SIZE = pad_n_head
+    BLOCK_SIZE = min(pad_n_head, _compute_rope_block_size_head(head_dim, rope_dim, is_neox_style))
     num_vectorcore = get_vectorcore_num()
     n_row = min(num_tokens, num_vectorcore)
 
