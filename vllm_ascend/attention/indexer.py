@@ -1042,15 +1042,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     ) -> AscendSFAIndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
-        if (
-            self.speculative_config is not None
-            and getattr(self.speculative_config, "method", None) == "dspark"
-            and getattr(self.speculative_config, "enable_adaptive_verification", False)
-        ):
-            # Keep the independently built indexer metadata aligned with SFA:
-            # adaptive verification records its graph-shaped token count in
-            # positions rather than common_attn_metadata.num_input_tokens.
-            num_input_tokens = common_attn_metadata.positions.shape[0]
         if self.use_dcp:
             block_table, slot_mapping = self._build_dcp_cache_metadata(
                 common_attn_metadata,

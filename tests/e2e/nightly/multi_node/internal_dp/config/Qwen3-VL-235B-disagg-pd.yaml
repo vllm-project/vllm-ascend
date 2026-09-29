@@ -2,6 +2,7 @@ test_name: "test Qwen3-VL-235B-A22B disaggregated_prefill"
 model: "Qwen/Qwen3-VL-235B-A22B-Instruct"
 num_nodes: 2
 npu_per_node: 16
+dp_load_balancing: internal
 env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 1024

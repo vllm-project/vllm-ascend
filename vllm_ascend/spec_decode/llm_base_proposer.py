@@ -67,7 +67,7 @@ from vllm_ascend.spec_decode.utils import (
     compact_mtp_topk_indices,
     patch_tensor_parallel_group,
 )
-from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph
+from vllm_ascend.utils import _is_glm_model, check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 
 
@@ -111,19 +111,6 @@ def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
     target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
     return target_argmax
-
-
-# TODO(lilinsiman): Remove this code segment after future versions of the GLM
-# series models support graph input for speculative inference.
-def _is_glm_model(model_config) -> bool:
-    """Return True if the target model belongs to the GLM series.
-
-    Detection is based on the model_type string (covers glm, chatglm, glm4,
-    glm4_moe, glm4_moe_lite, glm4_1v, glm_ocr, glm_moe_dsa, etc).
-    """
-    hf_text_config = getattr(model_config, "hf_text_config", None)
-    model_type = getattr(hf_text_config, "model_type", "") or ""
-    return "glm" in str(model_type).lower()
 
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):

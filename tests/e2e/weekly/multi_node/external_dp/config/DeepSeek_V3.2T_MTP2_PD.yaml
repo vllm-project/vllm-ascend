@@ -2,6 +2,7 @@ test_name: "DeepSeek_V3.2T_MTP2_PD"
 model: "vllm-ascend/DeepSeek-V3.2-W8A8"
 num_nodes: 4
 npu_per_node: 16
+dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"
@@ -60,6 +61,7 @@ env_common: &env_common
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   TASK_QUEUE_ENABLE: 1
   HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_USE_V1: "1"
   ASCEND_TRANSPORT_PRINT: "1"
   ACL_OP_INIT_MODE: "1"
   ASCEND_A3_ENABLE: "1"

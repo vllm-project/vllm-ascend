@@ -20,7 +20,6 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC4StateBackend,
@@ -563,43 +562,7 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
         return SimpleNamespace(common_attn_metadata=common_attn_metadata)
 
 
-class _RecordingDSACPMetadataBuilder(AscendDSACPMetadataBuilder):
-    def __init__(self, calls: list[dict[str, Any]]):
-        self.calls = calls
-        self.for_cudagraph_capture = False
-
-    def build_for_cudagraph_capture(
-        self,
-        common_attn_metadata,
-        **kwargs,
-    ):
-        self.for_cudagraph_capture = True
-        return super().build_for_cudagraph_capture(
-            common_attn_metadata,
-            **kwargs,
-        )
-
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata,
-        fast_build: bool = False,
-        **kwargs,
-    ):
-        del common_prefix_len, fast_build
-        self.common_ratio_to_sas_metadata = kwargs["common_ratio_to_sas_metadata"]
-        call = {
-            "common_attn_metadata": common_attn_metadata,
-            "common_ratio_to_sas_metadata": self.common_ratio_to_sas_metadata,
-            "for_cudagraph_capture": self.for_cudagraph_capture,
-            "num_actual_reqs": kwargs["num_actual_reqs"],
-        }
-        self.calls.append(call)
-        call["common_ratio_to_sas_metadata"].setdefault("first_group", len(self.calls) == 1)
-        return SimpleNamespace(common_attn_metadata=common_attn_metadata)
-
-
-def _make_dsa_metadata_groups(builder_cls=_RecordingDSAMetadataBuilder):
+def _make_dsa_metadata_groups():
     layer_names = [
         "model.layers.0.self_attn.compressor",
         "model.layers.0.self_attn.indexer",
@@ -616,7 +579,7 @@ def _make_dsa_metadata_groups(builder_cls=_RecordingDSAMetadataBuilder):
                 layer_names=[layer_name],
                 kv_cache_spec=spec,
                 kv_cache_group_id=group_id,
-                metadata_builders=[builder_cls(calls)],
+                metadata_builders=[_RecordingDSAMetadataBuilder(calls)],
             )
         ]
         for group_id, (layer_name, spec) in enumerate(zip(layer_names, specs))
@@ -633,6 +596,32 @@ def _make_dsa_metadata_groups(builder_cls=_RecordingDSAMetadataBuilder):
         ],
     )
     return layer_names, specs, calls, attn_groups, kv_cache_config
+
+
+def test_draft_metadata_uses_per_request_cpu_upper_bounds():
+    _, _, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
+    upper_bounds = torch.tensor([13, 27], dtype=torch.int32)
+
+    attn_utils.build_attn_metadata(
+        attn_groups=attn_groups,
+        num_reqs=2,
+        num_tokens=2,
+        query_start_loc_gpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([11, 25], dtype=torch.int32),
+        max_seq_len=27,
+        block_tables=(torch.zeros((2, 1), dtype=torch.int32),) * 2,
+        slot_mappings=(torch.zeros(2, dtype=torch.int32),) * 2,
+        kv_cache_config=kv_cache_config,
+        seq_lens_cpu_upper_bound=upper_bounds,
+    )
+
+    assert len(calls) == 2
+    for call in calls:
+        common_metadata = call["common_attn_metadata"]
+        torch.testing.assert_close(common_metadata.seq_lens_cpu, upper_bounds)
+        torch.testing.assert_close(common_metadata.seq_lens, torch.tensor([11, 25], dtype=torch.int32))
 
 
 def test_prepare_kernel_block_sizes_uses_logical_size_for_dsv4():
@@ -827,39 +816,6 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         pcp_manager.build_attention_context.assert_called_once_with(input_batch, block_tables, slot_mappings)
     else:
         assert all(call["pcp_cache_group_idx"] is None for call in calls)
-
-
-def test_mrv2_capture_shares_legacy_dsa_cp_metadata():
-    layer_names, _, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups(_RecordingDSACPMetadataBuilder)
-    block_tables = (
-        torch.zeros((4, 1), dtype=torch.int32),
-        torch.zeros((4, 1), dtype=torch.int32),
-    )
-    slot_mappings = torch.zeros((2, 8), dtype=torch.int32)
-
-    metadata = attn_utils.build_attn_metadata(
-        attn_groups=attn_groups,
-        num_reqs=2,
-        num_tokens=5,
-        query_start_loc_gpu=torch.tensor([0, 2, 5], dtype=torch.int32),
-        query_start_loc_cpu=torch.tensor([0, 2, 5], dtype=torch.int32),
-        max_query_len=3,
-        seq_lens=torch.tensor([2, 3], dtype=torch.int32),
-        max_seq_len=8,
-        block_tables=block_tables,
-        slot_mappings=slot_mappings,
-        kv_cache_config=kv_cache_config,
-        seq_lens_np=np.array([2, 3], dtype=np.int32),
-        positions=torch.arange(5, dtype=torch.int32),
-        for_cudagraph_capture=True,
-    )
-
-    assert set(metadata) == set(layer_names)
-    assert len(calls) == 2
-    assert all(call["for_cudagraph_capture"] for call in calls)
-    assert calls[0]["num_actual_reqs"] == 2
-    assert calls[0]["common_ratio_to_sas_metadata"] is calls[1]["common_ratio_to_sas_metadata"]
-    assert calls[1]["common_ratio_to_sas_metadata"]["first_group"] is True
 
 
 def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
