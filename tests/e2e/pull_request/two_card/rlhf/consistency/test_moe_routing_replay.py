@@ -17,6 +17,7 @@ from vllm import SamplingParams
 from vllm.sampling_params import RequestOutputKind
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 MODELS = [
     "Qwen/Qwen3.5-35B-A3B",
