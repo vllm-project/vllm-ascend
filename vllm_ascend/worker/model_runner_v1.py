@@ -147,7 +147,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     get_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
-    prepare_copy_sfa_request_slots,
+    CopySfaRequestStates,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
@@ -677,10 +677,11 @@ class NPUModelRunner(GPUModelRunner):
         self._offload_token_to_req = None
         self._offload_pool_slots = None
         self._offload_pool_generations = None
-        self._offload_request_slots: dict[str, int] = {}
-        self._offload_slot_generation = 0
-        self._offload_slot_generations: dict[int, int] = {}
-        self._offload_slot_last_prefix: dict[int, int] = {}
+        self._offload_request_states = (
+            CopySfaRequestStates()
+            if self.sparse_kv_offload_enabled and self.sparse_kv_offload_config.use_fused_copy_sfa
+            else None
+        )
         self._copy_sfa_need_eager_tail_restore = False
         if self.sparse_kv_offload_enabled:
             self._offload_req_ids_tensor = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
@@ -1108,6 +1109,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.cached.setdefault(cur_hash, set()).add(new_req_data.req_id)
 
     def _on_request_state_removed(self, req_id: str, req_state: Any | None) -> None:
+        if self._offload_request_states is not None:
+            self._offload_request_states.remove_request(req_id)
         if req_state is None:
             return
         if not self.use_score_encoder_cache:
@@ -3550,20 +3553,12 @@ class NPUModelRunner(GPUModelRunner):
         if self.sparse_kv_offload_config.use_fused_copy_sfa and self.sparse_kv_offload_enabled:
             assert self._offload_pool_slots is not None
             assert self._offload_pool_generations is not None
-            (
-                self._offload_request_slots,
-                self._offload_slot_generation,
-                self._copy_sfa_need_eager_tail_restore,
-                dense_fills,
-            ) = prepare_copy_sfa_request_slots(
+            assert self._offload_request_states is not None
+            self._copy_sfa_need_eager_tail_restore, dense_fills = self._offload_request_states.prepare(
                 req_ids=self.input_batch.req_ids[:num_reqs],
                 live_req_ids=self.input_batch.req_id_to_index,
                 slots=self._offload_pool_slots.np,
                 generations=self._offload_pool_generations.np,
-                request_slots=self._offload_request_slots,
-                slot_generations=self._offload_slot_generations,
-                last_prefixes=self._offload_slot_last_prefix,
-                generation=self._offload_slot_generation,
                 prebound_slots=get_prebound_copy_sfa_slots() if not offload_dummy else {},
                 computed_tokens=getattr(self.input_batch, "num_computed_tokens_cpu", None),
                 padded_reqs=num_reqs_padded,

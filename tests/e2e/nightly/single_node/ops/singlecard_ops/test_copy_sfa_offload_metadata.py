@@ -12,8 +12,8 @@ import torch_npu  # noqa: F401
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl, AscendSFAKVOffloadMetadataBuilder
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
+    CopySfaRequestStates,
     prepare_copy_sfa_dummy_slots,
-    prepare_copy_sfa_request_slots,
 )
 
 MODULE = "vllm_ascend.attention.sfa_kv_offload"
@@ -434,22 +434,14 @@ def test_pool_ownership_survives_compaction_and_dummy_run():
 
     slots = np.zeros(4, dtype=np.int32)
     generations = np.zeros(4, dtype=np.int64)
-    request_slots: dict[str, int] = {}
-    generation = 0
-    slot_generations: dict[int, int] = {}
-    last_prefixes: dict[int, int] = {}
+    states = CopySfaRequestStates()
 
     def prepare(req_ids, *, dummy=False):
-        nonlocal request_slots, generation
-        request_slots, generation, restore_tails, dense_fills = prepare_copy_sfa_request_slots(
+        restore_tails, dense_fills = states.prepare(
             req_ids=req_ids,
             live_req_ids=req_ids,
             slots=slots,
             generations=generations,
-            request_slots=request_slots,
-            slot_generations=slot_generations,
-            last_prefixes=last_prefixes,
-            generation=generation,
             prebound_slots={},
             computed_tokens=None,
             padded_reqs=3,
@@ -470,14 +462,15 @@ def test_pool_ownership_survives_compaction_and_dummy_run():
     prepare(["b", "c"], dummy=True)
     assert slots[:3].tolist() == [4, 5, 6]
     assert generations[:3].tolist() == [-1, -1, -1]
-    assert request_slots == {"b": 1, "c": 0}
     prepare(["b", "c"])
     assert generations[:3].tolist() == [2, 3, -1]
     # The draft-only dummy path needs no ownership maps or model runner.
     prepare_copy_sfa_dummy_slots(slots, generations, 3)
     assert slots[:3].tolist() == [4, 5, 6]
     assert generations[:3].tolist() == [-1, -1, -1]
-    assert request_slots == {"b": 1, "c": 0}
+    prepare(["b", "c"])
+    assert slots[:2].tolist() == [1, 0]
+    assert generations[:2].tolist() == [2, 3]
 
 
 def test_draft_metadata_remains_valid_until_its_step_executes():

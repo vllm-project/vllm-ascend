@@ -37,6 +37,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
 )
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
@@ -2467,10 +2468,33 @@ class TestNPUModelRunnerEncoderCacheReset(unittest.TestCase):
         runner.tmp_encoder_cache = {}
         runner.cpu_encoder_cache = {}
         runner.cached = {}
+        runner._offload_request_states = CopySfaRequestStates()
         runner._pending_encoder_cache_copies = deque()
         runner.late_interaction_runner = MagicMock()
         runner._sync_device = MagicMock()
         return runner
+
+    def test_request_removal_invalidates_offload_history_without_cached_request(self):
+        runner = self._build_runner()
+        slots = np.zeros(4, dtype=np.int32)
+        generations = np.zeros(4, dtype=np.int64)
+        args = dict(
+            req_ids=["a"],
+            live_req_ids=["a"],
+            slots=slots,
+            generations=generations,
+            prebound_slots={"a": 0},
+            padded_reqs=1,
+            block_size=128,
+            hot_tokens=8192,
+            dummy=False,
+        )
+        runner._offload_request_states.prepare(computed_tokens=np.asarray([8320]), **args)
+        old_generation = generations[0]
+        runner._on_request_state_removed("a", None)
+        outcome = runner._offload_request_states.prepare(computed_tokens=np.asarray([512]), **args)
+        self.assertGreater(generations[0], old_generation)
+        self.assertEqual(outcome, (False, {}))
 
     def test_reset_clears_score_encoder_cache_state(self):
         runner = self._build_runner()
