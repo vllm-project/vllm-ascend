@@ -26,6 +26,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
+from vllm_ascend.attention.utils import HostSeqLensRequirement
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -69,6 +70,7 @@ def _make_runner(need_timing: bool = True):
     # Empty groups keep prepare_dummy_attn's V4.1 ring-state prep a no-op;
     # these tests focus on buffer refresh / upstream passthrough only.
     runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
+    runner._host_seq_lens_requirement = HostSeqLensRequirement.EXACT
     return runner
 
 
@@ -1740,7 +1742,7 @@ def test_prepare_inputs_covers_draft_full_dcp_pp_and_rswa():
     assert runner.req_states.num_computed_tokens_cpu[0] == 3
 
 
-def test_postprocess_sampled_copies_only_with_speculator():
+def test_postprocess_sampled_copies_only_with_speculator_and_exact_requirement():
     runner = _make_runner()
     runner.speculator = object()
     runner._copy_num_computed_tokens_to_cpu = MagicMock()
@@ -1750,6 +1752,15 @@ def test_postprocess_sampled_copies_only_with_speculator():
     runner._copy_num_computed_tokens_to_cpu.assert_called_once_with()
 
     runner.speculator = None
+    runner._copy_num_computed_tokens_to_cpu.reset_mock()
+    with patch.object(GPUModelRunner, "postprocess_sampled"):
+        runner.postprocess_sampled("idx", "tok", 1, 0)
+    runner._copy_num_computed_tokens_to_cpu.assert_not_called()
+
+    # A speculator alone is not enough: non-EXACT consumers skip the
+    # exact-host snapshot entirely.
+    runner.speculator = object()
+    runner._host_seq_lens_requirement = HostSeqLensRequirement.UPPER_BOUND
     runner._copy_num_computed_tokens_to_cpu.reset_mock()
     with patch.object(GPUModelRunner, "postprocess_sampled"):
         runner.postprocess_sampled("idx", "tok", 1, 0)

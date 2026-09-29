@@ -11,7 +11,6 @@ from types import SimpleNamespace
 
 from vllm_ascend.attention.utils import (
     HostSeqLensRequirement,
-    get_host_seq_lens_requirement,
     resolve_host_seq_lens_requirements,
 )
 
@@ -89,11 +88,9 @@ def test_undeclared_consumer_falls_back_to_exact_and_is_reported():
     assert result.requirement is HostSeqLensRequirement.EXACT
     assert len(result.undeclared) == 1
     assert "_UndeclaredBuilder" in result.undeclared[0]
-    assert get_host_seq_lens_requirement(_UndeclaredBuilder) is HostSeqLensRequirement.EXACT
 
 
 def test_declaration_is_inherited_by_subclasses():
-    assert get_host_seq_lens_requirement(_SubclassedExactBuilder) is HostSeqLensRequirement.EXACT
     groups = [[_make_group(_SubclassedExactBuilder)]]
     result = resolve_host_seq_lens_requirements(groups)
     assert result.requirement is HostSeqLensRequirement.EXACT
@@ -154,7 +151,7 @@ def test_in_tree_builders_are_declared():
         AscendSFAIndexerMetadataBuilder: HostSeqLensRequirement.NONE,
     }
     for builder_cls, requirement in expected.items():
-        assert get_host_seq_lens_requirement(builder_cls) is requirement, (
+        assert getattr(builder_cls, "HOST_SEQ_LENS_REQUIREMENT", None) is requirement, (
             f"{builder_cls.__name__} must declare HOST_SEQ_LENS_REQUIREMENT={requirement.name}"
         )
 
