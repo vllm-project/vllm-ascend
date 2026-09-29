@@ -87,9 +87,9 @@ def test_zeroer_uses_single_fused_mla_physical_page():
     )
 
     assert zeroer._meta is not None
-    seg_addrs, page_size_el, _, n_segs = zeroer._meta
+    seg_addrs, seg_page_sizes, _, _, n_segs = zeroer._meta
     assert len(seg_addrs) == 1
-    assert page_size_el == PAGE_BYTES // 4
+    assert seg_page_sizes[0].item() == PAGE_BYTES // 4
     assert n_segs == 1
 
 
@@ -105,10 +105,10 @@ def test_zeroer_dedupes_component_mla_views_sharing_physical_page():
     )
 
     assert zeroer._meta is not None
-    seg_addrs, page_size_el, _, n_segs = zeroer._meta
+    seg_addrs, seg_page_sizes, _, _, n_segs = zeroer._meta
     assert len(seg_addrs) == 1
     assert seg_addrs[0] == nope.data_ptr()
-    assert page_size_el == PAGE_BYTES // 4
+    assert seg_page_sizes[0].item() == PAGE_BYTES // 4
     assert n_segs == 1
 
 
