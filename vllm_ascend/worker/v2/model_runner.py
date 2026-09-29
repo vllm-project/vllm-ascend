@@ -779,17 +779,26 @@ class NPUModelRunner(GPUModelRunner):
                 "the profile-run marker, which makes XLite bypass its graph path."
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
-        with skip_ring_state_update(skip_ring), load_balance_ctx:
-            hidden_states, sample_hidden_states = super()._dummy_run(
-                num_tokens,
-                *args,
-                skip_attn=skip_attn,
-                uniform_decode=uniform_decode,
-                context_len=context_len,
-                skip_eplb=True,
-                is_profile=is_profile,
-                **kwargs,
-            )
+        original_max_num_reqs = getattr(self, "max_num_reqs", None)
+        query_width = getattr(getattr(self, "speculator", None), "num_query_per_req", 1)
+        if original_max_num_reqs is not None and not uniform_decode and isinstance(query_width, int):
+            # Cap synthetic parallel-draft requests on vLLM builds before #56448.
+            self.max_num_reqs = min(original_max_num_reqs, self.max_num_tokens // query_width)
+        try:
+            with skip_ring_state_update(skip_ring), load_balance_ctx:
+                hidden_states, sample_hidden_states = super()._dummy_run(
+                    num_tokens,
+                    *args,
+                    skip_attn=skip_attn,
+                    uniform_decode=uniform_decode,
+                    context_len=context_len,
+                    skip_eplb=True,
+                    is_profile=is_profile,
+                    **kwargs,
+                )
+        finally:
+            if original_max_num_reqs is not None:
+                self.max_num_reqs = original_max_num_reqs
         if lmhead_tp_enable() and not is_profile and hidden_states is not None:
             dummy_indices = torch.zeros(
                 self._lmhead_tp_max_num_logits(),

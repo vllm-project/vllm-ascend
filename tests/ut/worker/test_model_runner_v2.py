@@ -707,6 +707,27 @@ def test_profile_run_skips_mc2_dummy_without_capacity():
     runner._dummy_run.assert_not_called()
 
 
+def test_parallel_draft_dummy_requests_fit_input_buffer():
+    runner = _make_runner()
+    runner.max_num_tokens = runner.max_num_reqs = 32
+    runner.speculator = SimpleNamespace(num_query_per_req=7)
+    observed = []
+
+    def old_vllm_dummy_run(self, num_tokens, *args, **kwargs):
+        num_reqs = min(num_tokens, self.max_num_reqs)
+        assert num_reqs * 7 <= self.max_num_tokens
+        observed.append(num_reqs)
+        return None, None
+
+    with (
+        patch.object(GPUModelRunner, "_dummy_run", old_vllm_dummy_run),
+        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=False),
+    ):
+        runner._dummy_run(32, is_profile=True, skip_eplb=True)
+    assert observed == [4]
+    assert runner.max_num_reqs == 32
+
+
 def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=False, rswa=False, speculator=False):
     runner = _make_runner()
     runner.max_num_reqs = 4
