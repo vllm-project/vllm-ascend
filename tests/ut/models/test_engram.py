@@ -8,6 +8,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -22,6 +23,7 @@ pytest.importorskip(
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.models.deepseek_v41.engram.common import engram_gate
+from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgramHashState
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -145,6 +147,21 @@ def test_shared_table_skips_per_step_dp_gather(monkeypatch):
     assert calls == [True, False]
 
 
+@pytest.mark.parametrize("num_tokens", [0, 2])
+def test_idle_hashes_have_no_valid_rows(num_tokens):
+    state = object.__new__(AscendNgramHashState)
+    torch.nn.Module.__init__(state)
+    state.multipliers = torch.empty(2, 3, dtype=torch.int64)
+    state.primes = torch.empty(2, 2, 4, dtype=torch.int64)
+    hashes, keep = state.dummy_hashes(torch.zeros(num_tokens, dtype=torch.int64))
+    assert hashes.shape == (num_tokens, 2, 8)
+    assert hashes.dtype == torch.int32
+    assert (hashes == DEAD_ID).all()
+    assert keep.shape == (num_tokens,)
+    assert keep.dtype == torch.bool
+    assert not keep.any()
+
+
 def _runner(rows, computed, prompt):
     token_ids = np.full((len(rows), 16), -7, dtype=np.int32)
     for index, row in enumerate(rows):
@@ -165,13 +182,23 @@ def _runner(rows, computed, prompt):
     return runner
 
 
-def test_v1_lookback_uses_prompt_tokens_only():
-    runner = _runner([[10, 11, 12, 13, -7, -7]], [4], [4])
-    prompt = runner._prepare_lookback_token_ids(1).numpy()
-    assert prompt[0].tolist() == [13, 12, 11]
-    runner.input_batch.num_computed_tokens_cpu[0] = 6
-    generated = runner._prepare_lookback_token_ids(1).numpy()
-    assert generated[0].tolist() == [-1, -1, 13]
+@pytest.mark.parametrize(
+    "computed,num_reqs,expected",
+    [
+        (4, None, [13, 12, 11]),
+        (6, None, [-1, -1, 13]),
+        (0, None, [-1, -1, -1]),
+        (4, 0, [-1, -1, -1]),
+        (4, 1, [13, 12, 11]),
+    ],
+)
+def test_v1_lookback_uses_prompt_tokens_once(computed, num_reqs, expected):
+    runner = _runner([[10, 11, 12, 13, -7, -7]], [computed], [4])
+    copy = Mock(wraps=runner.lookback_token_ids.copy_to_gpu)
+    runner.lookback_token_ids.copy_to_gpu = copy
+    kwargs = runner._init_model_kwargs(num_reqs=num_reqs)
+    assert kwargs["lookback_token_ids"][0].tolist() == expected
+    copy.assert_called_once_with()
 
 
 @pytest.mark.parametrize("shared", [False, True])
@@ -188,7 +215,7 @@ def test_engram_rejects_nonlocal_groups_before_allocation(monkeypatch, shared, r
 @pytest.mark.parametrize("dp_rank,num_tokens", [(2, 3), (3, 2), (3, 0)])
 def test_engram_gather_uses_the_local_edp_token_slice(monkeypatch, dp_rank, num_tokens):
     """A replica pads to its own EDP slot, never to another node's prefill."""
-    from vllm_ascend.models.deepseek_v41.engram import parallel as parallel_mod
+    from vllm.models.deepseek_v41.nvidia import engram as parallel_mod
 
     edp_group = SimpleNamespace(world_size=2, rank_in_group=dp_rank - 2, all_gather=lambda ids, dim=0: ids.repeat(2, 1))
     monkeypatch.setattr(parallel_mod, "get_engram_dp_group", lambda: edp_group)
@@ -201,7 +228,7 @@ def test_engram_gather_uses_the_local_edp_token_slice(monkeypatch, dp_rank, num_
         lambda: SimpleNamespace(dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=torch.tensor([1, 9, 4, 2]))),
     )
     ids = torch.full((num_tokens, 5), dp_rank + 10, dtype=torch.int32)
-    gathered = parallel_mod.gather_engram_hashes(ids)
+    gathered = embedding_mod.gather_engram_hashes(ids)
     assert gathered.shape == (8, 5)
     for replica in gathered.reshape(2, 4, 5):
         torch.testing.assert_close(replica[:num_tokens], ids)

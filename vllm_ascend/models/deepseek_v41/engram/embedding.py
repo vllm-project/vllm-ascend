@@ -21,6 +21,8 @@ import torch.distributed as dist
 from safetensors import safe_open
 from torch import nn
 from vllm.distributed import (
+    get_engram_dp_group,
+    get_engram_dp_size,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
@@ -31,6 +33,11 @@ from vllm.model_executor.utils import set_weight_attrs
 
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
+from vllm.models.deepseek_v41.nvidia.engram import (
+    _gather_engram_rows,
+    engram_head_shard_rank,
+    gather_engram_hashes,
+)
 
 from .npu import (
     HostUvaBuffer,
@@ -38,13 +45,6 @@ from .npu import (
     gather_dequantize_engram_int8,
     gather_dequantize_host_uva,
     quantize_engram_rows,
-)
-from .parallel import (
-    _gather_engram_rows,
-    engram_head_shard_rank,
-    gather_engram_hashes,
-    get_engram_dp_group,
-    get_engram_dp_size,
 )
 
 
