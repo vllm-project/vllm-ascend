@@ -551,7 +551,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             assert expanded_slot_mapping is not None
             self._finalize_pcp_metadata(metadata, expanded_slot_mapping)
             if self.pcp_shard_decode_requests:
-                metadata.pcp_cos, metadata.pcp_sin = get_cos_and_sin_mla(common_attn_metadata.positions.long())
+                # Decode queries use the same local-position prefix; refresh
+                # its padded tail in the existing graph-stable RoPE buffer.
+                metadata.pcp_cos, metadata.pcp_sin = get_cos_and_sin_mla(
+                    common_attn_metadata.positions.long(), use_cache=self.num_prefills == 0
+                )
         return metadata
 
     def _finalize_pcp_metadata(
