@@ -448,6 +448,8 @@ class AscendConfig:
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
+            "enable_pivot_lightning_indexer": false,
+            "pivot_lightning_indexer_backend": "v1",
             "c8_enable_reshape_optim": true,
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
@@ -633,6 +635,8 @@ class AscendConfig:
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False
+    enable_pivot_lightning_indexer: bool = False
+    pivot_lightning_indexer_backend: Literal["v1", "v2"] = "v1"
     # See https://github.com/vllm-project/vllm-ascend/issues/15896
     c8_enable_reshape_optim: bool = True
     pd_tp_ratio: int = 1
