@@ -28,7 +28,7 @@ constexpr uint32_t ATTR_KEY_LAYOUT_INDEX = 1;
 constexpr uint32_t ATTR_SPARSE_COUNT_INDEX = 2;
 constexpr uint32_t ATTR_RETURN_VALUE_INDEX = 6;
 
-static ge::graphStatus InferShapeLightningIndexer(gert::InferShapeContext *context)
+ge::graphStatus InferShapeLightningIndexer(gert::InferShapeContext *context)
 {
     OP_CHECK_IF(context == nullptr, OP_LOGE("LightningIndexer", "InferShapeContext is nullptr!"),
                return ge::GRAPH_FAILED);
