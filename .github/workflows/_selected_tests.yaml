@@ -246,6 +246,7 @@ jobs:
         if: ${{ matrix.group.npu_type == 'a2' || matrix.group.npu_type == 'a3' || matrix.group.npu_type == 'a5' }}
         env:
           NPU_TYPE: ${{ matrix.group.npu_type }}
+          GIT_PROXY: https://gh-proxy.test.osinfra.cn/
         run: |
           set -euo pipefail
           FLA_VERSION=26.9.1+deva4a7958
@@ -312,6 +313,7 @@ jobs:
         env:
           SOC_VERSION: ascend910b1
           COMPILE_CUSTOM_KERNELS: 0
+          GIT_PROXY: https://gh-proxy.test.osinfra.cn/
         run: |
           set -euo pipefail
           pip install uc-manager

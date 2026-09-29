@@ -227,6 +227,8 @@ jobs:
               uv pip install tblib
 
           - name: Install FLA NPU for A2 upstream tests
+            env:
+              GIT_PROXY: https://gh-proxy.test.osinfra.cn/
             run: |
               set -euo pipefail
               FLA_WHL=flash_linear_attention_npu_a2-26.9.1+deva4a7958-py3-none-manylinux_2_34_aarch64.whl
