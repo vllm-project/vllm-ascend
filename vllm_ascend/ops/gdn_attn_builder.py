@@ -971,7 +971,38 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         return has_initial_state
 
 
+class AscendVariableLengthGDNAttentionMetadataBuilder(AscendGDNAttentionMetadataBuilder):
+    """Metadata builder for native GDN kernels with ragged verify batches."""
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        speculative_config = vllm_config.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.method == "dflash"
+            and getattr(speculative_config, "enable_adaptive_verification", False)
+        ):
+            return AttentionCGSupport.ALWAYS
+        return AttentionCGSupport.UNIFORM_BATCH
+
+
 class AscendGDNAttentionBackend(GDNAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         return AscendGDNAttentionMetadataBuilder
+
+
+class AscendVariableLengthGDNAttentionBackend(AscendGDNAttentionBackend):
+    """GDN backend whose recurrent kernel accepts ragged device lengths."""
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendVariableLengthGDNAttentionMetadataBuilder]:
+        return AscendVariableLengthGDNAttentionMetadataBuilder
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return True

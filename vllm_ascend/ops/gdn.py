@@ -39,7 +39,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
+from vllm_ascend.ops.gdn_attn_builder import AscendVariableLengthGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -269,7 +269,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         return
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return AscendGDNAttentionBackend
+        return AscendVariableLengthGDNAttentionBackend
 
     def forward(
         self,
