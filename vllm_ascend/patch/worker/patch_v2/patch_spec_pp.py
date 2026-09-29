@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""0.30 PP sampled-token protocol for release trains.
+"""PP sampled-token communication patches.
 
-Replaces the deferred-broadcast transport that deadlocked under KV
-saturation with async EPLB.  Delete once the paired vLLM version ships
-the protocol natively.
+Skip broadcasts with no consumer on native PP, with or without speculation.
+The release-only protocol below replaces the deferred-broadcast transport
+that deadlocked under KV saturation with async EPLB; remove that backport
+once the paired vLLM version ships the protocol natively.
 """
 
 from dataclasses import dataclass
+from functools import wraps
 
 import numpy as np
 import torch
@@ -15,8 +17,71 @@ import torch
 # vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
 # torch_utils.async_tensor_h2d (gaining out=/device=None support).
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
+from vllm.v1.worker.gpu import pp_utils
 
 _INSTALLED = "_vllm_ascend_upstream_spec_pp_installed"
+_PATCHED_ATTR = "_vllm_ascend_pp_token_broadcast_patched"
+
+
+def broadcast_has_no_consumer(pp_handler, input_batch) -> bool:
+    """Whether no later step on this engine reads the PP token broadcast."""
+    request_states = getattr(pp_handler, "ascend_request_states", None)
+    if request_states is None:
+        return False
+
+    produces_sample = pp_utils.compute_need_sampled_mask(input_batch)
+    if produces_sample is None:
+        return False
+
+    # A final prefill chunk samples one token. If it reaches the request's
+    # length cap (max_tokens=1), no decode step will consume the broadcast.
+    # This uses shared request limits, not rank-local progress estimates.
+    final_prefill_chunk = input_batch.is_prefilling_np & (
+        input_batch.num_computed_tokens_np + input_batch.num_scheduled_tokens >= input_batch.prefill_len_np
+    )
+    reaches_length_cap = input_batch.prefill_len_np + 1 >= request_states.max_seq_len[input_batch.idx_mapping_np]
+    finished_with_sample = final_prefill_chunk & reaches_length_cap
+    return bool(finished_with_sample[produces_sample].all())
+
+
+def _patch_pp_handler() -> None:
+    pp_handler_cls = getattr(pp_utils, "PPHandler", None)
+    if pp_handler_cls is None or not hasattr(pp_utils, "compute_need_sampled_mask"):
+        return
+    if getattr(pp_handler_cls.receive, _PATCHED_ATTR, False):
+        return
+
+    original_receive = pp_handler_cls.receive
+    original_broadcast = pp_handler_cls.broadcast
+    original_broadcast_drafts = pp_handler_cls.broadcast_drafts
+
+    @wraps(original_receive)
+    def receive(self, input_batch):
+        if broadcast_has_no_consumer(self, input_batch):
+            # Match the no-sample path: leave the deferred queue slot empty.
+            return False
+        return original_receive(self, input_batch)
+
+    @wraps(original_broadcast)
+    def broadcast(self, sampled_token_ids, num_sampled, num_rejected, input_batch):
+        if broadcast_has_no_consumer(self, input_batch):
+            return
+        return original_broadcast(self, sampled_token_ids, num_sampled, num_rejected, input_batch)
+
+    @wraps(original_broadcast_drafts)
+    def broadcast_drafts(self, draft_tokens, input_batch):
+        if broadcast_has_no_consumer(self, input_batch):
+            return
+        return original_broadcast_drafts(self, draft_tokens, input_batch)
+
+    for patched in (receive, broadcast, broadcast_drafts):
+        setattr(patched, _PATCHED_ATTR, True)  # type: ignore[attr-defined]
+    pp_handler_cls.receive = receive
+    pp_handler_cls.broadcast = broadcast
+    pp_handler_cls.broadcast_drafts = broadcast_drafts
+
+
+_patch_pp_handler()
 
 
 def compute_need_sampled_mask(input_batch):
