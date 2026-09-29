@@ -146,10 +146,16 @@ def test_lmhead_tp_capacity_attribute_default_none():
     (target / MTP / DFlash) construct heads without any behavior change."""
     from vllm_ascend.ops.vocab_parallel_embedding import AscendParallelLMHead
 
-    head = object.__new__(AscendParallelLMHead)
+    head = AscendParallelLMHead(
+        num_embeddings=128,
+        embedding_dim=64,
+    )
     assert head.lmhead_tp_capacity is None
-    head2 = object.__new__(AscendParallelLMHead)
-    head2.lmhead_tp_capacity = 16
+    head2 = AscendParallelLMHead(
+        num_embeddings=128,
+        embedding_dim=64,
+        lmhead_tp_capacity=16,
+    )
     assert head2.lmhead_tp_capacity == 16
 
 
