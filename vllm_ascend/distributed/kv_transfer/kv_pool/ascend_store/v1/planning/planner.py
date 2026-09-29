@@ -13,7 +13,6 @@ from ..protocol.transfer import (
     LoadCommandBatch,
     RangeStoreCommand,
     StateCheckpointSource,
-    StoreCommand,
     StoreCommandBatch,
 )
 from .availability import ExternalPrefixPlan, LookupQuery, RemoteAvailabilityProbe
@@ -91,12 +90,14 @@ class TransferPlanner:
     def build_step(self, planning_step: TransferPlanningStep) -> KVTransferStep:
         self._discard_finished_and_preempted(planning_step)
         load_commands, planned_store_commands = self._plan_scheduled_requests(planning_step.scheduled_requests)
-        store_commands: list[StoreCommand] = list(planned_store_commands)
         load_commands.extend(self._publish_allocation_ready_load_commands())
-        store_commands.extend(self._plan_checkpoint_stores(planning_step.checkpoint_handoffs))
+        checkpoint_store_commands = self._plan_checkpoint_stores(planning_step.checkpoint_handoffs)
         return KVTransferStep(
             LoadCommandBatch(tuple(load_commands)),
-            StoreCommandBatch(tuple(store_commands)),
+            StoreCommandBatch(
+                source_pending_commands=tuple(planned_store_commands),
+                source_ready_commands=tuple(checkpoint_store_commands),
+            ),
         )
 
     def _plan_checkpoint_stores(self, handoffs: tuple[StateCheckpointHandoff, ...]) -> list[CheckpointStoreCommand]:
