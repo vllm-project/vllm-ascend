@@ -70,6 +70,11 @@ msprof op --kernel-name=<KernelName> --output=./profiling --aic-metrics=PipeUtil
 - gen/ 下只能删 `*_ascend910b_*.done`（编译步骤的门闩）。**不要删** `.sh` 和
   `_param.json`——它们是 opc 编译脚本的输入，删了会导致
   `[ERROR] op <name>: not any obj compile success`（脚本在、输入没了）。
+- **分支 rebase 之后**，`csrc/build` 的 CMake 缓存（CMakeCache.txt /
+  CMakeFiles / build.ninja）仍引用 rebase 前分支的目标（如已删除的
+  aicpu kernel obj），CMake Generate 阶段报 "referenced but no such target
+  exists"。清掉这些缓存文件（保留 `csrc/build/binary/` 增量产物）后重跑
+  build_aclnn.sh 即可；全量重配一次约多花几分钟。
 - 自检标准：build 树源文件与仓库源文件 md5 一致，且 .o 的 mtime 晚于源文件 mtime。
 
 ## 测量口径（对比数据必须注明口径）
