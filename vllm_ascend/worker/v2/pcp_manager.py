@@ -259,6 +259,38 @@ class AscendPCPManager(PCPManager):
         if cudagraph_mode.has_full_cudagraphs() and cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
             raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
 
+    # TODO: Remove once upstream PCP keeps per-request draft counts in the
+    # rank-local batch.
+    @staticmethod
+    def _restore_draft_token_counts(
+        global_batch: AscendInputBatch,
+        local_batch: AscendInputBatch,
+    ) -> AscendInputBatch:
+        """Carry the scheduled draft counts over to the rank-local requests.
+
+        Upstream already gathers the prepared K+1 input IDs; it only clears the
+        speculative counters of the local batch.
+        """
+        global_draft_counts = global_batch.num_draft_tokens_per_req
+        if global_draft_counts is None:
+            raise RuntimeError("PCP speculative decoding requires per-request draft token counts.")
+        if np.any(global_draft_counts[global_batch.is_prefilling_np] != 0):
+            raise NotImplementedError("PCP speculative decoding does not support draft tokens on prefill requests.")
+
+        draft_count_by_req = dict(zip(global_batch.req_ids, global_draft_counts, strict=True))
+        local_draft_counts = np.fromiter(
+            (draft_count_by_req[req_id] for req_id in local_batch.req_ids),
+            dtype=np.int32,
+            count=local_batch.num_reqs,
+        )
+        # The placeholder request of an empty rank schedules no drafts.
+        local_draft_counts[local_batch.num_scheduled_tokens == 0] = 0
+        return replace(  # type: ignore[call-arg]
+            local_batch,
+            num_draft_tokens=int(local_draft_counts.sum()),
+            num_draft_tokens_per_req=local_draft_counts,
+        )
+
     def get_global_graph_num_reqs(self, batch_desc: BatchExecutionDescriptor) -> int | None:
         """Global request capacity of a sharded FULL decode graph, if any.
 
@@ -308,6 +340,8 @@ class AscendPCPManager(PCPManager):
             padded_num_reqs=padded_num_reqs if self.is_decode_sharded else None,
         )
         assert isinstance(local_batch, AscendInputBatch)
+        if global_batch.num_draft_tokens > 0:
+            local_batch = self._restore_draft_token_counts(global_batch, local_batch)
         self._pad_hidden_restore_idx(global_batch)
         if not self.is_decode_sharded:
             local_batch = self._pad_replicated_decode_graph(global_batch, local_batch)
@@ -328,17 +362,20 @@ class AscendPCPManager(PCPManager):
             local_batch.seq_lens_np = seq_lens_np[: local_batch.num_reqs_after_padding]
         else:
             local_batch.seq_lens_np = actual_seq_lens_np
-        # Preserve the global attention state for decode-only batches, including
-        # empty ranks, before upstream clears local draft metadata.
+        # Decode-only batches, including empty ranks, keep the attention state
+        # computed from the global batch before partitioning.
         if not bool(global_batch.is_prefilling_np.any()):
             return local_batch
 
+        num_valid_tokens = local_batch.num_scheduled_tokens
+        if local_batch.num_draft_tokens_per_req is not None:
+            num_valid_tokens = num_valid_tokens - local_batch.num_draft_tokens_per_req
         local_batch.attn_state = build_attn_state(
             self.vllm_config,
             actual_seq_lens_np,
             local_batch.num_reqs,
             local_batch.num_scheduled_tokens,
-            local_batch.num_scheduled_tokens,
+            num_valid_tokens,
             kv_cache_config=self.kv_cache_config,
         )
         return local_batch

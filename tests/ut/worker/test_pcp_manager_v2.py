@@ -622,11 +622,12 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
 
 
 @pytest.mark.parametrize("pcp_rank", [0, 1])
-def test_partition_batch_preserves_speculative_target_inputs(pcp_rank) -> None:
+@pytest.mark.parametrize("pcp_shard_decode_requests", [False, True])
+def test_partition_batch_preserves_speculative_target_inputs(pcp_rank, pcp_shard_decode_requests) -> None:
     from vllm_ascend.attention.attention_v1 import AscendAttentionState
     from vllm_ascend.worker.v2.attn_utils import build_attn_state
 
-    config = _make_pcp_config(CUDAGraphMode.NONE, pcp_shard_decode_requests=False)
+    config = _make_pcp_config(CUDAGraphMode.NONE, pcp_shard_decode_requests=pcp_shard_decode_requests)
     config.model_config.runner_type = "generate"
     config.scheduler_config = SimpleNamespace(enable_chunked_prefill=False)
     buffers = AscendInputBuffers(2, 5, torch.device("cpu"))
@@ -662,13 +663,17 @@ def test_partition_batch_preserves_speculative_target_inputs(pcp_rank) -> None:
     assert manager.global_batch is global_batch
     assert global_batch.num_draft_tokens == 3
     np.testing.assert_array_equal(global_batch.num_draft_tokens_per_req, np.array([1, 2], dtype=np.int32))
-    assert result.req_ids == global_batch.req_ids
-    torch.testing.assert_close(result.input_ids, global_batch.input_ids)
-    torch.testing.assert_close(result.positions, global_batch.positions)
-    np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([2, 3], dtype=np.int32))
-    np.testing.assert_array_equal(result.seq_lens_np, np.array([12, 23], dtype=np.int32))
-    assert result.num_draft_tokens == 0
-    assert result.num_draft_tokens_per_req is None
+    request_indices = [pcp_rank] if pcp_shard_decode_requests else [0, 1]
+    token_start = int(global_batch.query_start_loc_np[request_indices[0]])
+    token_end = int(global_batch.query_start_loc_np[request_indices[-1] + 1])
+    assert result.req_ids == [global_batch.req_ids[i] for i in request_indices]
+    torch.testing.assert_close(result.input_ids[: result.num_tokens], global_batch.input_ids[token_start:token_end])
+    torch.testing.assert_close(result.positions[: result.num_tokens], global_batch.positions[token_start:token_end])
+    np.testing.assert_array_equal(result.num_scheduled_tokens, global_batch.num_scheduled_tokens[request_indices])
+    np.testing.assert_array_equal(result.seq_lens_np, global_batch.seq_lens_np[request_indices])
+    draft_counts = global_batch.num_draft_tokens_per_req[request_indices]
+    assert result.num_draft_tokens == int(draft_counts.sum())
+    np.testing.assert_array_equal(result.num_draft_tokens_per_req, draft_counts)
     assert result.attn_state == global_batch.attn_state == AscendAttentionState.ChunkedPrefill
     recompute.assert_not_called()
 
@@ -1132,17 +1137,19 @@ def test_speculative_decode_keeps_draft_tokens_on_pcp_ranks(pcp_rank):
     ):
         local = manager.partition_batch(batch)
     assert manager.get_num_tokens_for_dispatch(batch.num_scheduled_tokens, batch.is_prefilling_np) == 4
+    assert batch.num_draft_tokens_per_req.tolist() == [3]
+    assert batch.num_draft_tokens == 3
     if pcp_rank != 0:
+        assert local.num_draft_tokens == 0
+        assert local.num_draft_tokens_per_req.tolist() == [0]
         assert local.num_tokens == 0
         assert local.num_scheduled_tokens.tolist() == [0]
         assert local.seq_lens.tolist() == [0]
         return
     assert local.num_tokens == 4
     assert local.req_ids == batch.req_ids
-    assert batch.num_draft_tokens_per_req.tolist() == [3]
-    assert batch.num_draft_tokens == 3
-    assert local.num_draft_tokens_per_req is None
-    assert local.num_draft_tokens == 0
+    assert local.num_draft_tokens_per_req.tolist() == [3]
+    assert local.num_draft_tokens == 3
     assert local.input_ids.tolist() == batch.input_ids.tolist()
     assert local.positions.tolist() == batch.positions.tolist()
     assert local.is_prefilling_np.tolist() == [False]
