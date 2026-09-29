@@ -157,11 +157,7 @@ def _rope_fp8_pytorch_native(
     positions: torch.Tensor,
     rope_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Evaluate the E4M3 reference on CPU, independently of NPU cast support."""
-    query = query.cpu()
-    key = key.cpu()
-    cos_sin_cache = cos_sin_cache.cpu()
-    positions = positions.cpu()
+    """PyTorch reference for NeoX RoPE with a direct E4M3 store."""
     half = rope_dim // 2
     cos_sin = cos_sin_cache.index_select(0, positions).to(torch.float32)
     cos = cos_sin[:, :half].unsqueeze(-2)
@@ -279,8 +275,8 @@ def test_rotary_embedding_triton_kernel_fp8(
     rotary_dim: int,
     device: str,
 ) -> None:
-    if get_ascend_device_type() == AscendDeviceType.A2:
-        pytest.skip("A2 Triton backend cannot lower FP8 arith::TruncFOp to hfusion")
+    if get_ascend_device_type() != AscendDeviceType.A5:
+        pytest.skip("FP8 RoPE output requires Ascend A5")
     torch.manual_seed(0)
     torch.set_default_device(device)
 
@@ -320,20 +316,16 @@ def test_rotary_embedding_triton_kernel_fp8(
     assert actual_key.dtype == torch.float8_e4m3fn
     assert actual_query.shape == query.shape
     assert actual_key.shape == key.shape
-    # Copy raw storage before decoding FP8, since NPU dtype conversion support
-    # is separate from the Triton kernel's FP8 output contract.
-    actual_query_cpu = actual_query.view(torch.uint8).cpu().view(torch.float8_e4m3fn).float()
-    actual_key_cpu = actual_key.view(torch.uint8).cpu().view(torch.float8_e4m3fn).float()
-    assert actual_query_cpu[0, 0, 0] == FP8_E4M3_MAX
-    assert actual_key_cpu[0, 0, 0] == -FP8_E4M3_MAX
+    assert actual_query[0, 0, 0].to(torch.float32) == FP8_E4M3_MAX
+    assert actual_key[0, 0, 0].to(torch.float32) == -FP8_E4M3_MAX
     torch.testing.assert_close(
-        actual_query_cpu,
+        actual_query.to(torch.float32),
         expected_query.to(torch.float32),
         atol=0.125,
         rtol=0.125,
     )
     torch.testing.assert_close(
-        actual_key_cpu,
+        actual_key.to(torch.float32),
         expected_key.to(torch.float32),
         atol=0.125,
         rtol=0.125,
