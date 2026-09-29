@@ -67,6 +67,7 @@ class FakeStore:
 
     def get(self, keys, addrs, sizes):
         self.get_calls.append((list(keys), list(addrs), list(sizes)))
+        return [0] * len(keys)
 
 
 class FakeTokenDatabase(ChunkedTokenDatabase):
@@ -965,6 +966,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         t._handle_request(req)
         keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
+        self.assertEqual(t._invalid_block_ids, set())
 
 
 class TestLayerBatchBuilder(unittest.TestCase):
