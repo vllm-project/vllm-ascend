@@ -667,11 +667,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self._non_causal_swa_attn_mask = AttentionMaskBuilder(device).get_splitfuse_attn_mask()
             radius = self.sliding_window - 1
             return self._non_causal_swa_attn_mask, 4, radius, radius
-        # Decode-only graphs: every query token attends to all its cached
-        # keys, so causal masking is implicit. Passing the explicit mask with
-        # sparse_mode=3 forces FIA to build a redundant mask and costs ~10%
-        # end-to-end performance (issue #16889, same pattern as PR #10302).
-        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+        # Decode-only graphs without a sliding window: every query token
+        # attends to all its cached keys, so causal masking is implicit.
+        # Passing the explicit mask with sparse_mode=3 forces FIA to build a
+        # redundant mask and costs ~10% end-to-end performance (issue #16889,
+        # same pattern as PR #10302). Sliding-window decode keeps the mask.
+        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly and self.sliding_window is None:
             return None, 0, SWA_INT_MAX, SWA_INT_MAX
         return (
             attn_metadata.attn_mask,
