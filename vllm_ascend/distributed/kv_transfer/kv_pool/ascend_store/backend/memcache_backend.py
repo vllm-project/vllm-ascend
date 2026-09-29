@@ -329,7 +329,7 @@ class MemcacheBackend(Backend):
         infos = self.store.batch_get_key_info(keys)
         if not for_load:
             return infos
-        if len(infos) != len(keys):
+        if infos is None or len(infos) != len(keys):
             raise RuntimeError("Memcache key-info response length mismatch")
         rewarmed = False
         for key, info in zip(keys, infos, strict=True):
