@@ -1,0 +1,82 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+# Runner prerequisites: mount the model path below and configure the CANN
+# custom_transformer operator library/OPP paths in the inherited environment.
+# Network interfaces and optional metrics/log directories are runner-managed.
+
+_envs: &envs
+  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_DFS_CONFIG: "task_exception:off,inconsistent_check:off"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "100"
+  HCCL_BUFFSIZE: "400"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
+  HCCL_INTRA_PCIE_ENABLE: "1"
+  HCCL_INTRA_ROCE_ENABLE: "0"
+  ASCEND_LAUNCH_BLOCKING: "0"
+  DYNAMIC_EPLB: "true"
+  VLLM_USE_FASTOKENS: "1"
+
+_server_cmd: &server_cmd
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--api-server-count"
+  - "1"
+  - "--nnodes"
+  - "1"
+  - "--node-rank"
+  - "0"
+  - "--pipeline-parallel-size"
+  - "1"
+  - "--distributed-executor-backend"
+  - "mp"
+  - "--data-parallel-size-local"
+  - "1"
+  - "--max-num-batched-tokens"
+  - "16384"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--enable-expert-parallel"
+  - "--no-async-scheduling"
+  - "--trust-remote-code"
+  - "--enforce-eager"
+  - "--quantization"
+  - "ascend"
+  - "--enable-auto-tool-choice"
+  - "--tool-call-parser"
+  - "glm47"
+  - "--reasoning-parser"
+  - "glm45"
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "GLM5_2_W4A4C8_A5"
+    model: "/mnt/share/w00936111/GLM-5.2-W4A4C8-mxfp4-A5-0731"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "135000"
+      - "--data-parallel-size"
+      - "1"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--max-num-seqs"
+      - "20"
+      - "--enable-prefix-caching"
+      - "--additional-config"
+      - '{"enable_flashcomm1": true, "enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_dsa_cp": true}'
+    # TODO: Accuracy datasets, thresholds and measured results.
+    # TODO: Performance workloads, thresholds and measured results.
+    benchmarks: {}
