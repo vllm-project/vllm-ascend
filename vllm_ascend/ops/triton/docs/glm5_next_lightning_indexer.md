@@ -8,7 +8,7 @@
     1. Split the token batch into chunks targeting a 256 MiB score-buffer budget. Compute the head-weighted query with the existing FP32 multiplication and reduction.
     2. For larger batches, a bounded Triton gather reuses paged keys in a contiguous scratch cache. A Triton kernel maps tokens to requests, computes FP32 dot products with the head-weighted query, writes all score cells, and maps invisible, NaN, and negative-infinite scores to the lowest finite FP32 value. Positive infinity maps to the largest finite value. This avoids separate score initialization and sanitization passes.
     3. Apply `torch.topk` and convert its IDs once to int32. A Triton kernel expands pools, writes the causal tail, clears graph padding and alignment columns, and optionally writes directly into the SFA output buffer. The result contains logical token indices, not physical cache slots.
-- **Supported modes**: Eager execution and fixed-shape NPU graph capture/replay with Triton-Ascend. The implementation targets Atlas A2/A3; this change was validated on A3 only. See Test Cases for validation scope. Ascend 950: N/A (not validated by this change).
+- **Supported modes**: Eager execution and fixed-shape NPU graph capture/replay with Triton-Ascend.
 
 ## Parameters
 
@@ -33,7 +33,7 @@
 
 ## Constraints
 
-- Inference only. `D` must be a power of two; this path is intended and tested for `D = 128`. `H`, `P`, and `B` must be positive. `index_topk` must be a positive multiple of `P`.
+- Inference only. `D` must be a power of two; GLM-5.3-Flash uses `D = 128`. `H`, `P`, and `B` must be positive. `index_topk` must be a positive multiple of `P`.
 - `max_pool_seq_len >= 0`, `0 <= indexer_seq_lens[r] <= max_pool_seq_len`, and `max_pool_seq_len <= M * B`. If scoring is needed, the cache and request list must be nonempty. The caller must provide valid physical blocks for visible pools; clamping an invalid physical block is not a substitute for valid cache metadata.
 - Queries are packed in request order, cumulative ends are nondecreasing, and the last end does not exceed `T`. Positions are nonnegative. Empty queries return shape `[0, 1, index_topk + P - 1]`. A zero maximum pool count returns only the causal tail, with the history region filled with `-1`.
 - The first `index_topk` columns hold selected history. By default, tail tokens start at column `index_topk`. With `pack_tail=True`, they start at `min(((positions[t] + 1) // P) * P, index_topk)`, as required by the model's SFA consumer. The caller supplies complete history for that causal prefix.
@@ -47,16 +47,4 @@
 
 - **Origin**: Developed for GLM-5.3-Flash pooled-key selection.
 - **Differences**: Retains device `torch.topk`, with request lookup, paged scoring, and final index expansion implemented in Triton. Larger token batches reuse each head-weighted query across several pool tiles; small batches expose more pool-level parallelism. Contiguous pool-ID reads avoid repeatedly gathering each ID for all tokens in its pool. Larger batches also expand output indices in wider blocks. The model no longer needs separate tail scatter, padding-mask, buffer fill, and copy operations.
-- **Tiling**: Packed scoring and paged gathering use 128-pool tiles to fit the tested compiler's local-memory limit for FP32 multiplication and reduction. Index expansion uses 256-column blocks below 512 token rows and 4096-column blocks for larger chunks; the wider block is slower for medium batches on the tested A3 stack.
-
-## Test Cases
-
-The test uses the model's actual `[T, 32, 128]` BF16 queries, BF16 head weights/cache, pool size 4, and top-k 2048. Pool capacities 0, 4, 512, and 2050 cover tail-only output, insufficient history, exactly the selection width, and multiple score tiles with a partial final tile. Three requests exercise non-power-of-two request counts, distinct lengths, randomized physical page mappings, and noncontiguous cache blocks.
-
-An independent CPU reference scores each head against the logical keys before weighting and summing the scores. Selected token membership and multiplicity, history padding, and tail columns must match exactly (`rtol = 0`, `atol = 0`); history is sorted only for comparison because equal scores do not define a unique ordering. Test inputs use a fixed local generator for reproducibility.
-
-Both eager and graph cases force several token chunks with a reduced scratch budget. They change queries, head weights, positions, and visible pool lengths between calls/replays, and verify the cache remains unchanged. Graph cases exercise packed tails, strided output rows, alignment clearing, and output-buffer aliasing. Output shape/dtype and the empty-query path are checked separately. These are accuracy tests, not throughput measurements; hardware-specific performance results must be measured separately.
-
-```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5next_pool_key_indexer_triton.py
-```
+- **Tiling**: Packed scoring and paged gathering use 128-pool tiles to bound local-memory usage for FP32 multiplication and reduction. Index expansion uses 256-column blocks below 512 token rows and 4096-column blocks for larger chunks.
