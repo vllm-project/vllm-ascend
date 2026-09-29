@@ -147,7 +147,7 @@ class TestProtocolInstall:
         batch.idx_mapping_np = np.array([2], dtype=np.int64)  # type: ignore[attr-defined]
         batch.idx_mapping = object()  # type: ignore[attr-defined]
 
-        sent = []
+        sent: list[torch.Tensor] = []
         self._patch_transport(monkeypatch, sent)
         gather_all = handler.receive(batch)
 
@@ -168,7 +168,7 @@ class TestProtocolInstall:
             num_scheduled_tokens=np.array([8], dtype=np.int32),
             prefill_len_np=np.array([1024], dtype=np.int32),
         )
-        sent = []
+        sent: list[torch.Tensor] = []
         self._patch_transport(monkeypatch, sent)
         assert handler.receive(batch) is False
         assert sent == []
@@ -250,7 +250,7 @@ def test_send_receive_agree_on_skip(monkeypatch, num_speculative_steps, max_toke
     handler = fixture._handler(num_speculative_steps)
     req_states = _make_req_states([8192 + max_tokens])
     install_pp_token_transport(handler, req_states)
-    sent = []
+    sent: list[torch.Tensor] = []
     fixture._patch_transport(monkeypatch, sent)
     batch = _make_batch(
         num_computed=[4096], num_scheduled=[4096], prefill_len=[8192], is_prefilling=[True], idx_mapping=[0]
@@ -279,7 +279,7 @@ def test_draft_broadcast_gathers_request_slots(monkeypatch):
     req_states = _make_req_states([1024] * 4)
     req_states.draft_tokens = torch.arange(12, dtype=torch.int64).reshape(4, 3)
     install_pp_token_transport(handler, req_states)
-    sent = []
+    sent: list[torch.Tensor] = []
     fixture._patch_transport(monkeypatch, sent)
     batch = _make_batch(
         num_computed=[20, 30],
@@ -300,7 +300,7 @@ def test_draft_broadcast_uses_current_batch(monkeypatch):
     req_states = _make_req_states([8193, 1024])
     req_states.draft_tokens = torch.ones(2, 3, dtype=torch.int64)
     install_pp_token_transport(handler, req_states)
-    sent = []
+    sent: list[torch.Tensor] = []
     fixture._patch_transport(monkeypatch, sent)
     decode = _make_batch(num_computed=[20], num_scheduled=[4], prefill_len=[16], is_prefilling=[False], idx_mapping=[1])
     finishing = _make_batch(
