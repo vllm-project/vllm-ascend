@@ -122,8 +122,12 @@ class KVPoolScheduler:
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
-        if self.use_layerwise and len(cacheable_block_sizes) != len(self.original_block_size):
-            raise ValueError("AscendStore private KV state requires non-layerwise transfer")
+        if (
+            self.use_layerwise
+            and not self.use_block_key_layerwise
+            and len(cacheable_block_sizes) != len(self.original_block_size)
+        ):
+            raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
@@ -382,7 +386,13 @@ class KVPoolScheduler:
         protocol helper enumerates all stages and head/TP ranks.
         """
         assert self.layerwise_keys is not None
-        return self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, self.tp_size // self.put_step)
+        # Recurrent state is TP-sharded even when the model's MLA KV is replicated.
+        num_ranks = (
+            self.tp_size
+            if self.block_key_hybrid and group_id in self.num_speculative_blocks_by_group
+            else self.tp_size // self.put_step
+        )
+        return self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, num_ranks)
 
     def _get_layerwise_hit_tokens(
         self,

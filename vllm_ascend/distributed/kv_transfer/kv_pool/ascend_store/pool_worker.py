@@ -236,8 +236,12 @@ class KVPoolWorker:
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
-        if self.use_layerwise and len(cacheable_block_sizes) != len(self.original_block_size):
-            raise ValueError("AscendStore private KV state requires non-layerwise transfer")
+        if (
+            self.use_layerwise
+            and not self.use_block_key_layerwise
+            and len(cacheable_block_sizes) != len(self.original_block_size)
+        ):
+            raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
@@ -1308,7 +1312,7 @@ class KVPoolWorker:
             self._kv_stats = AscendStoreKVConnectorStats()
             return stats
 
-    def _is_layerwise_save_leader(self) -> bool:
+    def _is_layerwise_save_leader(self, group_id: int = 0) -> bool:
         """Exactly one rank per (pcp, dcp, head_or_tp) group saves/allocates.
 
         Without DCP the plain ``tp_rank % put_step == 0`` dedup is correct
@@ -1318,6 +1322,10 @@ class KVPoolWorker:
         dedup would drop every non-zero DCP shard from the pool. The leader
         is the smallest tp_rank inside the rank's own (dcp, head) group.
         """
+        group_uses_align_state = getattr(self, "group_uses_align_state", ())
+        if self.use_block_key_layerwise and group_id < len(group_uses_align_state) and group_uses_align_state[group_id]:
+            # MLA KV is replicated, but KDA/conv state is TP-sharded.
+            return True
         if self.dcp_size <= 1:
             return self.tp_rank % self.put_step == 0
         head = self.tp_rank // self.put_step
@@ -1341,7 +1349,7 @@ class KVPoolWorker:
         # skip save to avoid redundant writes. With DCP>1 the plain put_step
         # dedup would drop every non-zero DCP shard (see
         # _is_layerwise_save_leader).
-        if not self._is_layerwise_save_leader():
+        if not self._is_layerwise_save_leader(group_id):
             return
         block_size = get_group_block_size(self.grouped_block_size, group_id)
         request_block_ranges = []
@@ -1531,7 +1539,12 @@ class KVPoolWorker:
     def _make_layerwise_full_key(self, group_id: int, block_hash_hex: str) -> str:
         """Use the backend-bound layout shared with scheduler hit checks."""
         assert self.layerwise_keys is not None
-        return self.layerwise_keys.make_full_key(group_id, block_hash_hex, self.head_or_tp_rank, self.pp_rank)
+        group_uses_align_state = getattr(self, "group_uses_align_state", ())
+        is_tp_sharded_group = (
+            self.use_block_key_layerwise and group_id < len(group_uses_align_state) and group_uses_align_state[group_id]
+        )
+        rank = self.tp_rank if is_tp_sharded_group else self.head_or_tp_rank
+        return self.layerwise_keys.make_full_key(group_id, block_hash_hex, rank, self.pp_rank)
 
     def _make_layerwise_partial_key(
         self,
@@ -2010,8 +2023,8 @@ class KVPoolWorker:
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(block_ids)
 
-    def _is_layerwise_save_owner(self) -> bool:
-        return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and self.tp_rank % self.put_step == 0
+    def _is_layerwise_save_owner(self, group_id: int = 0) -> bool:
+        return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and self._is_layerwise_save_leader(group_id)
 
     def _make_mooncake_layerwise_key(self, block_hash_or_tail: str) -> str:
         return self._make_layerwise_full_key(0, block_hash_or_tail)
@@ -2025,7 +2038,9 @@ class KVPoolWorker:
             groups = self.physical_layer_to_group_layers.get(local_layer)
             if groups is None:
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
-            return groups
+            # Request-owned circular/tail pages are rebuilt locally at an
+            # aligned prefix boundary. They are not token-addressed pool data.
+            return [(group, layer) for group, layer in groups if group in self.cacheable_group_ids]
         # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
         return self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
 

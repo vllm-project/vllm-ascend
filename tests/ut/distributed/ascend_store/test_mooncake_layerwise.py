@@ -171,6 +171,8 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.tp_rank = 0
         worker.pp_rank = 0
         worker.put_step = 1
+        worker.dcp_size = 1
+        worker.group_uses_align_state = [False]
         worker.block_size = 16
         worker.grouped_block_size = [16]
         worker.num_layers = 1

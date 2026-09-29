@@ -16,6 +16,7 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
+    MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -110,7 +111,7 @@ def cpu_cache(array):
 
 
 class TestMooncakeHybrid(unittest.TestCase):
-    def make_hybrid(self, extra_entry=False):
+    def make_hybrid(self, extra_entry=False, private_tail=False, tp_rank=0, tp_size=1, use_mla=False):
         groups = [
             KVCacheGroupSpec(
                 ["model.layers.0.kv", "model.layers.2.kv"],
@@ -127,12 +128,40 @@ class TestMooncakeHybrid(unittest.TestCase):
         ]
         if extra_entry:
             groups[1].layer_names.append("model.layers.2.c4_indexer")
+        if private_tail:
+            groups[2].kv_cache_spec = MambaSpec(
+                block_size=16,
+                shapes=((4,), (4,)),
+                dtypes=("uint8", "uint8"),
+                mamba_cache_mode="align",
+                num_speculative_blocks=3,
+            )
+
+            # A private ring's capacity is unrelated to token/hash pages.
+            # Wrap it like the per-layer specs supplied to real workers.
+            class PrivateTailSpec(FullAttentionSpec):
+                @property
+                def prefix_cacheable(self):
+                    return False
+
+            name = "model.layers.2.indexer.tail_cache"
+            tail = PrivateTailSpec(block_size=7, num_kv_heads=1, head_size=1, dtype="uint8")
+            groups.append(KVCacheGroupSpec([name], UniformTypeKVCacheSpecs.from_specs({name: tail})))
         config = SimpleNamespace(num_blocks=8, kv_cache_groups=groups)
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVPoolWorker._build_cache_coordinator",
             return_value=None,
         ):
-            worker = make_worker(self, num_layers=4, num_hidden_layers=4, use_layerwise=True, kv_cache_config=config)
+            worker = make_worker(
+                self,
+                num_layers=4,
+                num_hidden_layers=4,
+                use_layerwise=True,
+                kv_cache_config=config,
+                tp_rank=tp_rank,
+                tp_size=tp_size,
+                use_mla=use_mla,
+            )
         store = MemoryRangeStore()
         worker.m_store = store
         arrays: dict[str, NDArray[np.uint8]] = {}
@@ -173,17 +202,106 @@ class TestMooncakeHybrid(unittest.TestCase):
         worker.kv_recv_thread.add_request = lambda task: dispatch(worker.kv_recv_thread, task)
         worker.cache_coordinator = object()
         masks = ([True] * 4, [True] * 2, [False, False, False, True])
+        if private_tail:
+            masks += ([],)
         worker.token_database.store_mask = MagicMock(return_value=masks)
         worker.token_database.load_mask = MagicMock(return_value=masks)
         return worker, store, arrays, jobs, errors
 
     def test_multigroup_roundtrip_sparse_masks_and_group_commit_boundaries(self):
-        worker, store, arrays, jobs, errors = self.make_hybrid()
+        self._roundtrip()
+
+    def test_private_tail_is_never_hashed_or_transferred(self):
+        self._roundtrip(private_tail=True)
+
+    def test_mla_dedup_preserves_every_tp_rank_kda_snapshot(self):
+        store = MemoryRangeStore()
+        workers = []
+        for rank in range(8):
+            worker, _, arrays, jobs, errors = self.make_hybrid(private_tail=True, tp_size=8, tp_rank=rank, use_mla=True)
+            worker.m_store = worker.kv_send_thread.m_store = worker.kv_recv_thread.m_store = store
+            for name, array in arrays.items():
+                if "state" in name:
+                    array.fill(80 + rank)
+            request = self.save_prefix(worker)
+            workers.append((worker, arrays, request, jobs, errors))
+        # MLA/indexer objects are replicated; recurrent state has eight shards.
+        self.assertEqual(len(store.complete), 4 + 2 + 8)
+        for rank, (worker, arrays, request, jobs, errors) in enumerate(workers):
+            for array in arrays.values():
+                array.fill(0)
+            request.load_spec = LoadSpec(0, 64, can_load=True)
+            request.can_save = False
+            worker.kv_role = "kv_consumer"
+            meta = AscendConnectorMetadata(set())
+            meta.add_request(request)
+            worker.prepare_layerwise_step(meta)
+            worker.start_load_kv(meta)
+            for _ in range(4):
+                worker.wait_for_layer_load()
+                with attention_transfer_window():
+                    pass
+            for name, array in arrays.items():
+                if "state" in name:
+                    np.testing.assert_array_equal(array[4], 80 + rank)
+                elif "tail_cache" in name:
+                    self.assertFalse(array.any())
+            for job in jobs:
+                job.join(timeout=2)
+                self.assertFalse(job.is_alive())
+            self.assertFalse(errors)
+        self.assertFalse(store.open_reads)
+
+    def test_private_layout_lookup_and_recompute_boundary(self):
+        worker, _, _, _, _ = self.make_hybrid(private_tail=True, tp_size=8, use_mla=True)
+        config = scheduler_tests.make_config(kv_role="kv_both", extra_config={"backend": "mooncake"})
+        config.parallel_config.tensor_parallel_size = 8
+        config.model_config.use_mla = True
+        config.scheduler_config.disable_hybrid_kv_cache_manager = False
+        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"):
+            scheduler = KVPoolScheduler(config, use_layerwise=True, kv_cache_config=worker.kv_cache_config)
+        self.assertEqual(scheduler.cacheable_group_ids, [0, 1, 2])
+        self.assertEqual(scheduler.hash_block_size, 16)
+        self.assertEqual(scheduler.cache_transfer_granularity, 32)
+        self.assertEqual(len(scheduler._make_layerwise_hit_check_keys(0, "hash")), 1)
+        keys = scheduler._make_layerwise_hit_check_keys(2, "hash")
+        self.assertEqual(len(keys), 8)
+        self.assertEqual(keys[0], worker._make_layerwise_full_key(2, "hash"))
+        scheduler.store_scheduler.batch_is_readable.return_value = [True] * 7 + [False]
+        self.assertEqual(scheduler._query_layerwise_block_hits([keys]), [False])
+
+        scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [True] * len(keys)
+        for eagle in (False, True):
+            scheduler.use_eagle = eagle
+            request = SimpleNamespace(
+                request_id="full-hit", num_tokens=64, prompt_token_ids=list(range(64)), block_hashes=[b"h"] * 4
+            )
+            self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (32, False))
+            load = scheduler.load_specs[request.request_id]
+            self.assertEqual(load.kvpool_cached_tokens, 32)
+            self.assertEqual(load.kvpool_store_skip_tokens, 64)
+        # The full hit is a write-skip extent, not the recurrent resume point.
+        worker.use_eagle = False
+        request = ReqMeta(
+            "load",
+            token_len_chunk=64,
+            block_ids_by_group=[[1, 2, 3, 4], [1, 2], [1, 2, 3, 4], [7]],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+            load_spec=LoadSpec(0, 32, True, 64),
+        )
+        with patch.object(worker, "_open_layerwise_get_sessions") as open_get:
+            views = mooncake_layerwise.prepare_group_sessions(worker, [request])
+        worker.token_database.load_mask.assert_called_with(request.block_hashes, 32)
+        self.assertFalse(views[3])
+        self.assertTrue(all(slot < 2 for _, _, _, slot in open_get.call_args.args[0]))
+
+    def _roundtrip(self, private_tail=False):
+        worker, store, arrays, jobs, errors = self.make_hybrid(private_tail=private_tail)
         saved = {name: array.copy() for name, array in arrays.items()}
         request = ReqMeta(
             "save",
             token_len_chunk=64,
-            block_ids_by_group=[[1, 2, 3, 4], [1, 2], [1, 2, 3, 4]],
+            block_ids_by_group=[[1, 2, 3, 4], [1, 2], [1, 2, 3, 4]] + ([[7]] if private_tail else []),
             block_hashes=[b"h0", b"h1", b"h2", b"h3"],
             can_save=True,
             is_last_chunk=True,
@@ -234,6 +352,9 @@ class TestMooncakeHybrid(unittest.TestCase):
             with attention_transfer_window():
                 pass
         for name, actual in arrays.items():
+            if "tail_cache" in name:
+                self.assertFalse(actual.any(), "Request-owned tail must never be loaded from another request")
+                continue
             slots = [4] if "state" in name else [1, 2] if "c4" in name else [1, 2, 3, 4]
             np.testing.assert_array_equal(actual[slots], saved[name][slots])
             self.assertFalse(actual[0].any(), "Null block must stay untouched")
@@ -317,6 +438,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         scheduler.tp_size = 2
         scheduler.pp_size = 1
         scheduler.put_step = 1
+        scheduler.num_speculative_blocks_by_group = {}
         scheduler.grouped_block_size = [16, 32]
         with patch.object(mooncake_layerwise, "hybrid_layout_id", return_value="layout"):
             scheduler.layerwise_keys = mooncake_layerwise.bind_layerwise_keys(
