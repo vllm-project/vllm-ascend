@@ -13,9 +13,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 from ...coordinates import TokenRange
-from ..elements import KVChunk, KVChunkBatch, RemoteObjectKey, RemoteObjectKeyBatch
-from ..reachability import GroupSelection, KVSelection
-from ..topology import KVPoolGroupTopology, KVPoolTopology
+from ..representation import KVChunk, KVChunkBatch, RemoteObjectKey, RemoteObjectKeyBatch
+from ..spec.topology import KVPoolGroupTopology, KVPoolTopology
+from .reachability import GroupSelection, KVSelection
 
 
 class KVChunkProjection:

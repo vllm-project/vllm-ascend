@@ -1,4 +1,4 @@
-"""Resolve the static topology and cache geometry used by the KV Pool graph."""
+"""Define the static topology and cache geometry of one KV Pool program."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class KVPoolGroupTopology:
 
 @dataclass(frozen=True, slots=True)
 class KVPoolTopology:
-    """Instance-lifetime topology and cache geometry compiled into graph mappings."""
+    """Instance-lifetime topology and cache geometry compiled into program stages."""
 
     tp_rank: int
     tp_size: int

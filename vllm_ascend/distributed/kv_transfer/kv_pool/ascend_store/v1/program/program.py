@@ -1,35 +1,44 @@
-"""Define the fixed KV Pool dataflow over request-local values."""
+"""Define the compiled KV Pool program over request-local values."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from typing import Any
+from collections.abc import Callable
 
 from vllm.logger import logger
 
-from ..execution.io import BindingEvidence, RemoteObjectObservation, StoreEvidence
-from ..execution.timeline import LoadCompletion, LoadTransfer, StoreCompletion, StoreTransfer
 from ..protocol.lookup import LookupRequest, LookupResult
-from ..protocol.transfer import KVTransferStep, LoadCommand, StoreCommand
-from .elements import BindingBatch, KVBinding, KVMemoryGeometry, RemoteObjectBatch
-from .evaluation import KVPoolStepEvaluation, LoadResult
-from .filter import MissingFilter, ObjectPresenceObserver
-from .projection.binding import BindingProjection
-from .projection.block import KVBlockProjection
-from .projection.chunk import KVChunkProjection
-from .projection.consumer import ConsumerProjection
-from .projection.object import RemoteObjectProjection
-from .projection.ownership import StoreOwnershipProjection
-from .reachability import ChunkAvailability, GroupAvailability, KVReachability
-from .topology import KVPoolTopology
+from ..protocol.transfer import LoadCommand, StoreCommand
+from .invocation import (
+    BindingEvidence,
+    KVPoolStepFrame,
+    LoadCompletion,
+    LoadTransfer,
+    RemoteObjectObservation,
+    StoreCompletion,
+    StoreEvidence,
+    StoreTransfer,
+)
+from .representation import BindingBatch, KVBinding, KVMemoryGeometry, RemoteObjectBatch
+from .spec.schedule import KVPoolSchedule
+from .spec.topology import KVPoolTopology
+from .stages.chunk import KVChunkProjection
+from .stages.memory import BindingProjection, KVBlockProjection
+from .stages.reachability import ChunkAvailability, GroupAvailability, KVReachability
+from .stages.remote import RemoteObjectProjection
+from .stages.store import (
+    ConsumerProjection,
+    MissingFilter,
+    ObjectPresenceObserver,
+    StoreOwnershipProjection,
+)
 
 ReadabilityObserver = Callable[[RemoteObjectBatch], tuple[RemoteObjectObservation, ...]]
 LoadBindings = Callable[[tuple[KVBinding, ...]], tuple[BindingEvidence, ...]]
 StoreBindings = Callable[[tuple[BindingBatch, ...]], StoreEvidence]
 
 
-class KVPoolGraph:
-    """Expose the fixed Lookup, Load and Store dataflow for one KV Pool participant."""
+class KVPoolProgram:
+    """Expose the compiled Lookup, Load and Store workflow for one KV Pool participant."""
 
     def __init__(
         self,
@@ -42,6 +51,8 @@ class KVPoolGraph:
         store_ownership_projection: StoreOwnershipProjection,
         consumer_projection: ConsumerProjection,
         missing_filter: MissingFilter,
+        backend_name: str,
+        schedule: KVPoolSchedule,
     ) -> None:
         self._topology = topology
         self._reachability = reachability
@@ -52,14 +63,16 @@ class KVPoolGraph:
         self._store_ownership_projection = store_ownership_projection
         self._consumer_projection = consumer_projection
         self._missing_filter = missing_filter
+        self.backend_name = backend_name
+        self.schedule = schedule
 
-    @staticmethod
-    def begin_step(step: KVTransferStep) -> KVPoolStepEvaluation:
-        return KVPoolStepEvaluation(step)
+    @property
+    def topology(self) -> KVPoolTopology:
+        return self._topology
 
-    def compile_memory_mapping(self, memory_geometry: KVMemoryGeometry) -> None:
-        self._binding_projection.compile_memory_mapping(memory_geometry)
-        self._consumer_projection.compile_memory_mapping(memory_geometry)
+    def bind_memory(self, memory_geometry: KVMemoryGeometry) -> None:
+        self._binding_projection.bind_memory(memory_geometry)
+        self._consumer_projection.bind_memory(memory_geometry)
 
     def lookup(self, request: LookupRequest, observe_readability: ReadabilityObserver) -> LookupResult:
         if request.transfer_group_ids != self._reachability.group_ids:
@@ -95,49 +108,25 @@ class KVPoolGraph:
             )
         return LookupResult(self._reachability.resolve_available_end(selection, availability))
 
-    def build_load_transfers(self, evaluation: KVPoolStepEvaluation) -> list[LoadTransfer]:
-        return [self._build_load_transfer(command) for command in evaluation.step.load.commands]
+    def build_load_transfers(self, frame: KVPoolStepFrame) -> list[LoadTransfer]:
+        return [self._build_load_transfer(command) for command in frame.step.load.commands]
 
     def execute_load(self, transfer: LoadTransfer, load_bindings: LoadBindings) -> LoadCompletion:
         return LoadCompletion(transfer.request_id, load_bindings(transfer.traversal))
 
-    def record_load_completion(self, evaluation: KVPoolStepEvaluation, completion: LoadCompletion) -> None:
+    def record_load_completion(self, frame: KVPoolStepFrame, completion: LoadCompletion) -> None:
         failed_block_ids = {
             evidence.binding.memory.block_id for evidence in completion.binding_evidence if evidence.result_code != 0
         }
         if not failed_block_ids:
             return
         if len(self._topology.transfer_group_ids) > 1:
-            evaluation.failed_request_ids.add(completion.request_id)
+            frame.failed_request_ids.add(completion.request_id)
         else:
-            evaluation.failed_block_ids.update(failed_block_ids)
+            frame.failed_block_ids.update(failed_block_ids)
 
-    @staticmethod
-    def consume_load_result(
-        evaluations: Iterable[KVPoolStepEvaluation],
-        completed_request_ids: Iterable[str],
-    ) -> LoadResult:
-        evaluations_by_identity = {id(evaluation): evaluation for evaluation in evaluations}
-        failed_request_ids = frozenset(
-            request_id
-            for evaluation in evaluations_by_identity.values()
-            for request_id in evaluation.failed_request_ids
-        )
-        failed_block_ids = frozenset(
-            block_id for evaluation in evaluations_by_identity.values() for block_id in evaluation.failed_block_ids
-        )
-        result = LoadResult(
-            frozenset(completed_request_ids),
-            failed_request_ids,
-            failed_block_ids,
-        )
-        for evaluation in evaluations_by_identity.values():
-            evaluation.failed_request_ids.clear()
-            evaluation.failed_block_ids.clear()
-        return result
-
-    def build_store_transfers(self, evaluation: KVPoolStepEvaluation) -> list[StoreTransfer]:
-        return [self._build_store_transfer(command) for command in evaluation.step.store.commands]
+    def build_store_transfers(self, frame: KVPoolStepFrame) -> list[StoreTransfer]:
+        return [self._build_store_transfer(command) for command in frame.step.store.commands]
 
     def filter_store_bindings(
         self,
@@ -204,13 +193,13 @@ class KVPoolGraph:
     def execute_store(
         self,
         transfer: StoreTransfer,
-        source_ready_event: Any,
+        wait_for_source: Callable[[], None],
         store_bindings: StoreBindings,
     ) -> StoreCompletion:
         if not any(batch.bindings for batch in transfer.batches):
             return StoreCompletion(transfer.request_id, StoreEvidence((), True, True))
         try:
-            source_ready_event.synchronize()
+            wait_for_source()
         except Exception as error:
             return StoreCompletion(transfer.request_id, StoreEvidence((), False, True, error))
 

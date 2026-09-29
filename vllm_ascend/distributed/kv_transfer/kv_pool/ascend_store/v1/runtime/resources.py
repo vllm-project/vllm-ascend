@@ -1,4 +1,4 @@
-"""Own Backend state, key derivation and registered local KV memory."""
+"""Bind Backend state and registered local KV memory to one compiled program."""
 
 from __future__ import annotations
 
@@ -6,63 +6,56 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
-from ..backend import BackendAdapter, create_backend
-from ..graph.elements import KVMemoryGeometry, KVMemorySegment
+from ..backend import BackendSpec, create_backend, resolve_backend_spec
+from ..program.representation import KVMemoryGeometry, KVMemorySegment
 
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig
 
-    from ..graph.topology import KVPoolGroupTopology
+    from ..program.spec.topology import KVPoolGroupTopology
 
 
 class KVPoolResources:
-    """Own the Backend, token database and registered local KV tensors."""
+    """Own the Backend and local KV memory bound to one compiled program."""
 
     def __init__(
         self,
-        backend: BackendAdapter,
-        token_database: ChunkedTokenDatabase,
+        backend: Backend,
+        backend_spec: BackendSpec,
         num_blocks: int,
         groups: tuple[KVPoolGroupTopology, ...],
     ) -> None:
         self.backend = backend
-        self.token_database = token_database
+        self.backend_spec = backend_spec
         self.num_blocks = num_blocks
         self._groups = groups
         self.kv_caches: dict[str, torch.Tensor] | None = None
-        self._registered = False
+        self._memory_bound = False
         self._closed = False
 
     @classmethod
-    def create(
+    def bind(
         cls,
+        backend_name: str,
         parallel_config: ParallelConfig,
         extra_config: dict[str, Any],
         groups: tuple[KVPoolGroupTopology, ...],
-        hash_block_size: int,
         num_blocks: int,
-        consumer_pipeline_partitions: tuple[int, ...] | None,
     ) -> KVPoolResources:
-        backend_name = extra_config.get("backend", "mooncake").strip().lower()
-        token_database = ChunkedTokenDatabase(
-            [group.key_metadata for group in groups],
-            [group.block_size for group in groups],
-            None if consumer_pipeline_partitions is None else list(consumer_pipeline_partitions),
-            hash_block_size,
-        )
-        backend = create_backend(backend_name, parallel_config, extra_config)
-        return cls(backend, token_database, num_blocks, groups)
+        backend_spec = resolve_backend_spec(backend_name)
+        backend = create_backend(backend_spec, parallel_config, extra_config)
+        return cls(backend, backend_spec, num_blocks, groups)
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> KVMemoryGeometry:
+    def bind_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> KVMemoryGeometry:
         if self._closed:
             raise RuntimeError("KV resources are closed")
-        if self._registered:
-            raise RuntimeError("KV caches are already registered")
+        if self._memory_bound:
+            raise RuntimeError("KV caches are already bound")
         memory_geometry = self._register_kv_buffers(kv_caches)
         self.kv_caches = kv_caches
-        self._registered = True
+        self._memory_bound = True
         return memory_geometry
 
     def close(self) -> None:
@@ -76,9 +69,6 @@ class KVPoolResources:
 
     def _register_kv_buffers(self, kv_caches: dict[str, torch.Tensor]) -> KVMemoryGeometry:
         group_ids = tuple(group.group_id for group in self._groups)
-        addresses_by_group: dict[int, list[int]] = {group_id: [] for group_id in group_ids}
-        block_lengths_by_group: dict[int, list[int]] = {group_id: [] for group_id in group_ids}
-        block_strides_by_group: dict[int, list[int]] = {group_id: [] for group_id in group_ids}
         segments_by_group: dict[int, list[KVMemorySegment]] = {group_id: [] for group_id in group_ids}
         registered_regions: dict[int, tuple[int, int]] = {}
 
@@ -105,9 +95,6 @@ class KVPoolResources:
                                 block_length // group.block_size,
                             )
                         )
-                        addresses_by_group[group.group_id].append(address)
-                        block_lengths_by_group[group.group_id].append(block_length)
-                        block_strides_by_group[group.group_id].append(block_stride)
                         region_end = address + (self.num_blocks - 1) * block_stride + block_length
                         storage_key = cache.untyped_storage().data_ptr()
                         previous = registered_regions.get(storage_key)
@@ -117,12 +104,6 @@ class KVPoolResources:
                             else (address, region_end)
                         )
 
-        self.token_database.set_group_buffers(
-            addresses_by_group,
-            block_lengths_by_group,
-            block_strides_by_group,
-            group_num_layers={group.group_id: len(group.layer_names) for group in self._groups},
-        )
         self.backend.register_buffer(
             [start for start, _ in registered_regions.values()],
             [end - start for start, end in registered_regions.values()],

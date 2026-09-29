@@ -1,4 +1,4 @@
-"""Shared contracts and values for KV Pool execution timelines."""
+"""Shared contracts and values for KV Pool runtime timelines."""
 
 from __future__ import annotations
 
@@ -7,24 +7,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from ...graph.elements import BindingBatch, KVBinding
-from ..io import BindingEvidence, StoreEvidence
-
-
-@dataclass(frozen=True, slots=True)
-class LoadTransfer:
-    """One request's immutable Load work after spatial projection."""
-
-    request_id: str
-    traversal: tuple[KVBinding, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class LoadCompletion:
-    """Load evidence produced when one transfer reaches its timeline completion point."""
-
-    request_id: str
-    binding_evidence: tuple[BindingEvidence, ...]
+from ...program.invocation import LoadCompletion, LoadTransfer, StoreCompletion, StoreTransfer
 
 
 class LoadTimelineProtocol(Protocol):
@@ -32,7 +15,7 @@ class LoadTimelineProtocol(Protocol):
 
     collects_completions: bool
 
-    def attach_operation(self, operation: Callable[[LoadTransfer], LoadCompletion]) -> None: ...
+    def bind_operation(self, operation: Callable[[LoadTransfer], LoadCompletion]) -> None: ...
 
     def start(self) -> None: ...
 
@@ -43,22 +26,6 @@ class LoadTimelineProtocol(Protocol):
     def abort(self) -> None: ...
 
     def close(self) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class StoreTransfer:
-    """One request's immutable Store work after spatial projection."""
-
-    request_id: str
-    batches: tuple[BindingBatch, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class StoreCompletion:
-    """Store completion with transfer and source-release facts kept separate."""
-
-    request_id: str
-    evidence: StoreEvidence
 
 
 @dataclass(slots=True)
@@ -73,7 +40,7 @@ class StoreBatch:
 class StoreTimelineProtocol(Protocol):
     """Submit whole-step Store work and expose its completion fence."""
 
-    def attach_operation(self, operation: Callable[[StoreTransfer, Any], StoreCompletion]) -> None: ...
+    def bind_operation(self, operation: Callable[[StoreTransfer, Any], StoreCompletion]) -> None: ...
 
     def start(self) -> None: ...
 

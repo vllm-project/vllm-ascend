@@ -24,7 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
 )
 
-from ..coordinates import TokenRange
+from ...coordinates import TokenRange
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"

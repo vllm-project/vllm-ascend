@@ -1,4 +1,4 @@
-"""Values carried between operators in the AscendStore KV computation graph."""
+"""Domain representations carried between stages of the KV Pool program."""
 
 from __future__ import annotations
 

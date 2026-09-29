@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..elements import PhysicalCoordinate, RemoteKVObject, RemoteObjectBatch, RemoteObjectKeyBatch
-from ..topology import KVPoolTopology
+from ..representation import PhysicalCoordinate, RemoteKVObject, RemoteObjectBatch, RemoteObjectKeyBatch
+from ..spec.topology import KVPoolTopology
 
 
 @dataclass(frozen=True, slots=True)

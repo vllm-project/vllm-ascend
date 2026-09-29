@@ -33,7 +33,7 @@ class LookupResult:
 
 
 class LookupCodec:
-    """Keep Lookup wire frames out of the Scheduler planner and Worker graph."""
+    """Keep Lookup wire frames out of the Scheduler planner and Worker program."""
 
     def __init__(self) -> None:
         self._encoder = MsgpackEncoder()
