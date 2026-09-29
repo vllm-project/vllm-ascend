@@ -1193,7 +1193,16 @@ def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
         "dp": {"hccl_buffer_size": calculate_dp_buffer_size()},
         "dynamic_eplb": {"hccl_buffer_size": _DYNAMIC_EPLB_BUFFER_SIZE},
     }
-    return hccl_config_map.get(group_name, get_default_buffer_config())
+    config = hccl_config_map.get(group_name, get_default_buffer_config())
+    if group_name == "tp" and os.environ.get("DSV41_A5_TP_CCU_MS") == "1":
+        # On the 950DT CANN 9.2 / torch_npu 2.10 build, communicator option 5
+        # selects CCU_MS. Only one group per device can reserve that resource.
+        # Keep the global mode at CCU_SCHED so WORLD/EP cannot claim it first.
+        if os.environ.get("HCCL_OP_EXPANSION_MODE") != "CCU_SCHED":
+            raise RuntimeError("DSV41_A5_TP_CCU_MS=1 requires HCCL_OP_EXPANSION_MODE=CCU_SCHED")
+        config = {**config, "hccl_op_expansion_mode": 5}
+        logger.info("Reserving HCCL CCU_MS for the tensor-parallel process group")
+    return config
 
 
 def get_default_buffer_config() -> dict:

@@ -167,7 +167,78 @@ class AscendDSAV41CPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         return replace(local, global_metadata=global_metadata, cp_token_range=(start, end, per_rank, padded))
 
 
-class _ReplicatedCacheImpl(AscendDSAV41Impl):
+class AscendDSAV41CPImpl(AscendDSAV41Impl):
+    def multistream_preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
+        """Slice local Q from full inputs and overlap replicated KV preprocessing."""
+        global_metadata = self._global_layer_metadata(get_forward_context().attn_metadata)
+        kv_hidden_states = hidden_states[: global_metadata.swa.num_actual_tokens]
+        start, _, _, _ = swa_metadata.cp_token_range
+        hidden_states = hidden_states[start : start + swa_metadata.num_actual_tokens]
+        kv_cos, kv_sin = global_metadata.rope(attn.rotary_emb.layername, kv_hidden_states.shape[0])
+        swa_metadata = global_metadata.swa
+        main_stream = torch.npu.current_stream()
+        aux_stream = dsv4_dsa_overlap_stream()
+        v1_impl = attn.dsa_attn.dsa_attn.impl
+        wq_a, wkv, wq_b = v1_impl.cv_wq_a, v1_impl.cv_wkv, v1_impl.cv_wq_b
+
+        # Q and KV own different token ranges, even with identical quantizers.
+        q_quant, q_scale = wq_a.quantize(hidden_states)
+        q_quant_done = main_stream.record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            aux_stream.wait_event(q_quant_done)
+            kv_quant, kv_scale = wkv.quantize(kv_hidden_states)
+            kv_quant_done = aux_stream.record_event()
+        q_a = wq_a.matmul(q_quant, q_scale, bias=attn.wq_a.bias)
+
+        # Serialize Cube matmuls while overlapping Q Vector work with KV Cube.
+        part2_start = main_stream.record_event()
+        main_stream.wait_event(kv_quant_done)
+        with npu_stream_switch(aux_stream, enabled=True):
+            aux_stream.wait_event(part2_start)
+            kv = wkv.matmul(kv_quant, kv_scale, bias=attn.wkv.bias)
+            kv_matmul_done = aux_stream.record_event()
+        qr = attn.q_norm(q_a)
+        q_b_quant, q_b_scale = wq_b.quantize(qr)
+
+        # KV Vector work uses global RoPE and global cache slots.
+        part3_start = main_stream.record_event()
+        main_stream.wait_event(kv_matmul_done)
+        with npu_stream_switch(aux_stream, enabled=True):
+            aux_stream.wait_event(part3_start)
+            kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                kv.unsqueeze(1),
+                kv_cos,
+                kv_sin,
+                rotary_mode="interleave",
+                partial_slice=[attn.nope_head_dim, attn.head_dim],
+            )
+            # Keep CP's replicated-cache write on the same A5 backend path as
+            # the non-CP implementation. The legacy scatter op is unavailable
+            # in the packaged A5 OPP, and its 2-D coordinates do not describe
+            # the packed cache layout used by the A5 writer.
+            AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+        q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (attn.n_heads, attn.head_dim))
+        main_stream.wait_stream(aux_stream)
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            q.unsqueeze(1),
+            cos,
+            sin,
+            rotary_mode="interleave",
+            partial_slice=[attn.nope_head_dim, attn.head_dim],
+        )
+        # Both streams have joined before compressor/indexer cache reads.
+        if self.role.is_kv_source:
+            self._write_compressed_source(
+                attn,
+                kv_hidden_states,
+                global_metadata.positions[: kv_hidden_states.shape[0]],
+                kv_cos,
+                kv_sin,
+                global_metadata,
+            )
+        return q.to(hidden_states.dtype), qr
+
     def _global_layer_metadata(self, metadata_by_prefix):
         global_by_prefix = {}
         # The runner also includes DSpark's native DSA metadata in this map.
