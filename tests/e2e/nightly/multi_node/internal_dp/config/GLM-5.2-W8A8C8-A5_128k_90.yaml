@@ -1,0 +1,120 @@
+test_name: "multi-node-GLM-5.2-W8A8C8-A5-128k"
+model: "Eco-Tech/GLM-5.2-w8a8c8"
+num_nodes: 2
+npu_per_node: 8
+
+env_common: &env_common
+  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_DFS_CONFIG: "task_exception:off,inconsistent_check:off"
+  HCCL_BUFFSIZE: "400"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_INTRA_PCIE_ENABLE: "1"
+  HCCL_INTRA_ROCE_ENABLE: "0"
+  ASCEND_LAUNCH_BLOCKING: "0"
+  VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
+  VLLM_PP_LAYER_PARTITION: "38,40"
+  SERVER_PORT: 30001
+
+deployment:
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      vllm serve Eco-Tech/GLM-5.2-w8a8c8
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --api-server-count 1
+      --nnodes 2
+      --node-rank 0
+      --master-addr $MASTER_IP
+      --master-port 13388
+      --pipeline-parallel-size 2
+      --distributed-executor-backend mp
+      --data-parallel-size 1
+      --data-parallel-size-local 1
+      --data-parallel-address $MASTER_IP
+      --data-parallel-rpc-port 12980
+      --tensor-parallel-size 8
+      --max-model-len 135000
+      --max-num-batched-tokens 16384
+      --served-model-name glm
+      --gpu-memory-utilization 0.9
+      --enable-expert-parallel
+      --no-async-scheduling
+      --max-num-seqs 20
+      --enable-prefix-caching
+      --trust-remote-code
+      --enforce-eager
+      --quantization ascend
+      --enable-auto-tool-choice
+      --tool-call-parser glm47
+      --reasoning-parser glm45
+      --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True","enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true,"enable_dsa_cp":true}'
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      vllm serve Eco-Tech/GLM-5.2-w8a8c8
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --headless
+      --nnodes 2
+      --node-rank 1
+      --master-addr $MASTER_IP
+      --master-port 13388
+      --pipeline-parallel-size 2
+      --distributed-executor-backend mp
+      --data-parallel-size 1
+      --data-parallel-size-local 1
+      --data-parallel-address $MASTER_IP
+      --data-parallel-start-rank 1
+      --data-parallel-rpc-port 12980
+      --tensor-parallel-size 8
+      --max-model-len 135000
+      --max-num-batched-tokens 16384
+      --served-model-name glm
+      --gpu-memory-utilization 0.9
+      --enable-expert-parallel
+      --no-async-scheduling
+      --max-num-seqs 20
+      --enable-prefix-caching
+      --trust-remote-code
+      --enforce-eager
+      --quantization ascend
+      --enable-auto-tool-choice
+      --tool-call-parser glm47
+      --reasoning-parser glm45
+      --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True","enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true,"enable_dsa_cp":true}'
+
+benchmarks:
+  acc_gsm8k:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k-lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 1024
+    batch_size: 20
+    baseline: 77.34
+    threshold: 5
+  perf_128k_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 1
+    max_out_len: 1
+    batch_size: 1
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
+  perf_128k_prefix90:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 8
+    max_out_len: 1
+    batch_size: 8
+    request_rate: 0
+    baseline: 34352.39
+    threshold: 0.97
