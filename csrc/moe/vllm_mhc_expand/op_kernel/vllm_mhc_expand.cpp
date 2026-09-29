@@ -21,6 +21,34 @@ public:
             Forward();
         }
     }
+    __aicore__ inline void ProcessOutputTiles()
+    {
+        LocalTensor<T> in(TPosition::VECIN, 0, p_.tileLength);
+        const DataCopyPadExtParams<T> pad{false, 0, 0, static_cast<T>(0)};
+        const uint64_t outputElements = p_.tokens * p_.mhcMult * p_.hidden;
+        for (uint64_t tile = GetBlockIdx(); tile < p_.totalTiles; tile += GetBlockNum()) {
+            uint64_t offset = tile * p_.tileLength;
+            const uint64_t remaining = outputElements - offset;
+            const uint64_t end = offset + (remaining < p_.tileLength ? remaining : p_.tileLength);
+            // Each core owns complete aligned output blocks. A row boundary
+            // inside this interval may be unaligned, but only this core writes
+            // either side of it; no cross-core partial-block race is possible.
+            while (offset < end) {
+                const uint64_t outputRow = offset / p_.hidden;
+                const uint64_t column = offset % p_.hidden;
+                const uint64_t rowRemaining = p_.hidden - column;
+                const uint32_t count = static_cast<uint32_t>(rowRemaining < end - offset
+                    ? rowRemaining : end - offset);
+                const uint64_t inputOffset = (outputRow / p_.mhcMult) * p_.hidden + column;
+                const DataCopyExtParams copy{1, static_cast<uint32_t>(count * sizeof(T)), 0, 0, 0};
+                DataCopyPad(in, input_[inputOffset], copy, pad);
+                Sync<HardEvent::MTE2_MTE3>();
+                DataCopyPad(output_[offset], in, copy);
+                Sync<HardEvent::MTE3_MTE2>();
+                offset += count;
+            }
+        }
+    }
 private:
     __aicore__ inline void Bulk() {
         const uint32_t d = static_cast<uint32_t>(p_.hidden);
@@ -115,5 +143,9 @@ extern "C" __global__ __aicore__ void vllm_mhc_expand(
         KernelMhcExpand op;
         op.Init(x, y, params);
         op.Process();
+    } else if (TILING_KEY_IS(2)) {
+        KernelMhcExpand op;
+        op.Init(x, y, params);
+        op.ProcessOutputTiles();
     }
 }
