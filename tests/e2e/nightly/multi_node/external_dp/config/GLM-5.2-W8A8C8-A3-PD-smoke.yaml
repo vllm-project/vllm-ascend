@@ -1,0 +1,281 @@
+# Deployment parameters: docs/source/tutorials/models/GLM5.2.md section 5.3.
+# CI adaptations: shared checkpoint path, dynamic ports/network, default served name.
+# Document's retired fuse_muls_add key omitted for current-main compatibility.
+# Prefill keeps default attention cache dtype; only its indexer is INT8 in the reference.
+test_name: "GLM-5.2-W8A8C8-A3-PD-smoke"
+model: "/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8"
+num_nodes: 4
+npu_per_node: 16
+routing:
+  type: disaggregated_prefill
+  groups:
+    prefiller: [0, 1]
+    decoder: [2, 3]
+config:
+  - {"node_index":0,"port_start":9081,"dp_rpc_port":12321,"dp_size":1,"dp_size_local":1,"dp_rank_start":0,"tp_size":16,"dp_address":"${NODE_0_IP}"}
+  - {"node_index":1,"port_start":9081,"dp_rpc_port":12321,"dp_size":1,"dp_size_local":1,"dp_rank_start":0,"tp_size":16,"dp_address":"${NODE_0_IP}","headless":true}
+  - {"node_index":2,"port_start":9900,"dp_rpc_port":16600,"dp_size":16,"dp_size_local":8,"dp_rank_start":0,"tp_size":2,"dp_address":"${NODE_2_IP}"}
+  - {"node_index":3,"port_start":9900,"dp_rpc_port":16600,"dp_size":16,"dp_size_local":8,"dp_rank_start":8,"tp_size":2,"dp_address":"${NODE_2_IP}","headless":true}
+templates:
+  - node_index: 0
+    envs:
+      VLLM_PP_LAYER_PARTITION: "41,37"
+      HCCL_BUFFSIZE: "400"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      VLLM_USE_FASTOKENS: "1"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+    server_cmd_template:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "${PORT}"
+      - "--tensor-parallel-size"
+      - "16"
+      - "--enable-expert-parallel"
+      - "--pipeline-parallel-size"
+      - "2"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--master-addr"
+      - "${NODE_0_IP}"
+      - "--master-port"
+      - "7060"
+      - "--nnodes"
+      - "2"
+      - "--node-rank"
+      - "0"
+      - "--speculative-config"
+      - "{\"num_speculative_tokens\":1,\"method\":\"deepseek_mtp\",\"enforce_eager\":true}"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "202752"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--attention-config.indexer_kv_dtype"
+      - "int8"
+      - "--additional-config"
+      - "{\"enable_dsa_cp\":true,\"enable_flashcomm1\":true,\"enable_fused_mc2\":1}"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--trust-remote-code"
+      - "--enable-prefix-caching"
+      - "--max-num-seqs"
+      - "64"
+      - "--quantization"
+      - "ascend"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--api-server-count"
+      - "16"
+      - "--enforce-eager"
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "glm47"
+      - "--reasoning-parser"
+      - "glm45"
+      - "--kv-transfer-config"
+      - "{\"kv_connector\":\"MooncakeConnectorV1\",\"kv_role\":\"kv_producer\",\"kv_port\":\"30000\",\"engine_id\":\"0\",\"kv_connector_extra_config\":{\"use_ascend_direct\":true,\"prefill\":{\"dp_size\":1,\"pp_size\":2,\"tp_size\":16,\"pp_layer_partition\":\"41,37\"},\"decode\":{\"dp_size\":16,\"tp_size\":2}}}"
+  - node_index: 1
+    envs:
+      VLLM_PP_LAYER_PARTITION: "41,37"
+      HCCL_BUFFSIZE: "400"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      VLLM_USE_FASTOKENS: "1"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+    server_cmd_template:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "${PORT}"
+      - "--tensor-parallel-size"
+      - "16"
+      - "--enable-expert-parallel"
+      - "--pipeline-parallel-size"
+      - "2"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--master-addr"
+      - "${NODE_0_IP}"
+      - "--master-port"
+      - "7060"
+      - "--nnodes"
+      - "2"
+      - "--node-rank"
+      - "1"
+      - "--speculative-config"
+      - "{\"num_speculative_tokens\":1,\"method\":\"deepseek_mtp\",\"enforce_eager\":true}"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "202752"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--attention-config.indexer_kv_dtype"
+      - "int8"
+      - "--additional-config"
+      - "{\"enable_dsa_cp\":true,\"enable_flashcomm1\":true,\"enable_fused_mc2\":1}"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--trust-remote-code"
+      - "--enable-prefix-caching"
+      - "--max-num-seqs"
+      - "64"
+      - "--quantization"
+      - "ascend"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--headless"
+      - "--enforce-eager"
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "glm47"
+      - "--reasoning-parser"
+      - "glm45"
+      - "--kv-transfer-config"
+      - "{\"kv_connector\":\"MooncakeConnectorV1\",\"kv_role\":\"kv_producer\",\"kv_port\":\"30000\",\"engine_id\":\"0\",\"kv_connector_extra_config\":{\"use_ascend_direct\":true,\"prefill\":{\"dp_size\":1,\"pp_size\":2,\"tp_size\":16,\"pp_layer_partition\":\"41,37\"},\"decode\":{\"dp_size\":16,\"tp_size\":2}}}"
+  - node_index: 2
+    envs:
+      HCCL_BUFFSIZE: "256"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      VLLM_USE_FASTOKENS: "1"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+    server_cmd_template:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "${PORT}"
+      - "--data-parallel-size"
+      - "${DP_SIZE}"
+      - "--data-parallel-rank"
+      - "${DP_RANK}"
+      - "--data-parallel-address"
+      - "${DP_ADDRESS}"
+      - "--data-parallel-rpc-port"
+      - "${DP_RPC_PORT}"
+      - "--tensor-parallel-size"
+      - "${TP_SIZE}"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "202752"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--max-num-batched-tokens"
+      - "192"
+      - "--compilation-config"
+      - "{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}"
+      - "--kv-cache-dtype"
+      - "int8"
+      - "--attention-config.indexer_kv_dtype"
+      - "int8"
+      - "--speculative-config"
+      - "{\"num_speculative_tokens\":5,\"method\":\"deepseek_mtp\",\"enforce_eager\":true}"
+      - "--additional-config"
+      - "{\"recompute_scheduler_enable\":true,\"enable_fused_mc2\":1,\"enable_mlapo\":true}"
+      - "--trust-remote-code"
+      - "--max-num-seqs"
+      - "32"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--api-server-count"
+      - "16"
+      - "--async-scheduling"
+      - "--quantization"
+      - "ascend"
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "glm47"
+      - "--reasoning-parser"
+      - "glm45"
+      - "--kv-transfer-config"
+      - "{\"kv_connector\":\"MooncakeConnectorV1\",\"kv_role\":\"kv_consumer\",\"kv_port\":\"30200\",\"engine_id\":\"2\",\"kv_connector_extra_config\":{\"use_ascend_direct\":true,\"prefill\":{\"dp_size\":1,\"pp_size\":2,\"tp_size\":16,\"pp_layer_partition\":\"41,37\"},\"decode\":{\"dp_size\":16,\"tp_size\":2}}}"
+  - node_index: 3
+    envs:
+      HCCL_BUFFSIZE: "256"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      VLLM_USE_FASTOKENS: "1"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+    server_cmd_template:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "${PORT}"
+      - "--data-parallel-size"
+      - "${DP_SIZE}"
+      - "--data-parallel-rank"
+      - "${DP_RANK}"
+      - "--data-parallel-address"
+      - "${DP_ADDRESS}"
+      - "--data-parallel-rpc-port"
+      - "${DP_RPC_PORT}"
+      - "--tensor-parallel-size"
+      - "${TP_SIZE}"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "202752"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--max-num-batched-tokens"
+      - "192"
+      - "--compilation-config"
+      - "{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}"
+      - "--kv-cache-dtype"
+      - "int8"
+      - "--attention-config.indexer_kv_dtype"
+      - "int8"
+      - "--speculative-config"
+      - "{\"num_speculative_tokens\":5,\"method\":\"deepseek_mtp\",\"enforce_eager\":true}"
+      - "--additional-config"
+      - "{\"recompute_scheduler_enable\":true,\"enable_fused_mc2\":1,\"enable_mlapo\":true}"
+      - "--trust-remote-code"
+      - "--max-num-seqs"
+      - "32"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--headless"
+      - "--async-scheduling"
+      - "--quantization"
+      - "ascend"
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "glm47"
+      - "--reasoning-parser"
+      - "glm45"
+      - "--kv-transfer-config"
+      - "{\"kv_connector\":\"MooncakeConnectorV1\",\"kv_role\":\"kv_consumer\",\"kv_port\":\"30200\",\"engine_id\":\"2\",\"kv_connector_extra_config\":{\"use_ascend_direct\":true,\"prefill\":{\"dp_size\":1,\"pp_size\":2,\"tp_size\":16,\"pp_layer_partition\":\"41,37\"},\"decode\":{\"dp_size\":16,\"tp_size\":2}}}"
+test_content: [chat_completion]
+chat_prompts: ["Reply with one short sentence confirming the P/D service is healthy."]
+api_keyword_args: {max_tokens: 16, temperature: 0.0}
+# PLACEHOLDER ONLY: invented values for initial community-resource runs.
+# These are NOT measured accuracy/performance baselines. Replace per case after
+# calibration; initial gate failures must not be classified as regressions.
+benchmarks:
+  accuracy_placeholder_gsm8k:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k-lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 4096
+    batch_size: 4
+    temperature: 0
+    baseline: 90
+    threshold: 10
+  performance_placeholder_3_5k_1k:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs400
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 4
+    request_rate: 0
+    baseline: 1000
+    threshold: 0.97

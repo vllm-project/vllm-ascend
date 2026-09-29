@@ -1,0 +1,80 @@
+test_cases:
+  - name: "GLM-5.2-W8A8C8-A3-nightly"
+    model: "/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-W8A8C8"
+    envs:
+      HCCL_BUFFSIZE: "200"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--api-server-count"
+      - "1"
+      - "--data-parallel-size"
+      - "1"
+      - "--tensor-parallel-size"
+      - "16"
+      - "--seed"
+      - "1024"
+      - "--tool-call-parser"
+      - "glm47"
+      - "--reasoning-parser"
+      - "glm45"
+      - "--enable-auto-tool-choice"
+      - "--max-num-seqs"
+      - "12"
+      - "--max-model-len"
+      - "32768"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--quantization"
+      - "ascend"
+      - "--compilation-config"
+      - "{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}"
+      - "--kv-cache-dtype"
+      - "int8"
+      - "--attention-config.indexer_kv_dtype"
+      - "int8"
+      - "--additional-config"
+      - "{\"enable_dsa_cp\":true,\"enable_balance_scheduling\":true,\"multistream_overlap_shared_expert\":true,\"enable_flashcomm1\":true}"
+      - "--speculative-config"
+      - "{\"num_speculative_tokens\":3,\"method\":\"deepseek_mtp\",\"enforce_eager\":true}"
+    prompts:
+      - "Reply with one short sentence confirming the service is healthy."
+    test_content:
+      - chat_completion
+    api_keyword_args:
+      max_tokens: 16
+      temperature: 0.0
+    # PLACEHOLDER ONLY: invented values for initial community-resource runs.
+    # These are NOT measured accuracy/performance baselines. Replace per case after
+    # calibration; initial gate failures must not be classified as regressions.
+    benchmarks:
+      accuracy_placeholder_gsm8k:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gsm8k-lite
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 4096
+        batch_size: 4
+        temperature: 0
+        baseline: 90
+        threshold: 10
+      performance_placeholder_3_5k_1k:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs400
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 16
+        max_out_len: 1024
+        batch_size: 4
+        request_rate: 0
+        baseline: 1000
+        threshold: 0.97

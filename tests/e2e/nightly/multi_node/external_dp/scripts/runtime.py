@@ -581,8 +581,8 @@ def build_proxy_server_cmd(config: ExternalDPConfig, ranks: list[RankInfo]) -> l
     cmd = [sys.executable, routing.proxy_script, "--host", routing.proxy_host, "--port", str(routing.proxy_port)]
 
     if routing.type == ROUTING_DISAGGREGATED_PREFILL:
-        prefiller_ranks = [rank for rank in ranks if rank.role == "prefiller"]
-        decoder_ranks = [rank for rank in ranks if rank.role == "decoder"]
+        prefiller_ranks = [rank for rank in ranks if rank.role == "prefiller" and not rank.headless]
+        decoder_ranks = [rank for rank in ranks if rank.role == "decoder" and not rank.headless]
         if not prefiller_ranks or not decoder_ranks:
             raise ValueError("disaggregated_prefill proxy requires prefiller and decoder ranks")
         cmd.extend(["--prefiller-hosts", *[rank.host for rank in prefiller_ranks]])
@@ -648,7 +648,9 @@ def wait_ranks_ready(
     timeout: int,
     rank_processes: list[RankProcess] | None = None,
 ) -> None:
-    ranks = list(ranks)
+    # Cross-node PP peers participate in the engine process group but do not
+    # expose /health. Their subprocess is still watched through rank_processes.
+    ranks = [rank for rank in ranks if not rank.headless]
     rank_ready = {rank: False for rank in ranks}
     deadline = time.monotonic() + timeout
     last_log_time = 0.0
