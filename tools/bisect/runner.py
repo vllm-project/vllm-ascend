@@ -71,11 +71,7 @@ def _multi_node_test_path(repo: Path, inp: BisectInput) -> str:
 
     base = inp.config_base_path or ""
     legacy_external_config = repo / _EXTERNAL_DP_CONFIG_DIR / inp.config_yaml
-    if (
-        "external_dp/config" in base
-        or "external_dp/config" in inp.config_yaml
-        or legacy_external_config.is_file()
-    ):
+    if "external_dp/config" in base or "external_dp/config" in inp.config_yaml or legacy_external_config.is_file():
         return _EXTERNAL_DP_TEST
     return _INTERNAL_DP_TEST
 
