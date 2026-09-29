@@ -118,11 +118,8 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             assert changes["parallel_config"].decode_context_parallel_size == (1 if target_pcp_size > 1 else dcp_size)
         if config is target_config and "model_config" not in changes:
             reconstructed_parallel = changes["parallel_config"]
-            # The draft config does not carry model_config through replace()
-            # (it is swapped in after validation, V1 parity), so this call is
-            # reached on every build. Record a reconstruction only when the DCP
-            # was actually normalized away, which is what the target having PCP
-            # means here.
+            # model_config is swapped in after validation (V1 parity), so this
+            # branch runs on every build; record only a real DCP normalization.
             if (
                 reconstructed_parallel.decode_context_parallel_size
                 != target_parallel_config.decode_context_parallel_size
@@ -216,10 +213,17 @@ def test_eagle_draft_config_disables_profiling_chunk() -> None:
         additional_config=additional_config,
     )
     speculator = object.__new__(AscendEagleSpeculator)
+    # Delegation to the base's _create_draft_vllm_config reads these too.
+    speculator.replicated_pcp = False
     speculator.vllm_config = target_config
+    target_config.cache_config = SimpleNamespace()
+    target_config.parallel_config.decode_context_parallel_size = 1
     speculator.draft_model_config = object()
 
-    with patch.object(eagle_speculator_module, "replace", side_effect=_fake_config_replace):
+    with (
+        patch.object(eagle_speculator_module, "replace", side_effect=_fake_config_replace),
+        patch.object(speculator_module, "replace", side_effect=_fake_config_replace),
+    ):
         draft_config = speculator._create_draft_vllm_config()
 
     assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False

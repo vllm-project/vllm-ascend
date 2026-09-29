@@ -22,9 +22,6 @@ from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
-from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
-    disable_profiling_chunk_for_draft,
-)
 
 
 class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
@@ -33,12 +30,8 @@ class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         # EAGLE draft models are dense even when the target is an MoE model.
-        # Reusing the target's EP/EPLB flags makes the draft run as an expert
-        # model and fail because the draft has no experts.
-        #
-        # The base already normalizes PP (and DCP for replicated PCP) and swaps
-        # in the draft model config without re-validating it; the draft-only
-        # parallel settings on top of that are applied here.
+        # The base swaps in the draft model config without re-validating it;
+        # the draft-only settings on top turn EP/EPLB off (no experts).
         draft_vllm_config = super()._create_draft_vllm_config()
         draft_vllm_config.parallel_config = replace(
             draft_vllm_config.parallel_config,
