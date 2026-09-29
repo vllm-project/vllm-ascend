@@ -2668,13 +2668,17 @@ class KVPoolWorker:
         gate = reset_attention_compute_start_gate()
         try:
             self.kv_recv_thread.raise_if_failed()
-            if getattr(self, "block_key_hybrid", False):
+            if getattr(self, "block_key_hybrid", False) or self.use_layerwise_transfer:
                 layer_id = self.current_layer
                 # Conv/recurrent state is updated inside attention, after this
                 # entry event. Preserve its post-compute save hook.
                 if layer_id not in self._recurrent_layers:
+                    # GVA (memcache) plane shares the same layer send thread +
+                    # sync events; without this wiring its save tasks are built
+                    # and allocated but never dispatched (blobs stay empty).
                     gate.on_start = lambda: self._submit_attention_save(layer_id)
-                gate.on_finish = self._finish_attention_window
+                if getattr(self, "block_key_hybrid", False):
+                    gate.on_finish = self._finish_attention_window
             if getattr(self, "block_key_hybrid", False) and self.next_layer_to_submit <= self.current_layer:
                 # An unprefetched demand load must not race earlier collectives.
                 boundary = torch.npu.Event()
