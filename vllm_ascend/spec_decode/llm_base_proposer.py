@@ -372,6 +372,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def load_model(self, model: nn.Module) -> None:
         assert get_pp_group().is_last_rank, f"{self.method} drafter must be loaded on the last pipeline stage."
 
+        # DFlash draft heads must rotate Q/K the way their distilled target
+        # does. Draft checkpoints do not carry is_neox_style, and a mismatch is
+        # silent: every drafted Q/K is rotated wrong, the verifier rejects all
+        # draft tokens, and acceptance collapses to zero with no error. Copy
+        # the style off the built target before the draft is constructed,
+        # mirroring the upstream GPU loader (vllm/v1/spec_decode/dflash.py).
+        if self.method == "dflash":
+            from vllm.model_executor.models.qwen3_dflash import (
+                dflash_target_rope_is_neox_style,
+            )
+
+            _draft_model_config = self.speculative_config.draft_model_config
+            _is_neox = dflash_target_rope_is_neox_style(model)
+            if _draft_model_config is not None and _is_neox is not None:
+                _draft_model_config.hf_config.is_neox_style = _is_neox
+                logger.info(
+                    "DFlash draft rope is_neox_style copied from target: %s",
+                    _is_neox,
+                )
+
         target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
 
         with self.maybe_eager_context:
