@@ -37,6 +37,12 @@ def init_speculator(
         )
 
         return ExtractHiddenStatesSpeculator(vllm_config, device)
+    if speculative_config.use_mamba_attn_hybrid():
+        from vllm_ascend.worker.v2.spec_decode.mamba_attn_hybrid.speculator import (
+            AscendMambaAttnHybridSpeculator,
+        )
+
+        return AscendMambaAttnHybridSpeculator(vllm_config, device)
     if speculative_config.use_dspark():
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,
