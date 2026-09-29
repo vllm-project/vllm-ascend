@@ -32,6 +32,7 @@ templates:
       TASK_QUEUE_ENABLE: "1"
       VLLM_PP_LAYER_PARTITION: "42,36"
       VLLM_USE_FASTOKENS: "1"
+      VLLM_DISABLE_COMPILE_CACHE: "1"
       ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
     server_cmd_template:
       - "--host"
@@ -101,6 +102,7 @@ templates:
       TASK_QUEUE_ENABLE: "1"
       VLLM_PP_LAYER_PARTITION: "42,36"
       VLLM_USE_FASTOKENS: "1"
+      VLLM_DISABLE_COMPILE_CACHE: "1"
       ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
     server_cmd_template:
       - "--host"
@@ -167,6 +169,7 @@ templates:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       TASK_QUEUE_ENABLE: "1"
       VLLM_USE_FASTOKENS: "1"
+      VLLM_DISABLE_COMPILE_CACHE: "1"
       ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
     server_cmd_template:
       - "--host"
@@ -229,6 +232,7 @@ templates:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       TASK_QUEUE_ENABLE: "1"
       VLLM_USE_FASTOKENS: "1"
+      VLLM_DISABLE_COMPILE_CACHE: "1"
       ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
     server_cmd_template:
       - "--host"
