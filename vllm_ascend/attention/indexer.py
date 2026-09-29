@@ -8,7 +8,6 @@ import torch_npu
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tp_group
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
@@ -38,7 +37,6 @@ from vllm_ascend.attention.utils import split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
@@ -318,25 +316,18 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
-        if HAS_TRITON:
-            cos = cos.view(-1, self.qk_rope_head_dim)
-            sin = sin.view(-1, self.qk_rope_head_dim)
-            k_li = rope_forward_triton_siso(
-                k_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
-        else:
-            k_li_pe, k_li_nope = torch.split(
-                k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
+        k_li_pe, k_li_nope = torch.split(
+            k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
+        )
 
-            cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
-            sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
+        cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
+        sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
 
-            k_li_pe = k_li_pe.unsqueeze(2)
-            k_li_pe = torch_npu.npu_rotary_mul(k_li_pe, cos, sin)
-            k_li_pe = k_li_pe.squeeze(2)
+        k_li_pe = k_li_pe.unsqueeze(2)
+        k_li_pe = torch_npu.npu_rotary_mul(k_li_pe, cos, sin)
+        k_li_pe = k_li_pe.squeeze(2)
 
-            k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
+        k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)
 
         if self.enable_sparse_li_c8:
             assert self.k_hadamard is not None
@@ -461,19 +452,14 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         else:
             q_li, _ = self.wq_b(q_c)
         q_li = q_li.view(-1, self.n_head, self.head_dim)
-        if HAS_TRITON:
-            q_li = rope_forward_triton_siso(
-                q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
-        else:
-            q_li_pe, q_li_nope = torch.split(
-                q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
+        q_li_pe, q_li_nope = torch.split(
+            q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
+        )
 
-            q_li_pe = q_li_pe.unsqueeze(2)
-            q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
-            q_li_pe = q_li_pe.squeeze(2)
-            q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)
+        q_li_pe = q_li_pe.unsqueeze(2)
+        q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
+        q_li_pe = q_li_pe.squeeze(2)
+        q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)
 
         q_li_scale = None
         q_li_shape_ori = None
