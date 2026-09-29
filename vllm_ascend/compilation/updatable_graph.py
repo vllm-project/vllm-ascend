@@ -157,7 +157,7 @@ class UpdatableGraph(torch.npu.NPUGraph):
 
         """
 
-        return tuple(task.bind(source.get(self.tasks.provider, index)) for index,task in enumerate(self.tasks))
+        return tuple(task.bind(source.get(task.provider, index)) for index,task in enumerate(self.tasks))
 
     def update(
         self,
