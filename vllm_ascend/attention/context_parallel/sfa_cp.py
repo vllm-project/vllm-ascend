@@ -45,6 +45,7 @@ from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
     enable_dsa_cp_full_o_proj,
+    enable_kpool_dcp_replicated_indexer,
     enable_pcp_o_proj_weight_sharding,
     enable_sfa_dcp_force_tmajor_restore,
     enable_sfa_dcp_replicated_indexer,
@@ -58,6 +59,24 @@ from vllm_ascend.weight_switch import (
 from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+
+
+def _get_sfa_indexer_output_width(vllm_config: VllmConfig) -> int:
+    """Return the full sparse-index width consumed by SFA.
+
+    LightningIndexer returns exactly ``index_topk`` entries. KPool appends the
+    uncompressed causal tail, whose maximum width is ``index_kpool - 1``.
+    """
+    for config in (
+        getattr(vllm_config.model_config, "hf_text_config", None),
+        getattr(vllm_config.model_config, "hf_config", None),
+    ):
+        index_topk = getattr(config, "index_topk", None)
+        if isinstance(index_topk, int) and index_topk > 0:
+            index_kpool = getattr(config, "index_kpool", 1)
+            output_padding = index_kpool - 1 if isinstance(index_kpool, int) and index_kpool > 1 else 0
+            return index_topk + output_padding
+    raise RuntimeError("index_topk must be set in the model config for DCP SFA.")
 
 
 class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
@@ -1146,17 +1165,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         self._dcp_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
         if self._dcp_interleave_size <= 0:
             raise RuntimeError(f"Invalid cp_kv_cache_interleave_size: {self._dcp_interleave_size}")
-        self._dcp_index_topk = 0
-        for config in (
-            getattr(self.vllm_config.model_config, "hf_text_config", None),
-            getattr(self.vllm_config.model_config, "hf_config", None),
-        ):
-            index_topk = getattr(config, "index_topk", None)
-            if isinstance(index_topk, int) and index_topk > 0:
-                self._dcp_index_topk = index_topk
-                break
-        if self._dcp_index_topk <= 0:
-            raise RuntimeError("index_topk must be set in the model config for DCP SFA.")
+        self._dcp_index_topk = _get_sfa_indexer_output_width(self.vllm_config)
         device = self.q_proj.weight.device
         self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=device)
         self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=device)
@@ -1289,7 +1298,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         topk_count = topk_indices.shape[-1]
         if topk_count > self._dcp_index_topk:
             raise RuntimeError(
-                f"topk_indices last dimension ({topk_count}) exceeds configured index_topk ({self._dcp_index_topk})."
+                "topk_indices last dimension "
+                f"({topk_count}) exceeds the configured indexer output width ({self._dcp_index_topk})."
             )
         if topk_indices.numel() == 0:
             return topk_indices
@@ -1670,7 +1680,9 @@ def resolve_sfa_metadata_builder(
 ) -> type[AscendSFAMetadataBuilder]:
     """Resolve one SFA metadata builder from the independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
+    dcp_enabled = enable_sfa_dcp_replicated_indexer(vllm_config) or (
+        vllm_config is not None and enable_kpool_dcp_replicated_indexer(vllm_config)
+    )
     pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPMetadataBuilder
@@ -1686,7 +1698,9 @@ def resolve_sfa_metadata_builder(
 def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImpl]:
     """Resolve one SFA implementation from the independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
+    dcp_enabled = enable_sfa_dcp_replicated_indexer(vllm_config) or (
+        vllm_config is not None and enable_kpool_dcp_replicated_indexer(vllm_config)
+    )
     pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPImpl

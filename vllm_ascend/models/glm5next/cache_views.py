@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
+    AscendKPoolIndexerCacheSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
@@ -67,9 +68,12 @@ def _view_compressed_indexer_cache(
     indexer_kernel_block_size = kernel_block_size // compression_ratio
     num_blocks = raw_single.numel() // kv_cache_spec.page_size_bytes
     num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // indexer_kernel_block_size
+    replication_size = (
+        kv_cache_spec.dcp_replication_size if isinstance(kv_cache_spec, AscendKPoolIndexerCacheSpec) else 1
+    )
     shape = tuple(
         attn_backend.get_kv_cache_shape(
-            num_blocks * num_blocks_per_kv_block,
+            num_blocks * replication_size * num_blocks_per_kv_block,
             indexer_kernel_block_size,
             kv_cache_spec.num_kv_heads,
             kv_cache_spec.head_size,

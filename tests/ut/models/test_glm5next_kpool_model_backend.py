@@ -145,22 +145,9 @@ def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compu
         select.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    ("pcp_size", "dcp_size"),
-    [(2, 1), (1, 2)],
-)
-def test_kpool_backend_rejects_context_parallelism(pcp_size: int, dcp_size: int) -> None:
-    source = SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                prefill_context_parallel_size=pcp_size,
-                decode_context_parallel_size=dcp_size,
-            )
-        )
-    )
-
-    with pytest.raises(NotImplementedError, match="PCP or DCP"):
-        Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
+def test_kpool_cache_backends_support_pcp() -> None:
+    assert backend_module.AscendIndexerKPoolBackend.supports_pcp()
+    assert backend_module.AscendIndexerKPoolTailBackend.supports_pcp()
 
 
 @pytest.mark.parametrize("compute_topk", [False, True])
@@ -190,6 +177,59 @@ def test_backend_zero_token_batch_does_not_launch_operators(monkeypatch, compute
         assert result is None
     compress.assert_not_called()
     select.assert_not_called()
+
+
+def test_kpool_operator_uses_global_pcp_write_view(monkeypatch) -> None:
+    metadata = _indexer_metadata(num_tokens=2)
+    metadata.cum_query_lens = torch.tensor([2], dtype=torch.int32)
+    metadata.raw_seq_lens = torch.tensor([2], dtype=torch.int32)
+    tail_metadata = _tail_metadata()
+    write_k = torch.arange(8, dtype=torch.float32).view(4, 2)
+    write_gate = write_k + 20
+    write_positions = torch.arange(4)
+    write_query_ends = torch.tensor([4], dtype=torch.int32)
+    write_seq_lens = torch.tensor([4], dtype=torch.int32)
+    write_indexer_slots = torch.tensor([-1, -1, -1, 0])
+    write_tail_slots = torch.arange(4)
+    write_tail_table = torch.tensor([[1]], dtype=torch.int32)
+
+    def compress(state, cache, k, gate, ape, positions, query_ends, seq_lens, tail_slots, table, slots, pool):
+        assert k is write_k
+        assert gate is write_gate
+        assert positions is write_positions
+        assert query_ends is write_query_ends
+        assert seq_lens is write_seq_lens
+        torch.testing.assert_close(tail_slots, write_tail_slots)
+        assert table is write_tail_table
+        torch.testing.assert_close(slots, write_indexer_slots)
+        assert pool == 4
+
+    monkeypatch.setattr(kpool_module, "glm5_next_kpool_tail_compress_and_write_cache_triton", compress)
+    result = SparseAttnIndexerKpool(4, 2)(
+        torch.zeros(2, 2),
+        None,
+        None,
+        metadata.positions,
+        torch.zeros(2, 2, 1, 2, dtype=torch.bfloat16),
+        torch.zeros(2, 2, 4, 2),
+        metadata,
+        tail_metadata,
+        gate_score=torch.zeros(2, 2),
+        compress_ape=torch.zeros(4, 2),
+        index_kpool=4,
+        max_pool_seq_len=1,
+        compute_topk=False,
+        write_k=write_k,
+        write_gate_score=write_gate,
+        write_positions=write_positions,
+        write_cum_query_lens=write_query_ends,
+        write_raw_seq_lens=write_seq_lens,
+        write_indexer_slot_mapping=write_indexer_slots,
+        write_tail_slot_mapping=write_tail_slots,
+        write_tail_block_table=write_tail_table,
+    )
+
+    assert result is None
 
 
 class _Projection(nn.Module):
@@ -283,3 +323,85 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     assert backend.indexer_op.args[7] is tail_metadata
     assert backend.indexer_op.kwargs is not None
     assert backend.indexer_op.kwargs["compute_topk"] is True
+
+
+def test_backend_restores_pcp_keys_before_kpool_cache_write(monkeypatch) -> None:
+    backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
+    nn.Module.__init__(backend)
+    backend.n_head = 2
+    backend.head_dim = 2
+    backend.topk_tokens = 2
+    backend.index_kpool = 4
+    backend.wq_b = _Projection()
+    backend.wk_weights_proj = nn.Linear(3, 4, bias=False)
+    backend.k_norm = nn.LayerNorm(2)
+    backend.index_kpool_compress_ape = nn.Parameter(torch.zeros(4, 2))
+    backend.index_kpool_compress_gate = nn.Parameter(torch.zeros(2, 3))
+    backend.k_cache = SimpleNamespace(
+        prefix="indexer.k_cache",
+        kv_cache=torch.zeros(2, 2, 1, 2, dtype=torch.bfloat16),
+    )
+    backend.tail_cache = SimpleNamespace(
+        prefix="indexer.tail",
+        kv_cache=torch.zeros(2, 2, 4, 2, dtype=torch.float32),
+    )
+    backend.topk_indices_buffer = None
+    backend.softmax_scale = 0.5
+    backend._wk_weight_f32 = None
+    backend._pcp_active = True
+    backend.indexer_op = _RecordingKPool()
+    tail_metadata = _tail_metadata()
+    metadata = _indexer_metadata(num_tokens=2)
+    metadata.num_actual_tokens = 2
+    metadata.cum_query_lens = torch.tensor([2], dtype=torch.int32)
+    metadata.raw_seq_lens = torch.tensor([4], dtype=torch.int32)
+    metadata.seq_lens = torch.tensor([1], dtype=torch.int32)
+    metadata.positions = torch.tensor([0, 2])
+    metadata.slot_mapping = torch.tensor([-1, -1])
+    metadata.pcp_local_token_count = 2
+    metadata.pcp_hidden_restore_indices = torch.tensor([0, 2, 1, 3])
+    metadata.write_positions = torch.arange(4)
+    metadata.write_cum_query_lens = torch.tensor([4], dtype=torch.int32)
+    metadata.write_raw_seq_lens = torch.tensor([4], dtype=torch.int32)
+    metadata.write_slot_mapping = torch.tensor([-1, -1, -1, 0])
+    tail_metadata.write_slot_mapping = torch.arange(4)
+
+    pcp_group = MagicMock()
+    pcp_group.all_gather.side_effect = lambda tensor, dim: torch.cat((tensor, tensor + 10), dim=dim)
+    monkeypatch.setattr(backend_module, "get_pcp_group", lambda: pcp_group)
+    monkeypatch.setattr(
+        backend_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            attn_metadata={"indexer.tail": tail_metadata},
+            cudagraph_runtime_mode=None,
+            virtual_engine=0,
+        ),
+    )
+
+    backend.forward(
+        torch.ones(2, 3),
+        torch.ones(2, 2),
+        torch.full((2, 3), 2.0),
+        metadata,
+        compute_topk=True,
+    )
+
+    assert pcp_group.all_gather.call_count == 2
+    recorded_args = backend.indexer_op.args
+    recorded_kwargs = backend.indexer_op.kwargs
+    assert recorded_args is not None
+    assert recorded_kwargs is not None
+    local_k = recorded_args[0]
+    local_gate = recorded_kwargs["gate_score"]
+    restore = metadata.pcp_hidden_restore_indices
+    assert restore is not None
+    torch.testing.assert_close(
+        recorded_kwargs["write_k"],
+        torch.cat((local_k, local_k + 10), dim=0)[restore],
+    )
+    torch.testing.assert_close(
+        recorded_kwargs["write_gate_score"],
+        torch.cat((local_gate, local_gate + 10), dim=0)[restore],
+    )
+    assert recorded_kwargs["write_positions"] is metadata.write_positions

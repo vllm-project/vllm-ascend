@@ -55,6 +55,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
+    AscendKPoolIndexerCacheSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -1169,6 +1170,8 @@ def _reshape_kv_cache_v2(
             num_blocks = total_bytes // kv_cache_spec.page_size_bytes
             num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+            if isinstance(kv_cache_spec, AscendKPoolIndexerCacheSpec):
+                kernel_num_blocks *= kv_cache_spec.dcp_replication_size
             kv_cache_shape = group.backend.get_kv_cache_shape(
                 kernel_num_blocks,
                 kernel_block_size,

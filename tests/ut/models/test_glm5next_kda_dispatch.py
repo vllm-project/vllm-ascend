@@ -9,6 +9,57 @@ import torch
 import vllm_ascend.models.glm5next.kda as model_kda
 
 
+@pytest.mark.parametrize("pcp_rank", [0, 1])
+@pytest.mark.parametrize("has_prefill", [False, True])
+def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank, has_prefill):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer"
+    layer.local_projection_size = 2
+    layer.local_num_heads = 1
+    layer.head_dim = 2
+
+    def project(x):
+        projected = torch.zeros(x.shape[0], 11)
+        projected[:, 0] = x[:, 0]
+        return projected, None
+
+    layer.in_proj_qkvbfg_a = project
+    layer.f_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
+    layer.g_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
+    layer.o_norm = lambda x, gate: x
+    layer.o_proj = lambda x: (x, None)
+    seen = []
+
+    def run_kda(qkv_proj_states, g1, beta, core_attn_out):
+        seen.extend(qkv_proj_states[:, 0].tolist())
+        core_attn_out[0, :, 0, 0] = qkv_proj_states[:, 0]
+        core_attn_out[0, :, 0, 1].zero_()
+
+    layer._forward = run_kda
+    pcp_context = SimpleNamespace(
+        global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([has_prefill])),
+        hidden_restore_idx=torch.tensor([0, 1, 4, 5, 6, 7, 2]),
+        padded_gather_idx=torch.tensor([0, 1, 6, 0, 2, 3, 4, 5]),
+    )
+    metadata = SimpleNamespace(pcp_context=pcp_context)
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
+    gathered = torch.tensor([[0.0], [1.0], [6.0], [-1.0], [2.0], [3.0], [4.0], [5.0]])
+    pcp_group = SimpleNamespace(
+        world_size=2,
+        rank_in_group=pcp_rank,
+        all_gather=lambda x, dim: gathered if has_prefill else pytest.fail("decode must not gather PCP tokens"),
+    )
+    monkeypatch.setattr(model_kda, "get_pcp_group", lambda: pcp_group)
+
+    local_input = gathered[pcp_rank * 4 : (pcp_rank + 1) * 4]
+    output = layer(local_input, torch.arange(4))
+
+    assert seen == (list(range(7)) if has_prefill else local_input[:, 0].tolist())
+    expected = ([0.0, 1.0, 6.0, 0.0] if pcp_rank == 0 else [2.0, 3.0, 4.0, 5.0]) if has_prefill else seen
+    assert output[:, 0].tolist() == expected
+
+
 @pytest.mark.parametrize("speculative", [False, True])
 @pytest.mark.parametrize("dim_first", [False, True])
 def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch, speculative, dim_first):

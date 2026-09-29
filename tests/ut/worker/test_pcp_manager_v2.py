@@ -110,6 +110,20 @@ def test_validate_config_allows_pipeline_parallelism():
     AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
 
 
+def test_validate_config_allows_kpool_model_registered_as_multimodal():
+    vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+    vllm_config.model_config.hf_text_config.index_kpool = 4
+
+    AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=True)
+
+
+def test_validate_config_rejects_other_multimodal_models():
+    vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+
+    with pytest.raises(NotImplementedError, match="MM inputs"):
+        AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=True)
+
+
 @pytest.mark.parametrize("cudagraph_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
 def test_validate_config_rejects_unsupported_sparse_mla_graph_modes(cudagraph_mode):
     vllm_config = _make_pcp_config(cudagraph_mode)
