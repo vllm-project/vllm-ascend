@@ -253,23 +253,36 @@ def _runner(prefix_replay_tokens: int, max_num_reqs: int = 4) -> NPUModelRunner:
     copies for real, so a value the device would still be holding is visible."""
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.prefix_replay_tokens = prefix_replay_tokens
+    runner._replay_starts = {}
     buffer = SimpleNamespace(
         np=np.zeros(max_num_reqs, dtype=np.int32),
         gpu=torch.zeros(max_num_reqs, dtype=torch.int32),
     )
     buffer.copy_to_gpu = lambda num=None: buffer.gpu.copy_(torch.from_numpy(buffer.np))
     runner.replay_start = buffer
-    runner.input_batch = SimpleNamespace(req_id_to_index={"req-0": 0, "req-1": 1})
+    runner.input_batch = SimpleNamespace(
+        req_id_to_index={"req-0": 0, "req-1": 1},
+        num_computed_tokens_cpu=np.full(max_num_reqs, REPLAY_START, dtype=np.int32),
+    )
     # Set by __init__ in production; _fill_replay_start owns it afterwards.
     runner._replay_active = False
     return runner
 
 
-def _scheduler_output(new_reqs=(), cached_replay_start=None):
+def _scheduler_output(new_reqs=(), cached_replay_start=None, resumed_req_ids=None, finished_req_ids=()):
     return SimpleNamespace(
         scheduled_new_reqs=list(new_reqs),
-        scheduled_cached_reqs=SimpleNamespace(replay_start=cached_replay_start or {}),
+        scheduled_cached_reqs=SimpleNamespace(
+            replay_start=cached_replay_start or {},
+            resumed_req_ids=list(cached_replay_start or {}) if resumed_req_ids is None else resumed_req_ids,
+        ),
+        finished_req_ids=finished_req_ids,
     )
+
+
+def _prepare_replay(runner, scheduler_output, num_reqs):
+    runner._update_replay_requests(scheduler_output)
+    return runner._fill_replay_start(num_reqs)
 
 
 def test_no_replay_window_means_no_work_at_all():
@@ -277,14 +290,14 @@ def test_no_replay_window_means_no_work_at_all():
     every run except DeepSeek-V4.1 with the switch on."""
     runner = _runner(prefix_replay_tokens=0)
 
-    assert runner._fill_replay_start(_scheduler_output(), num_reqs=2) is None
+    assert _prepare_replay(runner, _scheduler_output(), num_reqs=2) is None
 
 
 def test_newly_admitted_request_carries_its_replay_start():
     runner = _runner(prefix_replay_tokens=WINDOW)
     new_req = SimpleNamespace(req_id="req-1", replay_start=REPLAY_START)
 
-    replay_start = runner._fill_replay_start(_scheduler_output(new_reqs=[new_req]), num_reqs=2)
+    replay_start = _prepare_replay(runner, _scheduler_output(new_reqs=[new_req]), num_reqs=2)
 
     assert replay_start.tolist() == [0, REPLAY_START]
 
@@ -293,7 +306,7 @@ def test_resumed_request_carries_its_replay_start():
     """The V1 path: a preempted request comes back through CachedRequestData."""
     runner = _runner(prefix_replay_tokens=WINDOW)
 
-    replay_start = runner._fill_replay_start(_scheduler_output(cached_replay_start={"req-0": REPLAY_START}), num_reqs=2)
+    replay_start = _prepare_replay(runner, _scheduler_output(cached_replay_start={"req-0": REPLAY_START}), num_reqs=2)
 
     assert replay_start.tolist() == [REPLAY_START, 0]
 
@@ -301,26 +314,19 @@ def test_resumed_request_carries_its_replay_start():
 def test_a_step_with_no_replay_reports_none():
     runner = _runner(prefix_replay_tokens=WINDOW)
 
-    assert runner._fill_replay_start(_scheduler_output(), num_reqs=2) is None
+    assert _prepare_replay(runner, _scheduler_output(), num_reqs=2) is None
 
 
 def test_decode_step_never_inherits_an_earlier_replay_start():
-    """Replay is confined to admission steps, so every later step -- the whole
-    steady-state decode -- has to read all zeros, on the device too: the
-    attention metadata of that step is built from this buffer. Pinning this is
-    what replaces upstream's ``is_prefilling`` filter.
-
-    The padded rows are asserted as well, and they are why the buffer is
-    cleared and copied whole rather than up to ``num_reqs``: a graph row must
-    not inherit a write start from the step that did replay.
-    """
+    """Decode and padded rows must not retain a completed replay boundary."""
     runner = _runner(prefix_replay_tokens=WINDOW, max_num_reqs=4)
     new_req = SimpleNamespace(req_id="req-0", replay_start=REPLAY_START)
-    runner._fill_replay_start(_scheduler_output(new_reqs=[new_req]), num_reqs=2)
+    _prepare_replay(runner, _scheduler_output(new_reqs=[new_req]), num_reqs=2)
     assert runner.replay_start.gpu.tolist() == [REPLAY_START, 0, 0, 0]
 
-    # The next step names nobody.
-    assert runner._fill_replay_start(_scheduler_output(), num_reqs=2) is None
+    runner.input_batch.num_computed_tokens_cpu[0] = REPLAY_START + WINDOW
+    # The next step starts beyond the replay window.
+    assert _prepare_replay(runner, _scheduler_output(), num_reqs=2) is None
     assert runner.replay_start.np.tolist() == [0, 0, 0, 0]
     assert runner.replay_start.gpu.tolist() == [0, 0, 0, 0]
 
@@ -331,10 +337,82 @@ def test_requests_outside_the_batch_are_ignored():
     runner = _runner(prefix_replay_tokens=WINDOW, max_num_reqs=2)
     gone = SimpleNamespace(req_id="req-gone", replay_start=REPLAY_START)
     admitted = SimpleNamespace(req_id="req-1", replay_start=WINDOW)
+    runner.input_batch.num_computed_tokens_cpu[1] = WINDOW
 
-    replay_start = runner._fill_replay_start(_scheduler_output(new_reqs=[gone, admitted]), num_reqs=2)
+    replay_start = _prepare_replay(runner, _scheduler_output(new_reqs=[gone, admitted]), num_reqs=2)
 
     assert replay_start.tolist() == [0, WINDOW]
+
+
+@pytest.mark.parametrize("reorder", [False, True])
+def test_replay_boundary_survives_chunking_and_batch_reordering(reorder):
+    runner = _runner(prefix_replay_tokens=WINDOW)
+    new_req = SimpleNamespace(req_id="req-0", replay_start=REPLAY_START)
+    _prepare_replay(runner, _scheduler_output(new_reqs=[new_req]), num_reqs=2)
+
+    if reorder:
+        runner.input_batch.req_id_to_index = {"req-1": 0, "req-0": 1}
+    index = runner.input_batch.req_id_to_index["req-0"]
+    runner.input_batch.num_computed_tokens_cpu[index] = REPLAY_START + WINDOW // 2
+    replay_start = _prepare_replay(runner, _scheduler_output(), num_reqs=2)
+
+    expected = [0, 0]
+    expected[index] = REPLAY_START
+    assert replay_start.tolist() == expected
+    assert runner._attn_replay_start(2).tolist() == expected
+    # The second chunk still needs both slot padding and the SWA lower bound.
+    assert runner._replay_active
+
+
+@pytest.mark.parametrize("new_start", [0, REPLAY_START + WINDOW])
+def test_resume_replaces_saved_replay_boundary(new_start):
+    runner = _runner(prefix_replay_tokens=WINDOW)
+    new_req = SimpleNamespace(req_id="req-0", replay_start=REPLAY_START)
+    _prepare_replay(runner, _scheduler_output(new_reqs=[new_req]), num_reqs=2)
+    runner.input_batch.num_computed_tokens_cpu[0] = new_start
+
+    starts = {"req-0": new_start} if new_start else {}
+    replay_start = _prepare_replay(
+        runner,
+        _scheduler_output(cached_replay_start=starts, resumed_req_ids=["req-0"]),
+        num_reqs=2,
+    )
+    if new_start:
+        assert replay_start.tolist() == [new_start, 0]
+    else:
+        assert replay_start is None
+        assert "req-0" not in runner._replay_starts
+
+
+def test_finished_request_is_cleared_without_another_model_step():
+    runner = _runner(prefix_replay_tokens=WINDOW)
+    new_req = SimpleNamespace(req_id="req-0", replay_start=REPLAY_START)
+    _prepare_replay(runner, _scheduler_output(new_reqs=[new_req]), num_reqs=2)
+
+    runner._update_replay_requests(_scheduler_output(finished_req_ids={"req-0"}))
+
+    assert runner._replay_starts == {}
+
+
+def test_reused_request_id_without_hit_drops_saved_boundary():
+    runner = _runner(prefix_replay_tokens=WINDOW)
+    new_req = SimpleNamespace(req_id="req-0", replay_start=REPLAY_START)
+    _prepare_replay(runner, _scheduler_output(new_reqs=[new_req]), num_reqs=2)
+
+    new_req = SimpleNamespace(req_id="req-0", replay_start=0)
+    assert _prepare_replay(runner, _scheduler_output(new_reqs=[new_req]), num_reqs=2) is None
+    assert "req-0" not in runner._replay_starts
+
+
+def test_recompute_below_replay_start_discards_saved_boundary():
+    runner = _runner(prefix_replay_tokens=WINDOW)
+    new_req = SimpleNamespace(req_id="req-0", replay_start=REPLAY_START)
+    _prepare_replay(runner, _scheduler_output(new_reqs=[new_req]), num_reqs=2)
+    runner.input_batch.num_computed_tokens_cpu[0] = 0
+
+    assert _prepare_replay(runner, _scheduler_output(), num_reqs=2) is None
+    assert runner._replay_starts == {}
+    assert runner.replay_start.gpu.tolist() == [0, 0, 0, 0]
 
 
 # --- what the attention metadata carries -------------------------------------
@@ -357,7 +435,8 @@ def test_attention_metadata_reports_a_replay_only_when_the_step_replays(
     expected,
 ):
     runner = _runner(prefix_replay_tokens=WINDOW)
-    runner._fill_replay_start(
+    _prepare_replay(
+        runner,
         _scheduler_output(new_reqs=new_reqs, cached_replay_start=cached_replay_start),
         num_reqs=2,
     )
@@ -377,7 +456,8 @@ def test_no_replay_window_never_reports_a_replay():
     scheduler payload happens to hold."""
     runner = _runner(prefix_replay_tokens=0)
 
-    runner._fill_replay_start(
+    _prepare_replay(
+        runner,
         _scheduler_output(new_reqs=[SimpleNamespace(req_id="req-0", replay_start=REPLAY_START)]),
         num_reqs=2,
     )
