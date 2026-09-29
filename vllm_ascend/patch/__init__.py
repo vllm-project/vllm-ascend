@@ -164,21 +164,28 @@
 #
 # ** 6. File: platform/patch_engram_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.engram.EngramConfig.verify_model_config`
+#   1. `vllm.engine.arg_utils.EngramConfig`
+#   2. `vllm.engine.arg_utils.get_kwargs`
+#   3. `vllm.config.vllm.VllmConfig._resolve_and_verify_engram_config`
 #    Why:
-#       Upstream rejects every platform that is not CUDA, because Engram
-#       embedding offload started there. Validating `current_platform.is_cuda()`
-#       rather than "does the checkpoint carry n-gram layers" makes
-#       `--engram-config` unusable on Ascend even though the same checkpoint
-#       hashes to the same rows and only the storage location differs.
+#       The pinned vLLM 84030bbe does not define `dp_shared_memory` and only
+#       accepts CUDA Qwen Engram models. Its CLI schema is built from that
+#       config before the platform can supply an Ascend-specific subtype.
 #    How：
-#       Accept a configuration whose checkpoint declares `engram_layer_ids`,
-#       and reject the DP-sharding switches that the Ascend implementation does
-#       not provide instead of silently ignoring them.
+#       Define an Ascend EngramConfig subtype with `dp_shared_memory`, use it
+#       for EngineArgs conversion and `--engram-config` JSON parsing, then
+#       resolve DeepSeek V4.1 target configs through that subtype. Keep model,
+#       topology, load-format and DBO validation in the subtype.
+#       Skip this patch when vLLM does not provide EngramConfig. External DP
+#       locality is checked on the initialized DP group because its
+#       data_parallel_size_local counts engines per launcher.
 #    Related PR (if no, explain why):
-#       No, upstream vLLM has no Ascend Engram to relax this for.
+#       No Ascend upstream PR. The required generic Engram behavior is
+#       selectively backported from vLLM commit f84b0c4bce:
+#       https://github.com/vllm-project/vllm/commit/f84b0c4bce
 #    Future Plan:
-#       Remove this patch once upstream validation is platform-agnostic.
+#       Remove this patch when the pinned vLLM includes `dp_shared_memory` and
+#       exposes a platform hook for Engram config selection and validation.
 #
 # ** 7. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -287,19 +294,43 @@
 #       collapses the FullAttention hit length to 0, preventing partial
 #       FullAttention-only prefix cache reuse on the D side.
 #    How:
-#       For Mamba hybrid models,
-#       num_new_local_computed_tokens should be the FA hit
-#       length. This value is passed to the connector's
+#       Override the per-group lookup so the FullAttention hit length is
+#       reported directly; `num_new_local_computed_tokens` then carries the
+#       FA hit length. This value is passed to the connector's
 #       get_num_new_matched_tokens which computes:
 #       external = total - local_computed.
 #       Using the FA hit skips re-transferring FA blocks
-#       already cached on D-side.
+#       already cached on D-side. The override also injects the producer drop
+#       exemption of entry 2 into the per-group lookup.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/42524
 #       https://github.com/vllm-project/vllm/pull/44243
 #    Future Plan:
-#       Remove this patch when vLLM PR #42524 and #44243 is included in the supported
-#       upstream vLLM version.
+#       vLLM #44243 has landed in the supported upstream version, so this
+#       override is kept only for the drop exemption of entry 2; remove it
+#       together with entry 2 once upstream exposes the PD role.
+#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups`,
+#      `HybridKVCacheCoordinator.find_longest_cache_hit` and
+#      `...find_longest_cache_hit_per_group`
+#    Why:
+#       On a pure PD prefill producer (`kv_transfer_config.is_kv_producer`
+#       and not `is_kv_consumer`), every content-hash match is a verified
+#       prompt block, so the EAGLE last-block drop is never needed. With
+#       hybrid Mamba align pages (1536 tokens) the drop erases the whole
+#       shared prefix of typical ~2K prompts, pinning producer prefix hits
+#       to 0 (the MTP prefix-cache "kill band").
+#    How:
+#       Attach the live `kv_transfer_config` onto KVCacheConfig while it is
+#       built (the coordinator factory never receives VllmConfig; the
+#       attribute survives the scheduler-side deepcopy and is dropped by
+#       worker pickle IPC), read the PD role back in the coordinator, and
+#       skip the EAGLE drop in both lookup entry points on a pure producer.
+#       The EAGLE-group fallback marks FullAttention groups only.
+#    Related PR (if no, explain why):
+#       No upstream PR; producer-side drop exemption for hybrid PD.
+#    Future Plan:
+#       Remove once upstream exposes the PD role to the coordinator or
+#       removes the EAGLE last-block drop for verified prompt blocks.
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -337,6 +368,26 @@
 #    Future Plan:
 #       Remove this compatibility patch once upstream preserves speculative
 #       window atomicity for PD-admitted requests.
+#   2. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
+#    Why:
+#       Scheduler-side companion of fix 8.2: upstream backs the last cacheable
+#       mamba-align page off by one block while the EAGLE block drop is
+#       active, so the producer never ends a prefill chunk at the final full
+#       page boundary. Mamba "align" state materializes only across a chunk
+#       boundary (copy-on-write in MambaManager.allocate_new_blocks), so the
+#       final full state page stays unhashed and hybrid hits reconcile one
+#       page short (1600-token prompts -> 0 hit, 3200-token -> 1536).
+#    How:
+#       Delegate to the original method, but on a pure PD producer suppress
+#       the drop bit for the duration of that call and restore it afterwards.
+#       The gate is `_skips_eagle_block_drop(self.vllm_config.kv_transfer_config)`
+#       and is evaluated at call time, so consumers, kv_both and standalone
+#       instances pass through unchanged.
+#    Related PR (if no, explain why):
+#       No upstream PR; producer-side scheduler companion of fix 8.2.
+#    Future Plan:
+#       Remove together with fix 8.2 once upstream splits mamba-align pages
+#       without the EAGLE backoff on PD producers.
 #
 # ** 10a. File: platform/patch_mamba_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -645,6 +696,26 @@
 #       before DSpark draft selection, or otherwise guarantees that rebuilding
 #       `model_arch_config` preserves the selected draft architecture.
 #
+#   3. `vllm.config.model.ModelConfig.verify_with_parallel_config`
+#    Why:
+#       The pinned vLLM revision propagates `enable_expert_parallel` to the
+#       draft parallel config (upstream #55914) but no longer disables it for
+#       dense drafts (upstream #56930 is not on this revision). Non-MoE draft
+#       models (e.g. Kimi K3 DSpark, VWN eagle3) then fail the
+#       `_verify_with_expert_parallelism` check in
+#       `ModelConfig.verify_with_parallel_config` and cannot start.
+#    How:
+#       Monkey-patch `verify_with_parallel_config` to skip the expert-parallel
+#       check when `runner_type == "draft"` and the model is not MoE. The target
+#       model EP check and MoE draft models are unaffected.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/55914
+#       https://github.com/vllm-project/vllm/pull/56930
+#    Future Plan:
+#       Remove this patch once the pinned vLLM revision disables expert
+#       parallelism for non-MoE draft models (upstream #56930) or exposes a
+#       backend-safe draft parallel config selection.
+#
 # ** 20. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
@@ -752,15 +823,13 @@
 #
 #   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
 #    Why:
-#       vLLM 0.28.0 rejects PCP+DP before Ascend MRV2 can validate it.
+#       vLLM 0.28.0 rejected PCP+DP before Ascend MRV2 could validate it.
 #    How:
-#       Only on Ascend MRV2 with DP>1, PCP>1 and DCP=1, temporarily mask
-#       PCP inside the original validator and restore it on every exit.
-#       Retain real DP validation and world_size; rebuild dependent Pydantic
-#       schemas once at import so nested configs use the same validator.
+#       Removed with the v0.30.0 boundary: the release-only validator override
+#       is no longer applied.
 #    Related PR: https://github.com/vllm-project/vllm/pull/54523
 #    Future Plan:
-#       Remove this workaround when vLLM 0.28.0 support is dropped.
+#       Re-add only if a supported pin rejects PCP+DP.
 #
 # * Worker Patch:
 # ========#
@@ -1362,6 +1431,34 @@
 #       Triton-Ascend release is available. Remove the marker-cache kernel
 #       patch when Triton-Ascend 3.6.0 is the minimum supported version.
 #
+#   4. `vllm.v1.worker.gpu.sample.output.SamplingMaskTensors.from_logits`
+#    Why:
+#       Triton-Ascend can allocate excessive UB space for the sampling-mask
+#       kernel when the logits vocabulary dimension has a stride greater than
+#       one, causing compilation to fail with UB overflow. Reducing the boolean
+#       keep mask directly also returns one per tile instead of the finite-logit
+#       count on Triton-Ascend. The upstream row-wise bit packing additionally
+#       lowers to scalar-heavy variable shifts and width-8 reductions.
+#    How:
+#       Make logits contiguous only when the vocabulary dimension is strided,
+#       cast the keep mask to int32 before reducing it, and use a 4096-element
+#       tile to keep the corrected reduction within the NPU UB limit. Support
+#       both the release three-field bitmask API and the verified-main
+#       four-field compact-ID plus bitmask API with the same packing kernel.
+#       For the four-field API, return a zero-width `token_ids` tensor so its
+#       existing `tolists()` method uses the exact bitmask fallback. Pack bits by
+#       transposing `[512, 8]` to `[8, 512]`, multiplying by compile-time bit
+#       weights, and reducing the contiguous 8-row axis so the backend emits
+#       vector transpose, multiply, and reduction instructions.
+#    Test:
+#       Regression coverage is in
+#       `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py`.
+#    Related PR (if no, explain why):
+#       No. This is a Triton-Ascend compiler compatibility workaround.
+#    Future Plan:
+#       Remove this patch when Triton-Ascend can compile and efficiently lower
+#       the upstream kernel, or after an equivalent fix lands upstream.
+#
 # ** 29. File: worker/patch_v2/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
@@ -1416,14 +1513,56 @@
 #   1. `vllm.v1.worker.gpu.spec_decode.adaptive_verification._assign_draft_token_budget_compiled`
 #    Why:
 #       The upstream adaptive-verification draft-budget allocator is wrapped by
-#       `torch.compile`, whose compiled path is not supported on Ascend.
+#       `torch.compile`, whose compiled path is not supported on Ascend. In
+#       addition, the current A5 `index_fill_` implementation converts its
+#       device index tensor to a host vector, introducing synchronization
+#       proportional to the number of indices.
 #    How:
-#       Replace the compiled wrapper with the original eager allocator while
-#       preserving the upstream budget-allocation algorithm.
+#       Run the original upstream allocator eagerly, preserving its algorithm,
+#       and use a scoped `TorchFunctionMode` to route only `index_fill_` through
+#       `DeviceOperator`. The A5 adaptor temporarily implements it with the
+#       equivalent `scatter_` operation; other hardware keeps the native path.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/47808
 #    Future Plan:
-#       Remove this patch when the compiled allocator is supported on Ascend.
+#       Remove the scoped `index_fill_` interception once the native A5 operator
+#       accepts device indices without synchronization. Remove this patch
+#       entirely once the compiled allocator is also supported on Ascend.
+#
+# ** 33. File: worker/patch_v2/patch_model_runner.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.model_runner.GPUModelRunner.initialize_kv_cache`
+#    Why:
+#       Upstream filters per-layer cache values by `cache.device`, but Ascend
+#       allocates K/V tuples and Conv/SSM lists. Returning only the first tensor
+#       avoids that error but drops V/SSM from the dictionary given to connectors.
+#    How:
+#       Adapt the upstream initializer to flatten only the runner's cache list
+#       before device filtering. Preserve the original dictionary and container
+#       types for model bindings and connector registration; remove the old
+#       first-tensor wrapper in patch_attn_utils.py.
+#    Related PR (if no, explain why):
+#       No upstream PR linked; this adapts Ascend multi-tensor allocations.
+#    Future Plan:
+#       Remove this override when upstream supports multi-tensor allocations
+#       during device filtering without truncating connector cache entries.
+#       Until then, keep the copied initializer aligned with supported vLLM.
+#
+#   2. `vllm.v1.worker.gpu.model_runner.copy_kv_cache_blocks_inplace`
+#    Why:
+#       Runner cache flattening alone does not establish that upstream's
+#       storage-copy paths support every Ascend segmented cache layout.
+#    How:
+#       Rebind the helper imported by the MRv2 runner to the existing Ascend
+#       implementation, which copies individual tensor segments and deduplicates
+#       views by data_ptr. Its existing layout restrictions still apply.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/17451
+#    Future Plan:
+#       Remove this rebind once the upstream helper is validated for supported
+#       Ascend layouts, including segmented Conv/SSM storage, shared views and
+#       multiple kernel blocks per scheduler block. If #17451 is integrated,
+#       consolidate the duplicate runner rebind into one patch module.
 #
 # ** 34. File: platform/patch_vision.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1486,28 +1625,33 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
 #    Why:
-#       vLLM v0.29.0 rejects PCP > 1 combined with DP > 1 in its shared
+#       The v0.29.0 release rejected PCP > 1 combined with DP > 1 in its shared
 #       validator, preventing Ascend's PCP+DP implementation from being reached.
 #       Upstream #54523 scopes this restriction to CUDA/ROCm instead; the pinned
 #       main already contains that fix.
 #    How:
-#       Apply only when vllm_version_is("0.29.0"). Preserve the release validator
-#       except for the PCP+DP rejection, without changing parameter values or
-#       bypassing other validation. Update the class method and Pydantic
-#       model-validator registration, then rebuild ParallelConfig,
-#       SpeculativeConfig, and VllmConfig in dependency order. SpeculativeConfig
-#       retains shared ParallelConfig schemas even through SkipValidation;
-#       rebuilding only the outer VllmConfig can restore the stale validator.
-#       Read parallel.current_platform dynamically to preserve the Ascend EPLB
-#       platform proxy installed by platform/patch_eplb.py.
+#       Removed with the v0.30.0 boundary: v0.30.0 equals the pinned main and
+#       already contains #54523, so no release-only validator override applies.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/54523/files
 #       Upstream commit: 7c2f1ff4958eaf0818405e9192c71608fe4a16b1.
 #       Release source: 98dff2a81d747d1dba01a47f939f48c3526d4206.
 #    Future Plan:
-#       Remove this patch and its platform import when v0.29.0 support is dropped
-#       and all supported pins contain #54523 or an equivalent backend-scoped
-#       check. If the supported release pin first receives a backport, remove
-#       it after verifying PCP+DP construction and execution, retained invalid-
-#       config rejection, and Ascend EPLB validation.
+#       Re-add only if a supported pin predates #54523 or an equivalent
+#       backend-scoped check, then verify PCP+DP construction and execution,
+#       retained invalid-config rejection, and Ascend EPLB validation.
+#
+#   2. `vllm.config.parallel.ParallelConfig.use_sequence_parallel_moe`
+#    Why:
+#       Upstream requires DP > 1 for MoE sequence parallelism. Ascend
+#       FlashComm also supports the TP/EP, DP=1 topology, where rank-local
+#       token sharding is still required.
+#    How:
+#       Replace the property with the upstream predicate minus only the
+#       `data_parallel_size > 1` condition. Backend, EP, and TP checks remain.
+#    Related PR (if no, explain why):
+#       No, this enables an Ascend FlashComm-specific topology.
+#    Future Plan:
+#       Remove this patch when upstream provides a backend capability hook for
+#       enabling MoE sequence parallelism with DP=1.
 #

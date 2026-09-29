@@ -375,6 +375,40 @@ class TestAscendSFACacheComposition(TestBase):
         self.assertIs(impl._get_indexer_attn_metadata(), own_metadata)
 
     @patch(
+        "vllm_ascend.device.device_op.torch_npu.npu_lightning_indexer",
+        create=True,
+    )
+    def test_li_indexer_uses_torch_npu_operator(self, mock_indexer):
+        expected_topk = torch.zeros(2, 1, 4, dtype=torch.int32)
+        mock_indexer.return_value = expected_topk, torch.empty(0)
+        q_li = torch.zeros(2, 1, 128, dtype=torch.bfloat16)
+        weights = torch.ones(2, 1, dtype=torch.bfloat16)
+        indexer_k_cache = torch.empty(2, 16, 1, 128, dtype=torch.bfloat16)
+        kv_cache = (indexer_k_cache,)
+        attn_metadata = SimpleNamespace(block_table=torch.zeros(1, 2, dtype=torch.int32))
+
+        result = BaseDeviceAdaptor.indexer_select_post_process(
+            q_li,
+            None,
+            None,
+            weights,
+            kv_cache,
+            0,
+            1,
+            attn_metadata,
+            torch.tensor([2], dtype=torch.int32),
+            torch.tensor([2], dtype=torch.int32),
+            False,
+            False,
+        )
+
+        self.assertIs(result, expected_topk)
+        call_kwargs = mock_indexer.call_args.kwargs
+        self.assertIs(call_kwargs["key"], indexer_k_cache)
+        self.assertEqual(call_kwargs["layout_query"], "TND")
+        self.assertEqual(call_kwargs["layout_key"], "PA_BSND")
+
+    @patch(
         "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
         create=True,
     )
@@ -830,6 +864,12 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         assert builder.device == device
         assert builder.vllm_config == vllm_config
+        assert builder.use_pcp is False
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+        pcp_builder = AscendSFAMetadataBuilder(
+            kv_cache_spec=kv_cache_spec, layer_names=layer_names, vllm_config=vllm_config, device=device
+        )
+        assert pcp_builder.use_pcp is True
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
@@ -865,6 +905,9 @@ class TestAscendSFAMetadataBuilder(TestBase):
         )
 
         common_attn_metadata = MagicMock()
+        common_attn_metadata.decode_token_per_req = 1
+        common_attn_metadata.context_parallel_metadata = None
+        common_attn_metadata.max_query_len = 10
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
         common_attn_metadata.query_start_loc = torch.arange(0, 101, 10, dtype=torch.int32)
@@ -926,6 +969,9 @@ class TestAscendSFAMetadataBuilder(TestBase):
         )
 
         common_attn_metadata = MagicMock()
+        common_attn_metadata.decode_token_per_req = 1
+        common_attn_metadata.context_parallel_metadata = None
+        common_attn_metadata.max_query_len = 10
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
         common_attn_metadata.query_start_loc = torch.arange(0, 101, 10, dtype=torch.int32)
@@ -988,6 +1034,9 @@ class TestAscendSFAMetadataBuilder(TestBase):
         device = torch.device("cpu")
 
         common_attn_metadata = MagicMock()
+        common_attn_metadata.decode_token_per_req = 1
+        common_attn_metadata.context_parallel_metadata = None
+        common_attn_metadata.max_query_len = 10
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
         common_attn_metadata.query_start_loc = torch.arange(0, 101, 10, dtype=torch.int32)
@@ -1260,15 +1309,13 @@ class TestAscendSFAImpl(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.maybe_trans_nz")
     @patch("vllm_ascend.attention.sfa_v1.dispose_layer")
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_keeps_kv_b_proj_for_rl(
+    def test_process_weights_after_loading_keeps_runtime_weight_address(
         self, mock_format_cast, mock_dispose, mock_maybe_trans_nz
     ):
-        """RL keeps kv_b_proj so live weight updates stay loadable (#15463).
+        """RL reload preserves the source and derived weight addresses.
 
-        The layerwise reload writes every checkpoint weight back into the
-        storage that exists when the transaction starts. A disposed parameter
-        has no valid destination, so the incoming weight is dropped and
-        W_UK_T/W_UV are re-derived from an empty tensor on every update.
+        RL keeps ``kv_b_proj`` loadable. In graph + RL the derived tensor
+        addresses are captured, so reloading must refresh them in place.
         """
         layer = self._setup_kv_b_proj()
         mock_format_cast.return_value = layer.weight
@@ -1282,6 +1329,77 @@ class TestAscendSFAImpl(TestBase):
         self.assertEqual(self.impl.W_UK_T.shape[2], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
+        w_uv_ptr = self.impl.W_UV.data_ptr()
+        w_uk_t_ptr = self.impl.W_UK_T.data_ptr()
+        old_w_uv = self.impl.W_UV.clone()
+
+        # A weight update replaces the raw kv_b_proj weight; the derived
+        # tensors must follow it while staying at the same address.
+        kv_b_proj_shape = (
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim),
+            self.impl.kv_lora_rank,
+        )
+        layer.weight = torch.randn(*kv_b_proj_shape, dtype=torch.bfloat16)
+        mock_format_cast.return_value = layer.weight
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        self.assertEqual(self.impl.W_UK_T.data_ptr(), w_uk_t_ptr)
+
+        # ... and the refreshed buffers must hold the new kv_b_proj split.
+        expected_w_uk, expected_w_uv = layer.weight.T.view(
+            self.impl.kv_lora_rank,
+            self.impl.num_heads,
+            self.impl.qk_nope_head_dim + self.impl.v_head_dim,
+        ).split([self.impl.qk_nope_head_dim, self.impl.v_head_dim], dim=-1)
+        torch.testing.assert_close(self.impl.W_UV, expected_w_uv.transpose(0, 1).contiguous())
+        torch.testing.assert_close(self.impl.W_UK_T, expected_w_uk.permute(1, 2, 0).contiguous())
+        self.assertFalse(torch.equal(self.impl.W_UV, old_w_uv))
+
+    @patch("vllm_ascend.attention.sfa_v1.maybe_trans_nz")
+    @patch("vllm_ascend.attention.sfa_v1.dispose_layer")
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_rebinds_incompatible_value(
+        self, mock_format_cast, mock_dispose, mock_maybe_trans_nz
+    ):
+        """An incompatible reload must rebind instead of raising from ``copy_``.
+
+        ``replace_parameter(..., prefer_copy=True)`` reuses the stored storage
+        only while shape, dtype and device still match. The hand-rolled
+        ``copy_`` it replaced was unconditional, so a re-derived value that
+        stopped being compatible aborted the whole weight-update transaction
+        with a ``RuntimeError``. That failure mode is the only behaviour this
+        change alters, so it is the part of the contract the unit tests have to
+        pin down.
+        """
+        layer = self._setup_kv_b_proj()
+        mock_format_cast.return_value = layer.weight
+        mock_maybe_trans_nz.side_effect = lambda x: x
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+        w_uv_ptr = self.impl.W_UV.data_ptr()
+
+        # Narrow the layer: the re-derived split is still a valid value, but it
+        # no longer fits the buffer that is already stored.
+        self.impl.local_num_heads //= 2
+        layer.weight = torch.randn(
+            self.impl.local_num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim),
+            self.impl.kv_lora_rank,
+            dtype=torch.bfloat16,
+        )
+        mock_format_cast.return_value = layer.weight
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        self.assertEqual(
+            self.impl.W_UV.shape,
+            (self.impl.local_num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim),
+        )
+        self.assertEqual(
+            self.impl.W_UK_T.shape,
+            (self.impl.local_num_heads, self.impl.qk_nope_head_dim, self.impl.kv_lora_rank),
+        )
 
     # ============ _process_weights_for_fused_prolog_v3 ============
 
@@ -1370,7 +1488,7 @@ class TestAscendSFAImpl(TestBase):
     ):
         """exec_kv with enable_sparse_sfa_c8 delegates to custom_kv_rmsnorm_rope."""
         self.impl.enable_sparse_sfa_c8 = True
-        self.impl.c8_k_cache_dtype = torch.int8
+        self.impl.c8_cache_dtype = torch.int8
         self.impl.kv_a_layernorm = MagicMock()
         self.impl.kv_a_layernorm.weight = torch.ones(self.impl.kv_lora_rank)
         self.impl.kv_a_layernorm.variance_epsilon = 1e-5

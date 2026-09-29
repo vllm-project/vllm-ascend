@@ -46,21 +46,32 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 )
 from vllm_ascend.quantization.quant_type import QuantType
 
-_MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+_MoECommMethods: dict[tuple[MoECommType | None, tuple[int, ...]], MoECommMethod] = {}
 
 
-def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
-    return _MoECommMethods.get(moe_comm_type)
+def _moe_config_key(
+    moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig | None
+) -> tuple[MoECommType | None, tuple[int, ...]]:
+    """Return the execution shape that owns mutable MoE comm state."""
+    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
+    return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
+
+
+def get_moe_comm_method(
+    moe_comm_type: MoECommType | None,
+    moe_config: FusedMoEConfig | None = None,
+) -> MoECommMethod | None:
+    return _MoECommMethods.get(_moe_config_key(moe_comm_type, moe_config))
 
 
 def setup_moe_comm_method(moe_config):
     if moe_config.ep_size > 1:
-        _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
-        _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.ALLTOALL, moe_config)] = AlltoAllCommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.MC2, moe_config)] = MC2CommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.FUSED_MC2, moe_config)] = FusedMC2CommImpl(moe_config)
     else:
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
 
 
 @dataclass
@@ -268,6 +279,7 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
+        self._mega_moe_hccl_state_stale = False
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
@@ -289,6 +301,57 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
+
+    def prepare_hccl_teardown(self) -> bool:
+        """Invalidate the MegaMoe context before its MC2 group is destroyed."""
+        symm_buffer = getattr(self, "mega_moe_symm_buffer", None)
+        if symm_buffer is None:
+            return True
+
+        context_manager = getattr(symm_buffer, "_ctx_manager", None)
+        update_group = getattr(context_manager, "update_group", None)
+        if not callable(update_group):
+            raise RuntimeError(
+                "The installed cann_ops_transformer MegaMoe context manager "
+                "does not expose update_group(); refusing to tear down its HCCL group."
+            )
+
+        self._mega_moe_hccl_state_stale = True
+        logger.info("Marked MegaMoe HCCL runtime context stale before MC2 group teardown.")
+        return True
+
+    def refresh_hccl_runtime_state(self) -> bool:
+        """Rebind a stale MegaMoe context to the restored MC2 communicator."""
+        symm_buffer = getattr(self, "mega_moe_symm_buffer", None)
+        if symm_buffer is None or not self._mega_moe_hccl_state_stale:
+            return True
+
+        device_group = get_mc2_group().device_group
+        local_rank = torch.distributed.get_rank(group=device_group)
+        backend = device_group._get_backend(torch.device("npu"))
+        group_name = backend.get_hccl_comm_name(local_rank)
+        context_manager = symm_buffer._ctx_manager
+
+        # The context tensor was created under inference mode during model
+        # initialization. CANN updates it in place, so preserve that mode here.
+        with torch.inference_mode():
+            context_manager.update_group(group_name, symm_buffer.context)
+        symm_buffer.group = device_group
+        symm_buffer.rank_id = local_rank
+        symm_buffer.group_name = group_name
+        symm_buffer.ep_world_size = torch.distributed.get_world_size(group=device_group)
+        symm_buffer.ccl_buffer_size = context_manager.ccl_buffer_size
+        torch.distributed.barrier(
+            group=device_group,
+            device_ids=[torch.npu.current_device()],
+        )
+        self._mega_moe_hccl_state_stale = False
+        logger.info(
+            "Refreshed MegaMoe HCCL runtime context after MC2 group restore: rank=%d, world_size=%d.",
+            local_rank,
+            symm_buffer.ep_world_size,
+        )
+        return True
 
     def _init_mega_moe_symm_buffer(
         self,

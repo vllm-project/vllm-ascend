@@ -25,8 +25,11 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 |-----------------------------|---------------------------------------------------------------------|----------------|
 | `DeepSeek-V4-Pro-w4a8-mtp`  | 2 Atlas 800 A3 (128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp) |
 | `DeepSeek-V4-Pro-0813-w4a8` |                                                                     | [ModelScope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-0813-w4a8)    |
+| `DeepSeek-V4-Pro-0813-w4a4c8` | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_pro_w4a4c8.yaml) |
 
-`DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantized): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
+- `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantized): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
+
+- `DeepSeek-V4-Pro-0813-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -179,7 +182,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --data-parallel-address $node0_ip  \
       --data-parallel-size 4 \
       --data-parallel-size-local 1 \
-      --data-parallel-start-rank 0 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --served-model-name dsv4 \
@@ -330,7 +332,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --data-parallel-rpc-port 13399 \
       --data-parallel-size 2 \
       --data-parallel-size-local 1 \
-      --data-parallel-start-rank 0 \
       --tensor-parallel-size 16 \
       --enable-expert-parallel \
       --served-model-name dsv4 \
@@ -457,7 +458,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --data-parallel-rpc-port 13399 \
       --data-parallel-size 2 \
       --data-parallel-size-local 1 \
-      --data-parallel-start-rank 0 \
       --tensor-parallel-size 16 \
       --enable-expert-parallel \
       --served-model-name dsv4 \
@@ -553,7 +553,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
 Key Parameter Descriptions:
 
 - `--data-parallel-size` sets the global number of data parallel ranks, and `--data-parallel-size-local` sets the number of DP ranks on the current node.
-- `--data-parallel-start-rank` specifies the starting data parallel rank of the current node. Each node must be set to a unique value (e.g., Node0 = 0, Node1 = 1).
+- `--data-parallel-start-rank` specifies the starting data parallel rank of the current node. Set a unique value on each headless node (e.g., Node1 = 1). On Node0, omit `--data-parallel-start-rank` even when the start rank is 0, to avoid enabling hybrid load balancing with headless remote engines.
 - `--data-parallel-address` specifies the IP address of the data parallel master node (Node0). It must be consistent across all nodes.
 - `--data-parallel-rpc-port` is the DP RPC port. Use the same value on all nodes and ensure the port is available.
 - `--tensor-parallel-size` sets the tensor parallel size within each DP rank. Configure it together with the DP sizes according to the deployment topology and available NPUs.
@@ -1447,6 +1447,9 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 | GPQA | - | accuracy | gen | 91.41 | 0831 official W4A8 weight with DSpark enabled |
 | GPQA | - | accuracy | gen | 89.90 | 2 Atlas 800 A3 (128GB × 8) |
 | GSM8K | - | accuracy | gen | 96.21 | 2 Atlas 800 A3 (128GB × 8) |
+| GSM8K | - | accuracy | gen | 97.54 | 950PR&950DT Products, w4a4c8 |
+
+> **Note**: Dataset evaluation results fluctuate between runs due to sampling and runtime non-determinism. When a dataset is evaluated multiple times, the average score is reported.
 
 ## 8 Performance Evaluation
 
@@ -1501,3 +1504,21 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
+
+### Q: How do the W4A4C8 ultra-low-bit quantized weights preserve accuracy?
+
+A: For 950PR&950DT Products, the W4A4C8 weights of `DeepSeek-V4-Pro-0813` are quantized with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_pro_w4a4c8.yaml). To preserve accuracy at such a low bit-width, a mixed-precision strategy is used: only the modules that dominate the parameter count are quantized to 4 bit, while precision-sensitive modules fall back to higher precision or are not quantized at all.
+
+| Module | Quantization configuration |
+| ------ | -------------------------- |
+| MoE FFN routed experts | W4A4 MXFP4 |
+| Attention linear layers | W8A8 MXFP8 |
+| FFN shared experts | W8A8 MXFP8 |
+| Router gates, compressor projections (`wgate`/`wkv`), indexer projections, and MTP layers | Not quantized (kept in high precision) |
+
+- **Quantization algorithm**: The weights and activations use the MXFP4/MXFP8 microscaling formats. Each tensor is divided into blocks of 32 elements, and each block shares a single scaling factor obtained with symmetric min-max calibration on a mixed calibration dataset. Block-wise scaling adapts to the local dynamic range of each tensor, so the quantization error is far lower than that of uniform INT4 quantization.
+- **C8 (FP8 KV cache)**: C8 is a dynamic quantization applied to the KV cache during inference. On 950PR&950DT Products, the KV cache is quantized to FP8 (not INT8). It is unrelated to the parameters stored in the weight checkpoint and is controlled only by the serving configuration. DeepSeek-V4-Flash and DeepSeek-V4-Pro share exactly the same C8 scheme:
+    - **Attention KV cache** (FP8 by default on 950PR&950DT Products; switch back to BF16 with `--kv-cache-dtype bfloat16`): the compressed KV latent, which serves as both K and V, is dynamically quantized per 64-element tile to FP8 (E4M3) with a shared E8M0 scale per tile; the RoPE part of the KV cache stays in BF16, and Q is not quantized.
+    - **Indexer cache** (enabled with `--attention_config.indexer_kv_dtype fp8`): both indexer Q and K are first rotated by a Hadamard matrix to spread outliers, and then dynamically quantized per token to FP8 (E4M3) with per-token FP32 scales.
+
+For W4A4C8 accuracy scores, see [Accuracy Evaluation](#7-accuracy-evaluation).

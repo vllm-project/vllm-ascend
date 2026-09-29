@@ -2,6 +2,7 @@ test_name: "MiniMax-M2.5-w8a8-QuaRot—step"
 model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
 num_nodes: 2
 npu_per_node: 16
+dp_load_balancing: external
 env_common: &env_common
     HCCL_BUFFSIZE: "1200"
     HCCL_OP_EXPANSION_MODE: "AIV"

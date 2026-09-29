@@ -73,6 +73,7 @@ def _make_config():
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
+            prefix_cache_retention_interval=0,
         ),
         kv_transfer_config=None,
         compilation_config=SimpleNamespace(static_forward_context={}),
@@ -134,8 +135,9 @@ def _make_runner(config, main_cache_dims=(4, 0)):
     runner.sparse_kv_offload_config = SimpleNamespace(enabled=False)
     runner.tp_rank = 0
     runner.attn_backend = _AttentionBackend
-    # The runner must consume the descriptor/spec contract without inspecting
-    # a model type.
+    runner.kernel_block_sizes = [[8], [2], [0]]
+    # The runner gates GLM-Next reshape views on the spec-carried
+    # model_version marker, not on model_config.
     runner.model_config = SimpleNamespace()
 
     specs = _make_specs()
@@ -144,21 +146,25 @@ def _make_runner(config, main_cache_dims=(4, 0)):
             backend=_AttentionBackend,
             kv_cache_spec=specs[MAIN],
             layer_names=[MAIN],
+            kv_cache_group_id=0,
         ),
         SimpleNamespace(
             backend=_AttentionBackend,
             kv_cache_spec=specs[INDEXER],
             layer_names=[INDEXER],
+            kv_cache_group_id=0,
         ),
         SimpleNamespace(
             backend=_StateBackend,
             kv_cache_spec=specs[STATE],
             layer_names=[STATE],
+            kv_cache_group_id=1,
         ),
         SimpleNamespace(
             backend=None,
             kv_cache_spec=specs[MAMBA],
             layer_names=[MAMBA],
+            kv_cache_group_id=2,
         ),
     ]
     runner._kv_cache_spec_attn_group_iterator = lambda: iter(attn_groups)
@@ -170,7 +176,8 @@ def _make_plan(num_blocks=3, main_head_size=4):
     # Match production: vLLM registers built-in specs before the Ascend hook.
     register_all_kvcache_specs(None)
     config = _make_config()
-    groups = get_glm5_next_kv_cache_groups(config, _make_specs(main_head_size))
+    specs = _make_specs(main_head_size)
+    groups = get_glm5_next_kv_cache_groups(config, specs)
     bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
     plan = get_glm5_next_kv_cache_config(
         config,
@@ -206,10 +213,20 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
         (3, 1, 2, 2),
     ]
 
-    for name, cache in ((INDEXER, indexer_cache), (STATE, tail_cache)):
-        page_size = descriptors[name].size // plan.num_blocks
-        assert cache.stride(0) * cache.element_size() == page_size
-        assert cache.data_ptr() == raw_caches[name].data_ptr()
+    assert indexer_cache.is_contiguous()
+    assert indexer_cache.data_ptr() == raw_caches[INDEXER].data_ptr()
+    assert tail_cache.data_ptr() == raw_caches[STATE].data_ptr()
+    slot = raw_caches[STATE]
+    page_bytes = descriptors[STATE].size // plan.num_blocks
+    slot_fp32 = slot.view(torch.float32)
+    page_els_fp32 = page_bytes // slot_fp32.element_size()
+    tail_block_els = tail_cache[0].numel()
+    for block_index in range(plan.num_blocks):
+        assert tail_cache[block_index].data_ptr() == slot.data_ptr() + block_index * page_bytes
+    tail_cache[2].fill_(7)
+    assert torch.all(slot_fp32[2 * page_els_fp32 : 2 * page_els_fp32 + tail_block_els] == 7)
+    assert torch.count_nonzero(slot_fp32[2 * page_els_fp32 + tail_block_els : 3 * page_els_fp32]) == 0
+    assert torch.count_nonzero(slot_fp32[: 2 * page_els_fp32]) == 0
     for cache in caches[MAMBA]:
         assert cache.stride(0) * cache.element_size() == descriptors[MAMBA].size // plan.num_blocks
 
@@ -217,11 +234,6 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     assert caches[MAMBA][1].data_ptr() - raw_caches[MAMBA].data_ptr() == mamba_second_offset
     mamba_payload_size = sum(cache.numel() * cache.element_size() for cache in caches[MAMBA])
     assert mamba_payload_size < descriptors[MAMBA].size
-
-    tail_cache[2].fill_(7)
-    state_payload_size = tail_cache[0].numel() * tail_cache.element_size()
-    state_padding = 2 * (descriptors[STATE].size // plan.num_blocks) + state_payload_size
-    assert raw_caches[STATE][state_padding].item() == 0
 
 
 def test_glm5_next_runner_splits_main_mla_components_within_each_page():

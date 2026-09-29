@@ -613,12 +613,52 @@ class Glm5NextModel(nn.Module):
             self.norm = PPMissingLayer()
 
         self.is_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        if self.is_sequence_parallel and get_pp_group().world_size > 1:
+            # SP shards the activations once per TP rank and sp_shard is not
+            # idempotent, so crossing a PP boundary would re-shard an already
+            # sharded tensor. Keep the two features mutually exclusive.
+            raise NotImplementedError(
+                "Sequence parallelism (use_sequence_parallel_moe) is not supported together with "
+                "pipeline parallelism for GLM-5.3-Flash."
+            )
 
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, "num_attention_heads must be divisible by world_size"
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def make_empty_intermediate_tensors(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> IntermediateTensors:
+        """Placeholder inputs for PP ranks > 0 (profiling / dummy runs).
+
+        The tensors must mirror exactly what the previous rank sends. With mHC
+        the per-token stream stays 2D while ``residual`` carries the ``n``
+        hyper-connection streams, and the deferred hc_post state travels as
+        ``post`` / ``comb`` (FP32, matching the hc_pre kernel outputs).
+        Non-mHC configs only ship ``hidden_states`` / ``residual``.
+        """
+        config = self.config
+        if not config.mhc:
+            return IntermediateTensors(
+                {
+                    "hidden_states": torch.zeros((batch_size, config.hidden_size), dtype=dtype, device=device),
+                    "residual": torch.zeros((batch_size, config.hidden_size), dtype=dtype, device=device),
+                }
+            )
+        n = config.mhc_num_residual_streams
+        return IntermediateTensors(
+            {
+                "hidden_states": torch.zeros((batch_size, config.hidden_size), dtype=dtype, device=device),
+                "residual": torch.zeros((batch_size, n, config.hidden_size), dtype=dtype, device=device),
+                "post": torch.zeros((batch_size, n, 1), dtype=torch.float32, device=device),
+                "comb": torch.zeros((batch_size, n, n), dtype=torch.float32, device=device),
+            }
+        )
 
     def forward(
         self,
@@ -640,10 +680,10 @@ class Glm5NextModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-            # post/comb (deferred mHC hc_post state) are not propagated across
-            # PP ranks; the receiving rank's first mHC layer uses standalone pre.
-            post = None
-            comb = None
+            # Continue the previous rank's deferred mHC state so this rank's
+            # first layer runs hc_post_pre, identical to the single-stage math.
+            post = intermediate_tensors["post"] if self.config.mhc else None
+            comb = intermediate_tensors["comb"] if self.config.mhc else None
 
         full_num_tokens = positions.shape[0]
         if self.is_sequence_parallel:
@@ -653,12 +693,13 @@ class Glm5NextModel(nn.Module):
             hidden_states, residual, post, comb = layer(positions, hidden_states, residual, post, comb)
 
         if not get_pp_group().is_last_rank:
-            # PP is gated off for GLM-5.3-Flash (no make_empty_intermediate_tensors),
-            # so this branch is not exercised. post/comb are the deferred
-            # hc_post state of this rank's last mHC layer; a future PP path
-            # would need to propagate them, but for now they are dropped (the
-            # receiving rank's first layer would fall back to standalone pre).
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            # Ship the deferred mHC state produced by this rank's last layer so
+            # the next stage can continue exactly where this one stopped.
+            tensors = {"hidden_states": hidden_states, "residual": residual}
+            if self.config.mhc:
+                tensors["post"] = post
+                tensors["comb"] = comb
+            return IntermediateTensors(tensors)
 
         if self.is_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
@@ -814,6 +855,7 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(self.config.vocab_size, scale=self.config.logit_scale)
+        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -968,9 +1010,10 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
                 architectures=["Glm5NextForCausalLM"],
             )
 
-        # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
-        # so pipeline parallelism is gated off (consistent with the text-only
-        # model) and we intentionally do not alias it here.
+        # The language model owns the PP contract; expose it on the multimodal
+        # wrapper so PP ranks > 0 can materialize placeholder intermediate
+        # tensors (the vision tower only executes on the first rank).
+        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
 
     def load_weights(self, weights: Iterable[tuple[Any, ...]]) -> set[str]:
         # The visual merger's down_proj already contains the exported rotation.

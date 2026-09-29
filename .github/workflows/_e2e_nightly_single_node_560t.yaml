@@ -148,11 +148,12 @@ jobs:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
-    timeout-minutes: ${{ inputs.request_id != '' && (inputs.aop_single_enabled && 1440 || 240) || fromJSON(inputs.testcase_timeout) }}
+    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     container:
       image: ${{ inputs.image }}
     env:
       HF_HUB_OFFLINE: 1
+      TEST_FREQUENCY: ${{ inputs.test_frequency }}
       VLLM_USE_MODELSCOPE: True
       UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
       UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"

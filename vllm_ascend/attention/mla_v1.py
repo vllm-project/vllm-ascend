@@ -1,5 +1,6 @@
+from copy import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -9,9 +10,11 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_pcp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
     MLACommonMetadataBuilder,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
@@ -69,6 +72,9 @@ if TYPE_CHECKING:
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
+# Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
+TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
+
 
 def _npu_mla_prolog_v3_k3(**kwargs):
     """Call the isolated K3 MLA prolog with optional RoPE inputs omitted."""
@@ -115,6 +121,20 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
+
+
+class AscendMLAAttention(MLAAttention):
+    """Ascend ``MLAAttention`` layer.
+
+    Upstream gates PCP+DCP on the layer ``supports_pcp_dcp`` ClassVar (default
+    False) inside ``__init__``, so the Ascend opt-in must live on the class
+    (mirroring upstream ``DeepseekV32Attention``) rather than being assigned
+    onto the shared upstream ``MLAAttention``. PCP+DCP is implemented by the
+    Ascend attention impls (AscendMlaDCPImpl / AscendSFAPCPDCPImpl) selected
+    by the Ascend backends.
+    """
+
+    supports_pcp_dcp: ClassVar[bool] = True
 
 
 @dataclass
@@ -742,11 +762,20 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
         return decode_metadata
 
+    def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata):
+        capture_metadata = copy(common_attn_metadata)
+        if capture_metadata.attn_state is None:
+            capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        if self.dcp_enabled and capture_metadata.is_prefilling is None:
+            capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
+        return super().build_for_cudagraph_capture(capture_metadata)
+
     def build_for_graph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
     ):
+        # TODO: Drop SpecDecoding after legacy V1/310P graph capture callers migrate.
         if attn_state in {AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding}:
             attn_metadata = self.build(
                 common_prefix_len=0,
@@ -785,6 +814,14 @@ class AscendMLAImpl(MLAAttentionImpl):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    # ``W_UV``/``W_UK_T`` are injected during ``process_weights_after_loading``
+    # through ``replace_parameter``, which is ``setattr``-based and therefore
+    # invisible to static analysis. These declarations are what let mypy resolve
+    # the attributes at every use site; without them ``pre-commit`` fails with
+    # `Cannot determine type of "W_UK_T"  [has-type]`.
+    W_UV: torch.Tensor
+    W_UK_T: torch.Tensor
 
     def __init__(
         self,
@@ -986,18 +1023,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         return x
 
     def _v_up_proj_batch_major(self, x: torch.Tensor) -> torch.Tensor:
-        """Project a batch-major partial-attention result.
-
-        The normal MLA kernel returns head-major output. Distributed attention
-        merges partial outputs into batch-major layout, so it only needs this
-        small layout adapter instead of replacing the projection itself.
-        """
-        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-        x = torch.bmm(x, self.W_UV)
-        return x.transpose(0, 1).reshape(
-            -1,
-            self.num_heads * self.v_head_dim,
-        )
+        """Keep the DCP result batch-major and fuse both BMM permutations."""
+        x = x.view(-1, self.num_heads, self.kv_lora_rank)
+        # The operator's batch dimension is num_heads, not the token count.
+        if 1 <= self.num_heads * self.kv_lora_rank < TRANSPOSE_BMM_MAX_SUPPORTED_DIM:
+            x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
+        else:
+            x = torch.bmm(x.transpose(0, 1), self.W_UV).transpose(0, 1)
+        return x.reshape(-1, self.num_heads * self.v_head_dim)
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
@@ -1048,21 +1081,29 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         W_UK, W_UV = kv_b_proj_weight.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        # NOTE: When we make a incontiguous weight contiguous, a new address will be allocated for the weight,
-        # in graph + RL scenario, we only capture the graph once, and the weight address is expected to be the same
-        # across iterations, so we need to copy the weight to the original address after making it contiguous.
-        if not hasattr(self, "W_UV"):
-            # Convert from (L, N, V) to (N, L, V)
-            self.W_UV = W_UV.transpose(0, 1).contiguous()
-            # Convert from (L, N, P) to (N, P, L)
-            self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
-        else:
-            self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
-            self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
+        # NOTE: `W_UK`/`W_UV` must live at a stable address: in graph + RL
+        # scenario the graph is captured once, so every later weight update
+        # reload has to refresh the stored tensors in place instead of
+        # rebinding the attributes to freshly allocated tensors.
+        # `replace_parameter(..., prefer_copy=True)` does exactly that: it
+        # copies into the existing storage while the new value stays
+        # compatible, and rebinds only when shape/dtype/device actually
+        # changes. This mirrors how upstream vLLM refreshes
+        # `MLAAttention.W_UV`/`W_UK_T`, and unlike a plain `copy_` it cannot
+        # raise on a shape mismatch.
+        replace_parameter(
+            self,
+            "W_UV",
+            W_UV.transpose(0, 1).contiguous(),  # (L, N, V) -> (N, L, V)
+            prefer_copy=True,
+        )
+        replace_parameter(
+            self,
+            "W_UK_T",
+            W_UK.permute(1, 2, 0).contiguous(),  # (L, N, P) -> (N, P, L)
+            prefer_copy=True,
+        )
         self.mlapo_W_UK_T = self.W_UK_T
-
-        # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
-        # self.W_UV = maybe_trans_nz(self.W_UV)
 
         if self.enable_mlapo:
             layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
@@ -1648,6 +1689,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
 
         attn_output_shape: tuple | None = None
+        # TODO: Drop SpecDecoding after V1/310P MTP paths use DecodeOnly and
+        # verify that their FIA query layout still matches graph capture.
         if (
             attn_metadata.attn_state
             in [

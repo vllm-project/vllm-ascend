@@ -2,6 +2,7 @@ test_name: "GLM-5.2-w4a8c8-64k-1k-90-50"
 model: "Eco-Tech/GLM-5.2-w8a8c8"
 num_nodes: 4
 npu_per_node: 16
+dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"
@@ -355,7 +356,7 @@ benchmarks:
         max_out_len: 1024
         batch_size: 4
         request_rate: 0
-        baseline: 1
+        baseline: 0
         threshold: 0.97
       perf:
         case_type: performance

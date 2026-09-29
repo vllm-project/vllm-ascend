@@ -305,7 +305,9 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
+            num_actual_reqs=input_batch.num_reqs,
             num_tokens=num_tokens,
+            num_actual_tokens=input_batch.num_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
             max_query_len=input_batch.num_scheduled_tokens.max().item(),
@@ -315,6 +317,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            parallel_config=self.vllm_config.parallel_config,
             seq_lens_np=input_batch.seq_lens_np,
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,

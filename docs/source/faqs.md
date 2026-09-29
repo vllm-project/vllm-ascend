@@ -225,7 +225,7 @@ Recommended mitigation strategies:
 5. If you are debugging a startup failure, temporarily disable graph mode (`cudagraph_mode="NONE"` / `enforce_eager=True`) to confirm the issue is capture-related.
 
 Root cause analysis:
-ACL graph capture can still fail when the runtime resources required by the selected graph sizes exceed what the current software/hardware stack can provide. This is most visible in `PIECEWISE` scenarios because the number of captured graphs scales with model depth and capture-size coverage. vLLM Ascend no longer auto-shrinks the PIECEWISE capture-size set locally, so the practical mitigations are to upgrade the HDK/CANN stack or reduce the configured graph sizes explicitly. The runtime guidance is intentionally narrow: it is only added when capture fails with the confirmed stream-resource signature above.
+ACL graph capture can still fail when the runtime resources required by the selected graph sizes exceed what the current software/hardware stack can provide. This is most visible in `PIECEWISE` scenarios because the number of captured graphs scales with model depth and capture-size coverage. vLLM Ascend applies capture-size pruning for selected hardware profiles. If capture still fails, upgrade the matching HDK/CANN stack or reduce the configured graph sizes explicitly. The runtime guidance is intentionally narrow: it is only added when capture fails with the confirmed stream-resource signature above.
 
 ### 18. How to install custom version of torch_npu?
 

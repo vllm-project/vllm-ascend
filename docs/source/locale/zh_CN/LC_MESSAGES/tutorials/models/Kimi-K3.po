@@ -314,9 +314,6 @@ msgstr ""
 "数据集和评估器修订版固定。记录已完成、\n"
 "失败、缺失和未解析的样本以及分数。"
 
-msgid "### Using Language Model Evaluation Harness"
-msgstr "### 使用语言模型评估工具"
-
 msgid ""
 "See [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for\n"
 "evaluator setup. Use the same full checkpoint and serving configuration when\n"
@@ -328,18 +325,12 @@ msgstr ""
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
 
-msgid "### Using AISBench"
-msgstr "### 使用AISBench"
-
 msgid ""
 "Refer to [AISBench performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)\n"
 "for configuration and execution instructions."
 msgstr ""
 "有关配置和执行说明，请参阅[AISBench性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
-
-msgid "### Using vLLM Benchmark"
-msgstr "### 使用vLLM基准测试"
 
 msgid ""
 "After the service in Section 5.1 is ready, run the following from a load generator\n"
@@ -504,3 +495,21 @@ msgstr ""
 "[源码安装指南](../../getting_started/installation.md#installation-existing-cann-install)，使用\n"
 "所选的主分支检出及其已验证的vLLM提交，而不是通用示例中的较旧\n"
 "发布版本。"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。确保后续部署命令中的模型路径与此目录一致。"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用 AISBench"
+
+msgid "### 7.2 Using Language Model Evaluation Harness"
+msgstr "### 7.2 使用 Language Model Evaluation Harness"
+
+msgid "### 8.1 Using AISBench"
+msgstr "### 8.1 使用 AISBench"
+
+msgid "### 8.2 Using vLLM Benchmark"
+msgstr "### 8.2 使用 vLLM Benchmark"

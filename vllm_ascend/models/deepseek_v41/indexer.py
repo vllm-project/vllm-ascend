@@ -128,6 +128,7 @@ class DeepseekV41Indexer(nn.Module):
         candidate_topk_blocks,
         candidate_block_size,
         candidates,
+        output_indices=None,
     ):
         """Score index K, optionally filter blocks, then return position TopK."""
         query = self._output(self.wq_b, qr).unflatten(-1, (self.n_heads, self.width))
@@ -152,6 +153,7 @@ class DeepseekV41Indexer(nn.Module):
             candidate_topk_blocks=candidate_topk_blocks,
             candidate_block_size=candidate_block_size,
             candidates=candidates,
+            output_indices=output_indices,
         )
 
     def select_projected(
@@ -167,6 +169,7 @@ class DeepseekV41Indexer(nn.Module):
         candidate_topk_blocks,
         candidate_block_size,
         candidates,
+        output_indices=None,
     ):
         """Run QLI V2 on paged INT8 K; candidates are block IDs, not positions.
 
@@ -223,5 +226,10 @@ class DeepseekV41Indexer(nn.Module):
             candidate_block_size=candidate_block_size,
             **common,
         )
-        selected = prepare_indexer_indices(selected.squeeze(1), positions, self.compress_ratio)
+        selected = prepare_indexer_indices(
+            selected.squeeze(1),
+            positions,
+            self.compress_ratio,
+            output=output_indices,
+        )
         return selected, candidate_out if is_candidate_source else candidates

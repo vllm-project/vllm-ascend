@@ -50,6 +50,59 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
 
+@pytest.mark.parametrize("with_private_tail", [False, True])
+def test_disabled_prefix_cache_preserves_private_tail_allocation(with_private_tail):
+    register_all_kvcache_specs(None)
+    register_ascend_kv_cache_specs()
+    full = FullAttentionSpec(block_size=4480, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+    groups = [KVCacheGroupSpec(["full"], full)]
+    if with_private_tail:
+        tail = AscendIndexerKPoolTailSpec(
+            block_size=9, sliding_window=4, compress_ratio=4, num_kv_heads=1, head_size=8, dtype=torch.float32
+        )
+        groups.append(KVCacheGroupSpec(["tail"], UniformTypeKVCacheSpecs.from_specs({"tail": tail})))
+    cfg = KVCacheConfig(num_blocks=32, kv_cache_tensors=[], kv_cache_groups=groups)
+    scheduler_size, hash_size = _ascend_resolve_kv_cache_block_sizes(
+        cfg,
+        SimpleNamespace(
+            cache_config=SimpleNamespace(enable_prefix_caching=False, block_size=full.block_size),
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        ),
+    )
+    assert scheduler_size == hash_size == full.block_size
+    coordinator = get_kv_cache_coordinator(
+        cfg,
+        max_model_len=16384,
+        use_eagle=True,
+        enable_caching=False,
+        scheduler_block_size=scheduler_size,
+        hash_block_size=hash_size,
+    )
+    pool = coordinator.block_pool
+    free_blocks = pool.get_num_free_blocks()
+    hashes = [b"a" * 32]
+    for request_id in ("first", "repeat"):
+        for manager in coordinator.single_type_managers:
+            assert not manager.enable_caching
+            manager.allocate_new_blocks(request_id, full.block_size, full.block_size)
+            assert len(manager.req_to_blocks[request_id]) == 1
+        assert pool.get_num_free_blocks() == free_blocks - len(groups)
+        request = SimpleNamespace(
+            request_id=request_id,
+            block_hashes=hashes,
+            num_prompt_tokens=full.block_size + 1,
+            shared_prefix_boundary=None,
+        )
+        coordinator.cache_blocks(request, full.block_size)
+        for manager in coordinator.single_type_managers:
+            assert manager.req_to_blocks[request_id][0].block_hash is None
+        coordinator.free(request_id)
+        assert pool.get_num_free_blocks() == free_blocks
+        hit_blocks, hit_tokens, uncached_tokens = coordinator.find_longest_cache_hit(hashes, full.block_size)
+        assert hit_blocks == tuple([] for _ in groups)
+        assert hit_tokens == uncached_tokens == 0
+
+
 @pytest.mark.parametrize("wrapped", [False, True])
 @pytest.mark.parametrize("scheduler_size", [16, 32])
 def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrapped, scheduler_size):
@@ -975,7 +1028,7 @@ def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:
     coordinator = get_kv_cache_coordinator(
         single_group_config,
         max_model_len=1024,
-        max_num_batched_tokens=1024,
+        max_in_flight_tokens=1024,
         use_eagle=False,
         enable_caching=True,
         enable_kv_cache_events=False,
@@ -1002,7 +1055,7 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
     coordinator = get_kv_cache_coordinator(
         kv_cache_config,
         max_model_len=1024,
-        max_num_batched_tokens=1024,
+        max_in_flight_tokens=1024,
         use_eagle=False,
         enable_caching=False,
         enable_kv_cache_events=False,
@@ -1036,7 +1089,7 @@ def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> No
     coordinator = get_kv_cache_coordinator(
         kv_cache_config,
         max_model_len=1024,
-        max_num_batched_tokens=1024,
+        max_in_flight_tokens=1024,
         use_eagle=False,
         enable_caching=True,
         enable_kv_cache_events=False,
