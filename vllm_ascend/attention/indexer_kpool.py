@@ -9,7 +9,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -40,14 +39,14 @@ class AscendIndexerKPoolMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
-    seq_lens_cpu: torch.Tensor | None
     positions: torch.Tensor
     block_size: int
     compress_ratio: int
+    num_tokens: int
+    max_pool_seq_len: int
     cache_role: str = "indexer"
     cum_query_lens: torch.Tensor | None = None
     raw_seq_lens: torch.Tensor | None = None
-    num_actual_tokens: int = 0
 
 
 class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
@@ -148,6 +147,14 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             self._metadata_buffers[key] = buffers
         return buffers
 
+    def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata) -> AscendIndexerKPoolMetadata:
+        metadata = self.build(0, common_attn_metadata)
+        # Record padded tokens and the full pool capacity so replay can grow
+        # beyond the dummy batch's short prefix.
+        metadata.num_tokens = common_attn_metadata.num_input_tokens
+        metadata.max_pool_seq_len = metadata.block_table.shape[1] * metadata.block_size
+        return metadata
+
     def build(
         self,
         common_prefix_len: int,
@@ -189,20 +196,21 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
         else:
             seq_lens_cpu = None
-        if seq_lens_cpu is not None:
-            seq_lens_cpu = torch.div(seq_lens_cpu, self.compress_ratio, rounding_mode="floor")
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        max_pool_seq_len = block_table.shape[1] * self.kernel_row_block_size
+        if seq_lens_cpu is not None:
+            max_pool_seq_len = int(seq_lens_cpu.max()) // self.compress_ratio if seq_lens_cpu.numel() else 0
         return AscendIndexerKPoolMetadata(
             block_table=block_table,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
-            seq_lens_cpu=seq_lens_cpu,
             positions=positions,
             block_size=self.kernel_row_block_size,
             compress_ratio=self.compress_ratio,
             cum_query_lens=cum_query_lens,
             raw_seq_lens=raw_seq_lens,
-            num_actual_tokens=common_attn_metadata.num_actual_tokens,
+            num_tokens=common_attn_metadata.num_actual_tokens,
+            max_pool_seq_len=max_pool_seq_len,
         )
 
     def build_for_graph_capture(
@@ -211,8 +219,8 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         attn_state: Any = None,
         **kwargs,
     ) -> AscendIndexerKPoolMetadata:
-        del attn_state
-        return self.build(0, common_attn_metadata, **kwargs)
+        del attn_state, kwargs
+        return self.build_for_cudagraph_capture(common_attn_metadata)
 
     def build_for_drafting(
         self,
@@ -464,9 +472,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         if not isinstance(tail_metadata, AscendIndexerKPoolTailMetadata):
             raise TypeError("GLM KPool backend requires tail-cache metadata.")
 
-        num_tokens = hidden_states.shape[0]
-        if context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
-            num_tokens = min(num_tokens, indexer_metadata.num_actual_tokens)
+        num_tokens = min(hidden_states.shape[0], indexer_metadata.num_tokens)
         hidden = hidden_states[:num_tokens]
         k_hidden = k_hidden_states[:num_tokens]
         if self._wk_weight_f32 is None:
@@ -511,13 +517,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             gate_score=gate_score,
             compress_ape=self.index_kpool_compress_ape,
             index_kpool=self.index_kpool,
-            max_pool_seq_len=(
-                indexer_metadata.block_table.shape[1] * indexer_cache.shape[1]
-                if context.cudagraph_runtime_mode == CUDAGraphMode.FULL or indexer_metadata.seq_lens_cpu is None
-                else int(indexer_metadata.seq_lens_cpu.max())
-                if indexer_metadata.seq_lens_cpu.numel()
-                else 0
-            ),
+            max_pool_seq_len=indexer_metadata.max_pool_seq_len,
             compute_topk=compute_topk,
         )
         if result is None or self.topk_indices_buffer is None:
