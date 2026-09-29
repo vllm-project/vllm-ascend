@@ -38,7 +38,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.kv_connector import get_kv_connector
 from vllm.v1.worker.gpu.model_runner import BatchReqState, sort_batch_req_ids
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
-from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
+from vllm.v1.worker.utils import bind_kv_cache
 
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
@@ -59,6 +59,31 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
+# aclrtMemcpyKind::ACL_MEMCPY_DEVICE_TO_DEVICE
+_ACL_MEMCPY_DEVICE_TO_DEVICE = 3
+_acl_memcpy = None
+
+
+def _copy_block_bytes(dst: int, src: int, nbytes: int) -> None:
+    """Copy ``nbytes`` on device. ``swap_blocks_batch`` is not in this build."""
+    global _acl_memcpy
+    if _acl_memcpy is None:
+        import ctypes
+
+        lib = ctypes.CDLL("libascendcl.so")
+        fn = lib.aclrtMemcpy
+        fn.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_int,
+        ]
+        fn.restype = ctypes.c_int
+        _acl_memcpy = fn
+    rc = _acl_memcpy(dst, nbytes, src, nbytes, _ACL_MEMCPY_DEVICE_TO_DEVICE)
+    if rc != 0:
+        raise RuntimeError(f"aclrtMemcpy device-to-device failed with code {rc}.")
 
 
 def _post_update_cpu(
@@ -636,40 +661,44 @@ class NPUModelRunner310V2(NPUModelRunner):
         return deduped
 
     def _copy_kv_cache_blocks_310p(self, kv_cache_block_copies: Sequence[KVCacheBlockCopy]) -> None:
-        """Copy-on-write for hybrid prefix cache on 310P NZ attention + ND Mamba."""
+        """Copy-on-write for hybrid prefix cache on 310P NZ attention + ND Mamba.
+
+        FRACTAL_NZ slice ``copy_`` and advanced-index assignment both launch a
+        format-conversion kernel per page. On Qwen3.5 MTP that is ~0.57 s for
+        the first two decode steps after prefill (the TTFT gap versus prefix
+        cache off). Dim 0 of these caches is contiguous, so one device memcpy
+        per page preserves NZ/ND bytes.
+        """
         if not kv_cache_block_copies:
             return
 
-        indices_np = np.array(
-            [[copy.src_block_id, copy.dst_block_id] for copy in kv_cache_block_copies],
-            dtype=np.int64,
-        )
-        seen_attn_storage: set[int] = set()
-        for k_cache, v_cache, blocks_per_kv_block in self._attn_kv_copy_params:
-            storage_ptr = k_cache.untyped_storage().data_ptr()
-            if storage_ptr in seen_attn_storage:
-                continue
-            seen_attn_storage.add(storage_ptr)
-            for src_block_id, dst_block_id in indices_np:
-                src_start = int(src_block_id) * blocks_per_kv_block
-                src_end = src_start + blocks_per_kv_block
-                dst_start = int(dst_block_id) * blocks_per_kv_block
-                dst_end = dst_start + blocks_per_kv_block
-                k_cache[dst_start:dst_end].copy_(k_cache[src_start:src_end])
-                v_cache[dst_start:dst_end].copy_(v_cache[src_start:src_end])
+        pairs = [(int(copy.src_block_id), int(copy.dst_block_id)) for copy in kv_cache_block_copies]
+        seen: set[int] = set()
 
-        # Mamba layers store a list[Tensor] per layer (conv/ssm views). Upstream
-        # copy_kv_cache_blocks_inplace expects Iterable[Tensor], not nested lists.
-        mamba_tensors: list[torch.Tensor] = []
+        def copy_dim0(tensor: torch.Tensor, blocks_per: int) -> None:
+            data_ptr = tensor.data_ptr()
+            if data_ptr in seen or tensor.numel() == 0 or blocks_per <= 0:
+                return
+            bytes_per = blocks_per * tensor.stride(0) * tensor.element_size()
+            if bytes_per <= 0:
+                return
+            seen.add(data_ptr)
+            for src_block, dst_block in pairs:
+                _copy_block_bytes(
+                    data_ptr + dst_block * bytes_per,
+                    data_ptr + src_block * bytes_per,
+                    bytes_per,
+                )
+
+        for k_cache, v_cache, blocks_per_kv_block in self._attn_kv_copy_params:
+            copy_dim0(k_cache, blocks_per_kv_block)
+            copy_dim0(v_cache, blocks_per_kv_block)
         for entry in self.kv_caches:
-            if isinstance(entry, list):
-                mamba_tensors.extend(t for t in entry if isinstance(t, torch.Tensor))
-        if mamba_tensors:
-            copy_kv_cache_blocks_inplace(
-                mamba_tensors,
-                self.kv_cache_config.num_blocks,
-                kv_cache_block_copies,
-            )
+            if not isinstance(entry, list):
+                continue
+            for tensor in entry:
+                if isinstance(tensor, torch.Tensor):
+                    copy_dim0(tensor, 1)
 
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
         copies = scheduler_output.kv_cache_block_copies
