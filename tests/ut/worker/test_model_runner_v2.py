@@ -2,7 +2,7 @@ import ast
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 import numpy as np
 import pytest
@@ -13,6 +13,7 @@ from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -261,9 +262,8 @@ def test_sample_tokens_restores_replicated_draft_hidden_states():
     runner.use_spec_pp = False
 
     hidden_states = torch.arange(6, dtype=torch.float32).reshape(2, 3)
-    # aux_hidden_states are restored by upstream sample_tokens (#56107);
-    # the Ascend pre-restore only covers the target hidden states.
-    state = Mock(aux_hidden_states=[torch.ones(2, 3)])
+    aux_hidden_states = torch.ones(2, 3)
+    state = Mock(aux_hidden_states=[aux_hidden_states])
     state.hidden_states = hidden_states
     restored_state = object()
     state._replace.return_value = restored_state
@@ -293,8 +293,23 @@ def test_sample_tokens_restores_replicated_draft_hidden_states():
     assert actual is expected_output
     parent_sample_tokens.assert_called_once_with(grammar_output)
     runner.pcp_manager.restore_hidden_state_buffer.assert_called_once_with(target_hidden_states)
-    runner.pcp_manager.restore_hidden_states.assert_called_once_with(hidden_states)
-    state._replace.assert_called_once_with(hidden_states=restored_hidden_states)
+    if vllm_version_is("0.30.0"):
+        # v0.30.0 restores aux outside restore_for_sampling, so the Ascend
+        # pre-restore only covers the target hidden states.
+        runner.pcp_manager.restore_hidden_states.assert_called_once_with(hidden_states)
+        state._replace.assert_called_once_with(hidden_states=restored_hidden_states)
+    else:
+        # vLLM main (#57980) folded the aux restore into restore_for_sampling,
+        # which the replicated-PCP fast path bypasses; the pre-restore must
+        # cover aux too or the draft reads PCP-local rows.
+        assert runner.pcp_manager.restore_hidden_states.call_args_list == [
+            call(hidden_states),
+            call(aux_hidden_states),
+        ]
+        state._replace.assert_called_once_with(
+            hidden_states=restored_hidden_states,
+            aux_hidden_states=[restored_hidden_states],
+        )
     assert runner.execute_model_state is restored_state
 
 

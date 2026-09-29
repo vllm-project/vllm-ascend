@@ -260,11 +260,19 @@ class NPUModelRunner(GPUModelRunner):
 
         # vLLM main captures draft_hidden_states before maybe_restore_pcp_for_sampling,
         # so a replicated draft would read the PCP-local target output. Restore
-        # it to the global layout up front. aux_hidden_states need no handling
-        # here: upstream sample_tokens (#56107) already restores them, per
-        # tensor, before speculator.propose.
+        # it to the global layout up front.
         if state.hidden_states is not None:
-            state = state._replace(hidden_states=pcp_manager.restore_hidden_states(state.hidden_states))
+            replacements: dict[str, Any] = {"hidden_states": pcp_manager.restore_hidden_states(state.hidden_states)}
+            # vLLM main (#57980) folded the aux-hidden restore into
+            # restore_for_sampling. The replicated-PCP fast path below bypasses
+            # that call, so restore aux here too. On v0.30.0 the runner restores
+            # aux outside restore_for_sampling and pre-restoring here would
+            # re-gather them.
+            if not vllm_version_is("0.30.0") and state.aux_hidden_states is not None:
+                replacements["aux_hidden_states"] = [
+                    pcp_manager.restore_hidden_states(aux) for aux in state.aux_hidden_states
+                ]
+            state = state._replace(**replacements)
             # Tell restore_for_sampling to skip its second all-gather for this
             # step. The layout is tracked explicitly because a length match is
             # ambiguous under piecewise/FULL graphs: every rank pads its local
