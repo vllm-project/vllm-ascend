@@ -18,6 +18,7 @@
 #
 import copy
 
+import pytest
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -126,7 +127,8 @@ def test_basic_lifecycle():
     assert_scheduler_empty(scheduler)
 
 
-def test_no_spurious_prefix_caching():
+@pytest.mark.parametrize("receive_complete", [False, True], ids=["pending", "received"])
+def test_no_spurious_prefix_caching(receive_complete):
     """With P/D, blocks can be allocated but uncomputed for multiple engine steps.
     This test confirms that we do not accidentally have cache hits against
     uncomputed blocks."""
@@ -150,13 +152,38 @@ def test_no_spurious_prefix_caching():
     scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
     assert _num_waiting_requests(scheduler) == 1
 
-    remote_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
-        request_remote.request_id
-    ]
+    if receive_complete:
+        scheduler_output = scheduler.schedule()
+        received = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+        received.kv_connector_output = KVConnectorOutput(finished_recving={request_remote.request_id})
+        scheduler.update_from_output(scheduler_output, received)
 
-    for block in remote_blocks:
-        assert block.ref_cnt == 1
-        assert block._block_hash is None
+    # Same prompt and block hashes, but a distinct local request. Observe the
+    # scheduling contract rather than the cache manager's private hash layout.
+    probe = create_request(request_id=1, num_tokens=NUM_TOKENS, block_size=BLOCK_SIZE)
+    probe.request_id = "local-prefix-probe"
+    assert probe.prompt_token_ids == request_remote.prompt_token_ids
+    scheduler.add_request(probe)
+    scheduler_output = scheduler.schedule()
+    scheduled_probe = next(req for req in scheduler_output.scheduled_new_reqs if req.req_id == probe.request_id)
+    expected_hit_tokens = NUM_EXTERNAL_FULL_BLOCKS * BLOCK_SIZE if receive_complete else 0
+    assert scheduled_probe.num_computed_tokens == expected_hit_tokens
+    assert scheduler_output.num_scheduled_tokens[probe.request_id] == NUM_TOKENS - expected_hit_tokens
+
+    running = [request_remote, probe] if receive_complete else [probe]
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            running,
+            use_eos=True,
+            finished_recving=None if receive_complete else {request_remote.request_id},
+        ),
+    )
+    scheduler_output = scheduler.schedule()
+    if not receive_complete:
+        scheduler.update_from_output(scheduler_output, create_model_runner_output([request_remote], use_eos=True))
+        scheduler.schedule()
+    assert_scheduler_empty(scheduler)
 
 
 def test_full_block_prompt():
