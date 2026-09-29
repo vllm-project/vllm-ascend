@@ -269,6 +269,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
     requires_padded_page_layout,
+    supports_component_major_mla_pd,
 )
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
@@ -4852,7 +4853,7 @@ class NPUModelRunner(GPUModelRunner):
         # particular, sparse layerwise tests synthesize a runner without it.
         if (
             use_legacy_shared_by_layout
-            or self.vllm_config.kv_transfer_config is not None
+            or not supports_component_major_mla_pd(self.vllm_config)
             or self.use_sparse
             or self.sparse_kv_offload_enabled
             or self.use_compress

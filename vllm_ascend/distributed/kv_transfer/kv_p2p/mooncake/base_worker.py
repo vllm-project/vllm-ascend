@@ -60,6 +60,44 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
+def _is_component_major_mla_binding(spec: KVCacheSpec, caches: tuple[torch.Tensor, ...]) -> bool:
+    """Whether NoPE and RoPE are component-major views of one MLA slot.
+
+    The supported geometry is ``[all NoPE][all RoPE][padding]`` inside each
+    physical slot.  Both views share one storage and first-axis stride, while
+    each component remains internally contiguous.  This is deliberately
+    different from a token-interleaved parent page, where NoPE and RoPE are
+    sliced along the trailing dimension of every token.
+    """
+    # 检查MLA的双cache view
+    if not isinstance(spec, MLAAttentionSpec) or len(caches) != 2:
+        return False
+
+    nope, rope = caches
+    if nope.dtype != rope.dtype:
+        return False
+    # 两个view必须共享同一个storage
+    if nope.untyped_storage().data_ptr() != rope.untyped_storage().data_ptr():
+        return False
+    # 首轴布局必须一致
+    if nope.shape[0] != rope.shape[0] or nope.stride(0) != rope.stride(0):
+        return False
+
+    # Component-major views are 4-D and internally contiguous apart from the
+    # first-axis page stride.  A generic packed K/scale page or a token-
+    # interleaved parent does not satisfy both component strides.
+    if nope.ndim != 4 or rope.ndim != 4:
+        return False
+    # 非首轴外其余轴连续
+    if nope.stride(1) != nope.shape[2] * nope.shape[3]:
+        return False
+    if rope.stride(1) != rope.shape[2] * rope.shape[3]:
+        return False
+
+    nope_block_elems = nope.shape[1] * nope.shape[2] * nope.shape[3]
+    return rope.storage_offset() - nope.storage_offset() == nope_block_elems
+
+
 class MooncakeBaseConnectorWorker:
     """Worker implementation shared by Mooncake transfer modes."""
 
@@ -259,6 +297,19 @@ class MooncakeBaseConnectorWorker:
                     if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
                     else None
                 )
+                if shared_page_metadata is not None and _is_component_major_mla_binding(spec, caches):
+                    # MooncakeV2 is layout-agnostic: it only needs the raw
+                    # block's base address, length, and stride.  Publish the
+                    # complete physical slot as a flat byte descriptor instead
+                    # of the larger NoPE view's semantic shape.
+                    page_base_addr, page_stride, _, block_size_scale = shared_page_metadata
+                    element_size = caches[0].element_size()
+                    shared_page_metadata = (
+                        page_base_addr,
+                        page_stride,
+                        (page_stride // element_size,),
+                        block_size_scale,
+                    )
                 if shared_page_metadata is not None:
                     page_base_addr, page_stride, block_shape, block_size_scale = shared_page_metadata
                     base_addrs.append(page_base_addr)
