@@ -88,4 +88,5 @@ def test_pool_real_path_returns_mapped_view(monkeypatch):
 
     result = pool.copy_to_uva(np.array([[1, 2], [3, 4]], dtype=np.int32))
     assert result.device.type == "npu"
-    assert result.data_ptr() == pool._uva_bufs[pool._curr].cpu.data_ptr()
+    expected_view = torch.ops._C_ascend.get_npu_view_from_cpu_tensor(pool._uva_bufs[pool._curr].cpu)
+    assert result.data_ptr() == expected_view.data_ptr()

@@ -125,6 +125,8 @@ COMPILE_CUSTOM_KERNELS=1 MAX_JOBS=16 CMAKE_BUILD_PARALLEL_LEVEL=16 \
 
 本次详细日志留在蓝区隔离目录的 `build.log`、`install_vllm.log`、`install_vllm_ascend.log`、`direct_read.log`、`component_installed.log`、`e2e_installed.log`、`graph_probe.log`、`e2e_fallback_installed.log`。G6 的 fallback、重复请求与输出基线检查，G7 完整 serving graph，G8 并发压力，G9 profiler 仍需补齐。
 
+上述 NPU 结果来自 rebase 前的相同 UVA 实现补丁。`feat/uva` 后来移至更新的 `upstream/main`，并修正了 pool real-path UT 对 Host/NPU 指针相等的假设；当前分支的最终 SHA 尚未重新完成全套 NPU 验证。
+
 ### 本次 component pytest node 清单
 
 命令为 `python -m pytest -vv -rs tests/ut/device/test_uva_view.py tests/ut/device/test_uva_wrapper.py`；以下 20 个 node 全部 `PASSED`，没有 skip reason。`dtype0/1/2` 分别为 int32/int64/float32。
