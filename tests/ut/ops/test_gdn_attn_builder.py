@@ -135,6 +135,7 @@ def _make_vllm_config(
     model_config.get_num_attention_heads = lambda parallel_config: num_heads
 
     return SimpleNamespace(
+        use_v2_model_runner=False,
         cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode),
         compilation_config=SimpleNamespace(
             cudagraph_mode=cudagraph_mode,

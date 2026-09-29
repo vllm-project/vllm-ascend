@@ -365,7 +365,11 @@ Enable with `--additional-config '{"reuse_kv_cache_groups":true}'` (default: `fa
 This reduces repeated metadata preparation in Model Runner V2 by sharing batch-level
 fields across compatible KV cache groups while updating each group's block table,
 slot mapping and, for GDN, recurrent/convolution state indices. It does not merge
-KV cache groups or reduce cache capacity.
+KV cache groups or reduce cache capacity. The Ascend plugin implements this
+using the existing vLLM builder protocol, without requiring vLLM PR #58762.
+The Ascend update path also works with the GDN builder changes in that PR.
+With the option disabled, Ascend builders do not advertise metadata update
+support to the upstream runner.
 
 Reuse is limited to matching builder types, KV specifications, configuration and
 causality within one metadata build call. Supported paths are the standard Ascend

@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 
+from vllm_ascend.attention import metadata_reuse
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
@@ -34,9 +35,10 @@ def _cpu_pinned_memory(monkeypatch):
     monkeypatch.setattr(torch.Tensor, "pin_memory", lambda tensor, *args, **kwargs: tensor)
 
 
-def config(*, speculative=True, tp=1):
+def config(*, speculative=True, tp=1, reuse=True):
     return SimpleNamespace(
         use_v2_model_runner=True,
+        additional_config={"reuse_kv_cache_groups": reuse},
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=1, decode_context_parallel_size=1, tensor_parallel_size=tp
         ),
@@ -136,12 +138,7 @@ def test_update_equals_independent_build(device, kind, causal, capture, case):
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("capture", [False, True])
 def test_runner_builds_once_per_exact_full_sliding_spec(monkeypatch, enabled, capture):
-    cfg = config()
-    monkeypatch.setattr(
-        attn_utils,
-        "get_ascend_config",
-        lambda: SimpleNamespace(reuse_kv_cache_groups=enabled),
-    )
+    cfg = config(reuse=enabled)
     specs = [spec()] * 8 + [spec("sliding", num_kv_heads=8)] * 5 + [spec(num_kv_heads=8)]
     builders = [builder(kv=kv, cfg=cfg) for kv in specs]
     groups = [
@@ -208,11 +205,12 @@ def test_different_metadata_requirements_do_not_match(difference):
         other["group_spec"] = spec(block_size=256)
     else:
         other["common_kwargs"] = {"unsupported": object()}
-    assert attn_utils._metadata_reuse_key(a, **kwargs) != attn_utils._metadata_reuse_key(b, **other)
+    assert metadata_reuse._metadata_reuse_key(a, **kwargs) != metadata_reuse._metadata_reuse_key(b, **other)
 
 
 @pytest.mark.parametrize(
-    "restriction", ["v1", "pcp", "dcp", "cross", "quant", "static_quant", "derived", "metadata_class", "pooling"]
+    "restriction",
+    ["v1", "pcp", "dcp", "cross", "quant", "static_quant", "derived", "metadata_class", "pooling", "disabled"],
 )
 def test_unsupported_builder_cannot_update(restriction):
     cfg = config()
@@ -240,6 +238,8 @@ def test_unsupported_builder_cannot_update(restriction):
             cls.metadata_cls = SimpleNamespace
     elif restriction == "pooling":
         cfg.model_config.runner_type = "pooling"
+    elif restriction == "disabled":
+        cfg.additional_config = {"reuse_kv_cache_groups": False}
     b = builder(kv=kv, cfg=cfg, cls=cls)
     assert not b.supports_update_block_table
     with pytest.raises(NotImplementedError):

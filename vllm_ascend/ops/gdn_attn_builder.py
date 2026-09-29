@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.attention.metadata_reuse import kv_cache_group_reuse_enabled
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
@@ -325,6 +326,14 @@ class _GDNMetadataReuseContext:
     decode_padded: bool
 
 
+@dataclass
+class AscendGDNAttentionMetadata(GDNAttentionMetadata):
+    # vLLM #58762 adds this field to the base metadata. Declaring it here also
+    # supplies the same contract on older vLLM versions.
+    spec_sequence_masks_cpu: torch.Tensor | None = None
+    _reuse_context: _GDNMetadataReuseContext | None = None
+
+
 class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
@@ -340,10 +349,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         # Sharing batch buffers also requires reuse during MRV2 graph capture.
         self.supports_update_block_table = (
             type(self) is AscendGDNAttentionMetadataBuilder
-            and getattr(vllm_config, "use_v2_model_runner", False)
+            and getattr(vllm_config, "use_v2_model_runner", False) is True
             and vllm_config.parallel_config.prefill_context_parallel_size == 1
             and vllm_config.parallel_config.decode_context_parallel_size == 1
             and vllm_config.cache_config.mamba_cache_mode in ("none", "align")
+            and kv_cache_group_reuse_enabled(vllm_config)
         )
         sequence_index_capacity = max(
             self.vllm_config.scheduler_config.max_num_seqs,
@@ -926,7 +936,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
-        attn_metadata = GDNAttentionMetadata(
+        attn_metadata = AscendGDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
@@ -945,6 +955,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_state_indices_tensor=spec_state_indices_tensor,
             non_spec_state_indices_tensor=non_spec_state_indices_tensor,
             spec_sequence_masks=spec_sequence_masks,
+            spec_sequence_masks_cpu=spec_sequence_masks_cpu,
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
@@ -1006,6 +1017,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         if not self.supports_update_block_table:
             raise NotImplementedError("GDN metadata reuse requires the MRV2 GDN builder without CP")
         context = metadata._reuse_context
+        assert context is not None
         table = mamba_get_block_table_tensor(
             blk_table,
             context.seq_lens,

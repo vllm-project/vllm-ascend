@@ -50,6 +50,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.metadata_reuse import kv_cache_group_reuse_enabled
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_dcp,
@@ -243,13 +244,14 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         self.supports_update_block_table = (
             type(self) is AscendAttentionMetadataBuilder
             and self.metadata_cls is AscendMetadata
-            and getattr(vllm_config, "use_v2_model_runner", False)
+            and getattr(vllm_config, "use_v2_model_runner", False) is True
             and self.pcp_size == 1
             and vllm_config.parallel_config.decode_context_parallel_size == 1
             and type(kv_cache_spec) in (FullAttentionSpec, SlidingWindowSpec)
             and kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
             and kv_cache_spec.dtype in (torch.float16, torch.bfloat16, torch.float32)
             and vllm_config.model_config.runner_type == "generate"
+            and kv_cache_group_reuse_enabled(vllm_config)
         )
         self.model_config = vllm_config.model_config
         self.compilation_config = vllm_config.compilation_config

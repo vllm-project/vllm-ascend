@@ -13,17 +13,20 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
 
 from tests.ut.ops import test_gdn_attn_builder as helpers
+from vllm_ascend.attention import metadata_reuse
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 from vllm_ascend.worker.v2 import attn_utils
 
 
-def builder(device, graph, mode, num_spec=3, config=None):
+def builder(device, graph, mode, num_spec=3, config=None, reuse=True):
     cfg = config or helpers._make_vllm_config(
         num_speculative_tokens=num_spec,
         mamba_cache_mode=mode,
         cudagraph_mode=CUDAGraphMode.FULL if graph else CUDAGraphMode.NONE,
     )
     cfg.use_v2_model_runner = True
+    if config is None:
+        cfg.additional_config = {"reuse_kv_cache_groups": reuse}
     kv = MambaSpec(
         block_size=16,
         shapes=((1,), (1,)),
@@ -128,8 +131,7 @@ def test_graph_buffers_refresh_and_clear_previous_spec_state(device):
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("enabled", [False, True])
 def test_runner_reuses_only_within_invocation(monkeypatch, capture, enabled):
-    monkeypatch.setattr(attn_utils, "get_ascend_config", lambda: SimpleNamespace(reuse_kv_cache_groups=enabled))
-    first = builder("cpu", capture, "none")
+    first = builder("cpu", capture, "none", reuse=enabled)
     second = builder("cpu", capture, "none", config=first.vllm_config)
     groups = [
         [SimpleNamespace(layer_names=[f"layer{i}"], get_metadata_builder=lambda _, b=b: b)]
@@ -195,7 +197,7 @@ def test_reuse_key_rejects_incompatible_groups(difference):
         extras = {"unknown": object()}
     else:
         other.supports_update_block_table = False
-    assert attn_utils._metadata_reuse_key(first, True, {}, {}) != attn_utils._metadata_reuse_key(
+    assert metadata_reuse._metadata_reuse_key(first, True, {}, {}) != metadata_reuse._metadata_reuse_key(
         other, True, extras, {}
     )
 
@@ -206,6 +208,9 @@ def test_capability_excludes_derived_builders_and_legacy_runner():
     kv = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
     assert not AscendGDNAttentionMetadataBuilder(kv, ["x"], cfg, torch.device("cpu")).supports_update_block_table
     cfg.use_v2_model_runner = True
+    assert not AscendGDNAttentionMetadataBuilder(kv, ["x"], cfg, torch.device("cpu")).supports_update_block_table
+    cfg.additional_config = {"reuse_kv_cache_groups": True}
+    assert AscendGDNAttentionMetadataBuilder(kv, ["x"], cfg, torch.device("cpu")).supports_update_block_table
 
     class Derived(AscendGDNAttentionMetadataBuilder):
         pass
