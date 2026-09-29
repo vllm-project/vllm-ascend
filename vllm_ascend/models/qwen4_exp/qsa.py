@@ -33,6 +33,7 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_select_paged_tokens as qsa_select_paged_tokens_triton,
 )
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
+    build_qsa_metadata_ascend,
     qsa_sparse_paged_attention,
     qsa_store_cache_rows,
 )
@@ -466,8 +467,14 @@ upstream_qsa.Qwen4ExpQSAFlashAttentionImpl = AscendQSAImpl
 upstream_qsa.Qwen4ExpQSAFlashAttentionBackend = AscendQSABackend
 
 # qsa_cache selects its Triton metadata builder at import time. The upstream
-# kernel uses CUDA PDL intrinsics, so Ascend must use the equivalent Torch path.
-qsa_cache.build_qsa_metadata = qsa_cache._build_qsa_metadata_torch
+# kernel uses CUDA PDL intrinsics, so Ascend defaults to the equivalent Torch
+# path. A PDL-free Triton token path is available behind an opt-in flag for the
+# MTP-heavy hot path where the torch fallback launches many small device ops.
+qsa_cache.build_qsa_metadata = (
+    build_qsa_metadata_ascend
+    if envs.VLLM_ASCEND_QSA_METADATA_TRITON
+    else qsa_cache._build_qsa_metadata_torch
+)
 
 
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):

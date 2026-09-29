@@ -108,6 +108,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Enable the A3 qsa_expand_e3 output expansion kernel. Boolean 0/1,
     # default 0; unsupported SoCs use the portable expansion. Not sensitive.
     "VLLM_ASCEND_ENABLE_QSA_E3V": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_QSA_E3V", "0"))),
+    # Build QSA side-cache metadata (token_to_req / logical_positions /
+    # visible_blocks / slot_mapping) in a single Triton kernel instead of the
+    # torch fallback. The torch path issues many small device ops per call,
+    # which is amplified under MTP draft loops. Boolean 0/1, default 0; keep
+    # opt-in for A/B against the torch fallback. Not sensitive.
+    "VLLM_ASCEND_QSA_METADATA_TRITON": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_QSA_METADATA_TRITON", "0"))
+    ),
 }
 
 # end-env-vars-definition

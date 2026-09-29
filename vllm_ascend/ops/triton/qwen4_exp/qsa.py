@@ -1148,7 +1148,218 @@ def qsa_compress_groups_with_ratio(
     return pooled, first_positions
 
 
+@triton.jit(do_not_specialize=["num_reqs", "num_mapped_tokens", "num_tokens", "num_search_steps"])
+def _qsa_metadata_kernel(
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    common_slot_mapping_ptr,
+    block_table_ptr,
+    token_to_req_ptr,
+    logical_positions_ptr,
+    visible_blocks_ptr,
+    slot_mapping_ptr,
+    block_table_stride_0: tl.constexpr,
+    block_table_stride_1: tl.constexpr,
+    num_reqs,
+    num_mapped_tokens,
+    num_tokens,
+    num_search_steps,
+    storage_block_size: tl.constexpr,
+    compress_ratio: tl.constexpr,
+    circular_buffer_size: tl.constexpr,
+    num_block_table_columns: tl.constexpr,
+    TOKEN_BLOCK_SIZE: tl.constexpr,
+):
+    # PDL-free port of upstream ``_build_qsa_metadata_kernel`` token path. The
+    # CUDA gdc_* intrinsics and the tl.cumsum-based work-metadata pass are
+    # dropped; the latter stays on the torch path to avoid triton-ascend
+    # prefix-sum instability.
+    pid = tl.program_id(0)
+    token_idx = pid * TOKEN_BLOCK_SIZE + tl.arange(0, TOKEN_BLOCK_SIZE)
+    store_mask = token_idx < num_tokens
+    mapped = token_idx < num_mapped_tokens
+    search_token_idx = tl.minimum(token_idx, num_mapped_tokens - 1)
+    request_idx = tl.zeros((TOKEN_BLOCK_SIZE,), tl.int32)
+    # Find the last query start at or before each token.
+    for step in tl.range(0, num_search_steps):
+        candidate = request_idx + (1 << (num_search_steps - step - 1))
+        valid_candidate = candidate < num_reqs
+        candidate_start = tl.load(
+            query_start_loc_ptr + candidate,
+            mask=valid_candidate,
+            other=num_mapped_tokens + 1,
+        )
+        advance = valid_candidate & (candidate_start <= search_token_idx)
+        request_idx = tl.where(advance, candidate, request_idx)
+    query_start = tl.load(query_start_loc_ptr + request_idx, mask=mapped, other=0)
+    query_end = tl.load(query_start_loc_ptr + request_idx + 1, mask=mapped, other=0)
+    seq_len = tl.load(seq_lens_ptr + request_idx, mask=mapped, other=0)
+    logical_position = seq_len - (query_end - query_start) + token_idx - query_start
+    logical_position = tl.where(mapped, logical_position, -1)
+    tl.store(
+        token_to_req_ptr + token_idx,
+        tl.where(mapped, request_idx, 0),
+        mask=store_mask,
+    )
+    tl.store(logical_positions_ptr + token_idx, logical_position, mask=store_mask)
+    visible_blocks = tl.maximum(
+        0,
+        tl.minimum(
+            (logical_position + 1) // compress_ratio,
+            seq_len // compress_ratio,
+        ),
+    ).to(tl.int32)
+    tl.store(visible_blocks_ptr + token_idx, visible_blocks, mask=store_mask)
+
+    # circular_buffer_size is constexpr, so each builder instance compiles out
+    # the other QSA cache owner's slot-mapping rule.
+    if circular_buffer_size > 0:
+        valid = (
+            mapped
+            & (logical_position >= 0)
+            & (token_idx + circular_buffer_size >= query_end)
+            & (num_block_table_columns > 0)
+        )
+        physical_block = tl.load(
+            block_table_ptr + request_idx * block_table_stride_0,
+            mask=valid,
+            other=-1,
+        )
+        valid &= physical_block >= 0
+        slot = physical_block * circular_buffer_size + (
+            logical_position % circular_buffer_size
+        )
+    elif compress_ratio != 1:
+        compressed_position = tl.maximum(logical_position, 0) // compress_ratio
+        logical_block = compressed_position // storage_block_size
+        valid = (
+            mapped
+            & (logical_position >= 0)
+            & ((logical_position + 1) % compress_ratio == 0)
+            & (logical_block < num_block_table_columns)
+        )
+        physical_block = tl.load(
+            block_table_ptr
+            + request_idx * block_table_stride_0
+            + logical_block * block_table_stride_1,
+            mask=valid,
+            other=-1,
+        )
+        valid &= physical_block >= 0
+        valid &= (
+            tl.load(common_slot_mapping_ptr + token_idx, mask=mapped, other=-1) >= 0
+        )
+        slot = physical_block * storage_block_size + (
+            compressed_position % storage_block_size
+        )
+    if (circular_buffer_size > 0) or (compress_ratio != 1):
+        tl.store(
+            slot_mapping_ptr + token_idx,
+            tl.where(valid, slot, -1),
+            mask=store_mask,
+        )
+
+
+def build_qsa_metadata_ascend(
+    common_attn_metadata,
+    token_to_req_buffer: torch.Tensor,
+    logical_positions_buffer: torch.Tensor,
+    visible_blocks_buffer: torch.Tensor,
+    slot_mapping_buffer: torch.Tensor,
+    *,
+    storage_block_size: int,
+    compress_ratio: int,
+    circular_buffer_size: int = 0,
+    k_work_metadata_buffer: torch.Tensor | None = None,
+    request_capacity: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build QSA side-cache metadata with a single Triton token pass on Ascend.
+
+    Mirrors upstream ``qsa_cache._build_qsa_metadata_torch``: the token path
+    (token_to_req / logical_positions / visible_blocks / slot_mapping) is fused
+    into one PDL-free Triton kernel, while the pre-indexer work metadata stays
+    on the torch path to avoid ``tl.cumsum`` instability on triton-ascend.
+    """
+    del request_capacity
+    if not HAS_TRITON:
+        raise RuntimeError("QSA Ascend metadata builder requires Triton")
+
+    num_tokens = common_attn_metadata.num_actual_tokens
+    num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
+    token_to_req = token_to_req_buffer[:num_tokens]
+    logical_positions = logical_positions_buffer[:num_tokens]
+    visible_blocks = visible_blocks_buffer[:num_tokens]
+    slot_mapping = slot_mapping_buffer[:num_tokens]
+    num_reqs = common_attn_metadata.query_start_loc.shape[0] - 1
+    assert num_reqs > 0
+
+    block_table = common_attn_metadata.block_table_tensor
+
+    if num_tokens > 0:
+        num_search_steps = int(math.ceil(math.log2(num_reqs)))
+        num_token_blocks = triton.cdiv(num_tokens, 128)
+        _qsa_metadata_kernel[(num_token_blocks,)](
+            common_attn_metadata.query_start_loc,
+            common_attn_metadata.seq_lens,
+            common_attn_metadata.slot_mapping,
+            block_table,
+            token_to_req,
+            logical_positions,
+            visible_blocks,
+            slot_mapping,
+            block_table.stride(0),
+            block_table.stride(1),
+            num_reqs,
+            num_mapped_tokens,
+            num_tokens,
+            num_search_steps,
+            storage_block_size,
+            compress_ratio,
+            circular_buffer_size,
+            block_table.shape[1],
+            TOKEN_BLOCK_SIZE=128,
+            num_warps=4,
+        )
+    if circular_buffer_size == 0 and compress_ratio == 1:
+        slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
+    if k_work_metadata_buffer is not None:
+        query_lens = (
+            common_attn_metadata.query_start_loc[1:]
+            - common_attn_metadata.query_start_loc[:-1]
+        )
+        chunk_starts = common_attn_metadata.seq_lens - query_lens
+        num_work_per_request = (
+            common_attn_metadata.seq_lens // compress_ratio
+            - chunk_starts // compress_ratio
+        )
+        num_work_per_request = torch.where(
+            query_lens > 0, num_work_per_request.clamp_min(1), 0
+        )
+        k_start_loc = torch.empty(
+            query_lens.shape[0] + 1,
+            dtype=torch.int32,
+            device=query_lens.device,
+        )
+        k_start_loc[0] = 0
+        torch.cumsum(num_work_per_request, 0, out=k_start_loc[1:])
+        work = torch.arange(
+            k_work_metadata_buffer.shape[0],
+            device=k_work_metadata_buffer.device,
+        )
+        requests = torch.searchsorted(k_start_loc[1:], work, right=True)
+        active = work < k_start_loc[-1]
+        work_in_request = work - k_start_loc[requests.clamp_max(query_lens.shape[0] - 1)]
+        k_work_metadata_buffer[:, 0].copy_(
+            torch.where(active, requests, -1).to(torch.int32)
+        )
+        k_work_metadata_buffer[:, 1].copy_(
+            torch.where(active, work_in_request, -1).to(torch.int32)
+        )
+    return token_to_req, logical_positions, visible_blocks, slot_mapping
+
+
 __all__ = [
+    "build_qsa_metadata_ascend",
     "expand_qsa_block_indices_npu",
     "qsa_compress_groups_with_ratio",
     "qsa_mqa_paged",
