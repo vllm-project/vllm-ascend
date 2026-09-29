@@ -315,7 +315,7 @@ a3-560t:
       # pytest-driven tests
       - name: qwen3-30b-acc
         os: linux-aarch64-a3-800i-4
-        tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
+        tests: tests/e2e/cases/features/kv_pool/test_qwen3_30b_acc.py
       # YAML-driven tests
       - name: Qwen3.5-27B-w8a8-A3
         os: linux-aarch64-a3-800i-2
