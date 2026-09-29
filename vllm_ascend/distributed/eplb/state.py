@@ -21,6 +21,7 @@ from vllm.distributed.parallel_state import in_the_same_node_as
 
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
+from vllm_ascend.utils import vllm_version_is
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
@@ -150,8 +151,14 @@ class AscendEplbState(_eplb_state.EplbState):
         self._has_fresh_recorded_load = False
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
-        if self.cuda_device_index is None:
-            self.cuda_device_index = torch.accelerator.current_device_index()
+        # vLLM main renamed ``EplbState.cuda_device_index`` to ``device_index``
+        # (and passes it to EplbModelState on add_model), so keep both lanes
+        # pointing at the attribute upstream actually reads.
+        if vllm_version_is("0.30.0"):
+            if self.cuda_device_index is None:
+                self.cuda_device_index = torch.accelerator.current_device_index()
+        elif self.device_index is None:
+            self.device_index = torch.accelerator.current_device_index()
 
     @property
     def uses_custom_load_stats(self) -> bool:

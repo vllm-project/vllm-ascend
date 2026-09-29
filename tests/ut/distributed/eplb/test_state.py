@@ -15,6 +15,7 @@ from vllm_ascend.distributed.eplb.state import (
     AscendEplbLayerState,
     AscendEplbState,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_uses_upstream_policy_and_async_worker_lifecycle():
@@ -257,4 +258,7 @@ def test_init_sets_cuda_device_index_for_npu(monkeypatch):
 
     state = AscendEplbState(parallel_config, torch.device("cpu"))
 
-    assert state.cuda_device_index == 5
+    if vllm_version_is("0.30.0"):
+        assert state.cuda_device_index == 5
+    else:
+        assert state.device_index == 5
