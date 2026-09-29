@@ -1874,6 +1874,7 @@ def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
 def test_pcp_metadata_builds_from_manager_global_view():
     """Build rank-local metadata from the manager's scheduler-global view."""
     builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
+    builder._is_decode_sharded = False
     builder._pcp_world_size = 2
     builder._pcp_rank = 1
     builder._hidden_restore_idx_buffer = torch.empty(8, dtype=torch.int64)
@@ -2003,6 +2004,7 @@ def test_pcp_graph_metadata_builds_fixed_decode_shape(is_dummy: bool):
     seq_lens = torch.ones(graph_size, dtype=torch.int32) if is_dummy else torch.tensor([8, 9, 0, 0], dtype=torch.int32)
 
     builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
+    builder._is_decode_sharded = False
     builder._pcp_world_size = 2
     builder._pcp_rank = 1
     builder._hidden_restore_idx_buffer = torch.empty(8, dtype=torch.int64)

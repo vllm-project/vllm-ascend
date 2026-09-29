@@ -26,6 +26,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.context_parallel.common_cp import (
     build_pcp_ordered_slot_mapping,
     get_cp_local_query_key_lens,
+    get_pcp_num_replicated_tokens,
 )
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     build_sfa_dcp_replicated_block_table,
@@ -203,11 +204,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self.is_rope_neox_style = model_type not in ["glm_moe_dsa"]
         self.use_torch_npu_lightning_indexer = model_type in ["glm_moe_dsa"]
 
-        # Cache-write gathers for parallel layouts: PCP all-gathers the
-        # prefill region across the CP group, DSA-CP all-gathers the indexer
-        # k across the TP group. Both are no-ops in the base layout.
+        # Cache-write gathers for parallel layouts: PCP all-gathers every
+        # non-replicated token across the CP group, DSA-CP all-gathers the
+        # indexer k across the TP group. Both are no-ops in the base layout.
         parallel_config = get_current_vllm_config().parallel_config
         self._pcp_active = parallel_config.prefill_context_parallel_size > 1
+        self._is_pcp_decode_sharded = parallel_config.pcp_shard_decode_requests
         self._dsa_cp_active = enable_dsa_cp()
 
         # The LI C8 Hadamard matrices are created while the sleep-mode weights
@@ -364,9 +366,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         slot_mapping = indexer_metadata.slot_mapping
         if self._pcp_active:
             tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
-            gathered_tensors, slot_mapping = _gather_prefill_cache_inputs(
-                tensors, slot_mapping, indexer_metadata.num_decode_tokens
+            num_replicated_tokens = get_pcp_num_replicated_tokens(
+                indexer_metadata.num_decode_tokens, self._is_pcp_decode_sharded
             )
+            gathered_tensors, slot_mapping = _gather_prefill_cache_inputs(tensors, slot_mapping, num_replicated_tokens)
             k_li = gathered_tensors[0]
             assert slot_mapping.numel() == k_li.shape[0], (
                 "PCP indexer cache write requires one slot per gathered token: "

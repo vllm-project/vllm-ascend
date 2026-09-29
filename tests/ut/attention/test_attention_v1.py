@@ -230,6 +230,7 @@ def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
 
 def test_pcp_cache_write_uses_gathered_inputs() -> None:
     impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.is_pcp_decode_sharded = False
     impl.attn_type = attn_module.AttentionType.DECODER
     impl.key_cache = None
     impl.value_cache = None

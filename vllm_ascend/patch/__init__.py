@@ -1655,3 +1655,14 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+#   3. `vllm.config.parallel.ParallelConfig.pcp_shard_decode_requests`
+#    Why:
+#       PCP-only decode assigns each request to one PCP rank instead of
+#       replicating it on every rank. vLLM v0.30.0 has no switch for that mode.
+#    How:
+#       Add the upstream #52162 property (PCP > 1 and DCP == 1) when absent.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/52162
+#    Future Plan:
+#       Remove this patch once the paired vLLM includes #52162.
+#
