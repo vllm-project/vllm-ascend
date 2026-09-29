@@ -228,6 +228,10 @@ def test_cache_only_groups_use_main_backend_and_metadata(group_order, method):
         assert get_current_vllm_config() is proposer.vllm_config
         return object
 
+    def get_tail_impl():
+        assert get_current_vllm_config() is proposer.vllm_config
+        raise NotImplementedError("cache-only backend")
+
     main_group = MagicMock()
     main_group.layer_names = [main_name]
     main_group.kv_cache_spec = MagicMock()
@@ -242,7 +246,7 @@ def test_cache_only_groups_use_main_backend_and_metadata(group_order, method):
     tail_group.layer_names = [tail_name]
     # KpoolTailSpec derives from SlidingWindowSpec, not the SFA indexer spec.
     tail_group.kv_cache_spec = MagicMock(spec=SlidingWindowSpec)
-    tail_group.backend.get_impl_cls.return_value = None
+    tail_group.backend.get_impl_cls.side_effect = get_tail_impl
     tail_group.get_metadata_builder.return_value.build.return_value = tail_metadata
     groups = {"main": main_group, "indexer": indexer_group, "tail": tail_group}
     proposer.draft_attn_groups = [groups[name] for name in group_order]
@@ -261,6 +265,20 @@ def test_cache_only_groups_use_main_backend_and_metadata(group_order, method):
     proposer.draft_attn_groups = [indexer_group, tail_group]
     with pytest.raises(ValueError, match="no executable attention backend"):
         proposer._get_primary_draft_attn_group()
+
+
+def test_cache_only_group_does_not_swallow_unexpected_backend_error():
+    proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+    proposer.vllm_config = MagicMock()
+    group = MagicMock()
+
+    def get_impl():
+        assert get_current_vllm_config() is proposer.vllm_config
+        raise RuntimeError("backend initialization failed")
+
+    group.backend.get_impl_cls.side_effect = get_impl
+    with pytest.raises(RuntimeError, match="backend initialization failed"):
+        proposer._is_cache_only_draft_attn_group(group)
 
 
 def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():

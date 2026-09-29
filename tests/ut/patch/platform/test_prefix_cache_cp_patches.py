@@ -42,6 +42,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+    _ascend_annotate_eagle_groups,
     _ascend_resolve_kv_cache_block_sizes,
     _get_kimi_k3_dspark_mixed_kv_cache_groups,
     _get_kv_cache_config_deepseek_v4_main,
@@ -1099,6 +1100,161 @@ def test_verify_and_split_propagates_eagle_to_managers() -> None:
 
     assert coordinator.single_type_managers[1].use_eagle is True
     assert coordinator.single_type_managers[0].use_eagle is False
+
+
+def test_qwen4_exp_annotates_only_actual_mtp_group() -> None:
+    target_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+    )
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((2, 4),),
+        dtypes=(torch.float32,),
+    )
+    groups = [
+        KVCacheGroupSpec(
+            ["model.layers.0.self_attn.attn"],
+            target_spec,
+        ),
+        KVCacheGroupSpec(
+            ["model.layers.48.self_attn.attn"],
+            target_spec,
+        ),
+        KVCacheGroupSpec(
+            ["model.layers.1.linear_attn"],
+            mamba_spec,
+        ),
+    ]
+    speculative_config = SimpleNamespace(
+        use_eagle_block_drop=lambda: True,
+        draft_model_config=SimpleNamespace(
+            architectures=["Qwen4ExpMTP"],
+            hf_text_config=SimpleNamespace(
+                mtp_num_hidden_layers=1,
+            ),
+        ),
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=48)),
+    )
+    kv_cache_spec = {layer_name: group.kv_cache_spec for group in groups for layer_name in group.layer_names}
+
+    _ascend_annotate_eagle_groups(
+        vllm_config,
+        kv_cache_spec,
+        groups,
+    )
+
+    assert [group.is_eagle_group for group in groups] == [False, True, False]
+
+
+@pytest.mark.parametrize(
+    ("text_model_type", "text_architectures"),
+    [
+        ("qwen4_exp_mtp", []),
+        ("qwen4_exp_text", ["Qwen4ExpMTP"]),
+    ],
+)
+def test_qwen4_exp_mtp_text_config_fallback_annotation(
+    text_model_type,
+    text_architectures,
+) -> None:
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+    )
+    groups = [
+        KVCacheGroupSpec(["mtp.layers.48.self_attn.attn"], spec),
+    ]
+    speculative_config = SimpleNamespace(
+        use_eagle_block_drop=lambda: True,
+        draft_model_config=SimpleNamespace(
+            architectures=[],
+            hf_text_config=SimpleNamespace(
+                model_type=text_model_type,
+                architectures=text_architectures,
+                mtp_num_hidden_layers=1,
+            ),
+        ),
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=48)),
+    )
+
+    _ascend_annotate_eagle_groups(
+        vllm_config,
+        {groups[0].layer_names[0]: spec},
+        groups,
+    )
+
+    assert groups[0].is_eagle_group is True
+
+
+def test_non_qwen_mtp_does_not_use_positional_annotation() -> None:
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+    )
+    groups = [KVCacheGroupSpec(["model.layers.48.self_attn.attn"], spec)]
+    speculative_config = SimpleNamespace(
+        use_eagle_block_drop=lambda: True,
+        draft_model_config=SimpleNamespace(
+            architectures=["OtherMTP"],
+            hf_text_config=SimpleNamespace(
+                model_type="other_mtp",
+                architectures=["OtherMTP"],
+            ),
+        ),
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=48)),
+    )
+
+    _ascend_annotate_eagle_groups(
+        vllm_config,
+        {groups[0].layer_names[0]: spec},
+        groups,
+    )
+
+    assert groups[0].is_eagle_group is False
+
+
+def test_qwen4_exp_mtp_missing_draft_group_fails_fast() -> None:
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+    )
+    groups = [KVCacheGroupSpec(["model.layers.47.self_attn.attn"], spec)]
+    speculative_config = SimpleNamespace(
+        use_eagle_block_drop=lambda: True,
+        draft_model_config=SimpleNamespace(
+            architectures=["Qwen4ExpMTP"],
+            hf_text_config=SimpleNamespace(mtp_num_hidden_layers=1),
+        ),
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=48)),
+    )
+
+    with pytest.raises(ValueError, match="no KV cache group"):
+        _ascend_annotate_eagle_groups(
+            vllm_config,
+            {groups[0].layer_names[0]: spec},
+            groups,
+        )
 
 
 def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
