@@ -19,7 +19,7 @@ from ..program.values.evidence import (
 )
 from ..program.values.selection import LoadTransfer, StoreTransfer
 from ..protocol.lookup import LookupRequest, LookupResult
-from ..protocol.transfer import CheckpointStoreCommand, KVTransferStep
+from ..protocol.transfer import KVTransferStep
 from .io import BackendIO, LayerwiseBackendIO
 from .resources import KVPoolResources
 from .result import LoadResult
@@ -95,9 +95,7 @@ class KVPoolRuntime:
             try:
                 frame.store_transfers = self._program.select_store_transfers(step.store.commands)
                 self._timeline.prepare_store(frame.store_transfers)
-                # Checkpoint sources were completed and handed off before this step;
-                # they must also run in vLLM's connector-only path, which has no forward fence.
-                if all(isinstance(command, CheckpointStoreCommand) for command in step.store.commands):
+                if step.store.all_sources_ready:
                     self._submit_store(frame)
             except Exception as error:
                 self._store_error = error

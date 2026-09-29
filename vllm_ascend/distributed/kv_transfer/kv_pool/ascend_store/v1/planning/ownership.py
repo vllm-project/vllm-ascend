@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from ..protocol.transfer import CheckpointStoreCommand, StoreCommand
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
+
+StoreCommandT = TypeVar("StoreCommandT", bound=StoreCommand)
 
 
 class StoreSourceLeases:
@@ -30,7 +32,7 @@ class StoreSourceLeases:
     def bind_block_pool(self, block_pool: BlockPool) -> None:
         self._block_pool = block_pool
 
-    def acquire(self, command: StoreCommand) -> StoreCommand:
+    def acquire(self, command: StoreCommandT) -> StoreCommandT:
         if command.store_job_id is not None:
             return command
         store_job_id = self._next_job_id
@@ -41,7 +43,7 @@ class StoreSourceLeases:
                 raise RuntimeError("GPU block pool must be bound before a Store command is published")
             self._block_pool.touch([self._block_pool.blocks[block_id] for block_id in block_ids])
             self._leases[store_job_id] = (block_ids, self._expected_worker_count)
-        return replace(command, store_job_id=store_job_id)
+        return cast(StoreCommandT, replace(command, store_job_id=store_job_id))
 
     def release(self, released_store_jobs: dict[int, int]) -> None:
         for store_job_id, count in released_store_jobs.items():
@@ -64,7 +66,7 @@ class StoreSourceLeases:
         return bool(self._leases)
 
     def _source_block_ids(self, command: StoreCommand) -> tuple[int, ...]:
-        source_ids = []
+        source_ids: list[int] = []
         if isinstance(command, CheckpointStoreCommand):
             source_ids.extend(source.block_id for source in command.sources)
         for group_id, group_block_ids in enumerate(command.block_ids_by_group):

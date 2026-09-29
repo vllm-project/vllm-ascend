@@ -2284,7 +2284,7 @@ def test_kv_pool_runtime_submits_handed_off_checkpoint_without_forward(monkeypat
         store_job_id=9,
     )
 
-    runtime.begin_step(KVTransferStep(store=StoreCommandBatch((command,))))
+    runtime.begin_step(KVTransferStep(store=StoreCommandBatch(source_ready_commands=(command,))))
     runtime.end_step()
     completions = runtime.fence_previous_store()
     runtime.close()
@@ -2292,6 +2292,32 @@ def test_kv_pool_runtime_submits_handed_off_checkpoint_without_forward(monkeypat
     assert completions[0].evidence.succeeded
     assert runtime.take_released_store_job_ids() == {9}
     assert [call[0] for call in backend.calls].count("put") == 1
+
+
+def test_kv_pool_runtime_coalesces_mixed_store_sources_at_step_fence(monkeypatch) -> None:
+    backend = FakeBackend()
+    backend.put_result = [0]
+    runtime, _ = make_kv_pool_runtime(backend, registered=True, align_state_groups=(0,))
+    monkeypatch.setattr(torch.npu, "Event", FakeEvent)
+    pending = RangeStoreCommand("active", TokenRange(0, 4), ((3,),), (b"a",), 4)
+    ready = CheckpointStoreCommand(
+        "finished",
+        ((7,),),
+        (b"b",),
+        0,
+        (StateCheckpointSource(0, 7, 4),),
+    )
+
+    runtime.begin_step(
+        KVTransferStep(store=StoreCommandBatch(source_pending_commands=(pending,), source_ready_commands=(ready,)))
+    )
+
+    assert [call[0] for call in backend.calls].count("put") == 0
+    runtime.finish_step()
+    runtime.fence_previous_store()
+    runtime.close()
+
+    assert [call[0] for call in backend.calls].count("put") == 2
 
 
 def test_kv_pool_runtime_close_keeps_resources_when_store_source_release_is_unknown() -> None:
@@ -2787,6 +2813,8 @@ def test_transfer_step_keeps_load_and_store_commands_separate() -> None:
     step = KVTransferStep(LoadCommandBatch((load,)), StoreCommandBatch((store,)))
     assert step.load.commands == (load,)
     assert step.store.commands == (store,)
+    assert step.store.source_pending_commands == (store,)
+    assert step.store.source_ready_commands == ()
 
 
 def test_planner_publishes_boundary_state_beyond_the_normal_store_frontier() -> None:
@@ -2814,7 +2842,8 @@ def test_planner_publishes_boundary_state_beyond_the_normal_store_frontier() -> 
         kv_connector_block_state=SimpleNamespace(boundary_state_offloads={"request": [(1, 11, 8)]}),
     )
 
-    command = build_planner_step(planner, scheduler_output, {"request": request}).store.commands[0]
+    store = build_planner_step(planner, scheduler_output, {"request": request}).store
+    command = store.commands[0]
 
     assert command == CheckpointStoreCommand(
         "request",
@@ -2823,6 +2852,8 @@ def test_planner_publishes_boundary_state_beyond_the_normal_store_frontier() -> 
         4,
         (StateCheckpointSource(1, 11, 8),),
     )
+    assert store.source_ready_commands == (command,)
+    assert store.source_pending_commands == ()
 
 
 def test_planner_publishes_each_boundary_state_as_one_remote_object_version() -> None:

@@ -133,9 +133,20 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
         for request_id in planning_step.finished_request_ids | planning_step.preempted_request_ids:
             self._requests.pop(request_id, None)
         pending_checkpoint_stores = tuple(self._finished_checkpoint_stores)
-        commands = tuple(self._store_source_leases.acquire(command) for command in step.store.commands)
+        source_pending_commands = tuple(
+            self._store_source_leases.acquire(command) for command in step.store.source_pending_commands
+        )
+        source_ready_commands = tuple(
+            self._store_source_leases.acquire(command) for command in step.store.source_ready_commands
+        )
         self._finished_checkpoint_stores.clear()
-        return replace(step, store=StoreCommandBatch(commands + pending_checkpoint_stores))
+        return replace(
+            step,
+            store=StoreCommandBatch(
+                source_pending_commands=source_pending_commands,
+                source_ready_commands=source_ready_commands + pending_checkpoint_stores,
+            ),
+        )
 
     def request_finished(self, request: Request, block_ids: list[int]) -> tuple[bool, None]:
         assert self.planner is not None
