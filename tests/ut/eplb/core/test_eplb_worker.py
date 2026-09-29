@@ -41,13 +41,17 @@ def test_pack_update_info_uses_shared_dict_phys_to_logical():
     packed = worker.pack_update_info(iter(_update_info(new_expert_map)))
 
     assert len(packed) == 1
-    send, recv, maps, log2phy, layer_ids = packed[0]
+    send, recv, maps, log2phy, log2phy_rank_independent, layer_ids = packed[0]
     assert send == [] and recv == []
     # The worker ships the rank's full physical row, not just the owned slots.
     assert maps == [0, 1, 2, 3, 4, -1, -1, -1, -1, -1]
     assert layer_ids == 0
     # Logical length (8), not physical length (10).
     assert log2phy == [0, 1, 2, 3, 4, 5, 6, 7]
+    # Bug 6: the ALLGATHER variant picks the copy from a rank-independent rule,
+    # so logical 5 (physical 5 on rank 0 / 9 on rank 1) resolves to 9 while the
+    # rotated map above resolves it to 5 for this rank.
+    assert log2phy_rank_independent == [0, 1, 2, 3, 4, 9, 6, 7]
 
 
 def test_pack_update_info_falls_back_to_legacy_without_phys_to_logical():

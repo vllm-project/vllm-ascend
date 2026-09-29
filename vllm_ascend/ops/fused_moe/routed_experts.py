@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -424,6 +424,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.moe_load: torch.Tensor | None = None
         self.ascend_expert_map: torch.Tensor | None = None
         self.log2phy: torch.Tensor | None = None
+        # Rank-independent copy selection for the ALLGATHER dispatcher (which
+        # cannot move tokens between ranks). MC2/ALLTOALL keep ``log2phy``.
+        self.log2phy_rank_independent: torch.Tensor | None = None
         self.global_redundant_expert_num: int = 0
         self.phys_to_logical: torch.Tensor | None = None
         self.local_phys_expert_ids: torch.Tensor | None = None
@@ -505,6 +508,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.log2phy,
             self.global_redundant_expert_num,
             self.phys_to_logical,
+            self.log2phy_rank_independent,
         ) = init_eplb_config(
             placement_eplb_config,
             AscendRoutedExperts.moe_counter,
@@ -563,6 +567,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # rebalances, so they cannot rely on update_ascend_eplb_maps re-deriving
         # them after wake.
         self._promote_attr_to_buffer("log2phy")
+        self._promote_attr_to_buffer("log2phy_rank_independent")
         self._promote_attr_to_buffer("local_phys_expert_ids")
         self._promote_attr_to_buffer("_ascend_expert_map")
         self._promote_attr_to_buffer("global_expert_map")
@@ -638,6 +643,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     def get_log2phy_map(self) -> torch.Tensor | None:
         return self.log2phy
 
+    def get_log2phy_rank_independent_map(self) -> torch.Tensor | None:
+        """Rank-independent variant used by the ALLGATHER dispatcher."""
+        return self.log2phy_rank_independent
+
     @property
     def ep_rank(self) -> int:
         return self.moe_config.ep_rank
@@ -671,8 +680,21 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             router_logits=router_logits,
             input_ids=input_ids,
         )
-        if self.log2phy is not None:
-            topk_ids = self.log2phy[topk_ids]
+        # The ALLGATHER dispatcher cannot move tokens between ranks: it keeps
+        # the weight only on the rank that owns the selected physical expert
+        # and the partial results are all-reduced. It therefore needs the
+        # rank-independent copy selection (exactly one rank per logical
+        # expert). MC2 / FUSED_MC2 / ALLTOALL route tokens to the selected
+        # copy, so they keep the per-rank rotation.
+        log2phy = self.log2phy
+        if (
+            log2phy is not None
+            and self.log2phy_rank_independent is not None
+            and _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER
+        ):
+            log2phy = self.log2phy_rank_independent
+        if log2phy is not None:
+            topk_ids = log2phy[topk_ids]
 
         num_shared_experts = self.n_shared_experts
         if num_shared_experts is None:

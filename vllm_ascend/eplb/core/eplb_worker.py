@@ -278,6 +278,7 @@ class EplbWorker:
         recv_all = []
         maps = []
         log2phy_all = []
+        log2phy_rank_independent_all = []
         layer_ids = []
 
         phys_to_logical = self.shared_dict.get("phys_to_logical", None)
@@ -297,9 +298,20 @@ class EplbWorker:
             )
             log2phy_all.append(log2phy_map.numpy().tolist())
 
+            # The ALLGATHER dispatcher selects the duplicated-expert copy from a
+            # rank-independent rule, so its map ships next to the rotated one.
+            log2phy_rank_independent = generate_log2phy_map(
+                new_expert_map,
+                self.rank_id,
+                tp_size=self.tp_size,
+                phys_to_logical=phys_to_logical,
+                rank_independent_replica=True,
+            )
+            log2phy_rank_independent_all.append(log2phy_rank_independent.numpy().tolist())
+
             layer_ids.append(layer_id)
 
-        return list(zip(send_all, recv_all, maps, log2phy_all, layer_ids))
+        return list(zip(send_all, recv_all, maps, log2phy_all, log2phy_rank_independent_all, layer_ids))
 
     @staticmethod
     def _compute_imbalance(deployment_all_layer, hotness_all_layer: np.ndarray, return_list: bool = False):
