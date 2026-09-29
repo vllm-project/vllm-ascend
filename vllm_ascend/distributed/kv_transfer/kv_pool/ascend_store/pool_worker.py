@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import suppress
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -54,6 +54,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
+    KVCacheStoreLayerSendingThreadBase,
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
     KVTransferThread,
@@ -2525,7 +2526,7 @@ class KVPoolWorker:
         assert self.kv_send_thread is not None
         sync_save_events = self.sync_save_events
         save_finished_events = self.layer_save_finished_events
-        send_thread = self.kv_send_thread
+        send_thread = cast(KVCacheStoreLayerSendingThreadBase, self.kv_send_thread)
         self._attention_saved_layers.add(layer_id)
         sync_save_events[layer_id].record()
         tasks = self.layer_save_tasks[layer_id]
@@ -2700,7 +2701,7 @@ class KVPoolWorker:
         assert self.sync_save_events is not None
         assert self.layer_save_finished_events is not None
         assert self.kv_send_thread is not None
-        send_thread = self.kv_send_thread
+        send_thread = cast(KVCacheStoreLayerSendingThreadBase, self.kv_send_thread)
         send_thread.raise_if_failed()
         if self.current_layer not in self._attention_saved_layers:
             self.sync_save_events[self.current_layer].record()

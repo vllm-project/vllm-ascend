@@ -230,6 +230,39 @@ class TestKVTransferThread(unittest.TestCase):
             t.raise_if_failed()
 
 
+class TestLayerStoreRequestTracking(unittest.TestCase):
+    def test_multiple_pending_saves_finish_only_after_all_complete(self):
+        for thread_type, transfer_size in (
+            (KVCacheStoreKeyLayerSendingThread, 1),
+            (KVCacheStoreLayerSendingThread, 16),
+        ):
+            with self.subTest(thread_type=thread_type.__name__):
+                thread = thread_type(
+                    FakeStore(),
+                    FakeTokenDatabase(),
+                    16,
+                    0,
+                    1,
+                    1,
+                    transfer_size,
+                    ready_event=threading.Event(),
+                    num_layers=1,
+                    layer_save_finished_events=[threading.Event()],
+                    sync_save_events=[MagicMock()],
+                )
+                thread.add_stored_request("r1")
+                thread.add_stored_request("r1")
+                thread.add_stored_request("r2")
+
+                self.assertEqual(thread.dec_stored_request("r1"), 1)
+                self.assertFalse(thread.try_finish_and_delete_stored_request("r1"))
+                self.assertEqual(thread.dec_stored_request("r1"), 0)
+                self.assertTrue(thread.try_finish_and_delete_stored_request("r1"))
+                self.assertIsNone(thread.dec_stored_request("r1"))
+                self.assertFalse(thread.try_finish_and_delete_stored_request("r1"))
+                self.assertEqual(thread.stored_requests, {"r2": 1})
+
+
 class TestGVALayerTransferFailures(unittest.TestCase):
     def _make_sending_thread(self):
         # Plain mock store: the layerwise threads are backend-agnostic.
@@ -476,7 +509,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                             thread.tp_rank, thread.put_step = tp_rank, put_step
                             thread.dcp_size = dcp_size
                             thread.group_uses_align_state = [aligned]
-                            thread.add_stored_request("r1")
                             req = ReqMeta(
                                 req_id="r1",
                                 token_len_chunk=128,
@@ -484,6 +516,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                                 block_hashes=hashes,
                                 load_spec=LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True),
                             )
+                            thread.add_stored_request(req)
                             thread.request_queue.put(req)
                             thread._handle_request(req)
                             keys = [key for call in store.put_calls for key in call[0]]
@@ -1085,7 +1118,10 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
                             self.assertEqual(thread.completed_events[chunk], 1)
                             self.assertEqual("r1" in thread.stored_requests, chunk == 0)
                             self.assertEqual("r1" in thread.finished_requests, chunk == 1)
-                        self.assertEqual(store.put.call_count, 2 if tp_mismatch or pcp_rank == 0 else 0)
+                        # Identical successful saves reuse the durable offset;
+                        # failures retry, while the mocked TP path always puts.
+                        expected_puts = 2 if tp_mismatch or fail else 1
+                        self.assertEqual(store.put.call_count, expected_puts if tp_mismatch or pcp_rank == 0 else 0)
                         if worker is not None:
                             self.assertEqual(
                                 worker._store_kv_tp_mismatch.call_count, 2 if tp_mismatch or pcp_rank == 0 else 0
