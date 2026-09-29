@@ -18,7 +18,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     MLAAttentionImpl,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -403,7 +403,7 @@ class AscendSFABackend(AttentionBackend):
         return resolve_sfa_impl(get_current_vllm_config())
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec: KVCacheSpec | None = None) -> list[int]:
         return [128]
 
 

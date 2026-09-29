@@ -394,7 +394,7 @@ def _ascend_get_packed_kv_cache_groups(
         vllm_config,
         kv_cache_spec,
         groups,
-        use_deepseek_v4_fallback=True,
+        use_trailing_layer_fallback=vllm.v1.core.kv_cache_utils._uses_trailing_mtp_layers(vllm_config),
     )
     vllm.v1.core.kv_cache_utils._warn_if_unannotated_eagle_mamba(
         vllm_config,

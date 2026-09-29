@@ -18,6 +18,7 @@
 #
 
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -35,6 +36,9 @@ from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 
 @dataclass(frozen=True)
@@ -204,6 +208,7 @@ class AscendPCPManager(PCPManager):
     def _partition_speculative_batch_compat(
         self,
         global_batch: AscendInputBatch,
+        batch_desc: "BatchExecutionDescriptor",
     ) -> AscendInputBatch:
         """Adapt spec decode until upstream PCP supports it natively."""
         global_draft_counts = global_batch.num_draft_tokens_per_req
@@ -221,7 +226,7 @@ class AscendPCPManager(PCPManager):
             num_draft_tokens_per_req=None,
         )
         try:
-            local_batch = super().partition_batch(non_spec_batch)
+            local_batch = super().partition_batch(non_spec_batch, batch_desc)
         finally:
             self._global_batch = global_batch
         assert isinstance(local_batch, AscendInputBatch)
@@ -267,20 +272,14 @@ class AscendPCPManager(PCPManager):
     def partition_batch(
         self,
         input_batch: AscendInputBatch,
-        padded_num_tokens: int | None = None,
-        padded_num_reqs: int | None = None,
+        batch_desc: "BatchExecutionDescriptor",
     ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
         global_batch = input_batch
         if global_batch.num_draft_tokens > 0:
-            local_batch = self._partition_speculative_batch_compat(global_batch)
+            local_batch = self._partition_speculative_batch_compat(global_batch, batch_desc)
         else:
-            # padded_num_reqs is accepted for the upstream maybe_partition_pcp_batch
-            # signature but not forwarded: request-shaped padding is done below.
-            local_batch = super().partition_batch(
-                global_batch,
-                padded_num_tokens=padded_num_tokens,
-            )
+            local_batch = super().partition_batch(global_batch, batch_desc)
         assert isinstance(local_batch, AscendInputBatch)
 
         # PCP builds the local layout from actual tokens, but a FULL decode
@@ -293,7 +292,7 @@ class AscendPCPManager(PCPManager):
         graph_num_reqs = (
             global_batch.num_tokens_after_padding if is_full_decode_graph else global_batch.num_reqs_after_padding
         )
-        # The base PCP manager may already honor ``padded_num_tokens`` while
+        # The base PCP manager may already honor the descriptor's token count while
         # leaving request-shaped metadata at the actual request count. Pad when
         # either extent is still short so the runtime metadata matches the fixed
         # graph capture layout.

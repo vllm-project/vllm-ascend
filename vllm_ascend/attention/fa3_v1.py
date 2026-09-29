@@ -1,6 +1,7 @@
 import torch
 from flash_attn_npu_v3 import flash_attn_with_kvcache as _fa3_fn  # type: ignore[import-not-found]
 from vllm.v1.attention.backend import AttentionBackend  # type: ignore
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
@@ -35,7 +36,7 @@ class AscendFABackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec: KVCacheSpec | None = None) -> list[int]:
         return [128]
 
 

@@ -328,9 +328,6 @@ class NPUModelRunner(GPUModelRunner):
             for group in groups
         )
 
-        if self.model_config.enable_return_routed_experts:
-            self.init_routed_experts_capturer()
-
         self.kvpp = KVPPRuntime.create_from_kv_cache(
             vllm_config=self.vllm_config,
             kv_cache_config=self.kv_cache_config,
@@ -416,12 +413,18 @@ class NPUModelRunner(GPUModelRunner):
             )
             if np.any(pd_decode_recompute):
                 batch_state.is_prefilling_np[pd_decode_recompute] = False
-                batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
+                decode_rows = ~batch_state.is_prefilling_np
+                if batch_state.prefill_runs_as_decode_np is not None:
+                    decode_rows |= batch_state.prefill_runs_as_decode_np
+                batch_state = batch_state._replace(
+                    has_prefill=bool(batch_state.is_prefilling_np.any()),
+                    decode_graph_eligible=bool(decode_rows.all()),
+                )
                 uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
                     len(batch_state.req_ids),
                     batch_state.num_tokens,
                     int(batch_state.num_scheduled_tokens.max()),
-                    batch_state.has_prefill,
+                    batch_state.decode_graph_eligible,
                 )
         return batch_state, uniform_token_count
 
@@ -657,6 +660,8 @@ class NPUModelRunner(GPUModelRunner):
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
+            prefill_runs_as_decode_np=batch_req_state.prefill_runs_as_decode_np,
+            decode_graph_eligible=batch_req_state.decode_graph_eligible,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
@@ -670,13 +675,8 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-        # vLLM main (#53867) changed maybe_partition_pcp_batch to take the
-        # whole batch descriptor instead of padded_num_tokens.
-        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-            self.pcp_manager,
-            input_batch,
-            batch_desc=batch_desc,
-        )
+        if self.pcp_manager is not None:
+            input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)

@@ -46,10 +46,9 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.models.step3p5 import (
-    FP32ReplicatedLinear,
     FusedMoEBlock,
     Step3p5Attention,
     Step3p5DecoderLayer,
@@ -142,11 +141,10 @@ def _patched_fused_moe_block_init(
             f"Tensor parallel size {self.tp_size} is greater than the number of experts {config.moe_num_experts}."
         )
 
-    self.gate = FP32ReplicatedLinear(
+    self.gate = GateLinear(
         config.hidden_size,
         config.moe_num_experts,
-        bias=False,
-        quant_config=None,
+        out_dtype=torch.float32,
         params_dtype=torch.float32,  # Use FP32 for higher precision.
         prefix=f"{prefix}.gate",
     )
