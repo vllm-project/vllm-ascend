@@ -10,7 +10,6 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.logger import logger
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata

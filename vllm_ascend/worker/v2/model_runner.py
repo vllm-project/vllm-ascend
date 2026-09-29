@@ -830,9 +830,7 @@ class NPUModelRunner(GPUModelRunner):
         """
         assert self._host_seq_lens_requirements is not None
         requirements = self._host_seq_lens_requirements
-        consumers = {
-            requirement.name: names for requirement, names in sorted(requirements.consumers.items())
-        }
+        consumers = {requirement.name: names for requirement, names in sorted(requirements.consumers.items())}
         logger.debug(
             "MRV2 host seq-lens requirement: requirement=%s, consumers=%s, undeclared=%s",
             requirements.requirement.name,

@@ -51,9 +51,7 @@ def _make_group(builder_cls):
 
 
 def _make_speculator(builder_clses):
-    return SimpleNamespace(
-        attn_backends={f"draft_{i}": _make_backend(cls) for i, cls in enumerate(builder_clses)}
-    )
+    return SimpleNamespace(attn_backends={f"draft_{i}": _make_backend(cls) for i, cls in enumerate(builder_clses)})
 
 
 def test_aggregation_takes_strongest_requirement():
