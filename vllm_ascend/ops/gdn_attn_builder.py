@@ -321,9 +321,9 @@ def _build_non_spec_chunked_prefill_metadata(
 class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
-    # RFC #17479 stage 2: GDN kernels consume query-side cu_seqlens; the
-    # host view used is seq_lens_cpu_upper_bound for prefill/decode
-    # classification, which is exact outside speculative decoding.
+    # GDN kernels consume query-side cu_seqlens; the host view used is
+    # seq_lens_cpu_upper_bound for prefill/decode classification, which is
+    # exact outside speculative decoding.
     HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.UPPER_BOUND
 
     def __init__(

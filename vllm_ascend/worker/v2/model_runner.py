@@ -210,14 +210,14 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=True,
         )
 
-        # RFC #17479: host seq-lens requirement contract. Resolved over the
-        # instantiated target/draft metadata builders in initialize_kv_cache;
-        # EXACT is the conservative default before that.
+        # Host seq-lens requirement contract (see
+        # https://github.com/vllm-project/vllm-ascend/issues/17479). Resolved
+        # over the instantiated target/draft metadata builders in
+        # initialize_kv_cache; EXACT is the conservative default before that.
         self._host_seq_lens_requirements = None
         self._host_seq_lens_requirement = HostSeqLensRequirement.EXACT
-        # Generation of the last staged exact-host snapshot (-1: never staged).
-        self._seq_lens_snapshot_generation = -1
-        # DFX counters (RFC #17479 section 9.2).
+        # Low-overhead counters for diagnostics: exact-host snapshots staged
+        # and waits performed.
         self._dfx_exact_snapshots_staged = 0
         self._dfx_exact_waits = 0
 
@@ -329,8 +329,8 @@ class NPUModelRunner(GPUModelRunner):
             for group in groups
         )
 
-        # RFC #17479: aggregate the host seq-lens requirement over target and
-        # draft metadata builders. Never derived from model names or concrete
+        # Aggregate the host seq-lens requirement over target and draft
+        # metadata builders. Never derived from model names or concrete
         # backend tuples; a single EXACT consumer forces exact materialization
         # for the whole execution so hybrid models stay correct.
         self._host_seq_lens_requirements = resolve_host_seq_lens_requirements(
@@ -826,7 +826,8 @@ class NPUModelRunner(GPUModelRunner):
         return hidden_states, sample_hidden_states
 
     def _log_host_seq_lens_diagnostics(self) -> None:
-        """RFC #17479 section 9.1: one structured startup diagnostic.
+        """Log one structured startup diagnostic of the host seq-lens
+        requirement contract.
 
         Built from configuration and class metadata only; never inspects
         device tensors or synchronizes the NPU.
@@ -837,8 +838,7 @@ class NPUModelRunner(GPUModelRunner):
             requirement.name: names for requirement, names in sorted(requirements.consumers.items())
         }
         logger.debug(
-            "Host seq-lens requirement contract (RFC #17479, MRV2): "
-            "requirement=%s consumers=%s undeclared=%s",
+            "MRV2 host seq-lens requirement: requirement=%s, consumers=%s, undeclared=%s",
             requirements.requirement.name,
             consumers,
             requirements.undeclared,
@@ -868,8 +868,8 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         # Without MTP, update_requests writes the shared NumPy/torch CPU state.
-        # RFC #17479: stage the exact-host snapshot only when an active
-        # consumer requires it.
+        # Stage the exact-host snapshot only when an active consumer
+        # requires it.
         if self.speculator is not None and self._needs_exact_host_seq_lens():
             self._copy_num_computed_tokens_to_cpu()
 
@@ -886,8 +886,6 @@ class NPUModelRunner(GPUModelRunner):
                 non_blocking=True,
             )
             self.num_computed_tokens_event.record()
-        # RFC #17479: generation-aware staging bookkeeping.
-        self._seq_lens_snapshot_generation += 1
         self._dfx_exact_snapshots_staged += 1
 
     def _update_seq_lens_cpu(
@@ -900,13 +898,9 @@ class NPUModelRunner(GPUModelRunner):
         # MTP needs D2H copy to get reverted num_computed_tokens after rejection.
         # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
         # so this update also corrects the num_computed_tokens_np used by PCP.
-        # RFC #17479: exact-host materialization boundary; skipped entirely
-        # when no active consumer requires exact host seq lens.
+        # Exact-host materialization boundary; skipped entirely when no active
+        # consumer requires exact host seq lens.
         if self.speculator is not None and self._needs_exact_host_seq_lens():
-            if self._seq_lens_snapshot_generation < 0:
-                # Cold start before any snapshot was staged: new requests need
-                # no rejection correction, matching the pre-contract behavior.
-                logger.debug("Exact-host seq lens consumed before any snapshot was staged.")
             self.num_computed_tokens_event.synchronize()
             self._dfx_exact_waits += 1
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:

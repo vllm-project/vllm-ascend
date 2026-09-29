@@ -35,12 +35,13 @@ class PreprocessType(enum.Enum):
 
 
 class HostSeqLensRequirement(enum.IntEnum):
-    """RFC #17479 host sequence-length data contract.
+    """Host sequence-length data contract for metadata consumers.
 
-    Declared by the metadata consumer (normally the attention metadata
-    builder) via a ``HOST_SEQ_LENS_REQUIREMENT`` class attribute. The model
-    runner aggregates the strongest requirement across the instantiated
-    target and draft consumers:
+    See https://github.com/vllm-project/vllm-ascend/issues/17479 for the
+    design. Declared by the metadata consumer (normally the attention
+    metadata builder) via a ``HOST_SEQ_LENS_REQUIREMENT`` class attribute.
+    The model runner aggregates the strongest requirement across the
+    instantiated target and draft consumers:
 
     * NONE: the consumer reads device-exact sequence lengths only and must
       receive ``None`` for exact host lengths.
@@ -50,7 +51,7 @@ class HostSeqLensRequirement(enum.IntEnum):
       lengths (e.g. legacy FIA builds ``actual_seq_lengths_kv`` host lists).
 
     An undeclared consumer is conservatively treated as ``EXACT`` during
-    migration (RFC rollout stage 1).
+    migration.
     """
 
     NONE = 0
@@ -62,7 +63,8 @@ class HostSeqLensRequirement(enum.IntEnum):
 def _warn_undeclared_seq_lens_consumer(builder_cls: type) -> None:
     logger.warning(
         "Metadata builder %s does not declare HOST_SEQ_LENS_REQUIREMENT; "
-        "conservatively treating it as EXACT (see RFC #17479).",
+        "conservatively treating it as EXACT (see "
+        "https://github.com/vllm-project/vllm-ascend/issues/17479).",
         f"{builder_cls.__module__}.{builder_cls.__qualname__}",
     )
 
@@ -78,7 +80,7 @@ def get_host_seq_lens_requirement(builder_cls: type) -> HostSeqLensRequirement:
 
 @dataclass(frozen=True)
 class HostSeqLensRequirements:
-    """Aggregated host seq-lens requirement of one execution (RFC #17479).
+    """Aggregated host seq-lens requirement of one execution.
 
     Attributes:
         requirement: The strongest requirement across all consumers.
@@ -98,10 +100,9 @@ def resolve_host_seq_lens_requirements(
     """Aggregate host seq-lens requirements over target and draft consumers.
 
     The runner must never derive this from model names or concrete backend
-    class tuples (RFC #17479 section 3); it discovers the instantiated
-    consumers after KV-cache and attention-group initialization. A single
-    EXACT consumer forces exact materialization for the whole execution so
-    hybrid models stay correct.
+    class tuples; it discovers the instantiated consumers after KV-cache and
+    attention-group initialization. A single EXACT consumer forces exact
+    materialization for the whole execution so hybrid models stay correct.
     """
     consumers: dict[HostSeqLensRequirement, list[str]] = {}
     undeclared: list[str] = []
@@ -112,7 +113,9 @@ def resolve_host_seq_lens_requirements(
         if declared is None:
             undeclared.append(name)
             declared = HostSeqLensRequirement.EXACT
-        consumers.setdefault(declared, []).append(name)
+        names = consumers.setdefault(declared, [])
+        if name not in names:
+            names.append(name)
 
     for groups in attn_groups:
         for group in groups:

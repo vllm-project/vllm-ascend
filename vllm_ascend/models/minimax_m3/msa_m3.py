@@ -278,9 +278,8 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     reorder_batch_threshold: int = 1
 
-    # RFC #17479 stage 1: declared EXACT to stay behavior-equivalent while
-    # the contract lands. The M3 prefill path still syncs context lengths on
-    # host; reclassify during the stage-2 audit.
+    # The M3 prefill path still syncs context lengths on host, so exact host
+    # seq lens stay materialized for it.
     HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
 
     def __init__(
@@ -829,9 +828,8 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     reorder_batch_threshold: int = 1
 
-    # RFC #17479 stage 1: declared EXACT to stay behavior-equivalent while
-    # the contract lands. The M3 prefill path still syncs context lengths on
-    # host; reclassify during the stage-2 audit.
+    # The M3 prefill path still syncs context lengths on host, so exact host
+    # seq lens stay materialized for it.
     HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
 
     def __init__(

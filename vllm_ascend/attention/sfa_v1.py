@@ -503,8 +503,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     understand this class
     """
 
-    # RFC #17479 stage 2: SFA kernels consume device-exact seq_lens; the
-    # host view stored in metadata is a conservative bound, never exact.
+    # SFA kernels consume device-exact seq_lens; the host view stored in
+    # metadata is a conservative bound, never exact.
     HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.UPPER_BOUND
 
     def __init__(

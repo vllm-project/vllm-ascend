@@ -261,8 +261,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     understand this class
     """
 
-    # RFC #17479: MLA decode/chunked-prefill metadata derives host-side
-    # seq_lens_list and chunk splits from rejection-corrected exact seq lens.
+    # MLA decode/chunked-prefill metadata derives host-side seq_lens_list
+    # and chunk splits from rejection-corrected exact seq lens.
     HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
 
     decode_metadata_cls: type[AscendMLADecodeMetadata] = AscendMLADecodeMetadata

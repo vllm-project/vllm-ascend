@@ -217,8 +217,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     Ascend FlashAttention backend.
     """
 
-    # RFC #17479: legacy FIA kernels take host-side actual_seq_lengths_kv
-    # lists built from rejection-corrected exact seq lens. Inherited by the
+    # Legacy FIA kernels take host-side actual_seq_lengths_kv lists built
+    # from rejection-corrected exact seq lens. Inherited by the
     # FA3/PCP/DCP/C8/310 variants that reuse or subclass this builder.
     HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
 
