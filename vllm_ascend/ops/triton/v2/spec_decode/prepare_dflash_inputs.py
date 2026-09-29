@@ -311,6 +311,15 @@ def prepare_dflash_inputs_triton(
     *,
     physical_block_size: int,
 ) -> None:
+    """Prepare DFlash inputs and KV slot mappings for a draft step.
+
+    Args:
+        block_size: Attention kernel block size used to index ``block_table``.
+        physical_block_size: KV cache block size used to determine DCP rank
+            ownership and convert global positions to rank-local positions.
+            One physical block may span multiple kernel blocks; its size must
+            be divisible by ``block_size`` (for example, 384 versus 128).
+    """
     num_reqs = input_batch.num_reqs
     assert num_reqs > 0
 
