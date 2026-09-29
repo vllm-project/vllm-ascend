@@ -21,7 +21,7 @@
 #                        partitions (patterns are evaluated longest first,
 #                        most specific wins). Each entry has a ``default``
 #                        partition and an optional ``310p`` override for
-#                        tests under a ``_310p`` directory.
+#                        files whose name contains ``_310p``.
 # - ``partition:``       maps logical test buckets to exact labels from
 #                        runner_label.json and controls how many
 #                        load-balanced groups are created for each bucket.
@@ -104,7 +104,7 @@ accuracy_tests:
 # === Runner Mapping ===
 # Maps test paths to logical partitions using regex patterns.
 # Each entry has a ``default`` partition and an optional ``310p`` override
-# for tests under a ``_310p`` directory.
+# for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
   tests/e2e/pull_request/one_card:
