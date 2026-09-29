@@ -175,10 +175,10 @@
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/59171
 #       Tracks https://github.com/vllm-project/vllm/issues/59169.
-#       Adds Platform.supports_engram() for both model validation and defaults.
+#       Removes CUDA-alike restrictions from model validation and defaults.
 #    Future Plan:
-#       Once the pinned vLLM includes that capability, opt in on NPUPlatform and
-#       remove this patch plus platform-side default creation. Keep Ascend's
+#       Once the pinned vLLM includes that change, remove this patch and
+#       platform-side default creation. Keep Ascend's
 #       model, topology and loader restrictions in the normal platform hook.
 #
 # ** 7. File: platform/patch_eplb.py**
