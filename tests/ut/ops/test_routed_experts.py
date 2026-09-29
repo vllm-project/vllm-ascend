@@ -233,6 +233,9 @@ def _run_forward_impl(routed_experts, comm_method):
     with (
         patch("vllm_ascend.ops.fused_moe.routed_experts.get_forward_context", return_value=ctx),
         patch("vllm_ascend.ascend_forward_context.get_forward_context", return_value=ctx),
+        # forward_impl resolves the comm method from _EXTRA_CTX.moe_comm_type;
+        # inject the fake directly instead of registering a real comm type.
+        patch("vllm_ascend.ops.fused_moe.routed_experts.get_moe_comm_method", return_value=comm_method),
     ):
         routed_experts.forward_impl(hidden_states=torch.randn(2, 4), router_logits=torch.randn(2, 4))
 
