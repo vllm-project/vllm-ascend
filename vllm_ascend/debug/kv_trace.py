@@ -26,6 +26,17 @@ from pathlib import Path
 from typing import Any
 
 
+def process_identity() -> tuple[str | None, str | None]:
+    """Identify Linux process lifetimes across component writers and PID reuse."""
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        # comm may contain spaces and parentheses; fields after its last ')' start at state (3).
+        fields = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()
+        return boot, f"{boot}:{os.getpid()}:{fields[19]}"
+    except (OSError, IndexError):
+        return None, None
+
+
 @dataclass(frozen=True)
 class TraceConfig:
     directory: str
@@ -76,6 +87,7 @@ class KVTrace:
         self.actor = actor
         self.host = socket.gethostname()
         self.pid = os.getpid()
+        self.host_boot_id, self.process_instance_id = process_identity()
         self.trace_id = uuid.uuid4().hex
         self.enabled = True
         self._sequence = 0
@@ -134,6 +146,7 @@ class KVTrace:
         if self.pid != os.getpid():
             # A child must never reuse its parent's descriptor, lock or sequence.
             self.pid = os.getpid()
+            self.host_boot_id, self.process_instance_id = process_identity()
             self.trace_id = uuid.uuid4().hex
             self._lock = threading.Lock()
             self._stream = None
@@ -152,6 +165,8 @@ class KVTrace:
                 "run_id": self.config.run_id,
                 "host": self.host,
                 "pid": self.pid,
+                "host_boot_id": self.host_boot_id,
+                "process_instance_id": self.process_instance_id,
                 "thread_id": threading.get_ident(),
                 "component": self.component,
                 "trace_id": self.trace_id,
@@ -174,6 +189,8 @@ class KVTrace:
                             "run_id",
                             "host",
                             "pid",
+                            "host_boot_id",
+                            "process_instance_id",
                             "thread_id",
                             "component",
                             "trace_id",

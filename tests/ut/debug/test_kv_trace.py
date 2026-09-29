@@ -712,3 +712,22 @@ def test_observation_failure_does_not_replace_model_result(tmp_path):
 
     assert trace.observe_execution(runner, execute)(scheduler.schedule()) == "model-result"
     assert any(r["event"] == "trace.observation_error" for r in events(tmp_path))
+
+
+def test_process_identity_parses_linux_comm_and_degrades_without_proc(monkeypatch):
+    def proc_read(path):
+        if str(path).endswith("boot_id"):
+            return "test-boot\n"
+        # Fields 3..21 precede starttime (22). comm deliberately contains ')'.
+        return "42 (worker ) name) " + " ".join(["S", *(["0"] * 18), "987654", "0"])
+
+    monkeypatch.setattr(trace_module.Path, "read_text", proc_read)
+    boot, process = trace_module.process_identity()
+    assert boot == "test-boot"
+    assert process.endswith(":987654")
+
+    def missing(path):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(trace_module.Path, "read_text", missing)
+    assert trace_module.process_identity() == (None, None)

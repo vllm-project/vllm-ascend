@@ -5,6 +5,25 @@ and which slots real or dummy forwards access. It is useful for silent KV
 corruption, stale slot mappings, block reuse, and PD request correlation. The
 tracer observes the runtime; it does not mask writes or repair caches.
 
+## Module contract
+
+KV trace collects and queries evidence about block lifetime, request mappings,
+transfers and selected forward-window byte changes. It preserves source events,
+records observation failures, and explains derived associations. Its completion
+criterion is faithful, queryable evidence within the declared backend, layout
+and sampling scope.
+
+Response collection, repetition detection, model-quality evaluation, bad/ref
+numeric comparisons, intervention toggles, automatic blocking and final root
+cause conclusions belong to callers or separate diagnostic tools. They are not
+requirements for this module to be complete. Adding a backend means adding its
+event adapter, not moving that backend's data management into the tracer.
+
+For the Case 4 dummy overwrite, this module supplies block reuse, transfer
+events, actual dummy slots/batch state and selected cache differences. An
+external investigation relates these to the response and tests a write mask.
+It does not require cosine calculations or a built-in response detector.
+
 ## Initial P0 implementation
 
 This branch adds allocator generations, scheduler-to-worker context, and log
@@ -146,6 +165,11 @@ rank. Workers also include TP/PP rank. Forward spans tie input metadata to diffs
 completion and errors. Preserve the exact P/D request IDs; transfer events link
 them explicitly, without assuming how a proxy forms its IDs.
 
+On Linux, `host_boot_id` and `process_instance_id` (boot UUID, PID and process
+start ticks) distinguish host/process lifetimes. They connect component writers
+in the same worker process. Unavailable procfs produces null identities; older
+records can use the explicitly labelled `legacy_host_pid` association basis.
+
 New records use schema v2: sequence, nanosecond timestamps and allocation epochs
 are decimal strings. `trace_id` is retained alongside `writer_id`; `event_id`
 and `parent_event_ids` link dispatch, application and forward observations.
@@ -186,6 +210,7 @@ python tools/kv_block_trace.py /tmp/kv-traces/pd-debug --request REQUEST_ID_OR_P
 python tools/kv_block_trace.py /tmp/kv-traces/pd-debug --engine ENGINE_ID --group 0 --block 1
 python tools/kv_block_trace.py /tmp/kv-traces/pd-debug --block 1 --json > block-1.jsonl
 python tools/kv_block_trace.py /tmp/kv-traces/pd-debug --pool-id POOL_UUID --block 1 --epoch 2 --json
+python tools/kv_block_trace.py /tmp/kv-traces/pd-debug --host HOST --engine ENGINE_ID --dp-rank 0 --tp-rank 0 --pp-rank 0 --block 1 --json
 python tools/kv_block_trace.py /tmp/kv-traces/pd-debug --check
 ```
 
@@ -193,6 +218,47 @@ python tools/kv_block_trace.py /tmp/kv-traces/pd-debug --check
 query intentionally includes all observed uses of that address. Explicit P/D
 request pairs expand request aliases; co-batched requests do not become aliases
 and therefore do not pull in their unrelated later forwards.
+
+### Dummy access context
+
+The reader reconstructs `access_relations` for dummy spans from three sources:
+
+1. A preceding `schedule.received` binds the worker process to a scheduler and pool.
+2. The scheduler's observed allocation/acquire/release stream supplies the epoch
+   and active request references for each actual non-padding slot's block.
+3. Transfer events in the same process supply the last observed transfer in
+   that allocation lifetime, when its writer stream is complete.
+
+Reconstruction uses monotonic timestamps only within one host/boot and scopes
+pools by run, host, engine, DP rank, scheduler and pool ID. Missing sequences,
+explicit observation gaps, ambiguous process bindings or tied lifecycle
+timestamps leave the association unknown. Old transfers are not carried across
+new allocations. A released request is not restored as owner by an old transfer.
+Legacy logs lack boot/process-start identity, so their weaker basis is visible.
+
+`access_relations` are **query context**, not an assertion that the dummy belongs
+to a request or that its device storage independently verified the epoch.
+Original `request_ids`, `pool_id` and `alloc_epoch` are preserved. Each relation
+contains its supporting event IDs and `device_epoch_verified=false`. Cache diffs
+retain context at `span_begin`; `context_changed_during_span` warns when observed
+ownership, allocation or transfer context changed before the after-snapshot.
+When context changes, a separate `span_end` relation and its evidence are kept;
+queries for either boundary's request/epoch can inspect that overlapping window.
+An unchanged context does not prove absence of uninstrumented writers.
+
+Request and pool/epoch queries retain these related dummy spans. Their supporting
+allocation/binding/transfer records are also included, with
+`query_context=access_relation_evidence` when added only as evidence. Rank filters
+select access records; a supporting scheduler record may have no TP/PP rank.
+Related owners do not become request aliases and do not pull in unrelated later
+forwards. `--json` exposes the full basis; text output labels it `related:`.
+Re-reading a filtered export recalculates associations rather than trusting
+previously derived fields.
+
+If source evidence is missing, inspect by host/engine/rank and raw block number.
+The reader intentionally does not guess an epoch to satisfy an epoch query.
+Always provide the full original run files for reconstruction; a partial query
+export may lack the sequence history needed for reliable association.
 
 `--check` checks all input records (optionally restricted by `--run-id`), not the
 request/block display filter. It reports malformed records, sequence gaps or
@@ -203,9 +269,8 @@ a stop record is also unverified. It cannot detect a completely absent actor's
 file. Its output always says `kv_integrity: not_checked`: complete logging does
 not establish correct cache contents or complete hook coverage.
 
-Request filtering follows explicit P/D links and retains related forward spans.
-An empty dummy batch has no request ID: inspect its affected **block** to include
-interference from unrelated requests. `DUMMY_CACHE_CHANGED` highlights a
+Request filtering follows explicit P/D links and retains related forward spans,
+including dummy spans with a reconstructed block context. `DUMMY_CACHE_CHANGED` highlights a
 non-null block changed during a dummy span; it is a diagnostic lead, not an
 automatic corruption verdict. Check ownership, valid prefix length, surrounding
 transfers, and overlapping work before attributing the change to a specific

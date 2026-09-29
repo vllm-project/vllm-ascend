@@ -16,9 +16,10 @@ main{max-width:1440px;padding-top:40px}header{padding-bottom:24px}h1{font-size:4
 </style></head><body>
 <nav aria-label="图解目录"><strong>KV Block<br>全链路 Trace</strong><div class="subtitle">七图设计说明 · 2026-09-29</div><a href="#fig-chain">01 全链路</a><a href="#fig-identity-map">02 块身份</a><a href="#fig-lifecycle">03 生命周期</a><a href="#fig-mapping">04 映射对齐</a><a href="#fig-pd-checkpoints">05 PD</a><a href="#fig-offload">06 外部存储</a><a href="#fig-attribution">07 异常定位</a><a href="#technical-details">技术细节与源码依据</a><button class="print-control" type="button" id="print">打印 / 保存 PDF</button></nav>
 <main><header><div class="eyebrow">KV block tracing / Visual design</div><h1>七张图，讲清 KV Block 全链路 Trace</h1>
-<p class="lead">追踪<strong>哪块数据、归谁使用、经过哪里、何时变坏</strong>。</p>
-<p class="brief">核心方案：统一块身份，串起调度、实际读写和搬运事件，用边界校验定位首次差异。</p>
-<p class="brief"><strong>P0 初版已实现：</strong>BlockPool 分配代次、Scheduler→Worker 上下文、host 映射比对、pool/epoch 查询与日志完整性检查。图中 PD 内容校验、设备完成、外存适配及环形 checkpoint 仍属后续设计；已完成限定 NPU 验证；PPT 式数值与首次污染定位仍未闭环。<a href="../source/user_guide/feature_guide/kv_block_trace.md">使用说明</a></p>
+<p class="lead">记录<strong>哪块数据、归谁使用、经过哪里、在观测窗口内发生了什么</strong>。</p>
+<p class="brief">模块职责：采集 KV 生命周期、映射、搬运和选定窗口差分，提供带依据的关联检索。</p>
+<div class="callout"><p><strong>边界已收敛：</strong>Trace 负责事实采集与关联查询。复读统计、标杆生成、数值诊断、写入屏蔽和因果裁定在模块之外。<a href="kv-block-trace-contract.md">模块契约与验收</a></p></div>
+<p class="brief"><strong>当前实现：</strong>BlockPool 分配代次、Scheduler→Worker 上下文、host 映射比对、pool/epoch 查询与日志完整性检查。已补充 dummy 访问的关联检索与证据来源。下方状态机、内容校验和根因分析图属于扩展/消费者参考，不作为 trace 模块必须内置的能力。<a href="../source/user_guide/feature_guide/kv_block_trace.md">使用说明</a></p>
 <details class="baseline-summary"><summary>展开版本与参考信息</summary><p class="meta">分支 <code>codex/kv-block-trace-design</code> · 实现基线 <code>a331676c</code><br>上游参考 <code>dc68bd8c4199b00631fe71eb37313f406cc66ac1</code> · 输入 <code>debug_trace.pptx</code>（24 页）。图解基线保留；当前分支已增加 P0 初版实现，CPU 和限定 NPU 验证见使用说明；真实 PD 关联已通过，native 异常与内容覆盖缺口已记录。</p></details>
 <p class="mobile-note">窄屏可横向滑动图示，或点“放大”。每张图都可单独下载为 SVG。</p></header>
 <section class="visual-section" id="fig-chain">
@@ -59,11 +60,11 @@ main{max-width:1440px;padding-top:40px}header{padding-bottom:24px}h1{font-size:4
 <rect x="744" y="233" width="252" height="31" rx="2" fill="#fff" stroke="#fff" stroke-width="1.5"/>
 <text x="870" y="255" font-size="18" text-anchor="middle" class="" style="fill:#295db0">传输 / checksum</text>
 <rect x="30" y="300" width="980" height="87" rx="12" fill="#edf3ff" stroke="#b2c9ee" stroke-width="1.5"/>
-<text x="520.0" y="338.0" font-size="23" text-anchor="middle" class="dg-title">统一事件流 → 有界队列 → JSONL / incident</text>
-<text x="520.0" y="367.0" font-size="18" text-anchor="middle" class="dg-note">记录缺口；异常时冻结事件窗口与选定 KV 快照</text>
+<text x="520.0" y="338.0" font-size="23" text-anchor="middle" class="dg-title">统一事件契约 → 本地记录 → JSONL / 查询</text>
+<text x="520.0" y="367.0" font-size="18" text-anchor="middle" class="dg-note">保留来源与覆盖范围；选定窗口可记录 KV 前后差分</text>
 <path d="M520 389V438" fill="none" stroke="#086f74" stroke-width="2.5" marker-end="url(#chain-teal)"/>
 <rect x="180" y="440" width="680" height="70" rx="12" fill="#f2f6f8" stroke="#d4e0e6" stroke-width="1.5"/>
-<text x="520.0" y="482.5" font-size="21" text-anchor="middle" class="dg-title">按请求、块代次和搬运 ID 回放，找到第一条失败边</text>
+<text x="520.0" y="482.5" font-size="21" text-anchor="middle" class="dg-title">按请求、块代次和搬运关系，检索可复查的事实</text>
 </svg></div>
 <figcaption>实线表示业务交互，蓝色虚线表示观测事件。保留现有 KVTrace → JSONL → CLI 路径。 <a href="#architecture">查看技术细节</a></figcaption>
 <div class="diagram-tools"><button type="button" data-zoom="chain" aria-label="放大图 1：全链路：哪些环节需要看见">放大</button><button type="button" data-download="chain" aria-label="下载图 1 SVG">下载 SVG</button></div></figure>
@@ -105,8 +106,8 @@ main{max-width:1440px;padding-top:40px}header{padding-bottom:24px}h1{font-size:4
 <figcaption>prefix 命中保持 epoch；新用途分配才递增。迟到的 epoch 9 事件不能归到 epoch 10。 <a href="#identity">查看技术细节</a></figcaption>
 <div class="diagram-tools"><button type="button" data-zoom="identity-map" aria-label="放大图 2：块身份：同一个块号，可能是不同的数据">放大</button><button type="button" data-download="identity-map" aria-label="下载图 2 SVG">下载 SVG</button></div></figure>
 </section><section class="visual-section" id="fig-lifecycle">
-<h2><span class="n">图 03</span>生命周期：把归属、有效内容和在途操作分开</h2>
-<p class="intro">L1 检查读写是否合法；它无法证明合法 offset 上的数值就是正确的。</p>
+<h2><span class="n">图 03</span>生命周期记录与下游校验的边界</h2>
+<p class="intro">Trace 记录分配、引用与操作事件；下图的内容有效性状态机可由独立校验器实现。</p>
 <figure class="diagram"><div class="diagram-scroll"><svg xmlns="http://www.w3.org/2000/svg" id="svg-lifecycle" viewBox="0 0 1040 510" role="img" aria-labelledby="lifecycle-title lifecycle-desc">
 <title id="lifecycle-title">有效内容的状态迁移</title><desc id="lifecycle-desc">新分配从 empty 开始，完成的顺序写使内容部分有效，写满后为 sealed。load完成根据有效长度进入partial或sealed。issued不等于ready，读不改变状态，release不等于invalidate。</desc>
 <defs>
@@ -149,8 +150,8 @@ main{max-width:1440px;padding-top:40px}header{padding-bottom:24px}h1{font-size:4
 <text x="865.0" y="428.5" font-size="18" text-anchor="middle" class="dg-note">invalidate 清除有效范围</text>
 <text x="520" y="487" font-size="20" text-anchor="middle" class="">READ 不改状态；UNKNOWN 不因一次读取自动变成已加载。</text>
 </svg></div>
-<figcaption>这是稠密连续有效区的简化图。CoW、speculative rollback、SWA 等按专门规则适配。 <a href="#state">查看技术细节</a></figcaption>
-<div class="diagram-tools"><button type="button" data-zoom="lifecycle" aria-label="放大图 3：生命周期：把归属、有效内容和在途操作分开">放大</button><button type="button" data-download="lifecycle" aria-label="下载图 3 SVG">下载 SVG</button></div></figure>
+<figcaption>下游校验参考，非当前 trace 内置功能或验收前提。Trace 保留原始事件，不判定业务写入是否合法。 <a href="#state">查看技术细节</a></figcaption>
+<div class="diagram-tools"><button type="button" data-zoom="lifecycle" aria-label="放大图 3：生命周期记录与下游校验的边界">放大</button><button type="button" data-download="lifecycle" aria-label="下载图 3 SVG">下载 SVG</button></div></figure>
 </section><section class="visual-section" id="fig-mapping">
 <h2><span class="n">图 04</span>映射对齐：计划写哪里，实际写到了哪里</h2>
 <p class="intro">Scheduler 表、Worker 表与实际算子入参分别留证据，定位不同步发生在哪一跳。</p>
@@ -203,8 +204,8 @@ main{max-width:1440px;padding-top:40px}header{padding-bottom:24px}h1{font-size:4
 <figcaption>slot 示例仅适用于 block_size=128 的稠密连续布局；设备完成与 host 返回分开记录。 <a href="#hooks">查看技术细节</a></figcaption>
 <div class="diagram-tools"><button type="button" data-zoom="mapping" aria-label="放大图 4：映射对齐：计划写哪里，实际写到了哪里">放大</button><button type="button" data-download="mapping" aria-label="下载图 4 SVG">下载 SVG</button></div></figure>
 </section><section class="visual-section" id="fig-pd-checkpoints">
-<h2><span class="n">图 05</span>PD：用检查点缩小污染窗口</h2>
-<p class="intro">同时保留产生后、导出前、接收后、布局完成和首次读取的证据。</p>
+<h2><span class="n">图 05</span>PD 事件与内容分析的职责分工</h2>
+<p class="intro">当前记录源目标块、请求关联与 host 传输返回；图中的内容摘要检查点是可选扩展，比较判断属于消费者。</p>
 <figure class="diagram"><div class="diagram-scroll"><svg xmlns="http://www.w3.org/2000/svg" id="svg-pd-checkpoints" viewBox="0 0 1040 645" role="img" aria-labelledby="pd-checkpoints-title pd-checkpoints-desc">
 <title id="pd-checkpoints-title">PD校验时序</title><desc id="pd-checkpoints-desc">P生成和导出时摘要为A，D收到字节后还需要等待布局转换完成。如果D布局完成时摘要为B，则首次差异在export到layout_ready之间，但不能直接归因网络。</desc>
 <defs>
@@ -247,10 +248,10 @@ main{max-width:1440px;padding-top:40px}header{padding-bottom:24px}h1{font-size:4
 <text x="238" y="463" font-size="18" text-anchor="middle" class="dg-note">布局转换完成后再做 canonical 比较</text>
 </svg></div>
 <figcaption>A/B 是示意摘要。bytes_complete 不代表 layout_ready，也不代表与 P 内容一致；跨 TP/PP 先对齐 shard。 <a href="#transfer">查看技术细节</a></figcaption>
-<div class="diagram-tools"><button type="button" data-zoom="pd-checkpoints" aria-label="放大图 5：PD：用检查点缩小污染窗口">放大</button><button type="button" data-download="pd-checkpoints" aria-label="下载图 5 SVG">下载 SVG</button></div></figure>
+<div class="diagram-tools"><button type="button" data-zoom="pd-checkpoints" aria-label="放大图 5：PD 事件与内容分析的职责分工">放大</button><button type="button" data-download="pd-checkpoints" aria-label="下载图 5 SVG">下载 SVG</button></div></figure>
 </section><section class="visual-section" id="fig-offload">
-<h2><span class="n">图 06</span>外部存储：索引命中不等于内容正确</h2>
-<p class="intro">传输 ID 连接源目标块，object generation 连接 put / get，checksum 连接内容。</p>
+<h2><span class="n">图 06</span>外存事件的扩展参考</h2>
+<p class="intro">未来可用 adapter 记录 put/get 和对象版本；checksum 的生成、验证与错误处置由相应存储或诊断工具负责。</p>
 <figure class="diagram"><div class="diagram-scroll"><svg xmlns="http://www.w3.org/2000/svg" id="svg-offload" viewBox="0 0 1040 450" role="img" aria-labelledby="offload-title offload-desc">
 <title id="offload-title">CPU及外部存储版本闭环</title><desc id="offload-desc">设备卸载到存储对象时绑定对象generation、有效范围与内容摘要，回迁时核对同一个generation，并等H2D完成后才能发布可读。</desc>
 <defs>
@@ -290,10 +291,10 @@ main{max-width:1440px;padding-top:40px}header{padding-bottom:24px}h1{font-size:4
 <text x="520" y="430" font-size="20" text-anchor="middle" class="">D2H ready → 存储提交 → 版本匹配 → H2D ready → 首次读取</text>
 </svg></div>
 <figcaption>如果后端无法提供可关联的对象版本或摘要，只能声明搬运链路可见，不能声明内容校验闭环。 <a href="#transfer">查看技术细节</a></figcaption>
-<div class="diagram-tools"><button type="button" data-zoom="offload" aria-label="放大图 6：外部存储：索引命中不等于内容正确">放大</button><button type="button" data-download="offload" aria-label="下载图 6 SVG">下载 SVG</button></div></figure>
+<div class="diagram-tools"><button type="button" data-zoom="offload" aria-label="放大图 6：外存事件的扩展参考">放大</button><button type="button" data-download="offload" aria-label="下载图 6 SVG">下载 SVG</button></div></figure>
 </section><section class="visual-section" id="fig-attribution">
-<h2><span class="n">图 07</span>异常定位：证据能支持到哪一步，结论就写到哪一步</h2>
-<p class="intro">全链路 trace 的输出是可复查的失败边与证据缺口，避免凭时间相邻就归责。</p>
+<h2><span class="n">图 07</span>消费者如何使用 trace 证据</h2>
+<p class="intro">Trace 输出原始事件、派生关联及缺口。下图是外部分析者的判断方式；模块本身不输出最终根因。</p>
 <figure class="diagram"><div class="diagram-scroll"><svg xmlns="http://www.w3.org/2000/svg" id="svg-attribution" viewBox="0 0 1040 550" role="img" aria-labelledby="attribution-title attribution-desc">
 <title id="attribution-title">异常证据与归因</title><desc id="attribution-desc">数据出现差异后，先检查事件覆盖、布局和因果是否完整。缺失证据则保留宽窗口；只有快照则无法归责dummy；实际写事件、代次和并发证据齐全才可确认写入责任。</desc>
 <defs>
@@ -328,10 +329,10 @@ main{max-width:1440px;padding-top:40px}header{padding-bottom:24px}h1{font-size:4
 <text x="520" y="532" font-size="18" text-anchor="middle" class="dg-note">取证顺序：冻结事件窗口 → 找第一条失败边 → 按 token / layer 深挖</text>
 </svg></div>
 <figcaption>confirmed / suspect / inconclusive 分别表达不同证据强度；没有告警不代表不存在污染。 <a href="#evidence">查看技术细节</a></figcaption>
-<div class="diagram-tools"><button type="button" data-zoom="attribution" aria-label="放大图 7：异常定位：证据能支持到哪一步，结论就写到哪一步">放大</button><button type="button" data-download="attribution" aria-label="下载图 7 SVG">下载 SVG</button></div></figure>
+<div class="diagram-tools"><button type="button" data-zoom="attribution" aria-label="放大图 7：消费者如何使用 trace 证据">放大</button><button type="button" data-download="attribution" aria-label="下载图 7 SVG">下载 SVG</button></div></figure>
 </section>
-<div class="rollout-summary"><p><strong>实施顺序：</strong>先打通身份与事件关联 → 完成 v1 + Mooncake 的内容闭环 → 扩展 CPU / Store 和其他特性。</p><p><strong>验收重点：</strong>合法共享不误报、污染可定位到失败边、缺失证据不冒充确定结论。</p></div>
-<details class="appendix" id="technical-details"><summary>展开技术细节：PPT 分析、事件字段、代码埋点、验收与源码</summary><p class="small">原设计正文保留于此，按需查阅。图中的“查看技术细节”会自动展开对应章节。</p><div class="appendix-content"><section id="decision">
+<div class="rollout-summary"><p><strong>模块验收：</strong>已支持路径采集准确、关联检索完整、作用域不串线、未知状态明确。</p><p><strong>外部职责：</strong>复读判定、bad/ref 数值比较、mask 干预与最终根因分析由调用者或其他工具完成。</p></div>
+<details class="appendix" id="technical-details"><summary>展开早期扩展讨论与源码依据（保留供参考）</summary><p class="small">以下是早期系统级设计讨论，含状态机、自动检测、数值对比等范围更大的设想。当前模块契约以页首及 kv-block-trace-contract.md 为准，不将这些扩展全部列为 trace 的完成条件。图中的链接可定位讨论背景。</p><div class="appendix-content"><section id="decision">
 <h2><span class="n">A01 / DECISION</span>设计结论</h2>
 <p>保留现有 <code>KVTrace → JSONL → tools/kv_block_trace.py</code> 路径，在它上面补全身份、因果关联和边界证据。第一阶段交付可回放的链路，后续把 L1 行为校验、语义摘要和内容校验接到同一事件流。</p>
 <ol>
