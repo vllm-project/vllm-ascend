@@ -20,8 +20,13 @@ up to 16 rows per batch; full aligned rows use two-row strided output DMA.
 When there are no more tokens than launched cores, each core handles one row
 to avoid leaving half the cores idle.
 Larger rows are split into 32-element-aligned tiles of at most 8192 elements.
-GM offsets use 64-bit arithmetic. Unaligned rows use one core to avoid
-neighboring cores sharing a partial 32-byte output block. Explicit MTE events
+GM offsets use 64-bit arithmetic. Unaligned widths of at least 1024 elements
+partition the flattened output into aligned tiles. Each core owns complete
+32-byte output blocks; row boundaries inside a tile are copied serially by
+the owning core. The input address is derived from the output row and column.
+This permits parallel writes without neighboring cores sharing a partial block,
+at the cost of rereading inputs for different streams. Smaller unaligned widths
+retain the single-core implementation. Explicit MTE events
 protect load-to-store dependencies and UB reuse. No numerical conversion occurs.
 The conservative original tile budget is retained for this initial port.
 

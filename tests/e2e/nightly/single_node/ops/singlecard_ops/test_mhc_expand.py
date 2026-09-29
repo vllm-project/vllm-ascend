@@ -54,6 +54,22 @@ def test_mhc_expand_bit_patterns(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("mult", [1, 2, 4, 8])
+@pytest.mark.parametrize("hidden", [1023, 1025, 8191, 8193, 16385, 32769])
+def test_mhc_expand_unaligned_output_ownership(dtype, mult, hidden):
+    # Offset the contiguous input, and vary every row/stream boundary's values.
+    # Repeated launches help expose races between neighboring output tiles.
+    tokens = 5
+    for seed in (7, 19, 43):
+        generator = torch.Generator().manual_seed(seed)
+        bits = torch.randint(-32768, 32768, (tokens * hidden + 1,), dtype=torch.int16, generator=generator)
+        x = bits.view(dtype).to("npu")[1:].reshape(tokens, hidden)
+        expected = x.cpu().unsqueeze(1).repeat(1, mult, 1)
+        for _ in range(3):
+            assert_bits_equal(torch.ops._C_ascend.npu_mhc_expand(x, mult), expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_mhc_expand_npu_graph(dtype):
     x = torch.randn(16, 7168, dtype=dtype, device="npu")
     for _ in range(3):
