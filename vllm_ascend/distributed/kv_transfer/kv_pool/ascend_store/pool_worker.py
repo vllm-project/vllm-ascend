@@ -1140,10 +1140,12 @@ class KVPoolWorker:
                 self.sub_size_bytes,
             )
 
-        # Initialize store, register buffers, and start transfer threads
-        # directly here (like main) — no separate init_backend handshake.
-        if self.use_layerwise_transfer:
-            self.m_store.ensure_initialized()
+        # Register buffers eagerly; they stay pending inside the backend
+        # until the store initializes. Do NOT eagerly ensure_initialized()
+        # here: initializing the fabric store during worker startup wedges
+        # the first real forward compute stream on single-node (peerless)
+        # deployments. The store initializes lazily at the first real
+        # forward step via get_finished() -> ensure_store_initialized().
         self.m_store.register_buffer(ptrs, lengths)
         if self.use_block_key_layerwise:
             self.m_store.validate_layerwise_support()
@@ -1167,7 +1169,6 @@ class KVPoolWorker:
             return
         self.current_layer = 0
         self.layerwise_retrievers = []
-        logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
             return
         for request in metadata.requests:
@@ -1791,6 +1792,13 @@ class KVPoolWorker:
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
+            # Decode-step self-offload loads (the scheduler fabricates
+            # kvpool_cached_tokens == vllm_cached_tokens for a running
+            # request) race the request's own async saves: a not-yet-
+            # committed block reports gva=0. The KV is resident in HBM and
+            # batch_copy skips zero-GVA blocks, so tolerate the miss instead
+            # of failing the multi-group load.
+            pd_self_offload = request.load_spec.vllm_cached_tokens == request.load_spec.kvpool_cached_tokens
             cached_tokens = request.load_spec.kvpool_cached_tokens
             if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
@@ -1899,6 +1907,14 @@ class KVPoolWorker:
                     gvas.append(gva)
                     if gva > 0:
                         valid_gva_indices.append(len(gvas) - 1)
+                    elif pd_self_offload:
+                        logger.debug(
+                            "load_gvas: req=%s group=%d self-offload block not stored yet (size=%d), skip; block_id=%s",
+                            request.req_id,
+                            group_id,
+                            sizes if sizes else 0,
+                            int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else "N/A",
+                        )
                     else:
                         if block_idx < len(block_ids_by_group):
                             invalid_block_ids.append(int(block_ids_by_group[block_idx]))
@@ -1955,7 +1971,7 @@ class KVPoolWorker:
                             leased_keys.append(keys[gva_index])
                         else:
                             gvas[gva_index] = 0
-                            if block_id is not None:
+                            if block_id is not None and not pd_self_offload:
                                 invalid_block_ids.append(block_id)
                             logger.warning(
                                 "load_gvas: req=%s group=%d lease failed result=%d, block_id=%s load failed",
