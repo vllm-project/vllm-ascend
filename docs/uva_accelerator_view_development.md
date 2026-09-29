@@ -2,16 +2,15 @@
 
 ## Implementation
 
-`csrc/torch_binding.cpp` registers two Host runtime operations in `vllm_ascend_C`:
+`csrc/torch_binding.cpp` registers one Host runtime operation in `vllm_ascend_C`. Its name follows vLLM's `get_cuda_view_from_cpu_tensor` convention, with `npu` in place of `cuda`:
 
-- `torch.ops._C_ascend.can_get_npu_view_from_cpu_tensor(cpu_tensor) -> bool`
-- `torch.ops._C_ascend.get_npu_view_from_cpu_tensor(cpu_tensor) -> Tensor`
+- `torch.ops._C_ascend.get_npu_view_from_cpu_tensor(cpu_tensor) -> Tensor | None`
 
-For a nonempty tensor, the helper calls `aclrtHostGetDevicePointer` on the pinned CPU storage base, adds `storage_offset * element_size` to the mapped address, and constructs an NPU tensor with the input shape, strides, and dtype. The view does not copy data or own the mapped allocation. Its deleter retains the CPU tensor so that its storage remains alive while the view exists. `torch_npu` remains responsible for Host memory registration and unregistration. An empty input produces an empty NPU tensor with the same metadata.
+For a nonempty tensor, the helper calls `aclrtHostGetDevicePointer` once on the pinned CPU storage base, adds `storage_offset * element_size` to the mapped address, and constructs an NPU tensor with the input shape, strides, and dtype. If the allocation cannot be mapped, it returns `None` so the caller can use its copy fallback. The view does not copy data or own the mapped allocation. Its deleter retains the CPU tensor so that its storage remains alive while the view exists. `torch_npu` remains responsible for Host memory registration and unregistration. An empty input produces an empty NPU tensor with the same metadata.
 
 This helper is part of the `vllm_ascend_C` Host runtime extension. It is not an AscendC/ACLNN compute operator and does not belong in `CUSTOM_OPS`, `op_host`, or `op_kernel`. The helper checks each allocation at runtime; API availability at compile time does not establish that a particular allocation is mapped.
 
-`vllm_ascend/patch/worker/patch_v2/patch_uva.py` loads `vllm_ascend_C` when real UVA is requested and calls the registered operations directly. `UvaBufferWrapper` uses the mapped view only when the current allocation can be mapped. Otherwise, it retains the asynchronous Host-to-Device copy path and tracks modified CPU rows. It does not add a forwarding Python module.
+`vllm_ascend/patch/worker/patch_v2/patch_uva.py` loads `vllm_ascend_C` when real UVA is requested and calls the registered operation directly. `UvaBufferWrapper` uses the mapped view when the operation returns a tensor. When it returns `None`, the wrapper retains the asynchronous Host-to-Device copy path and tracks modified CPU rows. It does not add a forwarding Python module.
 
 ## Functionality and input/output requirements
 
@@ -19,11 +18,10 @@ The feature supplies an accelerator-typed view for MRV2 runtime metadata and sta
 
 | Interface | Input requirements | Output and failure behavior |
 | --- | --- | --- |
-| `can_get_npu_view_from_cpu_tensor` | A defined CPU tensor with strided layout. A nonempty tensor must be pinned and its storage must have a usable NPU mapping. | Returns `true` for an eligible empty tensor or a nonempty mapped allocation; otherwise returns `false`. |
-| `get_npu_view_from_cpu_tensor` | A defined CPU tensor with strided layout. A nonempty tensor must be pinned and mapped. Views with storage offsets and noncontiguous strides are supported. | Returns an NPU tensor preserving dtype, shape, and strides. A nonempty result aliases the mapped CPU storage and keeps its CPU owner alive. Invalid or unmapped nonempty input raises an error. An empty input returns an empty NPU tensor. |
+| `get_npu_view_from_cpu_tensor` | A defined CPU tensor with strided layout. Views with storage offsets and noncontiguous strides are supported. | Returns an NPU tensor preserving dtype, shape, and strides when the allocation is mapped. A nonempty result aliases the mapped CPU storage and keeps its CPU owner alive. Unpinned or unmapped nonempty input returns `None` for copy fallback; invalid device or layout raises an error. An empty input returns an empty NPU tensor. |
 | `UvaBufferWrapper(size, dtype)` | A valid buffer size and PyTorch dtype; the wrapper creates pinned CPU storage. | `cpu` and `np` expose the CPU buffer. `uva(n)` returns the full NPU buffer or its first `n` rows. If the allocation is mapped and UVA is enabled, it returns a view; otherwise it copies modified rows to an NPU buffer before returning it. |
 
-The mapped view does not perform a payload copy or synchronization. Callers must respect the ordering requirements of CPU writes and NPU reads. A successful capability check applies to the checked allocation; it is not a device-wide promise that future allocations will be mapped.
+The mapped view does not perform a payload copy or synchronization. Callers must respect the ordering requirements of CPU writes and NPU reads. A successful mapping applies to the current allocation; it is not a device-wide promise that future allocations will be mapped. Unlike vLLM's CUDA implementation, this helper does not allocate replacement pinned storage for an unpinned input; the MRV2 wrapper uses its existing copy fallback.
 
 ## Test method
 
@@ -58,7 +56,6 @@ import torch
 import torch_npu  # noqa: F401
 import vllm_ascend.vllm_ascend_C  # noqa: F401
 
-assert hasattr(torch.ops._C_ascend, "can_get_npu_view_from_cpu_tensor")
 assert hasattr(torch.ops._C_ascend, "get_npu_view_from_cpu_tensor")
 PY
 ```
@@ -70,18 +67,17 @@ Run the component tests on an Ascend NPU with registered pinned Host memory:
 ```bash
 PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True \
   python -m pytest -vv -rs \
-  tests/ut/device/test_uva_view.py \
-  tests/ut/device/test_uva_wrapper.py
+  tests/ut/device/test_uva.py
 ```
 
 Keep the per-node results and skip reasons from `-vv -rs`. The tests have different execution boundaries:
 
 | Tests | What they verify | Device execution |
 | --- | --- | --- |
-| `test_npu_view_preserves_metadata`, `test_empty_npu_view`, `test_npu_view_rejects_unpinned_or_device_input` | Dtype, shape, strides, device type, and rejected inputs. | Create NPU tensors; do not read mapped payload on the device. |
+| `test_npu_view_preserves_metadata`, `test_empty_npu_view`, `test_npu_view_returns_none_for_unpinned_input` | Dtype, shape, strides, device type, fallback result, and invalid device input. | Create NPU tensors; do not read mapped payload on the device. |
 | `test_npu_views_keep_cpu_storage_alive` | Multiple views retain their CPU owner until the last view is released. | Host weak references and garbage collection; no device payload read. |
 | `test_npu_view_reads_cpu_updates_without_copy`, `test_npu_view_keeps_cpu_storage_alive` | CPU updates and storage lifetime through a mapped view. | Real NPU/Triton `tl.load` only when these nodes are not skipped. The installed Triton-Ascend launcher must accept mapped Host pointers. |
-| `test_fallback_copies_modified_prefix_and_sparse_rows`, `test_unmapped_storage_uses_fallback`, `test_pool_fallback_growth_shrink_and_round_robin` | Modified-row copies, unmapped fallback, input types, pool growth, and slot rotation. | Real NPU H2D copies and readback; some capability decisions are mocked. |
+| `test_fallback_copies_modified_prefix_and_sparse_rows`, `test_unmapped_storage_uses_fallback`, `test_pool_fallback_growth_shrink_and_round_robin` | Modified-row copies, unmapped fallback, input types, pool growth, and slot rotation. | Real NPU H2D copies and readback; mapping failure is mocked where needed. |
 | `test_real_path_uses_npu_typed_view`, `test_pool_real_path_returns_mapped_view` | Wrapper and pool return an NPU mapped view. | Real view creation with mocked availability; no device payload read. |
 
 The pool pointer test compares two NPU mappings of the same CPU allocation. It does not assume the Host and NPU virtual addresses are equal.

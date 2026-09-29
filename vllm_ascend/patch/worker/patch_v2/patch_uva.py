@@ -136,14 +136,11 @@ class UvaBufferWrapper:
         if requested_real_uva:
             import vllm_ascend.vllm_ascend_C  # noqa: F401
 
-        self._use_real_uva = requested_real_uva and torch.ops._C_ascend.can_get_npu_view_from_cpu_tensor(self._cpu)
+        view = torch.ops._C_ascend.get_npu_view_from_cpu_tensor(self._cpu) if requested_real_uva else None
+        self._use_real_uva = view is not None
         if requested_real_uva and not self._use_real_uva:
             logger.warning_once("Pinned CPU memory is not mapped for NPU UVA; using the async H2D fallback")
-        self._uva: torch.Tensor = (
-            torch.ops._C_ascend.get_npu_view_from_cpu_tensor(self._cpu)
-            if self._use_real_uva
-            else torch.zeros_like(self._cpu, device="npu")
-        )
+        self._uva: torch.Tensor = view if view is not None else torch.zeros_like(self._cpu, device="npu")
 
     def _mark_cpu_modified(self, key: int):
         self._modified_indices.add(key)
