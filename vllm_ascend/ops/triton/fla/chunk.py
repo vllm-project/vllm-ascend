@@ -23,7 +23,7 @@ from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
 from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril
-from .utils import input_guard, prepare_final_chunk_indices
+from .utils import input_guard, prepare_chunk_indices, prepare_final_chunk_indices
 from .wy_fast import recompute_w_u_fwd
 
 
@@ -55,6 +55,10 @@ def chunk_gated_delta_rule_fwd(
     update_chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.update_chunk_offsets_chunk64
     final_chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.final_chunk_indices_chunk64
     chunk_indices_large_block = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_large_block
+    if chunk_indices_chunk64 is None and cu_seqlens is not None:
+        # The AscendC binding sizes h from the number of chunk indices. Packed
+        # sequences each round up independently, unlike a single dense sequence.
+        chunk_indices_chunk64 = prepare_chunk_indices(cu_seqlens, chunk_size)
     g = chunk_local_cumsum(
         g,
         chunk_size=chunk_size,
