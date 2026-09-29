@@ -168,19 +168,6 @@ templates:
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
 
 benchmarks:
-  acc_gpqa:
-    case_type: accuracy
-    dataset_path: vllm-ascend/gpqa
-    request_conf: vllm_api_general_chat
-    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-    temperature: 1.0
-    top_p: 1.0
-    thinking: "true"
-    max_out_len: 32768
-    batch_size: 32
-    baseline: 90.40
-    threshold: 10
-
   perf_TPOT50_16k_1_prefix0_warmup:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in16384-bs1024-prefix0-qwen

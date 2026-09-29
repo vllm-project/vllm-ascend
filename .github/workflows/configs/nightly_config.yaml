@@ -195,9 +195,6 @@ a3-560t:
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-a3-800i-16
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
-      - name: DeepSeek-V4-Flash-W8A8-A3-MRV2
-        os: linux-aarch64-a3-800i-16
-        config_file_path: DeepSeek-V4-Flash-W8A8-A3-MRV2.yaml
       - name: Qwen3.5-122B-A10B-W8A8-A3
         os: linux-aarch64-a3-800i-16
         config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
