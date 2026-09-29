@@ -107,7 +107,7 @@ python -m tools.bisect.auto_bisect \
 
 - `--num-nodes` 不填则自动从配置 YAML 的 `num_nodes` 字段读取;`--node-index` 不填则读 `LWS_WORKER_INDEX`(LWS 自动注入)。LWS 编排下这两个都无需手填。
 - `--coord-dir` 不填时默认 `/root/.cache/nightly_bisect/coord`;LWS 下 `/root/.cache` 是共享 PVC,各节点天然共享,可不填。非 LWS 环境需手动指定共享路径。
-- internal / external DP 通过 `--config-base-path`(或 yaml 路径含 `external_dp/config`)自动区分。
+- internal / external DP 由配置 YAML 的 `dp_load_balancing` 字段决定；`--config-base-path` 只负责定位配置文件。
 - 所有节点切到同一 commit 后才会开跑(屏障同步)。
 
 > ⚠️ **常见坑(barrier timeout)**:报错 `Barrier timeout: only 1/2 nodes ready` 表示**只有 master 跑了 bisect、worker 节点没跑**。多机 bisect 要求**每个节点都启动 `auto_bisect.py --scene multi_node`**(worker 节点会自动进入 worker 循环:接收 commit→部署→上报 ready→等 master)。如果你的流水线只在 leader 上调了 bisect、worker pod 只跑了用例,worker 永远不会加入屏障,master 就会超时。修法:让流水线在**所有节点**(含 worker)都执行同一条 bisect 命令,且共享同一个 `--coord-dir`。
@@ -291,7 +291,7 @@ vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspa
 #### `--num-nodes`
 
 - **作用**:集群节点总数;master 用它做屏障(等齐所有节点就绪才开跑)。
-- **默认**:**不填则自动从多机配置 YAML 的 `num_nodes` 字段读取**(在 `internal_dp/config` 或 `external_dp/config`,或 `--config-base-path` 指定的目录里按 `--config-yaml` 找该文件)。
+- **默认**:**不填则自动从多机配置 YAML 的 `num_nodes` 字段读取**(在 `--config-base-path` 指定的目录里按 `--config-yaml` 找该文件)。
 - **何时手填**:配置文件里没有 `num_nodes`、或你想覆盖时。单机场景固定为 1。
 - **注意**:这里**不依赖** `LWS_GROUP_SIZE` 之类的环境变量(节点数的权威来源就是配置 YAML,与现有 nightly 多机逻辑一致)。
 
@@ -324,9 +324,9 @@ vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspa
 
 #### `--config-base-path`
 
-- **作用**:覆盖 configs 的基准目录,设进环境变量 `CONFIG_BASE_PATH`;主要用于**多机 internal/external DP** 区分配置目录。
+- **作用**:覆盖 configs 的基准目录,设进环境变量 `CONFIG_BASE_PATH`,用于定位 `--config-yaml` 指定的配置文件。
 - **默认**:环境变量 `CONFIG_BASE_PATH`。
-- **注意**:路径里含 `external_dp/config` 时,多机会自动选用 external DP 的 pytest 入口。
+- **注意**:当前提交通过配置 YAML 的 `dp_load_balancing` 选择 DP 模式；二分到尚无公共 pytest 入口的旧提交时，才根据旧目录路径选择兼容入口。
 
 ---
 
