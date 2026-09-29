@@ -14,12 +14,15 @@ cannot walk sys.modules mid-registration.
 from __future__ import annotations
 
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.worker import NPUWorker
 
 _JOIN_TIMEOUT_S = 600.0
 
@@ -48,9 +51,14 @@ def _preimport() -> None:
     import vllm.triton_utils  # noqa: F401
 
     import vllm_ascend.ops.triton.penalty  # noqa: F401
+    import vllm_ascend.ops.triton.prepare_indexer_indices  # noqa: F401
+    import vllm_ascend.ops.triton.quantize_indexer_query  # noqa: F401
     import vllm_ascend.ops.triton.reject_sample  # noqa: F401
     import vllm_ascend.ops.triton.rms_norm  # noqa: F401
     import vllm_ascend.ops.triton.spec_decode.utils  # noqa: F401
+    from vllm_ascend.model_executor.warmup.indexer_triton_warmup import (  # noqa: F401
+        indexer_triton_warmup,
+    )
     from vllm_ascend.model_executor.warmup.penalties_triton_warmup import (  # noqa: F401
         penalties_triton_warmup,
     )
@@ -63,6 +71,9 @@ def _preimport() -> None:
 
 
 def _run(shim: _WarmupShim, device_index: int) -> None:
+    from vllm_ascend.model_executor.warmup.indexer_triton_warmup import (
+        indexer_triton_warmup,
+    )
     from vllm_ascend.model_executor.warmup.penalties_triton_warmup import (
         penalties_triton_warmup,
     )
@@ -77,10 +88,12 @@ def _run(shim: _WarmupShim, device_index: int) -> None:
         logger.warning("Early kernel warmup set_device failed; regular warmup still runs", exc_info=True)
         return
 
+    worker = cast("NPUWorker", shim)
     items = (
-        ("rejection_sampler", lambda: rejection_sampler_triton_warmup(shim)),
-        ("penalties", lambda: penalties_triton_warmup(shim)),
-        ("rms", lambda: triton_rms_warmup(shim, assume_used=True)),
+        ("rejection_sampler", lambda: rejection_sampler_triton_warmup(worker)),
+        ("penalties", lambda: penalties_triton_warmup(worker)),
+        ("rms", lambda: triton_rms_warmup(worker, assume_used=True)),
+        ("indexer", lambda: indexer_triton_warmup(worker)),
     )
     for name, fn in items:
         try:

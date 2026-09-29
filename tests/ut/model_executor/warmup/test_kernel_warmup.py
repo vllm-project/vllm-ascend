@@ -1,25 +1,47 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Unit tests for ``kernel_warmup``."""
+"""Unit tests for shared-registry kernel warmup orchestration."""
 
 import importlib
+from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import patch
-
-from tests.ut.model_executor.warmup.helpers import make_mock_worker
 
 kw = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
 
 
-@patch.object(kw, "logger")
-@patch.object(kw, "triton_rms_warmup")
-@patch.object(kw, "penalties_triton_warmup")
-@patch.object(kw, "rejection_sampler_triton_warmup")
-@patch.object(kw, "indexer_triton_warmup")
-@patch.object(kw, "HAS_TRITON", True)
-def test_kernel_warmup(mock_indexer, mock_rej, mock_pen, mock_rms, mock_logger):
-    worker = make_mock_worker()
-    kw.kernel_warmup(worker)
+class _Registry:
+    def __init__(self):
+        self.activations = 0
+        self.warmups = 0
 
-    mock_rej.assert_called_once_with(worker)
-    mock_pen.assert_called_once_with(worker)
+    @contextmanager
+    def activate(self):
+        self.activations += 1
+        yield
+
+    def warmup(self):
+        self.warmups += 1
+
+
+def test_kernel_warmup_uses_shared_registry_once():
+    registry = _Registry()
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(kernel_config=SimpleNamespace(enable_jit_warmup=True)),
+        model_runner=SimpleNamespace(jit_warmup_registry=registry),
+    )
+
+    with (
+        patch.object(kw, "HAS_TRITON", True),
+        patch.object(kw, "register_triton_rms_warmup", return_value=True) as mock_rms,
+        patch.object(kw, "register_penalties_triton_warmup", return_value=True) as mock_pen,
+        patch.object(kw, "register_rejection_sampler_triton_warmup", return_value=True) as mock_rej,
+        patch.object(kw, "register_indexer_triton_warmup", return_value=True) as mock_indexer,
+    ):
+        kw.kernel_warmup(worker)
+
     mock_rms.assert_called_once_with(worker)
+    mock_pen.assert_called_once_with(worker)
+    mock_rej.assert_called_once_with(worker)
     mock_indexer.assert_called_once_with(worker)
+    assert registry.activations == 1
+    assert registry.warmups == 1

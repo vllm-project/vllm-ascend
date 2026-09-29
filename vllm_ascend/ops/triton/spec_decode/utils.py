@@ -15,6 +15,16 @@
 #
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/v1/spec_decode/utils.py
 
+from dataclasses import dataclass
+from typing import Any
+
+import torch
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
 from vllm.triton_utils import tl, triton
 
 
@@ -63,6 +73,56 @@ def prepare_inputs_padded_kernel(
         index_to_sample = q_last_tok_idx - num_rejected
         tl.store(token_indices_to_sample_ptr + offsets, index_to_sample, mask=mask)
         tl.store(num_rejected_tokens_gpu_ptr + offsets, num_rejected, mask=mask)
+
+
+PREPARE_INPUTS_BLOCK_SIZE = 4
+
+
+class PrepareInputsPaddedKernel(VllmTritonJitKernel["PrepareInputsPaddedKernel.CompileKey"]):
+    BLOCK_SIZE = PREPARE_INPUTS_BLOCK_SIZE
+    kernel = prepare_inputs_padded_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_size: int
+
+    def dispatch(self, *, block_size: int) -> CompileKey:
+        return self.CompileKey(block_size=block_size)
+
+    def get_warmup_keys(self, context: Any) -> list[CompileKey]:
+        del context
+        return self._trace_dispatch(self.dispatch)(block_size=self.BLOCK_SIZE)
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            cu_num_draft_tokens=TritonWarmupTensor(torch.int32),
+            valid_sampled_tokens_count=TritonWarmupTensor(torch.int64),
+            query_start_loc=TritonWarmupTensor(torch.int32),
+            token_indices_to_sample=TritonWarmupTensor(torch.int32),
+            num_rejected_tokens_gpu=TritonWarmupTensor(torch.int32),
+            num_reqs=1,
+            grid_size=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        cu_num_draft_tokens: torch.Tensor,
+        valid_sampled_tokens_count: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        token_indices_to_sample: torch.Tensor,
+        num_rejected_tokens_gpu: torch.Tensor,
+        *,
+        num_reqs: int,
+        grid_size: int,
+    ) -> LaunchSpec:
+        return (grid_size,), dict(
+            query_start_loc_gpu_ptr=query_start_loc,
+            BLOCK_SIZE=self.BLOCK_SIZE,
+        )
+
+
+_PREPARE_INPUTS_PADDED_KERNEL = PrepareInputsPaddedKernel()
 
 
 @triton.jit
