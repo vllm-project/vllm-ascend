@@ -1,6 +1,6 @@
 # Single source of truth for the Nightly-A2 / Nightly-A3 / Nightly-A3-560T test matrix.
 # SOC differentiation: A2 runs on a2b3 runners and -a2 images, A3 runs on
-# a3 runners and -a3 images, A3-560T runs on cn12-001-labeled a3 runners and
+# a3 runners and -a3 images, A3-560T runs on linux-aarch64-a3-800i-x -labeled a3 runners and
 # reuses -a3 images. Adding a new test case is just appending a `- name: ...`
 # entry under the matching section. PRs that add entries here can be exercised
 # via `/nightly <name>` (or `/nightly <name> --a3-560t` for the 560T cluster)
@@ -179,9 +179,9 @@ a3-560t:
       - name: Qwen3.8-27B-w8a8-A3
         os: linux-aarch64-a3-800i-2
         config_file_path: Qwen3.8-27B-w8a8-A3.yaml
-      - name: MiniMax-M3-W8A8-A3
+      - name: MiniMax-M3-W8A8-A3-EAGLE3
         os: linux-aarch64-a3-800i-16
-        config_file_path: MiniMax-M3-W8A8-A3.yaml
+        config_file_path: MiniMax-M3-W8A8-A3-EAGLE3.yaml
       - name: qwen_3_6_27b_w8a8_A3
         os: linux-aarch64-a3-800i-16
         config_file_path: qwen_3_6_27b_w8a8_A3.yaml
