@@ -7,6 +7,7 @@ so they run on Windows as well as in CI.
 import argparse
 import asyncio
 import json
+from typing import Any
 
 import pytest
 from starlette.requests import Request
@@ -227,7 +228,7 @@ def test_cached_token_fields_follow_the_protocol():
     assert proxy.write_cached_tokens_for_api("/messages", message_out, 32) is True
     assert message_out["usage"]["cache_read_input_tokens"] == 32
 
-    completed = {"type": "response.completed", "response": {"usage": {"input_tokens": 10}}}
+    completed: dict[str, Any] = {"type": "response.completed", "response": {"usage": {"input_tokens": 10}}}
     assert proxy.write_cached_tokens_for_api("/responses", completed, 7) is True
     assert completed["response"]["usage"]["input_tokens_details"]["cached_tokens"] == 7
 
