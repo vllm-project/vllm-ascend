@@ -360,7 +360,10 @@ def test_recving_thread_socket_pool_creates_once_and_reuses_by_endpoint(
         socket_type=zmq.REQ,  # type: ignore[attr-defined]
         bind=False,
     )
-    assert socket.setsockopt.call_args_list == [call(zmq.SNDTIMEO, timeout), call(zmq.RCVTIMEO, timeout)]
+    assert socket.setsockopt.call_args_list == [
+        call(zmq.SNDTIMEO, timeout),  # type: ignore[attr-defined]
+        call(zmq.RCVTIMEO, timeout),  # type: ignore[attr-defined]
+    ]
 
 
 def test_base_scheduler_clips_attention_and_keeps_mamba_state_blocks() -> None:
@@ -960,7 +963,10 @@ def test_heartbeat_network_uses_one_attempt_and_own_socket(monkeypatch, timeout)
     assert send.call_args.kwargs == {"max_retries": 1}
     assert recv.call_args.kwargs == {"max_retries": 1}
     context.__exit__.assert_called_once()
-    assert sock.setsockopt.call_args_list == [call(zmq.SNDTIMEO, timeout), call(zmq.RCVTIMEO, timeout)]
+    assert sock.setsockopt.call_args_list == [
+        call(zmq.SNDTIMEO, timeout),  # type: ignore[attr-defined]
+        call(zmq.RCVTIMEO, timeout),  # type: ignore[attr-defined]
+    ]
 
 
 @pytest.mark.parametrize("active, expected", [(False, None), (True, 5.0)])
