@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
+    declared_kwarg,
 )
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
@@ -39,7 +40,7 @@ def uses_a5_packed_cache() -> bool:
     return get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
 
 
-def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtype):
+def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtype, bounded_replay=False):
     if uses_a5_packed_cache():
         if head_size != MLA_HEAD_DIM:
             raise ValueError(f"A5 DeepSeek V4.1 requires head size {MLA_HEAD_DIM}, got {head_size}")
@@ -56,6 +57,11 @@ def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtyp
         cache_dtype_str=cache_dtype,
         model_version="deepseek_v41",
         alignment=None,
+        # SWA bounded replay (vLLM #56227). The field and its cache argument
+        # arrive together upstream, and a pin without either rejects the
+        # keyword, so it is spelled out only for the constructor that
+        # declares it.
+        **declared_kwarg(AscendSlidingWindowMLASpec, "bounded_replay", bounded_replay),
     )
 
 
@@ -154,6 +160,12 @@ def get_layer_tuples(specs):
     target_swa = sorted((name for name in swa if ".mtp." not in f".{name}"), key=_layer_number)
     draft_swa = sorted((name for name in swa if ".mtp." in f".{name}"), key=_draft_layer_number)
 
+    # A reduced backbone may contain only the initial SWA layers. Without
+    # full-context source slots, each SWA layer needs its own physical slot.
+    if not full and len(swa) == len(specs):
+        names = target_swa + draft_swa
+        return [specs[name].unpadded_page_size_bytes for name in names], [(name,) for name in names]
+
     layer_tuples: list[tuple[str, ...]] = []
     page_sizes: list[int] = []
     for slot_idx, kv_name in enumerate(full):
@@ -180,6 +192,8 @@ def get_layer_tuples(specs):
 
 def group_cache_specs(specs):
     """Merge full-context resources and pad layer tuples without mutating inputs."""
+    if specs and all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs.values()):
+        return [UniformTypeKVCacheSpecs.from_specs({name: spec}) for name, spec in specs.items()]
     page_sizes, layer_tuples = get_layer_tuples(specs)
     padded = {}
     for page_size, layer_tuple in zip(page_sizes, layer_tuples):
@@ -236,7 +250,10 @@ def _specs_from_groups(groups):
     specs = {}
     for group in groups:
         for name in group.layer_names:
-            specs[name] = group.kv_cache_spec.kv_cache_specs[name]
+            group_spec = group.kv_cache_spec
+            specs[name] = (
+                group_spec.kv_cache_specs[name] if isinstance(group_spec, UniformTypeKVCacheSpecs) else group_spec
+            )
     return specs
 
 
@@ -250,7 +267,7 @@ def get_deepseek_v41_kv_cache_config(
     groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """Allocate four independent layer slots backed by one global block-ID pool."""
+    """Allocate independent layer slots backed by one global block-ID pool."""
     page_sizes, layer_tuples = get_layer_tuples(_specs_from_groups(groups))
     capacity = max(available_memory // sum(page_sizes), 0)
     num_blocks = may_override_num_blocks(vllm_config, capacity)

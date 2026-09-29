@@ -173,6 +173,35 @@ def test_owner_counts_nested_config_and_source_resolution(config, runtime):
     assert type(specs["model.layers.2.self_attn.compressor.state_cache"]) is CircularBufferSpec
 
 
+@pytest.mark.parametrize("packed_groups", [False, True])
+def test_swa_only_reduced_backbone_uses_independent_cache_allocations(config, runtime, packed_groups):
+    config.num_hidden_layers = 2
+    config.compress_ratios = [0, 0]
+    config.kv_source_layer_ids = []
+    config.index_source_layer_ids = []
+    specs = collect_specs(runtime)
+    assert len(specs) == 2
+    assert all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs.values())
+    assert is_deepseek_v41_cache(specs)
+
+    groups = (
+        make_cache_groups(group_cache_specs(specs))
+        if packed_groups
+        else kv_cache_utils.get_kv_cache_groups(runtime, specs)
+    )
+    assert is_deepseek_v41_cache(groups)
+    page_bytes = sum(spec.page_size_bytes for spec in specs.values())
+    assert kv_cache_utils._pool_bytes_per_block(groups) == page_bytes
+    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(runtime, groups, 10 * page_bytes + 1)
+    assert cache_config.num_blocks == 10
+    assert len(cache_config.kv_cache_tensors) == 2
+    assert {tuple(tensor.layers) for tensor in cache_config.kv_cache_tensors} == {(name,) for name in specs}
+    assert sum(tensor.size for tensor in cache_config.kv_cache_tensors) == 10 * page_bytes
+    for tensor in cache_config.kv_cache_tensors:
+        assert tensor.block_stride == specs[tensor.layers[0]].page_size_bytes
+        assert tensor.offset == tensor.layer_stride == 0
+
+
 def test_twelve_groups_share_four_layer_slots(config, runtime):
     original = collect_specs(runtime)
     uniform = group_cache_specs(original)
