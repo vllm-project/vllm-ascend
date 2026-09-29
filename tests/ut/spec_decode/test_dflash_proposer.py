@@ -1,10 +1,29 @@
-# SPDX-License-Identifier: Apache-2.0
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+"""Unit tests for the DFlash speculative-decoding proposer."""
 
+from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend.spec_decode.dflash2_proposer import AscendDflash2Proposer
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
@@ -71,34 +90,6 @@ def test_query_buffers_cover_execution_shape(proposer_cls, max_num_seqs, max_cap
     assert proposer._context_positions_buffer.shape == (_MAX_NUM_TOKENS,)
     assert proposer._context_slot_mapping_buffers.shape == (_MAX_NUM_TOKENS,)
     assert proposer._dflash_hidden_states.shape == (_MAX_NUM_TOKENS, _HIDDEN_SIZE)
-
-#
-# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
-"""Unit tests for the DFlash speculative-decoding proposer."""
-
-from contextlib import contextmanager
-from types import SimpleNamespace
-from unittest.mock import MagicMock
-
-import torch
-from vllm.config import CUDAGraphMode
-
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 
 
 class TestDummySlotMappingCleanup:
