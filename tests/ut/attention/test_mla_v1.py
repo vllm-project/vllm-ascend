@@ -56,7 +56,6 @@ def test_v_up_proj_transpose_bmm_limits(num_tokens, num_heads, kv_lora_rank):
     torch.testing.assert_close(result, expected)
 
 
-
 @pytest.mark.parametrize("kv_lora_rank", [4, 65536])
 def test_v_up_proj_batch_major_matches_weight_dtype(kv_lora_rank):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
@@ -75,7 +74,6 @@ def test_v_up_proj_batch_major_matches_weight_dtype(kv_lora_rank):
 
     assert result.dtype == impl.W_UV.dtype
     torch.testing.assert_close(result, expected)
-
 
 
 @pytest.mark.parametrize(
