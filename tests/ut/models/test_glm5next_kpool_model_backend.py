@@ -81,13 +81,13 @@ def _indexer_metadata(num_tokens: int = 8) -> AscendIndexerKPoolMetadata:
             dtype=torch.int64,
         )[:num_tokens],
         seq_lens=torch.tensor([1, 1], dtype=torch.int32),
-        seq_lens_cpu=torch.tensor([1, 1], dtype=torch.int32),
         positions=torch.tensor([0, 1, 2, 3, 0, 1, 2, 3, 0, 0])[:num_tokens],
         block_size=2,
         compress_ratio=4,
         cum_query_lens=torch.tensor([4, 8], dtype=torch.int32),
         raw_seq_lens=torch.tensor([4, 4], dtype=torch.int32),
-        num_actual_tokens=8,
+        num_tokens=num_tokens,
+        max_pool_seq_len=1,
     )
 
 
@@ -261,10 +261,10 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     normalized_q_c = torch.arange(128, dtype=torch.float32).reshape(64, 2)
     hidden = torch.ones(64, 3)
     metadata = _indexer_metadata()
+    metadata.num_tokens = 64 if graph_mode == CUDAGraphMode.FULL else 8
     metadata.cum_query_lens = torch.arange(1, 9, dtype=torch.int32)
     metadata.raw_seq_lens = torch.ones(8, dtype=torch.int32)
     metadata.seq_lens = torch.zeros(8, dtype=torch.int32)
-    metadata.seq_lens_cpu = metadata.seq_lens.clone()
     metadata.block_table = torch.zeros(8, 1, dtype=torch.int32)
     metadata.positions = torch.zeros(64, dtype=torch.int64)
     metadata.slot_mapping = torch.full((64,), -1, dtype=torch.int64)
@@ -302,3 +302,4 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     assert backend.indexer_op.kwargs["compute_topk"] is True
     assert backend.indexer_op.kwargs["output_buffer"] is backend.topk_indices_buffer
     assert backend.indexer_op.kwargs["allow_cache_packing"] is (graph_mode != CUDAGraphMode.FULL)
+    assert backend.indexer_op.kwargs["max_pool_seq_len"] == metadata.max_pool_seq_len

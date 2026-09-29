@@ -365,6 +365,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         # Reset indices to zeros to prevent stale values from prior
         # dummy runs to cause out-of-bounds indexing during capture.
         self.last_token_indices.zero_()
+        self.idx_mapping.zero_()
 
         # Capture the prefill routine (model forward + compute_logits +
         # sample).
@@ -374,6 +375,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
+        self.on_prefill_begin(self.max_num_reqs)
         with disable_target_pcp_for_replicated_draft(self):
             self.prefill_cudagraph_manager.capture(
                 self._prefill,
@@ -384,15 +386,19 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 self.kv_cache_config,
                 progress_bar_desc="Capturing prefill CUDA graphs",
             )
+        self.on_prefill_end(self.max_num_reqs)
 
         if self.num_speculative_steps == 1:
             return
 
         # Capture all decode draft generation steps as a single graph.
         assert self.decode_cudagraph_manager is not None
+        self.on_multi_step_decode_begin(self.max_num_reqs)
         with (
             disable_target_pcp_for_replicated_draft(self),
-            build_attn_metadata_wrapper(),
+            # Rebuilt metadata must retain capture semantics during every
+            # warmup/recording step, including calls through the new hooks.
+            build_attn_metadata_wrapper(for_cudagraph_capture=True),
         ):
             self.decode_cudagraph_manager.capture(
                 self._multi_step_decode,
@@ -403,6 +409,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 self.kv_cache_config,
                 progress_bar_desc="Capturing decode CUDA graphs",
             )
+        self.on_multi_step_decode_end(self.max_num_reqs)
 
     @torch.inference_mode()
     def _run_model(
