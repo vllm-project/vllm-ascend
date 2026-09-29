@@ -520,5 +520,8 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             ),
             compute_topk=compute_topk,
             output_buffer=self.topk_indices_buffer,
+            # FULL graphs retain padded token rows and replay the captured
+            # dispatch. Keep paged reads independent of the live query count.
+            allow_cache_packing=context.cudagraph_runtime_mode != CUDAGraphMode.FULL,
         )
         return result

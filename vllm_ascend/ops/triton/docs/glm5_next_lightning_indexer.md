@@ -28,6 +28,7 @@
 | `max_pool_seq_len` | Attribute | Upper bound on complete pool count and width of the score buffer | Python int | Scalar, keyword-only |
 | `output_buffer` | Optional output | Existing `[capacity, width]` buffer; width covers the result and any SFA alignment padding | int32 | Same device; contiguous columns and nonoverlapping rows |
 | `pack_tail` | Attribute | Place the tail immediately after the causal history prefix; default `False`, enabled by the model caller | Python bool | Scalar, keyword-only |
+| `allow_cache_packing` | Attribute | Allow the shape-based packed-cache optimization; default `True`, disabled by the model caller in FULL graph mode | Python bool | Scalar, keyword-only |
 | Return value | Output | Logical token indices, `[T, 1, index_topk + P - 1]`; unused columns are `-1` | int32 | ND |
 
 ## Constraints
@@ -40,7 +41,7 @@
 - Cache address offsets use int32 only when the full tensor span fits. Larger caches use scalar int64 page bases and int32 offsets within a page; the page span must fit in int32 and the block size must be a power of two.
 - Capture/replay requires stable shapes, addresses, strides, and scalar attributes (including `max_pool_seq_len`). Query values, weights, positions, pool lengths, and page-table contents may change in the existing buffers. The kernel skips invisible pool sub-tiles at runtime.
 - Outside a captured graph, pool capacities and selected-pool counts are runtime parameters, avoiding a new Triton binary for each context length. Tensor strides and tiling choices still specialize the kernels.
-- The score scratch budget controls token chunking; at least one score row is allocated. Its size is `max_pool_seq_len * sizeof(float32)`, so a single extremely long row can exceed the budget. No constant context-length cutoff is imposed by the wrapper. The optional prefill cache has a separate 256 MiB budget, so combined scratch can approach 512 MiB. It is enabled only when the original cache offsets fit in int32 and the token count exceeds the request count. Batches with one query per request and no token padding retain paged scoring to avoid packing keys without reuse. This shape-based heuristic includes graph padding in the token count and does not guarantee reuse for every request in a mixed batch.
+- The score scratch budget controls token chunking; at least one score row is allocated. Its size is `max_pool_seq_len * sizeof(float32)`, so a single extremely long row can exceed the budget. No constant context-length cutoff is imposed by the wrapper. The optional prefill cache has a separate 256 MiB budget, so combined scratch can approach 512 MiB. Packing requires `allow_cache_packing=True`, original cache offsets fitting in int32, and more token rows than requests. The model disables packing for FULL graphs: padded rows do not imply query reuse, and replay does not rerun Python dispatch. Other model execution modes trim token rows to the actual count before dispatch; a mixed batch can still contain requests without reuse. Direct callers with padded rows should also disable packing unless reuse has been established for that captured workload.
 
 ## Origin and Differences
 

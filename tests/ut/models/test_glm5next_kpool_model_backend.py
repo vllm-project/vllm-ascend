@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from torch import nn
+from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.indexer_kpool as backend_module
 from vllm_ascend.attention.indexer_kpool import (
@@ -98,8 +99,8 @@ def _tail_metadata() -> AscendIndexerKPoolTailMetadata:
     )
 
 
-@pytest.mark.parametrize("compute_topk", [False, True])
-def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compute_topk):
+@pytest.mark.parametrize("compute_topk,allow_cache_packing", [(False, True), (True, True), (True, False)])
+def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compute_topk, allow_cache_packing):
     metadata = _indexer_metadata(num_tokens=10)
     tail_metadata = _tail_metadata()
     tail_metadata.slot_mapping = torch.arange(10)
@@ -135,6 +136,7 @@ def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compu
         max_pool_seq_len=1,
         compute_topk=compute_topk,
         output_buffer=output_buffer,
+        allow_cache_packing=allow_cache_packing,
     )
     torch.testing.assert_close(tail_cache[0, 0], torch.full_like(tail_cache[0, 0], 7))
     torch.testing.assert_close(indexer_cache[0, 0], torch.full_like(indexer_cache[0, 0], 11))
@@ -144,6 +146,7 @@ def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compu
         select.assert_called_once()
         assert select.call_args.kwargs["output_buffer"] is output_buffer
         assert select.call_args.kwargs["pack_tail"] is True
+        assert select.call_args.kwargs["allow_cache_packing"] is allow_cache_packing
     else:
         assert result is None
         select.assert_not_called()
@@ -215,8 +218,10 @@ class _RecordingKPool(nn.Module):
         return None
 
 
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
 def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     monkeypatch,
+    graph_mode,
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
@@ -237,7 +242,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
         prefix="indexer.tail",
         kv_cache=torch.zeros(2, 2, 4, 2, dtype=torch.float32),
     )
-    backend.topk_indices_buffer = torch.empty(2, 16, dtype=torch.int32)
+    backend.topk_indices_buffer = torch.empty(64, 16, dtype=torch.int32)
     backend.softmax_scale = 0.5
     backend._wk_weight_f32 = None
     backend.indexer_op = _RecordingKPool()
@@ -247,20 +252,22 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
         "get_forward_context",
         lambda: SimpleNamespace(
             attn_metadata={"indexer.tail": tail_metadata},
-            cudagraph_runtime_mode=None,
+            cudagraph_runtime_mode=graph_mode,
             virtual_engine=0,
         ),
     )
 
-    normalized_q_c = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-    hidden = torch.ones(2, 3)
-    metadata = _indexer_metadata(num_tokens=2)
-    metadata.num_actual_tokens = 2
-    metadata.cum_query_lens = torch.tensor([1, 2], dtype=torch.int32)
-    metadata.raw_seq_lens = torch.tensor([1, 1], dtype=torch.int32)
-    metadata.seq_lens = torch.tensor([0, 0], dtype=torch.int32)
-    metadata.positions = torch.tensor([0, 0])
-    metadata.slot_mapping = torch.tensor([-1, -1])
+    # A 64-row graph bucket does not imply reuse for eight one-token requests.
+    normalized_q_c = torch.arange(128, dtype=torch.float32).reshape(64, 2)
+    hidden = torch.ones(64, 3)
+    metadata = _indexer_metadata()
+    metadata.cum_query_lens = torch.arange(1, 9, dtype=torch.int32)
+    metadata.raw_seq_lens = torch.ones(8, dtype=torch.int32)
+    metadata.seq_lens = torch.zeros(8, dtype=torch.int32)
+    metadata.seq_lens_cpu = metadata.seq_lens.clone()
+    metadata.block_table = torch.zeros(8, 1, dtype=torch.int32)
+    metadata.positions = torch.zeros(64, dtype=torch.int64)
+    metadata.slot_mapping = torch.full((64,), -1, dtype=torch.int64)
 
     result = backend.forward(
         hidden,
@@ -272,9 +279,13 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
 
     assert result is not None
     assert backend.indexer_op.args is not None
-    torch.testing.assert_close(backend.indexer_op.args[1], normalized_q_c.repeat(1, 2).view(2, 2, 2))
+    expected_rows = 64 if graph_mode == CUDAGraphMode.FULL else 8
+    assert result.shape[0] == expected_rows
+    torch.testing.assert_close(
+        backend.indexer_op.args[1], normalized_q_c[:expected_rows].repeat(1, 2).view(expected_rows, 2, 2)
+    )
     expected_k = torch.nn.functional.layer_norm(
-        torch.nn.functional.linear(hidden + 3, backend.wk_weights_proj.weight)[:, :2],
+        torch.nn.functional.linear(hidden[:expected_rows] + 3, backend.wk_weights_proj.weight)[:, :2],
         (2,),
         backend.k_norm.weight,
         backend.k_norm.bias,
@@ -282,9 +293,12 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     )
     torch.testing.assert_close(backend.indexer_op.args[0], expected_k)
     assert backend.indexer_op.args[0].dtype == torch.float32
-    expected_weights = torch.nn.functional.linear(hidden, backend.wk_weights_proj.weight[2:]) * (0.5 * 2**-0.5)
+    expected_weights = torch.nn.functional.linear(hidden[:expected_rows], backend.wk_weights_proj.weight[2:]) * (
+        0.5 * 2**-0.5
+    )
     torch.testing.assert_close(backend.indexer_op.args[2], expected_weights)
     assert backend.indexer_op.args[7] is tail_metadata
     assert backend.indexer_op.kwargs is not None
     assert backend.indexer_op.kwargs["compute_topk"] is True
     assert backend.indexer_op.kwargs["output_buffer"] is backend.topk_indices_buffer
+    assert backend.indexer_op.kwargs["allow_cache_packing"] is (graph_mode != CUDAGraphMode.FULL)

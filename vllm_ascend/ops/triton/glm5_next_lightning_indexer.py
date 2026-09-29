@@ -210,6 +210,7 @@ def glm5_next_lightning_indexer_triton(
     max_pool_seq_len: int,
     output_buffer: torch.Tensor | None = None,
     pack_tail: bool = False,
+    allow_cache_packing: bool = True,
 ) -> torch.Tensor:
     """Select pools, expand tokens and optionally write the final SFA buffer."""
     num_tokens, _, head_dim = query.shape
@@ -241,7 +242,8 @@ def glm5_next_lightning_indexer_triton(
         raise ValueError("GLM KPool large-cache pages require a power-of-two block size.")
     selected = min(index_topk // index_kpool, max_pool_seq_len)
     packed_cache = (
-        num_tokens >= TRITON_PREFILL_MIN_TOKENS
+        allow_cache_packing
+        and num_tokens >= TRITON_PREFILL_MIN_TOKENS
         and num_tokens > cum_query_lens.numel()
         and selected > 0
         and index32

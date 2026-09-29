@@ -80,6 +80,7 @@ class SparseAttnIndexerKpool(nn.Module):
         max_pool_seq_len: int,
         compute_topk: bool,
         output_buffer: torch.Tensor | None = None,
+        allow_cache_packing: bool = True,
     ) -> torch.Tensor | None:
         num_tokens = k.shape[0]
         if index_kpool <= 0 or self.topk_tokens % index_kpool:
@@ -141,6 +142,7 @@ class SparseAttnIndexerKpool(nn.Module):
             max_pool_seq_len=max_pool_seq_len,
             output_buffer=output_buffer,
             pack_tail=True,
+            allow_cache_packing=allow_cache_packing,
         )
         # Expansion also packs the causal tail and clears every padded row.
         return indices
