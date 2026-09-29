@@ -23,6 +23,7 @@ import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -345,9 +346,16 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             self.model.lm_head._lmhead_tp_dynamic_capacity = (
                 max_reqs_across_dp * self.num_speculative_steps
             )
+            logger.info(
+                "[lmhead_tp] draft: query_rows=%s qpr=%s -> draft_capacity=%s",
+                max_query_rows,
+                self.num_query_per_req,
+                self.model.lm_head._lmhead_tp_dynamic_capacity,
+            )
         elif hasattr(self.model.lm_head, "_lmhead_tp_dynamic_capacity"):
             # No DP sync this round: drop the previous round's dynamic value so
             # the static lmhead_tp_capacity stays authoritative and a stale
             # capacity cannot be reused.
             del self.model.lm_head._lmhead_tp_dynamic_capacity
+            logger.info("[lmhead_tp] draft: no DP sync -> dropped dynamic capacity")
         return hidden_states

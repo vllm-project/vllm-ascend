@@ -745,8 +745,15 @@ class NPUModelRunner(GPUModelRunner):
         static = self.max_num_reqs * self.decode_query_len
         if num_tokens_across_dp is not None and num_tokens_across_dp.numel() > 0:
             self._lmhead_tp_step_capacity_value = min(static, int(num_tokens_across_dp.max().item()))
+            logger.info(
+                "[lmhead_tp] target: static=%s synced_max=%s -> step_capacity=%s",
+                static,
+                int(num_tokens_across_dp.max().item()),
+                self._lmhead_tp_step_capacity_value,
+            )
         else:
             self._lmhead_tp_step_capacity_value = static
+            logger.info("[lmhead_tp] target: no DP sync -> static step_capacity=%s", static)
         return result
 
     def sample(self, hidden_states, input_batch, grammar_output):
