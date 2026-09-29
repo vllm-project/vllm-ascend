@@ -76,8 +76,10 @@ def _coalesce_310p_fitting_prefill(
 
     Align mode otherwise stops at the last cacheable block even when the
     whole prompt fits in ``num_new_tokens``. That second forward costs about
-    as much as the first on 310P. A shared-prefix junction still splits, so
-    the mamba state a later request needs is materialized.
+    as much as the first on 310P. A cold request still stops at a shared-prefix
+    junction so a later request can reuse the mamba state. A request that
+    already holds that hit only has a suffix left; stopping again at the
+    junction or the next block boundary is another full forward.
     """
     if split_tokens >= num_new_tokens or not is_310p():
         return split_tokens
@@ -88,16 +90,33 @@ def _coalesce_310p_fitting_prefill(
     if start + num_new_tokens < prefill_end:
         return split_tokens
     block_size = self.cache_config.block_size
-    if block_size <= 0 or start % block_size != 0:
+    if block_size <= 0:
         return split_tokens
-    unclipped_end = start + num_new_tokens
-    junction = request.shared_prefix_boundary
-    if start < junction < unclipped_end:
-        return split_tokens
-    if self.mamba_partial_cache_hit:
-        tail_boundary = request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
-        if start < tail_boundary < unclipped_end and tail_boundary < request.num_prompt_tokens:
+    # Only the request that creates the cached prefix must publish it.
+    # ``start > 0`` means those blocks are already computed. A later request
+    # just runs its suffix: another stop is a second full forward.
+    if start == 0:
+        if start % block_size != 0:
             return split_tokens
+        unclipped_end = start + num_new_tokens
+        junction = request.shared_prefix_boundary
+        if start < junction < unclipped_end:
+            # Mamba state is stored on scheduler-block boundaries. A junction
+            # at 512 with a 384-token block does not land in a slot, so the
+            # next request misses again. Floor onto the block grid.
+            # ``cache_config.block_size`` can be a single group's page (128)
+            # while the scheduler aligns on the LCM (384). Floor to that LCM.
+            page = self.block_size or block_size
+            aligned = junction // page * page
+            if aligned > start:
+                return aligned - start
+            # The shared prefix is shorter than one scheduler page, so it
+            # has no mamba slot. Stopping at the junction only adds a forward.
+            return num_new_tokens
+        if self.mamba_partial_cache_hit:
+            tail_boundary = request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
+            if start < tail_boundary < unclipped_end and tail_boundary < request.num_prompt_tokens:
+                return split_tokens
     return num_new_tokens
 
 
