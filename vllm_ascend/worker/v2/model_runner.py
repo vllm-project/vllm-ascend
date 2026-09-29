@@ -183,7 +183,7 @@ class NPUModelRunner(GPUModelRunner):
             device=self.device,
         )
         if self.pp_handler is not None:
-            from vllm_ascend.patch.worker.patch_v2.patch_pp import install_pp_token_transport
+            from vllm_ascend.patch.worker.patch_v2.patch_pp_handler import install_pp_token_transport
 
             install_pp_token_transport(self.pp_handler, self.req_states)
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.

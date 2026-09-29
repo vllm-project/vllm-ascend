@@ -1353,7 +1353,7 @@
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
 #
-# ** 27a. File: worker/patch_v2/patch_pp.py**
+# ** 27a. File: worker/patch_v2/patch_pp_handler.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. PPHandler sampled-token broadcast methods
 #    Why:

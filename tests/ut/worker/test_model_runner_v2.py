@@ -497,7 +497,7 @@ def test_init_without_speculation(use_pp):
         patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_mask"),
-        patch("vllm_ascend.patch.worker.patch_v2.patch_pp.install_pp_token_transport") as install_pp,
+        patch("vllm_ascend.patch.worker.patch_v2.patch_pp_handler.install_pp_token_transport") as install_pp,
         patch(
             "vllm_ascend.worker.v2.model_runner.breakable_cudagraph.is_breakable_cudagraph_enabled",
             return_value=False,
@@ -549,7 +549,7 @@ def test_init_spec_pp_full_graph_and_speculator():
         patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_mask"),
-        patch("vllm_ascend.patch.worker.patch_v2.patch_pp.install_pp_token_transport") as install_pp,
+        patch("vllm_ascend.patch.worker.patch_v2.patch_pp_handler.install_pp_token_transport") as install_pp,
         patch("torch.npu.Stream", return_value="stream"),
         patch("torch.npu.Event", return_value="event"),
         patch("torch.empty", return_value=torch.zeros(2, dtype=torch.int32)),

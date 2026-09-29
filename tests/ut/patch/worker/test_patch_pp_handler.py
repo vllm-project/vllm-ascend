@@ -10,8 +10,8 @@ import torch
 from vllm.v1.worker.gpu import pp_utils
 from vllm.v1.worker.gpu.pp_utils import PendingRecv, PPHandler
 
-from vllm_ascend.patch.worker.patch_v2 import patch_pp
-from vllm_ascend.patch.worker.patch_v2.patch_pp import (
+from vllm_ascend.patch.worker.patch_v2 import patch_pp_handler
+from vllm_ascend.patch.worker.patch_v2.patch_pp_handler import (
     compute_need_sampled_mask,
     install_pp_token_transport,
 )
@@ -118,7 +118,7 @@ class TestProtocolInstall:
             stack=torch.stack,
             as_tensor=torch.as_tensor,
         )
-        monkeypatch.setattr(patch_pp, "torch", fake_torch)
+        monkeypatch.setattr(patch_pp_handler, "torch", fake_torch)
         monkeypatch.setattr(torch.Tensor, "record_stream", lambda *args: None)
 
     def test_installs_and_is_idempotent(self, monkeypatch):
