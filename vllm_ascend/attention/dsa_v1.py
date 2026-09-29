@@ -595,10 +595,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     understand this class
     """
 
-    # RFC #17479 stage 1: declared EXACT to stay behavior-equivalent while
-    # the contract lands. DSA kernels consume device seq_lens; staged for
-    # downgrade during the stage-2 audit.
-    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
+    # RFC #17479 stage 2: DSA kernels consume device-exact seq_lens; the
+    # only host view used is max_seqlen_kv, a workspace/tiling hint that
+    # tolerates a conservative upper bound.
+    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.UPPER_BOUND
 
     _request_capacity_factor: ClassVar[int] = 1
 

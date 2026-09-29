@@ -514,10 +514,9 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     for the active parallel mode (full gather mapping under PCP).
     """
 
-    # RFC #17479 stage 1: declared EXACT to stay behavior-equivalent while
-    # the contract lands. Indexer kernels consume device seq_lens; staged
-    # for downgrade during the stage-2 audit.
-    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
+    # RFC #17479 stage 2: indexer kernels consume device-exact seq_lens
+    # only; no host sequence-length view is read.
+    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.NONE
 
     reorder_batch_threshold = None
     consumes_pcp_context = True
