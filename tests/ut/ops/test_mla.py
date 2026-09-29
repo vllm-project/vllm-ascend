@@ -117,6 +117,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.wk_weights_proj = MagicMock(return_value=(torch.zeros(2, 128 + 4), None))
         indexer.wq_b = MagicMock(return_value=(torch.zeros(2, 2 * 128), None))
         indexer._pcp_active = False
+        indexer._is_pcp_decode_sharded = False
         indexer._dsa_cp_active = False
         indexer_k_cache = MagicMock(name="indexer_k_cache")
         indexer.k_cache = SimpleNamespace(kv_cache=(indexer_k_cache,))

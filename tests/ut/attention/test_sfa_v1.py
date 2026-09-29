@@ -1183,6 +1183,7 @@ class TestAscendSFAImpl(TestBase):
             sin=None,
             slot_mapping=torch.arange(2),
             num_input_tokens=2,
+            num_actual_tokens=2,
             num_decode_tokens=2,
             attn_state=AscendAttentionState.DecodeOnly,
         )

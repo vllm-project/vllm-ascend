@@ -538,6 +538,7 @@ def test_sfa_pcp_dcp_only_overrides_main_cache_slot_mapping() -> None:
 
 def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl.is_pcp_decode_sharded = False
     attn_metadata = SimpleNamespace(num_decode_tokens=1, num_prefills=1)
     kv_no_split = torch.arange(6, dtype=torch.float32).view(2, 3)
     cos = torch.arange(2, dtype=torch.float32).view(2, 1)
@@ -714,6 +715,7 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
         cos=hidden_states,
         sin=hidden_states,
         num_input_tokens=2,
+        num_actual_tokens=2,
         num_decode_tokens=2,
         attn_state=AscendAttentionState.DecodeOnly,
     )
@@ -1074,6 +1076,7 @@ def test_sfa_dcp_slot_mapping_matches_parallel_layout(impl_cls, local_prefill, g
 @pytest.mark.parametrize("is_kv_consumer,sfa_c8", [(False, False), (True, True)])
 def test_sfa_pcp_keeps_prolog_v3_enabled(is_kv_consumer, sfa_c8):
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl.is_pcp_decode_sharded = False
     quant_cls = AscendW8A8DynamicLinearMethod
     impl.fused_qkv_a_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=quant_cls.__new__(quant_cls)))
     impl.q_proj = SimpleNamespace(_chunk_size=0)
@@ -1102,6 +1105,7 @@ def test_sfa_pcp_keeps_prolog_v3_enabled(is_kv_consumer, sfa_c8):
 )
 def test_sfa_pcp_prolog_gathers_only_prefill_kv(cache_dtype, pcp_size, rank, num_decode_tokens, num_tokens):
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl.is_pcp_decode_sharded = False
     c8 = impl.enable_sparse_sfa_c8 = cache_dtype != torch.bfloat16
     width = 656 if c8 else 5
     cache_blocks = (pcp_size * num_tokens + 7) // 8
@@ -1182,6 +1186,7 @@ def _make_sfa_split_builder(use_pcp: bool, threshold: int = 1) -> AscendSFAMetad
     builder = AscendSFAMetadataBuilder.__new__(AscendSFAMetadataBuilder)
     builder.speculative_config = None
     builder.use_pcp = use_pcp
+    builder.is_pcp_decode_sharded = False
     builder.decode_threshold = threshold
     builder.nope = False
     builder.kernel_block_size = 128
@@ -1298,6 +1303,7 @@ def test_sfa_pcp_builder_prepares_local_prolog_slots():
 
 def test_sfa_pcp_empty_local_prefill_joins_kv_gathers():
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl.is_pcp_decode_sharded = False
     impl.enable_sparse_sfa_c8 = False
     metadata = SimpleNamespace(
         num_decode_tokens=1,
@@ -1341,6 +1347,7 @@ def test_sfa_pcp_empty_local_prefill_joins_kv_gathers():
 
 def test_sfa_pcp_empty_global_slots_skips_kv_gather():
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl.is_pcp_decode_sharded = False
     impl.enable_sparse_sfa_c8 = False
     hidden = torch.empty((0, 1))
     slots = torch.empty(0, dtype=torch.int64)
@@ -1371,6 +1378,7 @@ def test_sfa_pcp_empty_global_slots_skips_kv_gather():
 def test_sfa_pcp_padded_decode_skips_kv_gather():
     num_decode_tokens = 2
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl.is_pcp_decode_sharded = False
     num_input_tokens = num_decode_tokens * 2
     hidden = torch.zeros((num_input_tokens, 3))
     slots = torch.cat((torch.arange(num_decode_tokens), torch.full((num_decode_tokens,), -1)))

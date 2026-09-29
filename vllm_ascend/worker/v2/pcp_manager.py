@@ -17,8 +17,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
+import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pcp_group, get_pp_group
@@ -119,6 +121,58 @@ class AscendPCPManager(PCPManager):
         # piecewise/FULL graphs where each rank pads its local batch to the
         # same global padded length.
         self._sampling_hidden_restored = False
+
+    @property
+    def is_decode_sharded(self) -> bool:
+        """Use the shared policy after the runner injects vllm_config."""
+        return self.vllm_config.parallel_config.pcp_shard_decode_requests
+
+    # TODO: Remove replicated_requests and _iter_rank_chunks once the paired
+    # vLLM includes #52162, which shards decode requests upstream.
+    def replicated_requests(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> np.ndarray:
+        """Sharded decodes have a single owner, so none of them is replicated."""
+        replicated = super().replicated_requests(num_scheduled_tokens, is_prefilling)
+        if self.is_decode_sharded:
+            replicated &= np.asarray(is_prefilling, dtype=np.bool_)
+        return replicated
+
+    def _iter_rank_chunks(
+        self,
+        rank: int,
+        num_scheduled_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+    ) -> Iterator[tuple[int, int, int]]:
+        """Split prefills as upstream does and assign decodes round-robin.
+
+        Only scheduled decodes count toward the round-robin order, which keeps
+        every step balanced. Ownership may change between steps because KV
+        and hidden states are gathered back to every PCP rank.
+        """
+        if not self.is_decode_sharded:
+            yield from super()._iter_rank_chunks(rank, num_scheduled_tokens, is_prefilling)
+            return
+
+        decode_ordinal = 0
+        num_chunks = 2 * self.pcp_world_size
+        for req_idx, num_tokens in enumerate(num_scheduled_tokens):
+            query_len = int(num_tokens)
+            if query_len == 0:
+                continue
+
+            if not is_prefilling[req_idx]:
+                owner_rank = decode_ordinal % self.pcp_world_size
+                decode_ordinal += 1
+                if rank == owner_rank:
+                    yield req_idx, 0, query_len
+                continue
+
+            # DCP == 1 here, so prefills use upstream's DualChunkSwap split.
+            chunk_size = (query_len + num_chunks - 1) // num_chunks
+            for chunk_idx in (rank, num_chunks - 1 - rank):
+                chunk_offset = chunk_idx * chunk_size
+                chunk_len = min(chunk_size, query_len - chunk_offset)
+                if chunk_len > 0:
+                    yield req_idx, chunk_offset, chunk_len
 
     @staticmethod
     def broadcast_replicated_hidden_states(
@@ -243,7 +297,7 @@ class AscendPCPManager(PCPManager):
         # graph capture layout.
         needs_token_padding = graph_num_tokens > local_batch.num_tokens_after_padding
         needs_request_padding = graph_num_reqs > local_batch.num_reqs_after_padding
-        if is_decode_only and (needs_token_padding or needs_request_padding):
+        if not self.is_decode_sharded and is_decode_only and (needs_token_padding or needs_request_padding):
             assert self._input_buffers is not None
             input_buffers = self._input_buffers
             actual_tokens = local_batch.num_tokens
@@ -303,6 +357,11 @@ class AscendPCPManager(PCPManager):
             )
 
         actual_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
+        if local_batch.num_tokens == 0:
+            # An empty rank keeps one zero-token placeholder request whose
+            # device sequence length upstream already sets to zero.
+            actual_seq_lens_np[:] = 0
+            local_batch.seq_lens_cpu_upper_bound.zero_()
         if local_batch.num_reqs_after_padding > local_batch.num_reqs:
             assert self._input_buffers is not None
             seq_lens_np = self._input_buffers.seq_lens_np

@@ -29,6 +29,7 @@ def default_vllm_config():
     mock_config.parallel_config.prefill_context_parallel_size = 1
     mock_config.parallel_config.decode_context_parallel_size = 1
     mock_config.parallel_config.tensor_parallel_size = 1
+    mock_config.parallel_config.pcp_shard_decode_requests = False
     mock_config.model_config = MagicMock()
     mock_config.model_config.dtype = torch.float16
     mock_config.speculative_config = None
