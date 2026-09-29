@@ -75,6 +75,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py: 190
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py: 260
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py: 790
+  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_kimi_k3_sleep_wake.py: 180
   tests/e2e/pull_request/one_card/test_sampler.py: 190
   tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 240
   tests/e2e/pull_request/one_card/test_vlm.py: 680
