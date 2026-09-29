@@ -123,8 +123,7 @@ class NPUModelRunner(GPUModelRunner):
                 super().__init__(vllm_config, device)
             if pp_disabled:
                 restore_pp_after_upstream_init(self, vllm_config)
-        # Native PP owns token broadcast/writeback; only releases use our packing.
-        # Legacy Spec+PP transport (0.28/0.29 only); deleted when 0.30+ is the floor.
+        # Only legacy runners need the extra draft broadcast in sample_tokens.
         self.use_spec_pp = spec_pp_support is not None and use_legacy_spec_pp()
         # These FIA models need post-rejection host counts on every PP stage.
         # TODO: Remove this extra PP sync when FIA and its metadata builders
@@ -194,17 +193,11 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             device=self.device,
         )
-        # The PP token-broadcast skip patch reads per-request length caps
-        # through this reference. Every rank builds it from the same request
-        # stream, so all PP ranks reach the same skip verdict.
-        if getattr(self, "pp_handler", None) is not None:
-            self.pp_handler.ascend_request_states = self.req_states
-        if self.use_spec_pp:
+        if self.pp_handler is not None:
             from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
                 install_upstream_spec_pp_protocol,
             )
 
-            assert self.pp_handler is not None
             install_upstream_spec_pp_protocol(self.pp_handler, self.req_states, self.num_speculative_steps)
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.

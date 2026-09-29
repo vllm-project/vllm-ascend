@@ -459,7 +459,7 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
     self.speculative_config = object() if speculative else None
     self.use_pp = use_pp
     self.is_last_pp_rank = True
-    self.pp_handler = MagicMock()
+    self.pp_handler = MagicMock() if use_pp else None
     self.max_num_reqs = 2
     self.max_model_len = 32
     self.max_num_tokens = 8
@@ -471,7 +471,8 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
     self.speculator = object()
 
 
-def test_init_without_spec_pp():
+@pytest.mark.parametrize("use_pp", [False, True])
+def test_init_without_spec_pp(use_pp):
     vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=False))
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"))
 
@@ -491,13 +492,14 @@ def test_init_without_spec_pp():
             "vllm_ascend.worker.v2.model_runner.bypass_upstream_spec_pp_guard",
             return_value=nullcontext(False),
         ),
-        patch.object(GPUModelRunner, "__init__", lambda self, cfg, dev: _parent_init(self, cfg, dev)),
+        patch.object(GPUModelRunner, "__init__", lambda self, cfg, dev: _parent_init(self, cfg, dev, use_pp=use_pp)),
         patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController", return_value="eplb"),
         patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req"),
         patch("vllm_ascend.worker.v2.model_runner.AscendInputBuffers", return_value="buf"),
         patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_mask"),
+        patch("vllm_ascend.patch.worker.patch_v2.patch_spec_pp.install_upstream_spec_pp_protocol") as install_pp,
         patch(
             "vllm_ascend.worker.v2.model_runner.breakable_cudagraph.is_breakable_cudagraph_enabled",
             return_value=False,
@@ -514,6 +516,10 @@ def test_init_without_spec_pp():
     assert runner.use_spec_pp is False
     assert runner.sync_spec_pp_cpu_counts is False
     assert runner.decode_query_len == 1
+    if use_pp:
+        install_pp.assert_called_once_with(runner.pp_handler, runner.req_states, 0)
+    else:
+        install_pp.assert_not_called()
 
 
 def test_init_spec_pp_full_graph_and_speculator():
@@ -569,7 +575,7 @@ def test_init_spec_pp_full_graph_and_speculator():
     assert speculator.update_stream is runner.update_stream
     assert runner.use_spec_pp is False
     assert runner.sync_spec_pp_cpu_counts is True
-    install_pp.assert_not_called()
+    install_pp.assert_called_once_with(runner.pp_handler, runner.req_states, runner.num_speculative_steps)
     assert runner.update_stream is not None
     assert runner.decode_query_len == 2
 

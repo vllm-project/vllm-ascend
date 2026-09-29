@@ -1,15 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""PP sampled-token communication patches.
+"""V2 PP token transport with no-consumer broadcast skipping.
 
-Skip broadcasts with no consumer on native PP, with or without speculation.
-The release-only protocol below replaces the deferred-broadcast transport
-that deadlocked under KV saturation with async EPLB; remove that backport
-once the paired vLLM version ships the protocol natively.
+Reuses the 0.30 protocol for both speculative and non-speculative PP.
+Remove when upstream skips broadcasts for requests with no subsequent step.
 """
 
 from dataclasses import dataclass
-from functools import wraps
 
 import numpy as np
 import torch
@@ -17,81 +14,26 @@ import torch
 # vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
 # torch_utils.async_tensor_h2d (gaining out=/device=None support).
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
-from vllm.v1.worker.gpu import pp_utils
 
 _INSTALLED = "_vllm_ascend_upstream_spec_pp_installed"
-_PATCHED_ATTR = "_vllm_ascend_pp_token_broadcast_patched"
 
 
-def broadcast_has_no_consumer(pp_handler, input_batch) -> bool:
-    """Whether no later step on this engine reads the PP token broadcast."""
-    request_states = getattr(pp_handler, "ascend_request_states", None)
-    if request_states is None:
-        return False
-
-    produces_sample = pp_utils.compute_need_sampled_mask(input_batch)
-    if produces_sample is None:
-        return False
-
-    # A final prefill chunk samples one token. If it reaches the request's
-    # length cap (max_tokens=1), no decode step will consume the broadcast.
-    # This uses shared request limits, not rank-local progress estimates.
-    final_prefill_chunk = input_batch.is_prefilling_np & (
-        input_batch.num_computed_tokens_np + input_batch.num_scheduled_tokens >= input_batch.prefill_len_np
-    )
-    reaches_length_cap = input_batch.prefill_len_np + 1 >= request_states.max_seq_len[input_batch.idx_mapping_np]
-    finished_with_sample = final_prefill_chunk & reaches_length_cap
-    return bool(finished_with_sample[produces_sample].all())
-
-
-def _patch_pp_handler() -> None:
-    pp_handler_cls = getattr(pp_utils, "PPHandler", None)
-    if pp_handler_cls is None or not hasattr(pp_utils, "compute_need_sampled_mask"):
-        return
-    if getattr(pp_handler_cls.receive, _PATCHED_ATTR, False):
-        return
-
-    original_receive = pp_handler_cls.receive
-    original_broadcast = pp_handler_cls.broadcast
-    original_broadcast_drafts = pp_handler_cls.broadcast_drafts
-
-    @wraps(original_receive)
-    def receive(self, input_batch):
-        if broadcast_has_no_consumer(self, input_batch):
-            # Match the no-sample path: leave the deferred queue slot empty.
-            return False
-        return original_receive(self, input_batch)
-
-    @wraps(original_broadcast)
-    def broadcast(self, sampled_token_ids, num_sampled, num_rejected, input_batch):
-        if broadcast_has_no_consumer(self, input_batch):
-            return
-        return original_broadcast(self, sampled_token_ids, num_sampled, num_rejected, input_batch)
-
-    @wraps(original_broadcast_drafts)
-    def broadcast_drafts(self, draft_tokens, input_batch):
-        if broadcast_has_no_consumer(self, input_batch):
-            return
-        return original_broadcast_drafts(self, draft_tokens, input_batch)
-
-    for patched in (receive, broadcast, broadcast_drafts):
-        setattr(patched, _PATCHED_ATTR, True)  # type: ignore[attr-defined]
-    pp_handler_cls.receive = receive
-    pp_handler_cls.broadcast = broadcast
-    pp_handler_cls.broadcast_drafts = broadcast_drafts
-
-
-_patch_pp_handler()
-
-
-def compute_need_sampled_mask(input_batch):
-    """Participation gate: pure function of the shared batch (no
-    rank-local max_seq_len bound).  Finished requests are filtered on
-    the receive side via generation counters."""
+def compute_need_sampled_mask(input_batch, req_states=None):
+    """Use shared batch/request limits, never rank-local progress bounds."""
     old_computed = input_batch.num_computed_tokens_np
     prefill_len = input_batch.prefill_len_np
     produces_sample = old_computed + input_batch.num_scheduled_tokens >= prefill_len
-    return produces_sample if produces_sample.any() else None
+    if not produces_sample.any():
+        return None
+    if req_states is not None:
+        # Final prefill produces one token. Skip only if every sampling row
+        # reaches its request limit; a continuing decode keeps the whole batch.
+        finished_with_sample = input_batch.is_prefilling_np & (
+            prefill_len + 1 >= req_states.max_seq_len[input_batch.idx_mapping_np]
+        )
+        if finished_with_sample[produces_sample].all():
+            return None
+    return produces_sample
 
 
 @dataclass
@@ -110,8 +52,7 @@ class SpecPPPendingRecv:
 
 
 def install_upstream_spec_pp_protocol(pp_handler, req_states, num_speculative_steps) -> None:
-    """Bind the 0.30 broadcast/receive/consume methods onto the release
-    PPHandler, adapted to fetch draft rows from ``req_states``."""
+    """Bind the 0.30 PP transport with a shared no-consumer participation gate."""
     if getattr(pp_handler, _INSTALLED, False):
         return
 
@@ -120,7 +61,7 @@ def install_upstream_spec_pp_protocol(pp_handler, req_states, num_speculative_st
 
     def receive(input_batch):
         assert not pp_handler.is_last_rank
-        need_sampled_mask = compute_need_sampled_mask(input_batch)
+        need_sampled_mask = compute_need_sampled_mask(input_batch, req_states)
         if need_sampled_mask is None:
             return False
 
@@ -158,7 +99,7 @@ def install_upstream_spec_pp_protocol(pp_handler, req_states, num_speculative_st
 
     def broadcast(sampled_token_ids, num_sampled, num_rejected, input_batch):
         assert pp_handler.is_last_rank
-        if compute_need_sampled_mask(input_batch) is None:
+        if compute_need_sampled_mask(input_batch, req_states) is None:
             captured_batch[0] = None
             return
         captured_batch[0] = input_batch
@@ -184,13 +125,14 @@ def install_upstream_spec_pp_protocol(pp_handler, req_states, num_speculative_st
         assert pp_handler.is_last_rank
         if input_batch is None:
             input_batch = captured_batch[0]
-        if input_batch is None or compute_need_sampled_mask(input_batch) is None:
+        if input_batch is None or compute_need_sampled_mask(input_batch, req_states) is None:
             return
         if draft_tokens is None:
-            draft_tokens = req_states.draft_tokens[input_batch.idx_mapping]
+            draft_tokens = req_states.draft_tokens
         with torch.cuda.stream(pp_handler.broadcast_stream):
             pp_handler.broadcast_stream.wait_stream(pp_handler.main_stream)
-            send = draft_tokens.contiguous()
+            # Native callers pass the full request-slot buffer, not batch rows.
+            send = draft_tokens[input_batch.idx_mapping].contiguous()
             input_batch.idx_mapping.record_stream(pp_handler.broadcast_stream)
             torch.distributed.broadcast(send, src=pp_handler.last_rank, group=pp_handler.broadcast_group)
 
