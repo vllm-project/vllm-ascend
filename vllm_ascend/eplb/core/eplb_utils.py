@@ -101,7 +101,7 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
 
     if ep_size == 1:
         assert not eplb_enable, "EPLB must used in expert parallelism."
-        return None, None, None, n_redundant, None
+        return None, None, None, n_redundant, None, None
 
     if expert_map_path:
         eplb_enable = True
@@ -114,8 +114,8 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
             _, expert_map, _ = determine_expert_map(ep_size, moe_config.ep_rank, n_experts)
             _LINEAR_EXPERT_MAP_CACHE[cache_key] = expert_map
         if expert_map is None:
-            return None, None, None, 0, None
-        return None, _to_execution_device(expert_map.clone()), None, 0, None
+            return None, None, None, 0, None, None
+        return None, _to_execution_device(expert_map.clone()), None, 0, None, None
 
     if global_placement is None:
         global_placement = generate_global_placement(n_experts, ep_size, n_redundant, num_shared_experts)
@@ -139,20 +139,32 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         global_expert_map.append(expert_map)
         if rankid == moe_config.ep_rank:
             local_expert_map = expert_map
-    log2phy = (
-        generate_log2phy_map(
-            global_expert_map,
-            moe_config.ep_rank,
-            tp_size=int(tp_size) if tp_size is not None else None,
-            phys_to_logical=phys_to_logical,
+    if eplb_enable:
+        log2phy_kwargs = {
+            "tp_size": int(tp_size) if tp_size is not None else None,
+            "phys_to_logical": phys_to_logical,
+        }
+        log2phy = generate_log2phy_map(global_expert_map, moe_config.ep_rank, **log2phy_kwargs).npu()
+        # ALLGATHER cannot move tokens, so it needs a rank-independent copy
+        # selection to keep the exactly-once execution invariant. MC2/ALLTOALL
+        # keep the per-rank rotation and are unaffected.
+        log2phy_rank_independent = generate_log2phy_map(
+            global_expert_map, moe_config.ep_rank, rank_independent_replica=True, **log2phy_kwargs
         ).npu()
-        if eplb_enable
-        else None
-    )
+    else:
+        log2phy = None
+        log2phy_rank_independent = None
 
     # Keep the local map on the execution device so the AllGather dispatcher
     # can index it with device topk_ids (consistent with the non-EPLB path).
-    return torch.stack(global_expert_map), _to_execution_device(local_expert_map), log2phy, n_redundant, phys_to_logical
+    return (
+        torch.stack(global_expert_map),
+        _to_execution_device(local_expert_map),
+        log2phy,
+        n_redundant,
+        phys_to_logical,
+        log2phy_rank_independent,
+    )
 
 
 def generate_log2phy_map(
@@ -160,6 +172,7 @@ def generate_log2phy_map(
     ep_rank,
     tp_size: int | None = None,
     phys_to_logical: torch.Tensor | None = None,
+    rank_independent_replica: bool = False,
 ):
     """Build the logical -> global physical expert ID map for ``ep_rank``.
 
@@ -168,6 +181,16 @@ def generate_log2phy_map(
     (entry p = local slot of physical expert p) and the physical copies of
     each logical expert are grouped through ``phys_to_logical``. The output
     stays logical-length so ``log2phy[logical_topk_ids]`` keeps working.
+
+    ``rank_independent_replica`` selects the copy of a duplicated logical
+    expert from a global rule (``key % num_of_duplications``) instead of the
+    per-rank rotation. The token-routing dispatchers (MC2 / ALLTOALL) send
+    their tokens to the selected copy, so the rotation splits the load and is
+    correct there. The ALLGATHER dispatcher moves no tokens: it keeps the
+    weight only on the rank that owns the selected physical expert and the
+    partial results are all-reduced, so it needs every logical expert to be
+    executed by exactly one rank. With the rotation each rank picks its own
+    copy, which double-counts one copy and drops the other.
     """
     log2phy_map = defaultdict(list)
     valid_count = torch.sum(global_expert_map[0] != -1)
@@ -186,7 +209,11 @@ def generate_log2phy_map(
 
     for key in log2phy_map:
         num_of_duplications = len(log2phy_map[key])
-        if tp_size is not None and tp_size > 1:
+        if rank_independent_replica:
+            # ALLGATHER: every rank must select the same physical copy, so the
+            # expert is executed exactly once across the group.
+            replica_index = key % num_of_duplications
+        elif tp_size is not None and tp_size > 1:
             tp_rank = ep_rank % tp_size
             dp_like_rank = ep_rank // tp_size
             replica_index = (tp_rank + dp_like_rank + key) % num_of_duplications
