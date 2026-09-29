@@ -26,6 +26,7 @@ from vllm.forward_context import is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
+    Gemma4RotaryEmbedding,
     MRotaryEmbedding,
     RotaryEmbedding,
     YaRNScalingRotaryEmbedding,
@@ -363,6 +364,50 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
+        offsets: torch.Tensor | None = None,
+        is_neox_style_override: bool | None = None,
+        out_dtype: torch.dtype | None = None,
+    ):
+        return AscendRotaryEmbedding.forward_oot(
+            self,
+            positions,
+            query,
+            key,
+            offsets,
+            is_neox_style_override,
+            out_dtype,
+        )
+
+
+class AscendGemma4RotaryEmbedding(Gemma4RotaryEmbedding):
+    """Gemma4 proportional RoPE on the NPU rotary kernel.
+
+    Subclasses rather than reusing AscendRotaryEmbedding so Gemma4's
+    `_compute_inv_freq`, which zero-pads the non-rotated frequency pairs, keeps
+    building the cos/sin cache. Only the forward is swapped, which lets full
+    attention layers emit `npu_rotary_embedding` like the sliding ones instead
+    of an unfused rotate_half chain.
+    """
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+        is_neox_style: bool,
+        dtype: torch.dtype,
+    ) -> None:
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype)
+        vllm_config = get_current_vllm_config()
+        self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
+        _record_cos_sin_cache(self.cos_sin_cache)
+
+    def forward_oot(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
         out_dtype: torch.dtype | None = None,

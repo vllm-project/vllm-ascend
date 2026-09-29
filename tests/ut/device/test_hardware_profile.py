@@ -32,6 +32,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
         HardwareCapability.GRAPH_MULS_ADD_FUSION,
         HardwareCapability.GRAPH_NORM_QUANT_FUSION,
+        HardwareCapability.GRAPH_QKV_NORM_ROPE_FUSION,
         HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
@@ -41,6 +42,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SCATTER_ND_CACHE_STORE,
+        HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE,
         HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER,
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
@@ -72,7 +74,8 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A5: frozenset(
         {
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
-            HardwareCapability.SCATTER_PA_CACHE_STORE,
+            HardwareCapability.SCATTER_ND_CACHE_STORE,
+            HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
             HardwareCapability.BGMV_SGMV_META_REGISTRATION,
             HardwareCapability.CANN_MEGAMOE,
             HardwareCapability.CANN_MEGAMOE_MXFP,
