@@ -45,7 +45,7 @@ from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV4MoE,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
-from vllm_ascend.utils import enable_dsa_cp
+from vllm_ascend.utils import enable_dsa_cp, lmhead_tp_max_num_logits
 
 
 def _apply_dsv4_rope(
@@ -337,6 +337,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
             self.config.vocab_size,
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "lm_head"),
+            lmhead_tp_capacity=lmhead_tp_max_num_logits(
+                vllm_config.scheduler_config.max_num_seqs,
+                vllm_config.speculative_config.num_speculative_tokens,
+            ),
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.set_moe_parameters()

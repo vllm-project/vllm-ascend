@@ -449,6 +449,7 @@ class AscendParallelLMHead(ParallelLMHead):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        lmhead_tp_capacity: int | None = None,
     ):
         AscendVocabParallelEmbedding.__init__(
             self,
@@ -462,6 +463,12 @@ class AscendParallelLMHead(ParallelLMHead):
             disable_tp=disable_tp,
         )
         self.quant_config = quant_config
+        # Optional lmhead-TP row capacity for this head. When set (e.g. the
+        # DSpark draft LMHead, which emits num_speculative_steps rows per
+        # request and is vocab-sharded over the lmhead-TP group), every
+        # _get_logits_lmheadtp call pads the hidden states up to this capacity
+        # so all ranks feed the collectives the same row count (V1 parity).
+        self.lmhead_tp_capacity = lmhead_tp_capacity
         if bias:
             self.bias = Parameter(torch.empty(self.num_embeddings_per_partition, dtype=params_dtype))
             set_weight_attrs(
@@ -572,18 +579,58 @@ class AscendLogitsProcessor(LogitsProcessor):
             logits = tp_group.all_gather(logits, dim=-1)
         return logits[..., : self.org_vocab_size]
 
+    def _get_lmhead_tp_capacity(self, lm_head: AscendParallelLMHead) -> int | None:
+        """Group-agreed row capacity for the lmhead-TP collectives.
+
+        The per-step capacity is computed upstream from the DP-synced token
+        count and published explicitly: the target side stores it on the runner
+        (``_lmhead_tp_step_capacity``) and the DSpark draft side writes it on
+        the head (``_lmhead_tp_dynamic_capacity``) before the draft head runs.
+        Here we read that explicit value first so every rank uses the same
+        per-step bound, falling back to the static ``lmhead_tp_capacity`` (or
+        None for heads without a capacity).
+        """
+        dynamic_capacity = getattr(lm_head, "_lmhead_tp_dynamic_capacity", None)
+        if isinstance(dynamic_capacity, int):
+            return dynamic_capacity
+        static_capacity = getattr(lm_head, "lmhead_tp_capacity", None)
+        if isinstance(static_capacity, int):
+            return static_capacity
+        return None
+
     def _get_logits_lmheadtp(
         self,
         hidden_states: torch.Tensor,
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
+        # Optional head-level row capacity (e.g. the DSpark draft LMHead).
+        # Every rank must feed the lmhead-TP collectives the same row count;
+        # pad the hidden states up to the group-agreed capacity and trim the
+        # logits back (V1: the dspark branch of ``_run_merged_draft`` pads
+        # ``token_indices_to_sample`` to ``max_num_reqs_across_dp`` and trims
+        # ``raw_logits[:num_indices]``). The capacity is taken from the
+        # DP-synced ``num_tokens_across_dp`` when available (dynamic, identical
+        # on every rank of the DP group), else the static ``lmhead_tp_capacity``.
+        capacity = self._get_lmhead_tp_capacity(lm_head)
+        num_logits = hidden_states.shape[0]
+        if capacity is not None:
+            if num_logits > capacity:
+                raise ValueError(
+                    f"lmhead TP rows ({num_logits}) exceed the group-agreed "
+                    f"capacity ({capacity}); desyncs the LM-head collectives."
+                )
+            if num_logits < capacity:
+                hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, capacity - num_logits))
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
         # Gather logits for tensor parallel
         if not get_ascend_config().enable_reduce_sample:
             logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
+        if capacity is not None:
+            # Remove the group-agreed padding rows.
+            logits = logits[:num_logits]
 
         # Remove paddings in vocab (if any)
         if logits is not None:
