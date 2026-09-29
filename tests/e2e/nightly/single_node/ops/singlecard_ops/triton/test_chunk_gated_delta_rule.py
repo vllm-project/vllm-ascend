@@ -6,6 +6,7 @@ import torch
 
 from tests.ut.base import PytestBase
 from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
+from vllm_ascend.ops.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 
 
@@ -14,7 +15,7 @@ class TestChunkGatedDeltaRule(PytestBase):
     def test_triton_fusion_ops(self, seq_lens):
         torch.manual_seed(42)
         mock_attn_metadata = MagicMock()
-        mock_attn_metadata.num_decodes = 1
+        mock_attn_metadata.num_decodes = 0
         mock_forward_context = MagicMock()
         mock_forward_context.attn_metadata = mock_attn_metadata
 
@@ -27,7 +28,17 @@ class TestChunkGatedDeltaRule(PytestBase):
         initial_state = (torch.randn(len(seq_lens), 8, 128, 128, dtype=torch.bfloat16) * 0.1).npu()
         # Packed sequence boundaries must cover every input token. Each sequence
         # rounds up its chunk count independently, including partial chunks.
-        q_start_loc = torch.tensor([0, *seq_lens], dtype=torch.int64, device="npu").cumsum(0)
+        q_start_loc_cpu = torch.tensor([0, *seq_lens], dtype=torch.int64).cumsum(0)
+        q_start_loc = q_start_loc_cpu.to(q.device)
+        # Use the production metadata builder, as the GDN prefill caller does.
+        # Only its configuration is reduced to the fields needed by this UT.
+        builder = SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(hf_text_config=SimpleNamespace(linear_num_value_heads=v.shape[2])),
+                parallel_config=SimpleNamespace(tensor_parallel_size=1),
+            )
+        )
+        prebuilt_meta = _build_non_spec_chunked_prefill_metadata(builder, q_start_loc_cpu, q.device)
 
         with (
             patch("vllm_ascend.ops.triton.fla.chunk.get_forward_context", return_value=mock_forward_context),
@@ -45,6 +56,7 @@ class TestChunkGatedDeltaRule(PytestBase):
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=q_start_loc,
+                prebuilt_meta=prebuilt_meta,
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
