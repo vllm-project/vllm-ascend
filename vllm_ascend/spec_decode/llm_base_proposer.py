@@ -676,7 +676,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if use_updatable_graph(att_backend):
             update_params = []
             for per_step_metadata in multi_steps_attn_metadata:
-                for layer_name, metadata in per_step_metadata.items():
+                for _, metadata in per_step_metadata.items():
                     update_params.append(
                         {
                             "actual_seq_lengths": metadata.actual_seq_lengths_q,
