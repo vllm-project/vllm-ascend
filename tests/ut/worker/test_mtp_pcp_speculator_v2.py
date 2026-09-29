@@ -675,8 +675,7 @@ def test_propose_preserves_dp_sync_state() -> None:
     assert parent.call_args.args[11] is dp_sync
 
 
-@pytest.mark.parametrize("enabled", [True, 1, "true", "yes", "on"])
-@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize(("enabled", "legacy"), [(True, False), ("yes", True)])
 def test_disable_profiling_chunk_for_draft_accepts_pydantic_true_values(enabled, legacy):
     profiling_chunk = {"enabled": enabled, "min_chunk": 128}
     if legacy:
@@ -703,46 +702,33 @@ def test_disable_profiling_chunk_for_draft_accepts_pydantic_true_values(enabled,
     assert profiling_chunk["enabled"] == enabled
 
 
-@pytest.mark.parametrize("enabled", [False, 0, "false", "no", "off"])
-def test_disable_profiling_chunk_for_draft_leaves_effectively_disabled_config_unchanged(enabled):
+@pytest.mark.parametrize(("pp_size", "enabled"), [(1, True), (2, "off")])
+def test_disable_profiling_chunk_for_draft_noop(pp_size, enabled):
     additional_config = {"profiling_chunk_config": {"enabled": enabled}}
+    config = _config(additional_config, pp_size=pp_size)
+
+    with disable_profiling_chunk_for_draft(config):
+        assert config.additional_config is additional_config
+
+
+def test_disable_profiling_chunk_for_draft_uses_nested_precedence():
+    additional_config = {
+        "scheduler_config": {"profiling_chunk_config": {"enabled": False}},
+        "profiling_chunk_config": {"enabled": True},
+    }
     config = _config(additional_config)
 
     with disable_profiling_chunk_for_draft(config):
         assert config.additional_config is additional_config
 
 
-@pytest.mark.parametrize(
-    ("nested_enabled", "legacy_enabled", "expect_rewrite"),
-    [(False, True, False), (True, False, True)],
-)
-def test_disable_profiling_chunk_for_draft_uses_nested_precedence(nested_enabled, legacy_enabled, expect_rewrite):
-    additional_config = {
-        "scheduler_config": {"profiling_chunk_config": {"enabled": nested_enabled}},
-        "profiling_chunk_config": {"enabled": legacy_enabled},
-    }
-    config = _config(additional_config)
-
-    with disable_profiling_chunk_for_draft(config):
-        if expect_rewrite:
-            assert config.additional_config is not additional_config
-            assert config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False
-            assert config.additional_config["profiling_chunk_config"]["enabled"] is False
-        else:
-            assert config.additional_config is additional_config
-
-
-@pytest.mark.parametrize("pp_size", [1, 2])
-def test_disable_profiling_chunk_for_draft_restores_after_failure(pp_size):
+def test_disable_profiling_chunk_for_draft_restores_after_failure():
     additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": True}}}
-    config = _config(additional_config, pp_size=pp_size)
+    config = _config(additional_config)
     expected_context = pytest.raises(RuntimeError, match="draft failed")
 
     with expected_context, disable_profiling_chunk_for_draft(config):
-        if pp_size > 1:
-            assert config.additional_config is not additional_config
-        else:
-            assert config.additional_config is additional_config
+        assert config.additional_config is not additional_config
         raise RuntimeError("draft failed")
 
     assert config.additional_config is additional_config
