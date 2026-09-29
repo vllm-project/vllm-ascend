@@ -971,12 +971,20 @@ def register_ascend_fla_customop():
 
 
 def lmhead_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
+    try:
+        return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
+    except RuntimeError:
+        # Fail closed: before init_ascend_config() (e.g. pure-mock unit tests)
+        # lmhead TP is not configured, so treat it as disabled.
+        return False
 
 
 def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
     """Row capacity every rank of the lmhead-TP group must agree on;
-    cross-rank drift desyncs the collectives and hangs."""
+
+    Callers pass config-derived values identical on every rank; drift
+    desyncs the LM-head collectives and hangs.
+    """
     return max_num_reqs * logits_rows_per_req
 
 
