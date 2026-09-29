@@ -4,7 +4,6 @@
 
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
-from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Protocol
 
 from vllm.config import VllmConfig, replace
@@ -62,11 +61,16 @@ def _draft_additional_config(vllm_config: VllmConfig) -> dict[str, Any] | None:
     if not enabled:
         return None
 
-    draft_additional_config = deepcopy(additional_config)
+    draft_profiling_chunk_config = profiling_chunk_config.copy()
+    draft_profiling_chunk_config["enabled"] = False
+
+    draft_additional_config = additional_config.copy()
     if nested:
-        draft_additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] = False
+        draft_scheduler_config = scheduler_config.copy()
+        draft_scheduler_config["profiling_chunk_config"] = draft_profiling_chunk_config
+        draft_additional_config["scheduler_config"] = draft_scheduler_config
     else:
-        draft_additional_config["profiling_chunk_config"]["enabled"] = False
+        draft_additional_config["profiling_chunk_config"] = draft_profiling_chunk_config
     return draft_additional_config
 
 
