@@ -7,7 +7,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from ...program.invocation import LoadCompletion, LoadTransfer, StoreCompletion, StoreTransfer
+from ...program.values.evidence import LoadCompletion, StoreCompletion
+from ...program.values.selection import LoadTransfer, StoreTransfer
 
 
 class LoadTimelineProtocol(Protocol):

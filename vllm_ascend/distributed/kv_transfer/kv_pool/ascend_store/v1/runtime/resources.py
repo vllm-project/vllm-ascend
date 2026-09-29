@@ -9,7 +9,7 @@ import torch
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
 from ..backend import BackendSpec
-from ..program.representation import KVMemoryGeometry, KVMemorySegment
+from ..program.values.representation import KVMemoryGeometry, KVMemorySegment
 
 if TYPE_CHECKING:
     from ..program.spec.topology import KVPoolGroupTopology

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from ..representation import (
+from ..values.representation import (
     KVMemoryGeometry,
     KVMemorySegment,
     KVMemoryView,

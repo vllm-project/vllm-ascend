@@ -75,9 +75,9 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from vllm.logger import logger
 
-from ...program.invocation import BindingEvidence, StoreEvidence
-from ...program.representation import BindingBatch, KVBinding
 from ...program.spec.topology import KVPoolTopology
+from ...program.values.evidence import BindingEvidence, StoreEvidence
+from ...program.values.representation import BindingBatch, KVBinding
 from . import (
     LoadCompletion,
     LoadTimelineProtocol,

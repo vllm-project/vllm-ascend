@@ -7,7 +7,8 @@ from dataclasses import dataclass
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import PoolKey, block_hash_to_str
 
-from ..representation import (
+from ..spec.topology import KVPoolGroupTopology, KVPoolTopology
+from ..values.representation import (
     KVChunk,
     KVChunkBatch,
     PhysicalCoordinate,
@@ -17,7 +18,6 @@ from ..representation import (
     RemoteObjectKeyBatch,
     TransferLayoutBatch,
 )
-from ..spec.topology import KVPoolGroupTopology, KVPoolTopology
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Protocol, cast
 
 from vllm.logger import logger
@@ -25,55 +24,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from ...coordinates import TokenRange
 from ...protocol.lookup import TailKeyBoundary
 from ..spec.topology import KVPoolGroupTopology
+from ..values.evidence import GroupAvailability, ReachablePrefix
+from ..values.selection import GroupSelection, KVSelection
 
-ChunkMask = tuple[bool, ...] | None
 BlockHashes = Sequence[BlockHash | str]
-
-
-@dataclass(frozen=True, slots=True)
-class GroupSelection:
-    """Logical chunks selected for one original vLLM cache group."""
-
-    group_id: int
-    chunk_mask: ChunkMask
-
-    def includes(self, start_token: int, block_size: int) -> bool:
-        chunk_index = start_token // block_size
-        return self.chunk_mask is None or (chunk_index < len(self.chunk_mask) and self.chunk_mask[chunk_index])
-
-
-@dataclass(frozen=True, slots=True)
-class KVSelection:
-    """Content-identified semantic KV selected on the token axis."""
-
-    token_range: TokenRange
-    block_hashes: tuple[BlockHash | str, ...]
-    groups: tuple[GroupSelection, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ChunkAvailability:
-    """Backend availability observed for one semantic KV chunk."""
-
-    token_range: TokenRange
-    content_hash: BlockHash | str
-    available: bool
-
-
-@dataclass(frozen=True, slots=True)
-class GroupAvailability:
-    """Semantic chunk observations for one original vLLM cache group."""
-
-    group_id: int
-    chunks: tuple[ChunkAvailability, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ReachablePrefix:
-    """Common reachable frontier and the remote identities needed to load its tail."""
-
-    end_token: int
-    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
 class ReachableRegionSelection(Protocol):

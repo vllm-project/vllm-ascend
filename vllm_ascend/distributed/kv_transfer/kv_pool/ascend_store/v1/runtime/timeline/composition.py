@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, cast
 
-from ...program.invocation import LoadCompletion, LoadTransfer, StoreCompletion, StoreTransfer
 from ...program.spec.schedule import KVPoolSchedule, LoadScheduleKind, StoreScheduleKind
 from ...program.spec.topology import KVPoolTopology
+from ...program.values.evidence import LoadCompletion, StoreCompletion
+from ...program.values.selection import LoadTransfer, StoreTransfer
 from . import LoadTimelineProtocol, StoreBatch, StoreTimelineProtocol
 from .bulk import AsyncLoadTimeline, LoadTimeline, StoreTimeline
 from .layerwise import (

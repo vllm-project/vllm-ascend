@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..representation import KVBlockAssignment, KVBlockAssignmentBatch
 from ..spec.topology import KVPoolTopology
+from ..values.representation import KVBlockAssignment, KVBlockAssignmentBatch
 
 
 @dataclass(frozen=True, slots=True)
