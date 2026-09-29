@@ -32,6 +32,7 @@ def _make_runner(need_timing: bool = True):
     runner.attn_groups = []
     runner.adaptive_verification = None
     runner.use_fia = False
+    runner.sync_spec_pp_cpu_counts = False
     # Set by NPUModelRunner.__init__ on real instances.
     runner._finegrained_tp_requires_graph = False
     # Empty groups keep prepare_dummy_attn's V4.1 ring-state prep a no-op;
@@ -433,7 +434,7 @@ def test_pcp_manager_cls():
     assert _make_runner().pcp_manager_cls is AscendPCPManager
 
 
-def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=False):
+def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=False, use_pp=False):
     self.vllm_config = vllm_config
     self.device = device
     self.compilation_config = SimpleNamespace(
@@ -441,8 +442,9 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
         mode=SimpleNamespace(),
         has_full_cudagraphs=lambda: full_graph,
     )
-    self.model_config = SimpleNamespace(enforce_eager=not full_graph)
+    self.model_config = SimpleNamespace(enforce_eager=not full_graph, architecture="Qwen3_5ForConditionalGeneration")
     self.speculative_config = object() if speculative else None
+    self.use_pp = use_pp
     self.is_last_pp_rank = True
     self.pp_handler = MagicMock()
     self.max_num_reqs = 2
@@ -497,6 +499,7 @@ def test_init_without_spec_pp():
     assert runner.input_buffers == "buf"
     assert runner.speculator is None
     assert runner.use_spec_pp is False
+    assert runner.sync_spec_pp_cpu_counts is False
     assert runner.decode_query_len == 1
 
 
@@ -526,7 +529,7 @@ def test_init_spec_pp_full_graph_and_speculator():
         patch.object(
             GPUModelRunner,
             "__init__",
-            lambda self, cfg, dev: _parent_init(self, cfg, dev, full_graph=True, speculative=True),
+            lambda self, cfg, dev: _parent_init(self, cfg, dev, full_graph=True, speculative=True, use_pp=True),
         ),
         patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController", return_value="eplb") as eplb_cls,
         patch("vllm_ascend.worker.v2.model_runner.init_speculator", return_value=speculator),
@@ -552,6 +555,7 @@ def test_init_spec_pp_full_graph_and_speculator():
     assert runner.speculator is speculator
     assert speculator.update_stream is runner.update_stream
     assert runner.use_spec_pp is False
+    assert runner.sync_spec_pp_cpu_counts is True
     install_pp.assert_not_called()
     assert runner.update_stream is not None
     assert runner.decode_query_len == 2

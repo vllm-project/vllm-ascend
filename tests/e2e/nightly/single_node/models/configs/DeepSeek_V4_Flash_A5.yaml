@@ -71,7 +71,7 @@ _benchmarks_per2: &benchmarks_per
 # ==========================================
 test_cases:
   - name: "DeepSeekV4_Flash_A5_Single_GPQA_Accuracy_Test_01"
-    model: "/root/.cache/modelscope/hub/models/models--deepseek-ai--DeepSeek-V4-Flash"
+    model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -85,7 +85,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_acc
   - name: "Refuse_sampling_acceptance_rate_test_06"
-    model: "/root/.cache/modelscope/hub/models/models--deepseek-ai--DeepSeek-V4-Flash"
+    model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -99,7 +99,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_per
   - name: "Refuse_sampling_acceptance_rate_test_05"
-    model: "/root/.cache/modelscope/hub/models/models--deepseek-ai--DeepSeek-V4-Flash"
+    model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -113,7 +113,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_per
   - name: "Refuse_sampling_acceptance_rate_test_04"
-    model: "/root/.cache/modelscope/hub/models/models--deepseek-ai--DeepSeek-V4-Flash"
+    model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -127,7 +127,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_per
   - name: "DeepSeek_V4_flash_FULL_DECODE_OMLY_A5_Single_Accrancy_Test_01"
-    model: "/root/.cache/modelscope/hub/models/models--deepseek-ai--DeepSeek-V4-Flash"
+    model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -139,7 +139,7 @@ test_cases:
       - "--additional-config"
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"rejection_sampler_config":{"enable_block_verify":true,"enable_entropy_verify":false,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
   - name: "DeepSeek_V4_flash_A5_Single_Maximum_Context_Test_01"
-    model: "/root/.cache/modelscope/hub/models/models--deepseek-ai--DeepSeek-V4-Flash"
+    model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash"
     envs:
       <<: *envs
     server_cmd: *server_cmd
