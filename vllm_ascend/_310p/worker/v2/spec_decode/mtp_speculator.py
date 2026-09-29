@@ -35,6 +35,9 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
+from vllm_ascend.worker.v2.spec_decode.config_utils import (
+    disable_profiling_chunk_for_draft,
+)
 
 
 class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
@@ -56,12 +59,13 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             self.vllm_config.parallel_config,
             pipeline_parallel_size=1,
         )
-        draft_vllm_config = replace(
-            self.vllm_config,
-            model_config=model_config_for_vllm,
-            parallel_config=parallel_config,
-            quant_config=self.vllm_config.quant_config,
-        )
+        with disable_profiling_chunk_for_draft(self.vllm_config):
+            draft_vllm_config = replace(
+                self.vllm_config,
+                model_config=model_config_for_vllm,
+                parallel_config=parallel_config,
+                quant_config=self.vllm_config.quant_config,
+            )
 
         target_path = os.path.realpath(self.vllm_config.model_config.model)
         draft_path = os.path.realpath(draft_model_config.model)

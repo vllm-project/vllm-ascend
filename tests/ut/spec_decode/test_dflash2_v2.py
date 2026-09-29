@@ -23,12 +23,42 @@ from unittest.mock import patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.worker.v2.spec_decode import init_speculator
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
     AscendDFlash2Speculator,
     _selector_walk_kernel_ascend,
 )
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_dflash_loader_temporarily_disables_profiling_chunk(monkeypatch, fail):
+    additional_config = {"profiling_chunk_config": {"enabled": "true", "min_chunk": 64}}
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=2),
+        additional_config=additional_config,
+    )
+    speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    speculator.vllm_config = config
+    draft = object()
+
+    def load(self, target_model, target_attn_layer_names):
+        del target_model, target_attn_layer_names
+        assert self.vllm_config is config
+        assert self.vllm_config.additional_config["profiling_chunk_config"]["enabled"] is False
+        if fail:
+            raise RuntimeError("draft load failed")
+        return draft
+
+    monkeypatch.setattr(DFlashSpeculator, "load_draft_model", load)
+    expected_context = pytest.raises(RuntimeError, match="draft load failed") if fail else nullcontext()
+    with expected_context:
+        assert speculator.load_draft_model(object(), set()) is draft
+
+    assert config.additional_config is additional_config
+    assert additional_config["profiling_chunk_config"]["enabled"] == "true"
 
 
 def test_patch_swaps_upstream_selector_walk_kernel():
