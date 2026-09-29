@@ -37,10 +37,12 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -123,6 +125,39 @@ def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfi
                 group = replace(group, kv_cache_spec=layer_specs[0])
         groups.append(group)
     return replace(kv_cache_config, kv_cache_groups=groups)
+
+
+def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec]) -> None:
+    """Align dense K/V segments before padding a shared Attention/Mamba pool."""
+    # MLA and compressed-cache subclasses manage their own storage layouts.
+    attention_specs = {
+        name: spec for name, spec in kv_cache_specs.items() if type(spec) in (FullAttentionSpec, SlidingWindowSpec)
+    }
+    if not attention_specs:
+        return
+    reference = max(attention_specs.values(), key=lambda spec: spec.real_page_size_bytes)
+    page_size = reference.real_page_size_bytes
+    for layer_name, spec in attention_specs.items():
+        # Ascend packs each layer as [all K blocks][all V blocks]. Equal
+        # padded pages alone do not isolate block IDs: a smaller SWA K segment
+        # can overlap another request's full-attention V block. Grow scheduler
+        # blocks before padding; the backend still splits them into kernel blocks.
+        if (
+            page_size % spec.real_page_size_bytes
+            or spec.head_size * reference.head_size_v != reference.head_size * spec.head_size_v
+        ):
+            raise ValueError(
+                f"Cannot align hybrid attention K/V pages for {layer_name}: "
+                "the shared contiguous cache requires matching K/V size ratios "
+                "and divisible unpadded page sizes."
+            )
+        ratio = page_size // spec.real_page_size_bytes
+        if ratio > 1:
+            kv_cache_specs[layer_name] = replace(
+                spec,
+                block_size=spec.block_size * ratio,
+                page_size_padded=max(spec.page_size_padded, page_size) if spec.page_size_padded is not None else None,
+            )
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -227,6 +262,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             continue
 
     if mamba_specs:
+        _align_hybrid_attention_page_sizes(kv_cache_spec)
         common_page_size = max(spec.page_size_bytes for spec in (*kv_cache_spec.values(), *mamba_specs.values()))
         for layer_name in attention_layer_names:
             spec = kv_cache_spec[layer_name]

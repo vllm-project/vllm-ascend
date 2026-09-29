@@ -128,6 +128,20 @@ class NPUModelRunner(GPUModelRunner):
         # Native PP owns token broadcast/writeback; only releases use our packing.
         # Legacy Spec+PP transport (0.28/0.29 only); deleted when 0.30+ is the floor.
         self.use_spec_pp = spec_pp_support is not None and use_legacy_spec_pp()
+        # These FIA models need post-rejection host counts on every PP stage.
+        # TODO: Remove this extra PP sync when FIA and its metadata builders
+        # use device lengths instead of exact CPU lengths.
+        self.sync_spec_pp_cpu_counts = (
+            self.use_pp
+            and self.num_speculative_steps > 0
+            and self.model_config.architecture
+            in (
+                "KimiLinearForCausalLM",
+                "KimiK3ForCausalLM",
+                "KimiK3ForConditionalGeneration",
+                "Qwen3_5ForConditionalGeneration",
+            )
+        )
         # These draft heads consume target aux states collected across PP ranks.
         if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
             self.use_aux_hidden_state_outputs = True
@@ -840,13 +854,20 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc,
         )
 
-        # Without MTP, update_requests writes the shared NumPy/torch CPU state.
-        if self.speculator is not None:
+        # Non-last PP stages receive rejections without owning a speculator.
+        if self.speculator is not None or self.sync_spec_pp_cpu_counts:
+            self._copy_num_computed_tokens_to_cpu()
+
+    def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
+        super().postprocess_num_computed_tokens(input_batch)
+        # Unsampled prefill chunks must also refresh the next step's snapshot.
+        if self.sync_spec_pp_cpu_counts:
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
-        # npu attention backend still need to use seq_lens_cpu,
-        # we need to copy num_computed_tokens back to cpu.
+        # Attention metadata still needs exact CPU lengths. This non-blocking
+        # D2H is waited on in _update_seq_lens_cpu, introducing a host/device
+        # sync point that can break asynchronous scheduling overlap.
         default_stream = torch.cuda.current_stream()
         assert self.num_computed_tokens_stream is not None
         assert self.num_computed_tokens_cpu is not None
@@ -865,10 +886,11 @@ class NPUModelRunner(GPUModelRunner):
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
-        # MTP needs D2H copy to get reverted num_computed_tokens after rejection.
+        # Speculative decoding needs corrected num_computed_tokens after rejection.
         # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
         # so this update also corrects the num_computed_tokens_np used by PCP.
-        if self.speculator is not None:
+        if self.speculator is not None or self.sync_spec_pp_cpu_counts:
+            # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
