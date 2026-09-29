@@ -68,7 +68,7 @@ _CURRENT_STREAM = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
-_ASCEND_CUSTOMOP_IS_REIGISTERED = False
+_ASCEND_CUSTOMOP_IS_REGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME = "sleep_lifecycle_anchor"
@@ -769,10 +769,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     """Register Ascend CustomOP
 
     NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`,
-    and ensure this will execute after model config is initilazed.
+    and ensure this will execute after model config is initialized.
     """
-    global _ASCEND_CUSTOMOP_IS_REIGISTERED
-    if _ASCEND_CUSTOMOP_IS_REIGISTERED:
+    global _ASCEND_CUSTOMOP_IS_REGISTERED
+    if _ASCEND_CUSTOMOP_IS_REGISTERED:
         return
     from vllm.model_executor.custom_op import CustomOp
 
@@ -898,7 +898,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 
     # NOTE: Keep this at last to ensure all custom actions are registered
-    _ASCEND_CUSTOMOP_IS_REIGISTERED = True
+    _ASCEND_CUSTOMOP_IS_REGISTERED = True
 
 
 def lmhead_tp_enable() -> bool:
