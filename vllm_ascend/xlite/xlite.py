@@ -124,6 +124,10 @@ class XliteModelBase(ABC):
         self.xlite_model.init(self.xlite_config, torch.distributed.get_rank())
         self.cossin_cache = self._precompute_freqs_cis()
 
+        if torch.distributed.get_rank() == 0:
+            logger.info_once("xlite: built model config: %s", self.xlite_config)
+            logger.info_once("xlite: built model weights: %s", self.xlite_model)
+
     def extract_kv_cache(self, kv_caches: list[tuple[torch.Tensor, ...]], /) -> list[tuple[torch.Tensor, ...]]:
         """Extract xlite-compatible KV cache from the vLLM-ascend KV cache.
 
@@ -365,6 +369,7 @@ class StandardXliteModel(XliteModelBase):
         # MoE-specific weights
         mlp_prefix = self._decoder_layer_mlp_module
         xlite_model.gate = get_layer_weights(layers, f"{mlp_prefix}.gate.weight")
+        xlite_config.gate_captured = self.is_tensor_nz(xlite_model.gate[0]) if xlite_model.gate else False
         xlite_model.gate_bias = get_layer_weights(
             layers,
             f"{mlp_prefix}.gate.e_score_correction_bias",
@@ -507,7 +512,6 @@ class Glm4MoeXliteModel(StandardXliteModel):
         xlite_config.norm_topk_prob = hf_config.norm_topk_prob
         xlite_config.scoring_func = ScoringFuncSigmoid
         xlite_config.route_scale = hf_config.routed_scaling_factor
-        xlite_config.gate_captured = False
 
 
 class DeepseekV3XliteModel(Glm4MoeXliteModel):
@@ -547,7 +551,7 @@ class DeepseekV3XliteModel(Glm4MoeXliteModel):
 
     def _build_model(self) -> None:
         super()._build_model()
-        xlite_model = self.xlite_model
+        xlite_model, xlite_config = self.xlite_model, self.xlite_config
         layers, _ = self._get_layers_and_model_prefix()
 
         # MLA attention weights
@@ -557,6 +561,8 @@ class DeepseekV3XliteModel(Glm4MoeXliteModel):
         xlite_model.mla_kv_norm = get_layer_weights(layers, "self_attn.kv_a_layernorm.weight")
         xlite_model.mla_wuv = get_layer_weights(layers, "self_attn.mla_attn.mla_attn.impl.W_UV")
         xlite_model.mla_wuk_t = get_layer_weights(layers, "self_attn.mla_attn.mla_attn.impl.W_UK_T")
+        xlite_config.mla_wuv_weight_nz = bool(wuv_lst := xlite_model.mla_wuv) and self.is_tensor_nz(wuv_lst[0])
+        xlite_config.mla_wukt_weight_nz = bool(wuk_lst := xlite_model.mla_wuk_t) and self.is_tensor_nz(wuk_lst[0])
 
         if not self.quantization:
             return
@@ -688,7 +694,6 @@ class MiniMaxM2XliteModel(StandardXliteModel):
         xlite_config.norm_topk_prob = True
         xlite_config.qk_norm_full = True
         xlite_config.scoring_func = ScoringFuncSigmoid
-        xlite_config.gate_captured = False
 
 
 def get_adapter_xlite_model(npu_runner: "XliteModelRunner", vllm_config: VllmConfig) -> XliteModelBase:
