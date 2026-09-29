@@ -21,9 +21,9 @@ class LoadTimeline:
     def __init__(self) -> None:
         self._operation: Callable[[LoadTransfer], LoadCompletion] | None = None
 
-    def attach_operation(self, operation: Callable[[LoadTransfer], LoadCompletion]) -> None:
+    def bind_operation(self, operation: Callable[[LoadTransfer], LoadCompletion]) -> None:
         if self._operation is not None:
-            raise RuntimeError("Load timeline operation is already attached")
+            raise RuntimeError("Load timeline operation is already bound")
         self._operation = operation
 
     def start(self) -> None:
@@ -56,9 +56,9 @@ class AsyncLoadTimeline:
         self._completed: list[LoadCompletion] = []
         self._executor = TimelineExecutor("KVPoolLoadExecutor", thread_initializer, self._execute)
 
-    def attach_operation(self, operation: Callable[[LoadTransfer], LoadCompletion]) -> None:
+    def bind_operation(self, operation: Callable[[LoadTransfer], LoadCompletion]) -> None:
         if self._operation is not None:
-            raise RuntimeError("Load timeline operation is already attached")
+            raise RuntimeError("Load timeline operation is already bound")
         self._operation = operation
 
     def start(self) -> None:
@@ -121,9 +121,9 @@ class StoreTimeline:
         self._operation: Callable[[StoreTransfer, Any], StoreCompletion] | None = None
         self._executor = TimelineExecutor("KVPoolStoreExecutor", thread_initializer, self._execute, self._complete)
 
-    def attach_operation(self, operation: Callable[[StoreTransfer, Any], StoreCompletion]) -> None:
+    def bind_operation(self, operation: Callable[[StoreTransfer, Any], StoreCompletion]) -> None:
         if self._operation is not None:
-            raise RuntimeError("Store timeline operation is already attached")
+            raise RuntimeError("Store timeline operation is already bound")
         self._operation = operation
 
     def start(self) -> None:
