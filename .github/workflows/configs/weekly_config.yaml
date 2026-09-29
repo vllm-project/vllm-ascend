@@ -272,7 +272,7 @@ a3:
   single_node:
     test_config:
       # pytest-driven tests
-      - name: engine-func-tests
+      - name: openai-api-compatibility
         os: linux-aarch64-a3-800t-4
         tests: tests/e2e/cases/features/openai_api_compatibility
       - name: structured_output_qwen3
