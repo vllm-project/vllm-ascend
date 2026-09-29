@@ -83,7 +83,7 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
             )
         )
     monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
-    events = []
+    events: list[object] = []
     monkeypatch.setattr(model_kda, "wait_for_kv_layer_from_connector", lambda prefix: events.append(("load", prefix)))
     monkeypatch.setattr(model_kda, "record_attention_compute_start", lambda: events.append("compute"))
     monkeypatch.setattr(model_kda, "maybe_save_kv_layer_to_connector", lambda *args: events.append("save"))
