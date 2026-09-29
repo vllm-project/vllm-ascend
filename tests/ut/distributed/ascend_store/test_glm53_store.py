@@ -40,7 +40,11 @@ def make_glm53_plan(layer_offset=0):
         parts = name.split(".")
         parts[2] = str(int(parts[2]) + layer_offset)
         specs[".".join(parts)] = replace(spec, mamba_cache_mode="align") if isinstance(spec, MambaSpec) else spec
-    config = make_config()
+    # Dense retention: the round-trip tests below persist and look up every
+    # block. The make_config default of 0 keeps only semantic checkpoints, and
+    # the coordinator passes no reachable boundaries, so 0 would mask off the
+    # mamba/indexer groups entirely (nothing stored, nothing found).
+    config = make_config(retention_interval=None)
     groups = get_glm5_next_kv_cache_groups(config, specs)
     return get_glm5_next_kv_cache_config(config, groups, 24 * get_glm5_next_pool_bytes_per_block(groups))
 
@@ -304,7 +308,9 @@ class TestGLM53Store(unittest.TestCase):
                 can_save=True,
             )
             metadata.add_request(request)
-            worker.start_load_kv(metadata)
+            # Layerwise state is prepared when metadata is bound (#17487);
+            # start_load_kv is a no-op for layerwise workers.
+            worker.prepare_layerwise_step(metadata)
             task_groups = {task.group_id for tasks in worker.layer_save_tasks for task in tasks}
             self.assertEqual(task_groups, {0, 2, 3, 4} if rank == 0 else {2, 3, 4})
             self.assertEqual(len(request.block_gvas_by_group_np), 5)
@@ -320,6 +326,10 @@ class TestGLM53Store(unittest.TestCase):
         self.assertEqual(len(readable), 14)  # Per PP stage: one MLA shard and three KDA groups on both TP ranks.
         self.assertFalse(any("@1@" in key.split(block_hash.hex())[0] for key in readable))
         start_patch(self, "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib")
+        # The scheduler builds its coordinator from vllm_config, which
+        # make_worker pins to retention 0 (semantic checkpoints only); this
+        # round-trip persists every block, so look it up densely.
+        workers[0][0].vllm_config.cache_config.prefix_cache_retention_interval = None
         scheduler = KVPoolScheduler(workers[0][0].vllm_config, True, workers[0][0].kv_cache_config)
         scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [key in readable for key in keys]
         hit_request = SimpleNamespace(
@@ -342,7 +352,7 @@ class TestGLM53Store(unittest.TestCase):
                 can_save=False,
             )
             metadata.add_request(request)
-            worker.start_load_kv(metadata)
+            worker.prepare_layerwise_step(metadata)
             self.assertEqual(len(request.load_block_gvas_by_group_np), 5)
             self.assertEqual(len(request.load_block_gvas_by_group_np[1]), 0)
             for _ in range(4):
@@ -456,7 +466,7 @@ class TestGLM53Store(unittest.TestCase):
         )
         metadata = AscendConnectorMetadata(set())
         metadata.add_request(request)
-        worker.start_load_kv(metadata)
+        worker.prepare_layerwise_step(metadata)
         expected = {2: [False, True, False], 3: [True, False, False], 4: [False, False, True]}
         for group_id, mask in expected.items():
             self.assertEqual(request.store_masks[group_id], mask)
