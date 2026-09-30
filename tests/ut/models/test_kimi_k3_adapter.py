@@ -19,6 +19,7 @@ from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
 )
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
@@ -242,17 +243,26 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
 
     hidden_states = torch.arange(4, dtype=torch.float32).view(2, 2)
     block_residual = torch.zeros(2, 1, 2)
-    output, returned_residual = layer.forward_attn_residual(
-        positions=torch.arange(3),
-        hidden_states=hidden_states,
-        block_residual=block_residual,
-    )
+    if vllm_version_is("0.30.0"):
+        output, returned_residual = layer.forward_attn_residual(
+            positions=torch.arange(3),
+            hidden_states=hidden_states,
+            block_residual=block_residual,
+        )
+        assert output.shape == torch.Size([2, 2])
+    else:
+        _, returned_residual, output = layer.forward_attn_residual(
+            positions=torch.arange(3),
+            hidden_states=hidden_states,
+            block_residual=block_residual,
+            prefix_delta=None,
+        )
+        assert output.shape == torch.Size([2, 2])
 
     assert collective_shapes == [
         ("gather", torch.Size([2, 2])),
         ("reduce_scatter", torch.Size([3, 2])),
     ]
-    assert output.shape == torch.Size([2, 2])
     assert returned_residual.shape == torch.Size([2, 1, 2])
 
 

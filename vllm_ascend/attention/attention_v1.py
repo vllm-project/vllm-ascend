@@ -343,13 +343,16 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # request extent, so a padded FULL-graph decode query tensor can exceed
         # the last cumulative query length. FIA's TND layout requires that last
         # entry to equal the model input token count, so append the padded tail
-        # as a final synthetic request. Only decode batches need this: prefill
-        # (including the EAGLE drafter's merged prefill) reuses the target's
-        # num_input_tokens while its own query is shorter. v0.30.0 already pads
-        # this at the request level and must stay unchanged.
+        # as a final synthetic request. This only applies to multi-token
+        # (speculative) decode where one request spans several query tokens:
+        # single-token decode never pads requests beyond the query start loc,
+        # and prefill (including the EAGLE drafter's merged prefill) reuses the
+        # target's num_input_tokens while its own query is shorter. v0.30.0
+        # already pads this at the request level and must stay unchanged.
         if (
             not vllm_version_is("0.30.0")
             and common_attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and (common_attn_metadata.max_query_len or 0) > 1
             and actual_seq_lengths_q
             and common_attn_metadata.num_input_tokens > actual_seq_lengths_q[-1]
         ):
