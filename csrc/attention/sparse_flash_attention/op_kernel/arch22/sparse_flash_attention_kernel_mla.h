@@ -331,6 +331,10 @@ template <typename SFAT>
 __aicore__ inline void SparseFlashAttentionMla<SFAT>::GetSparseActualSeqLen(uint32_t bIdx, uint32_t s1Idx,
                                                                             uint32_t n2Idx)
 {
+#if !defined(VLLM_ASCEND_SFA_A3)
+    (void)bIdx;
+    (void)n2Idx;
+#endif
     if (tempLoopInfo.nextTokensPerBatch < 0 && s1Idx < (-tempLoopInfo.nextTokensPerBatch)) { //存在行无效
         tempLoopInfo.curActualSeqLen = 0;
         return;
@@ -340,9 +344,34 @@ __aicore__ inline void SparseFlashAttentionMla<SFAT>::GetSparseActualSeqLen(uint
         threshold = static_cast<int64_t>(tempLoopInfo.nextTokensPerBatch) + s1Idx + 1;
     }
 
-    tempLoopInfo.curActualSeqLen = (constInfo.sparseBlockCount * constInfo.sparseBlockSize > threshold) ?
-                                           threshold :
-                                           constInfo.sparseBlockCount * constInfo.sparseBlockSize;
+    uint64_t selectedCount = constInfo.sparseBlockCount;
+    if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
+#if defined(VLLM_ASCEND_SFA_A3)
+        if (constInfo.sparseMode == 0 && constInfo.sparseBlockSize == 1) {
+            // mBaseSize == gSize: s1Idx addresses one query row on A3.
+            uint64_t queryOffset = bIdx * constInfo.qSeqSize + s1Idx;
+            if constexpr (LAYOUT_T == SFA_LAYOUT::TND) {
+                uint64_t prefix = bIdx == 0 ? 0 : actualSeqLengthsQGm.GetValue(bIdx - 1);
+                queryOffset = prefix + s1Idx;
+            }
+            uint64_t offset = (queryOffset * constInfo.kvHeadNum + n2Idx) * constInfo.sparseBlockCount;
+            uint64_t left = 0;
+            uint64_t right = constInfo.sparseBlockCount;
+            while (left < right) {
+                uint64_t middle = left + (right - left) / 2;
+                if (topKGm.GetValue(offset + middle) >= 0) {
+                    left = middle + 1;
+                } else {
+                    right = middle;
+                }
+            }
+            // Keep the original raw max/sum and output for all-invalid rows.
+            selectedCount = left == 0 ? constInfo.sparseBlockCount : left;
+        }
+#endif
+    }
+    int64_t selectedLength = static_cast<int64_t>(selectedCount * constInfo.sparseBlockSize);
+    tempLoopInfo.curActualSeqLen = selectedLength > threshold ? threshold : selectedLength;
 }
 
 template <typename SFAT>

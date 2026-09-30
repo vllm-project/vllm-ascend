@@ -220,3 +220,13 @@
     - <term>Ascend 950PR&950DT 系列产品</term>：只支持sparse\_block\_size为1。
     - <term>Atlas A3 系列产品</term>、<term>Atlas A2 系列产品</term>：支持[1,16]，且要求是2的幂次方，在PageAttention场景下要求sparse\_block\_size整除block\_size
 - 非PageAttention场景layout\_query和layout\_kv取值需要保持一致。
+
+## Automatic valid-prefix trimming on A3
+
+For the A3 V-template with `sparse_mode=0` and `sparse_block_size=1`, the
+kernel discovers the valid nonnegative index prefix and skips the invalid
+suffix. This uses the existing requirement that valid indices precede invalid
+indices. Index values within the prefix need not be sorted. No new operator
+parameter or serving configuration is required. Empty prefixes retain the
+legacy computation path and raw softmax max/sum behavior. Other devices and
+modes are unchanged. See the [validation guide](../../../docs/source/user_guide/feature_guide/sfa_valid_count.md).

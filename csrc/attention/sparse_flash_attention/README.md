@@ -230,3 +230,13 @@
     </td>
   </tr>
 </tbody></table>
+
+## Automatic valid-prefix trimming on A3
+
+For the A3 V-template with `sparse_mode=0` and `sparse_block_size=1`, the
+kernel discovers the valid nonnegative index prefix and skips the invalid
+suffix. This uses the existing requirement that valid indices precede invalid
+indices. Index values within the prefix need not be sorted. No new operator
+parameter or serving configuration is required. Empty prefixes retain the
+legacy computation path and raw softmax max/sum behavior. Other devices and
+modes are unchanged. See the [validation guide](../../../docs/source/user_guide/feature_guide/sfa_valid_count.md).

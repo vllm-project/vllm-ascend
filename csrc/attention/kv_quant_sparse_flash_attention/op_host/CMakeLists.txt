@@ -26,6 +26,13 @@ add_ops_compile_options(
             -mllvm -cce-aicore-hoist-movemask=false
 )
 
+# The arch22 kernels are shared by A2/A3; keep prefix trimming A3-only.
+add_ops_compile_options(
+    OP_NAME KvQuantSparseFlashAttention
+    COMPUTE_UNIT Ascend910_9391
+    OPTIONS -DVLLM_ASCEND_SFA_A3
+)
+
 if (NOT BUILD_OPS_RTY_KERNEL)
     add_modules_sources(OPTYPE kv_quant_sparse_flash_attention ACLNNTYPE aclnn)
 endif()
