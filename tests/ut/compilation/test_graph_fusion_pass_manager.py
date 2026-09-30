@@ -48,7 +48,10 @@ class TestGraphFusionPassManagerConfig(TestBase):
         profile.supports.side_effect = (
             lambda capability: capability.name == "GRAPH_MM_REDUCE_SCATTER_FUSION"
         )
-        with patch("vllm_ascend.compilation.graph_fusion_pass_manager.get_current_hardware_profile", return_value=profile):
+        with patch(
+            "vllm_ascend.compilation.graph_fusion_pass_manager.get_current_hardware_profile",
+            return_value=profile,
+        ):
             manager = GraphFusionPassManager()
             manager.configure(vllm_config)
 
