@@ -166,7 +166,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --max-model-len 43008 \
-      --tensor-parallel-size 16 \
+      --data-parallel-size 2 \
+      --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --max-num-seqs 16 \
       --distributed_executor_backend "mp" \
