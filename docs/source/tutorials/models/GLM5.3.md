@@ -441,7 +441,7 @@ Prerequisites:
 1. Prepare the same GLM-5.3 W8A8C8 weights and compatible software on every node. Install `fastokens` on Prefill nodes for `VLLM_USE_FASTOKENS=1`. Set `MODEL_PATH` to the local model directory. The `--quantization ascend` option loads the Ascend quantization configuration from the weights; do not copy the co-located KV-cache overrides into this reference without checking compatibility.
 2. Verify [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect). Set each node's `local_ip` and `nic_name` to its reachable address and matching network interface.
 3. Complete [MemCache backend setup](../../user_guide/feature_guide/kv_pool.md#scenario-2-memcache-backend), including the hardware/CANN prerequisites, `memfabric-hybrid` and `memcache-hybrid` installation, configuration files, and metadata service. All P/D instances must access the same pool. The connector configuration below does not start the MemCache service.
-4. Ensure the API, DP RPC, and KV-transfer ports are available and reachable. Each instance needs a distinct engine ID and non-conflicting local ports. The scripts below derive these from the role and global DP rank.
+4. Ensure the API, DP RPC, and KV-transfer ports are available and reachable. Keep the Prefill and Decode node groups separate and avoid conflicting local ports.
 
 Before you start, prepare the following scripts on each node, following the same launcher/template layout as the [GLM-5.2 PD deployment](GLM5.2.md#513-prefill-decode-disaggregation).
 
@@ -522,7 +522,6 @@ Before you start, prepare the following scripts on each node, following the same
 
         ```shell
         #!/usr/bin/env bash
-        set -euo pipefail
 
         # Set these values separately on each node.
         local_ip="<current_node_ip>"
@@ -584,7 +583,7 @@ Before you start, prepare the following scripts on each node, following the same
                 "kv_connector": "MultiConnector",
                 "kv_role": "kv_producer",
                 "kv_port": 30000,
-                "engine_id": "glm53-prefill-'"$4"'",
+                "engine_id": "0",
                 "kv_connector_extra_config": {
                     "connectors": [
                         {
@@ -601,7 +600,7 @@ Before you start, prepare the following scripts on each node, following the same
                             "kv_connector": "AscendStoreConnector",
                             "kv_role": "kv_producer",
                             "kv_connector_extra_config": {
-                                "lookup_rpc_port": '$((37000 + $4))',
+                                "lookup_rpc_port": 0,
                                 "backend": "memcache",
                                 "use_layerwise": false
                             }
@@ -615,7 +614,6 @@ Before you start, prepare the following scripts on each node, following the same
 
         ```shell
         #!/usr/bin/env bash
-        set -euo pipefail
 
         # Set these values separately on each node.
         local_ip="<current_node_ip>"
@@ -677,7 +675,7 @@ Before you start, prepare the following scripts on each node, following the same
                 "kv_connector": "MultiConnector",
                 "kv_role": "kv_consumer",
                 "kv_port": 30200,
-                "engine_id": "glm53-decode-'"$4"'",
+                "engine_id": "2",
                 "kv_connector_extra_config": {
                     "connectors": [
                         {
@@ -694,7 +692,7 @@ Before you start, prepare the following scripts on each node, following the same
                             "kv_connector": "AscendStoreConnector",
                             "kv_role": "kv_consumer",
                             "kv_connector_extra_config": {
-                                "lookup_rpc_port": '$((37100 + $4))',
+                                "lookup_rpc_port": 0,
                                 "backend": "memcache",
                                 "use_layerwise": false
                             }
@@ -809,7 +807,8 @@ Only the key parameters specific to this model/scenario are described below. Adj
 - `MultiConnector`: Combine `MooncakeConnectorV1` for P-to-D transfer with `AscendStoreConnector` for MemCache pooling. Set both child roles to `kv_producer` on Prefill and `kv_consumer` on Decode.
 - `prefill` / `decode`: Keep the same global topology (`DP4 TP8` / `DP8 TP4`) in every Mooncake connector configuration.
 - `kv_port`: Base handshake port, 30000 on Prefill and 30200 on Decode. Mooncake offsets worker ports using the DP/TP ranks; reserve the resulting ranges on each host.
-- `engine_id` / `lookup_rpc_port`: Distinct per-instance engine IDs and integer store lookup identifiers derived from the role and global DP rank.
+- `engine_id`: Follow the GLM-5.2 convention: `"0"` for Prefill and `"2"` for Decode.
+- `lookup_rpc_port`: Use `0` on both sides, as in the GLM-5.2 pooling examples. The Ascend Store IPC lookup path also includes the DP rank; Prefill and Decode run on separate node groups.
 - `backend=memcache` / `use_layerwise=false`: Use non-layerwise MemCache pooling on both sides. Complete the pool configuration and start its metadata service before starting the vLLM instances.
 
 **Request forwarding and verification:**
