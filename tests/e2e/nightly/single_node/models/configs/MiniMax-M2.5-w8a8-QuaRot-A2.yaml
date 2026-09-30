@@ -14,6 +14,7 @@ test_cases:
       VLLM_TORCH_PROFILER_WITH_STACK: "0"
       VLLM_TORCH_PROFILER_DIR: "./profile"
       VLLM_USE_MODELSCOPE: "true"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--tensor-parallel-size"
