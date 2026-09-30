@@ -17,6 +17,7 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops import register_custom_ops as custom_ops
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
+from vllm_ascend.ops.fused_moe import moe_comm_method as comm_module
 from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
 from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
@@ -2531,7 +2532,7 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_
     monkeypatch.setattr(
         fused_moe_module,
         "get_moe_comm_method",
-        lambda kind: fused_mc2_comm if kind == MoECommType.FUSED_MC2 else None,
+        lambda kind, moe_config=None: fused_mc2_comm if kind == MoECommType.FUSED_MC2 else None,
     )
 
     return AscendMoERunner(
@@ -2542,6 +2543,36 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_
         gate=gate,
         shared_experts=shared_experts,
     )
+
+
+def test_runner_registers_alltoall_indices_as_buffer(monkeypatch):
+    def init_base_runner(runner, layer_name, moe_config, router, routed_experts, *args):
+        nn.Module.__init__(runner)
+        runner.moe_config = moe_config
+        runner.routed_experts = routed_experts
+
+    moe_config = SimpleNamespace(hidden_dim=4, ep_size=2, num_experts=8, num_local_experts=4)
+    indices = torch.arange(moe_config.num_experts, dtype=torch.int32).remainder(moe_config.num_local_experts)
+    comm = SimpleNamespace(token_dispatcher=SimpleNamespace(expert_ids_per_ep_rank=indices))
+    routed_experts = nn.Module()
+    routed_experts.quant_type = QuantType.NONE
+
+    monkeypatch.setattr(fused_moe_module.MoERunner, "__init__", init_base_runner)
+    for name in ("get_tp_group", "get_dp_group", "get_ep_group", "get_mc2_group"):
+        monkeypatch.setattr(fused_moe_module, name, MagicMock())
+    # Keep real setup/lookup so a missing expert configuration cannot be hidden.
+    monkeypatch.setattr(comm_module, "_MoECommMethods", {})
+    monkeypatch.setattr(comm_module, "AlltoAllCommImpl", MagicMock(return_value=comm))
+    for name in ("AllGatherCommImpl", "MC2CommImpl", "FusedMC2CommImpl"):
+        monkeypatch.setattr(comm_module, name, MagicMock())
+
+    runner = AscendMoERunner("model.layers.0.mlp", moe_config, router=object(), routed_experts=routed_experts)
+
+    active_comm = comm_module.get_moe_comm_method(MoECommType.ALLTOALL, moe_config)
+    assert dict(runner.named_buffers())["routed_experts.expert_ids_per_ep_rank"] is (
+        active_comm.token_dispatcher.expert_ids_per_ep_rank
+    )
+    assert "routed_experts.expert_ids_per_ep_rank" not in runner.state_dict()
 
 
 def test_runner_keeps_mega_moe_activation_with_each_layer(monkeypatch):
