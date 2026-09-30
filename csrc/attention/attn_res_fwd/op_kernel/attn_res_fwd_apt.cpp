@@ -10,10 +10,15 @@
 
 /*!
  * \file attn_res_fwd_apt.cpp
- * \brief AttnResFwd A5(ascend950) kernel entry — same logic as A2, includes arch35/
+ * \brief Shared AttnResFwd entry for A3 (arch22) and A5 (arch35).
  */
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+#include "arch22/attn_res_fwd_reload.h"
+#include "arch22/attn_res_fwd_resident.h"
+#else
 #include "arch35/attn_res_fwd_reload.h"
 #include "arch35/attn_res_fwd_resident.h"
+#endif
 #include "attn_res_fwd_tiling_data.h"
 #include "tiling_key_attn_res_fwd.h"
 
