@@ -35,18 +35,20 @@ class TestEnvVariables(TestBase):
                     self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if var_name == "VLLM_ASCEND_KVPOOL_RANGE_DEBUG":
+                    if var_name == "VLLM_ASCEND_KVPOOL_RANGE_DEBUG" or "bool(int(" in handler_source:
                         test_vals = ["0", "1"]
                     elif "int(" in handler_source:
                         test_vals = ["123", "456"]
-                    elif "bool(int(" in handler_source:
-                        test_vals = ["0", "1"]
                     else:
                         test_vals = [f"test_{var_name}", f"custom_{var_name}"]
 
                     for test_val in test_vals:
                         os.environ[var_name] = test_val
-                        self.assertEqual(getattr(envs_ascend, var_name), var_handler())
+                        self.assertEqual(
+                            getattr(envs_ascend, var_name),
+                            var_handler(),
+                            f"{var_name}={test_val!r}; module attribute={vars(envs_ascend).get(var_name, '<lazy>')!r}",
+                        )
 
                 finally:
                     if original_val is None:

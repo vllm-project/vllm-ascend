@@ -100,7 +100,9 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
                 thread.add_request(
                     request_id=request_id,
                     remote_request_id=remote_request_id,
-                    local_block_ids=([], []) if outcome == "empty" else ([2, 3], [4]),
+                    # Decode reserves two extra MTP draft-state blocks. Only
+                    # the committed Mamba block exists on the prefill side.
+                    local_block_ids=([], []) if outcome == "empty" else ([2, 3], [4, 5, 6]),
                     remote_block_ids=([1, 2], [3]),
                     remote_engine_id="prefill",
                     remote_host="192.0.2.1",

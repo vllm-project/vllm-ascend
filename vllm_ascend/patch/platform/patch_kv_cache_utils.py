@@ -10,6 +10,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -23,7 +24,19 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.kv_cache_interface import (
+    get_kv_cache_compression_ratio,
+    is_prefix_cacheable,
+)
+from vllm_ascend.core.six_region_kv_cache_layout import (
+    GDN,
+    HIDDEN,
+    PLE,
+    QSA_COMPRESSED,
+    QSA_MAIN,
+    QSA_RAW,
+    build_six_region_kv_cache_layout,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -39,13 +52,19 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.utils import vllm_version_is
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
 _orig_get_kv_cache_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups
-_orig_get_packed_kv_cache_groups = vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups
+if vllm_version_is("0.28.0"):
+    _orig_get_packed_kv_cache_groups = None
+    _orig_annotate_eagle_groups = None
+else:
+    _orig_get_packed_kv_cache_groups = vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups
+    _orig_annotate_eagle_groups = vllm.v1.core.kv_cache_utils._annotate_eagle_groups
 _orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
 _orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
@@ -376,6 +395,82 @@ def _get_max_layers_per_page_size(spec: UniformTypeKVCacheSpecs) -> int:
     return spec.get_max_layers_per_page_size()
 
 
+def _uses_qwen4_exp_mtp(vllm_config: VllmConfig) -> bool:
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None:
+        return False
+    draft_model_config = getattr(
+        speculative_config,
+        "draft_model_config",
+        None,
+    )
+    architectures = tuple(getattr(draft_model_config, "architectures", ()) or ())
+    if "Qwen4ExpMTP" in architectures:
+        return True
+    text_config = getattr(draft_model_config, "hf_text_config", None)
+    text_architectures = tuple(getattr(text_config, "architectures", ()) or ())
+    return getattr(text_config, "model_type", None) == "qwen4_exp_mtp" or ("Qwen4ExpMTP" in text_architectures)
+
+
+def _ascend_annotate_eagle_groups(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+    kv_cache_groups: list[KVCacheGroupSpec],
+    use_deepseek_v4_fallback: bool = False,
+) -> None:
+    """Annotate Qwen4Exp's actual MTP cache group, not every group.
+
+    Qwen4Exp's MTP attention spec is otherwise indistinguishable from the
+    target's spec. Its predictor is registered at the target layer count, so
+    use that model-scoped position to find only the group containing the real
+    draft layer. Leaving every group unannotated triggers vLLM's flag-all
+    fallback, which incorrectly treats target Mamba groups as draft state and
+    disables cross-request prefix reuse.
+    """
+    assert _orig_annotate_eagle_groups is not None
+    _orig_annotate_eagle_groups(
+        vllm_config,
+        kv_cache_spec,
+        kv_cache_groups,
+        use_deepseek_v4_fallback=use_deepseek_v4_fallback,
+    )
+    speculative_config = vllm_config.speculative_config
+    if (
+        speculative_config is None
+        or not speculative_config.use_eagle_block_drop()
+        or not _uses_qwen4_exp_mtp(vllm_config)
+    ):
+        return
+
+    text_config = vllm_config.model_config.hf_text_config
+    first_draft_layer = int(text_config.num_hidden_layers)
+    num_draft_layers = int(
+        getattr(
+            getattr(
+                speculative_config.draft_model_config,
+                "hf_text_config",
+                None,
+            ),
+            "mtp_num_hidden_layers",
+            1,
+        )
+        or 1
+    )
+    draft_markers = tuple(
+        f".layers.{layer_idx}."
+        for layer_idx in range(
+            first_draft_layer,
+            first_draft_layer + num_draft_layers,
+        )
+    )
+    for group in kv_cache_groups:
+        if any(marker in f".{layer_name}." for marker in draft_markers for layer_name in group.layer_names):
+            group.is_eagle_group = True
+
+    if not any(group.is_eagle_group for group in kv_cache_groups):
+        raise ValueError(f"Qwen4Exp MTP is enabled, but no KV cache group contains its draft layer(s) {draft_markers}.")
+
+
 def _ascend_get_packed_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -540,6 +635,14 @@ def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int
         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
+    if not vllm_version_is("0.28.0"):
+        six_region_layout = build_six_region_kv_cache_layout(
+            kv_cache_groups,
+            num_blocks=1,
+        )
+        if six_region_layout is not None:
+            hidden_bytes = sum(owner.spec.page_size_bytes for owner in six_region_layout.owners if owner.role == HIDDEN)
+            return six_region_layout.slot_count * six_region_layout.slot_backing_size + hidden_bytes
     if not _is_deepseek_v4_groups(kv_cache_groups):
         return _orig_pool_bytes_per_block(kv_cache_groups)
 
@@ -554,7 +657,23 @@ def _ascend_max_memory_usage_bytes_from_groups(
     """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
-    if not _is_deepseek_v4_groups(kv_cache_groups):
+    if not vllm_version_is("0.28.0"):
+        six_region_layout = build_six_region_kv_cache_layout(
+            kv_cache_groups,
+            num_blocks=1,
+        )
+        if six_region_layout is not None:
+            hidden_bytes = sum(owner.spec.page_size_bytes for owner in six_region_layout.owners if owner.role == HIDDEN)
+            bytes_per_pool_block = six_region_layout.slot_count * six_region_layout.slot_backing_size + hidden_bytes
+            required_pool_blocks = sum(
+                cdiv(
+                    group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+                    group.kv_cache_spec.page_size_bytes,
+                )
+                for group in kv_cache_groups
+            )
+            return required_pool_blocks * bytes_per_pool_block
+    if vllm_version_is("0.28.0") or not _is_deepseek_v4_groups(kv_cache_groups):
         return _orig_max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
 
     assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
@@ -573,13 +692,364 @@ def _ascend_max_memory_usage_bytes_from_groups(
     )
 
 
-def _get_glm5_next_kv_cache_groups(
+def _prepare_qsa_composite_groups(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> tuple[set[str], set[str], set[str]] | None:
+    """Identify the three cache owners of every QSA source layer.
+
+    The six-region backing aliases main K/V and compressed-key pages by the
+    same physical block ID, while the raw-key ring has one request-lifetime
+    block.  Grouping must therefore express those lifetimes before the main
+    block manager and admission planner see the specs.
+    """
+
+    raw = {
+        name[: -len(".indexer.raw_key_cache")]: (name, spec)
+        for name, spec in kv_cache_spec.items()
+        if name.endswith(".indexer.raw_key_cache") and isinstance(spec, CircularBufferSpec)
+    }
+    if not raw:
+        return None
+    all_main = {
+        name[: -len(".attn")]: (name, spec)
+        for name, spec in kv_cache_spec.items()
+        if name.endswith(".attn") and isinstance(spec, FullAttentionSpec) and not isinstance(spec, MLAAttentionSpec)
+    }
+    all_compressed = {
+        name[: -len(".indexer.compressed_key_cache")]: (name, spec)
+        for name, spec in kv_cache_spec.items()
+        if name.endswith(".indexer.compressed_key_cache")
+        and isinstance(spec, MLAAttentionSpec)
+        and get_kv_cache_compression_ratio(spec) > 1
+    }
+    missing_main = set(raw) - set(all_main)
+    missing_compressed = set(raw) - set(all_compressed)
+    if missing_main or missing_compressed:
+        raise ValueError(
+            "QSA raw cache owners must have matching main/compressed owners: "
+            f"missing_main={sorted(missing_main)}, "
+            f"missing_compressed={sorted(missing_compressed)}"
+        )
+    main = {source: all_main[source] for source in raw}
+    compressed = {source: all_compressed[source] for source in raw}
+    if not any(isinstance(spec, MambaSpec) and len(spec.shapes) == 2 for spec in kv_cache_spec.values()):
+        raise ValueError("QSA six-region cache layout requires GDN state specs")
+
+    main_names: set[str] = set()
+    compressed_names: set[str] = set()
+    raw_names: set[str] = set()
+    for source in sorted(main):
+        main_name, main_spec = main[source]
+        compressed_name, compressed_spec = compressed[source]
+        raw_name, raw_spec = raw[source]
+        assert isinstance(main_spec, FullAttentionSpec)
+        assert isinstance(compressed_spec, MLAAttentionSpec)
+        assert isinstance(raw_spec, CircularBufferSpec)
+        ratio = get_kv_cache_compression_ratio(compressed_spec)
+        if main_spec.block_size != compressed_spec.block_size:
+            raise ValueError(
+                f"{main_name} block_size={main_spec.block_size} does not match "
+                f"{compressed_name} block_size={compressed_spec.block_size}"
+            )
+        if main_spec.block_size % 128 or main_spec.block_size % ratio:
+            raise ValueError(
+                f"QSA block_size={main_spec.block_size} violates kernel/compression alignment (ratio={ratio})"
+            )
+        if raw_spec.block_size % ratio:
+            raise ValueError(
+                f"{raw_name} capacity={raw_spec.block_size} is not compression-ratio aligned (ratio={ratio})"
+            )
+        main_names.add(main_name)
+        compressed_names.add(compressed_name)
+        raw_names.add(raw_name)
+    return main_names, compressed_names, raw_names
+
+
+def _merge_qsa_composite_groups(
+    groups: list[KVCacheGroupSpec],
+    kv_cache_spec: dict[str, KVCacheSpec],
+    main_names: set[str],
+    compressed_names: set[str],
+    raw_names: set[str],
+) -> list[KVCacheGroupSpec]:
+    """Give QSA aliases the block-table lifetimes their backing requires."""
+
+    def merge_owners(
+        current: list[KVCacheGroupSpec],
+        owner_names: set[str],
+        description: str,
+        ordered_names: list[str] | None = None,
+    ) -> list[KVCacheGroupSpec]:
+        consumed: list[int] = []
+        eagle = False
+        for index, group in enumerate(current):
+            members = set(group.layer_names)
+            if not members & owner_names:
+                continue
+            if not members <= owner_names:
+                raise ValueError(f"QSA {description} owners were mixed with another cache role")
+            consumed.append(index)
+            eagle = eagle or group.is_eagle_group
+        if not consumed:
+            raise ValueError(f"QSA {description} owners were not grouped")
+        covered = set().union(*(set(current[index].layer_names) for index in consumed))
+        if covered != owner_names:
+            raise ValueError(f"QSA {description} grouping lost cache owners")
+        ordered = ordered_names or [name for name in kv_cache_spec if name in owner_names]
+        if set(ordered) != owner_names or len(ordered) != len(owner_names):
+            raise ValueError(f"QSA {description} owner order does not match its cache owners")
+        uniform = UniformTypeKVCacheSpecs.from_specs({name: kv_cache_spec[name] for name in ordered})
+        if uniform is None:
+            raise ValueError(f"QSA {description} owners do not have one lifetime")
+        merged = KVCacheGroupSpec(
+            ordered,
+            uniform,
+            is_eagle_group=eagle,
+        )
+        first = min(consumed)
+        return [
+            merged if index == first else group
+            for index, group in enumerate(current)
+            if index == first or index not in consumed
+        ]
+
+    result = merge_owners(
+        groups,
+        main_names | compressed_names,
+        "main/compressed",
+        [name for name in kv_cache_spec if name in main_names]
+        + [name for name in kv_cache_spec if name in compressed_names],
+    )
+    return merge_owners(result, raw_names, "raw circular")
+
+
+def _merge_shattered_gdn_groups(
+    kv_cache_spec: dict[str, KVCacheSpec],
+    groups: list[KVCacheGroupSpec],
+) -> list[KVCacheGroupSpec]:
+    """Re-group identical GDN layers that upstream grouping shattered into
+    one-layer KV cache groups.
+
+    Upstream ``get_kv_cache_groups`` derives ``group_size`` from the *smallest*
+    spec bucket. Qwen3.8-Flash-Next carries a single rare PLE cache layer
+    (``ple_layer_ids: [2]``) whose ``MambaSpec`` declares a conv state only
+    (``len(shapes) == 1``) next to 36 identical GDN layers, so that minimum
+    collapses to 1 and the GDN bucket - which a hybrid without the rare type
+    (e.g. Qwen3.6-35B-A3B) groups into 3 groups of 12 - is split into 36
+    one-layer groups. Every KV cache group gets its own attention metadata
+    builder, so ``_build_attention_metadata`` rebuilds GDN metadata 36 times per
+    step instead of 3.
+
+    The fix merges the GDN singleton groups back into groups sized like the
+    dominant pattern (min size over the multi-layer buckets, same heuristic as
+    upstream), using the same strided layer assignment as upstream. Only buckets
+    whose members are *all* currently singleton groups and whose specs are
+    identical are touched, so models whose grouping is already healthy (or is
+    only partially shattered) are unaffected, and GLM5-Next / non-Mamba models
+    never reach the rewrite below.
+
+    The six-region memory planner keys physical tensors by layer *role*
+    (GDN/PLE/QSA_MAIN/QSA_RAW/QSA_COMPRESSED), not by kv_cache_group membership,
+    and ``owner_group_ids`` is only consulted to check whether QSA main and
+    compressed share a block table. Coalescing singleton groups of identical
+    specs back into balanced groups is therefore memory-safe and does not change
+    the physical layout.
+    """
+    # Buckets by spec equality, exactly like upstream does.
+    same_type_layers: dict[KVCacheSpec, list[str]] = defaultdict(list)
+    for layer_name, layer_spec in kv_cache_spec.items():
+        same_type_layers[layer_spec].append(layer_name)
+
+    def _is_gdn_singleton(group: KVCacheGroupSpec) -> bool:
+        return (
+            len(group.layer_names) == 1
+            and isinstance(group.kv_cache_spec, MambaSpec)
+            and len(group.kv_cache_spec.shapes) == 2
+        )
+
+    gdn_buckets = [
+        (spec, layers)
+        for spec, layers in same_type_layers.items()
+        if isinstance(spec, MambaSpec) and len(spec.shapes) == 2 and len(layers) > 1
+    ]
+    if not gdn_buckets:
+        return groups
+    # A rare spec type dragging the group size down is exactly what upstream
+    # computes here; recompute it over multi-layer buckets only. ``gdn_buckets``
+    # is non-empty, so this list always has at least one entry.
+    multi_sizes = [len(layers) for layers in same_type_layers.values() if len(layers) > 1]
+    group_size = min(multi_sizes)
+    max_size = max(len(layers) for layers in same_type_layers.values())
+    if max_size < group_size * 1.5:
+        group_size = max_size
+
+    regrouped: list[KVCacheGroupSpec] = []
+    consumed: set[str] = set()
+    for spec, layers in gdn_buckets:
+        member_set = set(layers)
+        singleton_groups = [g for g in groups if _is_gdn_singleton(g) and g.layer_names[0] in member_set]
+        if len(singleton_groups) != len(layers):
+            # Not shattered (already multi-layer groups) or partially grouped;
+            # leave this bucket untouched.
+            continue
+        num_groups = math.ceil(len(layers) / group_size)
+        eagle = any(g.is_eagle_group for g in singleton_groups)
+        for i in range(num_groups):
+            chunk = layers[i::num_groups]
+            regrouped.append(
+                KVCacheGroupSpec(
+                    chunk,
+                    spec.merge([kv_cache_spec[name] for name in chunk]),
+                    is_eagle_group=eagle,
+                )
+            )
+        consumed |= member_set
+    if not consumed:
+        return groups
+
+    logger.info(
+        "Ascend re-grouped %d shattered GDN layers into %d KV cache groups "
+        "(group_size=%d); GDN attention metadata will be built %d times per "
+        "step instead of %d.",
+        len(consumed),
+        len(regrouped),
+        group_size,
+        len(regrouped),
+        len(consumed),
+    )
+
+    # Replace the first shattered singleton with the regrouped blocks and drop
+    # the remaining ones, preserving the order of every other group.
+    out: list[KVCacheGroupSpec] = []
+    inserted = False
+    for group in groups:
+        if _is_gdn_singleton(group) and group.layer_names[0] in consumed:
+            if not inserted:
+                out.extend(regrouped)
+                inserted = True
+            continue
+        out.append(group)
+    return out
+
+
+def _get_ascend_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
-    return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
+    qsa_owners = _prepare_qsa_composite_groups(kv_cache_spec)
+    groups = _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
+    # Coalesce GDN layers that upstream shattered because a rare spec type
+    # (PLE) collapsed ``group_size`` to 1. Runs before the QSA composite merge
+    # and before the ``qsa_owners is None`` early return, so non-Qwen4Exp
+    # models benefit as well; the function is a no-op unless a bucket is fully
+    # shattered.
+    groups = _merge_shattered_gdn_groups(kv_cache_spec, groups)
+    if qsa_owners is None:
+        return groups
+    merged = _merge_qsa_composite_groups(
+        groups,
+        kv_cache_spec,
+        *qsa_owners,
+    )
+    logger.info(
+        "Using QSA six-region grouping: %d main/compressed owners, %d raw circular owners, %d total cache groups",
+        len(qsa_owners[0]) + len(qsa_owners[1]),
+        len(qsa_owners[2]),
+        len(merged),
+    )
+    return merged
+
+
+def _get_qwen4_exp_six_region_kv_cache_config(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig | None:
+    """Plan QSA hybrid storage as six contiguous slabs per ordinal slot.
+
+    The main descriptor API cannot express that one logical QSA/GDN owner has
+    two disjoint physical regions.  Descriptors therefore publish the anchor
+    region and shared backing geometry; the Ascend runner reconstructs every
+    role from the same capability-derived layout.  Different cache groups
+    deliberately alias the same allocation because a physical block ID is
+    owned by only one group at a time.
+    """
+    if vllm_version_is("0.28.0"):
+        return None
+    probe = build_six_region_kv_cache_layout(
+        kv_cache_groups,
+        num_blocks=1,
+    )
+    if probe is None:
+        return None
+
+    hidden_owners = [owner for owner in probe.owners if owner.role == HIDDEN]
+    hidden_bytes_per_block = sum(owner.spec.page_size_bytes for owner in hidden_owners)
+    slab_bytes_per_block = sum(region.page_size_bytes for region in probe.regions)
+    bytes_per_block = probe.slot_count * slab_bytes_per_block + hidden_bytes_per_block
+    candidate = available_memory // bytes_per_block
+    while candidate > 0:
+        candidate_layout = build_six_region_kv_cache_layout(
+            kv_cache_groups,
+            num_blocks=candidate,
+        )
+        assert candidate_layout is not None
+        required = candidate_layout.slot_count * candidate_layout.slot_backing_size + hidden_bytes_per_block * candidate
+        if required <= available_memory:
+            break
+        candidate -= 1
+    num_blocks = may_override_num_blocks(vllm_config, candidate)
+    layout = build_six_region_kv_cache_layout(
+        kv_cache_groups,
+        num_blocks=num_blocks,
+    )
+    assert layout is not None
+    backing_size = layout.slot_count * layout.slot_backing_size
+
+    region_by_role = {
+        QSA_MAIN: "r2",
+        QSA_RAW: "r4",
+        QSA_COMPRESSED: "r5",
+        GDN: "r1",
+        PLE: "r6",
+    }
+    tensors: list[KVCacheTensor] = []
+    for role, region_name in region_by_role.items():
+        owners = sorted(
+            (owner for owner in layout.owners if owner.role == role),
+            key=lambda owner: owner.slot,
+        )
+        if not owners:
+            continue
+        region = layout.region(region_name)
+        tensors.append(
+            KVCacheTensor(
+                size=backing_size,
+                layers=[owner.layer_name for owner in owners],
+                layer_stride=layout.slot_backing_size,
+                block_stride=region.page_size_bytes,
+                offset=region.offset,
+            )
+        )
+    tensors.extend(
+        KVCacheTensor(
+            size=owner.spec.page_size_bytes * num_blocks,
+            layers=[owner.layer_name],
+            layer_stride=owner.spec.page_size_bytes * num_blocks,
+            block_stride=owner.spec.page_size_bytes,
+            offset=0,
+        )
+        for owner in hidden_owners
+    )
+
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=kv_cache_groups,
+        prefix_cache_retention_interval=(vllm_config.cache_config.prefix_cache_retention_interval),
+    )
 
 
 def _ascend_get_kv_cache_config_from_groups(
@@ -587,7 +1057,7 @@ def _ascend_get_kv_cache_config_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """Restore Ascend's DSV4 shared-tuple planner removed by vLLM #51718.
+    """Restore Ascend-specific cache planners while retaining transfer metadata.
 
     Attach ``kv_transfer_config`` onto every built config: ``KVCacheConfig``
     has no native field, and the PD prefill-producer role read back by the
@@ -597,7 +1067,10 @@ def _ascend_get_kv_cache_config_from_groups(
     ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
     dropped by worker pickle IPC, which never reads it.
     """
-    if is_deepseek_v41_cache(kv_cache_groups):
+    qwen_config = _get_qwen4_exp_six_region_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+    if qwen_config is not None:
+        kv_cache_config = qwen_config
+    elif is_deepseek_v41_cache(kv_cache_groups):
         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
@@ -620,10 +1093,16 @@ def _ascend_get_kv_cache_config_from_groups(
 
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
-assert _orig_get_packed_kv_cache_groups is not None
-vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
+if vllm_version_is("0.28.0"):
+    vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
+    vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
+else:
+    assert _orig_get_packed_kv_cache_groups is not None
+    assert _orig_annotate_eagle_groups is not None
+    vllm.v1.core.kv_cache_utils._annotate_eagle_groups = _ascend_annotate_eagle_groups
+    vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
-vllm.v1.core.kv_cache_utils.get_kv_cache_groups = _get_glm5_next_kv_cache_groups
+vllm.v1.core.kv_cache_utils.get_kv_cache_groups = _get_ascend_kv_cache_groups
 KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
 )
