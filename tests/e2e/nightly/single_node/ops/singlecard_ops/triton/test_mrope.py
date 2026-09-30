@@ -150,7 +150,8 @@ def test_mrotary_embedding_triton_kernel(
 
     q_gold, k_gold = q_trt.clone(), k_trt.clone()
 
-    q_trt, k_trt = triton_mrope(q_trt, k_trt, cos, sin, mrope_section, head_size, rotary_dim, True)
+    q_trt, k_trt = triton_mrope(q_trt, k_trt, cos, sin, mrope_section, head_size, rotary_dim,
+                                mrope_interleaved=True, is_neox_style=True)
 
     q_gold, k_gold = pytorch_forward_native(q_gold, k_gold, cos, sin, mrope_section, head_size, rotary_dim, True)
     atol = DEFAULT_ATOL
