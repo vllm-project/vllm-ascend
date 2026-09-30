@@ -28,12 +28,17 @@ from unittest.mock import MagicMock
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 
 
-def bare_processor() -> RuntimeGuardProcessor:
-    """Minimal ``RuntimeGuardProcessor`` shell for soft-fail / hook wiring UTs."""
+def bare_processor(*, boom_detectors: bool = False) -> RuntimeGuardProcessor:
+    """Minimal ``RuntimeGuardProcessor`` shell for UTs.
+
+    Skips ``__init__`` / ``bind``. Set ``boom_detectors=True`` when exercising
+    soft-fail wrappers around detector hot-paths (e.g. V3a/V3b).
+    """
     p = object.__new__(RuntimeGuardProcessor)
     p.detectors = MagicMock()
-    p.detectors.after_sample_hot_path = MagicMock(side_effect=RuntimeError("boom"))
-    p.detectors.check_before_sample = MagicMock(side_effect=RuntimeError("boom"))
+    if boom_detectors:
+        p.detectors.after_sample_hot_path = MagicMock(side_effect=RuntimeError("boom"))
+        p.detectors.check_before_sample = MagicMock(side_effect=RuntimeError("boom"))
     p.wave_tracker = None
     p.runner = None
     p._handle_alert = MagicMock()

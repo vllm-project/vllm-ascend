@@ -78,12 +78,12 @@ def test_v2_report_json_tolerates_non_json_scalars():
 
 
 def test_v3a_check_after_sample_soft_fail():
-    p = _bare_processor()
+    p = _bare_processor(boom_detectors=True)
     p.check_after_sample(sampled_token_ids=[1], req_ids=["r1"])
 
 
 def test_v3b_check_before_sample_soft_fail():
-    p = _bare_processor()
+    p = _bare_processor(boom_detectors=True)
     p.check_before_sample(logits=torch.randn(2, 8))
 
 
@@ -1075,7 +1075,7 @@ def test_v18e_file_mode_claim_skips_tp_bus_when_dump_inactive():
     """dump_enabled=False: all ranks skip TP due-AR (lockstep via shared gate)."""
     from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 
-    proc = object.__new__(RuntimeGuardProcessor)
+    proc = _bare_processor()
     proc.runner = SimpleNamespace()
     proc.runtime_config = SimpleNamespace(dump_enabled=lambda: False)
     proc._kv_dump_jobs = [{"req_id": "stray", "consume_quota": False}]
@@ -1943,13 +1943,7 @@ def test_v26a_after_sample_cpu_does_not_block_return():
     from vllm_ascend.observability.runtime_guard.state import Incident, RequestGuardStore
 
     RequestGuardStore.reset_for_tests()
-    p = object.__new__(RuntimeGuardProcessor)
-    p.detectors = MagicMock()
-    p.wave_tracker = None
-    p.runner = None
-    p._handle_alert = MagicMock()
-    p._reap_finished_requests = MagicMock()
-    p._last_input_batch = None
+    p = _bare_processor()
     snap = AfterSampleCpuSnapshot(
         req_ids=["r1"],
         has_nonempty_sampled=True,
@@ -2067,7 +2061,7 @@ def test_v27c_zombie_with_stuck_cpu_jobs_force_reaps():
 
 
 def _claim_drop_processor(*, dump_enabled: bool, tp_rank: int, jobs: list) -> RuntimeGuardProcessor:
-    p = object.__new__(RuntimeGuardProcessor)
+    p = _bare_processor()
     p.runner = SimpleNamespace()
     p.runtime_config = MagicMock()
     p.runtime_config.dump_enabled.return_value = dump_enabled
@@ -2197,7 +2191,7 @@ def test_v28e_static_idle_drop_refunds_quota(monkeypatch):
 
     monkeypatch.setattr(processor_dump, "runner_tp_rank", lambda _r: 0)
 
-    p = object.__new__(RuntimeGuardProcessor)
+    p = _bare_processor()
     p.runner = SimpleNamespace()
     p.wave_tracker = MagicMock()
     p.runtime_config = MagicMock()
