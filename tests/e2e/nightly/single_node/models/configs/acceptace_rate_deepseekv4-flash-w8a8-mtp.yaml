@@ -5,6 +5,19 @@ _envs: &envs
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_BUFFSIZE: "1024"
 
+_kv_pool: &kv_pool
+  type: "memcache"
+  meta_service_port: 5000
+  config_store_port: 6000
+  config:
+    meta:
+      ock.mmc.log_level: "info"
+    local:
+      ock.mmc.log_level: "info"
+      ock.mmc.local_service.world_size: 256
+      ock.mmc.local_service.protocol: "device_sdma"
+      ock.mmc.local_service.dram.size: "10GB"
+
 _server_cmd: &server_cmd
   - "--max_model_len"
   - "135000"
@@ -41,6 +54,8 @@ _server_cmd: &server_cmd
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--speculative-config"
   - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+  - "--kv-transfer-config"
+  - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port": "0", "use_layerwise": false}}'
 
 _benchmarks_perf: &benchmarks_perf
   perf:
@@ -65,6 +80,7 @@ test_cases:
     model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
     envs:
       <<: *envs
+    kv_pool: *kv_pool
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
@@ -96,6 +112,7 @@ test_cases:
     model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
     envs:
       <<: *envs
+    kv_pool: *kv_pool
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
