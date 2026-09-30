@@ -340,13 +340,16 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
         # vLLM main keeps speculative-decode request metadata at the real
-        # request extent, so a padded FULL-graph query tensor can exceed the
-        # last cumulative query length. FIA's TND layout requires that last
+        # request extent, so a padded FULL-graph decode query tensor can exceed
+        # the last cumulative query length. FIA's TND layout requires that last
         # entry to equal the model input token count, so append the padded tail
-        # as a final synthetic request. v0.30.0 already pads this at the request
-        # level and must stay unchanged.
+        # as a final synthetic request. Only decode batches need this: prefill
+        # (including the EAGLE drafter's merged prefill) reuses the target's
+        # num_input_tokens while its own query is shorter. v0.30.0 already pads
+        # this at the request level and must stay unchanged.
         if (
             not vllm_version_is("0.30.0")
+            and common_attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and actual_seq_lengths_q
             and common_attn_metadata.num_input_tokens > actual_seq_lengths_q[-1]
         ):
