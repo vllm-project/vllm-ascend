@@ -176,6 +176,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
+        # Most MLA layers project the local attention output back to the model
+        # hidden size inside the wrapper. Bailing/Ling V3 deliberately supplies
+        # an identity projection here and applies its dense projection outside
+        # the wrapper, so expose the local head output in that case.
+        self.output_size = getattr(mla_modules.o_proj, "output_size", num_heads * v_head_dim)
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.q_lora_rank = q_lora_rank
@@ -264,7 +269,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
-        hidden_dim = self.hidden_size
+        hidden_dim = self.output_size
         output = torch.empty(
             (hidden_states.shape[0], hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
         )

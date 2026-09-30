@@ -158,6 +158,7 @@ class TestMtpSharesTheTargetLmHead:
         mtp_layer = SimpleNamespace(shared_head=SimpleNamespace(head=SimpleNamespace(weight=draft_head_weight)))
 
         draft = MagicMock()
+        del draft.share_lm_head
         draft.model.layers = {"78": mtp_layer}
         if has_own_lm_head is None:
             del draft.has_own_lm_head
@@ -191,6 +192,33 @@ class TestMtpSharesTheTargetLmHead:
         proposer, target, mtp_layer = self._build(torch.ones(4, 2), has_own_lm_head=True)
         proposer._maybe_share_lm_head(target)
         assert mtp_layer.shared_head.head is target.lm_head
+
+    def test_bailing_draft_uses_share_lm_head_hook_without_traversing_layers(self):
+        class BailingDraft:
+            def __init__(self):
+                self.lm_head = None
+                self.model = SimpleNamespace(layers=MagicMock())
+                self.model.layers.items.side_effect = AssertionError("Bailing hook must bypass shared_head traversal")
+
+            def share_lm_head(self, lm_head):
+                self.lm_head = lm_head
+
+        target_lm_head = SimpleNamespace(weight=torch.ones(4, 2))
+        target = SimpleNamespace(lm_head=target_lm_head)
+        draft = BailingDraft()
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.method = "mtp"
+        proposer.model = draft
+        proposer.use_cuda_graph = False
+        proposer.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(is_deepseek_mla=True),
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        )
+
+        proposer._maybe_share_lm_head(target)
+
+        assert draft.lm_head is target_lm_head
+        draft.model.layers.items.assert_not_called()
 
 
 def test_load_model_reads_validated_draft_window_size():

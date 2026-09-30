@@ -782,6 +782,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         AscendSiluAndMulWithClamp,
     )
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
+    from vllm_ascend.ops.bailing_moe_v3_kda import AscendBailingMoeV3KimiDeltaAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
     from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
@@ -843,6 +844,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
+        "BailingMoeV3KimiDeltaAttention": AscendBailingMoeV3KimiDeltaAttention,
         "MoERunner": AscendMoERunner,
         "RoutedExperts": AscendRoutedExperts,
         "GateLinear": AscendGateLinear,
@@ -1538,9 +1540,15 @@ def check_gdn_layer(vllm_config) -> bool:
         if config is None:
             continue
         # Most hybrid models expose layer_types. Kimi Linear/K3 instead
-        # exposes the equivalent is_linear_attn property.
+        # exposes the equivalent is_linear_attn property. Ling V3 exposes
+        # neither, so identify its hybrid architecture explicitly.
         layer_types = getattr(config, "layer_types", None) or []
-        if "linear_attention" in layer_types or bool(getattr(config, "is_linear_attn", False)):
+        architectures = getattr(config, "architectures", None) or []
+        if (
+            "linear_attention" in layer_types
+            or bool(getattr(config, "is_linear_attn", False))
+            or "BailingMoeV3ForCausalLM" in architectures
+        ):
             return True
 
     return False
