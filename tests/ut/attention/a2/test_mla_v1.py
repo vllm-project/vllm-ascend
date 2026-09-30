@@ -298,6 +298,10 @@ class TestAscendMLAMetadata(TestBase):
 
 class TestAscendMLAMetadataBuilder(TestBase):
     def setUp(self):
+        dcp_patcher = patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=False)
+        dcp_patcher.start()
+        self.addCleanup(dcp_patcher.stop)
+
         # Mock parent class __init__ to avoid complex initialization,
         # but still set the essential attributes that child class needs
         def mock_parent_init(
@@ -556,6 +560,10 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
 class TestAscendMLAMetadataBuilderBuild(TestBase):
     def setUp(self):
+        dcp_patcher = patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=False)
+        dcp_patcher.start()
+        self.addCleanup(dcp_patcher.stop)
+
         # Mock parent class __init__ to avoid complex initialization,
         # but still set the essential attributes that child class needs
         def mock_parent_init(
@@ -757,6 +765,69 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertTrue(torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
         self.assertEqual(metadata.decode.seq_lens_device.data_ptr(), seq_lens_device.data_ptr())
+
+        # PD recomputes the last prompt token (N-1 computed). Metadata building
+        # runs outside set_current_vllm_config, unlike DCP manager initialization.
+        self.mock_vllm_config.parallel_config.decode_context_parallel_size = 16
+        self.mock_vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
+        common_attn_metadata.is_prefilling = torch.ones(3, dtype=torch.bool)
+        # DCP runs populate context_parallel_metadata, so the release-branch
+        # `is None` gate is False and classification hinges on the override.
+        common_attn_metadata.context_parallel_metadata = SimpleNamespace(
+            query_lens_cpu=torch.tensor([1, 1, 1], dtype=torch.int32),
+            max_query_len=1,
+        )
+        with patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=True) as mock_enable_dcp:
+            builder = AscendMLAMetadataBuilder(
+                self.kv_cache_spec, ["layer_0", "layer_1"], self.mock_vllm_config, self.mock_device
+            )
+        mock_enable_dcp.assert_called_once_with()
+        self.assertTrue(builder.dcp_enabled)
+        ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(recompute_scheduler_enable=True))
+        with (
+            patch("vllm.config.get_current_vllm_config", side_effect=AssertionError("no current context")),
+            patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
+            patch(
+                "vllm_ascend.attention.mla_v1.enable_dcp",
+                side_effect=AssertionError("DCP state must be cached during initialization"),
+            ),
+        ):
+            metadata = builder.build(0, common_attn_metadata)
+        self.assertEqual(metadata.num_decodes, 3)
+        self.assertEqual(metadata.num_prefills, 0)
+        self.assertEqual(metadata.num_decode_tokens, 3)
+        self.assertIsNone(metadata.prefill)
+        self.assertEqual(metadata.decode.seq_lens_list, [4, 5, 6])
+
+        # With DCP enabled but the recompute scheduler off, the override must
+        # not fire: short extends stay prefills.
+        ascend_config.scheduler_config.recompute_scheduler_enable = False
+        with (
+            patch("vllm.config.get_current_vllm_config", side_effect=AssertionError("no current context")),
+            patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
+            patch.object(builder, "build_prefill_metadata", return_value=MagicMock()),
+        ):
+            metadata = builder.build(0, common_attn_metadata)
+        self.assertEqual(metadata.num_decodes, 0)
+        self.assertEqual(metadata.num_prefills, 3)
+        self.assertEqual(metadata.num_decode_tokens, 0)
+        common_attn_metadata.context_parallel_metadata = None
+
+        # Without DCP, preserve the original classification even on a PD consumer:
+        # the DCP-only override must never be evaluated.
+        self.mock_vllm_config.parallel_config.decode_context_parallel_size = 1
+        builder.dcp_enabled = False
+        with (
+            patch("vllm.config.get_current_vllm_config", side_effect=AssertionError("no current context")),
+            patch(
+                "vllm_ascend.attention.mla_v1.is_pd_decode_recompute_scheduler_enabled",
+                side_effect=AssertionError("DCP-only override must not run without DCP"),
+            ),
+        ):
+            metadata = builder.build(0, common_attn_metadata)
+        self.assertEqual(metadata.num_decodes, 3)
+        self.assertEqual(metadata.num_prefills, 0)
+        self.assertEqual(metadata.num_decode_tokens, 3)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     def test_build_decode_metadata_without_disable_padded_drafter_batch(self, mock_get_cos_and_sin_mla):
