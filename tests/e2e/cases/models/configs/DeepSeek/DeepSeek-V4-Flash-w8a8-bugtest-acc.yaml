@@ -1,6 +1,7 @@
 # DeepSeek-V4-Flash-0731-w8a8 Accuracy Testing
 test_name: "DeepSeek-V4-Flash-w8a8-bugtest-acc"
 model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
+dp_load_balancing: external
 num_nodes: 2
 npu_per_node: 16
 
