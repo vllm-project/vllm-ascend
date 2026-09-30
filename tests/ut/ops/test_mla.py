@@ -159,3 +159,23 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         output = attn.forward(positions, hidden_states)
 
         self.assertEqual(output.shape, (3, self.hidden_size))
+
+    @patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward")
+    def test_fused_o_proj_allocates_sequence_shard(self, mock_mla_forward):
+        attn = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
+        torch.nn.Module.__init__(attn)
+        attn.hidden_size = 32
+        attn.output_token_shard_size = 8
+        attn.prefix = self.prefix
+
+        def write_output(hidden_states, output, prefix):
+            self.assertEqual(output.shape, ((hidden_states.shape[0] + 7) // 8, 32))
+            self.assertEqual(prefix, self.prefix)
+            output.fill_(2)
+
+        mock_mla_forward.side_effect = write_output
+        for num_tokens in (0, 1, 8, 17):
+            with self.subTest(num_tokens=num_tokens):
+                output = attn.forward(torch.arange(num_tokens), torch.empty(num_tokens, 32, dtype=torch.bfloat16))
+                self.assertEqual(output.shape, ((num_tokens + 7) // 8, 32))
+                torch.testing.assert_close(output, torch.full_like(output, 2))

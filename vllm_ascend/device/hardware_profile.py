@@ -38,6 +38,7 @@ class HardwareCapability(Enum):
     MLAPO_NATIVE_WEIGHTS = auto()
     MC2_FULLMESH_V2_COMM = auto()
     MC2_HIERARCHY_COMM = auto()
+    MM_REDUCE_SCATTER_AI_CPU_INFERENCE = auto()
     NPUGRAPH_EX = auto()
     PAGED_ATTENTION = auto()
     RC_DEVICE_DISCOVERY = auto()
@@ -202,6 +203,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.LORA_CUSTOM_OPS,
                     HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
+                    HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
                     HardwareCapability.NPUGRAPH_EX,
                     HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
                     HardwareCapability.STANDARD_MAMBA_PATCH,

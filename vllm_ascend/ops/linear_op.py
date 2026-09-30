@@ -41,10 +41,13 @@ from types import SimpleNamespace
 import regex as re
 import torch
 import torch.distributed as dist
+import torch_npu
 from torch.nn.parameter import Parameter
 from vllm.distributed import split_tensor_along_last_dim
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
@@ -147,6 +150,86 @@ class CustomReplicatedOp(CustomLinearOp):
         output_bias = self.bias if self.skip_bias_add else None
 
         return output, output_bias
+
+
+class KimiOProjMMReduceScatterOp(CustomRowParallelOp):
+    """Return the token shard of Kimi's BF16 TP output projection."""
+
+    SUPPORTED_TP_SIZES = (2, 4, 8, 16, 32, 64)
+    MIN_K = 256
+    MAX_K = 65535
+    MAX_COMM_BYTES = 16 * 256 * 1024 * 1024
+
+    @staticmethod
+    def unsupported_reason(layer) -> str | None:
+        if layer.custom_op is not None:
+            return "Kimi O-projection MM ReduceScatter requires the original TP group."
+        if not isinstance(layer.quant_method, UnquantizedLinearMethod) or layer.weight.dtype != torch.bfloat16:
+            return "Kimi O-projection MM ReduceScatter requires unquantized BF16 O-projection weights."
+        if layer.bias is not None:
+            return "Kimi O-projection MM ReduceScatter requires bias-free O projections."
+        if not callable(getattr(torch_npu, "npu_quant_mm_reduce_scatter", None)):
+            return "Kimi O-projection MM ReduceScatter requires the torch_npu V2 interface."
+        if get_tp_group().world_size not in KimiOProjMMReduceScatterOp.SUPPORTED_TP_SIZES:
+            return "Kimi O-projection MM ReduceScatter requires TP size 2, 4, 8, 16, 32, or 64."
+        weight = layer.weight
+        if weight.ndim != 2 or weight.shape[0] == 0:
+            return "Kimi O-projection MM ReduceScatter requires nonempty 2D weights."
+        if not KimiOProjMMReduceScatterOp.MIN_K <= weight.shape[1] < KimiOProjMMReduceScatterOp.MAX_K:
+            return "Kimi O-projection MM ReduceScatter requires local K in [256, 65535)."
+        return None
+
+    def __init__(self, layer):
+        super().__init__(layer)
+        if reason := self.unsupported_reason(layer):
+            raise ValueError(reason)
+        self.update_attrs()
+        device_group = self.comm_group.device_group
+        backend = device_group._get_backend(torch.device("npu"))
+        self.hcom = backend.get_hccl_comm_name(self.tp_rank)
+        self.world_size = self.tp_size
+
+    def apply_impl(self, input_: torch.Tensor) -> tuple[torch.Tensor, None]:
+        input_parallel = self.get_input_parallel(input_)
+        weight = self.layer.weight
+        # Branch only on TP-consistent tensor metadata, before any collective.
+        # The decoder skips its RS and MLA already owns a sharded output buffer,
+        # so the unfused path must return the same token shard as fusion.
+        if not self._can_fuse(input_parallel, weight):
+            output = self.quant_method.apply(self.layer, input_parallel, None)
+            return sp_reduce_scatter(output), None
+        input_parallel = input_parallel.contiguous()
+        # sp_reduce_scatter pads the GEMM result. With bias-free O projections,
+        # padding the input before the fused GEMM gives the same zero rows.
+        sp_pad = (-input_parallel.shape[0]) % self.world_size
+        if sp_pad:
+            input_parallel = torch.nn.functional.pad(input_parallel, (0, 0, 0, sp_pad))
+        # The V2 interface supports BF16 inference without quantization scales.
+        # Keep TP communication on AI CPU, independently of the MoE EP engine.
+        output, _ = torch_npu.npu_quant_mm_reduce_scatter(
+            input_parallel,
+            self.layer.weight.t(),
+            self.hcom,
+            self.world_size,
+            reduce_op="sum",
+            comm_mode="ai_cpu",
+        )
+        return output, None
+
+    def _can_fuse(self, input_parallel: torch.Tensor, weight: torch.Tensor) -> bool:
+        if input_parallel.ndim != 2 or weight.ndim != 2:
+            return False
+        if input_parallel.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+            return False
+        if not self.MIN_K <= input_parallel.shape[1] < self.MAX_K or input_parallel.shape[1] != weight.shape[1]:
+            return False
+        if not (weight.is_contiguous() or weight.t().is_contiguous()):
+            return False
+        num_tokens, _ = input_parallel.shape
+        if num_tokens == 0 or weight.shape[0] == 0:
+            return False
+        padded_tokens = num_tokens + (-num_tokens) % self.world_size
+        return padded_tokens * weight.shape[0] * weight.element_size() < self.MAX_COMM_BYTES
 
 
 class MLPColumnParallelOp(CustomColumnParallelOp):

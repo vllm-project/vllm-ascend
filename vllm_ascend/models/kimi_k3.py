@@ -78,7 +78,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
+from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.utils import get_rotation_path
 
 if HAS_TRITON:
@@ -506,6 +509,30 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         if self.use_sequence_parallel:
             self.self_attn.o_proj.reduce_results = False
 
+        self.fuse_o_proj_mm_reduce_scatter = (
+            get_ascend_config().enable_kimi_o_proj_mm_reduce_scatter
+            and self._enable_o_proj_mm_reduce_scatter(vllm_config)
+        )
+
+    def _enable_o_proj_mm_reduce_scatter(self, vllm_config: VllmConfig) -> bool:
+        if not self.use_sequence_parallel or not self.use_attn_residuals:
+            return False
+        if not get_current_hardware_profile().supports(HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE):
+            return False
+        if get_ascend_config().weight_nz_mode == 2:
+            return False
+        if vllm_config.lora_config is not None:
+            return False
+        o_proj = self.self_attn.o_proj
+        if KimiOProjMMReduceScatterOp.unsupported_reason(o_proj) is not None:
+            return False
+        o_proj.custom_op = KimiOProjMMReduceScatterOp(o_proj)
+        if isinstance(self.self_attn, AscendKimiMLAAttention):
+            # The MLA custom op writes into a caller-owned output buffer. Its
+            # token dimension must match the fused projection's TP shard.
+            self.self_attn.mla_attn.output_token_shard_size = o_proj.tp_size
+        return True
+
     def _run_self_attn(
         self,
         positions: torch.Tensor,
@@ -542,7 +569,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             hidden_states=hidden_states,
             positions=positions,
         )
-        if self.use_sequence_parallel:
+        if self.use_sequence_parallel and not self.fuse_o_proj_mm_reduce_scatter:
             hidden_states = sp_reduce_scatter(hidden_states)
 
         prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
