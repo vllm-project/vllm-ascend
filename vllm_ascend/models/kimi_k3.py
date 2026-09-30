@@ -13,7 +13,7 @@ from copy import copy
 import torch
 import vllm.envs as envs
 from torch import nn
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -245,6 +245,7 @@ class AscendKimiMoE(nn.Module):
             self.routed_expert_up_proj = None
             self.routed_output_transform = None
 
+        parallel_config = get_current_vllm_config().parallel_config
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=num_experts,
@@ -265,6 +266,8 @@ class AscendKimiMoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
+            enable_eplb=parallel_config.enable_eplb,
+            num_redundant_experts=getattr(parallel_config.eplb_config, "num_redundant_experts", 0),
             is_sequence_parallel=use_sequence_parallel,
         )
 
@@ -816,6 +819,30 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM):
             self.config.vocab_size,
             scale=getattr(self.config, "logit_scale", 1.0),
         )
+        self._set_moe_parameters(getattr(vllm_config.parallel_config.eplb_config, "num_redundant_experts", 0))
+
+    def _set_moe_parameters(self, num_redundant_experts: int) -> None:
+        self.moe_layers = [
+            layer.block_sparse_moe.experts
+            for layer in self.model.layers
+            if not isinstance(layer, PPMissingLayer) and layer.is_moe_layer
+        ]
+        self.num_moe_layers = len(self.moe_layers)
+        self.expert_weights = []
+        self.num_expert_groups = self.model.config.num_expert_group or 1
+        self.num_logical_experts = self.model.config.num_experts or 0
+        self.num_routed_experts = self.num_logical_experts
+        self.num_redundant_experts = num_redundant_experts
+        self.num_physical_experts = self.num_logical_experts + self.num_redundant_experts
+        self.num_local_physical_experts = self.moe_layers[0].moe_config.num_local_experts if self.moe_layers else 0
+        self.num_shared_experts = self.model.config.num_shared_experts or 0
+
+    def update_physical_experts_metadata(self, num_physical_experts: int, num_local_physical_experts: int) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for runner in self.moe_layers:
+            runner.routed_experts.update_expert_map()
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.model.dspark_aux_capture_materialized = enabled

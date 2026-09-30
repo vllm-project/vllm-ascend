@@ -28,9 +28,10 @@ from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -41,6 +42,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMileston
 from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
+from vllm_ascend.ops.triton.eplb_map_record import MAX_COMPARISON_ELEMENTS
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -350,6 +352,44 @@ def _record_v2_eplb_load(router: FusedMoERouter, result: FusedExpertsResult) -> 
         result.group_list_type,
         eplb_state.local_expert_start,
     )
+
+
+def _mapping_valid_token_prefix(
+    layer: "AscendRoutedExperts",
+    router_logits: torch.Tensor,
+    mc2_mask: torch.Tensor | None,
+) -> torch.Tensor | int | None:
+    """Return the valid prefix in the rows seen by the EPLB mapping hook.
+
+    MC2's mask is a sliced prefix; All2All partitions that prefix into
+    contiguous TP ranges. DP/PCP AllGather interleaves rank-local padding,
+    so its rows cannot be represented by one prefix count.
+    """
+    state = layer.router.eplb_state
+    if state is None or state.num_unpadded_tokens_tensors is None:
+        return None
+    valid_tokens = state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
+    if mc2_mask is not None:
+        return mc2_mask.to(torch.int32).sum()
+    if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
+        if layer.moe_config.dp_size > 1 or layer.moe_config.pcp_size > 1:
+            return None
+        if layer.moe_config.is_sequence_parallel:
+            # sp_shard pads only the suffix, then shards contiguous TP ranges.
+            # EP gather restores rank order; the original device count is the
+            # prefix boundary even when the gathered shape includes padding.
+            return valid_tokens
+        return valid_tokens
+    if _EXTRA_CTX.moe_comm_type == MoECommType.ALLTOALL and not layer.moe_config.is_sequence_parallel:
+        prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
+        # torch.tensor_split assigns one extra row to each early TP rank.
+        # Multiplying this rank's row count by its index is wrong when the
+        # prepared row count is not divisible by TP size.
+        total_rows = max(prepare_finalize.num_tokens, prepare_finalize.tp_size)
+        base_rows, extra_rows = divmod(total_rows, prepare_finalize.tp_size)
+        rank_start = prepare_finalize.tp_rank * base_rows + min(prepare_finalize.tp_rank, extra_rows)
+        return (valid_tokens - rank_start).clamp(min=0, max=router_logits.shape[0])
+    return None
 
 
 class EplbExpertTensorList(list[torch.Tensor]):
@@ -695,19 +735,18 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
         eplb_state = self.router.eplb_state
         if eplb_state is not None:
-            eplb_state.fused_map_record_active = False
-            # These paths alter ids after the router or contain padding. Keep
-            # their existing downstream count source instead of counting the
-            # router's provisional decisions.
-            eplb_state.fused_record_allowed = (
+            eplb_state.record_done_in_mapping = False
+            eplb_state.mapping_valid_tokens = _mapping_valid_token_prefix(self, router_logits, mc2_mask)
+            # Only post-router ID rewrites and non-prefix row layouts prevent
+            # recording final physical assignments at the mapping hook.
+            eplb_state.record_in_mapping_allowed = (
                 self._use_v2_model_runner
-                and mc2_mask is None
-                and self.moe_config.dp_size == 1
-                and self.moe_config.pcp_size == 1
+                and eplb_state.mapping_valid_tokens is not None
                 and self.log2phy is None
                 and not getattr(self, "mix_placement", False)
                 and not get_ascend_config().enable_force_eplb
                 and not enable_force_load_balance
+                and 0 < eplb_state.local_expert_count <= MAX_COMPARISON_ELEMENTS
             )
         topk_weights, topk_ids = self._select_experts(
             hidden_states=hidden_states,
@@ -730,11 +769,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
 
-        if self._use_v2_model_runner and not getattr(eplb_state, "fused_map_record_active", False):
+        if self._use_v2_model_runner and not getattr(eplb_state, "record_done_in_mapping", False):
             _record_v2_eplb_load(self.router, fused_experts_results)
         if eplb_state is not None:
-            eplb_state.fused_map_record_active = False
-            eplb_state.fused_record_allowed = False
+            eplb_state.record_done_in_mapping = False
+            eplb_state.record_in_mapping_allowed = False
+            eplb_state.mapping_valid_tokens = None
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens
