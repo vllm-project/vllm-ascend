@@ -264,6 +264,7 @@ class TestAscendSFACacheComposition(TestBase):
                 impl.layer_name = "model.layers.0.self_attn.attn"
                 impl.has_indexer = True
                 impl.enable_sparse_sfa_c8 = enable_sfa_c8
+                impl.enable_sparse_sfa_turboquant = False
                 impl.enable_sparse_li_c8 = enable_li_c8
 
                 main_cache = tuple(torch.empty(1) for _ in range(1 if enable_sfa_c8 else 2))
@@ -481,6 +482,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
     def test_execute_kv_quant_sparse_flash_attention(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
         impl.enable_sparse_sfa_c8 = True
+        impl.enable_sparse_sfa_turboquant = False
         impl.scale = 0.125
         impl.sfa_qsfa_tile_size = 128
         impl.qk_rope_head_dim = 16
@@ -533,6 +535,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
         impl._quant_type = quant_type
         impl.enable_sparse_sfa_c8 = True
+        impl.enable_sparse_sfa_turboquant = False
         impl.has_indexer = True
         impl.sfa_qsfa_tile_size = 128
         impl.sfa_qsfa_k_nope_clip_alpha = torch.ones(1)
@@ -635,6 +638,7 @@ class TestAscendSFAKPathFusion(TestBase):
     def test_exec_kv_reuses_int64_slots_across_layers(self, mock_kv_cache_op):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
         impl.enable_sparse_sfa_c8 = False
+        impl.enable_sparse_sfa_turboquant = False
         impl.num_kv_heads = 1
         impl.kv_lora_rank = 128
         impl.qk_rope_head_dim = 64
@@ -1104,6 +1108,7 @@ class TestAscendSFAImpl(TestBase):
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_mlapo = False
         mock_ascend_config.enable_sparse_sfa_c8 = False
+        mock_ascend_config.enable_sparse_sfa_turboquant = False
         mock_ascend_config.enable_sparse_li_c8 = False
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.is_sparse_li_c8_layer.return_value = False
@@ -1488,6 +1493,7 @@ class TestAscendSFAImpl(TestBase):
     ):
         """exec_kv with enable_sparse_sfa_c8 delegates to custom_kv_rmsnorm_rope."""
         self.impl.enable_sparse_sfa_c8 = True
+        self.impl.enable_sparse_sfa_turboquant = False
         self.impl.c8_cache_dtype = torch.int8
         self.impl.kv_a_layernorm = MagicMock()
         self.impl.kv_a_layernorm.weight = torch.ones(self.impl.kv_lora_rank)
@@ -1545,6 +1551,7 @@ class TestAscendSFAImpl(TestBase):
         self._set_quant(AscendW8A8DynamicLinearMethod)
         self.impl.is_kv_consumer = True
         self.impl.enable_sparse_sfa_c8 = True
+        self.impl.enable_sparse_sfa_turboquant = False
 
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.PROLOG_V3)
@@ -1562,6 +1569,7 @@ class TestAscendSFAImpl(TestBase):
         self._set_quant(AscendW8A8MXFP8DynamicLinearMethod)
         self.impl.is_kv_consumer = True
         self.impl.enable_sparse_sfa_c8 = True
+        self.impl.enable_sparse_sfa_turboquant = False
 
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.PROLOG_V3)
@@ -1571,6 +1579,7 @@ class TestAscendSFAImpl(TestBase):
         self._set_quant(None)
         self.impl.is_kv_consumer = True
         self.impl.enable_sparse_sfa_c8 = True
+        self.impl.enable_sparse_sfa_turboquant = False
 
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         # The candidate is blocked by _get_fused_type_unsupported_reasons
@@ -1590,6 +1599,7 @@ class TestAscendSFAImpl(TestBase):
         self._set_quant(AscendW8A8DynamicLinearMethod)
         self.impl.is_kv_consumer = True
         self.impl.enable_sparse_sfa_c8 = True
+        self.impl.enable_sparse_sfa_turboquant = False
 
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.PROLOG_V3)
@@ -1599,6 +1609,7 @@ class TestAscendSFAImpl(TestBase):
         self._set_quant(AscendW8A8DynamicLinearMethod)
         self.impl.is_kv_consumer = False
         self.impl.enable_sparse_sfa_c8 = True
+        self.impl.enable_sparse_sfa_turboquant = False
 
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.PROLOG_V3)
@@ -1609,6 +1620,7 @@ class TestAscendSFAImpl(TestBase):
         self._set_quant(AscendW8A8DynamicLinearMethod)
         self.impl.is_kv_consumer = False
         self.impl.enable_sparse_sfa_c8 = False
+        self.impl.enable_sparse_sfa_turboquant = False
 
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.PROLOG_V3)
@@ -1638,6 +1650,7 @@ class TestAscendSFAImpl(TestBase):
         self.impl.is_kv_producer = True
         self.impl.is_kv_consumer = False
         self.impl.enable_sparse_sfa_c8 = True
+        self.impl.enable_sparse_sfa_turboquant = False
 
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.PROLOG_V3)
@@ -1689,6 +1702,7 @@ class TestAscendSFAImpl(TestBase):
         self.impl._quant_type = None
         self.impl.fused_qkv_a_proj.quant_method = SimpleNamespace(quant_method=None)
         self.impl.enable_sparse_sfa_c8 = True
+        self.impl.enable_sparse_sfa_turboquant = False
 
         reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
         self.assertTrue(any("C8 sparse requires quantized" in r for r in reasons))
@@ -1697,6 +1711,7 @@ class TestAscendSFAImpl(TestBase):
         self._setup_prolog_v3_state()
         self.impl.preprocess_type = PreprocessType.MLAPO
         self.impl.enable_sparse_sfa_c8 = True
+        self.impl.enable_sparse_sfa_turboquant = False
 
         reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.MLAPO)
         self.assertTrue(any("sparse C8" in r for r in reasons))
@@ -1708,6 +1723,7 @@ class TestAscendSFAImpl(TestBase):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
         impl._quant_type = AscendW8A8MXFP8DynamicLinearMethod
         impl.enable_sparse_sfa_c8 = False
+        impl.enable_sparse_sfa_turboquant = False
         impl.local_num_heads = 2
         impl.num_heads = 2
         impl.kv_lora_rank = 128

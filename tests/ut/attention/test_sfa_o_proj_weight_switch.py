@@ -193,6 +193,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl.has_indexer = False
         impl.skip_topk = True
         impl.enable_sparse_sfa_c8 = False
+        impl.enable_sparse_sfa_turboquant = False
         impl.is_kv_producer = True
         impl.preprocess_type = PreprocessType.NATIVE
         impl.tp_size = 2

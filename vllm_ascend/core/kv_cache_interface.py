@@ -111,6 +111,11 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     indexes_kv_by_block_stride: bool = False
 
     @property
+    def uses_packed_sfa_main_cache(self) -> bool:
+        """Whether the SFA main cache is stored in one packed tensor."""
+        return self.cache_sparse_sfa_c8 or self.cache_dtype_str == "turboquant_4bit_nc"
+
+    @property
     def real_page_size_bytes(self) -> int:
         return (
             get_storage_block_size(self)
@@ -132,6 +137,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.scale_dim,
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
+                spec.cache_dtype_str,
                 spec.store_on_host,
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
