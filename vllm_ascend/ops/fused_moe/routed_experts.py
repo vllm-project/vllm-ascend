@@ -365,9 +365,9 @@ def _mapping_valid_token_prefix(
 ) -> torch.Tensor | int | None:
     """Return the valid prefix in the rows seen by the EPLB mapping hook.
 
-    MC2's mask is a sliced prefix; All2All partitions that prefix into
-    contiguous TP ranges. DP/PCP AllGather interleaves rank-local padding,
-    so its rows cannot be represented by one prefix count.
+    MC2's mask is a sliced prefix; non-SP All2All partitions that prefix
+    into contiguous TP ranges. Other communication paths use the existing
+    #17574 valid-prefix contract without a mode-specific dispatch guard.
     """
     state = layer.router.eplb_state
     if state is None or state.num_unpadded_tokens_tensors is None:
@@ -375,15 +375,6 @@ def _mapping_valid_token_prefix(
     valid_tokens = state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
     if mc2_mask is not None:
         return mc2_mask.to(torch.int32).sum()
-    if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
-        if layer.moe_config.dp_size > 1 or layer.moe_config.pcp_size > 1:
-            return None
-        if layer.moe_config.is_sequence_parallel:
-            # sp_shard pads only the suffix, then shards contiguous TP ranges.
-            # EP gather restores rank order; the original device count is the
-            # prefix boundary even when the gathered shape includes padding.
-            return valid_tokens
-        return valid_tokens
     if _EXTRA_CTX.moe_comm_type == MoECommType.ALLTOALL and not layer.moe_config.is_sequence_parallel:
         prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
         # torch.tensor_split assigns one extra row to each early TP rank.
@@ -393,7 +384,10 @@ def _mapping_valid_token_prefix(
         base_rows, extra_rows = divmod(total_rows, prepare_finalize.tp_size)
         rank_start = prepare_finalize.tp_rank * base_rows + min(prepare_finalize.tp_rank, extra_rows)
         return (valid_tokens - rank_start).clamp(min=0, max=router_logits.shape[0])
-    return None
+    # DP/PCP AllGather may interleave rank-local padding if ranks have
+    # different valid counts. This scalar-prefix ABI cannot represent such
+    # layouts; preserve #17574's contract until a real mask is available.
+    return valid_tokens
 
 
 class EplbExpertTensorList(list[torch.Tensor]):
@@ -744,8 +738,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if eplb_state is not None:
             eplb_state.record_done_in_mapping = False
             eplb_state.mapping_valid_tokens = _mapping_valid_token_prefix(self, router_logits, mc2_mask)
-            # Only post-router ID rewrites and non-prefix row layouts prevent
-            # recording final physical assignments at the mapping hook.
+            # Post-router ID rewrites prevent recording final assignments here.
+            # Communication modes share the existing valid-prefix contract.
             eplb_state.record_in_mapping_allowed = (
                 self._use_v2_model_runner
                 and eplb_state.mapping_valid_tokens is not None
