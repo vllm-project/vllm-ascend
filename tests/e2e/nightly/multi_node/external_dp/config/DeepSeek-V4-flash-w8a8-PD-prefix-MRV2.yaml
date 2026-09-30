@@ -84,8 +84,6 @@ templates:
       - --max-num-seqs
       - "16"
       - --no-disable-hybrid-kv-cache-manager
-      - --model-loader-extra-config
-      - '{"enable_multithread_load": true, "num_threads": 128}'
       - --speculative-config
       - '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}'
       - --trust-remote-code
@@ -144,8 +142,6 @@ templates:
       - "int8"
       - --no-enable-prefix-caching
       - --no-disable-hybrid-kv-cache-manager
-      - --model-loader-extra-config
-      - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
       - --tokenizer-mode
       - "deepseek_v4"
