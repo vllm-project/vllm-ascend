@@ -312,6 +312,8 @@ def test_state_gathers_lookback_and_overlaps_engram(runtime, monkeypatch):
         input_ids=torch.ones(4, dtype=torch.int32),
         positions=torch.arange(4),
         num_tokens_after_padding=4,
+        num_tokens=4,
+        num_reqs=2,
         idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
         query_start_loc=torch.tensor([0, 2, 4]),
         is_dummy=False,
@@ -322,15 +324,16 @@ def test_state_gathers_lookback_and_overlaps_engram(runtime, monkeypatch):
     )
     model.prepare_engram_inputs = Mock(return_value={"engram_lookups": {"l": "buf"}})
     result = state.prepare_inputs(input_batch, req_states)
+    model.prepare_engram_inputs.assert_not_called()
+    state.prepare_engram()
     model.prepare_engram_inputs.assert_called_once()
     assert window[0].tolist() == [3, 3]
     assert result["lookback_token_ids"] is window
-    assert result["engram_lookups"] == {"l": "buf"}
     _, kwargs = model.prepare_engram_inputs.call_args
-    args = model.prepare_engram_inputs.call_args.args
-    assert args[0] is input_batch.input_ids and args[2] == 4 and args[3] is window
-    assert args[4] is input_batch.query_start_loc
-    assert kwargs == {"cg_mode": CUDAGraphMode.FULL, "force_dummy": False}
+    assert kwargs["input_ids"].tolist() == input_batch.input_ids.tolist()
+    assert kwargs["padded_tokens"] == 4 and kwargs["lookback_token_ids"] is window
+    assert kwargs["query_start_loc"].tolist() == input_batch.query_start_loc.tolist()
+    assert kwargs["cg_mode"] == CUDAGraphMode.FULL and kwargs["force_dummy"] is False
 
 
 def test_state_dummy_capture_primes_and_refills_window(runtime, monkeypatch):
@@ -398,6 +401,8 @@ def test_graph_capable_state_keeps_eager_preparation(runtime, monkeypatch):
         positions=torch.arange(2),
         idx_mapping=torch.tensor([0]),
         num_tokens_after_padding=2,
+        num_tokens=2,
+        num_reqs=1,
         query_start_loc=torch.tensor([0, 2]),
         is_dummy=False,
     )
@@ -405,7 +410,9 @@ def test_graph_capable_state_keeps_eager_preparation(runtime, monkeypatch):
         all_token_ids=SimpleNamespace(gpu=torch.zeros(4, 8)), num_computed_tokens=SimpleNamespace(gpu=torch.zeros(4))
     )
     result = state.prepare_engram_inputs(batch, req_states)
-    assert result["legacy"] is True and "unused" not in result
+    assert "unused" not in result
+    model.prepare_engram_inputs.assert_not_called()
+    assert state.prepare_engram()["legacy"] is True
     model.prepare_engram_inputs.assert_called_once()
 
 

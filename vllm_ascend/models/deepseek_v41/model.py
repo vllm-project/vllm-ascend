@@ -1173,6 +1173,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             mask = ~dead
             publish_mask()
             if lookback_token_ids is None:
+                if not hash_state.use_slot_cache:
+                    raise RuntimeError("MRV2 Engram requires device lookback_token_ids")
                 lookback_token_ids = input_ids.new_full((query_start_loc.numel() - 1, hash_state.lookback_depth), -1)
             hashes = hash_state(
                 input_ids,
@@ -1414,7 +1416,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         output_tokens = num_tokens if padded_tokens is None else padded_tokens
         if not num_tokens <= output_tokens <= self._engram_max_tokens:
             raise ValueError("Engram token count exceeds the output buffer capacity")
-        if is_forward_context_available():
+        if cg_mode is None and is_forward_context_available():
             # V1: the context decided above (capture registered ExternalEvents
             # under the batch descriptor).
             overlap = self._can_overlap_engram_preparation()
@@ -1423,7 +1425,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             # graph mode of this step (captured by the model state); None
             # means unknown, which stays synchronous.
             overlap = cg_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL) and self._engram_overlap_enabled
-            if overlap and cg_mode == CUDAGraphMode.FULL and "engram_pending" not in graph_inputs:
+            if overlap and cg_mode == CUDAGraphMode.FULL:
                 mask_ready, events = self._get_engram_external_events(output_tokens, prime=False)
                 graph_inputs.update(engram_pending=events, engram_mask_ready_event=mask_ready, engram_graph_events=True)
         if overlap and "engram_pending" not in graph_inputs:
