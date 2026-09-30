@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from vllm_ascend.utils import lmhead_tp_configured, lmhead_tp_max_num_logits, lmhead_tp_pad_rows
+from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, lmhead_tp_pad_rows
 
 
 class LmheadTPDraftSamplingMixin:
@@ -32,7 +32,7 @@ class LmheadTPDraftSamplingMixin:
 
     def _lmhead_tp_validate_draft_sampling(self) -> None:
         """Fail unsupported draft sampling at construction, not first use."""
-        if not lmhead_tp_configured():
+        if not lmhead_tp_enable():
             return
         if not self._lmhead_tp_sample_draft_supported:
             raise NotImplementedError(
@@ -71,7 +71,7 @@ class LmheadTPDraftSamplingMixin:
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
     ):
-        if not lmhead_tp_configured():
+        if not lmhead_tp_enable():
             return super().sample_draft(  # type: ignore[misc]
                 hidden_states, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
             )
