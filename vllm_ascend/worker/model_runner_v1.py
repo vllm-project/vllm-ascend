@@ -5010,7 +5010,8 @@ class NPUModelRunner(GPUModelRunner):
         if (
             not is_dsv4_main
             and not uses_padded_page_layout
-            and self.hybrid_with_attn_and_mamba
+            and (self.hybrid_with_attn_and_mamba
+                 or len(kv_cache_config.kv_cache_tensors) > 1)
             and not self.use_sparse
             and not self.use_compress
             and kv_cache_config.kv_cache_tensors
@@ -5488,7 +5489,8 @@ class NPUModelRunner(GPUModelRunner):
                             raw_k_tensor, raw_v_tensor = raw_cache
                             sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     elif (
-                        self.hybrid_with_attn_and_mamba
+                        (self.hybrid_with_attn_and_mamba
+                         or len(kv_cache_config.kv_cache_tensors) > 1)
                         and "cache_only_layers" not in layer_name
                         and not is_hidden_state_cache_spec(current_kv_cache_spec)
                         and isinstance(kv_cache_raw_tensors[layer_name], torch.Tensor)
