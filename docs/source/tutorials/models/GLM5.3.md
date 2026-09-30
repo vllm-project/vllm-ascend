@@ -554,7 +554,7 @@ kv_config=$(cat <<EOF
                 "kv_connector": "AscendStoreConnector",
                 "kv_role": "${kv_role}",
                 "kv_connector_extra_config": {
-                    "lookup_rpc_port": "${lookup_rpc_port}",
+                    "lookup_rpc_port": ${lookup_rpc_port},
                     "backend": "memcache",
                     "use_layerwise": false
                 }
