@@ -128,6 +128,7 @@ def test_adapted_router_records_at_mapping_without_touching_routing():
     router = _Router()
     patch_fused_moe._adapt_eplb_router(router, enable_eplb=True)
     state = router.eplb_state
+    assert isinstance(state, AscendEplbLayerState)
     state.expert_replica_routing_table = torch.tensor([[3, 2]], dtype=torch.int32)
     state.expert_load_view = torch.zeros(4, dtype=torch.int32)
     state.should_record_tensor = torch.tensor(True)
