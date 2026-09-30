@@ -220,7 +220,6 @@ def _run_generic_block_sparse_attention(
         cu_seqlens_q=cu_seqlens_q,
         seqused_kv=seq_lens,
         max_seqlen_q=max_query_len,
-        is_packed_gqa=True,
         layout_q="TND",
         layout_kv="PA_BBND",
         mask_mode=_GBSA_MASK_MODE_CAUSAL,
