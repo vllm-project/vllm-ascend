@@ -36,6 +36,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     register_ascend_kv_cache_specs,
 )
+from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager, get_kpool_tail_ring_capacity
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
@@ -106,6 +107,77 @@ def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrappe
 def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
     """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
     return KVCacheTensor(size=size, layers=layer_names, layer_stride=0, block_stride=0, offset=0)
+
+
+@pytest.mark.parametrize("full_block_size", [512, 1152])
+@pytest.mark.parametrize("num_spec_tokens", [0, 1, 2, 3, 4])
+@pytest.mark.parametrize("with_mamba", [False, True])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_private_tail_without_prefix_caching_keeps_token_alignment(
+    full_block_size, num_spec_tokens, with_mamba, wrapped
+):
+    """Ring capacity is physical storage, including non-divisors such as MTP3's seven rows."""
+    register_all_kvcache_specs(None)
+    register_ascend_kv_cache_specs()
+    config = _make_vllm_config(enable_prefix_caching=False, dcp=1, block_size=full_block_size)
+    config.speculative_config = SimpleNamespace(num_speculative_tokens=num_spec_tokens)
+    capacity = get_kpool_tail_ring_capacity(config, compress_ratio=4)
+    full = MLAAttentionSpec(
+        block_size=full_block_size, num_kv_heads=1, head_size=512, dtype=torch.bfloat16, model_version="glm5_next"
+    )
+    tail = AscendIndexerKPoolTailSpec(
+        block_size=capacity,
+        sliding_window=4,
+        compress_ratio=4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float32,
+    )
+    tail_group = UniformTypeKVCacheSpecs.from_specs({"tail": tail}) if wrapped else tail
+    groups = [KVCacheGroupSpec(["full"], full), KVCacheGroupSpec(["tail"], tail_group)]
+    if with_mamba:
+        groups.append(
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=131072,
+                    shapes=((1,),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="none",
+                ),
+            )
+        )
+    cache = KVCacheConfig(num_blocks=32, kv_cache_tensors=[], kv_cache_groups=groups)
+    config.cache_config.block_size = min(group.kv_cache_spec.block_size for group in groups)
+    scheduler_size, hash_size = _ascend_resolve_kv_cache_block_sizes(cache, config)
+    expected_size = math.lcm(full.block_size, 131072) if with_mamba else full.block_size
+    assert (scheduler_size, hash_size) == (expected_size, expected_size)
+
+    coordinator = get_kv_cache_coordinator(
+        cache,
+        max_model_len=131072,
+        max_in_flight_tokens=8196,
+        use_eagle=num_spec_tokens > 0,
+        enable_caching=False,
+        scheduler_block_size=scheduler_size,
+        hash_block_size=hash_size,
+    )
+    assert coordinator.scheduler_block_size == expected_size
+    assert not coordinator.enable_caching
+    assert len(coordinator.single_type_managers) == len(groups)
+    tail_manager = coordinator.single_type_managers[1]
+    assert isinstance(tail_manager, KpoolTailManager)
+    assert tail_manager.block_size == capacity
+    initial_free = coordinator.block_pool.get_num_free_blocks()
+    for computed in (64, 512, 2304):
+        for manager in coordinator.single_type_managers:
+            manager.allocate_new_blocks("request", computed, computed)
+        assert len(tail_manager.req_to_blocks["request"]) == 1
+        assert coordinator.get_num_common_prefix_blocks("request") == [0] * len(groups)
+    assert coordinator.find_longest_cache_hit([], 1024) == (tuple([] for _ in groups), 0, 0)
+    coordinator.free("request")
+    assert all(not manager.req_to_blocks.get("request") for manager in coordinator.single_type_managers)
+    assert coordinator.block_pool.get_num_free_blocks() == initial_free
 
 
 def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():

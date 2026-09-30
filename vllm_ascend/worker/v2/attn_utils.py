@@ -60,6 +60,8 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.glm5next.cache_config import _get_glm5_next_cache_layout
+from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     calc_split_factor,
@@ -644,6 +646,7 @@ def _allocate_kv_cache(
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
+    is_glm5_next = _get_glm5_next_cache_layout(kv_cache_config.kv_cache_groups) is not None
 
     # The restored DeepSeek-V4 planner on main computes capacity for one
     # shared-tuple backing and emits every KVCacheTensor as a view into it.
@@ -690,7 +693,7 @@ def _allocate_kv_cache(
     # once here; allocating tensor.size for every descriptor duplicates the
     # full cache pool and can OOM before the second tensor is initialized.
     hybrid_backing: torch.Tensor | None = None
-    if use_hybrid_layout and not is_dsv4_model:
+    if use_hybrid_layout and not is_dsv4_model and not is_glm5_next:
         tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
         if len(tensor_sizes) != 1:
             raise ValueError("Hybrid KV cache tensors must share one backing allocation.")
@@ -711,6 +714,34 @@ def _allocate_kv_cache(
             continue
 
         if dsv4_backing is not None:
+            continue
+
+        if is_glm5_next:
+            # GLM emits one independent allocation per physical slot. Names
+            # within a descriptor alias across independently scheduled groups.
+            # Validate the shared-slot geometry the GLM view builder assumes,
+            # matching the V1 allocator, so an unexpected upstream layout
+            # fails loudly instead of silently mis-sizing the slot backing.
+            expected_size = kv_cache_config.num_blocks * kv_cache_tensor.block_stride
+            if (
+                kv_cache_tensor.offset != 0
+                or kv_cache_tensor.layer_stride != 0
+                or kv_cache_tensor.block_stride <= 0
+                or kv_cache_tensor.size != expected_size
+                or any(
+                    layer_kv_cache_spec[layer_name].page_size_bytes != kv_cache_tensor.block_stride
+                    for layer_name in shared_names
+                )
+            ):
+                raise ValueError(
+                    "Invalid GLM-Next shared-slot KV cache descriptor geometry: "
+                    f"offset={kv_cache_tensor.offset}, layer_stride={kv_cache_tensor.layer_stride}, "
+                    f"block_stride={kv_cache_tensor.block_stride}, size={kv_cache_tensor.size}, "
+                    f"expected_size={expected_size}."
+                )
+            raw_tensor = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device)
+            for layer_name in shared_names:
+                kv_cache_raw_tensors[layer_name] = raw_tensor
             continue
 
         if any(isinstance(layer_kv_cache_spec[name], AscendIndexerKPoolTailSpec) for name in shared_names):
@@ -765,10 +796,11 @@ def _allocate_kv_cache(
             for layer_idx, layer_name in enumerate(shared_names):
                 layer_spec = layer_kv_cache_spec[layer_name]
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
+                # A singleton layer dimension has no address contribution;
+                # upstream may represent its unused stride as zero.
                 if (
-                    kv_cache_tensor.layer_stride != layer_size
-                    or kv_cache_tensor.block_stride != layer_spec.page_size_bytes
-                ):
+                    len(shared_names) > 1 and kv_cache_tensor.layer_stride != layer_size
+                ) or kv_cache_tensor.block_stride != layer_spec.page_size_bytes:
                     raise ValueError(
                         "Ascend hybrid KV cache requires contiguous per-layer "
                         f"views, but {layer_name} has layer_stride="
@@ -942,8 +974,10 @@ def allocate_kv_cache_main(
 def _reshape_mamba_kv_cache(
     raw_cache: torch.Tensor,
     kv_cache_spec: MambaSpec,
+    *,
+    page_strided: bool = False,
 ) -> list[torch.Tensor]:
-    """Create the contiguous per-state views used by the Ascend v1 runner."""
+    """Create per-state views, using page strides for the GLM shared pool."""
     page_size_bytes = kv_cache_spec.page_size_bytes
     assert raw_cache.numel() % page_size_bytes == 0
     num_blocks = raw_cache.numel() // page_size_bytes
@@ -957,6 +991,19 @@ def _reshape_mamba_kv_cache(
     # tensor3: [v,            (mamba_padding), ...]
     for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
         target_shape = (num_blocks, *shape)
+        if page_strided:
+            dtype_size = get_dtype_size(dtype)
+            strides = torch.empty(target_shape, device="meta").stride()
+            state_tensors.append(
+                torch.as_strided(
+                    raw_cache.view(dtype),
+                    size=target_shape,
+                    stride=(page_size_bytes // dtype_size, *strides[1:]),
+                    storage_offset=(raw_cache.storage_offset() + start_idx) // dtype_size,
+                )
+            )
+            start_idx += strides[0] * dtype_size
+            continue
         end_idx = start_idx + torch.empty(
             target_shape,
             device="meta",
@@ -965,7 +1012,7 @@ def _reshape_mamba_kv_cache(
         state_tensors.append(state)
         start_idx = end_idx
 
-    assert start_idx <= raw_cache.numel()
+    assert start_idx <= (page_size_bytes if page_strided else raw_cache.numel())
     return state_tensors
 
 
@@ -984,6 +1031,7 @@ def _reshape_kv_cache_v2(
     is_dsv4_model = _is_dsv4_model(vllm_config)
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
+    is_glm5_next = _get_glm5_next_cache_layout(kv_cache_config.kv_cache_groups) is not None
 
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
@@ -1085,6 +1133,20 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = typed_cache.view(kv_cache_shape)
                 continue
 
+            if is_glm5_next:
+                views = view_glm5_next_cache(
+                    layer_name,
+                    kv_cache_spec,
+                    raw_cache,
+                    attn_backend=group.backend,
+                    kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
+                    num_blocks=kv_cache_config.num_blocks,
+                    get_kv_cache_dims=_get_attention_kv_cache_dims,
+                )
+                if views is not None:
+                    kv_caches[layer_name] = views
+                    continue
+
             if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError(f"KPool tail cache for {layer_name} must use one raw tensor.")
@@ -1119,7 +1181,7 @@ def _reshape_kv_cache_v2(
             if isinstance(kv_cache_spec, MambaSpec):
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError(f"Mamba cache for {layer_name} must use one raw tensor.")
-                mamba_cache = _reshape_mamba_kv_cache(raw_cache, kv_cache_spec)
+                mamba_cache = _reshape_mamba_kv_cache(raw_cache, kv_cache_spec, page_strided=is_glm5_next)
                 if mamba_cache[0].shape[0] < kv_cache_config.num_blocks:
                     raise ValueError(f"Mamba cache for {layer_name} has fewer blocks than KVCacheManager.")
                 kv_caches[layer_name] = mamba_cache

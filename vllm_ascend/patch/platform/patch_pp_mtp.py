@@ -19,7 +19,9 @@
 The local Eagle/MTP drafter returns the draft tokens that belong to the model
 output being processed. With PP batch_queue, EngineCore schedules a newer batch
 before consuming the older output, so updating ``request.spec_token_ids`` from
-``post_step`` observes live Request state from the newer schedule step.
+``post_step`` observes live Request state from the newer schedule step. V2 uses
+its native device-side PP transport, but synchronous speculative scheduling
+still needs this output-bound metadata and same-request in-flight fence.
 """
 
 from __future__ import annotations
@@ -48,8 +50,17 @@ def _is_pd_prefill_node(vllm_config) -> bool:
     return is_kv_producer and not is_kv_consumer
 
 
+def _use_v2_sync_pp_mtp_runtime_patch(vllm_config, use_pp: bool) -> bool:
+    if not use_pp or not getattr(vllm_config, "use_v2_model_runner", False):
+        return False
+    # Load worker utilities only for V2, after platform patch installation.
+    from vllm_ascend.worker.v2.pp_utils import use_sync_spec_pp_output
+
+    return use_sync_spec_pp_output(vllm_config)
+
+
 def _use_pp_mtp_runtime_patch(vllm_config, use_pp: bool) -> bool:
-    if not _use_pp_ipc_runtime_patch(vllm_config, use_pp):
+    if not (_use_pp_ipc_runtime_patch(vllm_config, use_pp) or _use_v2_sync_pp_mtp_runtime_patch(vllm_config, use_pp)):
         return False
     speculative_config = getattr(vllm_config, "speculative_config", None)
     return speculative_config is not None
@@ -129,10 +140,9 @@ def _patch_scheduler_update_after_schedule() -> None:
     @wraps(original_update_after_schedule)
     def _patched_update_after_schedule(self, scheduler_output):
         original_update_after_schedule(self, scheduler_output)
-        if not _use_pp_ipc_runtime_patch(
-            getattr(self, "vllm_config", None),
-            getattr(self, "use_pp", False),
-        ):
+        config = getattr(self, "vllm_config", None)
+        use_pp = getattr(self, "use_pp", False)
+        if not (_use_pp_ipc_runtime_patch(config, use_pp) or _use_v2_sync_pp_mtp_runtime_patch(config, use_pp)):
             return
 
         for req_id in scheduler_output.num_scheduled_tokens:
@@ -248,9 +258,8 @@ def _patch_scheduler_update_from_output() -> None:
             getattr(self, "vllm_config", None),
             getattr(self, "use_pp", False),
         )
-        use_pp_mtp_runtime_patch = (
-            use_pp_ipc_runtime_patch
-            and getattr(getattr(self, "vllm_config", None), "speculative_config", None) is not None
+        use_pp_mtp_runtime_patch = _use_pp_mtp_runtime_patch(
+            getattr(self, "vllm_config", None), getattr(self, "use_pp", False)
         )
         if use_pp_mtp_runtime_patch and any(
             num_tokens <= 0 for num_tokens in scheduler_output.num_scheduled_tokens.values()
@@ -274,7 +283,7 @@ def _patch_scheduler_update_from_output() -> None:
             model_runner_output,
         )
 
-        if use_pp_ipc_runtime_patch:
+        if use_pp_ipc_runtime_patch or use_pp_mtp_runtime_patch:
             for req_id in scheduler_output.num_scheduled_tokens:
                 request = self.requests.get(req_id)
                 if request is not None:
@@ -293,14 +302,12 @@ def _patch_scheduler_update_from_output() -> None:
 def _patch_model_config_validation() -> None:
     from typing import get_args
 
+    import vllm.config.speculative as speculative_config
     from vllm.config.model import ModelConfig
-    from vllm.config.speculative import MTPModelTypes
 
     original_verify = ModelConfig.verify_with_parallel_config
     if getattr(original_verify, "_vllm_ascend_pp_mtp_patched", False):
         return
-
-    mtp_model_types = set(get_args(MTPModelTypes))
 
     @wraps(original_verify)
     def _patched_verify_with_parallel_config(self, parallel_config):
@@ -310,7 +317,8 @@ def _patch_model_config_validation() -> None:
         is_eagle_drafter = (model_type == "eagle" or model_type == "speculators") and any(
             arch.startswith("Eagle") or arch.endswith("Eagle3") for arch in architectures
         )
-        is_mtp_drafter = model_type in mtp_model_types
+        # Platform plugins can register MTP types after this patch is installed.
+        is_mtp_drafter = model_type in get_args(speculative_config.MTPModelTypes)
         is_dspark_drafter = any(arch in ("DSparkDraftModel", "Qwen3DSparkModel") for arch in architectures)
         if (
             getattr(self, "runner", None) == "draft"

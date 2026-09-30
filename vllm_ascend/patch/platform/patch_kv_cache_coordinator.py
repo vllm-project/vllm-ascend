@@ -345,6 +345,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_sizes = [self._get_effective_block_size(group.spec) for group in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
 
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
+        if not self.enable_caching:
+            return [0] * len(self.single_type_managers)
+        return super().get_num_common_prefix_blocks(running_request_id)
+
     def find_longest_cache_hit(
         self,
         block_hashes: list[BlockHash],
@@ -372,6 +377,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             return block_hashes
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
+        if not self.enable_caching:
+            return tuple([] for _ in range(num_groups)), 0, 0
         hit_length = max_cache_hit_length
         longest_hit_length = 0
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
@@ -536,7 +543,11 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
             num_prefill_lookahead=num_prefill_lookahead,
         )
 
-    if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
+    # Fixed request-private rings are not token-page alignment units. Keep
+    # their Ascend managers/coordinator even when prefix caching is disabled.
+    private_group_count = sum(not is_prefix_cacheable(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
+    has_mixed_private_groups = 0 < private_group_count < len(kv_cache_config.kv_cache_groups)
+    if len(kv_cache_config.kv_cache_groups) == 1 or (not enable_caching and not has_mixed_private_groups):
         orig_kwargs = dict(
             kv_cache_config=kv_cache_config,
             max_model_len=max_model_len,

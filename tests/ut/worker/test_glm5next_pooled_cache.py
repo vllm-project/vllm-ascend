@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU tests for GLM-Next model-runner pooled cache views."""
 
+from copy import deepcopy
 from itertools import permutations
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -351,3 +352,108 @@ def test_padded_page_layout_rejected_for_packed_hybrid_pool():
         ),
     ]
     assert not requires_padded_page_layout(specs)
+
+
+@pytest.mark.parametrize("padded_main", [False, True])
+@pytest.mark.parametrize("slot_count", [1, 2])
+def test_mrv2_glm_planner_slots_and_views_match_v1(monkeypatch, padded_main, slot_count):
+    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+    from vllm_ascend.worker.v2 import attn_utils
+
+    main_head_size = 4
+    config, _, _ = _make_plan()
+    specs = _make_specs()
+    if padded_main:
+        specs[MAMBA] = MambaSpec(
+            block_size=8,
+            shapes=((2, 2), (1, 4, 4)),
+            dtypes=(torch.bfloat16, torch.float32),
+        )
+    if slot_count == 2:
+        specs.update(
+            {
+                name.replace("layers.0.", "layers.2.").replace("layers.1.", "layers.3."): deepcopy(spec)
+                for name, spec in list(specs.items())
+            }
+        )
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    plan = get_glm5_next_kv_cache_config(config, groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
+    config.additional_config = {}
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_: (main_head_size, 0))
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _: False)
+    runner = _make_runner(config, main_cache_dims=(main_head_size, 0))
+    reference_raw = runner._allocate_kv_cache_tensors(plan)
+    reference = runner._reshape_kv_cache_tensors(plan, reference_raw)
+    raw = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+    assert raw[MAIN] is raw[MAMBA]
+    assert raw[INDEXER] is raw[STATE]
+    assert raw[MAIN].untyped_storage().data_ptr() != raw[INDEXER].untyped_storage().data_ptr()
+    slots = [raw[t.layers[0]] for t in plan.kv_cache_tensors]
+    assert len({slot.untyped_storage().data_ptr() for slot in slots}) == len(slots)
+    assert sum(t.size for t in plan.kv_cache_tensors) == sum(slot.numel() for slot in slots)
+    for descriptor in plan.kv_cache_tensors:
+        assert all(raw[name] is raw[descriptor.layers[0]] for name in descriptor.layers)
+    attn_groups = []
+    for group_id, group in enumerate(groups):
+        for name in group.layer_names:
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                spec = spec.kv_cache_specs[name]
+            attn_groups.append(
+                SimpleNamespace(
+                    kv_cache_group_id=group_id,
+                    kv_cache_spec=spec,
+                    layer_names=[name],
+                    backend=_StateBackend if isinstance(spec, AscendIndexerKPoolTailSpec) else _AttentionBackend,
+                )
+            )
+    caches = attn_utils._reshape_kv_cache_v2(attn_groups, raw, "auto", [8, 2, 8], {}, plan)
+    for name, views in reference.items():
+        for actual, expected in zip(caches[name], views, strict=True):
+            assert actual.shape == expected.shape
+            assert actual.dtype == expected.dtype
+            assert actual.stride() == expected.stride()
+            assert actual.storage_offset() == expected.storage_offset()
+    # Mamba block 1 must not overwrite the MLA bytes owned by block 0.
+    caches[MAIN][0][0].fill_(3)
+    for state in caches[MAMBA]:
+        state[1].fill_(7)
+    assert torch.all(caches[MAIN][0][0] == 3)
+    caches[STATE][0][-1].fill_(9)
+    assert torch.count_nonzero(caches[INDEXER][0]) == 0
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["offset", "layer_stride", "block_stride", "size", "spec_page"],
+)
+def test_mrv2_glm_rejects_invalid_slot_descriptor_geometry(monkeypatch, kind):
+    from vllm_ascend.worker.v2 import attn_utils
+
+    config, _, plan = _make_plan()
+    config.additional_config = {}
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+
+    descriptor = plan.kv_cache_tensors[0]
+    if kind == "offset":
+        descriptor.offset = 8
+    elif kind == "layer_stride":
+        descriptor.layer_stride = 8
+    elif kind == "block_stride":
+        descriptor.block_stride = 0
+    elif kind == "size":
+        descriptor.size = descriptor.size - 1
+    else:
+        # A self-consistent descriptor whose stride matches no spec page.
+        descriptor.block_stride = 4
+        descriptor.size = plan.num_blocks * 4
+
+    def unexpected_allocation(*args, **kwargs):
+        raise AssertionError("Invalid descriptor reached the allocator")
+
+    monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", unexpected_allocation)
+    with pytest.raises(ValueError, match="Invalid GLM-Next shared-slot KV cache descriptor geometry"):
+        attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))

@@ -140,3 +140,62 @@ def test_non_first_rank_without_mhc_reads_plain_payload(monkeypatch):
 
     assert layer.incoming == (None, None)
     torch.testing.assert_close(out, hidden_states + 1)
+
+
+class _StateDependentLayer(nn.Module):
+    """CPU stand-in whose output depends on every PP payload tensor."""
+
+    def __init__(self, index, mhc):
+        super().__init__()
+        self.index = index
+        self.mhc = mhc
+
+    def forward(self, positions, hidden_states, residual, post, comb):
+        if residual is None:
+            residual = hidden_states.clone()
+            if self.mhc:
+                residual = residual[:, None, :].expand(-1, N_STREAMS, -1).clone()
+        if self.mhc:
+            if post is not None:
+                residual = residual + post + comb.sum(dim=-1, keepdim=True)
+            hidden_states = hidden_states + residual.sum(dim=1)
+            post = hidden_states.new_full((len(positions), N_STREAMS, 1), self.index + 1).float()
+            comb = hidden_states.new_full((len(positions), N_STREAMS, N_STREAMS), self.index + 2).float()
+        else:
+            hidden_states = hidden_states + residual
+        return hidden_states, residual + self.index + 1, post, comb
+
+
+@pytest.mark.parametrize("mhc", [True, False])
+@pytest.mark.parametrize("num_tokens", [1, 5])
+@pytest.mark.parametrize("partition", [(3, 3), (1, 2, 3), (1, 2, 1, 2)])
+def test_pipeline_matches_single_stage_for_state_dependent_layers(monkeypatch, mhc, num_tokens, partition):
+    positions = torch.arange(num_tokens)
+    embeddings = torch.arange(num_tokens * HIDDEN_SIZE, dtype=torch.float32).reshape(num_tokens, HIDDEN_SIZE)
+    layers = [_StateDependentLayer(i, mhc) for i in range(sum(partition))]
+    model = _stub_model(mhc=mhc)
+    model._active_layers = layers
+    model.norm = nn.Identity()
+    monkeypatch.setattr(glm5next_model, "get_pp_group", _pp_group(is_first_rank=True, is_last_rank=True))
+    expected = model(None, positions, None, inputs_embeds=embeddings)
+
+    payload = None
+    start = 0
+    for rank, count in enumerate(partition):
+        stage = _stub_model(mhc=mhc)
+        stage._active_layers = layers[start : start + count]
+        stage.norm = nn.Identity()
+        last = rank == len(partition) - 1
+        monkeypatch.setattr(glm5next_model, "get_pp_group", _pp_group(is_first_rank=rank == 0, is_last_rank=last))
+        output = stage(None, positions, payload, inputs_embeds=embeddings if rank == 0 else None)
+        if not last:
+            buffers = stage.make_empty_intermediate_tensors(num_tokens, embeddings.dtype, embeddings.device)
+            assert set(output.tensors) == set(buffers.tensors)
+            for key, tensor in output.tensors.items():
+                assert tensor.shape == buffers[key].shape
+                assert tensor.dtype == buffers[key].dtype
+                buffers[key].copy_(tensor)
+            payload = buffers
+        start += count
+
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)

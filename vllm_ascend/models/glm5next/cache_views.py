@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pooled-cache physical views for GLM-Next on Model Runner V1."""
+"""Pooled-cache physical views for GLM-Next on Ascend model runners."""
 
 from collections.abc import Callable
 

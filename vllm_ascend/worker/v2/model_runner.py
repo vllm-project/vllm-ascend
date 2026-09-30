@@ -77,10 +77,12 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffe
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_utils import (
+    attach_batch_draft_tokens,
     bypass_upstream_spec_pp_guard,
     resolve_spec_pp_support,
     restore_pp_after_upstream_init,
     use_legacy_spec_pp,
+    use_sync_spec_pp_output,
 )
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
@@ -261,6 +263,8 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
             self.pp_handler.broadcast_drafts()
+            if output is not None and use_sync_spec_pp_output(self.vllm_config):
+                attach_batch_draft_tokens(output, self.draft_tokens_handler)
         return output
 
     def initialize_kv_cache(
@@ -455,6 +459,12 @@ class NPUModelRunner(GPUModelRunner):
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
             num_logits = num_draft_tokens_per_req + num_bonus_tokens
+            if not (num_scheduled_tokens_np >= num_logits).all():
+                raise ValueError(
+                    "Speculative verification requires scheduled tokens >= logits per request: "
+                    f"req_ids={req_ids}, scheduled={num_scheduled_tokens_np.tolist()}, "
+                    f"logits={num_logits.tolist()}"
+                )
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])

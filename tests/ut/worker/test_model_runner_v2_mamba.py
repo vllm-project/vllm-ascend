@@ -438,7 +438,19 @@ def test_mamba_cache_reshape_returns_contiguous_state_tensors(_mock_config):
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
     return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
 )
-def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
+@pytest.mark.parametrize(
+    "single_layer_descriptors,layer_stride,block_stride,invalid",
+    [
+        (False, 40, 20, False),
+        (True, 0, 20, False),
+        (True, 7, 20, False),
+        (False, 0, 20, True),
+        (True, 0, 40, True),
+    ],
+)
+def test_hybrid_cache_exposes_attention_views_and_mamba_states(
+    _mock_config, single_layer_descriptors, layer_stride, block_stride, invalid
+):
     attention_spec = FullAttentionSpec(
         block_size=4,
         num_kv_heads=1,
@@ -460,7 +472,7 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
             80,
             ["full_attn", "mtp_attn"],
             20,
-            layer_stride=40,
+            layer_stride=layer_stride,
         ),
         # Every descriptor aliases the same backing. The Mamba group starts
         # at byte zero and overlays the first attention-layer region.
@@ -468,9 +480,18 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
             80,
             ["linear_attn"],
             20,
-            layer_stride=40,
+            layer_stride=layer_stride,
         ),
     ]
+
+    if single_layer_descriptors:
+        # A PP-local group can have one layer: the layer dimension is unused.
+        kv_cache_tensors = [
+            _make_kv_cache_tensor(80, [name], 20, layer_stride=layer_stride, offset=offset)
+            for name, offset in [("full_attn", 0), ("mtp_attn", 40), ("linear_attn", 0)]
+        ]
+    for tensor in kv_cache_tensors:
+        tensor.block_stride = block_stride
 
     kv_cache_config = KVCacheConfig(
         num_blocks=2,
@@ -486,6 +507,10 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
             ),
         ],
     )
+    if invalid:
+        with pytest.raises(ValueError, match="contiguous per-layer"):
+            _allocate_kv_cache(kv_cache_config, shared_layers={}, device=torch.device("cpu"))
+        return
     raw_caches = _allocate_kv_cache(
         kv_cache_config,
         shared_layers={},

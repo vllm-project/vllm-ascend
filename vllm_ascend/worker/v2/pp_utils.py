@@ -19,7 +19,9 @@ from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
+    from vllm.v1.worker.gpu.async_utils import AsyncOutput
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 
 _PP_TRANSPORT_PREFIX = "pp_transport"
 
@@ -89,6 +91,26 @@ def resolve_spec_pp_support(vllm_config: VllmConfig) -> SpecPPSupport | None:
     ):
         return None
     return support
+
+
+def use_sync_spec_pp_output(vllm_config: VllmConfig) -> bool:
+    """Pair draft metadata with outputs only on the synchronous release PP path.
+
+    Keep scheduler and worker routing identical. Remove with the release
+    protocol once the paired vLLM handles this ordering natively.
+    """
+    if (
+        not getattr(vllm_config, "use_v2_model_runner", False)
+        or getattr(getattr(vllm_config, "scheduler_config", None), "async_scheduling", True)
+        or not use_legacy_spec_pp()
+        or resolve_spec_pp_support(vllm_config) is None
+    ):
+        return False
+    kv_transfer = getattr(vllm_config, "kv_transfer_config", None)
+    is_prefill_node = getattr(kv_transfer, "kv_role", None) == "kv_producer" or (
+        getattr(kv_transfer, "is_kv_producer", False) and not getattr(kv_transfer, "is_kv_consumer", False)
+    )
+    return not is_prefill_node
 
 
 @contextmanager
@@ -210,3 +232,16 @@ def add_pp_transport_buffers(
     """Add empty receive buffers for one PP transport data type."""
     tensors = [torch.zeros(shape, dtype=dtype, device=device) for _ in range(count)]
     return add_pp_transport_tensors(intermediate_tensors, data_type, tensors)
+
+
+def attach_batch_draft_tokens(output: "AsyncOutput", draft_tokens_handler: "DraftTokensHandler") -> None:
+    """Snapshot drafts before another PP batch overwrites the handler.
+
+    Ordinary V2 requests use placeholder IDs for scheduling; actual drafts stay
+    on device and are broadcast by PPHandler. Structured requests already have
+    a D2H copy in the handler, which get_draft_tokens waits for here.
+    """
+    draft_ids = draft_tokens_handler.get_draft_tokens()
+    model_output = output.model_runner_output
+    drafts_by_req = dict(zip(draft_ids.req_ids, draft_ids.draft_token_ids))
+    model_output.spec_token_ids = [list(drafts_by_req[req_id]) for req_id in model_output.req_ids]
