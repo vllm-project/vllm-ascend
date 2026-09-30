@@ -29,6 +29,7 @@ from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry
 from vllm_ascend.utils import create_hccl_pg_options
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
+_DEFAULT_WORLD_GROUP_NAME = "default_world"
 logger = logging.getLogger(__name__)
 
 
@@ -95,6 +96,35 @@ def _patch_destroy_distributed_environment():
     destroy_fn = _wrap_destroy_distributed_environment(vllm.distributed.parallel_state.destroy_distributed_environment)
     vllm.distributed.parallel_state.destroy_distributed_environment = destroy_fn
     vllm.distributed.destroy_distributed_environment = destroy_fn
+
+
+def _is_hccl_backend(backend: object) -> bool:
+    if backend is None:
+        return False
+    return str(backend).rsplit(".", maxsplit=1)[-1].lower() == "hccl"
+
+
+def _wrap_init_process_group(init_process_group):
+    if getattr(init_process_group, "_default_world_qos_wrapped", False) is True:
+        return init_process_group
+
+    @wraps(init_process_group)
+    def wrapped(*args, **kwargs):
+        backend = kwargs.get("backend", args[0] if args else None)
+        if not _is_hccl_backend(backend):
+            return init_process_group(*args, **kwargs)
+        if kwargs.get("pg_options") is not None:
+            return init_process_group(*args, **kwargs)
+
+        kwargs["pg_options"] = create_hccl_pg_options(_DEFAULT_WORLD_GROUP_NAME)
+        return init_process_group(*args, **kwargs)
+
+    cast(Any, wrapped)._default_world_qos_wrapped = True
+    return wrapped
+
+
+def _patch_init_process_group():
+    torch.distributed.init_process_group = _wrap_init_process_group(torch.distributed.init_process_group)
 
 
 class GroupCoordinatorPatch(GroupCoordinator):
@@ -252,3 +282,4 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch
 _patch_destroy_distributed_environment()
+_patch_init_process_group()
