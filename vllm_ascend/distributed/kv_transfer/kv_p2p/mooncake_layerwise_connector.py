@@ -54,7 +54,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.kv_transfer.kv_p2p import layerwise_qos
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.qos import validate_request_qos_policy
+from vllm_ascend.distributed.kv_transfer.qos_lifecycle import stop_listener, stop_queue, wait_remote_writes
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -98,6 +101,8 @@ class LayerMetadata:
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     te_rpc_port: int
     layer_metadata: dict[str, LayerMetadata]
+    qos_te_rpc_ports: dict[int, int] = msgspec.field(default_factory=dict)
+    layerwise_qos_version: int = 0
 
 
 @dataclass
@@ -123,6 +128,8 @@ class ReqMeta:
     local_computed_tokens: int = 0
     local_transed_tokens: int = 0
     do_virtual: bool = False
+    kv_priority: int | None = None
+    remote_qos_te_rpc_ports: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -207,6 +214,9 @@ class SizedDict(OrderedDict):
 
 
 class KVCacheSendingLayerThread(threading.Thread):
+    qos_pool = None
+    qos_policy = None
+
     def __init__(
         self,
         engine: TransferEngine,
@@ -230,6 +240,8 @@ class KVCacheSendingLayerThread(threading.Thread):
         resharding_stream: torch.npu.Stream,
         callback_func: Callable[..., None] = lambda x: None,
         reuse_completion_callback: Callable[[int, str | None], None] | None = None,
+        qos_pool=None,
+        qos_policy=None,
     ):
         super().__init__(daemon=True, name="KVCacheSendingLayerThread")
         self.engine = engine
@@ -269,6 +281,10 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.ready_event = ready_event
         self.callback_func = callback_func
         self.reuse_completion_callback = reuse_completion_callback
+        self.qos_pool = qos_pool
+        self.qos_policy = qos_policy
+        self.qos_error = None
+        self.qos_terminal_reqs = set()
 
     def run(self):
         local_rank = get_world_group().local_rank
@@ -277,9 +293,15 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.ready_event.set()
         while True:
             send_task = self.send_queue.get()
+            if send_task is None and self.qos_pool is not None:
+                self.send_queue.task_done()
+                return
             self._handle_request(send_task)
 
     def _handle_request(self, send_task: SendTask):
+        if self.qos_pool is not None:
+            layerwise_qos.handle_request(self, send_task)
+            return
         error: str | None = None
         try:
             error = self._transfer_kv_cache(send_task)
@@ -510,27 +532,31 @@ class KVCacheSendingLayerThread(threading.Thread):
                 value_quant = value_quant.view(-1, value_quant.shape[-1])  # type:ignore
                 self.v_buffer[: value_quant.shape[0]].copy_(value_quant)
 
-        # Merge transmission tasks of the same session
-        session_meta: dict[str, TransferMeta] = {}
-        layer_names = send_task.layer_names or [send_task.layer_name]
         layer_group_idx = self.layer_metadata[send_task.layer_name].tensor_group_idx[0]
-        for req_id, req_meta in send_task.send_request.items():
-            session_id = f"{req_meta.remote_host}:{req_meta.remote_te_rpc_port}"
-            if session_id not in session_meta:
-                session_meta[session_id] = TransferMeta(src=[], dst=[], length=[], req_ids=[])
+        if self.qos_pool is not None:
+            session_meta = layerwise_qos.group_batches(self, send_task, layer_group_idx)
+        else:
+            # Merge transmission tasks of the same session
+            session_meta: dict[str, TransferMeta] = {}
+            layer_names = send_task.layer_names or [send_task.layer_name]
+            layer_group_idx = self.layer_metadata[send_task.layer_name].tensor_group_idx[0]
+            for req_id, req_meta in send_task.send_request.items():
+                session_id = f"{req_meta.remote_host}:{req_meta.remote_te_rpc_port}"
+                if session_id not in session_meta:
+                    session_meta[session_id] = TransferMeta(src=[], dst=[], length=[], req_ids=[])
 
-            for layer_name in layer_names:
-                src_list, dst_list, length_list = self.get_transfer_meta(
-                    send_task,
-                    req_id,
-                    req_meta,
-                    layer_name,
-                    layer_group_idx,
-                )
-                session_meta[session_id].src.extend(src_list)
-                session_meta[session_id].dst.extend(dst_list)
-                session_meta[session_id].length.extend(length_list)
-            session_meta[session_id].req_ids.append(req_id)
+                for layer_name in layer_names:
+                    src_list, dst_list, length_list = self.get_transfer_meta(
+                        send_task,
+                        req_id,
+                        req_meta,
+                        layer_name,
+                        layer_group_idx,
+                    )
+                    session_meta[session_id].src.extend(src_list)
+                    session_meta[session_id].dst.extend(dst_list)
+                    session_meta[session_id].length.extend(length_list)
+                session_meta[session_id].req_ids.append(req_id)
 
         if send_task.k_quant_cache is not None:
             self.resharding_stream.synchronize()
@@ -544,6 +570,10 @@ class KVCacheSendingLayerThread(threading.Thread):
             send_task.wait_event.synchronize()  # type:ignore
         elif self.pd_head_ratio > 1:
             self.resharding_stream.synchronize()
+
+        if self.qos_pool is not None:
+            layerwise_qos.send_batches(self, send_task, session_meta, layer_group_idx)
+            return
 
         transfer_errors: list[str] = []
         for session_id, transfer_meta in session_meta.items():
@@ -626,6 +656,8 @@ class KVCacheRecvingLayerThread(threading.Thread):
             req_id: The ID of the request that has failed.
         """
         with self.lock:
+            if getattr(self, "qos_pending_requests", None) is not None:
+                self.qos_receive_error = True
             if req_id not in self.task_tracker:
                 self.task_tracker[req_id] = set()
             self.task_tracker.pop(req_id, None)
@@ -644,6 +676,8 @@ class KVCacheRecvingLayerThread(threading.Thread):
             if len(self.task_tracker[req_id]) == trans_count:
                 self.task_tracker.pop(req_id)
                 self.done_requests.add(req_id)
+                if getattr(self, "qos_pending_requests", None) is not None:
+                    self.qos_pending_requests.discard(req_id)
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
@@ -657,6 +691,12 @@ class KVCacheRecvingLayerThread(threading.Thread):
             decoder = msgspec.msgpack.Decoder(type=tuple)
             while True:
                 try:
+                    stop = getattr(self, "qos_stop_event", None)
+                    if stop is not None:
+                        if stop.is_set():
+                            return
+                        if not sock.poll(100, zmq.POLLIN):
+                            continue
                     frames = sock.recv_multipart()
                     if len(frames) < 2:
                         logger.error(
@@ -736,6 +776,7 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
             prompt_len=prompt_len,
             local_transed_tokens=local_transed_tokens,
             trans_count=[],
+            kv_priority=kv_transfer_params.get("kv_priority"),
         )
 
 
@@ -759,6 +800,19 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeLayerwiseConnectorWorker(vllm_config, kv_cache_config, str(self.engine_id))
+
+    def shutdown(self):
+        worker = self.connector_worker
+        if worker is None or worker.qos_pool is None:
+            return
+        self._qos_closing = True
+        sender = worker.kv_send_layer_thread
+        if sender is not None:
+            layerwise_qos.drain(sender)
+            stop_queue(sender, sender.send_queue)
+        wait_remote_writes(worker.kv_recv_layer_thread)
+        stop_listener(worker.kv_recv_layer_thread)
+        worker.qos_pool.close()
 
     ############################################################
     # Scheduler Side Methods
@@ -812,10 +866,23 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
 
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        if getattr(self, "_qos_closing", False):
+            raise RuntimeError("QoS connector is shutting down")
+        super().bind_connector_metadata(connector_metadata)
+        if self._is_kv_producer and self.connector_worker is not None:
+            assert isinstance(connector_metadata, MooncakeLayerwiseConnectorMetadata)
+            # The runner can defer start_load_kv until after forward. Producer
+            # layer indices, events and send metadata must be ready before it.
+            self.connector_worker.start_load_kv(connector_metadata)
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+        if getattr(self, "_qos_closing", False):
+            raise RuntimeError("QoS connector is shutting down")
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeLayerwiseConnectorMetadata)
-        self.connector_worker.start_load_kv(self._connector_metadata)
+        if not self._is_kv_producer:
+            self.connector_worker.start_load_kv(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """MooncakeLayerwiseConnector does not do layerwise saving."""
@@ -840,13 +907,17 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         self, layer_name: str, kv_layer: list[torch.Tensor], attn_metadata: "AttentionMetadata", **kwargs
     ) -> None:
         """MooncakeLayerwiseConnector does not save explicitly."""
+        if getattr(self, "_qos_closing", False):
+            raise RuntimeError("QoS connector is shutting down")
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeLayerwiseConnectorMetadata)
         self.connector_worker.save_kv_layer(layer_name, kv_layer, attn_metadata, self._connector_metadata)
 
     def wait_for_save(self):
-        """MooncakeLayerwiseConnector does not save explicitly."""
-        pass
+        """Drain QoS layer writes before KV blocks can be recycled."""
+        worker = self.connector_worker
+        if worker is not None and worker.qos_pool is not None and worker.kv_send_layer_thread is not None:
+            layerwise_qos.drain(worker.kv_send_layer_thread)
 
 
 class MooncakeLayerwiseConnectorScheduler:
@@ -858,6 +929,8 @@ class MooncakeLayerwiseConnectorScheduler:
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
         self.engine_id = engine_id
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
+        self.qos_policy = validate_request_qos_policy(vllm_config.kv_transfer_config.kv_connector_extra_config)
+        layerwise_qos.validate_policy(self.qos_policy)
 
         self.side_channel_host = get_ip()
 
@@ -988,6 +1061,7 @@ class MooncakeLayerwiseConnectorScheduler:
         return 0, False
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
+        layerwise_qos.bind_request(self.qos_policy, request)
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeLayerwiseConnector update_state_after_alloc: num_external_tokens=%s, kv_transfer_params=%s",
@@ -1032,6 +1106,8 @@ class MooncakeLayerwiseConnectorScheduler:
                 remote_dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
                 remote_cached_tokens=remote_cached_tokens,
             )
+            if self.qos_policy is not None:
+                kv_transfer_params.update(kv_priority=params["kv_priority"], layerwise_qos_version=1)
             if not do_virtual:
                 future = self.executor.submit(
                     self._access_metaserver, url=params.get("metaserver", None), message=kv_transfer_params
@@ -1231,8 +1307,21 @@ class MooncakeLayerwiseConnectorWorker:
         self.handshake_port = self.side_channel_port + self.tp_rank
         self.sockets: dict = {}
         logger.info("Initializing Mooncake work %s", engine_id)
-        inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
-        self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
+        self.qos_policy = validate_request_qos_policy(vllm_config.kv_transfer_config.kv_connector_extra_config)
+        layerwise_qos.validate_policy(self.qos_policy)
+        self.qos_pool = None
+        if self.qos_policy is None:
+            inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
+            self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
+        else:
+            self.qos_pool = layerwise_qos.QosPDWritePool(
+                self.side_channel_host,
+                "",
+                self.qos_policy.priority_to_qos.values(),
+                self.qos_policy.select(self.qos_policy.default_priority),
+                self.qos_policy.resource_config,
+            )
+            self.engine = self.qos_pool.default_engine
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.
@@ -1268,6 +1357,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.index_to_name = defaultdict(list)
         self.remote_layer_metadata: dict[str, dict[int, dict[str, LayerMetadata]]] = SizedDict()
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
+        self.remote_qos_ports = SizedDict()
         self.remote_sockets_lock = threading.Lock()
         self.remote_sockets: dict[  # type: ignore
             str, deque[zmq.Socket]
@@ -1360,7 +1450,11 @@ class MooncakeLayerwiseConnectorWorker:
             )
         for tensor in (self.k_buffer, self.v_buffer):
             assert tensor.data_ptr() % alignment == 0, "The address of the registered kv cache should be aligned to 2M"
-            ret_value = self.engine.register_memory(tensor.data_ptr(), tensor.numel() * tensor.element_size())
+            if self.qos_pool is not None:
+                self.qos_pool.register_buffers([tensor.data_ptr()], [tensor.numel() * tensor.element_size()])
+                ret_value = 0
+            else:
+                ret_value = self.engine.register_memory(tensor.data_ptr(), tensor.numel() * tensor.element_size())
             logger.info("Register memory buffer for transfer, buffer size:%s", tensor.numel() * tensor.element_size())
             if ret_value != 0:
                 raise RuntimeError("Mooncake memory registration failed. ")
@@ -1464,7 +1558,10 @@ class MooncakeLayerwiseConnectorWorker:
             register_regions = collect_storage_merged_register_regions(kv_caches)
 
         validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        if self.qos_pool is not None:
+            self.qos_pool.register_buffers(register_regions.ptrs, register_regions.lengths)
+        else:
+            global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
 
         if kv_buffer is not None:
             self.create_kv_buffer(kv_buffer)
@@ -1495,6 +1592,8 @@ class MooncakeLayerwiseConnectorWorker:
         metadata = MooncakeAgentMetadata(
             te_rpc_port=self.te_rpc_port,
             layer_metadata=self.layer_metadata,
+            qos_te_rpc_ports=self.qos_pool.rpc_ports if self.qos_pool is not None else {},
+            layerwise_qos_version=1 if self.qos_pool is not None else 0,
         )
         if self.vllm_config.kv_transfer_config.is_kv_producer:
             ready_event = threading.Event()
@@ -1520,6 +1619,8 @@ class MooncakeLayerwiseConnectorWorker:
                 resharding_stream=self.resharding_stream,
                 callback_func=self.send_done_send_signal,
                 reuse_completion_callback=self._complete_layer_reuse,
+                qos_pool=self.qos_pool,
+                qos_policy=self.qos_policy,
             )
             self.kv_send_layer_thread.start()
             ready_event.wait()
@@ -1535,6 +1636,10 @@ class MooncakeLayerwiseConnectorWorker:
                 metadata,
                 ready_event,
             )
+            if self.qos_pool is not None:
+                self.kv_recv_layer_thread.qos_stop_event = threading.Event()
+                self.kv_recv_layer_thread.qos_pending_requests = set()
+                self.kv_recv_layer_thread.qos_receive_error = False
             self.kv_recv_layer_thread.start()
             ready_event.wait()
 
@@ -1754,6 +1859,11 @@ class MooncakeLayerwiseConnectorWorker:
                 assert self.kv_recv_layer_thread is not None
                 self.request_map[external_req_id] = req_id
                 self._recving_metadata[req_id] = meta
+                if self.qos_pool is not None:
+                    receiver = self.kv_recv_layer_thread
+                    with receiver.lock:
+                        if external_req_id not in receiver.done_requests:
+                            receiver.qos_pending_requests.add(external_req_id)
         elif self.vllm_config.kv_transfer_config.is_kv_producer:
             # update trans info
             update_metadata = {}
@@ -1980,6 +2090,8 @@ class MooncakeLayerwiseConnectorWorker:
                 try:
                     req_meta_update = self.update_decoder_info(req_id, req_meta)
                 except Exception as e:
+                    if self.qos_pool is not None:
+                        raise
                     logger.warning(
                         "MooncakeLayerwiseConnector transfer fail. req_id=%s, layer_idx=%s, error=%s. ",
                         req_id,
@@ -2039,6 +2151,8 @@ class MooncakeLayerwiseConnectorWorker:
             return sock
 
     def update_decoder_info(self, req_id, req_meta: ReqMeta):
+        if self.qos_pool is not None and self.pd_head_ratio > 1:
+            raise ValueError("request layerwise QoS does not support unequal P/D head topology")
         if (
             req_meta.remote_engine_id not in self.remote_layer_metadata
             or req_meta.remote_port not in self.remote_layer_metadata[req_meta.remote_engine_id]
@@ -2062,6 +2176,8 @@ class MooncakeLayerwiseConnectorWorker:
             assert req_meta.remote_engine_id != self.engine_id, (
                 f"Conflict engine id {req_meta.remote_engine_id} with local engine id {self.local_engine_id}."
             )
+            ports = layerwise_qos.peer_ports(self.qos_policy, agent_meta)
+            self.remote_qos_ports[req_meta.remote_engine_id][req_meta.remote_port] = ports
             self.remote_layer_metadata[req_meta.remote_engine_id][req_meta.remote_port] = agent_meta.layer_metadata
             self.remote_te_port[req_meta.remote_engine_id][req_meta.remote_port] = agent_meta.te_rpc_port
             logger.debug(
@@ -2073,7 +2189,7 @@ class MooncakeLayerwiseConnectorWorker:
                 agent_meta.layer_metadata,
                 agent_meta.te_rpc_port,
             )
-            if self.pd_head_ratio > 1:
+            if self.pd_head_ratio > 1 and self.qos_pool is None:
                 # for tp inequal, pre-create link to prevent alltoall out of memory
                 session_id = f"{req_meta.remote_host}:{agent_meta.te_rpc_port}"
                 first_layer_name = next(iter(self.layer_metadata.keys()))
@@ -2085,6 +2201,10 @@ class MooncakeLayerwiseConnectorWorker:
                 )
                 if ret < 0:
                     logger.error("Mooncake transfer failed to create link. session_id=%s, ret=%d. ", session_id, ret)
+        if self.qos_pool is not None:
+            req_meta.remote_qos_te_rpc_ports = dict(
+                self.remote_qos_ports[req_meta.remote_engine_id][req_meta.remote_port]
+            )
         req_meta.remote_te_rpc_port = self.remote_te_port[req_meta.remote_engine_id][req_meta.remote_port]
         req_meta.remote_layer_metadata = self.remote_layer_metadata[req_meta.remote_engine_id][req_meta.remote_port]
         return req_meta
@@ -2144,6 +2264,8 @@ class MooncakeLayerwiseConnectorWorker:
                 req_meta.remote_port,
                 e,
             )
+            if self.qos_pool is not None:
+                raise
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass

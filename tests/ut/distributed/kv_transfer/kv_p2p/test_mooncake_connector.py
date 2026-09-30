@@ -1740,6 +1740,7 @@ class MockVllmConfig:
         self.parallel_config = MagicMock()
         self.cache_config = MagicMock()
         self.kv_transfer_config = MagicMock()
+        self.kv_transfer_config.kv_connector_extra_config = {}
         self.scheduler_config = MagicMock(disable_hybrid_kv_cache_manager=True)
         self.speculative_config = None
         self.model_config.use_mla = False

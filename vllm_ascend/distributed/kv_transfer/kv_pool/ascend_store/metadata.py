@@ -934,6 +934,7 @@ class RequestTracker:
 
 @dataclass(init=False)
 class ReqMeta:
+    kv_priority: int | None = None
     # Request id
     req_id: str
     # End token for full-block KV save.
@@ -1004,6 +1005,7 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
+        kv_priority: int | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1045,6 +1047,7 @@ class ReqMeta:
         self.load_key_block_offset = load_key_block_offset
         self.load_last_block_key = load_last_block_key
         self.load_keys = [] if load_keys is None else list(load_keys)
+        self.kv_priority = kv_priority
 
     @property
     def block_ids(self) -> list[int]:

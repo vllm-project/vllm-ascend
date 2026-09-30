@@ -58,6 +58,8 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.qos import validate_request_qos_policy
+from vllm_ascend.distributed.kv_transfer.qos_lifecycle import stop_listener, stop_queue, wait_remote_reads
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -115,6 +117,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_strides: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
+    qos_te_rpc_ports: dict[int, int] = msgspec.field(default_factory=dict)
 
 
 @dataclass
@@ -136,6 +139,7 @@ class ReqMeta:
     remote_block_size: int
     local_full_block_ids: BlockIds = tuple()
     do_virtual: bool = False
+    kv_priority: int | None = None
 
 
 @dataclass(frozen=True)
@@ -340,6 +344,12 @@ class KVCacheSendingThread(threading.Thread):
         decoder = msgspec.msgpack.Decoder(type=tuple)
         while True:
             try:
+                stop = getattr(self, "qos_stop_event", None)
+                if stop is not None:
+                    if stop.is_set():
+                        return
+                    if not sock.poll(100, zmq.POLLIN):
+                        continue
                 frames = sock.recv_multipart()
                 if len(frames) < 2:
                     logger.error(
@@ -418,6 +428,9 @@ class KVCacheSendingThread(threading.Thread):
 
 
 class KVCacheRecvingThread(threading.Thread):
+    qos_policy = None
+    qos_pool = None
+
     def __init__(
         self,
         tp_rank: int,
@@ -437,6 +450,8 @@ class KVCacheRecvingThread(threading.Thread):
         prefill_pp_layer_partition: str | None = None,
         kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] | None = None,
         block_size_scale: list[list[int]] | None = None,
+        qos_policy=None,
+        qos_pool=None,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
@@ -446,6 +461,9 @@ class KVCacheRecvingThread(threading.Thread):
         self.local_handshake_port = local_handshake_port
         self.side_channel_port = side_channel_port
         self.engine = engine
+        self.qos_policy = qos_policy
+        self.qos_pool = qos_pool
+        self.remote_qos_te_ports: dict[str, dict[int, dict[int, int]]] = SizedDict()
         if ready_event is None:
             ready_event = threading.Event()
         self.ready_event = ready_event
@@ -582,11 +600,15 @@ class KVCacheRecvingThread(threading.Thread):
         shard_idx: int = 0,
         local_block_ids_replicate_k: BlockIds | None = None,
         remote_block_ids_replicate_k: BlockIds | None = None,
+        kv_priority: int | None = None,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
             remote_port_send_num = {}
+        if self.qos_policy is not None:
+            self.qos_policy.select(kv_priority)
         trans_info = {
+            "kv_priority": kv_priority,
             "request_id": request_id,
             "local_block_ids": local_block_ids,
             "remote_block_ids": remote_block_ids,
@@ -643,6 +665,8 @@ class KVCacheRecvingThread(threading.Thread):
                 if request_data is None:
                     logger.warning("Received a None request. ")
                     self.request_queue.task_done()
+                    if self.qos_pool is not None:
+                        return
                     continue
                 self._submit_request(request_data)
             except Exception as e:
@@ -1039,7 +1063,7 @@ class KVCacheRecvingThread(threading.Thread):
             dst_list,
             length_list,
         )
-        ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+        ret = self._submit_kv_read(req_meta, session_id, src_list, dst_list, length_list)
         if ret < 0:
             logger.error(
                 "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
@@ -1463,6 +1487,38 @@ class KVCacheRecvingThread(threading.Thread):
         )
         torch_npu.npu_scatter_pa_kv_cache(k_buffer, v_buffer, k_cache_layer, v_cache_layer, slot_mapping)
 
+    def _submit_kv_read(self, req_meta, session_id, src_list, dst_list, length_list):
+        """Choose both local engine and matching remote engine before real READ."""
+        if self.qos_policy is None:
+            return self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+        qos = self.qos_policy.select(req_meta.get("kv_priority"))
+        with self.remote_metadata_lock:
+            ports = self.remote_qos_te_ports.get(req_meta["remote_engine_id"], {}).get(
+                req_meta["remote_handshake_port"], {}
+            )
+            if (
+                set(ports) != set(self.qos_policy.priority_to_qos.values())
+                or any(type(q) is not int for q in ports)
+                or any(type(p) is not int or not 1 <= p <= 65535 for p in ports.values())
+                or len(set(ports.values())) != len(ports)
+            ):
+                raise RuntimeError("P/D peer advertises invalid or mismatched QoS lanes")
+            remote_port = ports.get(qos)
+        if type(remote_port) is not int or not 0 < remote_port < 65536:
+            raise RuntimeError(f"P/D peer has no advertised QoS {qos} lane; both endpoints must enable kv_qos")
+        session = f"{req_meta['remote_host']}:{remote_port}"
+        if self.qos_policy.log_enabled:
+            logger.info(
+                "KV_QOS_PD request=%s remote_request=%s priority=%d lane_qos=%d op=read session=%s bytes=%d",
+                req_meta.get("request_id"),
+                req_meta.get("remote_request_id"),
+                req_meta["kv_priority"],
+                qos,
+                session,
+                sum(length_list),
+            )
+        return self.qos_pool.read(qos, session, src_list, dst_list, length_list)
+
     def _get_remote_metadata(self, remote_host: str, remote_handshake_port: int) -> None:
         """Get the metadata from the remote host."""
         sock: zmq.Socket | None = None  # type: ignore
@@ -1487,6 +1543,7 @@ class KVCacheRecvingThread(threading.Thread):
                 self.remote_kv_group2layeridx[engine_id][remote_handshake_port] = agent_meta.kv_group2layeridx
                 self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
+                self.remote_qos_te_ports[engine_id][remote_handshake_port] = agent_meta.qos_te_rpc_ports
                 self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
                 self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
         except Exception:
@@ -1584,6 +1641,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         num_external_tokens: int,
         kv_transfer_params: dict[str, Any],
         local_full_block_ids: BlockIds | None = None,
+        kv_priority: int | None = None,
     ):
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
@@ -1602,6 +1660,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_block_size=kv_transfer_params.get("remote_block_size", 0),
             local_full_block_ids=local_full_block_ids or tuple(),
             do_virtual=kv_transfer_params.get("do_virtual", False),
+            kv_priority=kv_priority,
         )
 
 
@@ -1626,6 +1685,18 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+
+    def shutdown(self):
+        worker = self.connector_worker
+        if worker is None or worker.qos_pool is None:
+            return
+        self._qos_closing = True
+        receiver = worker.kv_recv_thread
+        if receiver is not None:
+            stop_queue(receiver, receiver.request_queue)
+        wait_remote_reads(worker.kv_send_thread)
+        stop_listener(worker.kv_send_thread)
+        worker.qos_pool.close()
 
     ############################################################
     # Scheduler Side Methods
@@ -1684,6 +1755,8 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.get_block_ids_with_load_errors()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+        if getattr(self, "_qos_closing", False):
+            raise RuntimeError("QoS connector is shutting down")
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
@@ -1696,6 +1769,8 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs
     ) -> None:
         """MooncakeConnector does not save explicitly."""
+        if getattr(self, "_qos_closing", False):
+            raise RuntimeError("QoS connector is shutting down")
         pass
 
     def wait_for_save(self):
@@ -1737,9 +1812,12 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
+    qos_policy = None
+
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
+        self.qos_policy = validate_request_qos_policy(vllm_config.kv_transfer_config.kv_connector_extra_config)
         init_ascend_config(vllm_config)
         self.ascend_config = get_ascend_config()
         self.block_size = vllm_config.cache_config.block_size
@@ -1984,6 +2062,8 @@ class MooncakeConnectorScheduler:
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids, full_block_ids, num_external_tokens) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
+            if self.qos_policy is not None and "kv_priority" not in req.kv_transfer_params:
+                raise ValueError("P/D handoff lost kv_priority; patched P and proxy are required")
             # For the case where there are no remote blocks to pull
             # (block_ids is empty), we don't need to schedule
             # an async read on the worker side.
@@ -1993,6 +2073,7 @@ class MooncakeConnectorScheduler:
                 local_full_block_ids=full_block_ids,
                 num_external_tokens=num_external_tokens,
                 kv_transfer_params=req.kv_transfer_params,
+                kv_priority=self.qos_policy.request_priority(req) if self.qos_policy is not None else None,
             )
 
         # Clear the list once workers start the transfers
@@ -2051,7 +2132,7 @@ class MooncakeConnectorScheduler:
             logger.info("Delaying free of %d blocks for request %s", sum(computed_block_lens), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
 
-        return delay_free_blocks, dict(
+        handoff = dict(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
@@ -2067,6 +2148,9 @@ class MooncakeConnectorScheduler:
             num_prompt_blocks=num_prompt_blocks,
             remote_block_size=self.block_size,
         )
+        if self.qos_policy is not None:
+            handoff["kv_priority"] = self.qos_policy.request_priority(request)
+        return delay_free_blocks, handoff
 
     def _port_offset_from_handshake_metadata(
         self,
@@ -2116,6 +2200,9 @@ class MooncakeConnectorScheduler:
 
 class MooncakeConnectorWorker:
     """Implementation of Worker side methods"""
+
+    qos_policy = None
+    qos_pool = None
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         self._get_prefill_decode_size(vllm_config)
@@ -2193,11 +2280,22 @@ class MooncakeConnectorWorker:
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
-        inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
-        self.engine = global_te.get_transfer_engine(
-            self.side_channel_host,
-            device_name=device_name,
-        )
+        self.qos_policy = validate_request_qos_policy(vllm_config.kv_transfer_config.kv_connector_extra_config)
+        self.qos_pool = None
+        if self.qos_policy is None:
+            inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
+            self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=device_name)
+        else:
+            from mooncake.qos_pd_lane import QosPDPool
+
+            self.qos_pool = QosPDPool(
+                self.side_channel_host,
+                device_name,
+                self.qos_policy.priority_to_qos.values(),
+                self.qos_policy.select(self.qos_policy.default_priority),
+                self.qos_policy.resource_config,
+            )
+            self.engine = self.qos_pool.default_engine
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.
@@ -2671,7 +2769,10 @@ class MooncakeConnectorWorker:
             register_regions = collect_storage_merged_register_regions(kv_caches)
 
         validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        if self.qos_pool is None:
+            global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        else:
+            self.qos_pool.register_buffers(register_regions.ptrs, register_regions.lengths)
 
         logger.debug(
             "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "
@@ -2699,6 +2800,7 @@ class MooncakeConnectorWorker:
             block_strides=self.block_stride_per_addr,
             local_ip=get_ip(),
             handshake_port=self.handshake_port,
+            qos_te_rpc_ports=self.qos_pool.rpc_ports if self.qos_pool is not None else {},
         )
         self.xfer_handshake_metadata = metadata
 
@@ -2716,6 +2818,8 @@ class MooncakeConnectorWorker:
                 self.kv_caches,
                 self.pcp_rank,
             )
+            if self.qos_pool is not None:
+                self.kv_send_thread.qos_stop_event = threading.Event()
             self.kv_send_thread.start()
         else:
             self.kv_recv_thread = KVCacheRecvingThread(
@@ -2736,6 +2840,8 @@ class MooncakeConnectorWorker:
                 self._prefill_pp_layer_partition,
                 self.kv_group2layeridx,
                 self.block_size_scale,
+                qos_policy=self.qos_policy,
+                qos_pool=self.qos_pool,
             )
             self.kv_recv_thread.start()
         start_wait_time = time.time()
@@ -3917,6 +4023,7 @@ class MooncakeConnectorWorker:
                         remote_block_size=meta.remote_block_size,
                         local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
                         remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,
+                        kv_priority=getattr(meta, "kv_priority", None),
                     )
 
         if self.kv_send_thread is not None and self.dcp_size == 1:

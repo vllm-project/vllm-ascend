@@ -25,6 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     require_aligned_batch_results,
     set_scheduler_device,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.qos import validate_qos_mode
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
@@ -182,6 +183,9 @@ def _inject_store_qos(extra_config: dict[str, Any] | None) -> None:
 
 
 class MooncakeBackend(Backend):
+    qos_policy = None
+    qos_pool = None
+
     def __init__(
         self,
         parallel_config: ParallelConfig,
@@ -189,12 +193,15 @@ class MooncakeBackend(Backend):
         contribute_memory: bool = True,
         extra_config: dict[str, Any] | None = None,
     ):
+        self.qos_policy = validate_qos_mode(extra_config or {})
+        self.qos_pool = None
         self.parallel_config = parallel_config
         self.config = MooncakeStoreConfig.load_from_env()
         if self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
-        _inject_store_qos(extra_config)
-        _validate_store_qos()
+        if self.qos_policy is None:
+            _inject_store_qos(extra_config)
+            _validate_store_qos()
         self.device_id = torch.npu.current_device()
 
         self.store: Any | None = None
@@ -204,6 +211,8 @@ class MooncakeBackend(Backend):
         # operates independently of the global transfer engine; setup goes through store
         # and buffers are registered via store.register_buffer() instead of global_te.
         self._use_store_independent_te = bool(os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG")) and not self._use_fabric_mem
+        if self.qos_policy is not None and (self._use_fabric_mem or self.config.enable_ssd_offload):
+            raise ValueError("KV QoS requires direct transfer without fabric memory or SSD offload")
         self._lazy_init = lazy_init and self._use_fabric_mem
         self._contribute_memory = contribute_memory
         self._store_initialized = False
@@ -226,6 +235,27 @@ class MooncakeBackend(Backend):
             self._store_initialized = True
 
     def _setup_store(self):
+        if self.qos_policy is not None:
+            self.set_device()
+            from mooncake.qos_lane import QosStorePool
+
+            self.qos_pool = QosStorePool(
+                qos_values=self.qos_policy.priority_to_qos.values(),
+                default_qos=self.qos_policy.select(self.qos_policy.default_priority),
+                resource_config=self.qos_policy.resource_config,
+                setup_kwargs={
+                    "local_hostname": get_ip(),
+                    "metadata_server": self.config.metadata_server,
+                    "global_segment_size": self.config.global_segment_size if self._contribute_memory else 0,
+                    "local_buffer_size": self.config.local_buffer_size if self._contribute_memory else 0,
+                    "protocol": self.config.protocol,
+                    "rdma_devices": self.config.device_name,
+                    "master_server_addr": self.config.master_server_address,
+                    "tenant_id": self.config.tenant_id,
+                },
+            )
+            self.local_seg = self.qos_pool.default_segment
+            return self.qos_pool.default_store
         try:
             from mooncake.store import MooncakeDistributedStore  # type: ignore
         except ImportError as e:
@@ -310,6 +340,9 @@ class MooncakeBackend(Backend):
         torch.npu.set_device(self.device_id)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
+        if self.qos_pool is not None:
+            self.qos_pool.register_buffers(ptrs, lengths)
+            return
         if self._use_store_independent_te:
             assert self.store is not None
             for ptr, length in zip(ptrs, lengths):
@@ -432,7 +465,34 @@ class MooncakeBackend(Backend):
             raise RuntimeError("Mooncake client does not support batch_get_session_end")
         return int(method(keys))
 
+    def _transfer_request(self, request_id, priority, operation, keys, addrs, sizes):
+        qos = self.qos_policy.select(priority)
+        config = None
+        if operation == "put":
+            config = self._build_replicate_config()
+        if self.qos_policy.log_enabled:
+            logger.info(
+                "KV_QOS request=%s priority=%d qos=%d op=%s keys=%d", request_id, priority, qos, operation, len(keys)
+            )
+        return self.qos_pool.transfer(qos, operation, keys, addrs, sizes, config)
+
+    def get_request(self, request_id, priority, keys, addrs, sizes):
+        if self.qos_policy is None:
+            return super().get_request(request_id, priority, keys, addrs, sizes)
+        return self._transfer_request(request_id, priority, "get", keys, addrs, sizes)
+
+    def put_request(self, request_id, priority, keys, addrs, sizes):
+        if self.qos_policy is None:
+            return super().put_request(request_id, priority, keys, addrs, sizes)
+        return self._transfer_request(request_id, priority, "put", keys, addrs, sizes)
+
+    def close(self):
+        if self.qos_pool is not None:
+            self.qos_pool.close()
+
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+        if self.qos_policy is not None:
+            raise ValueError("use put_request when KV QoS is enabled")
         self.ensure_initialized()
         assert self.store is not None
         try:
@@ -465,6 +525,8 @@ class MooncakeBackend(Backend):
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+        if self.qos_policy is not None:
+            raise ValueError("use get_request when KV QoS is enabled")
         if self._lazy_init and not self._store_initialized:
             logger.error(
                 "Failed to get %d keys out of %d. Store is not initialized; "

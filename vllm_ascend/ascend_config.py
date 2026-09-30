@@ -1781,6 +1781,9 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     # These are stripped so that only user-configurable keys reach pydantic,
     # where extra="forbid" can reject unknown options.
     _NON_USER_INPUT_KEYS = {
+        # Validated/applied by ai_qos.apply_config in the platform hook.
+        # Keep the original additional_config entry for serialization/workers.
+        "ai_qos",
         # control-flow flag (singleton/cache refresh), not a configuration field
         "refresh",
         # Upstream-injected by EngineArgs for the generic GDN/KDA prefill
