@@ -334,8 +334,20 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.cann_mega_moe_w2_scale_bias_list = [
                 t.reshape(-1).to(torch.float32) for t in layer.w2_scale_bias.data.unbind(dim=0)
             ]
-            for tensor_name in tensor_names:
-                delattr(layer, tensor_name)
+            # NOTE: the stacked weights are intentionally kept (packed to int32
+            # below) so the non-fused MoE paths (MC2 / ALLGATHER / ALLTOALL via
+            # grouped_matmul) can still run when the fused MegaMoe path is
+            # unavailable at runtime (e.g. per-rank token count exceeds the
+            # sym-buffer capacity).
+            layer.w13_weight.data = self._pack_to_int32(layer.w13_weight.data)
+            layer.w2_weight.data = self._pack_to_int32(layer.w2_weight.data)
+            # Per-expert tensorlist views (no extra memory) consumed by all
+            # GMM paths; scales follow the same per-expert layout so the
+            # aclnn len(weight) == len(scale) requirement holds.
+            layer.w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
+            layer.w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
+            layer.w13_weight_scale_list = list(layer.w13_weight_scale.data.unbind(dim=0))
+            layer.w2_weight_scale_list = list(layer.w2_weight_scale.data.unbind(dim=0))
         else:
             layer.w13_weight.data = self._pack_to_int32(layer.w13_weight.data)
             layer.w2_weight.data = self._pack_to_int32(layer.w2_weight.data)
@@ -436,10 +448,10 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale_bias=layer.cann_mega_moe_w2_scale_bias_list,
             )
         return MoEWeights(
-            w1=[layer.w13_weight],
-            w2=[layer.w2_weight],
-            w1_scale=[layer.w13_weight_scale],
-            w2_scale=[layer.w2_weight_scale],
+            w1=getattr(layer, "w13_weight_list", None) or [layer.w13_weight],
+            w2=getattr(layer, "w2_weight_list", None) or [layer.w2_weight],
+            w1_scale=getattr(layer, "w13_weight_scale_list", None) or [layer.w13_weight_scale],
+            w2_scale=getattr(layer, "w2_weight_scale_list", None) or [layer.w2_weight_scale],
             w1_scale_bias=[layer.w13_scale_bias.detach()] if hasattr(layer, "w13_scale_bias") else None,
             w2_scale_bias=[layer.w2_scale_bias.detach()] if hasattr(layer, "w2_scale_bias") else None,
         )

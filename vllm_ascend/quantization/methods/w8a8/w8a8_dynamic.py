@@ -368,10 +368,12 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale_bias=None,
             )
         return MoEWeights(
-            w1=[layer.w13_weight],
-            w2=[layer.w2_weight],
-            w1_scale=[layer.fused_w1_scale] if fused_scale_flag else [layer.w13_weight_scale_fp32],
-            w2_scale=[layer.fused_w2_scale] if fused_scale_flag else [layer.w2_weight_scale],
+            w1=getattr(layer, "w13_weight_list", None) or [layer.w13_weight],
+            w2=getattr(layer, "w2_weight_list", None) or [layer.w2_weight],
+            w1_scale=getattr(layer, "w13_weight_scale_fp32_list", None)
+            or ([layer.fused_w1_scale] if fused_scale_flag else [layer.w13_weight_scale_fp32]),
+            w2_scale=getattr(layer, "w2_weight_scale_list", None)
+            or ([layer.fused_w2_scale] if fused_scale_flag else [layer.w2_weight_scale]),
             w1_scale_bias=layer.fused_w1_scale_bias if fused_scale_flag else None,
             w2_scale_bias=layer.fused_w2_scale_bias if fused_scale_flag else None,
         )
