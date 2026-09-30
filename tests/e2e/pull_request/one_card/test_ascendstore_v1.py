@@ -102,9 +102,9 @@ def test_inprocess_store_lookup_load(monkeypatch: pytest.MonkeyPatch, tmp_path: 
             (warm_evidence,) = runner.model.collective_rpc(collect_worker_io_probe)
             assert warm_evidence["get_calls"] == 1, "The warm request must execute a real Backend GET"
             assert sorted(warm_evidence["loaded_keys"]) == sorted(cold_evidence["stored_keys"])
-            assert warm_evidence["loaded_ranges"] == tuple(
-                (start, start + granularity) for start in range(0, expected_loaded_tokens, granularity)
-            )
+            assert warm_evidence["loaded_ranges"] == [
+                [start, start + granularity] for start in range(0, expected_loaded_tokens, granularity)
+            ]
             assert warm_evidence["loaded_bytes"] == cold_evidence["stored_bytes"] > 0
             print(
                 f"AscendStore v1 verified: GET calls={warm_evidence['get_calls']}, "
