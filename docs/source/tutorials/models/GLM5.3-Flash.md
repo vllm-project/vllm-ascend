@@ -6,6 +6,8 @@
 
 This document shows the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, 1P1D Prefill-Decode (PD) disaggregated deployment, multi-node deployment, and accuracy and performance evaluation.
 
+This document is written based on the vLLM-Ascend v0.30.0RC. This model is supported in this release.
+
 ## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
@@ -15,6 +17,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 The A3 PD configuration in this guide uses DP2/TP8 on the Prefill node and
 DP16/TP1 on the Decode node. Prefill runs in eager mode with FlashComm1, while
 Decode uses `FULL_DECODE_ONLY` graph mode and keeps FlashComm1 disabled.
+
 GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
 all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
@@ -388,6 +391,9 @@ Only the key parameters specific to this model/scenario are described below. `ma
       --quantization ascend \
       --limit-mm-per-prompt '{"image": 1, "video": 0}' \
       --gpu-memory-utilization 0.92 \
+      --tool-call-parser glm47 \
+      --reasoning-parser glm45 \
+      --enable-auto-tool-choice \
       --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
       --additional_config '{"multistream_overlap_shared_expert":true,"enable_flashcomm1":true}' \
       --kv-transfer-config \
@@ -449,6 +455,9 @@ Only the key parameters specific to this model/scenario are described below. `ma
       --quantization ascend \
       --limit-mm-per-prompt '{"image": 1, "video": 0}' \
       --gpu-memory-utilization 0.92 \
+      --tool-call-parser glm47 \
+      --reasoning-parser glm45 \
+      --enable-auto-tool-choice \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
       --additional_config '{"multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_static_kernel": true}}' \
@@ -691,17 +700,18 @@ The expected result of this request is a JSON payload containing the model’s g
 
 ## 7 Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
-
 ### 7.1 Using AISBench
 
-1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
+For detailed instructions, refer to [Using AISBench for accuracy evaluation](../../developer_guide/evaluation/using_ais_bench.md).
 
-2. After execution, you can get the result.
+### 7.2 Evaluation
 
-### 7.2 Using Language Model Evaluation Harness
+TODO
 
-Not tested yet.
+| Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
+|---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
+| GPQA-Diamond | 8 Atlas 800 A3 (64GB × 16)      | 92.42    | 131072      | 32        | 65536       | 8       | temperature=1, top_p=0.95 |
+| MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000      | 128       | 131072       | 50       | temperature=1, top_p=0.95 |
 
 ## 8 Performance Evaluation
 
