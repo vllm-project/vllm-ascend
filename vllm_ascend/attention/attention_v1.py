@@ -1510,23 +1510,66 @@ class AscendAttentionBackendImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         attn_metadata: AscendMetadata,
-        _: torch.Tensor,
+        output: torch.Tensor,
     ) -> torch.Tensor:
-        # use default sparse_mode 0 in normal scenario, which means no mask works on it
-        # Pad actual_seq_len with 0 when num_tokens > actual_seq_len in TND layout
-        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
-        if query.shape[0] > actual_seq_qlen[-1]:
-            actual_seq_qlen = actual_seq_qlen + [0]
-        return torch_npu.npu_fusion_attention(
-            query=query,
-            key=key,
-            value=value,
+        # TND layout reads the batch as consecutive sequences and never attends
+        # across a sequence boundary, which is exactly the key-padding mask this
+        # path needs. ``sparse_mode=0`` with no ``atten_mask`` therefore means
+        # *unbounded* attention, and the encoder-only branch has no
+        # ``pre_tokens`` parameter to carry ``self.sliding_window`` the way the
+        # causal path (``forward_impl``) does. Without an explicit band mask
+        # every ``sliding_attention`` layer of an encoder-only (``--runner
+        # pooling``) model silently degenerates into full attention. Measured on
+        # a 28-layer Laya encoder against a fp32 reference of the same
+        # checkpoint: max |dlogit| 12.81 with full attention versus 0.11 with
+        # the band, i.e. the missing window was the entire divergence.
+        #
+        # The equivalent band is ``abs(i - j) >= sliding_window`` where
+        # ``sliding_window`` is an inclusive boundary (the window is
+        # ``2 * sliding_window - 1`` tokens wide, matching the bidirectional
+        # overlay vLLM's own flash-attn backend uses for encoder-only models).
+        # In TND layout the mask is indexed by the *global* query index while
+        # the operator still confines each query to its own sequence, so a
+        # single band reproduces the window for the whole batch.
+        actual_seq_qlen = list(attn_metadata.actual_seq_lengths_q)
+        num_tokens = actual_seq_qlen[-1]
+        # The mask may be no larger than the query token count, so drop the
+        # padding rows (they are never pooled and produce garbage anyway).
+        query_t = query[:num_tokens] if query.shape[0] > num_tokens else query
+        key_t = key[:num_tokens] if key.shape[0] > num_tokens else key
+        value_t = value[:num_tokens] if value.shape[0] > num_tokens else value
+        fia_kwargs = dict(
+            query=query_t,
+            key=key_t,
+            value=value_t,
             head_num=self.num_heads,
             input_layout="TND",
             scale=self.scale,
             actual_seq_qlen=actual_seq_qlen,
             actual_seq_kvlen=actual_seq_qlen,
-        )[0]
+        )
+        # A sequence that already fits inside one window cannot be masked, so
+        # keep the original maskless call for it; that covers the short-request
+        # common case at no extra cost. The boundary is inclusive, so every pair
+        # of a sequence is visible as soon as ``max_seq_len <= sliding_window``.
+        max_seq_len = 0
+        prev_len = 0
+        for cumulative_len in actual_seq_qlen:
+            max_seq_len = max(max_seq_len, cumulative_len - prev_len)
+            prev_len = cumulative_len
+        if self.sliding_window is not None and max_seq_len > self.sliding_window:
+            fia_kwargs["atten_mask"] = AttentionMaskBuilder(query.device).get_encoder_band_mask(
+                num_tokens, self.sliding_window, query.device
+            )
+            fia_kwargs["sparse_mode"] = 0
+        attn_output = torch_npu.npu_fusion_attention(**fia_kwargs)[0]
+        if attn_output.shape == output.shape:
+            return attn_output
+        # Padding rows were trimmed above: hand back the caller's buffer with
+        # the live rows filled in, since the caller slices it by the untrimmed
+        # token count.
+        output[: attn_output.shape[0]] = attn_output
+        return output
 
     def do_kv_cache_update(
         self,
