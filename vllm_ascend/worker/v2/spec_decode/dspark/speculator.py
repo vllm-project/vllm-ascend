@@ -344,9 +344,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
 
         sample_hidden = head_hidden[self.sample_indices[:num_sample]]
         if num_sample < capacity:
-            sample_hidden = torch.nn.functional.pad(
-                sample_hidden, (0, 0, 0, capacity - num_sample)
-            )
+            sample_hidden = torch.nn.functional.pad(sample_hidden, (0, 0, 0, capacity - num_sample))
 
         base_logits = self.model.compute_draft_logits(sample_hidden)
         base_logits = base_logits[:num_sample]
@@ -364,9 +362,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 confidence_markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
-            draft_sampled_i = self._sample_logits(
-                logits_i, idx_map[:, i], sample_pos[:, i], i
-            )
+            draft_sampled_i = self._sample_logits(logits_i, idx_map[:, i], sample_pos[:, i], i)
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
@@ -375,9 +371,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 sample_hidden[:num_sample],
                 torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
             )
-            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
-                num_reqs, n_spec
-            )
+            self.draft_token_confidence_probs[:num_reqs] = confidence.view(num_reqs, n_spec)
 
     def _sample_sequential_topk(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         if not lmhead_tp_configured():
@@ -395,9 +389,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
 
         sample_hidden = head_hidden[self.sample_indices[:num_sample]]
         if num_sample < capacity:
-            sample_hidden = torch.nn.functional.pad(
-                sample_hidden, (0, 0, 0, capacity - num_sample)
-            )
+            sample_hidden = torch.nn.functional.pad(sample_hidden, (0, 0, 0, capacity - num_sample))
         base_logits = self.model.compute_draft_logits(sample_hidden)
         base_logits = base_logits[:num_sample]
         base_logits = base_logits.view(num_reqs, n_spec, -1)
@@ -418,9 +410,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 base_values[:, i],
                 draft_indices[:, i],
             )
-            draft_sampled_i = self._sample_logits(
-                logits_i, idx_map[:, i], sample_pos[:, i], i
-            )
+            draft_sampled_i = self._sample_logits(logits_i, idx_map[:, i], sample_pos[:, i], i)
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
@@ -429,6 +419,4 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 sample_hidden[:num_sample],
                 torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
             )
-            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
-                num_reqs, n_spec
-            )
+            self.draft_token_confidence_probs[:num_reqs] = confidence.view(num_reqs, n_spec)
