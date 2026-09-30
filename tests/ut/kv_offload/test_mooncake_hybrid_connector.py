@@ -20,6 +20,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import
     MAX_REQUESTS_PER_PEER_HANDLER,
     KVCacheRecvingThread,
     MooncakeConnectorScheduler,
+    MooncakeConnectorWorker,
+    _get_tensor_transfer_span_bytes,
 )
 
 
@@ -324,3 +326,47 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         self.assertIsNotNone(params)
         self.assertEqual(params["remote_block_ids"], ([0], [100, 101]))
         self.assertEqual(params["num_prompt_blocks"], 2)
+
+
+class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
+    def test_transfer_span_includes_inter_block_padding(self):
+        backing = torch.empty(18, dtype=torch.uint8)
+        tensor = torch.as_strided(backing, size=(3, 4), stride=(6, 1))
+
+        self.assertEqual(tensor.numel() * tensor.element_size(), 12)
+        self.assertEqual(_get_tensor_transfer_span_bytes(tensor), 18)
+
+    def test_registration_expands_for_inter_block_padding(self):
+        layer_name = "model.layers.0.self_attn"
+        backing = torch.empty(18, dtype=torch.uint8)
+        tensor = torch.as_strided(backing, size=(3, 4), stride=(6, 1))
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = types.SimpleNamespace(
+            model_config=types.SimpleNamespace(
+                is_deepseek_mla=False,
+                hf_text_config=types.SimpleNamespace(),
+            )
+        )
+        worker.kv_cache_config = types.SimpleNamespace(
+            num_blocks=3,
+            kv_cache_groups=[types.SimpleNamespace(layer_names=[layer_name])],
+            kv_cache_tensors=[types.SimpleNamespace(size=12, shared_by=[layer_name])],
+        )
+        worker.use_hybrid = True
+        worker.use_mamba = False
+        worker.use_compress = True
+
+        class RegistrationCaptured(Exception):
+            pass
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.global_te.register_buffer",
+                side_effect=RegistrationCaptured,
+            ) as register_buffer,
+            self.assertRaises(RegistrationCaptured),
+        ):
+            worker.register_kv_caches({layer_name: (tensor,)})
+
+        register_buffer.assert_called_once_with([tensor.data_ptr()], [18])
