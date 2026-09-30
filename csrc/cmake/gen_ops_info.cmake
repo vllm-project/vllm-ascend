@@ -200,6 +200,10 @@ function(compile_from_config)
   file(MAKE_DIRECTORY ${CONFCMP_OUT_DIR}/bin)
   file(MAKE_DIRECTORY ${CONFCMP_OUT_DIR}/gen)
   snake_to_camel("${CONFCMP_OP_NAME}" OP_TYPE)
+  # The custom QLI uses a distinct GE type while retaining its source directory name.
+  if(CONFCMP_OP_NAME STREQUAL "quant_lightning_indexer_v2")
+    set(OP_TYPE VllmAscendQuantLightningIndexerV2)
+  endif()
   message(STATUS "start to compile op: ${CONFCMP_OP_NAME}, op_type: ${OP_TYPE}")
   # add Environment Variable Configurations of python & ccache
   set(_ASCENDC_ENV_VAR)

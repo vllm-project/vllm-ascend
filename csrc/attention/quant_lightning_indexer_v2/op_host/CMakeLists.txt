@@ -20,7 +20,7 @@ if (BUILD_OPEN_PROJECT)
 endif()
 
 add_ops_compile_options(
-    OP_NAME QuantLightningIndexerV2
+    OP_NAME VllmAscendQuantLightningIndexerV2
     OPTIONS --cce-auto-sync=off
             -Wno-deprecated-declarations
             -Werror

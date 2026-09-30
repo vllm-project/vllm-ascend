@@ -386,6 +386,9 @@ if (base_aclnn_srcs)
             get_filename_component(name_without_ext ${_src} NAME_WE)
 
             string(REGEX REPLACE "_def$" "" _op_name ${name_without_ext})
+            if(_op_name STREQUAL "quant_lightning_indexer_v2")
+                set(_op_name "vllm_ascend_quant_lightning_indexer_v2")
+            endif()
             list(APPEND generate_aclnn_srcs ${base_aclnn_binary_dir}/aclnn_${_op_name}.cpp)
             list(APPEND generate_aclnn_headers ${base_aclnn_binary_dir}/aclnn_${_op_name}.h)
             append_versioned_aclnn_outputs("${_src}" "aclnn" "${_op_name}" "${base_aclnn_binary_dir}"
