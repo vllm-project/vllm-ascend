@@ -57,10 +57,13 @@ class HardwareCapability(Enum):
     ATB_WARMUP = auto()
     # Register fake/meta implementations for the custom BGMV and SGMV LoRA ops.
     BGMV_SGMV_META_REGISTRATION = auto()
-    # Stride-aware scatter kernel for paged cache writes (A2/A3 ABI).
+    # SK scatter kernel for paged cache writes (A2/A3/A5 ABI).
     SCATTER_ND_CACHE_STORE = auto()
-    # CANN ScatterPaCache for contiguous paged caches (A5 ABI).
-    SCATTER_PA_CACHE_STORE = auto()
+    # Extend SK cache writes to non-overlapping row-strided destinations.
+    # A5 is excluded until arch35 handles their storage bounds correctly.
+    SCATTER_ND_STRIDED_CACHE_STORE = auto()
+    # Extend SK cache writes to FP8 E4M3FN/E5M2 (A5 ABI).
+    SCATTER_ND_FP8_CACHE_STORE = auto()
     # Allow the CANN MegaMoe fused-MC2 path when its model, EP, and config checks pass.
     CANN_MEGAMOE = auto()
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
@@ -81,6 +84,8 @@ class HardwareCapability(Enum):
     DYNAMIC_MX_QUANT_FUSION = auto()
     # Select DynamicMxQuantV3 ``scale_alg=1`` for model paths that require it.
     DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
+    # Allow GDN prefill to use the external FLA NPU fused operator.
+    FLA_GDN_PREFILL = auto()
     # Enable the FP8/C8 attention KV-cache ABI and matching attention preprocess paths.
     # This is not a general statement that every FP8 operation is supported.
     FP8_ATTENTION = auto()
@@ -94,6 +99,9 @@ class HardwareCapability(Enum):
     GRAPH_MULS_ADD_FUSION = auto()
     # Register the FX graph rewrites for supported RMSNorm-plus-quant patterns.
     GRAPH_NORM_QUANT_FUSION = auto()
+    # Register the FX graph rewrite that fuses q/k RMSNorm, RoPE and the weight-less
+    # v RMSNorm into the SIMD ``split_qkv_rmsnorm_rope_vnorm`` Triton kernel.
+    GRAPH_QKV_NORM_ROPE_FUSION = auto()
     # Let inplace_partial_rotary_mul negate sine internally; profiles without
     # this contract negate the sine input explicitly and pass negate_sin=False.
     INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN = auto()
@@ -230,9 +238,11 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.ATB_EXTENSIONS,
         HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+        HardwareCapability.FLA_GDN_PREFILL,
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
         HardwareCapability.GRAPH_MULS_ADD_FUSION,
         HardwareCapability.GRAPH_NORM_QUANT_FUSION,
+        HardwareCapability.GRAPH_QKV_NORM_ROPE_FUSION,
         HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
@@ -242,6 +252,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SCATTER_ND_CACHE_STORE,
+        HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE,
         HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER,
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
@@ -319,7 +330,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=frozenset(
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
-                    HardwareCapability.SCATTER_PA_CACHE_STORE,
+                    HardwareCapability.SCATTER_ND_CACHE_STORE,
+                    HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
                     HardwareCapability.BGMV_SGMV_META_REGISTRATION,
                     HardwareCapability.CANN_MEGAMOE,
                     HardwareCapability.CANN_MEGAMOE_MXFP,
@@ -329,6 +341,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DSV4_COMPRESSED_CACHE,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
+                    HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FP8_ATTENTION,
                     HardwareCapability.GRAPH_MULS_ADD_FUSION,
                     HardwareCapability.GRAPH_NORM_QUANT_FUSION,

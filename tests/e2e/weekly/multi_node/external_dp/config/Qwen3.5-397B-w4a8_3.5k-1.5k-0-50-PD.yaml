@@ -2,6 +2,7 @@ test_name: "Qwen3.5-397B-w4a8_3.5k-1.5k-0-50"
 model: "Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp"
 num_nodes: 2
 npu_per_node: 16
+dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"
@@ -80,7 +81,7 @@ templates:
       - --async-scheduling
       - --enforce-eager
       - --speculative-config
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 1, "enforce_eager": true}'
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - --additional-config
       - '{"enable_cpu_binding": true}'
       - --profiler-config

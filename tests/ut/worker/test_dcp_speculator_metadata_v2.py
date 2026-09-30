@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import AttentionConfig
+from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
 
 from vllm_ascend.attention.context_parallel import sfa_cp
@@ -155,10 +157,10 @@ def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width,
     if full_rebuild:
         result = spec.build_draft_attn_metadatas(padded, spec.input_batch.seq_lens_cpu_upper_bound)[0]
     else:
-        result = spec._build_draft_attn_metadata(
+        result = spec._build_attn_metadata(
             num_reqs=2,
-            num_reqs_padded=padded,
-            num_tokens_padded=padded * width,
+            batch_desc=BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=padded * width, num_reqs=padded),
+            query_start_loc_np=np.arange(padded + 1, dtype=np.int32) * width,
             seq_lens_cpu_upper_bound=spec.input_batch.seq_lens_cpu_upper_bound,
             step=width,
             causal=spec._group_causal,
@@ -188,10 +190,10 @@ def test_mtp_common_dcp_preparation(monkeypatch, architecture, padded, step):
     spec, original_target, device_lengths = _speculator(monkeypatch, "mtp", architecture, 1, padded, step)
     supplied_device_local = _local(device_lengths.tolist())
     with attn_utils.build_attn_metadata_wrapper():
-        result = spec._build_draft_attn_metadata(
+        result = spec._build_uniform_attn_metadata(
+            batch_desc=BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=padded, num_reqs=padded),
             num_reqs=2,
-            num_reqs_padded=padded,
-            num_tokens_padded=padded,
+            num_query_per_req=1,
             seq_lens_cpu_upper_bound=spec.input_batch.seq_lens_cpu_upper_bound,
             step=step,
             dcp_local_seq_lens=supplied_device_local,
@@ -208,7 +210,7 @@ def test_mtp_common_dcp_preparation(monkeypatch, architecture, padded, step):
 
 @pytest.mark.parametrize("kind,full_rebuild", [("mtp", False), ("dspark", False), ("dspark", True)])
 @pytest.mark.parametrize("architecture", ["MLA", "SFA"])
-def test_non_dcp_preserves_existing_length_fallback(monkeypatch, kind, architecture, full_rebuild):
+def test_non_dcp_uses_per_request_length_bounds(monkeypatch, kind, architecture, full_rebuild):
     width = 3 if kind == "dspark" else 1
     spec, original_target, device_lengths = _speculator(monkeypatch, kind, architecture, width, 2, width, use_dcp=False)
 
@@ -221,13 +223,22 @@ def test_non_dcp_preserves_existing_length_fallback(monkeypatch, kind, architect
         result = spec.build_draft_attn_metadatas(2, spec.input_batch.seq_lens_cpu_upper_bound)[0]
     else:
         with attn_utils.build_attn_metadata_wrapper() if kind == "mtp" else nullcontext():
-            result = spec._build_draft_attn_metadata(
-                num_reqs=2,
-                num_reqs_padded=2,
-                num_tokens_padded=2 * width,
-                seq_lens_cpu_upper_bound=spec.input_batch.seq_lens_cpu_upper_bound,
-                step=width,
-            )
+            if kind == "mtp":
+                result = spec._build_uniform_attn_metadata(
+                    batch_desc=BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=2, num_reqs=2),
+                    num_reqs=2,
+                    num_query_per_req=1,
+                    seq_lens_cpu_upper_bound=spec.input_batch.seq_lens_cpu_upper_bound,
+                    step=width,
+                )
+            else:
+                result = spec._build_attn_metadata(
+                    num_reqs=2,
+                    batch_desc=BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=2 * width, num_reqs=2),
+                    query_start_loc_np=np.arange(3, dtype=np.int32) * width,
+                    seq_lens_cpu_upper_bound=spec.input_batch.seq_lens_cpu_upper_bound,
+                    step=width,
+                )
     common = result["draft.layer"].common
     assert _dcp_local_cpu(common) is None
     assert common.dcp_local_seq_lens is None
@@ -236,7 +247,9 @@ def test_non_dcp_preserves_existing_length_fallback(monkeypatch, kind, architect
         # seq_lens_cpu property was removed in vLLM main.
         torch.testing.assert_close(common.seq_lens, device_lengths[:2])
     else:
-        assert common.seq_lens_cpu.tolist() == [128, 128]
+        # The first request uses its own bound after advancing the draft step;
+        # only the second request reaches the model-length cap.
+        assert common.seq_lens_cpu.tolist() == [31 + width, 128]
     assert torch.equal(common.seq_lens, device_lengths[:2])
     assert torch.equal(spec.target_input_buffers.seq_lens_cpu, original_target)
 

@@ -41,6 +41,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
+from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend._310p.worker.v2.aclgraph import ModelAclGraphManager310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.input_batch import Ascend310PInputBatch
@@ -48,6 +49,7 @@ from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.spec_utils import (
     combine_sampled_and_draft_tokens_cpu,
     expand_idx_mapping_cpu,
+    set_prefill_host_meta,
 )
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.core.kv_cache_interface import get_storage_block_size
@@ -872,6 +874,13 @@ class NPUModelRunner310V2(NPUModelRunner):
             for layer_name in group.layer_names
         }
         kv_caches: dict[str, Any] = {}
+        layout_resolver = getattr(self.cache_config, "get_resolved_kv_cache_layout", None)
+        share_slots = (
+            get_310p_shared_cache_slots(kv_cache_config.kv_cache_groups, layout_resolver())
+            if callable(layout_resolver)
+            else {}
+        )
+        slot_caches: dict[tuple[Any, ...], Any] = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             layer_names = [name for name in get_kv_cache_tensor_layers(kv_cache_tensor) if name not in shared_layers]
             if not layer_names:
@@ -920,9 +929,8 @@ class NPUModelRunner310V2(NPUModelRunner):
                         raise NotImplementedError("310P MRV2 does not support asymmetric K/V head sizes.")
                     # Symmetric NZ only: K/V share the 4D view ``kv_cache_shape[1:]``.
                     kv_view_shape = kv_cache_shape[1:]
-                    # Standardized descriptors list distinct layer
-                    # regions. Allocate one private NZ K/V pair per layer;
-                    # only explicit shared_layers below may alias.
+                    # Attention layers in the single supported attention group
+                    # need separate NZ K/V storage for each layer.
                     for name in cache_layer_names:
                         k_cache = torch_npu.empty_with_format(
                             size=kv_view_shape,
@@ -978,7 +986,13 @@ class NPUModelRunner310V2(NPUModelRunner):
                         return state_tensors
 
                     for name in cache_layer_names:
+                        slot_key = (share_slots[name], cache_key) if name in share_slots else None
+                        if slot_key is not None and slot_key in slot_caches:
+                            kv_caches[name] = slot_caches[slot_key]
+                            continue
                         kv_caches[name] = allocate_mamba_cache()
+                        if slot_key is not None:
+                            slot_caches[slot_key] = kv_caches[name]
                 else:
                     raise NotImplementedError(f"Unsupported 310P KV cache spec: {type(kv_cache_spec).__name__}.")
 
@@ -1264,6 +1278,10 @@ class NPUModelRunner310V2(NPUModelRunner):
         if self._sampled_tokens_cpu is not None:
             assert self.rejection_sampler is not None
             self.rejection_sampler.synchronize_cpu()
+        # Host rejection counts are ready after synchronize_cpu; reuse them in
+        # propose() instead of another device→host copy.
+        if self.speculator is not None and self._num_rejected_cpu is not None:
+            self.speculator._last_num_rejected_cpu = self._num_rejected_cpu
         sampled_tokens_cpu = self._sampled_tokens_cpu
         num_sampled_cpu = _post_update_cpu(
             self._postprocess_idx_mapping_np,
@@ -1312,6 +1330,31 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_sampled_cpu,
             self.req_states.num_computed_tokens_cpu,
         )
+        # Publish host mirrors for draft-prefill prepare (avoid 4× D2H there).
+        if self.speculator is not None and self._num_rejected_cpu is not None:
+            num_reqs = int(self._num_rejected_cpu.shape[0])
+            next_cpu = getattr(self, "next_prefill_tokens_cpu", None)
+            if next_cpu is not None:
+                next_prefill_np = np.asarray(next_cpu)
+            else:
+                next_prefill_np = np.zeros(
+                    int(self.req_states.next_prefill_tokens.shape[0]),
+                    dtype=np.int64,
+                )
+            max_reqs = int(self.req_states.last_sampled_tokens.shape[0])
+            last_sampled_np = np.zeros((max_reqs, 1), dtype=np.int64)
+            if valid_batch_np.size and sampled_tokens_cpu is not None:
+                for batch_idx in valid_batch_np:
+                    req_idx = int(self._postprocess_idx_mapping_np[batch_idx])
+                    n = int(self._num_sampled_cpu[batch_idx])
+                    last_sampled_np[req_idx, 0] = int(sampled_tokens_cpu[batch_idx, n - 1])
+            set_prefill_host_meta(
+                num_reqs=num_reqs,
+                num_sampled_np=self._num_sampled_cpu.numpy(),
+                num_rejected_np=self._num_rejected_cpu.numpy(),
+                last_sampled_np=last_sampled_np,
+                next_prefill_np=next_prefill_np,
+            )
 
     def _update_seq_lens_cpu(
         self,

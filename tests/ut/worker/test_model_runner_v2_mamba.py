@@ -1,4 +1,5 @@
 import ast
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -6,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+import vllm.v1.worker.gpu.cp_utils as _cp_utils
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -13,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
@@ -20,7 +23,9 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
+    _align_hybrid_attention_page_sizes,
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
     get_kv_cache_spec,
@@ -32,11 +37,17 @@ from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
 
+if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(_cp_utils, "maybe_prepare_dcp_local_seq_lens"):
+    _cp_utils.prepare_dcp_local_seq_lens = (
+        lambda dcp_local_seq_lens, seq_lens, num_reqs, dcp_size, dcp_rank, cp_interleave: None
+    )
+
 
 def _mock_vllm_config():
     # Config for get_kv_cache_spec: attn_utils reads attention_config.indexer_kv_dtype.
     config = MagicMock()
     config.attention_config.indexer_kv_dtype = "int8"
+    config.cache_config.cache_dtype = "auto"
     return config
 
 
@@ -655,9 +666,11 @@ def test_mamba_spec_follows_aligned_attention_spec(
     assert specs["full_attn"].page_size_padded == 20
 
 
+@pytest.mark.parametrize("include_mamba", [False, True])
 @patch("vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config")
-def test_get_kv_cache_spec_aligns_nondivisible_attention_and_mamba_pages(
+def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
     mock_get_layers,
+    include_mamba,
 ):
     small_attention_spec = FullAttentionSpec(
         block_size=4,
@@ -699,12 +712,124 @@ def test_get_kv_cache_spec_aligns_nondivisible_attention_and_mamba_pages(
         "large_attn": FakeAttention(large_attention_spec),
     }
 
-    specs = get_kv_cache_spec(_mock_vllm_config())
+    if include_mamba:
+        with pytest.raises(ValueError, match="Cannot align hybrid attention K/V pages for small_attn"):
+            get_kv_cache_spec(_mock_vllm_config())
+    else:
+        del mock_get_layers.return_value["linear_attn"]
+        # Non-hybrid allocation does not use the shared Attention/Mamba layout.
+        specs = get_kv_cache_spec(_mock_vllm_config())
+        assert specs == {"small_attn": small_attention_spec, "large_attn": large_attention_spec}
 
-    assert {spec.page_size_bytes for spec in specs.values()} == {80}
-    assert specs["small_attn"].page_size_padded == 80
-    assert specs["large_attn"].page_size_bytes == 80
-    assert specs["linear_attn"].page_size_padded == 80
+
+@pytest.mark.parametrize("full_block_size", [128, 512])
+@pytest.mark.parametrize("draft_num_kv_heads", [1, 2])
+@pytest.mark.parametrize("padded_sliding", [False, True])
+def test_hybrid_dflash_writes_preserve_other_request_blocks(
+    monkeypatch, full_block_size, draft_num_kv_heads, padded_sliding
+):
+    """Draft writes must not alias another block ID in target attention or GDN."""
+    full = FullAttentionSpec(block_size=full_block_size, num_kv_heads=1, head_size=2, dtype=torch.bfloat16)
+    padded_page_size = full.real_page_size_bytes + 64
+    sliding = SlidingWindowSpec(
+        block_size=128,
+        num_kv_heads=draft_num_kv_heads,
+        head_size=1,
+        dtype=torch.bfloat16,
+        sliding_window=4096,
+        extra_retained_tokens=15,
+        page_size_padded=padded_page_size if padded_sliding else None,
+    )
+    mamba = MambaSpec(
+        block_size=full_block_size,
+        shapes=((32,), (full.real_page_size_bytes // 8,)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=padded_page_size,
+    )
+    draft_full = FullAttentionSpec(
+        block_size=full_block_size, num_kv_heads=draft_num_kv_heads, head_size=1, dtype=torch.bfloat16, non_causal=True
+    )
+    original_specs = {"target.full": full, "draft.sliding": sliding, "draft.full": draft_full, "target.gdn": mamba}
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace()),
+        kv_transfer_config=None,
+        additional_config={},
+    )
+    layers = {
+        name: SimpleNamespace(get_kv_cache_spec=lambda _config, spec=spec: spec)
+        for name, spec in original_specs.items()
+    }
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _config: False)
+    specs = get_kv_cache_spec(config)
+    num_blocks = 8
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(
+                num_blocks * spec.page_size_bytes,
+                [name],
+                spec.page_size_bytes,
+                layer_stride=num_blocks * spec.page_size_bytes,
+            )
+            for name, spec in specs.items()
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name, spec in specs.items()],
+    )
+    backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d, _dtype: (2, n, b, h, d))
+    groups = [
+        SimpleNamespace(kv_cache_group_id=i, kv_cache_spec=spec, layer_names=[name], backend=backend)
+        for i, (name, spec) in enumerate(specs.items())
+    ]
+    raw_caches = _allocate_kv_cache(kv_cache_config, {}, torch.device("cpu"))
+    caches = _reshape_kv_cache_v2(groups, raw_caches, "auto", [128] * len(groups), {}, kv_cache_config)
+    # Group virtual kernel blocks back into scheduler blocks. The groups alias
+    # one backing by design, but only the SAME scheduler block ID may overlap.
+    target_caches = [tensor.view(num_blocks, -1) for name in ("target.full", "target.gdn") for tensor in caches[name]]
+    for name in ("draft.sliding", "draft.full"):
+        for cache in caches[name]:
+            assert cache.is_contiguous()
+            assert cache.shape[1] == 128
+            draft_cache = cache.view(num_blocks, -1)
+            for block_id in range(num_blocks):
+                raw_caches["target.full"].zero_()
+                before = [tensor.clone() for tensor in target_caches]
+                draft_cache[block_id].fill_(99)
+                other_blocks = torch.arange(num_blocks) != block_id
+                for target_cache, expected in zip(target_caches, before):
+                    torch.testing.assert_close(target_cache[other_blocks], expected[other_blocks])
+    assert specs["draft.sliding"].sliding_window == sliding.sliding_window
+    assert specs["draft.sliding"].extra_retained_tokens == sliding.extra_retained_tokens
+    assert specs["draft.sliding"].block_size == full_block_size * 2 // draft_num_kv_heads
+    assert specs["draft.full"].block_size == specs["draft.sliding"].block_size
+    assert specs["draft.full"].non_causal is True
+    assert specs["target.gdn"] == mamba
+    assert sliding.block_size == 128
+
+
+def test_hybrid_attention_alignment_rejects_different_k_v_proportions():
+    full = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=2, dtype=torch.float16)
+    # Equal total page sizes still do not make the K and V segments compatible.
+    sliding = SlidingWindowSpec(
+        block_size=128, num_kv_heads=1, head_size=1, head_size_v=3, dtype=torch.float16, sliding_window=4096
+    )
+    assert full.real_page_size_bytes == sliding.real_page_size_bytes
+    with pytest.raises(ValueError, match="matching K/V size ratios"):
+        _align_hybrid_attention_page_sizes({"full": full, "sliding": sliding})
+
+
+def test_hybrid_attention_alignment_preserves_mla_specs():
+    mla = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.float16)
+    specs = {"mla": mla, "padded_mla": replace(mla, page_size_padded=4096)}
+    original = specs.copy()
+    _align_hybrid_attention_page_sizes(specs)
+    assert specs == original
 
 
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.AscendMambaHybridModelState")

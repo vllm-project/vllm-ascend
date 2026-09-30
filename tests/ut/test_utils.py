@@ -13,6 +13,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import builtins
 import json
 import math
 import os
@@ -28,6 +29,41 @@ from vllm_ascend import utils
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import REGISTERED_ASCEND_OPS
+
+
+@pytest.mark.parametrize("device_type", list(AscendDeviceType))
+def test_register_customop_selects_gdn_before_import(device_type):
+    from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
+
+    if device_type == AscendDeviceType._310P:
+        expected_gdn = AscendGatedDeltaNetAttention310
+    else:
+        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+
+        expected_gdn = AscendGatedDeltaNetAttention
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if device_type == AscendDeviceType._310P and (
+            name == "vllm_ascend.ops.gdn" or name == "fla_npu" or name.startswith("fla_npu.")
+        ):
+            raise ModuleNotFoundError(f"Unexpected 310P dependency: {name}", name=name)
+        return original_import(name, *args, **kwargs)
+
+    with (
+        mock.patch.object(utils, "_ASCEND_CUSTOMOP_IS_REIGISTERED", False),
+        mock.patch.object(utils, "REGISTERED_ASCEND_OPS", {}),
+        mock.patch.object(utils, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
+        mock.patch("vllm.model_executor.custom_op.CustomOp.register_oot") as register,
+        mock.patch("builtins.__import__", side_effect=guarded_import),
+    ):
+        utils.register_ascend_customop()
+        assert utils.REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] is expected_gdn
+        register.assert_any_call(_decorated_op_cls=expected_gdn, name="GatedDeltaNetAttention")
+        assert register.call_count == len(utils.REGISTERED_ASCEND_OPS)
+        utils.register_ascend_customop()
+        assert register.call_count == len(utils.REGISTERED_ASCEND_OPS)
 
 
 class TestUtils(TestBase):

@@ -2,6 +2,7 @@ test_name: "Qwen3.5-122B-A10B-w4a8-984k-1k-0-PD"
 model: "Eco-Tech/Qwen3.5-122B-A10B-w4a8"
 num_nodes: 2
 npu_per_node: 16
+dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"
@@ -41,6 +42,7 @@ env_common: &env_common
   VLLM_USE_V1: "1"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   VLLM_USE_MODELSCOPE: "true"
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
 env_prefill: &env_prefill
   <<: *env_common
   ASCEND_BUFFER_POOL: "4:8"

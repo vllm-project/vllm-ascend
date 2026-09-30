@@ -21,10 +21,10 @@ estimated_times:
   tests/e2e/pull_request/one_card/_310p/test_spec_decode_mtp_310p.py: 510
   tests/e2e/pull_request/one_card/_310p/test_sampling_temp_310p.py: 190
   tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py: 330
-  tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_batch_invariant.py: 550
   tests/e2e/pull_request/one_card/aclgraph/test_device_metadata.py: 30
   tests/e2e/pull_request/one_card/compile/test_graphex_norm_quant_fusion.py: 150
   tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py: 180
+  tests/e2e/pull_request/one_card/compile/test_graphex_qkvnorm_rope_fusion.py: 240
   tests/e2e/pull_request/one_card/compile/test_norm_quant_fusion.py: 170
   tests/e2e/pull_request/one_card/lora/test_ilama_lora.py: 190
   tests/e2e/pull_request/one_card/lora/test_llama32_lora.py: 280
@@ -57,16 +57,16 @@ estimated_times:
   tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py: 250
   tests/e2e/pull_request/one_card/spec_decode/test_suffix.py: 220
   tests/e2e/pull_request/one_card/rlhf/consistency/test_attention_fa3.py: 30
-  tests/e2e/pull_request/one_card/test_camem.py: 140
   tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py: 200
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 250
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 530
+  tests/e2e/pull_request/one_card/test_gdn_stable_argsort.py: 60
   tests/e2e/pull_request/one_card/test_guided_decoding.py: 690
   tests/e2e/pull_request/one_card/test_minicpm.py: 330
   tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py: 440
   tests/e2e/pull_request/one_card/test_multi_instance.py: 160
   tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 360
-  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_npu_ipc_weight_transfer.py: 1800
+  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_npu_ipc_weight_transfer.py: 1050
   tests/e2e/pull_request/one_card/test_qwen3_0_6b.py: 260
   tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py: 460
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 440
@@ -91,7 +91,8 @@ estimated_times:
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py: 710
   tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 460
-  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 1870
+  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 850
+  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode_heavy.py: 1020
   tests/e2e/pull_request/two_card/test_data_parallel.py: 590
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 270
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 170
@@ -108,7 +109,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py: 280
   tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 480
   tests/e2e/pull_request/two_card/test_shared_expert_dp_graph.py: 540
-  tests/e2e/pull_request/two_card/rlhf/state_transitions/test_hccl_weight_transfer.py: 1800
+  tests/e2e/pull_request/two_card/rlhf/state_transitions/test_hccl_weight_transfer.py: 670
   tests/e2e/pull_request/two_card/test_xlite.py: 840
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 500
   tests/e2e/pull_request/four_card/_310p/test_model_runner_v2_310p.py: 1220
@@ -118,7 +119,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py: 1060
   tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py: 1230
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
-  tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 2190
+  tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 1520
   tests/e2e/pull_request/four_card/model_runner_v2/test_qwen35_pp_mtp.py: 300
   tests/e2e/pull_request/four_card/model_runner_v2/test_spec_pp_accuracy.py: 900
   tests/e2e/pull_request/four_card/model_runner_v2/test_spec_decode_data_parallel.py: 540
@@ -141,6 +142,8 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_gemma4.py: 290
   tests/e2e/pull_request/four_card/test_minimax_m3.py: 240
   tests/e2e/pull_request/four_card/test_kimi_k3.py: 600
+  # Conservative per-job scheduling budget for the GLM-5.3-Flash functional smoke.
+  tests/e2e/pull_request/four_card/test_glm5_3_flash.py: 420
   tests/e2e/pull_request/one_card/test_attention_v1_precision.py: 480
   tests/e2e/pull_request/one_card/test_mla_precision.py: 210
   tests/e2e/pull_request/one_card/test_sfa_v1_precision.py: 90

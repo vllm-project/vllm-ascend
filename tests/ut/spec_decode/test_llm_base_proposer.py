@@ -219,7 +219,7 @@ def test_load_model_reads_validated_draft_window_size():
             "vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config",
             side_effect=[{}, {"draft": draft_layer}, {"draft": draft_layer}],
         ),
-        patch("vllm_ascend.ascend_config.get_ascend_config") as mock_get_ascend_config,
+        patch("vllm_ascend.spec_decode.llm_base_proposer.get_ascend_config") as mock_get_ascend_config,
         patch("vllm_ascend.spec_decode.llm_base_proposer.SlidingWindowAdapter") as mock_adapter,
         patch("vllm_ascend.spec_decode.llm_base_proposer.supports_multimodal", return_value=False),
     ):
@@ -275,7 +275,6 @@ def test_load_model_aligns_dspark_before_precomputing_hidden_states(method, has_
         ),
         patch("vllm_ascend.ascend_config.get_ascend_config", return_value=SimpleNamespace(draft_window_size=None)),
         patch(f"{module}.supports_multimodal", return_value=False),
-        patch(f"{module}.set_current_vllm_config", return_value=nullcontext()) as current_config,
     ):
         proposer.load_model(MagicMock())
 
@@ -283,9 +282,6 @@ def test_load_model_aligns_dspark_before_precomputing_hidden_states(method, has_
     expected = ["embeddings", "indices", "lm_head"]
     if should_process:
         expected.append("post_process")
-        current_config.assert_called_once_with(proposer.vllm_config)
-    else:
-        current_config.assert_not_called()
     assert events == [*expected, "combine"]
     assert torch.equal(proposer.parallel_drafting_hidden_state_tensor, torch.full((2,), 2.0 if should_process else 1.0))
 

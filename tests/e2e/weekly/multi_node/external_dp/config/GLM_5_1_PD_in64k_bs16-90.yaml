@@ -4,6 +4,7 @@ test_name: "GLM_5_1_PD-in64k_in128k_bs16_bs8"
 model: "Eco-Tech/GLM-5.1-w8a8"
 num_nodes: 4
 npu_per_node: 16
+dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"

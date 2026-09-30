@@ -18,7 +18,12 @@ from vllm_ascend.worker.v2.spec_decode.dspark import speculator as shared
 @pytest.mark.parametrize("fail", [False, True])
 def test_post_process_receives_target_config_after_loading(monkeypatch, fail):
     events: list[tuple[str, object]] = []
-    config = SimpleNamespace(quant_config=object())
+    additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": True}}}
+    config = SimpleNamespace(
+        quant_config=object(),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=2),
+        additional_config=additional_config,
+    )
     spec = shared.AscendDSparkSpeculator.__new__(shared.AscendDSparkSpeculator)
     spec.vllm_config = config
     target = object()
@@ -29,15 +34,19 @@ def test_post_process_receives_target_config_after_loading(monkeypatch, fail):
 
     def load(self, received, names):
         assert received is target
+        assert self.vllm_config is config
+        assert self.vllm_config.additional_config is not additional_config
+        assert self.vllm_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False
         events.append(("load", config))
         if fail:
             raise ValueError("load failed")
         return draft
 
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
-    monkeypatch.setattr(shared, "set_current_vllm_config", lambda _: nullcontext())
     with pytest.raises(ValueError, match="load failed") if fail else nullcontext():
         assert spec.load_draft_model(target, set()) is draft
+    assert config.additional_config is additional_config
+    assert additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
     expected: list[tuple[str, object]] = [("load", config)]
     if not fail:
         expected.extend([("post_process", config), ("capture", target)])
