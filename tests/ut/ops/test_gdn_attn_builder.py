@@ -225,6 +225,49 @@ def _build_attn_metadata(
     return builder, common_attn_metadata, attn_metadata
 
 
+@pytest.mark.parametrize("draft_lengths", [None, [-1, 3, -1]])
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
+def test_trimmed_drafts_preserve_speculative_state_history(draft_lengths, graph_mode):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        num_speculative_blocks=3,
+        cudagraph_mode=graph_mode,
+    )
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[64, 64, 64], query_lens=[1, 4, 0]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    if draft_lengths is None:
+        common.query_start_loc_cpu = torch.tensor([0, 1, 2, 2], dtype=torch.int32)
+        common.query_start_loc = common.query_start_loc_cpu
+        common.num_actual_tokens = 2
+        common.max_query_len = 1
+    common.is_prefilling = torch.tensor([False, False, False])
+    accepted = torch.tensor([4, 2, 1], dtype=torch.int32)
+    metadata = builder.build(
+        0,
+        common,
+        num_accepted_tokens=accepted,
+        num_decode_draft_tokens_cpu=(None if draft_lengths is None else torch.tensor(draft_lengths, dtype=torch.int32)),
+    )
+    assert metadata.num_spec_decodes == 2
+    assert metadata.num_decodes == 0
+    assert metadata.num_prefills == 0
+    assert metadata.spec_decode_metadata.spec_causal_conv1d.num_accepted_tokens[:2].tolist() == [4, 2]
+    torch.testing.assert_close(metadata.spec_state_indices_tensor[:2], common.block_table_tensor[:2, :4])
+    padding = [0] if graph_mode == CUDAGraphMode.FULL_DECODE_ONLY else []
+    assert (
+        metadata.spec_decode_metadata.actual_seq_lengths.tolist()
+        == ([0, 1, 1] if draft_lengths is None else [0, 1, 4]) + padding
+    )
+    if padding:
+        assert metadata.spec_state_indices_tensor[2].tolist() == [NULL_BLOCK_ID] * 4
+        assert metadata.num_accepted_tokens[2].item() == 1
+
+
 def _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens: torch.Tensor) -> None:
     hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
     if hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):

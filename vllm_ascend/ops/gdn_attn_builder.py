@@ -553,17 +553,23 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         spec_sequence_indices: torch.Tensor | None = None
         non_spec_sequence_indices: torch.Tensor | None = None
         non_spec_conv1d_cache_indices: torch.Tensor | None = None
-        if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
+        if not self.use_spec_decode or (num_decode_draft_tokens_cpu is None and num_accepted_tokens is None):
             spec_sequence_masks = None
             num_spec_decodes = 0
         else:
-            num_reqs = num_decode_draft_tokens_cpu.numel()
+            num_reqs = m.num_reqs if num_decode_draft_tokens_cpu is None else num_decode_draft_tokens_cpu.numel()
             spec_sequence_masks_cpu = self.spec_sequence_masks_cpu[:num_reqs]
-            torch.ge(
-                num_decode_draft_tokens_cpu,
-                0,
-                out=spec_sequence_masks_cpu,
-            )
+            if num_decode_draft_tokens_cpu is None:
+                spec_sequence_masks_cpu.fill_(False)
+            else:
+                torch.ge(num_decode_draft_tokens_cpu, 0, out=spec_sequence_masks_cpu)
+            # Grammar can remove every draft while the previous step still
+            # has accepted history in a nonzero slot. Keep single-token decode
+            # rows on the spec kernels so both conv and recurrent state use it.
+            if m.is_prefilling is not None and num_accepted_tokens is not None:
+                query_lens_cpu = torch.diff(query_start_loc_cpu)[:num_reqs]
+                has_history = m.seq_lens_cpu_upper_bound[:num_reqs] > query_lens_cpu
+                spec_sequence_masks_cpu |= ~m.is_prefilling[:num_reqs] & (query_lens_cpu == 1) & has_history
             spec_sequence_masks_cpu, num_accepted_tokens = self._fold_spec_sized_prefill_chunks_into_spec(
                 m,
                 spec_sequence_masks_cpu,
