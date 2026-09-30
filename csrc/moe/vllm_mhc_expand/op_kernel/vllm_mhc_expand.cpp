@@ -100,15 +100,25 @@ private:
     }
 
     __aicore__ inline void ForwardRows() {
-        LocalTensor<T> in(TPosition::VECIN, 0, p_.tileLength * 2);
-        // Use every launched core for small batches; pair rows only when there
-        // are enough tokens to keep the cores busy.
-        const uint32_t rowsPerGroup = p_.tokens <= GetBlockNum() ? 1 : 2;
-        const uint64_t groups = (p_.tokens + rowsPerGroup - 1) / rowsPerGroup;
-        for (uint64_t group = GetBlockIdx(); group < groups; group += GetBlockNum()) {
-            const uint64_t token = group * rowsPerGroup;
-            const uint32_t rows = p_.tokens - token >= rowsPerGroup
-                ? rowsPerGroup : static_cast<uint32_t>(p_.tokens - token);
+        constexpr uint32_t rowsPerGroup = 4;
+        // Four input rows use eight bytes per tile element, within the host's
+        // conservative twelve-byte UB budget. Output DMA reuses this buffer.
+        LocalTensor<T> in(TPosition::VECIN, 0, p_.tileLength * rowsPerGroup);
+        uint64_t first = GetBlockIdx();
+        uint64_t owned = 1;
+        // Keep the one-row path free of division. Larger batches receive
+        // contiguous ranges differing by at most one row between cores.
+        if (p_.tokens > GetBlockNum()) {
+            const uint64_t base = p_.tokens / GetBlockNum();
+            const uint64_t extra = p_.tokens % GetBlockNum();
+            const uint64_t core = GetBlockIdx();
+            first = core * base + (core < extra ? core : extra);
+            owned = base + (core < extra ? 1 : 0);
+        }
+        for (uint64_t offset = 0; offset < owned; offset += rowsPerGroup) {
+            const uint64_t token = first + offset;
+            const uint32_t rows = owned - offset >= rowsPerGroup
+                ? rowsPerGroup : static_cast<uint32_t>(owned - offset);
             const uint32_t rowBytes = static_cast<uint32_t>(p_.hidden * sizeof(T));
             const DataCopyExtParams load{1, rows * rowBytes, 0, 0, 0};
             const DataCopyPadExtParams<T> pad{false, 0, 0, static_cast<T>(0)};

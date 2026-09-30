@@ -7,23 +7,17 @@ import torch
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import enable_custom_op
 
-MHC_EXPAND_ALIGNMENT = 16  # 32-byte DMA blocks for both supported 16-bit dtypes.
-MHC_EXPAND_MULT = 4  # The GLM stream count covered by the performance comparison.
+# The hardware profile is immutable for the lifetime of this process. Reading
+# its capability does not load the extension or initialize an NPU context.
+MHC_EXPAND_SUPPORTED = get_current_hardware_profile().supports(HardwareCapability.MHC_EXPAND)
 
 
 def mhc_expand(x: torch.Tensor, mult: int) -> torch.Tensor:
     """Replicate ``[tokens, hidden]`` into contiguous ``[tokens, mult, hidden]``."""
-    if (
-        x.device.type == "npu"
-        and x.ndim == 2
-        and x.dtype in (torch.float16, torch.bfloat16)
-        and x.is_contiguous()
-        and x.shape[-1] % MHC_EXPAND_ALIGNMENT == 0
-        and not x.requires_grad
-        and x.numel() > 0
-        and mult == MHC_EXPAND_MULT
-        and get_current_hardware_profile().supports(HardwareCapability.MHC_EXPAND)
-        and enable_custom_op()
-    ):
-        return torch.ops._C_ascend.npu_mhc_expand(x, mult)
+    if x.device.type == "npu" and not x.requires_grad and MHC_EXPAND_SUPPORTED and enable_custom_op():
+        # Check tensor metadata within the C++ call to avoid repeated Python
+        # dispatch. None leaves native aliasing and autograd behavior intact.
+        result = torch.ops._C_ascend.npu_mhc_expand_if_supported(x, mult)
+        if result is not None:
+            return result
     return x.unsqueeze(1).expand(-1, mult, -1).contiguous()

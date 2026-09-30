@@ -32,6 +32,7 @@ ACTIVE = 5
 
 def profile_case(fn, trace_dir):
     trace_dir.mkdir(parents=True)
+    torch.npu.synchronize()
     with torch_npu.profiler.profile(
         activities=[torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU],
         schedule=torch_npu.profiler.schedule(wait=0, warmup=WARMUP, active=ACTIVE, repeat=1),
@@ -42,6 +43,9 @@ def profile_case(fn, trace_dir):
     ) as prof:
         for _ in range(WARMUP + ACTIVE):
             result = fn()
+            # Drain queued launches before moving the profiler boundary. A
+            # warmup kernel must not spill into the five active invocations.
+            torch.npu.synchronize()
             prof.step()
     torch.npu.synchronize()
     del result
@@ -53,7 +57,14 @@ def profile_case(fn, trace_dir):
         key = next((key for key in reader.fieldnames or [] if key.replace(" ", "").lower() == "totaltime(us)"), None)
         if key is None:
             raise RuntimeError(f"No Total Time(us) column in {paths[0]}")
-        times = [float(row[key].replace(",", "")) for row in reader]
+        rows = list(reader)
+        # These benchmark paths each launch one device kernel per invocation.
+        # Reject incomplete or contaminated traces instead of normalizing them
+        # with a denominator that does not match the recorded work.
+        count = sum(int(row["Count"]) for row in rows)
+        if count != ACTIVE:
+            raise RuntimeError(f"Expected {ACTIVE} device calls in {paths[0]}, recorded {count}")
+        times = [float(row[key].replace(",", "")) for row in rows]
     if not times or sum(times) <= 0:
         raise RuntimeError(f"No device time recorded in {paths[0]}")
     return sum(times) / ACTIVE

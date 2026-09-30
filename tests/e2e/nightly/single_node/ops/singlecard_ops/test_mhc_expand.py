@@ -87,6 +87,29 @@ def test_mhc_expand_npu_graph(dtype, tokens, hidden):
         assert_bits_equal(y, x.unsqueeze(1).repeat(1, 4, 1))
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_mhc_expand_addresses_and_streams(dtype):
+    # Keep every allocation live: dispatch must preserve both addresses
+    # and must not overwrite an earlier result or share state between streams.
+    streams = [torch.npu.Stream(), torch.npu.Stream()]
+    pending = []
+    for stream_index, stream in enumerate(streams):
+        stream.wait_stream(torch.npu.current_stream())
+        with torch.npu.stream(stream):
+            for iteration in range(6):
+                offset = iteration % 3
+                generator = torch.Generator().manual_seed(101 + 11 * stream_index + iteration)
+                bits = torch.randint(-32768, 32768, (7 * 4096 + offset,), dtype=torch.int16, generator=generator)
+                x = bits.view(dtype).to("npu")[offset:].reshape(7, 4096)
+                expected = bits[offset:].view(dtype).reshape(7, 4096)
+                y = torch.ops._C_ascend.npu_mhc_expand(x, 4)
+                pending.append((x, y, expected))
+    torch.npu.synchronize()
+    for x, y, expected in pending:
+        assert_bits_equal(y, expected.unsqueeze(1).repeat(1, 4, 1))
+        assert_bits_equal(x, expected)
+
+
 @pytest.mark.parametrize("device", ["npu", "meta"])
 def test_mhc_expand_validation(device):
     x = torch.empty(3, 17, dtype=torch.float16, device=device)
@@ -99,6 +122,46 @@ def test_mhc_expand_validation(device):
         torch.ops._C_ascend.npu_mhc_expand(x.t(), 4)
     with pytest.raises(RuntimeError, match="float16 and bfloat16"):
         torch.ops._C_ascend.npu_mhc_expand(x.float(), 4)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_mhc_expand_temporary_inputs(dtype):
+    # Only retain outputs on the caller. Submitted work must safely consume each
+    # temporary input while later allocations put pressure on its storage.
+    pending = []
+    for iteration in range(12):
+        generator = torch.Generator().manual_seed(401 + iteration)
+        bits = torch.randint(-32768, 32768, (7, 4096), dtype=torch.int16, generator=generator)
+        expected = bits.view(dtype)
+        output = torch.ops._C_ascend.npu_mhc_expand(expected.to("npu"), 4)
+        pending.append((output, expected))
+    torch.npu.synchronize()
+    for output, expected in pending:
+        assert_bits_equal(output, expected.unsqueeze(1).repeat(1, 4, 1))
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("change_output", [False, True])
+def test_mhc_expand_metadata_snapshot(dtype, change_output):
+    pending = []
+    for iteration in range(12):
+        generator = torch.Generator().manual_seed(601 + iteration)
+        bits = torch.randint(-32768, 32768, (7, 4096), dtype=torch.int16, generator=generator)
+        expected = bits.view(dtype)
+        x = expected.to("npu")
+        output = torch.ops._C_ascend.npu_mhc_expand(x, 4)
+        # Metadata mutation is immediate on the caller; both dispatch paths must
+        # finish reading the original descriptor before returning.
+        if change_output:
+            output.transpose_(0, 2)
+        else:
+            x.transpose_(0, 1)
+        pending.append((x, output, expected))
+    torch.npu.synchronize()
+    for _, output, expected in pending:
+        if change_output:
+            output = output.transpose(0, 2)
+        assert_bits_equal(output, expected.unsqueeze(1).repeat(1, 4, 1))
 
 
 def test_mhc_expand_meta():
@@ -122,29 +185,36 @@ def test_mhc_expand_compile_dynamic():
 @pytest.mark.parametrize("shape", [(1, 4096), (16, 7168), (128, 4096), (3, 8193), (3, 17), (0, 17), (3, 0)])
 def test_mhc_expand_dispatch(expand, dtype, shape, monkeypatch):
     x = torch.randn(shape, dtype=dtype, device="npu")
-    original = torch.ops._C_ascend.npu_mhc_expand
+    original = torch.ops._C_ascend.npu_mhc_expand_if_supported
     calls = []
 
     def traced(x, mult):
-        calls.append((tuple(x.shape), mult))
-        return original(x, mult)
+        result = original(x, mult)
+        calls.append((tuple(x.shape), mult, result is not None))
+        return result
 
-    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_expand", traced)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_expand_if_supported", traced)
     assert_bits_equal(expand(x, 4), x.unsqueeze(1).repeat(1, 4, 1))
-    expected_calls = [(shape, 4)] if x.numel() > 0 and shape[1] % 16 == 0 else []
-    assert calls == expected_calls
+    assert calls == [(shape, 4, x.numel() > 0 and shape[1] % 16 == 0)]
 
 
 @pytest.mark.parametrize("expand", [mhc_expand, hc_expand], ids=["helper", "glm"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("mult", [2, 8])
 def test_mhc_expand_other_multipliers_use_native(expand, dtype, mult, monkeypatch):
-    def unexpected_custom(*args):
-        raise AssertionError("Only mult=4 has a measured custom path")
+    original = torch.ops._C_ascend.npu_mhc_expand_if_supported
+    calls = []
 
-    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_expand", unexpected_custom)
+    def checked(x, mult):
+        result = original(x, mult)
+        assert result is None
+        calls.append(mult)
+        return result
+
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_expand_if_supported", checked)
     x = torch.randn(3, 64, dtype=dtype, device="npu")
     assert_bits_equal(expand(x, mult), x.unsqueeze(1).repeat(1, mult, 1))
+    assert calls == [mult]
 
 
 @pytest.mark.parametrize("expand", [mhc_expand, hc_expand], ids=["helper", "glm"])
@@ -153,7 +223,7 @@ def test_mhc_expand_gradient_fallback(expand, dtype, monkeypatch):
     def unexpected_custom(*args):
         raise AssertionError("Gradient-requiring input must use native expansion")
 
-    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_expand", unexpected_custom)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_expand_if_supported", unexpected_custom)
     x = torch.randn(3, 64, dtype=dtype, device="npu", requires_grad=True)
     expand(x, 4).sum().backward()
     assert_bits_equal(x.grad, torch.full((3, 64), 4, dtype=dtype))
@@ -173,3 +243,115 @@ def test_mhc_expand_helper_graph(expand, dtype):
         x.fill_(value)
         graph.replay()
         assert_bits_equal(y, x.unsqueeze(1).repeat(1, 4, 1))
+
+
+@pytest.mark.parametrize("device", ["npu", "meta"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "reason",
+    ["supported", "dtype", "rank", "noncontiguous", "unaligned", "gradient", "empty", "zero_hidden", "trivial", "mult"],
+)
+def test_mhc_expand_optional_eligibility(device, dtype, reason):
+    shape = {"unaligned": (3, 17), "empty": (0, 64), "zero_hidden": (3, 0)}.get(reason, (3, 64))
+    x = torch.empty(shape, device=device, dtype=torch.float32 if reason == "dtype" else dtype)
+    if reason == "rank":
+        x = x.unsqueeze(0)
+    elif reason == "noncontiguous":
+        x = x.t()
+    elif reason == "gradient":
+        x.requires_grad_()
+    mult = {"trivial": 1, "mult": 8}.get(reason, 4)
+    result = torch.ops._C_ascend.npu_mhc_expand_if_supported(x, mult)
+    if reason != "supported":
+        assert result is None
+    else:
+        assert result.shape == (3, 4, 64)
+        assert result.dtype == dtype
+        assert result.device == x.device
+        assert result.is_contiguous()
+        if device == "npu":
+            assert_bits_equal(result, x.unsqueeze(1).repeat(1, 4, 1))
+            assert result.data_ptr() != x.data_ptr()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_mhc_expand_fallback_aliasing(dtype):
+    x = torch.randn(3, 64, device="npu", dtype=dtype)
+    y = mhc_expand(x, 1)
+    assert y.data_ptr() == x.data_ptr()
+    y.fill_(2)
+    assert_bits_equal(x, torch.full((3, 64), 2, dtype=dtype))
+    empty = x[:0]
+    result = mhc_expand(empty, 4)
+    assert result.untyped_storage().data_ptr() == empty.untyped_storage().data_ptr()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_mhc_expand_optional_compile_dynamic(dtype):
+    def expand(x, mult):
+        result = torch.ops._C_ascend.npu_mhc_expand_if_supported(x, mult)
+        return result if result is not None else x.unsqueeze(1).expand(-1, mult, -1).contiguous()
+
+    compiled = torch.compile(expand, backend="eager", dynamic=True, fullgraph=True)
+    for tokens, hidden in ((3, 64), (11, 64), (7, 128), (3, 17), (5, 33), (0, 64), (3, 0)):
+        x = torch.randn(tokens, hidden, device="npu", dtype=dtype)
+        assert_bits_equal(compiled(x, 4), x.unsqueeze(1).repeat(1, 4, 1))
+
+
+@pytest.mark.parametrize("expand", [mhc_expand, hc_expand], ids=["helper", "glm"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_mhc_expand_helper_compile_dynamic(expand, dtype):
+    compiled = torch.compile(expand, backend="eager", dynamic=True, fullgraph=True)
+    for tokens, hidden in ((3, 64), (11, 128), (3, 17), (0, 64)):
+        x = torch.randn(tokens, hidden, device="npu", dtype=dtype)
+        assert_bits_equal(compiled(x, 4), x.unsqueeze(1).repeat(1, 4, 1))
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("hidden", [4096, 8192])
+@pytest.mark.parametrize("tokens", [39, 40, 41, 79, 80, 81, 127, 128, 129, 159, 160, 161, 205])
+def test_mhc_expand_row_group_boundaries(dtype, hidden, tokens):
+    generator = torch.Generator().manual_seed(tokens + hidden)
+    bits = torch.randint(-32768, 32768, (tokens, hidden), dtype=torch.int16, generator=generator)
+    x = bits.view(dtype).to("npu")
+    for mult in (1, 2, 4, 8):
+        actual = torch.ops._C_ascend.npu_mhc_expand(x, mult)
+        assert_bits_equal(actual, bits.view(dtype).unsqueeze(1).repeat(1, mult, 1))
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_mhc_expand_stream_core_limit(dtype):
+    # Core-controlled calls retain the ACLNN adapter path. Use a separate stream
+    # and restore its configuration so subsequent callers retain their limits.
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    generator = torch.Generator().manual_seed(1401)
+    bits = torch.randint(-32768, 32768, (33, 8193), dtype=torch.int16, generator=generator)
+    with torch.npu.stream(stream):
+        try:
+            torch.npu.set_stream_limit(stream, vector_num=8)
+            x = bits.view(dtype).to("npu")
+            result = torch.ops._C_ascend.npu_mhc_expand(x, 4)
+            assert_bits_equal(result, bits.view(dtype).unsqueeze(1).repeat(1, 4, 1))
+        finally:
+            stream.synchronize()
+            torch.npu.reset_stream_limit(stream)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("separate_stream", [False, True], ids=["current", "separate"])
+def test_mhc_expand_queued_producers_and_consumers(dtype, separate_stream):
+    stream = torch.npu.Stream() if separate_stream else torch.npu.current_stream()
+    stream.wait_stream(torch.npu.current_stream())
+    pending = []
+    with torch.npu.stream(stream):
+        x = torch.empty(17, 4096, device="npu", dtype=dtype)
+        for value in range(12):
+            # No intermediate synchronization: every expansion must observe its
+            # producer, and the consumer must finish before a later write to x.
+            x.fill_(value)
+            y = torch.ops._C_ascend.npu_mhc_expand(x, 4)
+            pending.append((y + 3, value + 3))
+    stream.synchronize()
+    for actual, expected in pending:
+        assert_bits_equal(actual, torch.full((17, 4, 4096), expected, dtype=dtype))
