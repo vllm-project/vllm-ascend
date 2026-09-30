@@ -117,7 +117,7 @@ def test_detected_soc_version_wins_over_the_fallback():
 
 
 def test_missing_soc_version_still_fails_a_kernel_build():
-    """npi-smi should be installed and return a chip type if
+    """npu-smi should be installed and return a chip type if
     COMPILE_CUSTOM_KERNELS is true; raise a runtime error if
     this is not the behavior.
     """
@@ -127,7 +127,7 @@ def test_missing_soc_version_still_fails_a_kernel_build():
 
 def test_missing_soc_version_falls_back_without_custom_kernels(caplog):
     """Check that SOC version resolves to a dummy value when COMPILE_CUSTOM_KERNELS
-    is False and npi-smi is not installed (CPU-only scenario); check that
+    is False and npu-smi is not installed (CPU-only scenario); check that
     warning is logged that mentions the dummy SOC version and the
     COMPILE_CUSTOM_KERNELS flag.
     """

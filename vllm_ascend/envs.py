@@ -46,8 +46,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Whether to compile custom kernels. If not set, the default value is True.
     # If set to False, the custom kernels will not be compiled. Set it to False
     # only when the kernels are already present (a restored csrc build cache) or
-    # are not needed (running UT in an environment without an NPU). Cannot be set
-    # to True if no NPU is available or `npu-smi` is not installed.
+    # are not needed (running UT in an environment without an NPU).
     "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
