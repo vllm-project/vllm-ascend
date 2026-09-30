@@ -171,39 +171,6 @@ __aicore__ inline void ReduceMaxHalfInterval(const LocalTensor<float> &dst_local
 __aicore__ inline void ReduceSumHalfInterval(const LocalTensor<float> &dst_local, const LocalTensor<float> &src_local,
                                              int32_t count)
 {
-    // Match A5 GroupedReduce: 32 lanes, sixteen additions per 512-value
-    // group, then four groups of eight lanes and a sequential eight-lane sum.
-    if (count > 0 && (count % 512) == 0 && count <= 8192) {
-        for (int32_t base = 0; base < count; base += 512) {
-            for (int32_t offset = 32; offset < 512; offset += 32) {
-                Add(src_local[base], src_local[base], src_local[base + offset], 32);
-                PipeBarrier<PIPE_V>();
-            }
-            if (base != 0) {
-                Add(src_local, src_local, src_local[base], 32);
-                PipeBarrier<PIPE_V>();
-            }
-        }
-        for (int32_t offset = 8; offset < 32; offset += 8) {
-            Add(src_local, src_local, src_local[offset], 8);
-            PipeBarrier<PIPE_V>();
-        }
-        auto indices = src_local[32].ReinterpretCast<uint32_t>();
-        Duplicate(src_local[96], 0.0f, 8);
-        PipeBarrier<PIPE_V>();
-        for (uint32_t lane = 0; lane < 8; ++lane) {
-            Duplicate(indices, lane * 4U, 8);
-            PipeBarrier<PIPE_V>();
-            Gather(src_local[64], src_local, indices, 0U, 8U);
-            PipeBarrier<PIPE_V>();
-            Add(src_local[96], src_local[96], src_local[64], 8);
-            PipeBarrier<PIPE_V>();
-        }
-        WholeReduceSum(dst_local, src_local[96], 1, 1, 1, 1, 8);
-        PipeBarrier<PIPE_V>();
-        return;
-    }
-
     if (likely(count > ELEM_PER_REP_FP32)) {
         int32_t bodyCount = findPowerTwo(count);
         int32_t tailCount = count - bodyCount;
@@ -240,14 +207,10 @@ __aicore__ inline void ReduceSumHalfInterval(const LocalTensor<float> &dst_local
  * 对齐 ops-nn RMSNorm：Sqrt + Duplicate(1.0) + Div（避免 Rsqrt / Reciprocal 融合近似）。
  * scratch 需 ≥1 个 32B 对齐块，用于存放 1.0。
  */
-__aicore__ inline void InvRmsInPlace(const LocalTensor<float> &dst, uint32_t hiddenSize, float normEps,
+__aicore__ inline void InvRmsInPlace(const LocalTensor<float> &dst, float invHiddenSize, float normEps,
                                      const LocalTensor<float> &scratch)
 {
-    Duplicate(scratch.ReinterpretCast<int32_t>(), static_cast<int32_t>(hiddenSize), ELEM_PER_BLK_FP32);
-    PipeBarrier<PIPE_V>();
-    Cast(scratch, scratch.ReinterpretCast<int32_t>(), RoundMode::CAST_RINT, ELEM_PER_BLK_FP32);
-    PipeBarrier<PIPE_V>();
-    Div(dst, dst, scratch, 1);
+    Muls(dst, dst, invHiddenSize, 1);
     PipeBarrier<PIPE_V>();
     Adds(dst, dst, normEps, 1);
     PipeBarrier<PIPE_V>();
@@ -352,12 +315,7 @@ __aicore__ inline void MulAddRowByBrcBlock(const LocalTensor<float>& dst, const 
         SetMaskCount();
         SetVectorMask<float, MaskMode::COUNTER>(hiddenSize);
     }
-    // Match A5: round the FP32 product before adding it to the mixture.
-    // src is a temporary converted row and is not reused by the caller.
-    Mul<float, false>(src, src, brcOneBlock, MASK_PLACEHOLDER, 1, repeatParams);
-    PipeBarrier<PIPE_V>();
-    const BinaryRepeatParams addParams{1, 1, 1, 8, 8, 8};
-    Add<float, false>(dst, dst, src, MASK_PLACEHOLDER, 1, addParams);
+    MulAddDst<float, float, false>(dst, src, brcOneBlock, MASK_PLACEHOLDER, 1, repeatParams);
     PipeBarrier<PIPE_V>();
     if (manageMask) {
         SetMaskNorm();
