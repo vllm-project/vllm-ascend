@@ -22,7 +22,7 @@ using namespace Ops::Transformer::OpTiling;
 inline DimTileChoice ChooseCanonicalUpdateBaseDimChoice(gert::TilingContext *context, int64_t batch, int64_t dim,
                                                         uint32_t coreNum)
 {
-    const int64_t candidates[] = {4096, 2048, 1024, 512, 384, 192};
+    const int64_t candidates[] = {3072, 2048, 1024, 512, 384, 192};
 
     auto chooseOnce = [&](bool requireExactDiv) -> DimTileChoice {
         DimTileChoice bestOver;
@@ -98,7 +98,7 @@ inline int64_t ComputeFnUbLimitedBaseDim(uint64_t ubSize)
         return 0;
     }
 
-    const int64_t bytesPerElem = (RING_SLOT_CNT * BF16_FP16_ELEM_BYTES) + (FN_OUT_SLOT_CNT * BF16_FP16_ELEM_BYTES) +
+    const int64_t bytesPerElem = (RING_SLOT_CNT * static_cast<int64_t>(sizeof(float))) + (FN_OUT_SLOT_CNT * BF16_FP16_ELEM_BYTES) +
                                  (FN_CALC_FP32_SLOT_CNT * static_cast<int64_t>(sizeof(float)));
     const int64_t budgetBytes = static_cast<int64_t>(ubSize) - FN_UB_RESERVED_BYTES;
     const int64_t ubLimitedBaseDim = AlignDownInt64(budgetBytes / bytesPerElem, DIM_ALIGN_ELEMS);

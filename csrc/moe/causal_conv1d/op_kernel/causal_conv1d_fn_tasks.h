@@ -104,19 +104,20 @@
      const int32_t historyCount = width - 1;
      const int32_t ringStart = MAX_WIDTH - width;
      const int32_t historyStartTok = tileStart - historyCount;
-     LocalTensor<T> ring = inBuf.Get<T>();
+     LocalTensor<float> ringF = inBuf.Get<float>();
+     LocalTensor<T> ringT = ringF.ReinterpretCast<T>();
      bool hasGmHistoryCopy = false;
      bool hasVectorInit = false;
      const int64_t stateBaseOffset = static_cast<int64_t>(cacheIdx) * stateLen * dim + channelStart;
      int64_t xHistoryOffset = static_cast<int64_t>(historyStartTok) * dim + channelStart;
  
      for (int32_t i = 0; i < ringStart; ++i) {
-         Duplicate(ring[i * MAX_BLOCK_DIM], static_cast<T>(0), baseDim);
+         Duplicate(ringF[i * MAX_BLOCK_DIM], 0.0f, baseDim);
          hasVectorInit = true;
      }
  
      for (int32_t i = 0, srcTok = historyStartTok; i < historyCount; ++i, ++srcTok, xHistoryOffset += dim) {
-         LocalTensor<T> histSlot = ring[(ringStart + i) * MAX_BLOCK_DIM];
+         LocalTensor<T> histSlot = ringT[(ringStart + i) * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM];
          if (srcTok >= seqStart) {
              DataCopy(histSlot, xGm[xHistoryOffset], baseDim);
              hasGmHistoryCopy = true;
@@ -132,7 +133,7 @@
              }
              hasGmHistoryCopy = true;
          } else {
-             Duplicate(histSlot, static_cast<T>(0), baseDim);
+             Duplicate(ringF[(ringStart + i) * MAX_BLOCK_DIM], 0.0f, baseDim);
              hasVectorInit = true;
          }
      }
@@ -140,6 +141,14 @@
      if (hasGmHistoryCopy) {
          SetFlag<HardEvent::MTE2_V>(stateMte2ToVEvent_);
          WaitFlag<HardEvent::MTE2_V>(stateMte2ToVEvent_);
+         for (int32_t i = 0, srcTok = historyStartTok; i < historyCount; ++i, ++srcTok) {
+             if (srcTok >= seqStart || hasInit) {
+                 const int32_t pos = ringStart + i;
+                 Cast(ringF[pos * MAX_BLOCK_DIM], ringT[pos * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM],
+                      RoundMode::CAST_NONE, baseDim);
+             }
+         }
+         hasVectorInit = true;
      }
      if (hasVectorInit) {
          PipeBarrier<PIPE_V>();
@@ -148,7 +157,7 @@
      if (tileLen > 0) {
          const int32_t slot0 = SlotCurr(0);
          const int64_t xOffset = static_cast<int64_t>(tileStart) * dim + channelStart;
-         DataCopy(ring[slot0 * MAX_BLOCK_DIM], xGm[xOffset], baseDim);
+         DataCopy(ringT[slot0 * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], xGm[xOffset], baseDim);
          SetFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[slot0]);
      }
  
