@@ -50,6 +50,17 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "DSpark probabilistic draft sampling is not supported on the v1 "
                 "model runner; use greedy (the default) instead."
             )
+        draft_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+        if isinstance(draft_hf_config, K3DSparkConfig):
+            # This is the trained draft length, not the KV-cache page size.
+            checkpoint_block_size = getattr(draft_hf_config, "block_size", None)
+            configured_block_size = vllm_config.speculative_config.num_speculative_tokens
+            if checkpoint_block_size is not None and configured_block_size != checkpoint_block_size:
+                raise ValueError(
+                    "K3 DSpark requires num_speculative_tokens to match the "
+                    f"checkpoint block_size ({checkpoint_block_size}); got "
+                    f"{configured_block_size}."
+                )
         super().__init__(vllm_config, device, runner=runner)
         self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
