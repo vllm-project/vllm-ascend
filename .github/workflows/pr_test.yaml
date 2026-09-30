@@ -711,6 +711,9 @@ jobs:
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ matrix.test_groups }}
       timeout-minutes: 240
+      # TEMP(a2-dual-runner): keep running the remaining test targets after a
+      # failure so one broken case does not hide the rest of the suite.
+      continue_on_error: true
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
