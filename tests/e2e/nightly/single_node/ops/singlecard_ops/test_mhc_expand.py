@@ -57,7 +57,9 @@ def test_mhc_expand_bit_patterns(dtype):
 @pytest.mark.parametrize("tokens", [16, 17])
 @pytest.mark.parametrize("entry", ["raw", "helper", "glm"])
 def test_mhc_expand_nz_storage(dtype, tokens, entry):
-    previous = torch.npu.config.allow_internal_format
+    # The config property is write-only in torch_npu; preserve its raw option.
+    previous = torch_npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT")
+    assert previous is not None
     try:
         torch.npu.config.allow_internal_format = True
         # Cover all 16-bit payloads and a padded NZ row boundary.
@@ -71,7 +73,7 @@ def test_mhc_expand_nz_storage(dtype, tokens, entry):
         assert_bits_equal(x, expected)
         assert torch_npu.get_npu_format(x) == 29
     finally:
-        torch.npu.config.allow_internal_format = previous
+        torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": previous.decode()})
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
