@@ -42,8 +42,8 @@ The following table lists individual feature combinations with KVPP. It does not
 | Prefix caching | ✅ Supported | Can be combined with KVPP. |
 | Asynchronous scheduling | ✅ Supported | Can be combined with KVPP. |
 | LI-C8 and SFA-C8 cache layouts | ✅ Supported | Allocation follows the actual KV cache specifications. |
-| Fixed-step MTP | ✅ Supported | MTP caches are allocated independently and excluded from KVPP layer partitioning. |
-| Variable-step MTP and other speculative decoding methods | ❌ Not supported | Only fixed-step MTP is supported. |
+| MTP, DSpark, DFlash, and EAGLE3 | ✅ Supported | Draft caches stay on every rank and are excluded from KVPP layer partitioning. Fixed and dynamic speculative lengths both use the method's existing runner. |
+| Other speculative decoding methods | ❌ Not supported | KVPP accepts only `mtp`, `dspark`, `dflash`, and `eagle3`. |
 | PCP | ✅ Supported | Requires Model Runner V2; caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
@@ -92,7 +92,7 @@ For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-si
 
 For PP, add `enable_kvpp` to the existing PP launch configuration. Each stage allocates its caches independently. KVPP does not change PP layer partitioning.
 
-Fixed-step MTP can be combined with KVPP, but MTP caches remain independently allocated and are excluded from KVPP layer partitioning. Follow the model-specific configuration requirements for MTP launch arguments.
+MTP, DSpark, DFlash, and EAGLE3 can be combined with KVPP. Their draft caches remain independently allocated and are excluded from KVPP layer partitioning. Speculative length, including batch-size dynamic K and confidence-based verification, follows that method's existing runner. Follow the model-specific configuration requirements for the draft.
 
 ## Configuration Parameters
 

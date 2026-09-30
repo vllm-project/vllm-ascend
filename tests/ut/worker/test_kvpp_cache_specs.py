@@ -10,11 +10,15 @@ from vllm_ascend.core.kv_cache_placement import create_kvpp_cache_allocation_pla
 from vllm_ascend.worker import worker
 
 
+@pytest.mark.parametrize("method", ["dspark", "dflash", "eagle3"])
 @pytest.mark.parametrize("rank", [0, 1, 2])
 @pytest.mark.parametrize("draft_block_size", [1, 2])
 @pytest.mark.parametrize("enabled", [False, True])
-def test_dspark_worker_returns_the_specs_used_for_kvpp_budget(monkeypatch, rank, draft_block_size, enabled):
+def test_windowed_draft_worker_returns_the_specs_used_for_kvpp_budget(
+    monkeypatch, method, rank, draft_block_size, enabled
+):
     config, specs, drafts = make_dspark_kvpp_case()
+    config.speculative_config.method = method
     full_plan = create_kvpp_cache_allocation_plan(config, specs, rank)
     config.additional_config["enable_kvpp"] = enabled
     for name in drafts:

@@ -2035,8 +2035,7 @@ class TestKVPPConfig(TestBase):
             ("parallel_config", "decode_context_parallel_size", 2, "DCP"),
             ("model_config", "use_mla", False, "MLA"),
             ("model_config", "is_hybrid", True, "MLA"),
-            ("speculative_config", "method", "eagle3", "mtp"),
-            ("speculative_config", "num_speculative_tokens_per_batch_size", {1: 2}, "fixed"),
+            ("speculative_config", "method", "ngram", "speculative decoding"),
         )
         for section, field, value, message in restrictions:
             with self.subTest(field=field):
@@ -2047,17 +2046,15 @@ class TestKVPPConfig(TestBase):
                 with self.assertRaisesRegex(ValueError, message):
                     _validate_parallel_config(config)
 
-    def test_dspark_accepts_fixed_length_and_rejects_dynamic_verification(self):
-        config = make_kvpp_config()
-        config.speculative_config.method = "dspark"
-        KVPPConfig.from_vllm_config(config).validate(config)
-        config.speculative_config.enable_adaptive_verification = True
-        with self.assertRaisesRegex(ValueError, "adaptive verification"):
-            KVPPConfig.from_vllm_config(config).validate(config)
-        config.speculative_config.enable_adaptive_verification = False
-        config.additional_config["dynamic_spec_config"] = {"method": "dspark"}
-        with self.assertRaisesRegex(ValueError, "dynamic speculative lengths"):
-            KVPPConfig.from_vllm_config(config).validate(config)
+    def test_supported_methods_allow_dynamic_speculative_lengths(self):
+        for method in ("mtp", "dspark", "dflash", "eagle3"):
+            with self.subTest(method=method):
+                config = make_kvpp_config()
+                config.speculative_config.method = method
+                config.speculative_config.num_speculative_tokens_per_batch_size = [[1, 1, 0], [2, 4, 3]]
+                config.speculative_config.enable_adaptive_verification = True
+                config.additional_config["dynamic_spec_config"] = {"method": method}
+                KVPPConfig.from_vllm_config(config).validate(config)
 
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_config_factory_keeps_kvpp_enabled(self, _check_config):

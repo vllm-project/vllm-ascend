@@ -12,7 +12,7 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
-from vllm_ascend.ascend_config import KVPPConfig
+from vllm_ascend.ascend_config import KVPP_SPECULATIVE_METHODS, KVPPConfig
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import calc_split_factor, enable_sfa
@@ -116,7 +116,7 @@ def register_kvpp_draft_layers(
 ) -> None:
     """Record loader-discovered ownership on this worker's cache modules."""
     spec = vllm_config.speculative_config
-    if spec is None or spec.method not in ("mtp", "dspark"):
+    if spec is None or spec.method not in KVPP_SPECULATIVE_METHODS:
         return
     if not is_last_pp_rank:
         draft_names = set()
@@ -143,7 +143,7 @@ def register_kvpp_draft_layers(
 def find_draft_layers(vllm_config: VllmConfig, local_layer_names: Iterable[str]) -> set[str]:
     """Read exact worker-local ownership, never infer it from layer indices."""
     spec = vllm_config.speculative_config
-    if spec is None or spec.method not in ("mtp", "dspark"):
+    if spec is None or spec.method not in KVPP_SPECULATIVE_METHODS:
         return set()
     context = vllm_config.compilation_config.static_forward_context
     result = set()
