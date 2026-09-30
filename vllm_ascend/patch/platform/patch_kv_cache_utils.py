@@ -823,6 +823,56 @@ def _merge_qsa_composite_groups(
     return merge_owners(result, raw_names, "raw circular")
 
 
+def _merge_mamba_state_groups(
+    groups: list[KVCacheGroupSpec],
+) -> list[KVCacheGroupSpec]:
+    """Merge same-shape MambaSpec groups so state layers share one block table.
+
+    In the six-region backing every GDN/PLE layer owns a slot within the same
+    physical blocks, so all state layers of one geometry must share a block
+    table. Upstream grouping leaves them as per-layer groups here; each group
+    then allocates its own blocks and uses only its own slot's worth of every
+    block, while admission charges the full packed pool-block price for each.
+    On a 48-layer Qwen4Exp that inflated the admission floor by tens of times
+    (36 GDN groups x 2 blocks each charged at the 36-slot pool-block size).
+
+    Draft (eagle) groups keep their own block tables: merging across the
+    is_eagle_group boundary would corrupt the draft/target accounting.
+    """
+    buckets: dict[tuple, list[int]] = {}
+    for index, group in enumerate(groups):
+        spec = group.kv_cache_spec
+        if isinstance(spec, MambaSpec) and not isinstance(spec, UniformTypeKVCacheSpecs):
+            key = (
+                spec.page_size_bytes,
+                tuple(tuple(shape) for shape in spec.shapes),
+                tuple(str(dtype) for dtype in spec.dtypes),
+                group.is_eagle_group,
+            )
+            buckets.setdefault(key, []).append(index)
+    drop: set[int] = set()
+    replacements: dict[int, KVCacheGroupSpec] = {}
+    for indices in buckets.values():
+        if len(indices) < 2:
+            continue
+        names = [name for index in indices for name in groups[index].layer_names]
+        uniform = UniformTypeKVCacheSpecs.from_specs(
+            {name: groups[idx].kv_cache_spec for idx in indices for name in groups[idx].layer_names}
+        )
+        if uniform is None:
+            continue
+        first = indices[0]
+        replacements[first] = KVCacheGroupSpec(
+            names,
+            uniform,
+            is_eagle_group=groups[first].is_eagle_group,
+        )
+        drop.update(indices[1:])
+    if not replacements:
+        return groups
+    return [replacements.get(index, group) for index, group in enumerate(groups) if index not in drop]
+
+
 def _get_ascend_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -838,6 +888,7 @@ def _get_ascend_kv_cache_groups(
         kv_cache_spec,
         *qsa_owners,
     )
+    merged = _merge_mamba_state_groups(merged)
     logger.info(
         "Using QSA six-region grouping: %d main/compressed owners, %d raw circular owners, %d total cache groups",
         len(qsa_owners[0]) + len(qsa_owners[1]),
