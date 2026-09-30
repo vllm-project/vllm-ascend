@@ -8,6 +8,8 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.v1.engine import EngineCoreOutputs, UtilityOutput
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, UtilityResult
 
 from tests.e2e.common.kv_pool.ascendstore_v1_probe import (
     _snapshot_buffers,
@@ -103,8 +105,24 @@ def test_probe_verifies_real_copy_after_erasing_source(worker: SimpleNamespace) 
     warm_evidence = collect_worker_io_probe(worker)
     assert warm_evidence["get_calls"] == 1
     assert warm_evidence["loaded_keys"] == cold_evidence["stored_keys"]
-    assert warm_evidence["loaded_ranges"] == ((0, 4), (4, 8))
+    assert warm_evidence["loaded_ranges"] == [[0, 4], [4, 8]]
     assert warm_evidence["loaded_bytes"] == cold_evidence["stored_bytes"] == 128
+
+
+def test_probe_evidence_survives_collective_rpc_codec(worker: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    install_worker_io_probe(worker)
+    worker.runtime._backend_io.store((SimpleNamespace(bindings=worker.bindings),))
+    clear_worker_local_kv(worker)
+    worker.runtime._backend_io.load(worker.bindings)
+    evidence = collect_worker_io_probe(worker)
+    outputs = EngineCoreOutputs(utility_output=UtilityOutput(call_id=1, result=UtilityResult([evidence])))
+
+    # Exercise the utility response codec used by LLM.collective_rpc, not a direct callback or pickle round trip.
+    frames = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(frames).utility_output
+    assert decoded is not None and decoded.result is not None
+    assert decoded.result.result == [evidence]
 
 
 @pytest.mark.parametrize("mode", ["noop", "partial", "fail", "short", "missing"])
