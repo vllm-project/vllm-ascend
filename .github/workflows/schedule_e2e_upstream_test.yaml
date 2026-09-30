@@ -190,6 +190,7 @@ jobs:
               uv pip install "mteb[bm25s]" "lm-eval[api]" "runai-model-streamer[s3,gcs]"
               uv pip install open_clip_torch terratorch==1.2.2 torchgeo==0.9.0
               uv pip install pytest-asyncio 
+              uv pip install cohere 
               uv pip install pytest-timeout multiprocess 
               uv pip install "accelerate>=1.1.0" 
               uv pip install datasets 
