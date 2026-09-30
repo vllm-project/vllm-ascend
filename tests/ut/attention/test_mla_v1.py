@@ -25,8 +25,9 @@ from vllm_ascend.attention.mla_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, PreprocessType, mark_fused_preprocess_weights
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
-from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8DynamicLinearMethod
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
@@ -53,49 +54,6 @@ def test_v_up_proj_transpose_bmm_limits(num_tokens, num_heads, kv_lora_rank):
 
     assert fused.call_count == int(use_fused)
     torch.testing.assert_close(result, expected)
-
-
-@pytest.mark.parametrize("use_rope", [False, True])
-@pytest.mark.parametrize("weight_quant_mode", [0, 3])
-def test_mla_prolog_k3_and_cann_dispatch_are_isolated(use_rope, weight_quant_mode):
-    impl = AscendMLAImpl.__new__(AscendMLAImpl)
-    impl.support_fp8_attention = True
-    impl.use_mla_rope = use_rope
-    impl.mlapo_weight_quant_mode = weight_quant_mode
-    impl.fa_quant_layer = False
-    impl.mlapo_num_heads = impl.num_heads = 2
-    impl.kv_lora_rank = 4
-    for name in ("weight_dq", "weight_uq_qr", "mlapo_W_UK_T", "weight_dkv_kr"):
-        setattr(impl, name, torch.empty(1))
-    for name in ("dequant_scale_w_dq", "dequant_scale_w_uq_qr", "dequant_scale_w_dkv_kr"):
-        setattr(impl, name, torch.ones(1, dtype=torch.uint8))
-    impl.q_a_layernorm = impl.kv_a_layernorm = SimpleNamespace(weight=torch.ones(1))
-    metadata = SimpleNamespace(
-        num_decode_tokens=2,
-        slot_mapping=torch.arange(2),
-        decode=SimpleNamespace(cos=torch.ones(2, 2), sin=torch.zeros(2, 2)),
-    )
-    kv_cache = (torch.empty(1, 128, 1, 4), torch.empty(1, 128, 1, 2))
-    outputs = (torch.randn(2, 2, 4), torch.randn(2, 2, 2), torch.empty(0), None, None)
-    with (
-        patch.dict("sys.modules", {"vllm_ascend.vllm_ascend_C": MagicMock()}),
-        patch("torch.ops._C_ascend.npu_mla_prolog_v3_k3", create=True, return_value=outputs) as k3_op,
-        patch("torch_npu.npu_mla_prolog_v3", return_value=outputs) as cann_op,
-        patch(
-            "torch_npu.npu_dynamic_mx_quant",
-            create=True,
-            return_value=(torch.empty(2, 1, 8), torch.ones(2, 1, 1, dtype=torch.uint8)),
-        ),
-    ):
-        impl.mla_preprocess_only_decode(torch.randn(2, 8), kv_cache, metadata)
-
-    selected, unused = (cann_op, k3_op) if use_rope else (k3_op, cann_op)
-    selected.assert_called_once()
-    unused.assert_not_called()
-    kwargs = selected.call_args.kwargs
-    assert kwargs["weight_quant_mode"] == weight_quant_mode
-    assert kwargs["kv_cache"] is kv_cache[0]
-    assert (kwargs["rope_cos"] is None) == (not use_rope)
 
 
 @pytest.mark.parametrize(
@@ -265,6 +223,39 @@ def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, 
         impl.process_weights_after_loading(torch.bfloat16)
     assert impl.enable_mlapo == enable_mlapo
     assert fused.call_count == int(enable_mlapo or fa_quant_layer)
+
+
+@pytest.mark.parametrize(
+    "device_type,scheme_type,expected_enabled",
+    [
+        (AscendDeviceType.A2, AscendW8A8DynamicLinearMethod, True),
+        (AscendDeviceType.A3, AscendW8A8DynamicLinearMethod, True),
+        (AscendDeviceType.A5, AscendW8A8DynamicLinearMethod, False),
+        (AscendDeviceType.A3, AscendW8A8FP8DynamicLinearMethod, False),
+    ],
+)
+def test_mla_dynamic_int8_weight_whitelist(device_type, scheme_type, expected_enabled):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    profile = get_hardware_profile(device_type)
+    impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
+    impl.enable_mlapo = True
+    impl.fa_quant_layer = False
+    impl.fused_qkv_a_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=scheme_type()))
+    impl.q_proj = SimpleNamespace()
+    impl.kv_lora_rank = 4
+    impl.num_heads = 1
+    impl.qk_nope_head_dim = 2
+    impl.v_head_dim = 2
+    impl.kv_b_proj = SimpleNamespace(weight=torch.randn(4, 4), quant_method=UnquantizedLinearMethod())
+    with (
+        patch("vllm_ascend.attention.mla_v1.get_current_hardware_profile", return_value=profile),
+        patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight),
+        patch("vllm_ascend.attention.mla_v1.maybe_trans_nz", side_effect=lambda weight: weight),
+        patch.object(impl, "_process_weights_for_fused") as fused,
+    ):
+        impl.process_weights_after_loading(torch.bfloat16)
+    assert impl.enable_mlapo is expected_enabled
+    assert fused.call_count == int(expected_enabled)
 
 
 class TestAscendMLABackend(TestBase):
