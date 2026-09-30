@@ -169,6 +169,7 @@ def hadamard_transform_ref(
     x: torch.Tensor,
     hadamard: torch.Tensor,
     scale: float = 1.0,
+    use_custom_muls: bool = False,
 ):
     x_shape = x.shape
     dim = x.shape[-1]
@@ -178,13 +179,25 @@ def hadamard_transform_ref(
     if dim != dim_padded:
         x = F.pad(x, (0, dim_padded - dim))
     out = F.linear(x, hadamard)
-    out = out * scale
+    if use_custom_muls:
+        out = torch.ops._C_ascend.custom_muls(out, scale)
+    else:
+        out = out * scale
     return out[..., :dim].reshape(*x_shape)
 
 
-def rotate_activation(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tensor:
+def rotate_activation(
+    x: torch.Tensor,
+    hadamard: torch.Tensor,
+    use_custom_muls: bool = False,
+) -> torch.Tensor:
     hidden_size = x.size(-1)
-    return hadamard_transform_ref(x, hadamard=hadamard, scale=hidden_size**-0.5)
+    return hadamard_transform_ref(
+        x,
+        hadamard=hadamard,
+        scale=hidden_size**-0.5,
+        use_custom_muls=use_custom_muls,
+    )
 
 
 def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:
@@ -206,12 +219,21 @@ def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tens
     return out, x_shape, dim
 
 
-def hadamard_scale(out: torch.Tensor, x_shape: tuple[int, ...], dim: int, scale: float = 1.0) -> torch.Tensor:
+def hadamard_scale(
+    out: torch.Tensor,
+    x_shape: tuple[int, ...],
+    dim: int,
+    scale: float = 1.0,
+    use_custom_muls: bool = False,
+) -> torch.Tensor:
     """
     Part 2 of rotate_activation: Execute scale multiplication and reshape.
     This runs in main stream after aux_stream completes.
     """
-    out = out * scale
+    if use_custom_muls:
+        out = torch.ops._C_ascend.custom_muls(out, scale)
+    else:
+        out = out * scale
     return out[..., :dim].reshape(*x_shape)
 
 
@@ -2783,7 +2805,10 @@ class AscendDSAImpl(DSAAttentionImpl):
             if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
                 # Wait aux_stream weights_proj done
                 main_stream.wait_stream(aux_stream)
-                weights = weights_proj_output * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
+                weights = torch.ops._C_ascend.custom_muls(
+                    weights_proj_output,
+                    self.indexer_softmax_scale * self.indexer_heads**-0.5,
+                )
                 # lightning_indexer
                 indexer_scale_decode_metadata = _require_decode_metadata(indexer_kv_scale_metadata)
                 qli_metadata = indexer_scale_decode_metadata.qli_metadata
@@ -2938,7 +2963,11 @@ class AscendDSAImpl(DSAAttentionImpl):
             partial_slice=[self.indexcom_head_dim - self.rope_head_dim, self.indexcom_head_dim],
         )
 
-        q = rotate_activation(q, indexer_kv_scale_metadata.hadamard)
+        q = rotate_activation(
+            q,
+            indexer_kv_scale_metadata.hadamard,
+            use_custom_muls=not with_prefill,
+        )
         coff = 2 if self.compressor_overlap else 1
 
         if with_prefill:
@@ -2982,7 +3011,11 @@ class AscendDSAImpl(DSAAttentionImpl):
         if kv.numel() == 0:
             kv = None
         elif self.indexcom_rotate:
-            kv = rotate_activation(kv, indexer_kv_scale_metadata.hadamard)
+            kv = rotate_activation(
+                kv,
+                indexer_kv_scale_metadata.hadamard,
+                use_custom_muls=not with_prefill,
+            )
 
         return (
             q,
@@ -3104,7 +3137,12 @@ class AscendDSAImpl(DSAAttentionImpl):
             qr_pertoken_scale,
         )
 
-        weights = self.weights_proj(x) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
+        weights_proj_output = self.weights_proj(x)
+        scale = self.indexer_softmax_scale * self.indexer_heads**-0.5
+        if with_prefill:
+            weights = weights_proj_output * scale
+        else:
+            weights = torch.ops._C_ascend.custom_muls(weights_proj_output, scale)
 
         return self._indexer_qli_finish(
             q,
@@ -3201,7 +3239,11 @@ class AscendDSAImpl(DSAAttentionImpl):
         if kv.numel() == 0:
             kv = None
         elif self.indexcom_rotate:
-            kv = rotate_activation(kv, indexer_kv_scale_metadata.hadamard)
+            kv = rotate_activation(
+                kv,
+                indexer_kv_scale_metadata.hadamard,
+                use_custom_muls=not with_prefill,
+            )
 
         # ===== Part1: matmul[C] ∥ kv_quant[V] + scatter_k_cache[AIV] =====
         # Record event before main stream operations for aux_stream to wait
@@ -3267,6 +3309,12 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         # Main: q_hadamard[Part2 - scale] (after aux_stream completes)
         # Part2: scale * reshape - dot multiplication
-        q = hadamard_scale(q_linear, q_shape, q_dim, scale=hidden_size**-0.5)
+        q = hadamard_scale(
+            q_linear,
+            q_shape,
+            q_dim,
+            scale=hidden_size**-0.5,
+            use_custom_muls=not with_prefill,
+        )
 
         return q

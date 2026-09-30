@@ -1983,6 +1983,15 @@ std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_meta(
     return {y, scale};
 }
 
+at::Tensor custom_muls_meta(const at::Tensor& x, double scalar)
+{
+    TORCH_CHECK(x.scalar_type() == at::kBFloat16 || x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat,
+                "custom_muls: x must be bfloat16, float16 or float32");
+    TORCH_CHECK(x.dim() <= 8, "custom_muls: x rank must be <= 8, but got ", x.dim());
+    (void)scalar;
+    return at::empty_symint(x.sym_sizes(), x.options().device(c10::kMeta));
+}
+
 std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     const at::Tensor& x,
     double beta,
@@ -2056,6 +2065,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_recurrent_gated_delta_rule", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_meta);
     ops.impl("recurrent_kda", &vllm_ascend::meta::recurrent_kda_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
+    ops.impl("custom_muls", &vllm_ascend::meta::custom_muls_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
