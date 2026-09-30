@@ -11,7 +11,7 @@ extern "C" aclnnStatus aclnnAttnResFwdFusedGetWorkspaceSize(
     const aclTensor *prefix, const aclTensor *blocks, const aclTensor *proj,
     const aclTensor *norm, const aclTensor *addend, const aclTensor *outputNorm,
     double eps, int64_t validBlocks, int64_t blockTokenStride, int64_t blockWriteIdx,
-    double outputNormEps, bool saveMaterialized, bool mix, bool fuseAdd,
+    double outputNormEps, bool saveMaterialized, bool mix, bool fuseAdd, bool optimizePrefill,
     aclTensor *output, aclTensor *prefixOut, aclTensor *materialized,
     uint64_t *workspaceSize, aclOpExecutor **executorOut)
 {
@@ -39,7 +39,7 @@ extern "C" aclnnStatus aclnnAttnResFwdFusedGetWorkspaceSize(
         OP_INPUT(prefix, blocks, proj, norm, addend, outputNorm),
         OP_OUTPUT(output, prefixOut, materialized),
         OP_ATTR(static_cast<float>(eps), false, validBlocks, blockTokenStride,
-                blockWriteIdx, static_cast<float>(outputNormEps), saveMaterialized, mix, fuseAdd));
+                blockWriteIdx, static_cast<float>(outputNormEps), saveMaterialized, mix, fuseAdd, optimizePrefill));
     if (ret != ACLNN_SUCCESS) return ret;
     *workspaceSize = exec->GetWorkspaceSize();
     exec.ReleaseTo(executorOut);

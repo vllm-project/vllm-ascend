@@ -241,7 +241,7 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
     monkeypatch.setattr(
         torch.ops._C_ascend,
         "attn_res_fwd",
-        SimpleNamespace(fused=fake_fused, fused_prefill=fake_fused),
+        SimpleNamespace(fused=fake_fused),
         raising=False,
     )
 
@@ -306,7 +306,7 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
         "sp_all_gather",
         lambda hidden_states: torch.cat((hidden_states, hidden_states), dim=0),
     )
-    monkeypatch.setattr(kimi_k3, "_use_attn_res_prefill_kernel", lambda: False)
+    monkeypatch.setattr(kimi_k3, "_use_attn_res_prefill_cache", lambda: False)
 
     def fake_fused(prefix, addend, *_args, **_kwargs):
         raw = prefix if addend is None else prefix + addend
@@ -315,7 +315,7 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
     monkeypatch.setattr(
         torch.ops._C_ascend,
         "attn_res_fwd",
-        SimpleNamespace(fused=fake_fused, fused_prefill=fake_fused),
+        SimpleNamespace(fused=fake_fused),
         raising=False,
     )
 
@@ -347,7 +347,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
             del positions, hidden_states
             return prepared_attn_input[1] + 10, residual, None
 
-    monkeypatch.setattr(kimi_k3, "_use_attn_res_prefill_kernel", lambda: False)
+    monkeypatch.setattr(kimi_k3, "_use_attn_res_prefill_cache", lambda: False)
 
     def fake_fused(prefix, addend, *_args, **_kwargs):
         raw = prefix if addend is None else prefix + addend
@@ -356,7 +356,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
     monkeypatch.setattr(
         torch.ops._C_ascend,
         "attn_res_fwd",
-        SimpleNamespace(fused=fake_fused, fused_prefill=fake_fused),
+        SimpleNamespace(fused=fake_fused),
         raising=False,
     )
     monkeypatch.setattr(

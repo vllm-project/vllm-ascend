@@ -43,5 +43,13 @@ extern "C" __global__ __aicore__ void attn_res_fwd_fused(
         AttnResFwdResident<bfloat16_t, true> op(&pipe, &tilingData);
         op.Init(initParams);
         op.Process();
+    } else if (TILING_KEY_IS(TILING_KEY_BF16_PREFILL_RELOAD)) {
+        AttnResFwdReload<bfloat16_t, true, true> op(&pipe, &tilingData);
+        op.Init(initParams);
+        op.Process();
+    } else if (TILING_KEY_IS(TILING_KEY_BF16_PREFILL_RESIDENT)) {
+        AttnResFwdResident<bfloat16_t, true, true> op(&pipe, &tilingData);
+        op.Init(initParams);
+        op.Process();
     }
 }

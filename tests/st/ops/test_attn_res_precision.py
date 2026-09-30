@@ -23,7 +23,7 @@ def require_a5():
     torch.set_num_threads(previous_threads)
 
 
-def check_case(entry, tokens, hidden, blocks, seed):
+def check_case(optimize_prefill, tokens, hidden, blocks, seed):
     generator = torch.Generator().manual_seed(seed)
 
     def rand(*shape):
@@ -50,8 +50,9 @@ def check_case(entry, tokens, hidden, blocks, seed):
         expected = (value * torch.rsqrt(value.square().mean(-1, keepdim=True) + 1e-5) * output_norm.float()).bfloat16()
 
     p, a, b, w, g, og = [None if x is None else x.npu() for x in (prefix, addend, bank, proj, norm, output_norm)]
-    fn = torch.ops._C_ascend.attn_res_fwd.fused if entry == "fused" else torch.ops._C_ascend.attn_res_fwd.fused_prefill
-    outputs = fn(p, a, b, w, g, 1e-5, blocks, og, 1e-5, -1, True, True)
+    outputs = torch.ops._C_ascend.attn_res_fwd.fused(
+        p, a, b, w, g, 1e-5, blocks, og, 1e-5, -1, True, True, optimize_prefill
+    )
     torch.npu.synchronize()
     pairs = [(outputs[0], expected), (outputs[2], materialized)]
     for actual, golden in pairs:
@@ -60,13 +61,13 @@ def check_case(entry, tokens, hidden, blocks, seed):
         error = (actual - golden).abs()
         assert torch.isfinite(actual).all()
         assert (error <= (1 + golden.abs()) / 64).float().mean() >= 0.99
-        assert error.max() <= 1, (entry, tokens, hidden, blocks, seed, error.max().item())
+        assert error.max() <= 1, (optimize_prefill, tokens, hidden, blocks, seed, error.max().item())
     assert torch.equal(outputs[1].cpu(), raw)
 
 
-@pytest.mark.parametrize("entry", ["fused", "prefill"])
+@pytest.mark.parametrize("optimize_prefill", [False, True])
 @pytest.mark.parametrize("hidden", [4096, 7168])
 @pytest.mark.parametrize("tokens", [1, 16, 128])
 @pytest.mark.parametrize("blocks", [1, 4, 8])
-def test_large_values_shapes(entry, hidden, tokens, blocks):
-    check_case(entry, tokens, hidden, blocks, 27177)
+def test_large_values_shapes(optimize_prefill, hidden, tokens, blocks):
+    check_case(optimize_prefill, tokens, hidden, blocks, 27177)
