@@ -497,7 +497,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         self.lim_indexer_owner = self
         self._copy_sfa_metadata: AscendSFAOffloadMetadata | None = None
         if self.use_fused_copy_sfa:
-            if self.enable_sparse_li_c8:
+            if self.has_indexer and self.indexer.enable_sparse_li_c8:
                 raise NotImplementedError("Fused Copy-SFA offload does not support sparse LI C8 serving yet")
             self.copy_sfa_hot_tokens = offload_cfg.topk_buffer_size
             requests = self.vllm_config.scheduler_config.max_num_seqs + 2

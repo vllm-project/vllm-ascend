@@ -9,6 +9,8 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  # Initial scheduling estimate for the TP2 Prefill + TP2 Copy-SFA Decode smoke.
+  tests/e2e/pull_request/four_card/test_copy_sfa_pd_offload.py: 600
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
   tests/e2e/pull_request/four_card/test_kvpp_pd.py: 230
   tests/e2e/pull_request/two_card/test_kvpp.py: 290

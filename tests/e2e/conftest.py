@@ -632,6 +632,7 @@ class DisaggPDProxy(RemotePDServer):
         host: str = "127.0.0.1",
         env_dict: dict[str, str] | None = None,
         max_wait_seconds: float | None = 600,
+        proxy_script: Path | None = None,
     ) -> None:
         self.env_dict: dict[str, str] = {}
         if env_dict is not None:
@@ -655,7 +656,7 @@ class DisaggPDProxy(RemotePDServer):
         ]
 
         print(f"proxy param is: {self.proxy_args}")
-        proxy_cmd = [sys.executable, str(DISAGG_PD_PROXY_SCRIPT), *self.proxy_args]
+        proxy_cmd = [sys.executable, str(proxy_script or DISAGG_PD_PROXY_SCRIPT), *self.proxy_args]
         proc = self._start_server_with_prefix(proxy_cmd, self.env_dict, "[PD_PROXY] ")
         self._proc_list.append(proc)
 
