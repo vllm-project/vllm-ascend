@@ -742,6 +742,49 @@ def test_compressed_metadata_exposes_original_and_cache_coordinates(config, runt
     assert metadata.num_decode_tokens == 2
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "model.layers.2.self_attn.long_kv_cache",
+        "model.layers.2.self_attn.indexer.k_cache",
+        "model.layers.20.self_attn.long_kv_cache",
+        "model.layers.20.self_attn.indexer.k_cache",
+    ],
+)
+def test_full_graph_capture_keeps_empty_compressed_descriptor_nonzero(runtime, name):
+    """FULL capture must include QLI even when the dummy cache is empty.
+
+    The descriptor passed to native metadata is the maximum compressed cache
+    length, while ``cache_seq_lens`` remains the exact per-request length.
+    This covers both C2 and C1 layers and the zero-cache dummy decode used by
+    FULL_DECODE_ONLY capture.
+    """
+    spec = collect_specs(runtime)[name]
+    assert spec.tokens_per_state in (1, 2)
+    builder = AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
+    common = SimpleNamespace(
+        slot_mapping=torch.tensor([-1]),
+        block_table_tensor=torch.tensor([[0]]),
+        query_start_loc=torch.tensor([0, 1]),
+        query_start_loc_cpu=torch.tensor([0, 1]),
+        seq_lens=torch.tensor([0]),
+        seq_lens_cpu=torch.tensor([0]),
+        positions=torch.tensor([0]),
+        num_reqs=1,
+        num_actual_tokens=1,
+        num_input_tokens=1,
+        max_query_len=1,
+        max_seq_len=0,
+        is_prefilling=torch.tensor([False]),
+    )
+
+    metadata = builder.build(0, common, full_graph_mode=True)
+
+    assert metadata.max_cache_seq_len == 1
+    assert metadata.cache_seq_lens.tolist() == [0]
+    assert metadata.seq_lens.tolist() == [0]
+
+
 @pytest.mark.parametrize("deferred", [False, True])
 @pytest.mark.parametrize("query_len", [1, 3])
 def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monkeypatch, deferred, query_len):
