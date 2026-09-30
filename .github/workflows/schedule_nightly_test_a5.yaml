@@ -34,7 +34,7 @@ on:
         default: 'main'
         type: string
       test_cases:
-        description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
+        description: 'Test cases to run (comma-separated, e.g., "Qwen3_32b_w8a8_A5,DeepSeek_V4_Flash_A5" or "all" for all tests)'
         required: false
         default: 'all'
         type: string
