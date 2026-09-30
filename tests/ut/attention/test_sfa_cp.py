@@ -22,6 +22,7 @@ from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFAPCPDCPImpl,
     AscendSFAPCPDCPMetadataBuilder,
     AscendSFAPCPImpl,
+    _get_sfa_indexer_output_width,
     resolve_sfa_impl,
     resolve_sfa_metadata_builder,
 )
@@ -657,6 +658,21 @@ def test_sfa_cp_query_gather_axis_follows_composed_layout() -> None:
     combined_impl = AscendSFADSADCPImpl.__new__(AscendSFADSADCPImpl)
     assert dcp_impl._parallel_query_gather_dim() == 1
     assert combined_impl._parallel_query_gather_dim() == 0
+
+
+@pytest.mark.parametrize(("index_kpool", "expected"), [(None, 2048), (1, 2048), (4, 2051)])
+def test_sfa_dcp_indexer_width_includes_kpool_tail(index_kpool, expected) -> None:
+    hf_text_config = SimpleNamespace(index_topk=2048)
+    if index_kpool is not None:
+        hf_text_config.index_kpool = index_kpool
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=hf_text_config,
+            hf_config=hf_text_config,
+        )
+    )
+
+    assert _get_sfa_indexer_output_width(config) == expected
 
 
 @pytest.mark.parametrize("sfa_c8", [False, True])

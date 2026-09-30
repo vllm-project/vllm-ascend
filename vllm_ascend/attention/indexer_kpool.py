@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -20,8 +21,16 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
+    build_sfa_dcp_replicated_block_table,
+    build_sfa_dcp_replicated_slot_mapping,
+    get_sfa_dcp_local_block_table,
+    get_sfa_dcp_max_local_block_table_cols,
+    get_sfa_pcp_global_metadata,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
+    AscendKPoolIndexerCacheSpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
@@ -48,10 +57,37 @@ class AscendIndexerKPoolMetadata:
     cum_query_lens: torch.Tensor | None = None
     raw_seq_lens: torch.Tensor | None = None
     num_actual_tokens: int = 0
+    write_slot_mapping: torch.Tensor | None = None
+    write_positions: torch.Tensor | None = None
+    write_cum_query_lens: torch.Tensor | None = None
+    write_raw_seq_lens: torch.Tensor | None = None
+    pcp_hidden_restore_indices: torch.Tensor | None = None
+    pcp_local_token_count: int = 0
+
+
+@dataclass
+class _AscendIndexerKPoolBuffers:
+    """Persistent per-step tensors referenced by captured ACL graphs."""
+
+    slot_mapping: torch.Tensor
+    seq_lens: torch.Tensor
+    cum_query_lens: torch.Tensor
+    raw_seq_lens: torch.Tensor
+    positions: torch.Tensor
+    write_slot_mapping: torch.Tensor
+    write_cum_query_lens: torch.Tensor
+    write_raw_seq_lens: torch.Tensor
+    write_positions: torch.Tensor
+    select_dcp_block_table: torch.Tensor | None
+    write_dcp_block_table: torch.Tensor | None
+    select_dcp_token_slots: torch.Tensor | None
+    write_dcp_token_slots: torch.Tensor | None
 
 
 class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
     """Build pool-level addressing for the compressed indexer cache."""
+
+    consumes_pcp_context = True
 
     @classmethod
     def get_cudagraph_support(
@@ -71,9 +107,10 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         vllm_config: VllmConfig,
         device: torch.device,
     ) -> None:
-        if not isinstance(kv_cache_spec, MLAAttentionSpec):
+        if not isinstance(kv_cache_spec, AscendKPoolIndexerCacheSpec):
             raise TypeError(
-                f"Ascend Indexer KPool backend requires MLAAttentionSpec, got {type(kv_cache_spec).__name__}."
+                "Ascend Indexer KPool backend requires "
+                f"AscendKPoolIndexerCacheSpec, got {type(kv_cache_spec).__name__}."
             )
         compress_ratio = get_kv_cache_compression_ratio(kv_cache_spec)
         if compress_ratio <= 1:
@@ -86,6 +123,16 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         if self.storage_block_size <= 0:
             raise ValueError(f"Indexer KPool storage block size must be positive, got {self.storage_block_size}.")
         self.compress_ratio = compress_ratio
+        parallel_config = vllm_config.parallel_config
+        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        self.pcp_size = parallel_config.prefill_context_parallel_size
+        self.dcp_size = kv_cache_spec.dcp_replication_size
+        if self.dcp_size != parallel_config.decode_context_parallel_size:
+            raise ValueError(
+                "KPool cache replication must match decode context parallelism: "
+                f"cache={self.dcp_size}, dcp={parallel_config.decode_context_parallel_size}."
+            )
+        self.use_dcp = self.dcp_size > 1
         if self.logical_block_size % GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE:
             raise ValueError(
                 "GLM-Next logical block size must be divisible by the SFA "
@@ -104,49 +151,125 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             self._max_num_seqs,
             self._max_num_batched_tokens,
         )
+        self._max_num_write_tokens = self._max_num_batched_tokens * self.pcp_size
         # Each MTP draft step owns a persistent common slot-mapping tensor. Key
         # derived buffers by that address so capture and runtime rebuilds bind
         # the same storage without different draft steps overwriting each other.
-        self._metadata_buffers: dict[
-            int,
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        ] = {}
+        self._metadata_buffers: dict[int, _AscendIndexerKPoolBuffers] = {}
+        if self.use_dcp:
+            self.max_local_block_table_cols = get_sfa_dcp_max_local_block_table_cols(
+                vllm_config.model_config.max_model_len,
+                self.logical_block_size,
+                self.dcp_size,
+                1,
+            )
+            max_replicated_cols = self.max_local_block_table_cols * self.dcp_size
+            self._replicated_col_idx = torch.arange(
+                max_replicated_cols,
+                dtype=torch.int32,
+                device=device,
+            )
 
-    def _get_metadata_buffers(
-        self, common_attn_metadata: CommonAttentionMetadata
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _get_metadata_buffers(self, common_attn_metadata: CommonAttentionMetadata) -> _AscendIndexerKPoolBuffers:
         key = common_attn_metadata.slot_mapping.data_ptr()
         buffers = self._metadata_buffers.get(key)
         if buffers is None:
-            buffers = (
-                torch.empty(
-                    self._max_num_batched_tokens,
-                    dtype=torch.int64,
-                    device=self.device,
-                ),
-                torch.empty(
-                    self._max_num_metadata_reqs,
+
+            def empty_tokens(capacity: int, dtype: torch.dtype) -> torch.Tensor:
+                return torch.empty(capacity, dtype=dtype, device=self.device)
+
+            def empty_block_table() -> torch.Tensor | None:
+                if not self.use_dcp:
+                    return None
+                return torch.empty(
+                    (self._max_num_metadata_reqs, self.max_local_block_table_cols * self.dcp_size),
                     dtype=torch.int32,
                     device=self.device,
+                )
+
+            buffers = _AscendIndexerKPoolBuffers(
+                slot_mapping=empty_tokens(self._max_num_batched_tokens, torch.int64),
+                seq_lens=empty_tokens(self._max_num_metadata_reqs, torch.int32),
+                cum_query_lens=empty_tokens(self._max_num_metadata_reqs, torch.int32),
+                raw_seq_lens=empty_tokens(self._max_num_metadata_reqs, torch.int32),
+                positions=empty_tokens(self._max_num_batched_tokens, torch.int64),
+                write_slot_mapping=empty_tokens(self._max_num_write_tokens, torch.int64),
+                write_cum_query_lens=empty_tokens(self._max_num_metadata_reqs, torch.int32),
+                write_raw_seq_lens=empty_tokens(self._max_num_metadata_reqs, torch.int32),
+                write_positions=empty_tokens(self._max_num_write_tokens, torch.int64),
+                select_dcp_block_table=empty_block_table(),
+                write_dcp_block_table=empty_block_table(),
+                select_dcp_token_slots=(
+                    empty_tokens(self._max_num_batched_tokens, torch.int32) if self.use_dcp else None
                 ),
-                torch.empty(
-                    self._max_num_metadata_reqs,
-                    dtype=torch.int32,
-                    device=self.device,
-                ),
-                torch.empty(
-                    self._max_num_metadata_reqs,
-                    dtype=torch.int32,
-                    device=self.device,
-                ),
-                torch.empty(
-                    self._max_num_batched_tokens,
-                    dtype=torch.int64,
-                    device=self.device,
-                ),
+                write_dcp_token_slots=(empty_tokens(self._max_num_write_tokens, torch.int32) if self.use_dcp else None),
             )
             self._metadata_buffers[key] = buffers
         return buffers
+
+    def _build_cache_view(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        buffers: _AscendIndexerKPoolBuffers,
+        *,
+        write: bool,
+        token_slots_override: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_reqs = common_attn_metadata.num_reqs
+        num_tokens = common_attn_metadata.num_input_tokens
+        token_capacity = buffers.write_slot_mapping.shape[0] if write else buffers.slot_mapping.shape[0]
+        if num_tokens > token_capacity:
+            raise RuntimeError(
+                f"KPool {'write' if write else 'select'} metadata needs {num_tokens} "
+                f"token slots, but its persistent buffer holds {token_capacity}."
+            )
+        if self.use_dcp:
+            local_table = get_sfa_dcp_local_block_table(
+                common_attn_metadata.block_table_tensor,
+                num_reqs,
+                self.max_local_block_table_cols,
+            )
+            replicated_cols = local_table.shape[1] * self.dcp_size
+            table_buffer = buffers.write_dcp_block_table if write else buffers.select_dcp_block_table
+            token_slot_buffer = buffers.write_dcp_token_slots if write else buffers.select_dcp_token_slots
+            assert table_buffer is not None and token_slot_buffer is not None
+            if table_buffer.shape[0] < num_reqs or table_buffer.shape[1] < replicated_cols:
+                raise RuntimeError("KPool replicated block-table buffer is too small.")
+            block_table = build_sfa_dcp_replicated_block_table(
+                local_table,
+                common_attn_metadata.seq_lens,
+                table_buffer[:num_reqs, :replicated_cols],
+                self._replicated_col_idx[:replicated_cols],
+                self.dcp_size,
+                1,
+            )
+            token_slots = token_slot_buffer[:num_tokens]
+            build_sfa_dcp_replicated_slot_mapping(
+                common_attn_metadata,
+                block_table,
+                token_slots,
+                self.logical_block_size,
+                self.device,
+            )
+        else:
+            block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+            token_slots = (
+                common_attn_metadata.slot_mapping[:num_tokens]
+                if token_slots_override is None
+                else token_slots_override[:num_tokens]
+            )
+
+        compressed_slot_buffer = buffers.write_slot_mapping if write else buffers.slot_mapping
+        compressed_slots = compressed_slot_buffer[:num_tokens]
+        compressed_slots.copy_(
+            format_indexer_kpool_slot_mapping(
+                token_slots,
+                common_attn_metadata.positions[:num_tokens].long(),
+                self.logical_block_size,
+                self.compress_ratio,
+            )
+        )
+        return block_table, compressed_slots
 
     def build(
         self,
@@ -155,33 +278,27 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         fast_build: bool = False,
         **kwargs,
     ) -> AscendIndexerKPoolMetadata:
-        del common_prefix_len, fast_build, kwargs
+        del common_prefix_len, fast_build
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
-        slot_buffer, seq_buffer, cum_buffer, raw_seq_buffer, positions_buffer = self._get_metadata_buffers(
-            common_attn_metadata
-        )
-        positions = positions_buffer[:num_input_tokens]
+        buffers = self._get_metadata_buffers(common_attn_metadata)
+        positions = buffers.positions[:num_input_tokens]
         positions.copy_(common_attn_metadata.positions[:num_input_tokens])
-        slot_mapping = slot_buffer[:num_input_tokens]
-        slot_mapping.copy_(
-            format_indexer_kpool_slot_mapping(
-                common_attn_metadata.slot_mapping[:num_input_tokens],
-                positions,
-                self.logical_block_size,
-                self.compress_ratio,
-            )
+        block_table, slot_mapping = self._build_cache_view(
+            common_attn_metadata,
+            buffers,
+            write=False,
         )
-        seq_lens = seq_buffer[:num_reqs]
+        seq_lens = buffers.seq_lens[:num_reqs]
         torch.div(
             common_attn_metadata.seq_lens[:num_reqs],
             self.compress_ratio,
             rounding_mode="floor",
             out=seq_lens,
         )
-        cum_query_lens = cum_buffer[:num_reqs]
+        cum_query_lens = buffers.cum_query_lens[:num_reqs]
         cum_query_lens.copy_(common_attn_metadata.query_start_loc[: num_reqs + 1][1:])
-        raw_seq_lens = raw_seq_buffer[:num_reqs]
+        raw_seq_lens = buffers.raw_seq_lens[:num_reqs]
         raw_seq_lens.copy_(common_attn_metadata.seq_lens[:num_reqs])
         if common_attn_metadata._seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
@@ -191,7 +308,41 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             seq_lens_cpu = None
         if seq_lens_cpu is not None:
             seq_lens_cpu = torch.div(seq_lens_cpu, self.compress_ratio, rounding_mode="floor")
-        block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        write_slot_mapping = slot_mapping
+        write_positions = positions
+        write_cum_query_lens = cum_query_lens
+        write_raw_seq_lens = raw_seq_lens
+        pcp_hidden_restore_indices = None
+        pcp_local_token_count = 0
+        pcp_context = kwargs.get("pcp_context")
+        if self.use_pcp and pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any()):
+            pcp_cache_group_idx = kwargs.get("pcp_cache_group_idx")
+            if pcp_cache_group_idx is None:
+                raise RuntimeError("KPool PCP metadata requires the PCP cache-group index.")
+            global_metadata = get_sfa_pcp_global_metadata(
+                common_attn_metadata,
+                pcp_context,
+                pcp_cache_group_idx,
+            )
+            global_num_reqs = global_metadata.num_reqs
+            global_num_tokens = global_metadata.num_input_tokens
+            global_token_slots = pcp_context.global_slot_mappings[pcp_cache_group_idx, :global_num_tokens]
+            _, write_slot_mapping = self._build_cache_view(
+                global_metadata,
+                buffers,
+                write=True,
+                token_slots_override=global_token_slots,
+            )
+            write_positions = buffers.write_positions[:global_num_tokens]
+            write_positions.copy_(global_metadata.positions[:global_num_tokens])
+            write_cum_query_lens = buffers.write_cum_query_lens[:global_num_reqs]
+            write_cum_query_lens.copy_(global_metadata.query_start_loc[1 : global_num_reqs + 1])
+            write_raw_seq_lens = buffers.write_raw_seq_lens[:global_num_reqs]
+            write_raw_seq_lens.copy_(global_metadata.seq_lens[:global_num_reqs])
+            pcp_hidden_restore_indices = pcp_context.hidden_restore_idx[:global_num_tokens]
+            if pcp_context.padded_gather_idx is None:
+                raise RuntimeError("KPool PCP prefill requires the gathered-token layout.")
+            pcp_local_token_count = pcp_context.padded_gather_idx.numel() // self.pcp_size
         return AscendIndexerKPoolMetadata(
             block_table=block_table,
             slot_mapping=slot_mapping,
@@ -203,6 +354,12 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             cum_query_lens=cum_query_lens,
             raw_seq_lens=raw_seq_lens,
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
+            write_slot_mapping=write_slot_mapping,
+            write_positions=write_positions,
+            write_cum_query_lens=write_cum_query_lens,
+            write_raw_seq_lens=write_raw_seq_lens,
+            pcp_hidden_restore_indices=pcp_hidden_restore_indices,
+            pcp_local_token_count=pcp_local_token_count,
         )
 
     def build_for_graph_capture(
@@ -234,6 +391,10 @@ class AscendIndexerKPoolBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_INDEXER_KPOOL"
+
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -267,10 +428,14 @@ class AscendIndexerKPoolTailMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
     block_size: int
+    write_block_table: torch.Tensor | None = None
+    write_slot_mapping: torch.Tensor | None = None
 
 
 class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
     """Build independent metadata for the GLM-Next compressor tail."""
+
+    consumes_pcp_context = True
 
     @classmethod
     def get_cudagraph_support(
@@ -305,13 +470,28 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
         fast_build: bool = False,
         **kwargs,
     ) -> AscendIndexerKPoolTailMetadata:
-        del common_prefix_len, fast_build, kwargs
+        del common_prefix_len, fast_build
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
+        block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
+        write_block_table = block_table
+        write_slot_mapping = slot_mapping
+        pcp_context = kwargs.get("pcp_context")
+        if pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any()):
+            pcp_cache_group_idx = kwargs.get("pcp_cache_group_idx")
+            if pcp_cache_group_idx is None:
+                raise RuntimeError("KPool tail PCP metadata requires the PCP cache-group index.")
+            global_num_reqs = pcp_context.global_batch.num_reqs
+            global_num_tokens = pcp_context.global_batch.num_tokens
+            write_block_table = pcp_context.global_block_tables[pcp_cache_group_idx][:global_num_reqs]
+            write_slot_mapping = pcp_context.global_slot_mappings[pcp_cache_group_idx, :global_num_tokens]
         return AscendIndexerKPoolTailMetadata(
-            block_table=common_attn_metadata.block_table_tensor[:num_reqs],
-            slot_mapping=common_attn_metadata.slot_mapping[:num_input_tokens],
+            block_table=block_table,
+            slot_mapping=slot_mapping,
             block_size=self.block_size,
+            write_block_table=write_block_table,
+            write_slot_mapping=write_slot_mapping,
         )
 
     def build_for_graph_capture(
@@ -343,6 +523,10 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_INDEXER_KPOOL_TAIL"
+
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -382,8 +566,6 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 f"GLM-Next KPool indexing supports NoPE queries only, got qk_rope_head_dim={qk_rope_head_dim}."
             )
         parallel_config = vllm_indexer.vllm_config.parallel_config
-        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
-            raise NotImplementedError("GLM-Next KPool indexing does not support PCP or DCP.")
 
         if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
             raise NotImplementedError("KPool sparse attention requires Ascend A2, A3 or A5.")
@@ -402,6 +584,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         self.k_cache: Any = vllm_indexer.k_cache
         self.tail_cache: Any = vllm_indexer.tail_cache
         self.topk_indices_buffer: torch.Tensor | None = vllm_indexer.topk_indices_buffer
+        self._pcp_active = parallel_config.prefill_context_parallel_size > 1
         # Load KPool operators only when constructing the model-side backend;
         # cache metadata is also imported during engine initialization.
         from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import SparseAttnIndexerKpool
@@ -467,8 +650,15 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         num_tokens = hidden_states.shape[0]
         if context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
             num_tokens = min(num_tokens, indexer_metadata.num_actual_tokens)
-        hidden = hidden_states[:num_tokens]
-        k_hidden = k_hidden_states[:num_tokens]
+        projection_num_tokens = max(num_tokens, indexer_metadata.pcp_local_token_count)
+        if projection_num_tokens > hidden_states.shape[0] or projection_num_tokens > k_hidden_states.shape[0]:
+            raise RuntimeError(
+                "KPool PCP projection exceeds the local token buffer: "
+                f"required={projection_num_tokens}, hidden={hidden_states.shape[0]}, "
+                f"k_hidden={k_hidden_states.shape[0]}."
+            )
+        hidden = hidden_states[:projection_num_tokens]
+        k_hidden = k_hidden_states[:projection_num_tokens]
         if self._wk_weight_f32 is None:
             self.process_weights_after_loading()
         assert self._wk_weight_f32 is not None
@@ -490,17 +680,29 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 raise TypeError("GLM KPool backend requires an unquantized q_c tensor.")
             q_values = self.wq_b(q_c[:num_tokens])[0].view(num_tokens, self.n_head, self.head_dim)
             weights = (
-                projected[:, self.head_dim :]
+                projected[:num_tokens, self.head_dim :]
                 if k_hidden_states is hidden_states
                 else F.linear(hidden_f32, self._wk_weight_f32[self.head_dim :])
-            ).to(q_values.dtype)
+            )[:num_tokens].to(q_values.dtype)
             weights = weights * (self.softmax_scale * self.n_head**-0.5)
+
+        write_k = k
+        write_gate_score = gate_score
+        if indexer_metadata.pcp_hidden_restore_indices is not None:
+            if not self._pcp_active:
+                raise RuntimeError("KPool metadata requested a PCP gather while PCP is disabled.")
+            local_count = indexer_metadata.pcp_local_token_count
+            gathered_k = get_pcp_group().all_gather(k[:local_count].contiguous(), dim=0)
+            gathered_gate = get_pcp_group().all_gather(gate_score[:local_count].contiguous(), dim=0)
+            restore = indexer_metadata.pcp_hidden_restore_indices
+            write_k = torch.index_select(gathered_k, 0, restore)
+            write_gate_score = torch.index_select(gathered_gate, 0, restore)
 
         indexer_cache = self._bound_cache(self.k_cache)
         tail_cache = self._bound_cache(self.tail_cache)
         positions = indexer_metadata.positions[:num_tokens]
         result = self.indexer_op(
-            k,
+            k[:num_tokens],
             q_values,
             weights,
             positions,
@@ -508,7 +710,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             tail_cache,
             indexer_metadata,
             tail_metadata,
-            gate_score=gate_score,
+            gate_score=gate_score[:num_tokens],
             compress_ape=self.index_kpool_compress_ape,
             index_kpool=self.index_kpool,
             max_pool_seq_len=(
@@ -519,6 +721,14 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 else 0
             ),
             compute_topk=compute_topk,
+            write_k=write_k,
+            write_gate_score=write_gate_score,
+            write_positions=indexer_metadata.write_positions,
+            write_cum_query_lens=indexer_metadata.write_cum_query_lens,
+            write_raw_seq_lens=indexer_metadata.write_raw_seq_lens,
+            write_indexer_slot_mapping=indexer_metadata.write_slot_mapping,
+            write_tail_slot_mapping=tail_metadata.write_slot_mapping,
+            write_tail_block_table=tail_metadata.write_block_table,
         )
         if result is None or self.topk_indices_buffer is None:
             return result

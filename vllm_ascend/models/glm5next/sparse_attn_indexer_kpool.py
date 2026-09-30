@@ -79,21 +79,48 @@ class SparseAttnIndexerKpool(nn.Module):
         index_kpool: int,
         max_pool_seq_len: int,
         compute_topk: bool,
+        write_k: torch.Tensor | None = None,
+        write_gate_score: torch.Tensor | None = None,
+        write_positions: torch.Tensor | None = None,
+        write_cum_query_lens: torch.Tensor | None = None,
+        write_raw_seq_lens: torch.Tensor | None = None,
+        write_indexer_slot_mapping: torch.Tensor | None = None,
+        write_tail_slot_mapping: torch.Tensor | None = None,
+        write_tail_block_table: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         num_tokens = k.shape[0]
         if index_kpool <= 0 or self.topk_tokens % index_kpool:
             raise ValueError("KPool top-k must be divisible by its positive pool size.")
-        if num_tokens == 0:
+        if indexer_metadata.cum_query_lens is None or indexer_metadata.raw_seq_lens is None:
+            raise ValueError("GLM KPool metadata requires cum_query_lens and raw_seq_lens.")
+        if indexer_cache.dtype != torch.bfloat16:
+            raise TypeError("GLM KPool compressed cache must be bfloat16.")
+        write_k = k if write_k is None else write_k
+        write_gate_score = gate_score if write_gate_score is None else write_gate_score
+        write_positions = positions if write_positions is None else write_positions
+        write_cum_query_lens = indexer_metadata.cum_query_lens if write_cum_query_lens is None else write_cum_query_lens
+        write_raw_seq_lens = indexer_metadata.raw_seq_lens if write_raw_seq_lens is None else write_raw_seq_lens
+        write_indexer_slot_mapping = (
+            indexer_metadata.slot_mapping if write_indexer_slot_mapping is None else write_indexer_slot_mapping
+        )
+        write_tail_slot_mapping = (
+            tail_metadata.slot_mapping if write_tail_slot_mapping is None else write_tail_slot_mapping
+        )
+        write_tail_block_table = tail_metadata.block_table if write_tail_block_table is None else write_tail_block_table
+        assert write_cum_query_lens is not None and write_raw_seq_lens is not None
+        if write_k.shape[0] == 0:
             return (
                 None
                 if not compute_topk
                 else torch.empty((0, 1, self.topk_tokens + index_kpool - 1), dtype=torch.int32, device=k.device)
             )
-        if indexer_metadata.cum_query_lens is None or indexer_metadata.raw_seq_lens is None:
-            raise ValueError("GLM KPool metadata requires cum_query_lens and raw_seq_lens.")
-        if indexer_cache.dtype != torch.bfloat16:
-            raise TypeError("GLM KPool compressed cache must be bfloat16.")
-        if tail_cache.dtype != torch.float32 or k.dtype != torch.float32 or gate_score.dtype != torch.float32:
+        if (
+            tail_cache.dtype != torch.float32
+            or k.dtype != torch.float32
+            or gate_score.dtype != torch.float32
+            or write_k.dtype != torch.float32
+            or write_gate_score.dtype != torch.float32
+        ):
             raise TypeError("GLM KPool keys, gates and compressor tail must be float32.")
         if (
             tail_cache.ndim != 4
@@ -101,6 +128,7 @@ class SparseAttnIndexerKpool(nn.Module):
             or tail_cache.shape[2] < index_kpool
             or tail_cache.shape[3] != self.head_dim
             or gate_score.shape != k.shape
+            or write_gate_score.shape != write_k.shape
         ):
             raise ValueError("GLM KPool tail requires [blocks, 2, capacity, head_dim] K/gate storage.")
         if tail_metadata.block_size != tail_cache.shape[2]:
@@ -111,17 +139,23 @@ class SparseAttnIndexerKpool(nn.Module):
         glm5_next_kpool_tail_compress_and_write_cache_triton(
             tail_cache,
             indexer_cache,
-            k,
-            gate_score,
+            write_k,
+            write_gate_score,
             compress_ape,
-            positions,
-            indexer_metadata.cum_query_lens,
-            indexer_metadata.raw_seq_lens,
-            tail_metadata.slot_mapping[:num_tokens],
-            tail_metadata.block_table,
-            indexer_metadata.slot_mapping[:num_tokens],
+            write_positions,
+            write_cum_query_lens,
+            write_raw_seq_lens,
+            write_tail_slot_mapping[: write_k.shape[0]],
+            write_tail_block_table,
+            write_indexer_slot_mapping[: write_k.shape[0]],
             index_kpool,
         )
+        if num_tokens == 0:
+            return (
+                None
+                if not compute_topk
+                else torch.empty((0, 1, self.topk_tokens + index_kpool - 1), dtype=torch.int32, device=k.device)
+            )
         # Sharing top-k still advances the compressed cache and raw tail.
         if not compute_topk:
             return None

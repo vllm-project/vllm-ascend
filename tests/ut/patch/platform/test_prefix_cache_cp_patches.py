@@ -1238,8 +1238,8 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     assert manager.block_size == mamba_spec.block_size
 
 
-def test_ascend_mamba_cache_lookup_ignores_dcp_sharding() -> None:
-    """Mamba states are replicated, unlike DCP-sharded attention KV cache."""
+def test_ascend_mamba_cache_lookup_ignores_context_parallel_sharding() -> None:
+    """Mamba states are replicated, unlike CP-sharded attention KV cache."""
     mamba_spec = MambaSpec(
         block_size=16,
         shapes=((1,),),
@@ -1264,11 +1264,12 @@ def test_ascend_mamba_cache_lookup_ignores_dcp_sharding() -> None:
             kv_cache_spec=mamba_spec,
             alignment_tokens=16,
             dcp_world_size=8,
-            pcp_world_size=1,
+            pcp_world_size=2,
             drop_eagle_block=False,
         )
 
     assert find_cache_hit.call_args.kwargs["dcp_world_size"] == 1
+    assert find_cache_hit.call_args.kwargs["pcp_world_size"] == 1
 
 
 def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:

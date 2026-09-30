@@ -35,9 +35,9 @@ class AscendMambaManager(MambaManager):
         pcp_world_size: int = 1,
         drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
-        # Mamba recurrent states are replicated across DCP ranks (see
-        # __init__), so their prefix-cache lookup keeps the ordinary logical
-        # block layout. Only attention groups shard their KV cache for DCP.
+        # Mamba state keeps its TP shard on each rank; CP does not partition
+        # its logical blocks. PCP ranks with the same TP shard replay the full
+        # sequence, so cache lookup uses the ordinary logical block layout.
         return super().find_longest_cache_hit(
             block_hashes=block_hashes,
             max_length=max_length,
@@ -46,7 +46,7 @@ class AscendMambaManager(MambaManager):
             kv_cache_spec=kv_cache_spec,
             alignment_tokens=alignment_tokens,
             dcp_world_size=1,
-            pcp_world_size=pcp_world_size,
+            pcp_world_size=1,
             drop_eagle_block=drop_eagle_block,
         )
 

@@ -47,8 +47,10 @@ from vllm_ascend.utils import (
     FP8_METHOD,
     bootstrap_custom_op_env,
     check_kv_extra_config,
+    enable_kpool_dcp_replicated_indexer,
     enable_sfa_dcp_replicated_indexer,
     is_moe_model,
+    model_uses_kpool_indexer,
     model_uses_sfa_sparse,
     refresh_block_size,
     update_cudagraph_capture_sizes,
@@ -1369,7 +1371,7 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
     model_config = vllm_config.model_config
 
     dcp_enabled = parallel_config.decode_context_parallel_size > 1
-    use_sparse = model_uses_sfa_sparse(model_config)
+    use_sparse = model_uses_sfa_sparse(model_config) or model_uses_kpool_indexer(model_config)
     if (
         vllm_config.kv_transfer_config is not None
         and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
@@ -1576,7 +1578,9 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
     ):
         return
 
-    sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
+    sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config) or enable_kpool_dcp_replicated_indexer(
+        vllm_config
+    )
     if sfa_dcp_replicated_indexer:
         pcp_size = parallel_config.prefill_context_parallel_size
         full_dcp_size = parallel_config.tensor_parallel_size * pcp_size
