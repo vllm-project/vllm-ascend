@@ -375,6 +375,40 @@ class TestAscendSFACacheComposition(TestBase):
         self.assertIs(impl._get_indexer_attn_metadata(), own_metadata)
 
     @patch(
+        "vllm_ascend.device.device_op.torch_npu.npu_lightning_indexer",
+        create=True,
+    )
+    def test_li_indexer_uses_torch_npu_operator(self, mock_indexer):
+        expected_topk = torch.zeros(2, 1, 4, dtype=torch.int32)
+        mock_indexer.return_value = expected_topk, torch.empty(0)
+        q_li = torch.zeros(2, 1, 128, dtype=torch.bfloat16)
+        weights = torch.ones(2, 1, dtype=torch.bfloat16)
+        indexer_k_cache = torch.empty(2, 16, 1, 128, dtype=torch.bfloat16)
+        kv_cache = (indexer_k_cache,)
+        attn_metadata = SimpleNamespace(block_table=torch.zeros(1, 2, dtype=torch.int32))
+
+        result = BaseDeviceAdaptor.indexer_select_post_process(
+            q_li,
+            None,
+            None,
+            weights,
+            kv_cache,
+            0,
+            1,
+            attn_metadata,
+            torch.tensor([2], dtype=torch.int32),
+            torch.tensor([2], dtype=torch.int32),
+            False,
+            False,
+        )
+
+        self.assertIs(result, expected_topk)
+        call_kwargs = mock_indexer.call_args.kwargs
+        self.assertIs(call_kwargs["key"], indexer_k_cache)
+        self.assertEqual(call_kwargs["layout_query"], "TND")
+        self.assertEqual(call_kwargs["layout_key"], "PA_BSND")
+
+    @patch(
         "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
         create=True,
     )
@@ -830,6 +864,12 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         assert builder.device == device
         assert builder.vllm_config == vllm_config
+        assert builder.use_pcp is False
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+        pcp_builder = AscendSFAMetadataBuilder(
+            kv_cache_spec=kv_cache_spec, layer_names=layer_names, vllm_config=vllm_config, device=device
+        )
+        assert pcp_builder.use_pcp is True
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
@@ -865,6 +905,9 @@ class TestAscendSFAMetadataBuilder(TestBase):
         )
 
         common_attn_metadata = MagicMock()
+        common_attn_metadata.decode_token_per_req = 1
+        common_attn_metadata.context_parallel_metadata = None
+        common_attn_metadata.max_query_len = 10
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
         common_attn_metadata.query_start_loc = torch.arange(0, 101, 10, dtype=torch.int32)
@@ -926,6 +969,9 @@ class TestAscendSFAMetadataBuilder(TestBase):
         )
 
         common_attn_metadata = MagicMock()
+        common_attn_metadata.decode_token_per_req = 1
+        common_attn_metadata.context_parallel_metadata = None
+        common_attn_metadata.max_query_len = 10
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
         common_attn_metadata.query_start_loc = torch.arange(0, 101, 10, dtype=torch.int32)
@@ -988,6 +1034,9 @@ class TestAscendSFAMetadataBuilder(TestBase):
         device = torch.device("cpu")
 
         common_attn_metadata = MagicMock()
+        common_attn_metadata.decode_token_per_req = 1
+        common_attn_metadata.context_parallel_metadata = None
+        common_attn_metadata.max_query_len = 10
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
         common_attn_metadata.query_start_loc = torch.arange(0, 101, 10, dtype=torch.int32)

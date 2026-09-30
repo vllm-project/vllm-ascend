@@ -216,6 +216,10 @@ template <typename QSFAT> __aicore__ inline void KvQuantSparseFlashAttentionMla<
     constInfo.kvHeadNum = kvHeadNum;
     constInfo.headDim = headDim;
     constInfo.headDimRope = headDimRope;
+    // Packed INT8 KV contains NoPE bytes, optional RoPE, then FP32 scales.
+    constInfo.inputHeadDimRope =
+        (tilingData->baseParams.dSizeVInput * sizeof(KV_T) - headDim * sizeof(KV_T) -
+         headDim / constInfo.tileSize * sizeof(T)) / sizeof(K_ROPE_T);
     constInfo.sparseBlockSize = tilingData->baseParams.sparseBlockSize;
     constInfo.sparseBlockCount = tilingData->baseParams.sparseBlockCount;
     constInfo.sparseMode = tilingData->baseParams.sparseMode;
@@ -223,7 +227,7 @@ template <typename QSFAT> __aicore__ inline void KvQuantSparseFlashAttentionMla<
     constInfo.quantScaleRepoMode = QUANT_SCALE_REPO_MODE::COMBINE;
     constInfo.attentionMode = ATTENTION_MODE::MLA_ABSORB;
     constInfo.combineHeadDim = (constInfo.quantScaleRepoMode ==
-        QUANT_SCALE_REPO_MODE::COMBINE) ? headDim + headDimRope : headDim;
+        QUANT_SCALE_REPO_MODE::COMBINE) ? headDim + constInfo.inputHeadDimRope : headDim;
 
     constInfo.preLoadNum = PRELOAD_NUM;
     constInfo.nBufferMBaseSize = N_BUFFER_M_BASIC_SIZE;

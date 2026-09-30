@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
@@ -10,9 +9,11 @@ import numpy as np
 import pytest
 import torch
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFuncsByType,
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
 from vllm.v1.worker.mamba_utils import (
@@ -24,11 +25,9 @@ from vllm.v1.worker.mamba_utils import (
 
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa: F401
 
-MambaStateCopyFunc = Callable[..., Any]
-_COPY_FUNCS: tuple[MambaStateCopyFunc, ...] = (
-    get_conv_copy_spec,
-    get_temporal_copy_spec,
-)
+_COPY_FUNCS: MambaStateCopyFuncsByType = {
+    MambaAttentionBackendEnum.MAMBA2: (get_conv_copy_spec, get_temporal_copy_spec)
+}
 
 
 def postprocess_mamba(
@@ -37,7 +36,7 @@ def postprocess_mamba(
     input_batch: Any,
     requests: dict[str, Any],
     forward_context: dict[str, Any],
-    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
+    mamba_state_copy_funcs: MambaStateCopyFuncsByType,
     copy_bufs: MambaCopyBuffers,
 ):
     assert input_batch.mamba_state_idx_cpu is not None
@@ -200,7 +199,7 @@ def _make_gpu_ctx(cfg: _TestConfig, kv_cache_config: KVCacheConfig, device: torc
     return MambaSpecDecodeGPUContext.create(
         max_num_reqs=cfg.max_num_reqs,
         kv_cache_config=kv_cache_config,
-        num_state_types=2,
+        copy_funcs=_COPY_FUNCS,
         device=device,
         make_buffer=lambda n, dtype: _MockCpuGpuBuffer(n, dtype, device),
     )
@@ -211,7 +210,7 @@ def _run_gpu_postprocess(
     *,
     kv_cache_config: KVCacheConfig,
     forward_context: dict[str, Any],
-    copy_funcs: tuple,
+    copy_funcs: MambaStateCopyFuncsByType,
     block_table: torch.Tensor,
     req_ids: list[str],
     num_accepted_tokens: list[int],

@@ -21,6 +21,7 @@ from vllm_ascend.platform import (
     _setup_compile_backend,
     _validate_eplb_config,
     _validate_parallel_config,
+    _validate_routing_replay_config,
     _validate_sfa_dcp_kv_sp,
 )
 from vllm_ascend.utils import (
@@ -110,6 +111,22 @@ def test_sfa_dcp_c8_hardware_validation(device_type, enable_sfa_c8):
             _validate_parallel_config(config)
 
 
+@pytest.mark.parametrize(
+    "r3_requested,use_v2,expected_error",
+    [(True, False, "only supported by the V2 model runner"), (True, True, None), (False, False, None)],
+)
+def test_routing_replay_requires_v2_model_runner(r3_requested, use_v2, expected_error):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_return_routed_experts=r3_requested),
+        use_v2_model_runner=use_v2,
+    )
+    if expected_error is None:
+        _validate_routing_replay_config(config)
+    else:
+        with pytest.raises(ValueError, match=expected_error):
+            _validate_routing_replay_config(config)
+
+
 def test_visible_device_id_to_physical_device_id():
     with (
         patch("vllm_ascend.platform.bootstrap_custom_op_env"),
@@ -131,6 +148,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.model_config = MagicMock()
         mock_vllm_config.model_config.is_hybrid = False
         mock_vllm_config.model_config.is_encoder_decoder = False
+        mock_vllm_config.model_config.enable_return_routed_experts = False
         mock_vllm_config.device_config = MagicMock()
         mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
@@ -155,6 +173,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.scheduler_config.async_scheduling = False
         mock_vllm_config.scheduler_config.scheduler_cls = None
         mock_vllm_config.speculative_config = None
+        mock_vllm_config.engram_config = None
         mock_vllm_config.kv_transfer_config = None
         mock_vllm_config.additional_config = {}
         mock_vllm_config.compilation_config.pass_config.enable_sp = False
@@ -261,7 +280,7 @@ class TestNPUPlatform(TestBase):
 
         self.assertTrue(vllm_config.parallel_config.eplb_config.use_async)
         self.assertEqual(vllm_config.parallel_config.eplb_config.communicator, "torch_gloo")
-        self.assertNotIn("stair_config", vllm_config.additional_config["eplb_config"])
+        self.assertNotIn("stair_config", vllm_config.additional_config.get("eplb_config", {}))
         warning.assert_called_once()
 
     def test_validate_eplb_config_limits_auto_gloo_fallback_migrations(self):
@@ -913,10 +932,17 @@ class TestNPUPlatform(TestBase):
         mock_inference_mode.assert_called_once()
 
     def test_set_additional_forward_context_v2_includes_required_moe_fields(self):
+        from vllm_ascend.ops.fused_moe.moe_comm_method import FusedMC2CommImpl
+        from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithMC2
+
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
         vllm_config.parallel_config.prefill_context_parallel_size = 2
-        dummy_comm_method = object()
+        dummy_comm_method = object.__new__(FusedMC2CommImpl)
+        dummy_comm_method.enable_fused_mc2 = 1
+        dummy_comm_method.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
+        output = torch.empty(1)
+        dummy_comm_method._apply_cann_mega_moe = MagicMock(return_value=(output, None))
 
         with (
             patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True, create=True),
@@ -924,7 +950,9 @@ class TestNPUPlatform(TestBase):
             patch("vllm_ascend.platform.enable_sp", return_value=False),
             patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4),
             patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=1)),
-            patch("vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.ALLGATHER),
+            patch("vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.FUSED_MC2),
+            patch("vllm_ascend.ascend_forward_context.use_cann_megamoe", return_value=True),
+            patch("vllm_ascend.ascend_forward_context._is_decode_only_node", return_value=False),
             patch("vllm_ascend.ascend_forward_context.get_mc2_mask", return_value=None),
             patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_moe_comm_method", return_value=dummy_comm_method),
         ):
@@ -941,28 +969,21 @@ class TestNPUPlatform(TestBase):
         self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
         self.assertEqual(kwargs["dynamic_mx_quant_scale_alg"], 0)
 
-    def test_set_additional_forward_context_v2_without_tp_falls_back(self):
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.use_v2_model_runner = True
-
+        # Missing V2 extras previously sent MXFP weights to the legacy INT
+        # dispatch/FFN/combine branch, which requires scale-bias tensors.
+        fused_input = SimpleNamespace(weights=SimpleNamespace(w1_scale_bias=None, w2_scale_bias=None))
         with (
+            patch("vllm_ascend.ascend_forward_context.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True),
             patch(
-                "vllm_ascend.quantization.utils.get_dynamic_mx_quant_scale_alg",
-                return_value=1,
-            ),
-            patch(
-                "vllm.distributed.get_tensor_model_parallel_world_size",
-                side_effect=AssertionError("tensor model parallel group is not initialized"),
+                "vllm_ascend.ascend_forward_context.get_forward_context",
+                return_value=SimpleNamespace(additional_kwargs=kwargs),
             ),
         ):
-            kwargs = self.platform.set_additional_forward_context(
-                attn_metadata=None,
-                vllm_config=vllm_config,
-                dp_metadata=None,
-                num_tokens=5,
-            )
-
-        self.assertEqual(kwargs, {"dynamic_mx_quant_scale_alg": 1})
+            result = dummy_comm_method.fused_experts(fused_input)
+        self.assertIs(result.routed_out, output)
+        dummy_comm_method._apply_cann_mega_moe.assert_called_once_with(
+            fused_input, fused_input.weights, is_decode_only_node=False
+        )
 
     def test_set_additional_forward_context_v1_includes_dynamic_mx_scale_alg(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -993,6 +1014,8 @@ class TestNPUPlatform(TestBase):
             patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=1)),
             patch("vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.ALLGATHER),
             patch("vllm_ascend.ascend_forward_context.get_mc2_mask", return_value=None),
+            patch("vllm_ascend.ascend_forward_context.use_cann_megamoe", return_value=False),
+            patch("vllm_ascend.ascend_forward_context._is_decode_only_node", return_value=False),
             patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_moe_comm_method", return_value=object()),
             override_mrv2_in_profile_run(True),
         ):

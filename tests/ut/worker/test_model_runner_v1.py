@@ -156,7 +156,7 @@ class TestDPPaddingPolicy(unittest.TestCase):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.dp_size = 2
         runner.dp_rank = dp_rank
-        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(enable_return_routed_experts=False))
+        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace())
         runner.ascend_config = SimpleNamespace(finegrained_tp_config=FinegrainedTPConfig())
         return runner
 
@@ -254,15 +254,6 @@ class TestDPPaddingPolicy(unittest.TestCase):
                                 self.assertEqual(maximum, 31)
                                 self.assertEqual(mode, CUDAGraphMode.NONE)
                                 self.assertEqual(across_dp.tolist(), [31, 31] if size > 1 else list(tokens))
-
-    def test_routing_capture_keeps_uniform_eager_inputs(self):
-        for dp_rank in range(2):
-            with self.subTest(dp_rank=dp_rank):
-                runner = self._make_runner(dp_rank)
-                runner.vllm_config.model_config.enable_return_routed_experts = True
-                _, across_dp, mode = self._run_sync(runner, comm_method=MoECommType.FUSED_MC2)
-                self.assertEqual(mode, CUDAGraphMode.NONE)
-                self.assertEqual(across_dp.tolist(), [32, 32])
 
     def test_imbalanced_and_idle_metadata_use_agreed_graph_mode(self):
         for tokens in ((0, 32), (1, 32), (8, 32)):
@@ -2632,7 +2623,6 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         """Verify output_token_ids are updated before sampler is called"""
         mock_lmhead_tp_enable.return_value = False
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
         mock_get_ascend_config.return_value = mock_ascend_config
 
         # Build input batch with historical sampled tokens
@@ -2840,7 +2830,6 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
         runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
         runner.vllm_config = MagicMock()
-        runner.vllm_config.model_config.enable_return_routed_experts = False
         runner.ascend_config = SimpleNamespace(
             scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False))
         )
@@ -2880,7 +2869,6 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
         runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
         runner.vllm_config = MagicMock()
-        runner.vllm_config.model_config.enable_return_routed_experts = False
         runner.ascend_config = SimpleNamespace(
             scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False))
         )

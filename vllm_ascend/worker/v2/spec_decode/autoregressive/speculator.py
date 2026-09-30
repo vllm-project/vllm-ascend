@@ -51,6 +51,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
+    disable_profiling_chunk_for_draft,
     disable_target_pcp_for_replicated_draft,
     prepare_replicated_pcp_config,
 )
@@ -59,19 +60,6 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 logger = logging.getLogger(__name__)
-
-
-def ensure_draft_hf_overrides(draft_model_config: Any) -> Any:
-    """Fill ``hf_overrides`` so ``VllmConfig.replace`` accepts the draft copy.
-
-    ModelSlim ``get_quant_config`` requires ``hf_overrides`` to be a dict.
-    Draft ``ModelConfig`` often leaves it ``None`` while the target uses ``{}``.
-    Normalize in place before ``replace`` so pydantic does not reject the
-    draft worker config (DSv4 MTP nightly on default MRv2).
-    """
-    if not isinstance(getattr(draft_model_config, "hf_overrides", None), dict):
-        draft_model_config.hf_overrides = {}
-    return draft_model_config
 
 
 class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
@@ -143,7 +131,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Build the runtime config used while executing the draft model."""
-        ensure_draft_hf_overrides(self.draft_model_config)
         source_parallel_config = self.vllm_config.parallel_config
         dcp_size = source_parallel_config.decode_context_parallel_size
         parallel_config = replace(
@@ -151,12 +138,13 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             pipeline_parallel_size=1,
             decode_context_parallel_size=1 if self.replicated_pcp else dcp_size,
         )
-        draft_config = replace(
-            self.vllm_config,
-            model_config=self.draft_model_config,
-            parallel_config=parallel_config,
-            cache_config=replace(self.vllm_config.cache_config),
-        )
+        with disable_profiling_chunk_for_draft(self.vllm_config):
+            draft_config = replace(
+                self.vllm_config,
+                model_config=self.draft_model_config,
+                parallel_config=parallel_config,
+                cache_config=replace(self.vllm_config.cache_config),
+            )
         if self.replicated_pcp:
             # TODO: Separate draft execution settings from worker topology.
             # Restore DCP only after the complete draft config reconstruction;

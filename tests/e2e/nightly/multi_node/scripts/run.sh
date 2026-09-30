@@ -5,6 +5,8 @@ BISECT_SOC="${1:-}"
 MAX_GOOD_AGE_DAYS="${2:-3}"
 BISECT_SCENE="${3:-multi_node}"
 
+export VLLM_ASCEND_BUILD_CACHE_DIR="/root/.cache/vllm-ascend/csrc-build-cache/${BISECT_SOC:-unknown}/node-${LWS_WORKER_INDEX:-0}"
+
 # Color definitions
 GREEN="\033[0;32m"
 BLUE="\033[0;34m"
@@ -12,16 +14,7 @@ YELLOW="\033[0;33m"
 RED="\033[0;31m"
 NC="\033[0m" # No Color
 
-INTERNAL_DP_TEST_PATH="tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py"
-EXTERNAL_DP_TEST_PATH="tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py"
-
-if [ -z "${MULTI_NODE_TEST_PATH:-}" ]; then
-    if [[ "${CONFIG_BASE_PATH:-}" == *"external_dp/config"* || "${CONFIG_YAML_PATH:-}" == *"external_dp/config"* ]]; then
-        MULTI_NODE_TEST_PATH="$EXTERNAL_DP_TEST_PATH"
-    else
-        MULTI_NODE_TEST_PATH="$INTERNAL_DP_TEST_PATH"
-    fi
-fi
+MULTI_NODE_TEST_PATH="${MULTI_NODE_TEST_PATH:-tests/e2e/nightly/multi_node/scripts/test_multi_node.py}"
 
 # Configuration
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
@@ -141,7 +134,7 @@ check_npu_info() {
 
 check_and_config() {
     echo "====> Configure mirrors and git proxy"
-    git config --global url."https://shturl.cc/https://github.com/".insteadOf "https://github.com/"
+    git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
     pip config set global.trusted-host mirrors.huaweicloud.com
     export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"

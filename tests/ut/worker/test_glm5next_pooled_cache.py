@@ -73,6 +73,7 @@ def _make_config():
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
+            prefix_cache_retention_interval=0,
         ),
         kv_transfer_config=None,
         compilation_config=SimpleNamespace(static_forward_context={}),
