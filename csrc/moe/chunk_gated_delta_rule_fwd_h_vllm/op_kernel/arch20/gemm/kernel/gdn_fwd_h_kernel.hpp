@@ -311,6 +311,11 @@ public:
                     {
                         AscendC::LocalTensor<float> gl =
                             resource.ubBuf.template GetBufferByByte<float>(UB_UPD_NDOUT);
+                        // The previous head's final-state deformat writes this
+                        // aliased UB window on V. Order that write before the
+                        // scalar pipe reuses the first word for g_last.
+                        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID5);
+                        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID5);
                         gl.SetValue(0, gmG[stage2Offsets.gOffset].GetValue(stage2Offsets.blockTokens - 1));
                         AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
                         AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
