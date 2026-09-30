@@ -571,7 +571,7 @@ Before you start, prepare the following scripts on each node, following the same
             --gpu-memory-utilization 0.92 \
             --async-scheduling \
             --quantization ascend \
-            --safetensors-load-strategy prefetch \
+            --safetensors-load-strategy 'prefetch' \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm47 \
@@ -664,7 +664,7 @@ Before you start, prepare the following scripts on each node, following the same
             --gpu-memory-utilization 0.92 \
             --async-scheduling \
             --quantization ascend \
-            --safetensors-load-strategy prefetch \
+            --safetensors-load-strategy 'prefetch' \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm47 \
