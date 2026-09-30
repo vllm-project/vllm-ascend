@@ -12,12 +12,15 @@ This section provides comprehensive documentation for using vLLM Ascend in produ
 
 - **[Environment Variables](configuration/env_vars.md)** — Configure vLLM Ascend via environment variables
 - **[Additional Configuration](configuration/additional_config.md)** — Additional configuration options
+- **[runtime_config](configuration/runtime_config.md)** — Runtime Guard JSON configuration reference
 - **[MS Service Metric](ms_service_metric.md)** — Enable metrics and add vLLM Ascend metric points
 - **[Score Encoder Cache Manager](configuration/encoder_cache_manager.md)** — Configure score-based encoder caching for online and offline inference
 
 ## Feature Guide
 
-Explore detailed guides for vLLM Ascend features including graph mode, CPU binding, quantization, sleep mode, structured output, LoRA, expert parallelism load balancing, and more.
+- **[Runtime Guard](feature_guide/runtime_guard.md)** — Online anomaly detect / report / optional KV dump
+
+Explore other guides for graph mode, CPU binding, quantization, sleep mode, structured output, LoRA, expert parallelism load balancing, and more.
 
 ## Deployment Guide
 
