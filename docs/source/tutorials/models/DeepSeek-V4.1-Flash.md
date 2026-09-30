@@ -678,7 +678,6 @@ and use the `main` branch with the matching vLLM revision recorded in
     import subprocess
     import sys
 
-
     def parse_args():
         parser = argparse.ArgumentParser()
         parser.add_argument("--dp-size", type=int, required=True)
@@ -690,12 +689,10 @@ and use the `main` branch with the matching vLLM revision recorded in
         parser.add_argument("--vllm-start-port", type=int, default=9000)
         return parser.parse_args()
 
-
     args = parse_args()
     dp_size = args.dp_size
     tp_size = args.tp_size
     dp_size_local = args.dp_size if args.dp_size_local == -1 else args.dp_size_local
-
 
     def run_command(visible_devices, dp_rank, vllm_engine_port):
         command = [
@@ -757,7 +754,6 @@ and use the `main` branch with the matching vLLM revision recorded in
     #!/usr/bin/env bash
 
     set -euo pipefail
-
 
     NIC_NAME="<NETWORK_INTERFACE>"
     LOCAL_IP="<LOCAL_PREFILL_NODE_IP>"
