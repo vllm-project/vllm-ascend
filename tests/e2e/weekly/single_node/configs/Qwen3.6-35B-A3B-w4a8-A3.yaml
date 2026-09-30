@@ -13,6 +13,7 @@ test_cases:
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "1024"
       SERVER_PORT: "DEFAULT_PORT"
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
     server_cmd:
       - "--quantization"
       - "ascend"
