@@ -59,6 +59,8 @@ def test_inprocess_store_lookup_load(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     )
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # Trusted test callbacks need pickle support in the client and spawned EngineCore.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     # Keep a nonaligned tail: Store publishes full chunks; Load still leaves work for prefill.
     prompts = [TokensPrompt(prompt_token_ids=[0] * PROMPT_TOKEN_COUNT)]
     sampling_params = SamplingParams(temperature=0, max_tokens=OUTPUT_TOKEN_COUNT, ignore_eos=True)
