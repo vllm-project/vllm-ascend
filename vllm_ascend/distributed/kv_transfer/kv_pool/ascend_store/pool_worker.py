@@ -1885,7 +1885,9 @@ class KVPoolWorker:
                 valid_gva_indices = []
                 invalid_block_ids: list[int] = []
                 for ki, key, block_idx in zip(key_infos, keys, block_indices):
-                    sizes = ki.size()
+                    # A None entry means the key is absent from the store;
+                    # treat it like an unreadable block (gva=0) below.
+                    sizes = ki.size() if ki is not None else 0
                     gva = next((address for address in ki.gva_list() if address > 0), 0) if sizes and sizes > 0 else 0
                     gvas.append(gva)
                     if gva > 0:
@@ -1969,7 +1971,9 @@ class KVPoolWorker:
                         raise RuntimeError("Memcache leased key-info response length mismatch")
                     for key, info in zip(leased_keys, leased_infos, strict=True):
                         index = keys.index(key)
-                        gvas[index] = next((address for address in info.gva_list() if address > 0), 0)
+                        gvas[index] = (
+                            next((address for address in info.gva_list() if address > 0), 0) if info is not None else 0
+                        )
                         if not gvas[index]:
                             invalid_block_ids.append(int(block_ids_by_group[block_indices[index]]))
 
