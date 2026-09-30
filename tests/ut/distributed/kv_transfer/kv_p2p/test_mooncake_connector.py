@@ -327,6 +327,54 @@ class TestKVCacheSendingThread(unittest.TestCase):
         torch.testing.assert_close(reformatted_v_cache, expected)
 
 
+@pytest.mark.parametrize("budget", [1, 192, 384])
+@pytest.mark.parametrize("pulls", [2, 4, 8])
+@pytest.mark.parametrize("strided", [False, True])
+def test_hybrid_reformat_bounded_buffers(monkeypatch, budget, pulls, strided):
+    # Full-suite module mocks can detach package attributes from the imported
+    # class. Patch the globals used by the actual method, not a dotted lookup.
+    method = inspect.unwrap(KVCacheRecvingThread.reformat_kv_cache_hybrid_linear_torch)
+    monkeypatch.setitem(method.__globals__, "KV_REFORMAT_BUFFER_BYTES", budget)
+    caches = []
+    expected = []
+    ids = torch.tensor([4, 1, 3, 0])
+    for features in (8, 16):
+        storage = torch.arange(6 * 3 * features * 2, dtype=torch.float32).reshape(6, 3, features * 2)
+        cache = storage[..., ::2] if strided else storage[..., :features].contiguous()
+        original = cache.clone()
+        selected = original.index_select(0, ids)
+        result = original.clone()
+        result.index_copy_(0, ids, selected.reshape(4, pulls, 3, -1).transpose(1, 2).contiguous().reshape_as(selected))
+        caches.append(cache)
+        expected.append(result)
+
+    original_index_select = torch.Tensor.index_select
+    selected_sizes = []
+
+    def checked_index_select(cache, dim, indices):
+        result = original_index_select(cache, dim, indices)
+        selected_sizes.append(result.numel() * result.element_size())
+        block_bytes = cache[0].numel() * cache.element_size()
+        assert selected_sizes[-1] <= max(budget, block_bytes)
+        return result
+
+    monkeypatch.setattr(torch.Tensor, "index_select", checked_index_select)
+    thread = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    thread.kv_caches = {"layer": tuple(caches)}
+    # Repeated IDs cross chunk boundaries and must be transformed only once.
+    thread.reformat_kv_cache_hybrid_linear_torch([[4, 1, 3], [0, 4, 1]], pulls, thread.kv_caches)
+    assert len(selected_sizes) > 2
+    for actual, reference in zip(caches, expected):
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("ids,pulls", [([], 2), ([[]], 2), ([[1, 2]], 1)])
+def test_hybrid_reformat_noop(ids, pulls):
+    thread = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    # No cache/device access is needed for either no-op condition.
+    thread.reformat_kv_cache_hybrid_linear_torch(ids, pulls, {})
+
+
 class TestMooncakeTransferGroups(unittest.TestCase):
     def test_glm_sfa_indexer_uses_independent_metadata_layer(self):
         mla_layer = "model.layers.3.self_attn.attn"
