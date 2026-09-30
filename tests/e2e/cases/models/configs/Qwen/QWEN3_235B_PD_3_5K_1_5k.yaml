@@ -42,6 +42,7 @@ env_common: &env_common
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
   VLLM_USE_MODELSCOPE: "true"
   HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
   LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
@@ -55,8 +56,6 @@ env_prefill: &env_prefill
 env_decode: &env_decode
   <<: *env_common
   HCCL_BUFFSIZE: "1024"
-  DYNAMIC_EPLB: "true"
-  EXPERT_MAP_RECORD: "true"
 
 templates:
   - node_index: 0
@@ -133,9 +132,11 @@ templates:
       - --quantization
       - "ascend"
       - --no-enable-prefix-caching
+      - --enable-eplb
+      - --eplb-config
+      - '{"window_size":4000,"step_interval":200,"num_redundant_experts":0,"use_async":true}'
       - --additional-config
-      # #5533 renamed and nested the legacy EPLB keys below.
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":4000,"algorithm_execution_interval":200,"num_redundant_experts":0},"enable_flashcomm1": true,"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
+      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"enable_flashcomm1": true,"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -172,9 +173,11 @@ templates:
       - --quantization
       - "ascend"
       - --no-enable-prefix-caching
+      - --enable-eplb
+      - --eplb-config
+      - '{"window_size":4000,"step_interval":200,"num_redundant_experts":0,"use_async":true}'
       - --additional-config
-      # #5533 renamed and nested the legacy EPLB keys below.
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":4000,"algorithm_execution_interval":200,"num_redundant_experts":0},"enable_flashcomm1": true,"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
+      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"enable_flashcomm1": true,"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
