@@ -2,6 +2,7 @@
 #pragma once
 #include <array>
 #include <limits>
+#include <torch_npu/csrc/aten/CustomFunctions.h>
 #include <torch_npu/csrc/core/npu/NPUFunctions.h>
 
 namespace vllm_ascend {
@@ -94,9 +95,15 @@ inline int ExecuteMhcExpand(const MhcExpandDescriptor& x, int64_t mult, const Mh
 
 inline void LaunchMhcExpand(const at::Tensor& x, int64_t mult, const at::Tensor& y)
 {
-    // Preserve the existing caller-side path for thread-local core controls and
-    // non-base storage formats. The asynchronous path copies only base formats.
-    if (c10_npu::is_core_control_enabled() || !IsOpInputBaseFormat(x)) {
+    // Logical contiguity does not imply ND storage: NZ inputs need an explicit
+    // conversion because the generated custom ACLNN interface accepts only ND.
+    if (!IsOpInputBaseFormat(x)) {
+        const auto input = at_npu::native::custom_ops::npu_format_cast(x, static_cast<int64_t>(ACL_FORMAT_ND));
+        EXEC_NPU_CMD(aclnnVllmMhcExpand, input, mult, y);
+        return;
+    }
+    // Preserve the existing caller-side path for thread-local core controls.
+    if (c10_npu::is_core_control_enabled()) {
         EXEC_NPU_CMD(aclnnVllmMhcExpand, x, mult, y);
         return;
     }
