@@ -238,12 +238,7 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
         raw = prefix if addend is None else prefix + addend
         return raw, raw, raw
 
-    monkeypatch.setattr(
-        torch.ops._C_ascend,
-        "attn_res_fwd",
-        SimpleNamespace(fused=fake_fused),
-        raising=False,
-    )
+    monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", fake_fused, raising=False)
 
     hidden_states = torch.arange(4, dtype=torch.float32).view(2, 2)
     block_residual = torch.zeros(2, 1, 2)
@@ -312,12 +307,7 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
         raw = prefix if addend is None else prefix + addend
         return raw, raw, raw
 
-    monkeypatch.setattr(
-        torch.ops._C_ascend,
-        "attn_res_fwd",
-        SimpleNamespace(fused=fake_fused),
-        raising=False,
-    )
+    monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", fake_fused, raising=False)
 
     output = model(
         input_ids=None,
@@ -353,12 +343,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
         raw = prefix if addend is None else prefix + addend
         return raw, raw, raw
 
-    monkeypatch.setattr(
-        torch.ops._C_ascend,
-        "attn_res_fwd",
-        SimpleNamespace(fused=fake_fused),
-        raising=False,
-    )
+    monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", fake_fused, raising=False)
     monkeypatch.setattr(
         kimi_k3,
         "get_pp_group",
