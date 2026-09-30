@@ -21,16 +21,23 @@ import torch.distributed as dist
 from safetensors import safe_open
 from torch import nn
 from vllm.distributed import (
+    get_engram_dp_group,
+    get_engram_dp_size,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.distributed.parallel_state import in_the_same_node_as
+from vllm.distributed.parallel_state import get_tp_group, in_the_same_node_as
 from vllm.logger import logger
 from vllm.model_executor.utils import set_weight_attrs
 
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
+from vllm.models.deepseek_v41.nvidia.engram import (
+    _gather_engram_rows,
+    engram_head_shard_rank,
+    gather_engram_hashes,
+)
 
 from .npu import (
     HostUvaBuffer,
@@ -38,13 +45,6 @@ from .npu import (
     gather_dequantize_engram_int8,
     gather_dequantize_host_uva,
     quantize_engram_rows,
-)
-from .parallel import (
-    _gather_engram_rows,
-    engram_head_shard_rank,
-    gather_engram_hashes,
-    get_engram_dp_group,
-    get_engram_dp_size,
 )
 
 
@@ -66,10 +66,16 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self.cpu_offload = cpu_offload
         self.layer_hash_index = layer_hash_index
         self._shared_group = None
+        # The table is sharded and exchanged inside one node. The EDP group is
+        # derived from the physical placement, but the TP heads are gathered
+        # every step, so the TP shards have to be on one node as well. EDP
+        # falling back to a single replica does not by itself guarantee that.
+        if not all(in_the_same_node_as(get_tp_group().cpu_group)):
+            raise ValueError("Ascend Engram requires the TP ranks of one replica to stay on a single node")
         group = get_engram_dp_group()
         if group is not None and not all(in_the_same_node_as(group.cpu_group)):
             raise ValueError(
-                "Ascend Engram requires all DP replicas to share the same node and shared-memory namespace"
+                "Ascend Engram requires all Engram DP replicas to share the same node and shared-memory namespace"
             )
         if dp_shared_memory:
             if group is None or group.world_size <= 1:

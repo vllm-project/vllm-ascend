@@ -686,20 +686,10 @@ class NPUModelRunner(GPUModelRunner):
     def prepare_dummy_attn(
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        if self.pcp_manager is None:
-            block_tables, slot_mappings = super().prepare_dummy_attn(
-                input_batch,
-                valid_state_slots=valid_state_slots,
-            )
-        else:
-            block_tables, slot_mappings = self.pcp_manager.prepare_dummy_attn(input_batch)
-            if valid_state_slots:
-                # Match the upstream state-slot contract in the persistent PCP views.
-                for block_table in block_tables:
-                    state_slots = torch.arange(
-                        1, block_table.shape[0] + 1, dtype=torch.int32, device=block_table.device
-                    )
-                    block_table[:, 0].copy_(state_slots)
+        block_tables, slot_mappings = super().prepare_dummy_attn(
+            input_batch,
+            valid_state_slots=valid_state_slots,
+        )
         prepare_v41_dummy_ring_state(self, input_batch.num_reqs)
         return block_tables, slot_mappings
 

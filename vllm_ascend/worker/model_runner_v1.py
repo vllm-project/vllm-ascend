@@ -3200,35 +3200,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.speculative_config,
             )
 
-    # Prompt lookback contract backported from vLLM f84b0c4bce.
-    def _prepare_lookback_token_ids(self, num_reqs: int) -> torch.Tensor:
-        """Gather, per request, the `depth` prompt token ids preceding its
-        first scheduled token (column j is position start - 1 - j); -1 where
-        the position is before the prompt or already past it. Generated
-        positions are left to the model: under async scheduling the CPU token
-        table holds placeholders for them."""
-        buf: CpuGpuBuffer | None = getattr(self, "lookback_token_ids", None)
-        assert buf is not None
-        buf.np.fill(-1)
-        if num_reqs > 0:
-            depth = buf.np.shape[1]
-            starts = self.input_batch.num_computed_tokens_cpu[:num_reqs, None]
-            pos = starts - np.arange(1, depth + 1)
-            num_prompt = self.input_batch.num_prompt_tokens[:num_reqs, None]
-            valid = (pos >= 0) & (pos < num_prompt)
-            rows = np.arange(num_reqs)[:, None]
-            ids = self.input_batch.token_ids_cpu[rows, np.clip(pos, 0, None)]
-            buf.np[:num_reqs] = np.where(valid, ids, -1)
-        return buf.copy_to_gpu()
-
-    def _init_model_kwargs(self, num_reqs: int | None = None):
-        model_kwargs = super()._init_model_kwargs()
-        if getattr(self, "lookback_token_ids", None) is not None:
-            if num_reqs is None:
-                num_reqs = self.input_batch.num_reqs
-            model_kwargs["lookback_token_ids"] = self._prepare_lookback_token_ids(num_reqs)
-        return model_kwargs
-
     def _get_engram_device_inputs(self) -> dict[str, torch.Tensor]:
         """Full-request device metadata for upstream NgramHashState.
 
