@@ -5,6 +5,7 @@
 from collections.abc import Sequence
 
 import torch
+
 # KDA operators from the flashserve/flash-linear-attention-npu ecosystem repository.
 # https://github.com/flashserve/flash-linear-attention-npu
 from fla_npu.ops.ascendc import chunk_kda_fwd, recurrent_kda
