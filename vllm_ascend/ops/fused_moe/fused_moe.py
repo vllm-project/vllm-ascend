@@ -132,6 +132,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self.moe_config,
                 self.quant_type,
                 self._quant_method,
+                moe_layer=self.routed_experts,
             )
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
@@ -285,6 +286,17 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if shared_experts is None or not hasattr(shared_experts, "parallel_mode"):
             return SharedExpertParallelMode.TENSOR_PARALLEL
         return shared_experts.parallel_mode()
+
+    @property
+    def _megamoe_shared_expert_fused(self) -> bool:
+        """True when this step's routed experts run the shared expert inside MegaMoe."""
+        shared_experts = self.ascend_shared_experts
+        return (
+            shared_experts is not None
+            and shared_experts.megamoe_shared_weights_ready
+            and not shared_experts._megamoe_shared_fusion_disabled
+            and _EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
+        )
 
     @property
     def local_num_experts(self) -> int:
@@ -455,9 +467,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if prepared_shared_input.is_gathered:
                 milestones.routed_finalize_done = torch.npu.current_stream().record_event()
 
-            shared_out = self.ascend_shared_experts.forward(
-                prepared_shared_input,
-                milestones,
-                defer_output_wait=defer_shared_output_wait,
-            )
+            if self._megamoe_shared_expert_fused:
+                # The shared expert GMM1 + activation + GMM2 runs inside the
+                # MegaMoe operator on the routed stream, so its contribution
+                # is already contained in routed_out. Skip the standalone
+                # forward to avoid computing it twice.
+                shared_out = None
+            else:
+                shared_out = self.ascend_shared_experts.forward(
+                    prepared_shared_input,
+                    milestones,
+                    defer_output_wait=defer_shared_output_wait,
+                )
             return shared_out, routed_out

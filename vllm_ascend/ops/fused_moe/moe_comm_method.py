@@ -510,6 +510,27 @@ class FusedMC2CommImpl(MoECommMethod):
             swiglu_beta=self.swiglu_beta,
         )
 
+        # Shared experts fused into the MegaMoe operator (A5 only): their
+        # GMM1 + activation + GMM2 runs inside the kernel on the local tokens,
+        # so no Dispatch/Combine traffic is involved. The caller skips the
+        # separate shared-expert forward when this payload is present.
+        shared_kwargs: dict = {}
+        if weights.shared_w1 is not None:
+            shared_kwargs = dict(
+                shared_l1_weights=weights.shared_w1,
+                shared_l2_weights=weights.shared_w2,
+                shared_l1_weights_sf=weights.shared_w1_scale,
+                shared_l2_weights_sf=weights.shared_w2_scale,
+                # Mirror the routed activation quant dtype so the kernel tiling
+                # sizes the shared GMM1/activation output the same way as the
+                # routed one (fp8_e4m3fn for the A5 MXFP quant types).
+                shared_expert_quant_out_dtype=(
+                    fused_experts_input.quant.mxfp.act_quant_type
+                    if fused_experts_input.quant.mxfp is not None
+                    else None
+                ),
+            )
+
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),
@@ -524,6 +545,7 @@ class FusedMC2CommImpl(MoECommMethod):
             x_active_mask=x_active_mask,
             weight1_type=weight_type,
             weight2_type=weight_type,
+            **shared_kwargs,
             **activation_kwargs,
         )
         # NOTE: self.expert_token_nums is only used by the

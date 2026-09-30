@@ -20,13 +20,14 @@ from functools import wraps
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.config import get_current_vllm_config
 from vllm.distributed import tensor_model_parallel_all_gather, tensor_model_parallel_reduce_scatter
 from vllm.logger import logger
-from vllm.model_executor.layers.activation import SituAndMul
+from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodBase
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
@@ -72,9 +73,11 @@ class AscendSharedExperts:
         moe_config: FusedMoEConfig,
         quant_type: QuantType,
         quant_method: FusedMoEMethodBase,
+        moe_layer: torch.nn.Module | None = None,
     ):
         self.layer = layer
         self.moe_config = moe_config
+        self.moe_layer = moe_layer
         self.hidden_size = moe_config.hidden_dim
         self.shared_expert_input_size = getattr(
             layer.gate_up_proj,
@@ -93,6 +96,13 @@ class AscendSharedExperts:
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
         self.weights_replicated = ascend_config.enable_shared_expert_dp
 
+        # Shared-expert fusion into the A5 MegaMoe operator: disabled until the
+        # setup below proves the configuration is supported, then armed once
+        # both shared linears have been processed into the MegaMoe layout.
+        self.megamoe_shared_weights_ready = False
+        self._megamoe_shared_fusion_disabled = False
+        self._megamoe_shared_parts: dict[str, torch.Tensor] = {}
+
         if self.multistream_overlap:
             # Wrap the quant_method's process_weights_after_loading to validate that
             # splitting shared expert computation (gate_up projection, activation,
@@ -107,6 +117,179 @@ class AscendSharedExperts:
                 return result
 
             quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+
+        self._setup_megamoe_shared_fusion()
+
+    def _setup_megamoe_shared_fusion(self) -> None:
+        """Fuse the shared expert into the A5 MegaMoe operator when supported.
+
+        When active, each shared linear's ``process_weights_after_loading`` is
+        wrapped to rebuild the weight into the MegaMoe layout; the payload is
+        attached to the routed-expert layer as
+        ``ascend_megamoe_shared_weights`` and forwarded to the operator as
+        ``shared_l1_weights``/``shared_l2_weights``. The runner then skips the
+        separate shared-expert forward whenever the step dispatches to
+        MegaMoe. Any unsupported configuration keeps the standalone
+        shared-expert execution unchanged.
+        """
+        if self.moe_layer is None or not use_cann_megamoe(get_current_vllm_config()):
+            return
+        # Only enable_fused_mc2=3 opts into fusing the shared expert into the
+        # MegaMoe operator; =2 keeps the separate shared-expert forward.
+        if not get_ascend_config().megamoe_shared_expert_fusion:
+            return
+        if not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+            return
+        if self.quant_type != QuantType.W8A8MXFP:
+            # Only MXFP8 is implemented: its shared weights rebuild cheaply
+            # from the post-processed linear buffers. Packed-FP4 schemes
+            # (W4A8MXFP/W4A4MXFP) would need a dedicated NZ_C0_32 rebuild.
+            logger.info_once(
+                "MegaMoe shared-expert fusion is not implemented for quant type %s; "
+                "keeping the separate shared-expert forward.",
+                self.quant_type,
+            )
+            self._megamoe_shared_fusion_disabled = True
+            return
+        # Output gating (e.g. Qwen3-Next expert_gate) happens outside the
+        # operator and cannot be fused.
+        if getattr(self.layer, "expert_gate", None) is not None:
+            logger.info_once(
+                "MegaMoe shared-expert fusion is not supported with expert gating; "
+                "keeping the separate shared-expert forward."
+            )
+            self._megamoe_shared_fusion_disabled = True
+            return
+        # The operator consumes no shared bias.
+        if (
+            getattr(self.layer.gate_up_proj, "bias", None) is not None
+            or getattr(self.layer.down_proj, "bias", None) is not None
+        ):
+            logger.info_once(
+                "MegaMoe shared-expert fusion is not supported with shared-expert bias; "
+                "keeping the separate shared-expert forward."
+            )
+            self._megamoe_shared_fusion_disabled = True
+            return
+        # The operator applies the routed activation to the shared experts too,
+        # so only the standard SiluAndMul pairing can be fused.
+        routed_activation = str(getattr(self.moe_layer, "activation", "silu"))
+        if (
+            routed_activation != "silu"
+            or isinstance(self.layer.act_fn, SituAndMul)
+            or not isinstance(self.layer.act_fn, SiluAndMul)
+        ):
+            logger.info_once(
+                "MegaMoe shared-expert fusion is not supported for shared activation %s "
+                "with routed activation %s; keeping the separate shared-expert forward.",
+                type(self.layer.act_fn).__name__,
+                routed_activation,
+            )
+            self._megamoe_shared_fusion_disabled = True
+            return
+        # Sequence-parallel shared experts rely on split/gather layouts that
+        # the fused operator does not reproduce.
+        if self.is_sequence_parallel:
+            self._megamoe_shared_fusion_disabled = True
+            return
+
+        for linear, slot in (
+            (self.layer.gate_up_proj, "w1"),
+            (self.layer.down_proj, "w2"),
+        ):
+            self._wrap_linear_for_megamoe_fusion(linear, slot)
+
+    def _wrap_linear_for_megamoe_fusion(self, linear: torch.nn.Module, slot: str) -> None:
+        """Rebuild the shared weight right after its linear is processed.
+
+        The wrapper is attached to the linear's own quant-method instance and
+        ignores calls for other layers, so a shared quant-method instance
+        stays safe.
+        """
+        quant_method = getattr(linear, "quant_method", None)
+        original = getattr(quant_method, "process_weights_after_loading", None)
+        if original is None:
+            self._disable_megamoe_shared_fusion(
+                f"shared linear {type(linear).__name__} has no process_weights_after_loading"
+            )
+            return
+
+        @wraps(original)
+        def wrapped_megamoe_collect(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args and args[0] is linear:
+                self._collect_megamoe_shared_weight(slot, linear)
+            return result
+
+        quant_method.process_weights_after_loading = wrapped_megamoe_collect  # type: ignore
+
+    def _collect_megamoe_shared_weight(self, slot: str, linear: torch.nn.Module) -> None:
+        """Rebuild one shared linear into the A5 MegaMoe layout.
+
+        MegaMoe expects (out, in) tensors while the processed linear buffer is
+        (in, out) NZ, so a transpose+contiguous materializes the correct ND
+        layout; the per-group scale becomes (n, k//2, 2), matching the routed
+        per-expert scale shape.
+        """
+        if self._megamoe_shared_fusion_disabled:
+            return
+        padding = vars(linear).get("mxfp8_tp_padding", (0, 0))
+        if padding != (0, 0):
+            self._disable_megamoe_shared_fusion(
+                f"padded shared-expert weights {padding} do not match the routed "
+                "intermediate size required by the MegaMoe layout"
+            )
+            return
+        expected_weight_shape = (
+            (
+                2 * self.moe_config.intermediate_size_per_partition,
+                self.moe_config.hidden_dim,
+            )
+            if slot == "w1"
+            else (
+                self.moe_config.hidden_dim,
+                self.moe_config.intermediate_size_per_partition,
+            )
+        )
+        weight = linear.weight.data.transpose(0, 1).contiguous()
+        scale = linear.weight_scale.data.transpose(0, 1).contiguous()
+        if tuple(weight.shape) != expected_weight_shape:
+            self._disable_megamoe_shared_fusion(
+                f"shared-expert weight shape {tuple(weight.shape)} does not match the "
+                f"routed expert layout {expected_weight_shape}"
+            )
+            return
+        self._megamoe_shared_parts[slot] = weight
+        self._megamoe_shared_parts[slot + "_scale"] = scale
+        self._maybe_finish_megamoe_shared_weights()
+
+    def _maybe_finish_megamoe_shared_weights(self) -> None:
+        if self._megamoe_shared_fusion_disabled or self.moe_layer is None:
+            return
+        needed = ("w1", "w2", "w1_scale", "w2_scale")
+        if not all(name in self._megamoe_shared_parts for name in needed):
+            return
+        # Attach to the routed-expert layer so the quant methods can pick the
+        # payload up in get_fused_mc2_weights. Re-attaching on every rebuild
+        # keeps RL weight reloads pointing at the fresh tensors.
+        self.moe_layer.ascend_megamoe_shared_weights = (
+            [self._megamoe_shared_parts["w1"]],
+            [self._megamoe_shared_parts["w2"]],
+            [self._megamoe_shared_parts["w1_scale"]],
+            [self._megamoe_shared_parts["w2_scale"]],
+        )
+        if not self.megamoe_shared_weights_ready:
+            self.megamoe_shared_weights_ready = True
+            logger.info_once("Fused the shared expert into the A5 MegaMoe operator.")
+
+    def _disable_megamoe_shared_fusion(self, reason: str) -> None:
+        if not self._megamoe_shared_fusion_disabled:
+            logger.info_once(
+                "Disabling MegaMoe shared-expert fusion: %s; keeping the separate shared-expert forward.",
+                reason,
+            )
+        self._megamoe_shared_fusion_disabled = True
+        self._megamoe_shared_parts.clear()
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
