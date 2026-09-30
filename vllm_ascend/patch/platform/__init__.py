@@ -58,3 +58,5 @@ import vllm_ascend.patch.platform.patch_stop_token_ids_validation  # noqa
 
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
+
+import vllm_ascend.patch.platform.patch_pd_xfer_terminal  # noqa
