@@ -198,7 +198,8 @@ class LayerBatchBuilder:
 
         total = 0
         for block_range in task.block_ranges:
-            total += block_range.end_block - block_range.start_block
+            # Empty/reversed full-block ranges still may carry a partial block.
+            total += max(0, block_range.end_block - block_range.start_block)
             if block_range.partial_block_index is not None:
                 total += 1
 
@@ -223,7 +224,7 @@ class LayerBatchBuilder:
             block_ids_np, block_gvas_np = self._require_request_arrays(block_range, is_save)
             gva_block_offset = request.gva_block_offset if is_save else request.load_gva_block_offset
 
-            num_blocks = block_range.end_block - block_range.start_block
+            num_blocks = max(0, block_range.end_block - block_range.start_block)
             if num_blocks > 0:
                 gva_start = block_range.start_block - gva_block_offset
                 gva_end = block_range.end_block - gva_block_offset
