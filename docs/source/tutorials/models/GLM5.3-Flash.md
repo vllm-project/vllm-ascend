@@ -26,6 +26,12 @@ disabled.
 GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
 all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
+Experimental SFA context parallelism can be enabled with
+`--additional-config '{"enable_dsa_cp": true}'`. It shards SFA query tokens
+within the tensor parallel group and keeps the main KV, indexer pool, and tail
+caches replicated. KDA continues to use its existing tensor parallel path.
+Keep both prefill context parallel size and decode context parallel size at 1.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
