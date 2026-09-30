@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 import os
 from importlib import import_module, util
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 from uuid import uuid4
 
 import torch
@@ -324,6 +324,16 @@ class NPUPlatform(Platform):
             if quant_action and hasattr(quant_action, "choices") and quant_action.choices:
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
+            # Same pattern for --kv-cache-dtype: the argparse choices were
+            # built from the upstream CacheDType Literal before this patch
+            # widened it, so append the Ascend-only dtypes here.
+            dtype_action = parser._option_string_actions.get("--kv-cache-dtype")
+            if dtype_action and hasattr(dtype_action, "choices") and dtype_action.choices:
+                from vllm.config.cache import CacheConfig
+
+                for dtype in get_args(CacheConfig.__dataclass_fields__["cache_dtype"].type):
+                    if dtype not in dtype_action.choices:
+                        dtype_action.choices.append(dtype)
 
         if get_current_hardware_profile().quantization_backend_family is QuantizationBackendFamily.STANDARD:
             from vllm_ascend.quantization import (  # noqa: F401
