@@ -303,12 +303,14 @@ class cmake_build_ext(build_ext):
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
         cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
 
-        torch_npu_command = "python3 -m pip show torch-npu | grep '^Location:' | awk '{print $2}'"
         try:
-            torch_npu_path = subprocess.check_output(torch_npu_command, shell=True).decode().strip()
-            torch_npu_path += "/torch_npu"
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Retrieve torch version version failed: {e}")
+            pip_show = subprocess.check_output([sys.executable, "-m", "pip", "show", "torch-npu"], text=True)
+            location = next(
+                line.split(":", 1)[1].strip() for line in pip_show.splitlines() if line.startswith("Location:")
+            )
+            torch_npu_path = os.path.join(location, "torch_npu")
+        except (subprocess.CalledProcessError, StopIteration) as e:
+            raise RuntimeError(f"Failed to locate torch-npu installation path: {e}")
 
         # add TORCH_NPU_PATH
         cmake_args += [f"-DTORCH_NPU_PATH={torch_npu_path}"]
