@@ -985,16 +985,6 @@ and use the `main` branch with the matching vLLM revision recorded in
         --decoder-ports 7100 7101 7102 7103 7100 7101 7102 7103
     ```
 
-    Verify the service:
-
-    ```shell
-    curl http://<PREFILL_NODE_1_IP>:2999/v1/models
-    ```
-
-    The response must list `dsv41`. Then send inference requests to
-    `http://<PREFILL_NODE_1_IP>:2999/v1/chat/completions` or
-    `/v1/completions`.
-
     #### 5.2.2.5 Key Parameter Descriptions
 
     - The A2 layout is 2P2D: the Prefill role spans two servers (two DP4/TP4
@@ -1030,7 +1020,6 @@ and use the `main` branch with the matching vLLM revision recorded in
     INFO:     Waiting for application startup.
     INFO:     Application startup complete.
     ```
-
 
 ### 5.3 Multi-Node Colocated Deployment
 
