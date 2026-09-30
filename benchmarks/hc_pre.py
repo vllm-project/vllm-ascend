@@ -36,7 +36,9 @@ def make_inputs(tokens, hidden, signed):
 
 def measure(inputs, iterations, samples, warmup, timing, replays):
     def call():
-        return torch.ops._C_ascend.npu_hc_pre_v3(*inputs, None, 4, iterations, 1e-6, 1e-6)
+        return torch.ops._C_ascend.npu_hc_pre_v3(
+            *inputs, None, hc_mult=4, hc_sinkhorn_iters=iterations, norm_eps=1e-6, hc_eps=1e-6
+        )
 
     if timing == "graph":
         for _ in range(3):
