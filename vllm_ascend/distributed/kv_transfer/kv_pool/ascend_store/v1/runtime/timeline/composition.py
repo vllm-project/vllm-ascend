@@ -149,6 +149,13 @@ class KVPoolTimelineRuntime:
             return ()
         return self._store.wait(batch)
 
+    def prepare_store_close(self) -> StoreBatch | None:
+        """Hand unfinished Store work to Runtime before closing its executor."""
+
+        if self._layerwise_store is None:
+            return None
+        return self._layerwise_store.prepare_close()
+
     def close(self) -> None:
         close_error: BaseException | None = None
         if self._store is not None:

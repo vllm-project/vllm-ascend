@@ -46,7 +46,7 @@ class RemoteObjectObservation:
 
 @dataclass(frozen=True, slots=True)
 class BindingEvidence:
-    """Native result code observed for one exact transfer binding."""
+    """Backend-normalized result code attached to one exact transfer binding."""
 
     binding: KVBinding
     result_code: int | None
@@ -54,7 +54,13 @@ class BindingEvidence:
 
 @dataclass(frozen=True, slots=True)
 class StoreEvidence:
-    """Store execution evidence with source-release kept independent."""
+    """Authoritative outcome at the producer's current Store execution granularity.
+
+    Binding codes retain diagnostics; consumers use the success summary rather than
+    deriving it again. A layer range can succeed before its remote object is committed;
+    session finalization supplies the whole-transfer outcome consumed by Runtime.
+    Source release independently confirms this operation no longer reads its bindings.
+    """
 
     binding_evidence: tuple[BindingEvidence, ...]
     succeeded: bool
@@ -80,7 +86,7 @@ class LoadFailure:
 
 @dataclass(frozen=True, slots=True)
 class StoreCompletion:
-    """Store evidence published when one selected transfer completes."""
+    """Evidence for one executed transfer, which may be only one layer range."""
 
     request_id: str
     evidence: StoreEvidence

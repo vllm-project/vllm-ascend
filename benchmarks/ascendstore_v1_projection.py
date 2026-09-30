@@ -12,7 +12,6 @@ import json
 import statistics
 import timeit
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, KeyMetadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.coordinates import TokenRange
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.projection import (
     ContiguousBindingProjection,
@@ -25,6 +24,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.graph.topology 
     KVTopology,
     TPPartitionSpec,
 )
+
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, KeyMetadata
 
 
 def measure(operation, iterations: int) -> float:

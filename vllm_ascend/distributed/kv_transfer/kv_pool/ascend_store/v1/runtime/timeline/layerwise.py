@@ -95,7 +95,11 @@ _TIMELINE_POLL_INTERVAL_S = 1.0
 
 
 class LayerwiseBackendOperations(Protocol):
-    """Backend session operations required by layerwise timelines."""
+    """Backend session operations required by layerwise timelines.
+
+    Code tuples align exactly with input keys: zero means success, nonzero means
+    failure. The Backend boundary rejects malformed results before returning.
+    """
 
     def validate_support(self) -> None: ...
 
@@ -133,7 +137,9 @@ class LayerwiseStoreTimelineProtocol(Protocol):
 
     def wait(self, batch: StoreBatch) -> tuple[StoreCompletion, ...]: ...
 
-    def close(self) -> None: ...
+    def prepare_close(self) -> StoreBatch | None: ...
+
+    def close(self) -> StoreBatch | None: ...
 
 
 @dataclass(slots=True)
@@ -226,8 +232,6 @@ class _StoreSession:
             key = item.binding.remote_object.key
             layer_id = item.binding.local_region.region.physical_layer_ids[0]
             self.range_result_codes[key, layer_id] = item.result_code
-            if item.result_code not in (0, None):
-                self.failed_keys.add(key)
         if not completion.evidence.succeeded:
             self.failed_keys.update(transfer_keys)
         if not completion.evidence.source_release_confirmed:
@@ -282,14 +286,6 @@ class _StoreSession:
         except Exception as error:
             self.failed_keys.update(missing_keys)
             self.errors_by_key.update((key, error) for key in missing_keys)
-            self._revoke_sessions(list(missing_keys), backend_io)
-            return
-        if len(result_codes) != len(missing_keys):
-            result_count_error = RuntimeError(
-                f"Layerwise Store session start returned {len(result_codes)} results for {len(missing_keys)} keys"
-            )
-            self.failed_keys.update(missing_keys)
-            self.errors_by_key.update((key, result_count_error) for key in missing_keys)
             self._revoke_sessions(list(missing_keys), backend_io)
             return
         self.pending_finalization_keys = tuple(
@@ -534,10 +530,6 @@ class LayerwiseLoadTimeline:
 
     def _open_session(self, command: _OpenLoadSession) -> None:
         result_codes = self._backend_io.start_load_sessions(list(command.keys), list(command.object_sizes))
-        if len(result_codes) != len(command.keys):
-            raise RuntimeError(
-                f"Layerwise Load session start returned {len(result_codes)} results for {len(command.keys)} keys"
-            )
         codes_by_key = dict(zip(command.keys, result_codes, strict=True))
         session_keys = tuple(key for key, code in codes_by_key.items() if code == 0)
         command.completions = tuple(
@@ -734,14 +726,17 @@ class LayerwiseStoreTimeline:
     def finalize(self) -> StoreBatch:
         with self._lifecycle_lock:
             self._raise_if_not_running()
-            session = self._session
-            if session is None:
-                raise RuntimeError("Layerwise Store session has not been prepared")
-            batch = StoreBatch(session.transfers)
-            self._session = None
-            self._pending_batch = batch
-            incomplete_layer_ids = tuple(sorted(session.pending_transfers_by_layer))
-            self._executor.submit(_FinalizeStoreSession(session, batch, incomplete_layer_ids))
+            return self._finalize_session()
+
+    def _finalize_session(self) -> StoreBatch:
+        session = self._session
+        if session is None:
+            raise RuntimeError("Layerwise Store session has not been prepared")
+        batch = StoreBatch(session.transfers)
+        self._session = None
+        self._pending_batch = batch
+        incomplete_layer_ids = tuple(sorted(session.pending_transfers_by_layer))
+        self._executor.submit(_FinalizeStoreSession(session, batch, incomplete_layer_ids))
         return batch
 
     def wait(self, batch: StoreBatch) -> tuple[StoreCompletion, ...]:
@@ -755,25 +750,25 @@ class LayerwiseStoreTimeline:
                 self._pending_batch = None
         return tuple(batch.completions)
 
-    def close(self) -> None:
-        batch = None
+    def prepare_close(self) -> StoreBatch | None:
+        """Expose the finalization fence, including sessions interrupted before finalize."""
+
         with self._lifecycle_lock:
-            if self._executor.closed:
-                return
-            if self._executor.failure is not None:
-                self._executor.close()
-                self._raise_if_failed()
-            if self._session is not None:
-                session = self._session
-                batch = StoreBatch(session.transfers)
-                self._session = None
-                self._pending_batch = batch
-                incomplete_layer_ids = tuple(sorted(session.pending_transfers_by_layer))
-                self._executor.submit(_FinalizeStoreSession(session, batch, incomplete_layer_ids))
-        if batch is not None:
-            self.wait(batch)
-        self._executor.close()
+            if self._session is None:
+                return self._pending_batch
+            self._raise_if_not_running()
+            return self._finalize_session()
+
+    def close(self) -> StoreBatch | None:
+        batch = None
+        try:
+            batch = self.prepare_close()
+            if batch is not None:
+                self.wait(batch)
+        finally:
+            self._executor.close()
         self._raise_if_failed()
+        return batch
 
     def _execute(self, command: _OpenStoreSession | _StoreLayerJob | _FinalizeStoreSession) -> None:
         try:
