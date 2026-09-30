@@ -106,8 +106,6 @@ templates:
       - --enable-auto-tool-choice
       - --reasoning-parser
       - "deepseek_v4"
-      - --model-loader-extra-config
-      - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
       - --gpu-memory-utilization
       - "0.94"
@@ -160,8 +158,6 @@ templates:
       - --enable-auto-tool-choice
       - --reasoning-parser
       - "deepseek_v4"
-      - --model-loader-extra-config
-      - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
       - --gpu-memory-utilization
       - "0.94"
@@ -220,8 +216,6 @@ templates:
       - --reasoning-parser
       - "deepseek_v4"
       - --no-disable-hybrid-kv-cache-manager
-      - --model-loader-extra-config
-      - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
       - --speculative-config
       - '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}'
@@ -277,8 +271,6 @@ templates:
       - --reasoning-parser
       - "deepseek_v4"
       - --no-disable-hybrid-kv-cache-manager
-      - --model-loader-extra-config
-      - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
       - --speculative-config
       - '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}'
