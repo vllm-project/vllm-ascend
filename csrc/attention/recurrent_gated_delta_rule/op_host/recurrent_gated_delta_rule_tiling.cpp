@@ -21,6 +21,7 @@
 #include "math_util.h"
 #include "error/ops_error.h"
 #include <array>
+#include <limits>
 
 namespace optiling {
 
@@ -41,7 +42,8 @@ const size_t QKV_DIM_NUM = 3;
 const size_t BETA_DIM_NUM = 2;
 const size_t STATE_DIM_NUM = 4;
 const size_t CUSEQLENS_DIM_NUM = 1;
-const size_t SSM_STATE_INDICES_DIM_NUM = 1;
+const size_t SSM_STATE_INDICES_PACKED_DIM_NUM = 1;
+const size_t SSM_STATE_INDICES_BATCHED_DIM_NUM = 2;
 const size_t G_DIM_NUM = 2;
 
 const size_t DIM_0 = 0;
@@ -264,12 +266,65 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::CheckShapeDimAndRelation(const ge
                                                                          const gert::Shape &cuSeqlensShape,
                                                                          const gert::Shape &ssmStateShape)
 {
+    const size_t stateIndicesDimNum = ssmStateShape.GetDimNum();
+    const bool hasPackedStateIndices = stateIndicesDimNum == SSM_STATE_INDICES_PACKED_DIM_NUM;
+    const bool hasBatchedStateIndices = stateIndicesDimNum == SSM_STATE_INDICES_BATCHED_DIM_NUM;
+
     if (!CheckDim(queryShape, QKV_DIM_NUM, "query") || !CheckDim(keyShape, QKV_DIM_NUM, "key") ||
         !CheckDim(valueShape, QKV_DIM_NUM, "value") || !CheckDim(betaShape, BETA_DIM_NUM, "beta") ||
         !CheckDim(stateShape, STATE_DIM_NUM, "state") ||
-        !CheckDim(cuSeqlensShape, CUSEQLENS_DIM_NUM, "actual_seq_lengths") ||
-        !CheckDim(ssmStateShape, SSM_STATE_INDICES_DIM_NUM, "ssm_state_indices")) {
+        !CheckDim(cuSeqlensShape, CUSEQLENS_DIM_NUM, "actual_seq_lengths")) {
         return ge::GRAPH_FAILED;
+    }
+    if (!hasPackedStateIndices && !hasBatchedStateIndices) {
+        OP_LOGE(context_->GetNodeName(),
+                "The number of dimensions of ssm_state_indices should be 1 or 2, but it is %zu",
+                stateIndicesDimNum);
+        return ge::GRAPH_FAILED;
+    }
+
+    const int64_t actualSeqLengthsSize = cuSeqlensShape.GetDim(DIM_0);
+    OP_CHECK_IF(actualSeqLengthsSize < 2,
+                OP_LOGE(context_->GetNodeName(), "actual_seq_lengths must contain at least 2 elements"),
+                return ge::GRAPH_FAILED);
+
+    tilingData_.stateIndicesStride = 0;
+    const int64_t batchSize = actualSeqLengthsSize - 1;
+    if (hasPackedStateIndices) {
+        OP_CHECK_IF(ssmStateShape.GetDim(DIM_0) < queryShape.GetDim(DIM_0),
+                    OP_LOGE(context_->GetNodeName(),
+                            "Packed ssm_state_indices must contain at least T elements, but it has %ld while T is %ld",
+                            ssmStateShape.GetDim(DIM_0), queryShape.GetDim(DIM_0)),
+                    return ge::GRAPH_FAILED);
+    } else {
+        const int64_t stateSlots = ssmStateShape.GetDim(DIM_1);
+        OP_CHECK_IF(ssmStateShape.GetDim(DIM_0) != batchSize,
+                    OP_LOGE(context_->GetNodeName(),
+                            "The batch dimension of ssm_state_indices should be actual_seq_lengths dim 0 minus 1, "
+                            "but it is %ld while the expected batch size is %ld",
+                            ssmStateShape.GetDim(DIM_0), batchSize),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(stateSlots <= 0 ||
+                        static_cast<uint64_t>(stateSlots) > std::numeric_limits<uint32_t>::max(),
+                    OP_LOGE(context_->GetNodeName(),
+                            "The state_slots dimension of ssm_state_indices should be in [1, %u], but it is %ld",
+                            std::numeric_limits<uint32_t>::max(), stateSlots),
+                    return ge::GRAPH_FAILED);
+        tilingData_.stateIndicesStride = static_cast<uint32_t>(stateSlots);
+    }
+
+    const auto numAcceptedTokensShape = context_->GetOptionalInputShape(ACC_TO_INDEX);
+    if (numAcceptedTokensShape != nullptr) {
+        const auto &shape = numAcceptedTokensShape->GetOriginShape();
+        if (!CheckDim(shape, 1, "num_accepted_tokens")) {
+            return ge::GRAPH_FAILED;
+        }
+        OP_CHECK_IF(shape.GetDim(DIM_0) != batchSize,
+                    OP_LOGE(context_->GetNodeName(),
+                            "The length of num_accepted_tokens should equal the batch size, but it is %ld while the "
+                            "batch size is %ld",
+                            shape.GetDim(DIM_0), batchSize),
+                    return ge::GRAPH_FAILED);
     }
 
     if (!CheckDimEqual(queryShape, DIM_0, keyShape, DIM_0, "query", "key", "T dimension") ||
@@ -508,6 +563,7 @@ void RecurrentGatedDeltaRuleTiling::PrintTilingData()
     OP_LOGD(context_->GetNodeName(), "hasGama: [%u]", tilingData_.hasGama);
     OP_LOGD(context_->GetNodeName(), "hasGamaK: [%u]", tilingData_.hasGamaK);
     OP_LOGD(context_->GetNodeName(), "hasAcceptedTokens: [%u]", tilingData_.hasAcceptedTokens);
+    OP_LOGD(context_->GetNodeName(), "stateIndicesStride: [%u]", tilingData_.stateIndicesStride);
 }
 
 int64_t RecurrentGatedDeltaRuleTiling::CalcFixedUbBytes(int64_t aNv, int64_t aDv, int64_t aDk) const
