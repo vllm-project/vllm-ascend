@@ -358,7 +358,10 @@ def _mapping_valid_token_prefix(
     mc2_mask: torch.Tensor | None,
 ) -> torch.Tensor | int | None:
     """Use the existing step count or #17574's MC2 mask as a valid prefix."""
-    state = layer.router.eplb_state
+    router = layer.router
+    if router is None:
+        return None
+    state = router.eplb_state
     if state is None or state.num_unpadded_tokens_tensors is None:
         return None
     valid_tokens = state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]

@@ -13,6 +13,10 @@ from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRo
 from vllm_ascend.ops.triton.eplb_map_record import MAX_COMPARISON_ELEMENTS, _select_tiling
 
 
+def test_valid_prefix_without_router_is_unavailable():
+    assert routed_experts._mapping_valid_token_prefix(SimpleNamespace(router=None), None) is None
+
+
 def test_grid_ownership_is_balanced_and_independent_of_comparison_tile():
     for tokens in (1, 2, 4, 8, 16, 32, 64, 65, 128, 256, 512, 65536):
         for vector_cores in (1, 40, 64):
