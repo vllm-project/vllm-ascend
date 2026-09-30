@@ -708,24 +708,24 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         if rotary_dim > head_dim:
             raise ValueError(f"rotary_dim ({rotary_dim}) must not exceed head_dim ({head_dim})")
 
-        if not self.is_neox_style:
-            # GPT-J/Kimi pairs adjacent dimensions; npu_rotary_mul uses split halves.
-            output = self.forward_static(x[..., :rotary_dim], cos, sin, is_neox_style=False)
-            if rotary_dim < head_dim:
-                output = torch.cat((output, x[..., rotary_dim:]), dim=-1)
-            return self._post_process(output, origin_shape, origin_dtype)
-
         # cos, sin: [seq_len, rotary_dim // 2]
-        cos = torch.cat((cos, cos), dim=-1)
-        sin = torch.cat((sin, sin), dim=-1)
+        if self.is_neox_style:
+            cos = torch.cat((cos, cos), dim=-1)
+            sin = torch.cat((sin, sin), dim=-1)
+            rotary_mode = "half"
+        else:
+            # GPT-J/Kimi pairs adjacent dimensions and repeats each coefficient.
+            cos = cos.repeat_interleave(2, dim=-1)
+            sin = sin.repeat_interleave(2, dim=-1)
+            rotary_mode = "interleave"
         # cos, sin: [1, seq_len, 1, rotary_dim]
         cos = cos.reshape(1, -1, 1, rotary_dim)
         sin = sin.reshape(1, -1, 1, rotary_dim)
 
         if rotary_dim == head_dim:
-            output = torch_npu.npu_rotary_mul(x, cos, sin)
+            output = torch_npu.npu_rotary_mul(x, cos, sin, rotary_mode=rotary_mode)
         else:
-            x_rot = torch_npu.npu_rotary_mul(x[..., :rotary_dim], cos, sin)
+            x_rot = torch_npu.npu_rotary_mul(x[..., :rotary_dim], cos, sin, rotary_mode=rotary_mode)
             output = torch.cat((x_rot, x[..., rotary_dim:]), dim=-1)
 
         output = self._post_process(output, origin_shape, origin_dtype)
