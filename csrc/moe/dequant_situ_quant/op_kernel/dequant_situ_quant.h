@@ -755,9 +755,12 @@ public:
             if (hasBias_) {
                 biasGm_.SetGlobalBuffer((__gm__ float*)bias, expertNum_ * inputWidth_);
             }
-            if (hasGroupIndex_) {
-                groupIndexGm_.SetGlobalBuffer((__gm__ int64_t*)groupIndex, expertNum_);
-            }
+        }
+        if (hasGroupIndex_) {
+            groupIndexGm_.SetGlobalBuffer((__gm__ int64_t*)groupIndex, expertNum_);
+            groupIndexGm32_.SetGlobalBuffer((__gm__ int32_t*)groupIndex, expertNum_ * 2);
+            pipe_->InitBuffer(groupIndexQue_, 1,
+                static_cast<uint32_t>(expertNum_ * sizeof(int64_t)));
         }
         yGm_.SetGlobalBuffer((__gm__ int8_t*)y, rowLen_ * outputWidth_);
         scaleGm_.SetGlobalBuffer((__gm__ float*)scale, rowLen_);
@@ -785,7 +788,56 @@ public:
         }
 
         if constexpr (!std::is_same_v<XType, int32_t>) {
-            ProcessGroup(0, rowLen_, 0);
+            if (hasGroupIndex_) {
+                // Bulk read group_index into local memory (1 DataCopy vs N GM reads)
+                LocalTensor<int32_t> groupIndexRaw = groupIndexQue_.AllocTensor<int32_t>();
+                DataCopyExtParams giParams{1,
+                    static_cast<uint32_t>(expertNum_ * sizeof(int64_t)), 0, 0, 0};
+                DataCopyPadExtParams<int32_t> giPadParams{false, 0, 0, 0};
+                DataCopyPad(groupIndexRaw, groupIndexGm32_, giParams, giPadParams);
+                groupIndexQue_.EnQue(groupIndexRaw);
+                groupIndexRaw = groupIndexQue_.DeQue<int32_t>();
+                LocalTensor<int64_t> groupIndexLocal =
+                    groupIndexRaw.ReinterpretCast<int64_t>();
+
+                // Row-range balanced assignment:
+                // Total real rows T = sum(group_index) are split into usedCoreNum_
+                // contiguous ranges [k*T/N, (k+1)*T/N); block k processes every row
+                // of its range across expert boundaries (the BF16 path has no
+                // per-expert params, so cutting inside an expert is safe).
+                // Unlike round-robin expert assignment this keeps every core busy
+                // for any expert distribution (uniform or hot-expert tail), which
+                // matters for prefill where group_index is skewed: routing a whole
+                // hot expert to a single block serializes up to ~T rows on one
+                // core, and expertNum << usedCoreNum_ leaves cores idle even for
+                // uniform splits.
+                int64_t totalRows = 0;
+                for (int64_t e = 0; e < expertNum_; ++e) {
+                    totalRows += groupIndexLocal.GetValue(e);
+                }
+                if (totalRows > rowLen_) {
+                    totalRows = rowLen_;
+                }
+                const int64_t lo = blockIdx_ * totalRows / usedCoreNum_;
+                const int64_t hi = (blockIdx_ + 1) * totalRows / usedCoreNum_;
+                if (lo < hi) {
+                    int64_t groupOffset = 0;
+                    for (int64_t e = 0; e < expertNum_ && groupOffset < hi; ++e) {
+                        const int64_t rows = groupIndexLocal.GetValue(e);
+                        const int64_t start = groupOffset > lo ? groupOffset : lo;
+                        const int64_t end = (groupOffset + rows < hi) ? (groupOffset + rows) : hi;
+                        for (int64_t rowIdx = start; rowIdx < end; ++rowIdx) {
+                            CopyInRow(rowIdx);
+                            ComputeRow(rowIdx);
+                            CopyOutRow(rowIdx);
+                        }
+                        groupOffset += rows;
+                    }
+                }
+                groupIndexQue_.FreeTensor(groupIndexRaw);
+            } else {
+                ProcessGroup(0, rowLen_, 0);
+            }
             return;
         }
 
@@ -1050,10 +1102,12 @@ private:
     TQue<QuePosition::VECIN, 1> weightScaleQueue_;
     TQue<QuePosition::VECIN, 1> biasQueue_;
     TQue<QuePosition::VECOUT, 1> outQueue_;
+    TQue<QuePosition::VECIN, 1> groupIndexQue_;
     TBuf<TPosition::VECCALC> tmpBuf_;
     TBuf<TPosition::VECCALC> dequantBuf_;
     LocalTensor<float> weightScaleLocal_;
     LocalTensor<float> biasLocal_;
+    GlobalTensor<int32_t> groupIndexGm32_;
 };
 
 } // namespace DequantSituQuantOps
