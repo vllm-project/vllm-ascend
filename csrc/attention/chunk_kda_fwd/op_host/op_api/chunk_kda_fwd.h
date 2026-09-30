@@ -13,35 +13,20 @@
 #include "opdev/op_executor.h"
 
 namespace l0op {
-const std::array<const aclTensor *, 10> ChunkKdaFwd(
-    const aclTensor *q,
-    const aclTensor *k,
-    const aclTensor *v,
-    const aclTensor *gk,
-    const aclTensor *beta,
-    const aclTensor *initialStateOptional,
-    const aclIntArray *cuSeqlensOptional,
-    const aclIntArray *chunkIndicesOptional,
-    const aclTensor *stageQGInputOptional,
-    const aclTensor *stageAqkInputOptional,
-    const aclTensor *stageVNewInputOptional,
-    const aclTensor *stageHInputOptional,
-    double scale,
-    int64_t chunkSize,
-    bool outputFinalState,
-    int64_t totalChunks,
-    int64_t stage,
-    const aclTensor *oOut,
-    const aclTensor *finalStateOut,
-    const aclTensor *aqkOut,
-    const aclTensor *akkOut,
-    const aclTensor *wOut,
-    const aclTensor *uOut,
-    const aclTensor *qgOut,
-    const aclTensor *kgOut,
-    const aclTensor *vNewOut,
-    const aclTensor *hOut,
+using KdaCoreOutputs = std::array<const aclTensor *, 13>;
+
+KdaCoreOutputs KdaChunkForward(
+    const aclTensor *q, const aclTensor *k, const aclTensor *v, const aclTensor *g, const aclTensor *beta,
+    const aclTensor *aLogOptional, const aclTensor *dtBiasOptional,
+    const aclTensor *initialStateOptional, const aclIntArray *cuSeqlensOptional,
+    const aclIntArray *chunkIndicesOptional, double scale, int64_t chunkSize,
+    bool safeGate, bool inputSequenceMajor, bool useGateInKernel, double lowerBound,
+    const aclTensor *attnOut,
+    const aclTensor *finalStateOut, const aclTensor *gkOut, const aclTensor *aqkOut,
+    const aclTensor *akkOut, const aclTensor *wOut, const aclTensor *uOut, const aclTensor *qgOut,
+    const aclTensor *kgOut, const aclTensor *vNewOut, const aclTensor *hOut,
+    const aclTensor *qgScaledOut, const aclTensor *uSeedOut, int64_t stage,
     aclOpExecutor *executor);
-}
+} // namespace l0op
 
 #endif

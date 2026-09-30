@@ -211,19 +211,28 @@ struct BlockSchedulerGdnFwdH {
         vBlockSize = vHeadDim;
         taskNum = batch * vNumHead;
         headGroups = vNumHead / kNumHead;
-        uint32_t maxTaskCntPerLoop = taskNum > cubeCoreNum ? PING_PONG_STAGES : 1;
-        taskStride = cubeCoreNum * maxTaskCntPerLoop;
+        InitTaskWave(0);
+
+    }
+
+    CATLASS_DEVICE
+    void InitTaskWave(uint32_t waveIdx) {
+        uint32_t firstTaskIdx = waveIdx * cubeCoreNum + cubeCoreIdx;
+        taskStride = taskNum;
         for (uint32_t streamId = 0; streamId < PING_PONG_STAGES; ++streamId) {
             auto& stream = runningQ.streams[streamId];
-            stream.nextTaskIdx = (streamId < maxTaskCntPerLoop) ? (cubeCoreIdx * maxTaskCntPerLoop + streamId) : taskNum;
+            stream.nextTaskIdx = streamId == 0 ? firstTaskIdx : taskNum;
             stream.chunkIdx = 0;
             stream.batchChunks = 0;
             stream.active = false;
         }
-        isRunning = cubeCoreIdx * maxTaskCntPerLoop < taskNum;
-
+        isRunning = firstTaskIdx < taskNum;
     }
 
+    CATLASS_DEVICE
+    uint32_t GetTaskWaveCount() const {
+        return CeilDiv(taskNum, cubeCoreNum);
+    }
 
     CATLASS_DEVICE
     void ResolveVarlenSequence(uint32_t compactBatchIdx, GDNFwdHStream& stream) {
