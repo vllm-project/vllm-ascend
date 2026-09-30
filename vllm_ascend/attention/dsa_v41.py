@@ -831,6 +831,10 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 compressed_lengths = (self._cache_seq_lens[:num_reqs], self._cmp_residual[:num_reqs])
                 batch_shared["lengths:c2"] = compressed_lengths
             coordinates["cache_seq_lens"], cmp_residual_buffer = compressed_lengths
+        # Capture the indexer path even when a dummy C2 decode has no
+        # completed compression group. Device cache lengths remain exact.
+        if full_graph_mode and compressed:
+            coordinates["max_cache_seq_len"] = max(plane_ratio, coordinates["max_cache_seq_len"])
         coordinates["max_cache_seq_len"] //= plane_ratio
         cos = sin = None
         if cache_kind == "swa" and positions is not None:

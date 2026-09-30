@@ -18,6 +18,7 @@ from torch import nn
 from transformers import PretrainedConfig
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
+    get_engram_dp_size,
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -48,6 +49,7 @@ from vllm.model_executor.models.utils import PPMissingLayer, is_pp_missing_param
 
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import EngramLayout
+from vllm.models.deepseek_v41.nvidia.engram import gather_engram_hashes
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -85,7 +87,7 @@ from .engram.embedding import (
     preflight_engram_checkpoint,
 )
 from .engram.layer import AscendEngram
-from .engram.parallel import gather_engram_hashes, get_engram_dp_size
+from .engram.parallel import resolve_dp_shared_memory
 from .indexer import DeepseekV41Indexer
 
 
@@ -1005,7 +1007,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         # Preserve BF16 tables for non-quantized checkpoints. Host placement
         # remains controlled by vLLM's EngramConfig.
         cpu_offload = engram_cpu_offload(vllm_config)
-        self.engram_dp_shared_memory = bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
+        # A node that holds one DP replica has nothing to share, so an explicit
+        # request resolves there to the plain TP-sharded table, before any table
+        # exists: the model and the embedding then read the same mode.
+        self.engram_dp_shared_memory = resolve_dp_shared_memory(
+            bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
+        )
         self.engram_layout = EngramLayout.from_config(config) if engram_enabled(config) else None
         if self.engram_layout is not None:
             # Complete head buckets per rank, laid out over TP and the
