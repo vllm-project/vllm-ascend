@@ -196,7 +196,9 @@ class build_and_install_aclnn(Command):
     def run(self):
         try:
             print("Running bash build_aclnn.sh ...")
-            subprocess.check_call(["bash", "csrc/build_aclnn.sh", ROOT_DIR, envs.SOC_VERSION])
+            subprocess.check_call(
+                ["bash", os.path.join(ROOT_DIR, "csrc", "build_aclnn.sh"), ROOT_DIR, envs.SOC_VERSION]
+            )
             print("build_aclnn.sh executed successfully!")
         except subprocess.CalledProcessError as e:
             print(f"Error running build_aclnn.sh: {e}")
