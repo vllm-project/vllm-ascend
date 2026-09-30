@@ -12,7 +12,7 @@
  * \file attn_res_fwd_tiling.cpp
  * \brief AttnResFwd host tiling — CanResidentAllBlocks → RESIDENT / RELOAD；无 FP32-v WS
  */
-#include "../../attn_res_fwd/op_host/attn_res_fwd_tiling.h"
+#include "attn_res_fwd_tiling.h"
 
 #include <algorithm>
 #include <cstring>

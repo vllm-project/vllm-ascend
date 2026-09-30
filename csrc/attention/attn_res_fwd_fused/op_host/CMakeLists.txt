@@ -18,7 +18,7 @@ if (BUILD_OPEN_PROJECT)
     if(CONDITION_UNIT STREQUAL "ascend950")
         add_ops_compile_options(
             OP_NAME AttnResFwdFused
-            OPTIONS -I${CMAKE_CURRENT_SOURCE_DIR}/../../attn_res_fwd/op_kernel
+            OPTIONS -I${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel
                     --cce-auto-sync=off
                     -Wno-deprecated-declarations
                     -Werror
@@ -28,7 +28,7 @@ if (BUILD_OPEN_PROJECT)
     else()
         add_ops_compile_options(
             OP_NAME AttnResFwdFused
-            OPTIONS -I${CMAKE_CURRENT_SOURCE_DIR}/../../attn_res_fwd/op_kernel
+            OPTIONS -I${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel
                     --cce-auto-sync=off
                     -Wno-deprecated-declarations
                     -Werror

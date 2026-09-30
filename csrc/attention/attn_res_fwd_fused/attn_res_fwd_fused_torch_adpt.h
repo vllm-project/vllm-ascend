@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-#include "../attn_res_fwd/attn_res_fwd_fused_common.h"
+#include "attn_res_fwd_fused_common.h"
 
 namespace vllm_ascend {
 std::tuple<at::Tensor, at::Tensor, at::Tensor> attn_res_fwd_fused(
