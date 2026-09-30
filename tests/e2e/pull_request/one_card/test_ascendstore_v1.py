@@ -11,6 +11,11 @@ from vllm.config import KVTransferConfig
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_ports_list
 
+from tests.e2e.common.kv_pool.ascendstore_v1_probe import (
+    clear_worker_local_kv,
+    collect_worker_io_probe,
+    install_worker_io_probe,
+)
 from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import SingleNodeMooncakeManager
@@ -43,6 +48,7 @@ def test_inprocess_store_lookup_load(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         kv_connector="AscendStoreV1Connector",
         kv_connector_module_path=CONNECTOR_MODULE,
         kv_role="kv_both",
+        kv_load_failure_policy="fail",
         kv_connector_extra_config={
             "backend": "mooncake",
             "lookup_rpc_port": lookup_port,
@@ -75,16 +81,31 @@ def test_inprocess_store_lookup_load(monkeypatch: pytest.MonkeyPatch, tmp_path: 
             seed=42,
             kv_transfer_config=transfer_config,
         ) as runner:
+            (granularity,) = runner.model.collective_rpc(install_worker_io_probe)
+            expected_loaded_tokens = PROMPT_TOKEN_COUNT // granularity * granularity
+            assert 0 < expected_loaded_tokens < PROMPT_TOKEN_COUNT
             cold_output = runner.model.generate(prompts, sampling_params, use_tqdm=False)[0]
             assert cold_output.finished
             assert cold_output.num_cached_tokens == 0
             assert len(cold_output.outputs[0].token_ids) == OUTPUT_TOKEN_COUNT
 
-            # Reset only local prefix cache; preserve the Mooncake objects written by Store.
+            # Reset removes cache hashes, not bytes. Erase Worker KV as well, but preserve the Mooncake objects.
             assert runner.model.reset_prefix_cache(), "Local KV must be cleared before testing remote Load"
+            (cold_evidence,) = runner.model.collective_rpc(clear_worker_local_kv)
+            assert len(cold_evidence["stored_keys"]) == expected_loaded_tokens // granularity
             warm_output = runner.model.generate(prompts, sampling_params, use_tqdm=False)[0]
             assert warm_output.finished
-            assert warm_output.num_cached_tokens is not None and warm_output.num_cached_tokens > 0, (
-                "No external KV cache hit after clearing the local prefix cache"
-            )
+            assert warm_output.num_cached_tokens == expected_loaded_tokens
             assert warm_output.outputs[0].token_ids == cold_output.outputs[0].token_ids
+            (warm_evidence,) = runner.model.collective_rpc(collect_worker_io_probe)
+            assert warm_evidence["get_calls"] == 1, "The warm request must execute a real Backend GET"
+            assert sorted(warm_evidence["loaded_keys"]) == sorted(cold_evidence["stored_keys"])
+            assert warm_evidence["loaded_ranges"] == tuple(
+                (start, start + granularity) for start in range(0, expected_loaded_tokens, granularity)
+            )
+            assert warm_evidence["loaded_bytes"] == cold_evidence["stored_bytes"] > 0
+            print(
+                f"AscendStore v1 verified: GET calls={warm_evidence['get_calls']}, "
+                f"keys={len(warm_evidence['loaded_keys'])}, tokens={expected_loaded_tokens}, "
+                f"bytes={warm_evidence['loaded_bytes']}, local KV erased, exact source bytes restored"
+            )
