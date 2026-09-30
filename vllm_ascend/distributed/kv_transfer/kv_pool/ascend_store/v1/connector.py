@@ -191,7 +191,8 @@ class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
             sources,
         )
         self._finished_checkpoint_stores.append(self._store_source_leases.acquire(command))
-        # Exact job-level references own the source blocks, so vLLM can release the request's own references on time.
+        # This bool means delay_free, not accepted: False releases vLLM's request references immediately.
+        # The Store job's exact source leases remain until Workers confirm source release.
         return False
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:

@@ -6,8 +6,12 @@ import importlib
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType, ModuleType
+from typing import TYPE_CHECKING
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+if TYPE_CHECKING:
+    from ..backend.memcache_backend import MemcacheBackend
+    from ..backend.mooncake_backend import MooncakeBackend
+    from ..backend.yuanrong_backend import YuanrongBackend
 
 _BACKEND_PACKAGE = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"
 
@@ -33,7 +37,7 @@ class BackendSpec:
     """Fix one Backend implementation and its startup-time capabilities."""
 
     name: str
-    backend_type: type[Backend]
+    backend_type: type[MooncakeBackend] | type[MemcacheBackend] | type[YuanrongBackend]
     backend_module: ModuleType
     layerwise_access: LayerwiseAccessKind | None
     requires_exists_before_put: bool

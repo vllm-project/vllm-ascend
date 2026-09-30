@@ -4,13 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from numbers import Integral
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
 from ...backend import BackendSpec
 from ...program.values.evidence import BindingEvidence, RemoteObjectObservation, StoreEvidence
 from ...program.values.representation import BindingBatch, KVBinding, RemoteKVObject
+
+if TYPE_CHECKING:
+    from ....backend.memcache_backend import MemcacheBackend
+    from ....backend.mooncake_backend import MooncakeBackend
+    from ....backend.yuanrong_backend import YuanrongBackend
 
 
 class BackendIO:
@@ -81,24 +86,31 @@ class BackendIO:
         addresses: list[list[int]],
         sizes: list[list[int]],
     ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
-        backend = self._backend
         if self._backend_spec.name == "mooncake":
-            backend.ensure_initialized()
-            if backend.store is None:
+            mooncake_backend = cast("MooncakeBackend", self._backend)
+            mooncake_backend.ensure_initialized()
+            if mooncake_backend.store is None:
                 raise RuntimeError("Mooncake store is unavailable for put")
-            replicate_config = backend._build_replicate_config()
-            return backend.store.batch_put_from_multi_buffers, (keys, addresses, sizes, replicate_config)
+            replicate_config = mooncake_backend._build_replicate_config()
+            return mooncake_backend.store.batch_put_from_multi_buffers, (keys, addresses, sizes, replicate_config)
         if self._backend_spec.name == "memcache":
-            backend.ensure_initialized()
-            if backend.store is None:
+            memcache_backend = cast("MemcacheBackend", self._backend)
+            memcache_backend.ensure_initialized()
+            if memcache_backend.store is None:
                 raise RuntimeError("Memcache store is unavailable for put")
             direction = self._backend_spec.backend_module.MmcDirect.COPY_L2G.value
-            return backend.store.batch_put_from_layers, (keys, addresses, sizes, direction)
+            return memcache_backend.store.batch_put_from_layers, (keys, addresses, sizes, direction)
         if self._backend_spec.name == "yuanrong":
-            if backend.store is None:
+            yuanrong_backend = cast("YuanrongBackend", self._backend)
+            if yuanrong_backend.store is None:
                 raise RuntimeError("Yuanrong store is unavailable for put")
-            return backend.store.mset_d2h_from_multi_buffers, (keys, addresses, sizes, backend._ds_set_param)
-        return backend.put, (keys, addresses, sizes)
+            return yuanrong_backend.store.mset_d2h_from_multi_buffers, (
+                keys,
+                addresses,
+                sizes,
+                yuanrong_backend._ds_set_param,
+            )
+        return self._backend.put, (keys, addresses, sizes)
 
     def _store_evidence_from_aligned_results(
         self,

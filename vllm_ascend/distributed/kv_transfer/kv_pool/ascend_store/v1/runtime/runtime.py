@@ -53,13 +53,19 @@ class KVPoolRuntime:
         source_ready_event_factory: Callable[[], Any] | None = None,
     ) -> None:
         timeline = KVPoolTimelineRuntime(program.schedule, program.topology)
-        backend_io_type = BackendIO
+        backend_io: BackendIO
+        layerwise_backend: GVABackendIO | KeyRangeBackendIO | None = None
         if program.schedule.requires_layerwise_backend:
             access_kind = resources.backend_spec.layerwise_access
             if access_kind is None:
                 raise ValueError("Layerwise timeline requires a session Backend")
-            backend_io_type = GVABackendIO if access_kind is LayerwiseAccessKind.GVA else KeyRangeBackendIO
-        backend_io = backend_io_type(resources.backend, resources.backend_spec)
+            backend_io_type: type[GVABackendIO] | type[KeyRangeBackendIO] = (
+                GVABackendIO if access_kind is LayerwiseAccessKind.GVA else KeyRangeBackendIO
+            )
+            layerwise_backend = backend_io_type(resources.backend, resources.backend_spec)
+            backend_io = layerwise_backend
+        else:
+            backend_io = BackendIO(resources.backend, resources.backend_spec)
         self._program = program
         self._resources = resources
         self._backend_io = backend_io
@@ -77,7 +83,7 @@ class KVPoolRuntime:
             store_operation=self._execute_store,
             store_transfer_operation=self._execute_store_transfer,
             store_admission=self._admit_store_transfers,
-            layerwise_backend=backend_io if program.schedule.requires_layerwise_backend else None,
+            layerwise_backend=layerwise_backend,
             start_gate_factory=start_gate_factory,
         )
 
