@@ -1172,6 +1172,29 @@ def create_hccl_pg_options(group_name: str):
     return options
 
 
+def normalize_hccl_group_name(group_name: str) -> str:
+    base_name = group_name.split(":", maxsplit=1)[0]
+    if base_name.startswith("p_tp_"):
+        return "p_tp"
+    return base_name
+
+
+def get_hccl_qos_config(group_name: str) -> dict:
+    if get_ascend_device_type() != AscendDeviceType.A5:
+        return {}
+
+    base_name = normalize_hccl_group_name(group_name)
+    qos = get_ascend_config().ai_qos.collective_communication.get_qos(base_name)
+    if qos is None:
+        return {}
+
+    return {
+        "hccl_sdma_qos": qos,
+        "qos_service_level": qos,
+        "qos_traffic_class": qos * 32,
+    }
+
+
 def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
     """
     Get HCCL process group options for the given communication group name.
@@ -1186,14 +1209,22 @@ def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
     # based on HCCL_BUFFSIZE configuration. Using pg_options with mc2 group would
     # result in memory misalignment problems.
     if group_name and "mc2" in group_name:
-        return None
-    if group_name == SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME:
-        return {"hccl_buffer_size": SLEEP_LIFECYCLE_ANCHOR_BUFFER_SIZE}
-    hccl_config_map = {
-        "dp": {"hccl_buffer_size": calculate_dp_buffer_size()},
-        "dynamic_eplb": {"hccl_buffer_size": _DYNAMIC_EPLB_BUFFER_SIZE},
-    }
-    return hccl_config_map.get(group_name, get_default_buffer_config())
+        hccl_config = {}
+    elif group_name == SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME:
+        hccl_config = {"hccl_buffer_size": SLEEP_LIFECYCLE_ANCHOR_BUFFER_SIZE}
+    else:
+        hccl_config_map = {
+            "dp": {"hccl_buffer_size": calculate_dp_buffer_size()},
+            "dynamic_eplb": {"hccl_buffer_size": _DYNAMIC_EPLB_BUFFER_SIZE},
+        }
+        hccl_config = hccl_config_map.get(group_name, get_default_buffer_config()).copy()
+
+    qos_config = get_hccl_qos_config(group_name)
+    if not qos_config:
+        return hccl_config or None
+
+    hccl_config.update(qos_config)
+    return hccl_config
 
 
 def get_default_buffer_config() -> dict:

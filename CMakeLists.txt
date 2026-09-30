@@ -195,6 +195,10 @@ if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
     PUBLIC
     ${VLLM_ASCEND_C_COMMON_LIBS}
   )
+  if(SOC_VERSION MATCHES "ascend950")
+    target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_HCCL_QOS_CONFIG)
+    target_link_libraries(vllm_ascend_C PRIVATE hccl)
+  endif()
 else()
   target_link_libraries(
     vllm_ascend_C

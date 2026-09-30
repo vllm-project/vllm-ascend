@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import math
 import os
 from importlib import import_module, util
@@ -84,6 +86,44 @@ _MINIMAX_M3_ARCHITECTURES = frozenset(
         "MiniMaxM3SparseForConditionalGeneration",
     }
 )
+
+
+def _parse_ai_qos(value: str) -> dict[str, Any]:
+    try:
+        config = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(f"--ai-qos must be valid JSON: {exc}") from exc
+    if not isinstance(config, dict):
+        raise argparse.ArgumentTypeError("--ai-qos must be a JSON object")
+    return config
+
+
+def _patch_engine_args_ai_qos() -> None:
+    from vllm.engine.arg_utils import EngineArgs
+
+    from_cli_args = EngineArgs.from_cli_args
+    if getattr(from_cli_args, "_ascend_ai_qos_wrapped", False):
+        return
+    original = from_cli_args.__func__
+
+    def wrapped(cls, args):
+        ai_qos = getattr(args, "ai_qos", None)
+        if ai_qos is not None:
+            additional_config = getattr(args, "additional_config", None)
+            if additional_config is None:
+                additional_config = {}
+            elif not isinstance(additional_config, dict):
+                raise TypeError("additional_config must be a dict when --ai-qos is specified")
+            elif "ai_qos" in additional_config:
+                raise ValueError("--ai-qos conflicts with additional_config.ai_qos")
+            else:
+                additional_config = additional_config.copy()
+            additional_config["ai_qos"] = ai_qos
+            args.additional_config = additional_config
+        return original(cls, args)
+
+    wrapped._ascend_ai_qos_wrapped = True
+    EngineArgs.from_cli_args = classmethod(wrapped)
 
 
 class NPUPlatform(Platform):
@@ -337,6 +377,14 @@ class NPUPlatform(Platform):
                 for dtype in get_args(CacheConfig.__dataclass_fields__["cache_dtype"].type):
                     if dtype not in dtype_action.choices:
                         dtype_action.choices.append(dtype)
+            if "--ai-qos" not in parser._option_string_actions:
+                parser.add_argument(
+                    "--ai-qos",
+                    type=_parse_ai_qos,
+                    default=None,
+                    help="Ascend AI QoS configuration as a JSON object.",
+                )
+            _patch_engine_args_ai_qos()
 
         if get_current_hardware_profile().quantization_backend_family is QuantizationBackendFamily.STANDARD:
             from vllm_ascend.quantization import (  # noqa: F401

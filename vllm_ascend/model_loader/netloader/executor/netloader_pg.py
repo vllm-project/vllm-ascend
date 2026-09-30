@@ -28,6 +28,22 @@ from torch.distributed.rendezvous import rendezvous
 from torch_npu._C._distributed_c10d import ProcessGroupHCCL
 from vllm.logger import logger
 
+from vllm_ascend.utils import get_hccl_qos_config
+
+
+def _set_hccl_config(pg_options: Any, group_name: str) -> None:
+    hccl_config = dict(getattr(pg_options, "hccl_config", None) or {})
+    hccl_config["group_name"] = group_name
+    qos_config = get_hccl_qos_config(group_name)
+    if not qos_config:
+        pg_options.hccl_config = hccl_config
+        return
+
+    hccl_config["hccl_sdma_qos"] = qos_config["hccl_sdma_qos"]
+    hccl_config["qos_service_level"] = qos_config["qos_service_level"]
+    hccl_config["qos_traffic_class"] = qos_config["qos_traffic_class"]
+    pg_options.hccl_config = hccl_config
+
 
 def stateless_init_process_group(
     host: str,
@@ -121,6 +137,9 @@ def stateless_init_process_group(
     # Check if pg_options is None or not of type ProcessGroupHCCL.Options
     if pg_options is None or not isinstance(pg_options, torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options):
         pg_options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
+
+    _set_hccl_config(pg_options, group_name)
+
     # Set attributes for pg_options
     pg_options.is_high_priority_stream = False
     pg_options._timeout = timeout
