@@ -2171,7 +2171,8 @@ def test_layerwise_load_closes_an_incomplete_session_before_reporting_it() -> No
         runtime.close()
 
 
-def test_layerwise_store_publishes_ranges_before_committing_shared_objects(monkeypatch) -> None:
+@pytest.mark.parametrize("no_work", ["no_session", "existing_keys", "unknown_layer", "duplicate_layer"])
+def test_layerwise_store_skips_source_events_without_layer_work(monkeypatch, no_work) -> None:
     backend = FakeBackend()
     events = []
 
@@ -2180,6 +2181,104 @@ def test_layerwise_store_publishes_ranges_before_committing_shared_objects(monke
         events.append(event)
         return event
 
+    if no_work == "existing_keys":
+        backend.requires_exists_before_put = True
+        backend.presence = [1]
+    monkeypatch.setattr(torch.npu, "Event", make_event)
+    runtime, resources = make_layerwise_store_runtime(backend)
+    store = (
+        StoreCommandBatch()
+        if no_work == "no_session"
+        else StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    )
+    begin_kv_pool_step(runtime, store=store)
+    try:
+        if no_work == "duplicate_layer":
+            runtime.save_layer("layers.0.group.0")
+            assert len(events) == 1
+        expected_events = len(events)
+        idle_layers_by_case = {
+            "no_session": ("layers.0.group.0", "layers.1.group.0"),
+            "existing_keys": ("layers.0.group.0", "layers.1.group.0"),
+            "unknown_layer": ("layers.99.group.0",),
+            "duplicate_layer": ("layers.0.group.0",),
+        }
+        for layer_name in idle_layers_by_case[no_work]:
+            runtime.save_layer(layer_name)
+        assert len(events) == expected_events
+    finally:
+        if no_work != "no_session":
+            runtime.save_layer("layers.0.group.0")
+            runtime.save_layer("layers.1.group.0")
+        runtime.finish_step()
+        runtime.close()
+    assert resources.closed
+    expected_copies = 0 if no_work in ("no_session", "existing_keys") else 2
+    assert [call[0] for call in backend.calls].count("batch_copy_put") == expected_copies
+
+
+def test_layerwise_store_retains_layer_work_when_source_event_recording_fails(monkeypatch) -> None:
+    backend = FakeBackend()
+    monkeypatch.setattr(torch.npu, "Event", FakeEvent)
+    runtime, resources = make_layerwise_store_runtime(backend)
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
+    begin_kv_pool_step(runtime, store=store)
+    timeline = runtime._timeline.store
+
+    def fail_recording():
+        raise RuntimeError("source event recording failed")
+
+    try:
+        with pytest.raises(RuntimeError, match="source event recording failed"):
+            timeline.submit_layer("layers.0.group.0", fail_recording)
+        assert set(timeline._session.pending_transfers_by_layer) == {0, 1}
+        assert "batch_copy_put" not in [call[0] for call in backend.calls]
+    finally:
+        runtime.save_layer("layers.0.group.0")
+        runtime.save_layer("layers.1.group.0")
+        runtime.finish_step()
+        runtime.close()
+    assert resources.closed
+
+
+def test_layerwise_store_idle_hook_still_reports_executor_failure(monkeypatch) -> None:
+    def unexpected_event():
+        raise AssertionError("An idle hook must not create a source event")
+
+    monkeypatch.setattr(torch.npu, "Event", unexpected_event)
+    runtime, resources = make_layerwise_store_runtime(FakeBackend())
+    begin_kv_pool_step(runtime)
+    runtime._timeline.store._executor.terminate(RuntimeError("executor failed"))
+    try:
+        with pytest.raises(RuntimeError, match="Layerwise Store failed"):
+            runtime.save_layer("layers.0.group.0")
+    finally:
+        with pytest.raises(RuntimeError, match="previous Store failure"):
+            runtime.close()
+    assert resources.closed
+
+
+def test_layerwise_store_publishes_ranges_before_committing_shared_objects(monkeypatch) -> None:
+    backend = FakeBackend()
+    events = []
+    worker_thread = threading.current_thread()
+    copy_range = backend.batch_copy_put
+    copy_count = 0
+
+    def make_event():
+        assert threading.current_thread() is worker_thread
+        event = FakeEvent()
+        events.append(event)
+        return event
+
+    def copy_after_source_ready(*args):
+        nonlocal copy_count
+        event = events[copy_count]
+        assert event.recorded and event.synchronized
+        copy_count += 1
+        return copy_range(*args)
+
+    monkeypatch.setattr(backend, "batch_copy_put", copy_after_source_ready)
     monkeypatch.setattr(torch.npu, "Event", make_event)
     runtime, resources = make_layerwise_store_runtime(backend)
     store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4),))
@@ -2199,7 +2298,8 @@ def test_layerwise_store_publishes_ranges_before_committing_shared_objects(monke
     ]
     assert store_calls[0][2] == (64,)
     assert [call[4] for call in store_calls[1:3]] == [((0,),), ((32,),)]
-    assert all(event.synchronized for event in events)
+    assert len(events) == 2
+    assert all(event.recorded and event.synchronized for event in events)
     assert runtime._pending_store_batch is None
     assert resources.closed
 

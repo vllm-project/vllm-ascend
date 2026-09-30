@@ -133,7 +133,7 @@ class KVPoolTimelineRuntime:
     def submit_store_layer(self, layer_name: str) -> None:
         if self._layerwise_store is None:
             return
-        self._layerwise_store.submit_layer(layer_name, self._record_source_ready())
+        self._layerwise_store.submit_layer(layer_name, self._record_source_ready)
 
     def finish_store(self, transfers: list[StoreTransfer]) -> StoreBatch:
         if self._store is None:

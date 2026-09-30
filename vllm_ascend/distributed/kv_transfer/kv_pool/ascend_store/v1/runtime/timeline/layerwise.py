@@ -131,7 +131,7 @@ class LayerwiseStoreTimelineProtocol(Protocol):
 
     def prepare(self, transfers: list[StoreTransfer]) -> None: ...
 
-    def submit_layer(self, layer_name: str, source_ready_event: Any) -> None: ...
+    def submit_layer(self, layer_name: str, record_source_ready: Callable[[], Any]) -> None: ...
 
     def finalize(self) -> StoreBatch: ...
 
@@ -710,7 +710,7 @@ class LayerwiseStoreTimeline:
                 raise RuntimeError("Previous Layerwise Store session has not reached its fence")
             self._session = self._open_session(transfers)
 
-    def submit_layer(self, layer_name: str, source_ready_event: Any) -> None:
+    def submit_layer(self, layer_name: str, record_source_ready: Callable[[], Any]) -> None:
         with self._lifecycle_lock:
             self._raise_if_not_running()
             session = self._session
@@ -719,8 +719,11 @@ class LayerwiseStoreTimeline:
             layer_id = self._layer_ids_by_name.get(layer_name)
             if layer_id is None:
                 return
-            layer_transfers = session.pending_transfers_by_layer.pop(layer_id, ())
+            layer_transfers = session.pending_transfers_by_layer.get(layer_id, ())
             if layer_transfers:
+                # Record on the caller's stream before consuming work; event failures must leave it pending.
+                source_ready_event = record_source_ready()
+                session.pending_transfers_by_layer.pop(layer_id)
                 self._executor.submit(_StoreLayerJob(session, layer_transfers, source_ready_event))
 
     def finalize(self) -> StoreBatch:
