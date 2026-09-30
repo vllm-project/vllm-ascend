@@ -1,0 +1,60 @@
+test_cases:
+  - name: "deepseek_r1_ttft_benegit_A3"
+    model: "Eco-Tech/DeepSeek-R1-0528-w8a8-mtp-QuaRot"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "100"
+      VLLM_USE_V1: "1"
+      HCCL_BUFFSIZE: "1024"
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
+      VLLM_RPC_TIMEOUT: "360000"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "36000"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
+      DISABLE_L2_CACHE: "1"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      SERVER_PORT: "DEFAULT_PORT"
+
+    server_cmd:
+      - "host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--data-parallel-size"
+      - "4"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--quantization"
+      - "ascend"
+      - "--seed"
+      - "1024"
+      - "--enable-export-parallel"
+      - "--max-num-seqs"
+      - "8"
+      - "--max-model-len"
+      - "40000"
+      - "--max-num-batched-tokens"
+      - "2048"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--api-sever-count"
+      - "1"
+      - "--speculative-config"
+      - '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"ascend_scheduler_config":{"enabled":false}}'
+
+    benchmarks:
+      spec_decode:
+        case_type: spec_decode
+        dataset_path: vllm-ascend/prefix75-in3500-bs210
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 38912
+        batch_size: 48
+        temperature: 0
+        baseline: [0.89, 0.79, 0.69, 0.60, 0.53, 0.46, 0.40]
+        threshold: 0.05

@@ -1,0 +1,45 @@
+test_cases:
+  - name: "Qwen3_32b_ttft_benegit_A3"
+    model: "Qwen/Qwen3-32B"
+    envs:
+      VLLM_USE_V1: "1"
+      LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE: "1"
+      VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
+      SERVER_PORT: "DEFAULT_PORT"
+
+    server_cmd:
+      - "--port"
+      - "$SERVER_PORT"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--distributed_executor_backend",
+      - "mp",
+        - "--max-model-len"
+        - "40960"
+        - "--max-num-batched-tokens"
+        - "16384"
+        - "--trust-remote-code"
+        - "--quantization"
+        - "ascend"
+        - "--reasoning-parser"
+        - "qwen3"
+        - "--gpu-memory-utilization"
+        - "0.9"
+        - "--block-size"
+        - "128"
+        - "--async-scheduling"
+        - "--compilation-config"
+        - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    benchmarks:
+      spec_decode:
+        case_type: spec_decode
+        dataset_path: vllm-ascend/prefix75-in3500-bs210
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 38912
+        batch_size: 48
+        temperature: 0
+        baseline: [0.89, 0.79, 0.69, 0.60, 0.53, 0.46, 0.40]
+        threshold: 0.05
