@@ -71,5 +71,5 @@ test_cases:
         max_out_len: 1024
         batch_size: 16
         request_rate: 0
-        baseline: 234.6171
+        baseline: 269.023
         threshold: 0.97
