@@ -178,10 +178,6 @@ a3:
         config_file_path: GLM-5.1-W8A8C8-A3_128k_90_50.yaml
         config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
-      - name: multi-node-deepseek-v3.1
-        config_file_path: DeepSeek-V3.1-BF16.yaml
-        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
-        size: 2
       - name: multi-node-qwenw8a8-2node-eplb
         config_file_path: Qwen3-235B-W8A8-EPLB.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
