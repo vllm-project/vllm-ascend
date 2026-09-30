@@ -371,6 +371,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             build_attn_metadata_wrapper(),
         ):
             # Replicated capture already prepares draft metadata; do not rebuild it from the runtime batch.
+            # TODO: Refactor capture/runtime metadata preparation so capture can use
+            # self._prefill without rebuilding metadata from a stale self.input_batch.
             self.prefill_cudagraph_manager.capture(
                 super()._prefill if self.replicated_pcp else self._prefill,
                 self.model_state,
