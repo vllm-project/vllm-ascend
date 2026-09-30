@@ -130,9 +130,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "kda_layout_swap12"
         "store_kv_block"
         "store_kv_block_metadata"
-        "sparse_attention_score"
         "k2q_csr"
-        "msa_index_score"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
         "fused_scatter_copy_sparse_flash_attention"
@@ -184,9 +182,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "kda_layout_swap12"
         "store_kv_block"
         "store_kv_block_metadata"
-        "sparse_attention_score"
         "k2q_csr"
-        "msa_index_score"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
         "fused_scatter_copy_sparse_flash_attention"
@@ -226,9 +222,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "store_kv_block"
         "store_kv_block_metadata"
         "k2q_csr"
-        "sparse_attention_score"
         "mla_prolog_v3_k3"
-        "msa_index_score"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
