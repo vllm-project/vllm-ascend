@@ -328,7 +328,9 @@ class NPUModelRunner(GPUModelRunner):
             for group in groups
         )
 
-        if self.model_config.enable_return_routed_experts:
+        # Legacy (pre-AuxOutput) R3 path; the getattr keeps MRv2 startable on a
+        # vLLM lane where ModelConfig no longer exposes the flag.
+        if getattr(self.model_config, "enable_return_routed_experts", False):
             self.init_routed_experts_capturer()
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(
