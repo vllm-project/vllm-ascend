@@ -129,6 +129,8 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     const int64_t quantMode = mla_preprocess_detail::ParseQuantMode(quant_mode);
     const bool enableInnerOut = enable_inner_out.value_or(false);
     const bool enableRope = cos.has_value();
+    const at::Tensor slotMapping =
+        slotmapping.scalar_type() == at::kLong ? slotmapping.to(at::kInt) : slotmapping;
 
     mla_preprocess_detail::ValidateCacheNonFirstAxisContiguous(kv_cache, "kv_cache");
     mla_preprocess_detail::ValidateCacheNonFirstAxisContiguous(kv_cache_rope, "kv_cache_rope");
@@ -167,7 +169,7 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
         sin,
         cos,
         kv_cache,
-        slotmapping,
+        slotMapping,
         wuq,
         bias1,
         wuk,
