@@ -40,12 +40,14 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### 4.1 Docker Image Installation
 
+- You can use our official docker image to run GLM-5.3-Flash directly.
+
 === "950DT Products"
 
     Start the docker image on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:glm-5.3-flash-a5-openeuler
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -83,7 +85,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:glm-5.3-flash-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
@@ -127,7 +129,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:glm-5.3-flash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -384,11 +386,10 @@ Only the key parameters specific to this model/scenario are described below. `ma
       --trust-remote-code \
       --enforce-eager \
       --quantization ascend \
-      --skip-mm-profiling \
-      --limit-mm-per-prompt '{"image": 35, "video": 0}' \
+      --limit-mm-per-prompt '{"image": 1, "video": 0}' \
       --gpu-memory-utilization 0.92 \
       --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
-      --additional_config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":true,"enable_flashcomm1":true}' \
+      --additional_config '{"multistream_overlap_shared_expert":true,"enable_flashcomm1":true}' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "36680"}'
     ```
@@ -423,7 +424,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,pin_memory_expandable_segments:True
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_USE_V2_MODEL_RUNNER=0
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
@@ -446,8 +447,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
       --max-num-batched-tokens 60 \
       --trust-remote-code \
       --quantization ascend \
-      --skip-mm-profiling \
-      --limit-mm-per-prompt '{"image": 35, "video": 0}' \
+      --limit-mm-per-prompt '{"image": 1, "video": 0}' \
       --gpu-memory-utilization 0.92 \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
@@ -524,8 +524,9 @@ Only the key parameters specific to this model/scenario are described below. `ma
       enables FlashComm1 with `enable_flashcomm1: true`. Decode leaves
       FlashComm1 disabled and uses `FULL_DECODE_ONLY` for the target model.
     - `multistream_overlap_shared_expert: true` overlaps shared-expert and
-      routed-expert work. Prefill also enables CPU binding; Decode enables the
-      static kernel in `ascend_compilation_config`.
+      routed-expert work. CPU binding remains enabled by default on both roles;
+      Decode additionally enables the static kernel in
+      `ascend_compilation_config`.
     - `HCCL_IF_IP` and all socket interface variables must select the service
       network used by the configured node IPs. The DP RPC, engine, Mooncake,
       and proxy ports must be allowed by the host firewall.
