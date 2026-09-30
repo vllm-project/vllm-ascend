@@ -40,7 +40,7 @@ def _make_op(is_neox_style):
 def test_interleaved_rope_matches_complex_reference(dtype, batched, strided, rotary_dim):
     """Kimi's adjacent-pair RoPE must not use the split-half NPU kernel."""
     generator = torch.Generator().manual_seed(1024)
-    shape = (SEQ_LEN, NUM_HEADS, HEAD_SIZE * (2 if strided else 1))
+    shape: tuple[int, ...] = (SEQ_LEN, NUM_HEADS, HEAD_SIZE * (2 if strided else 1))
     if batched:
         shape = (2, *shape)
     x = torch.randn(shape, generator=generator).to(dtype)
