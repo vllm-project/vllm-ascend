@@ -9,6 +9,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.core.six_region_kv_cache_layout import (
@@ -21,6 +22,7 @@ from vllm_ascend.core.six_region_kv_cache_layout import (
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_max_memory_usage_bytes_from_groups,
     _get_qwen4_exp_six_region_kv_cache_config,
+    _merge_mamba_state_groups,
     _merge_qsa_composite_groups,
     _prepare_qsa_composite_groups,
 )
@@ -456,3 +458,73 @@ def test_six_region_admission_matches_shared_planner_allocation() -> None:
     assert layout is not None
     assert layout.slot_count == 36
     assert layout.slot_count * layout.slot_backing_size == required_bytes
+
+
+def test_mamba_state_groups_merge_shares_one_block_table() -> None:
+    """36 per-layer GDN groups must merge into one group sharing a block table.
+
+    Regression for the on-machine 910B2 finding: with per-layer GDN groups the
+    admission formula charges each layer's state blocks at the full 36-slot
+    pool-block price, inflating the minimum KV memory by tens of times and
+    preventing TP4 startup on 64GB cards.
+    """
+    specs = _ungrouped_qwen_specs()
+    owners = _prepare_qsa_composite_groups(specs)
+    assert owners is not None
+    groups = _merge_qsa_composite_groups(
+        [KVCacheGroupSpec([name], spec) for name, spec in specs.items()],
+        specs,
+        *owners,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=135168),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="align",
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+        ),
+        max_in_flight_tokens=4096,
+    )
+
+    def is_gdn_group(group) -> bool:
+        spec = group.kv_cache_spec
+        members = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else [spec]
+        return all(isinstance(member, MambaSpec) and len(member.shapes) == 2 for member in members)
+
+    def required_blocks(group_list) -> int:
+        return sum(
+            (g.kv_cache_spec.max_memory_usage_bytes(vllm_config) + g.kv_cache_spec.page_size_bytes - 1)
+            // g.kv_cache_spec.page_size_bytes
+            for g in group_list
+        )
+
+    gdn_groups = [g for g in groups if is_gdn_group(g)]
+    assert len(gdn_groups) == 36
+    assert all(len(g.layer_names) == 1 for g in gdn_groups)
+    gdn_blocks_each = required_blocks(gdn_groups[:1])
+
+    blocks_before = required_blocks(groups)
+    bytes_before = _ascend_max_memory_usage_bytes_from_groups(vllm_config, groups)
+
+    merged = _merge_mamba_state_groups(groups)
+
+    gdn_merged = [g for g in merged if is_gdn_group(g)]
+    assert len(gdn_merged) == 1
+    assert len(gdn_merged[0].layer_names) == 36
+    # PLE (single-shape MambaSpec) keeps its own group.
+    ple_groups = [g for g in merged if isinstance(g.kv_cache_spec, MambaSpec) and len(g.kv_cache_spec.shapes) == 1]
+    assert len(ple_groups) == 1
+    assert len(merged) == len(groups) - 35
+
+    blocks_after = required_blocks(merged)
+    assert blocks_before - blocks_after == 35 * gdn_blocks_each
+
+    probe = build_six_region_kv_cache_layout(merged, num_blocks=1)
+    assert probe is not None
+    assert probe.slot_count == 36
+    pool_block_bytes = probe.slot_count * probe.slot_backing_size
+
+    bytes_after = _ascend_max_memory_usage_bytes_from_groups(vllm_config, merged)
+    assert bytes_after == blocks_after * pool_block_bytes
+    assert bytes_before - bytes_after == 35 * gdn_blocks_each * pool_block_bytes
