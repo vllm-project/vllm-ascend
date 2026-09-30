@@ -139,6 +139,9 @@ private:
         pipe_->InitBuffer(outFp32Buf_, hiddenSizeAlignFp32_ * sizeof(float));
         metaAlign_ = (blockCount_ + ELEM_PER_BLK_FP32 - 1U) / ELEM_PER_BLK_FP32 * ELEM_PER_BLK_FP32;
         pipe_->InitBuffer(vecMetaBuf_, metaAlign_ * sizeof(float));
+        // 2 KiB fits within the tiling estimate's 32 KiB UB overhead.
+        pipe_->InitBuffer(mathScratchBuf_, 512 * sizeof(float));
+        mathScratch_ = mathScratchBuf_.Get<float>();
         pipe_->InitBuffer(metaSoftmaxBuf_, metaAlign_ * sizeof(float));
         pipe_->InitBuffer(metaBrcBuf_, metaAlign_ * ELEM_PER_BLK_FP32 * sizeof(float));
         pipe_->InitBuffer(scalarBuf_, SCALAR_LOCAL_ELEMS * sizeof(float));
@@ -220,7 +223,7 @@ private:
         PipeBarrier<PIPE_V>();
         ReduceSumHalfInterval(scalarLocal_, outFp32_, static_cast<int32_t>(hiddenSize_));
         PipeBarrier<PIPE_V>();
-        InvRmsInPlace(scalarLocal_, invHiddenSize_, normEps_, metaSoftmax_);
+        InvRmsInPlace(scalarLocal_, hiddenSize_, normEps_, metaBrc_, mathScratch_);
         if (needBackward_) {
             // inv 逐点搬 GM：Alloc→Copy→EnQue→DeQue→DataCopyPad→Free
             PipeBarrier<PIPE_V>();
@@ -289,7 +292,7 @@ private:
 
     __aicore__ inline void SoftmaxSmall()
     {
-        SoftmaxSmallVec(vecMeta_, blockCount_, metaAlign_, scalarLocal_, metaSoftmax_, metaBrc_);
+        SoftmaxSmallVec(vecMeta_, blockCount_, metaAlign_, scalarLocal_, metaSoftmax_, metaBrc_, mathScratch_);
         // 紧凑 prob → metaBrc[n*8]：零填充 staging 后单次 Brcb（repeat=ceil(B/8)）
         Duplicate(metaSoftmax_, 0.0f, metaAlign_);
         PipeBarrier<PIPE_V>();
@@ -361,7 +364,7 @@ private:
             Mul(vRow_, outFp32_, outFp32_, hiddenSize_);
             PipeBarrier<PIPE_V>();
             ReduceSumHalfInterval(scalarLocal_, vRow_, static_cast<int32_t>(hiddenSize_));
-            InvRmsInPlace(scalarLocal_, invHiddenSize_, tiling_->outputNormEps, metaSoftmax_);
+            InvRmsInPlace(scalarLocal_, hiddenSize_, tiling_->outputNormEps, metaBrc_, mathScratch_);
             BroadcastScalarMulTensor(outFp32_, outFp32_, scalarLocal_, metaSoftmax_, metaBrc_, hiddenSize_,
                                      hiddenSizeAlignFp32_);
             LocalTensor<D_IN> weight;
@@ -493,6 +496,8 @@ private:
     TPipe *pipe_{nullptr};
     const AttnResFwdTilingData *tiling_{nullptr};
 
+    TBuf<TPosition::VECCALC> mathScratchBuf_;
+    LocalTensor<float> mathScratch_;
     GlobalTensor<D_IN> prefixSumGm_;
     GlobalTensor<D_IN> blockResidualGm_;
     GlobalTensor<D_IN> projWeightGm_;
