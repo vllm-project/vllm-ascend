@@ -10,6 +10,26 @@ import torch
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import routed_experts
 from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
+from vllm_ascend.ops.triton.eplb_map_record import MAX_COMPARISON_ELEMENTS, _select_tiling
+
+
+def test_grid_ownership_is_balanced_and_independent_of_comparison_tile():
+    for tokens in (1, 2, 4, 8, 16, 32, 64, 65, 128, 256, 512, 65536):
+        for vector_cores in (1, 40, 64):
+            for local_count in (8, 16, 32, 64, 112):
+                num_grids, block_p, token_tile = _select_tiling(tokens, local_count, vector_cores)
+                assert num_grids == min(tokens, vector_cores)
+                assert token_tile * block_p <= MAX_COMPARISON_ELEMENTS
+                assert token_tile > 0 and token_tile & (token_tile - 1) == 0
+                base, extra = divmod(tokens, num_grids)
+                assert token_tile <= 1 << ((base + bool(extra) - 1).bit_length())
+                ranges = [
+                    (pid * base + min(pid, extra), (pid + 1) * base + min(pid + 1, extra)) for pid in range(num_grids)
+                ]
+                assert ranges[0][0] == 0 and ranges[-1][1] == tokens
+                assert all(end == next_start for (_, end), (next_start, _) in zip(ranges, ranges[1:], strict=False))
+                sizes = [end - start for start, end in ranges]
+                assert max(sizes) - min(sizes) <= 1
 
 
 @pytest.mark.parametrize("scoring", ["softmax", "sigmoid"])
@@ -62,11 +82,13 @@ def test_router_preserves_cann_logical_ids_and_weights_before_mapping(scoring, g
         (MoECommType.FUSED_MC2, 1, 1, False, [1, 1, 1, 0], 3),
         (MoECommType.FUSED_MC2, 1, 1, False, None, 6),
         (MoECommType.MC2, 1, 1, False, None, 6),
-        (MoECommType.ALLTOALL, 1, 1, False, None, 2),
+        (MoECommType.ALLTOALL, 1, 1, False, None, 6),
         (MoECommType.ALLTOALL, 1, 1, True, None, 6),
     ],
 )
-def test_valid_prefix_tracks_prepared_router_rows(monkeypatch, comm, dp, pcp, sequence_parallel, mask, expected):
+def test_valid_prefix_uses_existing_step_count_and_mc2_mask(
+    monkeypatch, comm, dp, pcp, sequence_parallel, mask, expected
+):
     state = SimpleNamespace(num_unpadded_tokens_tensors=[torch.tensor(6, dtype=torch.int32)])
     layer = SimpleNamespace(
         router=SimpleNamespace(eplb_state=state),
@@ -80,23 +102,5 @@ def test_valid_prefix_tracks_prepared_router_rows(monkeypatch, comm, dp, pcp, se
     monkeypatch.setattr(routed_experts, "dbo_current_ubatch_id", lambda: 0)
     mc2_mask = torch.tensor(mask, dtype=torch.bool) if mask is not None else None
 
-    prepared_rows = 8 if sequence_parallel else 4
-    result = routed_experts._mapping_valid_token_prefix(layer, torch.zeros(prepared_rows, 16), mc2_mask)
+    result = routed_experts._mapping_valid_token_prefix(layer, mc2_mask)
     assert (None if result is None else int(result)) == expected
-
-
-def test_alltoall_uneven_tp_split_uses_the_actual_rank_offset(monkeypatch):
-    state = SimpleNamespace(num_unpadded_tokens_tensors=[torch.tensor(6, dtype=torch.int32)])
-    layer = SimpleNamespace(
-        router=SimpleNamespace(eplb_state=state),
-        moe_config=SimpleNamespace(dp_size=1, pcp_size=1, is_sequence_parallel=False),
-    )
-    context = SimpleNamespace(
-        moe_comm_type=MoECommType.ALLTOALL,
-        moe_comm_method=SimpleNamespace(prepare_finalize=SimpleNamespace(tp_rank=2, tp_size=8, num_tokens=10)),
-    )
-    monkeypatch.setattr(routed_experts, "_EXTRA_CTX", context)
-    monkeypatch.setattr(routed_experts, "dbo_current_ubatch_id", lambda: 0)
-
-    result = routed_experts._mapping_valid_token_prefix(layer, torch.zeros(1, 16), None)
-    assert int(result) == 1  # Rank 2 owns row 4; the old rank * local_rows formula gave row 2.

@@ -4,7 +4,7 @@
 
 - **Function**: Map Router-produced logical TopK expert IDs through the runtime EPLB table and add valid-token assignment counts to the cumulative physical-expert load. Scoring, gating, TopK and routing weights remain with the existing Router.
 - **Formula**: `physical_ids[t, j] = routing_table[t % table_rows, logical_ids[t, j]]`. For each local physical expert `e`, `expert_load[e] += sum(t < valid_tokens, j: physical_ids[t, j] == e)` when recording is enabled. Every assignment contributes one, independent of its weight.
-- **Algorithm flow**: The first Triton kernel assigns each program a contiguous token range, maps every row (including padding rows), and accumulates one program-private physical-expert histogram over its valid tokens. Each program stores one disjoint histogram row. The second kernel reduces these rows and adds the result to `expert_load`. Neither kernel uses a global atomic.
+- **Algorithm flow**: The first Triton kernel launches `min(T, vector_core_num)` programs and assigns each a balanced contiguous token range. Within that range, it maps every row (including padding rows) and processes one TopK slot at a time in token tiles, accumulating one program-private physical-expert histogram over valid tokens. Each program stores one disjoint histogram row. The unchanged second kernel reduces these rows and adds the result to `expert_load`. Neither kernel uses a global atomic.
 - **Supported modes**: Atlas A2 (910B4-1) verified in eager and operator graph replay. Atlas A3 and 950PR&950DT Products: N/A (not yet verified). No dispatch guard is based solely on ALLGATHER, MC2, FUSED_MC2, ALLTOALL, DP or PCP; their valid-token layout must still satisfy the prefix contract below.
 
 ## Parameters
@@ -23,9 +23,9 @@
 ## Constraints
 
 - `T >= 0`, `K >= 1`, `R >= 1`, `E_logical >= 1`. All tensors are on the same device. The routing table and load use int32; the load is a contiguous 1-D view.
-- Logical IDs outside `[0, E_logical)` map to `-1`. The local range must lie within `expert_load` and have positive length. The comparison working set is bounded by `BLOCK * next_power_of_2(local_expert_count) <= 8192`.
+- Logical IDs outside `[0, E_logical)` map to `-1`. The local range must lie within `expert_load` and have positive length. `BLOCK_P = next_power_of_2(local_expert_count)` and `TOKEN_TILE * BLOCK_P <= 8192`; `TOKEN_TILE` is also capped by the largest program-owned token range to avoid mostly masked lanes on small T. The 8192 elements are an operator-internal, single-slot comparison working-set safety budget—not a functional expert-count limit or a factor in grid selection. Only a local range whose `BLOCK_P > 8192` cannot fit even a one-token tile and is rejected internally.
 - The record contract is a **valid prefix**: rows `0 <= t < valid_tokens` are real and later rows are padding. The count can change on-device during graph replay. Mapping still produces output for padded rows, but they do not contribute to load.
-- Communication mode names are not a correctness guard. However, a DP/PCP AllGather with unequal per-rank valid lengths can place padding between valid rows. A scalar prefix cannot represent that layout; such a workload needs a separate layout/record validation before its load can be treated as correct. This is the retained #17574 prefix-contract risk, not a property fixed by changing global atomics to grid-local reduction.
+- Communication mode names are not a correctness guard. The MC2 mask count and the existing step-level unpadded count supply the valid-prefix value; no new ALLTOALL partition arithmetic is introduced. A DP/PCP AllGather with unequal per-rank valid lengths can place padding between valid rows, and a scalar prefix cannot represent that layout. This remains an unknown/inherited #17574 prefix-contract risk, not a problem created or solved by replacing global atomics with grid-private reduction.
 - Post-Router ID rewrites (`log2phy`, mixed placement, forced EPLB or forced load balance) use the existing downstream record path, because recording before the final ID rewrite would count the wrong assignment.
 
 ## Origin and Differences

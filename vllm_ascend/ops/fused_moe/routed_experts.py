@@ -31,7 +31,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -42,7 +42,6 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMileston
 from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
-from vllm_ascend.ops.triton.eplb_map_record import MAX_COMPARISON_ELEMENTS
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -356,33 +355,17 @@ def _record_v2_eplb_load(router: FusedMoERouter, result: FusedExpertsResult) -> 
 
 def _mapping_valid_token_prefix(
     layer: "AscendRoutedExperts",
-    router_logits: torch.Tensor,
     mc2_mask: torch.Tensor | None,
 ) -> torch.Tensor | int | None:
-    """Return the valid prefix in the rows seen by the EPLB mapping hook.
-
-    MC2's mask is a sliced prefix; non-SP All2All partitions that prefix
-    into contiguous TP ranges. Other communication paths use the existing
-    #17574 valid-prefix contract without a mode-specific dispatch guard.
-    """
+    """Use the existing step count or #17574's MC2 mask as a valid prefix."""
     state = layer.router.eplb_state
     if state is None or state.num_unpadded_tokens_tensors is None:
         return None
     valid_tokens = state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
     if mc2_mask is not None:
         return mc2_mask.to(torch.int32).sum()
-    if _EXTRA_CTX.moe_comm_type == MoECommType.ALLTOALL and not layer.moe_config.is_sequence_parallel:
-        prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
-        # torch.tensor_split assigns one extra row to each early TP rank.
-        # Multiplying this rank's row count by its index is wrong when the
-        # prepared row count is not divisible by TP size.
-        total_rows = max(prepare_finalize.num_tokens, prepare_finalize.tp_size)
-        base_rows, extra_rows = divmod(total_rows, prepare_finalize.tp_size)
-        rank_start = prepare_finalize.tp_rank * base_rows + min(prepare_finalize.tp_rank, extra_rows)
-        return (valid_tokens - rank_start).clamp(min=0, max=router_logits.shape[0])
-    # DP/PCP AllGather may interleave rank-local padding if ranks have
-    # different valid counts. This scalar-prefix ABI cannot represent such
-    # layouts; preserve #17574's contract until a real mask is available.
+    # Other modes inherit the valid-prefix contract. DP/PCP interleaving
+    # remains an inherited risk, not a grid-private reduction requirement.
     return valid_tokens
 
 
@@ -730,7 +713,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         eplb_state = self.router.eplb_state
         if eplb_state is not None:
             eplb_state.record_done_in_mapping = False
-            eplb_state.mapping_valid_tokens = _mapping_valid_token_prefix(self, router_logits, mc2_mask)
+            eplb_state.mapping_valid_tokens = _mapping_valid_token_prefix(self, mc2_mask)
             # Post-router ID rewrites prevent recording final assignments here.
             # Communication modes share the existing valid-prefix contract.
             eplb_state.record_in_mapping_allowed = (
@@ -740,7 +723,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 and not getattr(self, "mix_placement", False)
                 and not get_ascend_config().enable_force_eplb
                 and not enable_force_load_balance
-                and 0 < eplb_state.local_expert_count <= MAX_COMPARISON_ELEMENTS
+                and eplb_state.local_expert_count > 0
             )
         topk_weights, topk_ids = self._select_experts(
             hidden_states=hidden_states,

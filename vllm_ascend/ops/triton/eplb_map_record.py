@@ -12,9 +12,9 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
-# Bound the live [assignment, local-expert] comparison tensor. The token
-# ownership range is independent of this inner processing tile.
-MAX_ASSIGNMENTS_PER_TILE = 512
+# Bound the live [token, local-expert] comparison for one TopK slot. The
+# program count and contiguous token ownership are independent of this tile.
+MAX_TOKEN_TILE = 512
 MAX_COMPARISON_ELEMENTS = 8192
 
 
@@ -31,40 +31,44 @@ def _eplb_map_grid_record_kernel(
     table_rows,
     local_expert_start,
     local_expert_count,
+    num_grids,
     K: tl.constexpr,
-    TOKENS_PER_GRID: tl.constexpr,
-    BLOCK: tl.constexpr,
+    TOKEN_TILE: tl.constexpr,
     BLOCK_P: tl.constexpr,
     VALID_IS_TENSOR: tl.constexpr,
 ):
     grid_id = tl.program_id(0)
-    assignment_start = grid_id * TOKENS_PER_GRID * K
-    assignment_end = tl.minimum((grid_id + 1) * TOKENS_PER_GRID, tokens) * K
+    base_tokens = tokens // num_grids
+    extra_tokens = tokens % num_grids
+    token_start = grid_id * base_tokens + tl.minimum(grid_id, extra_tokens)
+    token_end = token_start + base_tokens + (grid_id < extra_tokens)
     physical = tl.arange(0, BLOCK_P)
     grid_record = tl.full((BLOCK_P,), 0, tl.int32)
     recording = tl.load(record_enabled_ptr) != 0
     if VALID_IS_TENSOR:
-        valid_end = tl.minimum(tl.maximum(tl.load(valid_tokens_ptr), 0), tokens) * K
+        valid_end = tl.minimum(tl.maximum(tl.load(valid_tokens_ptr), 0), tokens)
     else:
-        valid_end = valid_tokens_ptr * K
+        valid_end = valid_tokens_ptr
 
-    for base in range(assignment_start, assignment_end, BLOCK):
-        assignment = base + tl.arange(0, BLOCK)
-        assignment_mask = assignment < assignment_end
-        logical_id = tl.load(logical_ids_ptr + assignment, mask=assignment_mask, other=0).to(tl.int64)
-        logical_valid = (logical_id >= 0) & (logical_id < experts)
-        safe_logical_id = tl.where(logical_valid, logical_id, 0)
-        table_index = ((assignment // K) % table_rows) * experts + safe_logical_id
-        physical_id = tl.load(
-            table_ptr + table_index,
-            mask=assignment_mask & logical_valid,
-            other=-1,
-        )
-        tl.store(physical_ids_ptr + assignment, physical_id, mask=assignment_mask)
-        if recording:
-            valid_assignment = assignment_mask & (assignment < valid_end)
-            hits = (physical_id[:, None] - local_expert_start == physical[None, :]) & valid_assignment[:, None]
-            grid_record += tl.sum(hits.to(tl.int32), axis=0)
+    for token_base in range(token_start, token_end, TOKEN_TILE):
+        token = token_base + tl.arange(0, TOKEN_TILE)
+        token_mask = token < token_end
+        valid_token = token_mask & (token < valid_end)
+        for slot in tl.static_range(K):
+            assignment = token * K + slot
+            logical_id = tl.load(logical_ids_ptr + assignment, mask=token_mask, other=0).to(tl.int64)
+            logical_valid = (logical_id >= 0) & (logical_id < experts)
+            safe_logical_id = tl.where(logical_valid, logical_id, 0)
+            table_index = (token % table_rows) * experts + safe_logical_id
+            physical_id = tl.load(
+                table_ptr + table_index,
+                mask=token_mask & logical_valid,
+                other=-1,
+            )
+            tl.store(physical_ids_ptr + assignment, physical_id, mask=token_mask)
+            if recording:
+                hits = (physical_id[:, None] - local_expert_start == physical[None, :]) & valid_token[:, None]
+                grid_record += tl.sum(hits.to(tl.int32), axis=0)
 
     # Grid rows have disjoint addresses, so this is an ordinary store.
     tl.store(
@@ -72,6 +76,21 @@ def _eplb_map_grid_record_kernel(
         grid_record,
         mask=physical < local_expert_count,
     )
+
+
+def _select_tiling(tokens: int, local_expert_count: int, vector_core_num: int) -> tuple[int, int, int]:
+    """Select independent program parallelism and per-slot comparison tile."""
+    block_p = triton.next_power_of_2(local_expert_count)
+    if block_p > MAX_COMPARISON_ELEMENTS:
+        raise ValueError("local physical expert count exceeds the comparison resource budget")
+    num_grids = min(tokens, vector_core_num)
+    max_owned_tokens = triton.cdiv(tokens, num_grids)
+    token_tile = min(
+        MAX_TOKEN_TILE,
+        MAX_COMPARISON_ELEMENTS // block_p,
+        triton.next_power_of_2(max_owned_tokens),
+    )
+    return num_grids, block_p, token_tile
 
 
 @triton.jit
@@ -164,14 +183,8 @@ def eplb_map_and_record(
         return torch.empty_like(logical_ids)
     physical_ids = torch.empty_like(logical_ids)
 
-    block_p = triton.next_power_of_2(local_expert_count)
-    if block_p > MAX_COMPARISON_ELEMENTS:
-        raise ValueError("local physical expert count exceeds the comparison resource budget")
-    block = min(MAX_ASSIGNMENTS_PER_TILE, MAX_COMPARISON_ELEMENTS // block_p)
     init_device_properties_triton()
-    target_grids = min(tokens, triton.cdiv(tokens * k, block), get_vectorcore_num())
-    tokens_per_grid = triton.cdiv(tokens, target_grids)
-    num_grids = triton.cdiv(tokens, tokens_per_grid)
+    num_grids, block_p, token_tile = _select_tiling(tokens, local_expert_count, get_vectorcore_num())
     grid_records = torch.empty((num_grids, local_expert_count), dtype=torch.int32, device=logical_ids.device)
     _eplb_map_grid_record_kernel[(num_grids,)](
         logical_ids,
@@ -185,9 +198,9 @@ def eplb_map_and_record(
         routing_table.shape[0],
         local_expert_start,
         local_expert_count,
+        num_grids,
         K=k,
-        TOKENS_PER_GRID=tokens_per_grid,
-        BLOCK=block,
+        TOKEN_TILE=token_tile,
         BLOCK_P=block_p,
         VALID_IS_TENSOR=isinstance(valid_tokens, torch.Tensor),
     )
