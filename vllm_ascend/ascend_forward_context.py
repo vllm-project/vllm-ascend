@@ -245,16 +245,7 @@ def set_ascend_forward_context(
                 mc2_mask[:num_actual_tokens] = True
                 mc2_mask[num_actual_tokens:] = False
                 forward_context.mc2_mask = mc2_mask
-        # Mirror the V1 profile marker into the dynamo-guardable module flag
-        # (V2 uses override_mrv2_in_profile_run); written just before the try so
-        # setup failures never latch a stuck flag.
-        global _IN_PROFILE_RUN
-        previous_profile_run = _IN_PROFILE_RUN
-        _IN_PROFILE_RUN = previous_profile_run or in_profile_run
-        try:
-            yield
-        finally:
-            _IN_PROFILE_RUN = previous_profile_run
+        yield
 
 
 _mc2_tokens_capacity: int | None = None
