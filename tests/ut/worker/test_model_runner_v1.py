@@ -37,6 +37,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
 )
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
@@ -156,7 +157,7 @@ class TestDPPaddingPolicy(unittest.TestCase):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.dp_size = 2
         runner.dp_rank = dp_rank
-        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(enable_return_routed_experts=False))
+        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace())
         runner.ascend_config = SimpleNamespace(finegrained_tp_config=FinegrainedTPConfig())
         return runner
 
@@ -254,15 +255,6 @@ class TestDPPaddingPolicy(unittest.TestCase):
                                 self.assertEqual(maximum, 31)
                                 self.assertEqual(mode, CUDAGraphMode.NONE)
                                 self.assertEqual(across_dp.tolist(), [31, 31] if size > 1 else list(tokens))
-
-    def test_routing_capture_keeps_uniform_eager_inputs(self):
-        for dp_rank in range(2):
-            with self.subTest(dp_rank=dp_rank):
-                runner = self._make_runner(dp_rank)
-                runner.vllm_config.model_config.enable_return_routed_experts = True
-                _, across_dp, mode = self._run_sync(runner, comm_method=MoECommType.FUSED_MC2)
-                self.assertEqual(mode, CUDAGraphMode.NONE)
-                self.assertEqual(across_dp.tolist(), [32, 32])
 
     def test_imbalanced_and_idle_metadata_use_agreed_graph_mode(self):
         for tokens in ((0, 32), (1, 32), (8, 32)):
@@ -2467,10 +2459,32 @@ class TestNPUModelRunnerEncoderCacheReset(unittest.TestCase):
         runner.tmp_encoder_cache = {}
         runner.cpu_encoder_cache = {}
         runner.cached = {}
+        runner._offload_request_states = CopySfaRequestStates()
         runner._pending_encoder_cache_copies = deque()
         runner.late_interaction_runner = MagicMock()
         runner._sync_device = MagicMock()
         return runner
+
+    def test_request_removal_invalidates_offload_history_without_cached_request(self):
+        runner = self._build_runner()
+        slots = np.zeros(4, dtype=np.int32)
+        active = np.zeros(4, dtype=np.bool_)
+        args = dict(
+            req_ids=["a"],
+            live_req_ids=["a"],
+            slots=slots,
+            active=active,
+            prebound_slots={"a": 0},
+            padded_reqs=1,
+            block_size=128,
+            hot_tokens=8192,
+            dummy=False,
+            lim_cache_histories=(),
+        )
+        runner._offload_request_states.prepare(computed_tokens=np.asarray([8320]), **args)
+        runner._on_request_state_removed("a", None)
+        outcome = runner._offload_request_states.prepare(computed_tokens=np.asarray([512]), **args)
+        self.assertEqual(outcome, (False, {}, (0,)))
 
     def test_reset_clears_score_encoder_cache_state(self):
         runner = self._build_runner()
@@ -2500,6 +2514,7 @@ class TestNPUModelRunnerScoreEncoderCache(unittest.TestCase):
         runner.cached = {}
         runner._pending_encoder_cache_copies = deque()
         runner.use_score_encoder_cache = use_score_encoder_cache
+        runner._offload_request_states = None
         runner.maybe_save_ec_to_connector = MagicMock()
         return runner
 
@@ -2839,7 +2854,6 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
         runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
         runner.vllm_config = MagicMock()
-        runner.vllm_config.model_config.enable_return_routed_experts = False
         runner.ascend_config = SimpleNamespace(
             scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False))
         )
@@ -2879,7 +2893,6 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
         runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
         runner.vllm_config = MagicMock()
-        runner.vllm_config.model_config.enable_return_routed_experts = False
         runner.ascend_config = SimpleNamespace(
             scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False))
         )

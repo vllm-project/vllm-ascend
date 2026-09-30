@@ -103,6 +103,7 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    max_num_reqs: int
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -318,6 +319,15 @@ class NPUModelRunner(GPUModelRunner):
                     module.prepare_ring_compressor(self.max_num_tokens, self.device)
         prepare_v41_source_rope(self)
 
+        # Upstream has bound every local cache; publish sealed plans before
+        # the worker can warm up, capture graphs or execute prefill requests.
+        from vllm_ascend.ops.kda_state_copy_plan import initialize_kda_state_copy
+
+        initialize_kda_state_copy(
+            self.vllm_config.compilation_config.static_forward_context,
+            self.vllm_config.scheduler_config.max_num_seqs,
+        )
+
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
@@ -328,7 +338,9 @@ class NPUModelRunner(GPUModelRunner):
             for group in groups
         )
 
-        if self.model_config.enable_return_routed_experts:
+        # Legacy (pre-AuxOutput) R3 path; the getattr keeps MRv2 startable on a
+        # vLLM lane where ModelConfig no longer exposes the flag.
+        if getattr(self.model_config, "enable_return_routed_experts", False):
             self.init_routed_experts_capturer()
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(
@@ -758,6 +770,21 @@ class NPUModelRunner(GPUModelRunner):
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
+    @contextmanager
+    def _cap_parallel_draft_dummy_reqs(self, uniform_decode: bool):
+        # TODO: Remove this context and its use once main2main includes
+        # https://github.com/vllm-project/vllm/pull/56448. Until then,
+        # profiling can exceed the speculator's query buffer.
+        original_max_num_reqs = self.max_num_reqs
+        if self.speculator is not None and not uniform_decode:
+            # Other speculators use one query row per request in vLLM v0.30.0.
+            query_width = getattr(self.speculator, "num_query_per_req", 1)
+            self.max_num_reqs = min(original_max_num_reqs, self.max_num_tokens // query_width)
+        try:
+            yield
+        finally:
+            self.max_num_reqs = original_max_num_reqs
+
     @step_eplb_after(is_dummy=True)
     def _dummy_run(
         self,
@@ -783,7 +810,7 @@ class NPUModelRunner(GPUModelRunner):
                 "the profile-run marker, which makes XLite bypass its graph path."
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
-        with skip_ring_state_update(skip_ring), load_balance_ctx:
+        with self._cap_parallel_draft_dummy_reqs(uniform_decode), skip_ring_state_update(skip_ring), load_balance_ctx:
             hidden_states, sample_hidden_states = super()._dummy_run(
                 num_tokens,
                 *args,

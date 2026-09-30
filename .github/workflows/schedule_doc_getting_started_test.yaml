@@ -197,6 +197,14 @@ jobs:
           echo "Image: ${{ matrix.image }}"
           npu-smi info
 
+      - name: Restore incremental cache for source installation
+        id: doctest-l1
+        if: ${{ matrix.method == 'source' }}
+        uses: $/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          architecture: ${{ runner.arch }}
+          soc-version: a2
       - name: Run Installation doctest
         run: |
           runtime_dir="$(mktemp -d)"

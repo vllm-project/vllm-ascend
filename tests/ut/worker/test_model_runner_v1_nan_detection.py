@@ -14,7 +14,6 @@ class TestNPUModelRunnerNaNDetection(unittest.TestCase):
     def _build_runner(self, num_reqs: int = 3, max_model_len: int = 64):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.use_async_scheduling = False
-        runner.routed_experts_initialized = False
         runner.num_discarded_requests = 0
         runner.discard_request_indices = SimpleNamespace(np=np.array([], dtype=np.int64))
         runner.max_model_len = max_model_len

@@ -154,7 +154,7 @@ concurrency:
 jobs:
   e2e:
     name: ${{ inputs.config_file_path }}
-    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
+    timeout-minutes: ${{ inputs.request_id != '' && (inputs.aop_multi_enabled && 1440 || 240) || fromJSON(inputs.testcase_timeout) }}
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
@@ -394,12 +394,148 @@ jobs:
           done
 
           LEADER_TMP=$(mktemp)
-          kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | tee "$LEADER_TMP" | while IFS= read -r line; do
-            echo "$line"
-            if echo "$line" | grep -q "$FAIL_TAG"; then
+          if [ "${{ inputs.aop_multi_enabled }}" = "true" ]; then
+            leader_identity() {
+              local attempt state
+              for ((attempt=0; attempt<3; attempt++)); do
+                if state=$(kubectl --request-timeout=30s get pod "$LEADER_POD" -n "$NAMESPACE" \
+                    -o jsonpath='{.metadata.uid}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].containerID}{"|"}{.status.containerStatuses[?(@.name=="vllm-leader")].restartCount}'); then
+                  printf '%s\n' "$state"
+                  return 0
+                fi
+                sleep 1
+              done
+              echo "::error::Unable to query AOP leader state." >&2
+              return 1
+            }
+            initial_identity=$(leader_identity)
+            IFS='|' read -r pod_uid container_id restart_count <<< "$initial_identity"
+            if [ -z "$pod_uid" ] || [ -z "$container_id" ] || [ -z "$restart_count" ]; then
+              echo "::error::Cannot identify the AOP leader container."
               exit 1
             fi
-          done
+            finished="AOP_RUN_FINISHED:${LOG_PREFIX}:"
+            MAX_RECONNECTS=12
+            reconnects=0
+            verified_logs=$(mktemp)
+            stream_pid=""
+            display_pid=""
+            stop_aop_stream() {
+              if [ -n "$stream_pid" ]; then
+                kill "$stream_pid" 2>/dev/null || true
+                wait "$stream_pid" 2>/dev/null || true
+                stream_pid=""
+              fi
+              if [ -n "$display_pid" ]; then
+                kill "$display_pid" 2>/dev/null || true
+                wait "$display_pid" 2>/dev/null || true
+                display_pid=""
+              fi
+            }
+            trap 'stop_aop_stream; rm -f "$verified_logs"; cleanup' EXIT
+            read_result() {
+              local line
+              result=""
+              # read ignores an incomplete trailing line, unlike a prefix grep.
+              while IFS= read -r line; do
+                if [[ "$line" == *"$FAIL_TAG"* ]]; then
+                  result=1
+                  return
+                fi
+                if [[ "$line" == "$finished"* ]]; then
+                  result=${line#"$finished"}
+                  if [[ ! "$result" =~ ^[0-9]+$ ]]; then result=1; fi
+                  return
+                fi
+              done < "$1"
+            }
+            recover_result() {
+              local before after uid restarts attempt
+              local previous=()
+              for ((attempt=0; attempt<3; attempt++)); do
+                before=$(leader_identity)
+                IFS='|' read -r uid _ restarts <<< "$before"
+                if [ "$uid" != "$pod_uid" ]; then
+                  echo "::error::AOP leader pod was replaced; original logs are unavailable."
+                  exit 1
+                fi
+                previous=()
+                if [ "$before" != "$initial_identity" ]; then
+                  if [[ "$restarts" =~ ^[0-9]+$ ]] && [ "$restarts" -eq "$((restart_count + 1))" ]; then
+                    previous=(--previous)
+                  else
+                    echo "::error::Original AOP leader logs are no longer available."
+                    exit 1
+                  fi
+                fi
+                if ! kubectl --request-timeout=30s logs "$LEADER_POD" -c vllm-leader -n "$NAMESPACE" \
+                    "${previous[@]}" > "$verified_logs"; then
+                  sleep 1
+                  continue
+                fi
+                after=$(leader_identity)
+                if [ "$before" != "$after" ]; then
+                  sleep 1
+                  continue
+                fi
+                read_result "$verified_logs"
+                if [ -n "$result" ]; then
+                  cp "$verified_logs" "$LEADER_TMP"
+                  return
+                fi
+                if [ "${#previous[@]}" -gt 0 ]; then
+                  echo "::error::Original AOP leader ended without a completion result."
+                  exit 1
+                fi
+                return
+              done
+              echo "::error::Unable to retrieve stable AOP leader logs."
+              exit 1
+            }
+            while true; do
+              # Check retained logs before reconnecting; never follow a new
+              # container just because the original stream disconnected.
+              recover_result
+              if [ "$result" = "0" ]; then break; fi
+              if [ -n "$result" ]; then exit 1; fi
+              : > "$LEADER_TMP"
+              kubectl logs -f "$LEADER_POD" -c vllm-leader -n "$NAMESPACE" \
+                > "$LEADER_TMP" &
+              stream_pid=$!
+              tail -n +1 -f "$LEADER_TMP" &
+              display_pid=$!
+              # Completion must stop even a still-open log connection.
+              while kill -0 "$stream_pid" 2>/dev/null; do
+                read_result "$LEADER_TMP"
+                if [ -n "$result" ]; then break; fi
+                sleep 1
+              done
+              stop_aop_stream
+              # Only a finite snapshot with stable identity is authoritative.
+              recover_result
+              if [ "$result" = "0" ]; then
+                break
+              elif [ -n "$result" ]; then
+                echo "::error::AOP leader reported failure: $result"
+                exit 1
+              fi
+              # A disconnect is retryable only when no completion was reported.
+              if [ "$reconnects" -ge "$MAX_RECONNECTS" ]; then
+                echo "::error::AOP log reconnection limit reached without a completion result."
+                exit 1
+              fi
+              reconnects=$((reconnects + 1))
+              echo "[stream] reconnecting to AOP leader ($reconnects/$MAX_RECONNECTS)..."
+              sleep 5
+            done
+          else
+            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | tee "$LEADER_TMP" | while IFS= read -r line; do
+              echo "$line"
+              if echo "$line" | grep -q "$FAIL_TAG"; then
+                exit 1
+              fi
+            done
+          fi
 
           eval "$(awk '
             /^vLLM Git information$/        { sec="vllm"; next }

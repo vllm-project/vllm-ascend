@@ -1013,8 +1013,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         return ("slot_mapping", common_attn_metadata.slot_mapping.data_ptr())
 
     def _mask_lim_slot_mapping(self, common_attn_metadata, slot_mapping, buffer_key) -> None:
-        generations = getattr(common_attn_metadata, "req_topk_buffer_generations", None)
-        if generations is None or not get_ascend_config().sparse_kv_offload_config.use_fused_copy_sfa:
+        active = getattr(common_attn_metadata, "req_topk_buffer_active", None)
+        if active is None or not get_ascend_config().sparse_kv_offload_config.use_fused_copy_sfa:
             return
         # Only request ownership and query layout are needed; exact device
         # positions in this group's slot mapping must remain unchanged.
@@ -1029,7 +1029,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             )
             self._lim_token_masks[buffer_key] = mask
         size = slot_mapping.numel()
-        mask.np[:size] = (generations.numpy()[rows] < 0) | (positions >= ends[-1])
+        mask.np[:size] = (~active.numpy()[rows]) | (positions >= ends[-1])
         slot_mapping.masked_fill_(mask.copy_to_gpu(size), -1)
 
     def _build(
