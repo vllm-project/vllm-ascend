@@ -9,8 +9,6 @@ test_cases:
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
-      - "--enforce-eager"
-      - "--no-enable-prefix-caching"
       - "--tensor-parallel-size"
       - "2"
       - "--port"
@@ -24,18 +22,9 @@ test_cases:
       - "0.9"
       - "--speculative-config"
       - '{"method": "eagle3", "model": "RedHatAI/Qwen3-32B-speculator.eagle3", "num_speculative_tokens": 3}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": true}}'
     benchmarks:
-      perf_warmup:
-        case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs400
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 20
-        max_out_len: 128
-        batch_size: 20
-        request_rate: 0
-        baseline: 0
-        threshold: 0.97
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs400
