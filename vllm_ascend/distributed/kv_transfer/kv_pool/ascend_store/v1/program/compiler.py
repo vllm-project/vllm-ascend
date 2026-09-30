@@ -52,9 +52,9 @@ def compile_kv_pool_program(spec: KVPoolCompilationSpec) -> KVPoolProgram:
         raise ProgramCompilationError(
             "AscendStore v1 Layerwise transfer does not yet coordinate Mamba align-state copies"
         )
-    if use_layerwise and not backend_spec.supports_layerwise:
+    if use_layerwise and backend_spec.layerwise_access is None:
         raise ProgramCompilationError(
-            f"AscendStore v1 Layerwise transfer requires a block-key Backend; got {spec.backend_name!r}"
+            f"AscendStore v1 Layerwise transfer requires a session Backend; got {spec.backend_name!r}"
         )
 
     reachability: ReachableRegionSelection

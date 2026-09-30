@@ -22,6 +22,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import vllm_adapter
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
     BackendSpec,
+    LayerwiseAccessKind,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.connector import AscendStoreV1Connector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
@@ -148,7 +149,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     StoreCommandBatch,
     StoreSourceReleaseMetadata,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.io import BackendIO, LayerwiseBackendIO
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend import BackendIO, KeyRangeBackendIO
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.resources import KVPoolResources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.runtime import KVPoolRuntime
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.timeline.bulk import (
@@ -459,7 +460,7 @@ def make_backend_spec(
         name,
         backend_type,
         backend_module or SimpleNamespace(),
-        supports_layerwise,
+        LayerwiseAccessKind.KEY_RANGE if supports_layerwise else None,
         requires_exists_before_put,
     )
 
@@ -853,7 +854,7 @@ def test_resources_bind_memory_geometry_once() -> None:
 
 
 def test_program_rejects_layerwise_backend_before_resource_binding(monkeypatch) -> None:
-    with pytest.raises(ProgramCompilationError, match="requires a block-key Backend"):
+    with pytest.raises(ProgramCompilationError, match="requires a session Backend"):
         compile_program(monkeypatch, make_topology(), use_layerwise=True, supports_layerwise=False)
 
 
@@ -3168,10 +3169,10 @@ def test_backend_io_preserves_layerwise_load_session_results() -> None:
             return 0
 
     backend = Backend()
-    backend_io = LayerwiseBackendIO(backend, make_backend_spec(Backend, name="mooncake"))
+    backend_io = KeyRangeBackendIO(backend, make_backend_spec(Backend, name="mooncake"))
 
     backend_io.validate_support()
-    assert backend_io.start_load_sessions(["key"]) == (0,)
+    assert backend_io.start_load_sessions(["key"], [32]) == (0,)
     binding = make_binding_batch().bindings[0]
     assert backend_io.load((binding,))[0].result_code == 0
     backend_io.finish_load_sessions(["key"])
@@ -3180,7 +3181,7 @@ def test_backend_io_preserves_layerwise_load_session_results() -> None:
 
 def test_layerwise_backend_io_requires_complete_success_to_release_source() -> None:
     backend = SimpleNamespace(batch_copy_put=lambda *args: [-1])
-    backend_io = LayerwiseBackendIO(backend, make_backend_spec(type(backend), name="mooncake"))
+    backend_io = KeyRangeBackendIO(backend, make_backend_spec(type(backend), name="mooncake"))
 
     result = backend_io.store((make_binding_batch(),))
 

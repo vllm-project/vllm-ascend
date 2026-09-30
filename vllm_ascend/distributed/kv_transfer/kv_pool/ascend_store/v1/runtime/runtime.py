@@ -11,6 +11,7 @@ import torch
 from vllm.logger import logger
 
 from ...attention_fence import reset_attention_compute_start_gate
+from ..backend import LayerwiseAccessKind
 from ..program.program import KVPoolProgram
 from ..program.values.evidence import (
     LoadCompletion,
@@ -20,7 +21,7 @@ from ..program.values.evidence import (
 from ..program.values.selection import LoadTransfer, StoreTransfer
 from ..protocol.lookup import LookupRequest, LookupResult
 from ..protocol.transfer import KVTransferStep
-from .io import BackendIO, LayerwiseBackendIO
+from .backend import BackendIO, GVABackendIO, KeyRangeBackendIO
 from .resources import KVPoolResources
 from .result import LoadResult
 from .timeline import StoreBatch
@@ -52,7 +53,12 @@ class KVPoolRuntime:
         source_ready_event_factory: Callable[[], Any] | None = None,
     ) -> None:
         timeline = KVPoolTimelineRuntime(program.schedule, program.topology)
-        backend_io_type = LayerwiseBackendIO if program.schedule.requires_layerwise_backend else BackendIO
+        backend_io_type = BackendIO
+        if program.schedule.requires_layerwise_backend:
+            access_kind = resources.backend_spec.layerwise_access
+            if access_kind is None:
+                raise ValueError("Layerwise timeline requires a session Backend")
+            backend_io_type = GVABackendIO if access_kind is LayerwiseAccessKind.GVA else KeyRangeBackendIO
         backend_io = backend_io_type(resources.backend, resources.backend_spec)
         self._program = program
         self._resources = resources
@@ -70,7 +76,7 @@ class KVPoolRuntime:
             store_operation=self._execute_store,
             store_transfer_operation=self._execute_store_transfer,
             store_admission=self._admit_store_transfers,
-            layerwise_backend=backend_io if isinstance(backend_io, LayerwiseBackendIO) else None,
+            layerwise_backend=backend_io if program.schedule.requires_layerwise_backend else None,
             start_gate_factory=start_gate_factory,
         )
 
