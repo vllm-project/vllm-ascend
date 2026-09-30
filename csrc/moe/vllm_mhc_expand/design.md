@@ -9,16 +9,18 @@ Empty tensors return without launching a kernel. This is an inference-only op.
 The Python helper preserves the native path for gradients, other devices,
 unsupported dtypes, noncontiguous input, widths not divisible by 16, and
 empty expansion and stream counts other than the measured GLM multiplier 4.
-Nonaligned widths remain supported by the raw operator. The helper retains
-native fallback pending hardware qualification of the output-partitioned path.
+Nonaligned widths remain supported by the raw operator. Default helper dispatch
+remains limited to aligned GLM layouts measured through the production entry point.
 
 ## Algorithm
 
 Adapted from the local mHC Expand competition implementation: copy each input
 tile into UB once, then emit all streams using DMA. Small aligned rows use
-up to 16 rows per batch; full aligned rows use two-row strided output DMA.
+up to 16 rows per batch; full aligned rows use up to four-row strided output DMA.
 When there are no more tokens than launched cores, each core handles one row
-to avoid leaving half the cores idle.
+to avoid leaving half the cores idle. Larger batches assign contiguous row ranges
+to cores, with row counts differing by at most one. Four input rows occupy at most
+eight bytes per tile element, within the host's twelve-byte UB budget.
 Larger rows are split into 32-element-aligned tiles of at most 8192 elements.
 GM offsets use 64-bit arithmetic. Unaligned widths of at least 1024 elements
 partition the flattened output into aligned tiles. Each core owns complete
@@ -39,6 +41,20 @@ See the [official nonaligned-copy guide](https://www.hiascend.com/developer/tech
 ## Integration and evaluation
 
 Register the ACLNN op, Torch PrivateUse1 and symbolic Meta implementations.
+The helper uses an optional-output entry to check metadata and submit within one
+C++ call. Unsupported inputs return `None`; the helper applies the original native
+expression, preserving aliases for empty tensors and multiplier one. The hardware
+capability is immutable, while extension loading remains lazy. The existing load
+cache is checked before importing its initialization dependencies. Gradient inputs
+stay on the native path. The strict raw operator retains its validation contract.
+
+For base storage formats without caller-local core controls, snapshot sizes,
+strides, storage offsets and storage ownership before queuing ACLNN preparation
+and execution together through the framework's `RunOpApiV2`. This avoids reading
+mutable tensor metadata from the worker. Other formats and core controls retain
+the existing adapter path. Graph replay, streams, queued producer/consumer chains,
+temporary tensor lifetimes and immediate metadata changes are covered by NPU tests.
+
 Initially build and select this implementation on A2 only. Route GLM mHC
 expansion through the helper; preserve its mean-based contraction.
 The GLM call is at the first layer of each mHC forward, rather than at every
@@ -60,10 +76,12 @@ hardware/software versions and speedups. These are independently designed cases
 
 In an A2 environment with the repository's supported CANN, PyTorch and vLLM
 versions, build/install this branch using the normal project installation flow.
-Then run:
+After editing kernel sources, use a clean operator build. Generated source-copy
+and compilation completion stamps can otherwise retain an older device binary;
+verify installed kernel artifacts alongside the loaded shared libraries. Then run:
 
 ```bash
-pytest -q tests/ut/ops/test_mhc_expand.py tests/ut/device/test_hardware_profile.py
+pytest -q tests/ut/ops/test_mhc_expand.py tests/ut/device/test_hardware_profile.py tests/ut/test_utils.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_mhc_expand.py
 python benchmarks/mhc_expand.py --output /tmp/mhc-expand-profile
 ```

@@ -5,6 +5,7 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
+#include "moe/vllm_mhc_expand/mhc_expand_support.h"
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
  *
@@ -605,6 +606,14 @@ at::Tensor npu_mhc_expand_meta(const at::Tensor& x, int64_t mult)
                 "npu_mhc_expand supports float16 and bfloat16");
     TORCH_CHECK(mult > 0, "npu_mhc_expand mult must be positive");
     return at::empty_symint(c10::SymDimVector{x.sym_size(0), c10::SymInt(mult), x.sym_size(1)}, x.options());
+}
+
+std::optional<at::Tensor> npu_mhc_expand_if_supported_meta(const at::Tensor& x, int64_t mult)
+{
+    if (!MhcExpandSupported(x, mult)) {
+        return std::nullopt;
+    }
+    return npu_mhc_expand_meta(x, mult);
 }
 
 std::tuple<at::Tensor, at::Tensor> npu_rms_norm_cast_meta(
@@ -1906,6 +1915,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     ops.impl("npu_rms_norm_cast", &vllm_ascend::meta::npu_rms_norm_cast_meta);
     ops.impl("npu_mhc_expand", &vllm_ascend::meta::npu_mhc_expand_meta);
+    ops.impl("npu_mhc_expand_if_supported", &vllm_ascend::meta::npu_mhc_expand_if_supported_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
     // npu_sign_bits_pack

@@ -3217,6 +3217,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def("npu_mhc_expand(Tensor x, int mult) -> Tensor");
     ops.impl("npu_mhc_expand", torch::kPrivateUse1, &vllm_ascend::npu_mhc_expand);
+    ops.def("npu_mhc_expand_if_supported(Tensor x, int mult) -> Tensor?");
+    ops.impl("npu_mhc_expand_if_supported", torch::kPrivateUse1, &vllm_ascend::npu_mhc_expand_if_supported);
 
     ops.def("npu_sign_bits_pack(Tensor input, int size) -> Tensor");
     ops.impl("npu_sign_bits_pack", torch::kPrivateUse1, &vllm_ascend::npu_sign_bits_pack);

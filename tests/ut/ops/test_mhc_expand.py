@@ -40,12 +40,10 @@ def test_npu_routing(monkeypatch, supported, enabled):
     x.requires_grad = False
     x.numel.return_value = 64
     x.is_contiguous.return_value = True
-    profile = MagicMock()
-    profile.supports.return_value = supported
-    monkeypatch.setattr(mhc, "get_current_hardware_profile", lambda: profile)
+    monkeypatch.setattr(mhc, "MHC_EXPAND_SUPPORTED", supported)
     monkeypatch.setattr(mhc, "enable_custom_op", lambda: enabled)
     kernel = MagicMock()
-    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_expand", kernel, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_expand_if_supported", kernel, raising=False)
     result = mhc.mhc_expand(x, 4)
     if supported and enabled:
         kernel.assert_called_once_with(x, 4)
@@ -66,13 +64,17 @@ def test_npu_fallback_preconditions(monkeypatch, reason):
     x.numel.return_value = 0 if reason == "empty" else 64
     x.is_contiguous.return_value = reason != "noncontiguous"
     mult = {"trivial": 1, "mult": 8}.get(reason, 4)
-    profile = MagicMock(side_effect=AssertionError("Unsupported inputs must use the native path"))
-    monkeypatch.setattr(mhc, "get_current_hardware_profile", profile)
-    kernel = MagicMock()
-    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_expand", kernel, raising=False)
+    monkeypatch.setattr(mhc, "MHC_EXPAND_SUPPORTED", True)
+    loader = MagicMock(return_value=True)
+    monkeypatch.setattr(mhc, "enable_custom_op", loader)
+    kernel = MagicMock(return_value=None)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_expand_if_supported", kernel, raising=False)
     result = mhc.mhc_expand(x, mult)
-    kernel.assert_not_called()
-    profile.assert_not_called()
+    if reason == "gradient":
+        kernel.assert_not_called()
+        loader.assert_not_called()
+    else:
+        kernel.assert_called_once_with(x, mult)
     assert result is x.unsqueeze.return_value.expand.return_value.contiguous.return_value
 
 
