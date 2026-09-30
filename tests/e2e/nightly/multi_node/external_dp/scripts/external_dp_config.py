@@ -24,6 +24,9 @@ ROUTING_DISAGGREGATED_PREFILL = "disaggregated_prefill"
 PROXY_SCRIPT_BY_ROUTING_TYPE = {
     ROUTING_DISAGGREGATED_PREFILL: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py",
 }
+LAYERWISE_PROXY_SCRIPT_BY_ROUTING_TYPE = {
+    ROUTING_DISAGGREGATED_PREFILL: ("examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py"),
+}
 
 CLUSTER_PLACEHOLDER_RE = re.compile(r"\$\{(NODE_(\d+)_IP|LOCAL_IP|MASTER_IP|LWS_WORKER_INDEX)\}")
 
@@ -38,6 +41,7 @@ class RoutingConfig:
     proxy_port: int
     proxy_script: str
     groups: dict[str, list[int]]
+    layerwise: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,6 +124,10 @@ class ExternalDPConfig:
     @property
     def is_disaggregated_prefill(self) -> bool:
         return self.routing.type == ROUTING_DISAGGREGATED_PREFILL
+
+    @property
+    def is_layerwise(self) -> bool:
+        return self.routing.layerwise
 
 
 def replace_cluster_placeholders(
@@ -263,6 +271,16 @@ class ExternalDPConfigLoader:
         if routing_type not in PROXY_SCRIPT_BY_ROUTING_TYPE:
             raise ValueError(f"Unsupported routing.type: {routing_type}")
 
+        layerwise = raw_routing.get("layerwise", False)
+        if not isinstance(layerwise, bool):
+            raise TypeError("routing.layerwise must be a boolean")
+        if layerwise:
+            proxy_script = LAYERWISE_PROXY_SCRIPT_BY_ROUTING_TYPE.get(routing_type)
+            if proxy_script is None:
+                raise ValueError(f"routing.layerwise=true is not supported for routing.type={routing_type!r}")
+        else:
+            proxy_script = PROXY_SCRIPT_BY_ROUTING_TYPE[routing_type]
+
         proxy_node_index = 0
         proxy_port = 1999
         if proxy_node_index >= len(cluster_ips) or proxy_node_index < 0:
@@ -279,10 +297,11 @@ class ExternalDPConfigLoader:
             proxy_node_index=proxy_node_index,
             proxy_host=local_ip,
             proxy_port=proxy_port,
-            proxy_script=PROXY_SCRIPT_BY_ROUTING_TYPE[routing_type],
+            proxy_script=proxy_script,
             groups={
                 str(name): [int(index) for index in indices] for name, indices in routing.get("groups", {}).items()
             },
+            layerwise=layerwise,
         )
 
     @staticmethod

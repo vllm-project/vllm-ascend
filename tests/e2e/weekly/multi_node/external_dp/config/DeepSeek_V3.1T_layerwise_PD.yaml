@@ -6,6 +6,7 @@ dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"
+  layerwise: true
   groups:
     prefiller: [ 0, 1 ]
     decoder: [ 2, 3 ]
@@ -251,7 +252,7 @@ benchmarks:
     case_type: accuracy
     dataset_path: vllm-ascend/gpqa
     request_conf: vllm_api_general_chat
-    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt 
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
     max_out_len: 32768
     batch_size: 64
     baseline: 80.3
