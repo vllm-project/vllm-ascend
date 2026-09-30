@@ -910,7 +910,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table.commit_block_table(num_reqs)
+        self.input_batch.block_table.commit_runtime(num_reqs)
 
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
