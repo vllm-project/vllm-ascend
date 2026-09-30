@@ -192,14 +192,8 @@ checkout_src() {
 
 install_vllm_ascend() {
     echo "====> Install vllm-ascend"
-    pip install uv
-    export UV_SYSTEM_PYTHON=1
-    export UV_INDEX_URL="https://mirrors.huaweicloud.com/repository/pypi/simple/"
-    export UV_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
-    export UV_INDEX_STRATEGY="unsafe-best-match"
-    export UV_NO_CACHE=1
-    uv pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
-    uv pip install -e "$WORKSPACE/vllm-ascend"
+    pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
+    pip install -e "$WORKSPACE/vllm-ascend"
 }
 
 install_aisbench() {
