@@ -761,15 +761,8 @@ def minimax_m3_sparse_attn(
         block_size,
     )
     hardware_profile = get_current_hardware_profile()
-    supports_kv_gather_q = hardware_profile.supports(HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q)
     supports_fp8 = hardware_profile.supports(HardwareCapability.FP8_ATTENTION)
-    if not supports_kv_gather_q:
-        _minimax_m3_sparse_attn_a3(*common_args, max_query_len=max_query_len)
-        return
-
-    # The A3 CI image can predate the vendor Split-KV ACLNN package. A5
-    # already requires that package and cannot use the BF16-only A3 fallback.
-    if not supports_fp8 and not _is_minimax_sparse_attention_split_kv_available():
+    if not _is_minimax_sparse_attention_split_kv_available():
         _minimax_m3_sparse_attn_a3(*common_args, max_query_len=max_query_len)
         return
 
