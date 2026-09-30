@@ -170,6 +170,10 @@ a3:
         config_file_path: DeepSeek-V4.1-Flash-w8a8-PD-prefix.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
         size: 2
+      - name: DeepSeek-V4-flash-w8a8-PD-prefix-MRV2
+        config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix-MRV2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 2
       - name: multi-node-qwen-vl-disagg-pd
         config_file_path: Qwen3-VL-235B-disagg-pd.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
