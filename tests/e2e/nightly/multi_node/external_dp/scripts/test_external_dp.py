@@ -195,7 +195,7 @@ def _run_spec_decode_acceptance_ext(
     first_server_cmd: list[str],
     baseline: tuple[int, list[int]] | None = None,
 ) -> None:
-    from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rate
+    from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rates
 
     spec_config = _parse_json_flag_ext(first_server_cmd, "--speculative-config")
     num_speculative_tokens = int(spec_config.get("num_speculative_tokens", 1))
@@ -212,7 +212,7 @@ def _run_spec_decode_acceptance_ext(
         baseline = (0, [0] * num_speculative_tokens)
 
     _, all_rates = measure_acceptance_rate(metrics_server, num_speculative_tokens, baseline)
-    validate_acceptance_rate(all_rates[0], float(baseline_val), float(tolerance))
+    validate_acceptance_rates(all_rates, baseline_val, float(tolerance))
 
 
 def test_external_dp() -> None:
