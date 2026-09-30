@@ -23,7 +23,6 @@ import os
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-import vllm.envs as envs_vllm
 from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
@@ -795,17 +794,6 @@ class AscendConfig:
             self.finegrained_tp_config.oproj_tensor_parallel_size > 0
             or self.finegrained_tp_config.mlp_tensor_parallel_size > 0
         )
-        if finegrained_tp_enabled and not envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            logger.warning_once(
-                "Disabling fine-grained TP exchanges (oproj_tensor_parallel_size=%d, "
-                "mlp_tensor_parallel_size=%d): the cross-DP-rank static exchanges deadlock "
-                "on the V1 model runner. Set VLLM_USE_V2_MODEL_RUNNER=1 to enable them.",
-                self.finegrained_tp_config.oproj_tensor_parallel_size,
-                self.finegrained_tp_config.mlp_tensor_parallel_size,
-            )
-            self.finegrained_tp_config.oproj_tensor_parallel_size = 0
-            self.finegrained_tp_config.mlp_tensor_parallel_size = 0
-            finegrained_tp_enabled = False
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
                 "oproj_tensor_parallel_size / mlp_tensor_parallel_size require "
