@@ -11,6 +11,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
     FusedMC2CommImpl,
     MC2CommImpl,
     MoECommMethod,
+    _MegaMoEBypassTokenDispatcher,
 )
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
@@ -20,8 +21,10 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoERoutingParams,
     MoEWeights,
 )
+from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithMegaMoE
 from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenDispatchOutput, TokenDispatcherWithMC2
 from vllm_ascend.quantization.methods.base import QuantType
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestMoECommMethod(TestBase):
@@ -114,6 +117,7 @@ class TestMoECommMethod(TestBase):
 
     def test_fused_mc2_situ_falls_back_to_decomposed_mc2_pipeline(self):
         comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.uses_a5_mega_moe = False
         fused_input = MoEFusedExpertsInput(
             hidden_states=torch.randn(2, 4),
             topk_weights=torch.ones(2, 1),
@@ -138,6 +142,46 @@ class TestMoECommMethod(TestBase):
 
         self.assertIs(result, expected)
         mock_decomposed.assert_called_once_with(fused_input)
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.MegaMoEBackend")
+    @patch(
+        "vllm_ascend.ops.fused_moe.moe_comm_method.get_ascend_device_type",
+        return_value=AscendDeviceType.A5,
+    )
+    def test_a5_fused_mc2_bypasses_dispatch_and_uses_mega_moe(self, _mock_device, mock_backend):
+        self.mock_ascend_config.enable_fused_mc2 = 1
+        routed_out = torch.randn(2, 4)
+        expert_tokens = torch.tensor([1, 1], dtype=torch.int32)
+        mock_backend.return_value.fused_experts.return_value = (routed_out, expert_tokens)
+        comm_impl = FusedMC2CommImpl(self.moe_config)
+        fused_input = MoEFusedExpertsInput(
+            hidden_states=torch.randn(2, 4),
+            topk_weights=torch.ones(2, 1),
+            topk_ids=torch.zeros(2, 1, dtype=torch.int32),
+            weights=MoEWeights(
+                w1=torch.ones(1, 4, 2, dtype=torch.uint8),
+                w2=torch.ones(1, 4, 1, dtype=torch.uint8),
+                w1_scale=torch.ones(1, 4, 1, 2, dtype=torch.uint8),
+                w2_scale=torch.ones(1, 4, 1, 2, dtype=torch.uint8),
+            ),
+            routing=MoERoutingParams(
+                expert_map=None,
+                global_redundant_expert_num=0,
+                mc2_mask=None,
+                apply_router_weight_on_input=False,
+            ),
+            quant=MoEQuantParams(),
+            activation=SituActivationConfig(beta=4.0, linear_beta=25.0),
+        )
+
+        result = comm_impl.fused_experts(fused_input)
+
+        self.assertTrue(comm_impl.uses_a5_mega_moe)
+        self.assertIsInstance(comm_impl.token_dispatcher, _MegaMoEBypassTokenDispatcher)
+        self.assertIsInstance(comm_impl.prepare_finalize, PrepareAndFinalizeWithMegaMoE)
+        self.assertIs(result.routed_out, routed_out)
+        self.assertIs(result.expert_tokens, expert_tokens)
+        mock_backend.return_value.fused_experts.assert_called_once_with(fused_input)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")

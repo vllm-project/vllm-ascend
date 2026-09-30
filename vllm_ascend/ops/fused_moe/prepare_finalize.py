@@ -27,9 +27,11 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_a5_mega_moe_buffer_tokens_per_rank
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -321,6 +323,77 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
                 input_ids = torch.tensor_split(input_ids, self.tp_size, dim=0)
                 input_ids = input_ids[self.tp_rank]
         return input_ids
+
+
+class PrepareAndFinalizeWithMegaMoE(PrepareAndFinalize):
+    """Align DP token shapes for the A5 fused dispatch/compute/combine op."""
+
+    def prepare(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        enable_shared_expert_dp: bool = False,
+        replace_allreduce: bool = False,
+        quant_type=QuantType.NONE,
+    ) -> MoEPrepareOutput:
+        del enable_shared_expert_dp, replace_allreduce, quant_type
+        self.num_tokens = hidden_states.shape[0]
+        ascend_config = get_ascend_config()
+        buffer_tokens_per_rank = get_a5_mega_moe_buffer_tokens_per_rank(ascend_config.vllm_config)
+        max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
+        if max_tokens_across_dp is None:
+            max_tokens_across_dp = self.num_tokens
+        if max_tokens_across_dp < self.num_tokens:
+            raise ValueError(
+                "MegaMoE synchronized token count cannot be smaller than the local token count: "
+                f"max_across_dp={max_tokens_across_dp}, local={self.num_tokens}."
+            )
+        if max_tokens_across_dp > buffer_tokens_per_rank:
+            raise ValueError(
+                "MegaMoE input exceeds the symmetric buffer token capacity: "
+                f"capacity={buffer_tokens_per_rank}, max_across_dp={max_tokens_across_dp}, "
+                f"local={self.num_tokens}."
+            )
+
+        self.padded_num_tokens = max_tokens_across_dp
+        pad_size = max_tokens_across_dp - self.num_tokens
+        logger.debug(
+            "A5 MegaMoE prepare: local_tokens=%s, max_tokens_across_dp=%s, buffer_tokens_per_rank=%s, pad_size=%s.",
+            self.num_tokens,
+            max_tokens_across_dp,
+            buffer_tokens_per_rank,
+            pad_size,
+        )
+        if pad_size > 0:
+            hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+            router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+        self._mega_moe_input_prepared = True
+
+        return MoEPrepareOutput(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            mc2_mask=None,
+            padded_hidden_states_shape=hidden_states.shape,
+            pertoken_scale=None,
+        )
+
+    def pad_and_split_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if not getattr(self, "_mega_moe_input_prepared", False):
+            return input_ids
+        pad_size = self.padded_num_tokens - self.num_tokens
+        if pad_size > 0:
+            input_ids = nn.functional.pad(input_ids, (0, pad_size))
+        return input_ids
+
+    def finalize(
+        self,
+        hidden_states: torch.Tensor,
+        reduce_results: bool,
+        padded_hidden_states_shape: torch.Size | None = None,
+    ) -> torch.Tensor:
+        del reduce_results, padded_hidden_states_shape
+        self._mega_moe_input_prepared = False
+        return hidden_states[: self.num_tokens]
 
 
 class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
