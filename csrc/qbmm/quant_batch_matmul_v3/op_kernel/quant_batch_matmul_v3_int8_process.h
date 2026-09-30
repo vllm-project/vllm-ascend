@@ -56,6 +56,15 @@ __aicore__ inline void QBMInt8Compute<SCALE_TYPE>::Process()
             // drain WaitFlag at kernel end.
             SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
         }
+        // Encoded non-coalesced scales have independent ping/pong lifetimes.
+        // Keep the existing fixed-ID convention: V_MTE2 IDs 0/1 are unused
+        // by the other buffers (which use 2, 3, 5 and 7).
+        const bool encodedScalePingPong =
+            !isPerTensor_ && !scaleCoalesce_ && scaleType_ == SCALE_UINT64;
+        if (encodedScalePingPong) {
+            SetFlag<HardEvent::V_MTE2>(EVENT_ID0);
+            SetFlag<HardEvent::V_MTE2>(EVENT_ID1);
+        }
         // wL1Ping_ and wL1Pong_ initially free
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);  // wL1Ping_
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);  // wL1Pong_
@@ -83,6 +92,7 @@ __aicore__ inline void QBMInt8Compute<SCALE_TYPE>::Process()
             // idxI32[i] = i  (linear ramp, Muls below scales by 8)
             CreateVecIndex<int32_t>(idxI32, static_cast<int32_t>(0), baseN_);
             // idxI32[i] = i * 8  (byte offset of even int32 slot i)
+            PipeBarrier<PIPE_V>();
             Muls<int32_t>(idxI32, idxI32, static_cast<int32_t>(8), baseN_);
             PipeBarrier<PIPE_V>();
         }
@@ -370,6 +380,14 @@ __aicore__ inline void QBMInt8Compute<SCALE_TYPE>::Process()
             if (pingPong_ && tailPingSize_ == 0) {
                 WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);  // drain last pong scatter token
             }
+            if (!isPerTensor_ && scaleType_ != SCALE_UINT64) {
+                // Phase D's FP32 staging aliases Phase X's UB storage.
+                // MTE3_V above protects V writes, but the staging writer is
+                // MTE2. The Phase X ID0 token has been consumed on every
+                // ping/pong/tail path, so this is a fresh, balanced handoff.
+                SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
+                WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
+            }
 
             // Pertoken pre-broadcast lets the cb loop run a single
             // element-wise Mul against the [mAligned, baseN] scratch
@@ -448,6 +466,8 @@ __aicore__ inline void QBMInt8Compute<SCALE_TYPE>::Process()
                                    static_cast<int32_t>(qbmv3::VDEQ16_MARKER), baseN_ * 2);
                 uint32_t reps = (baseN_ * 2 + 7) / 8;
                 uint64_t evenMask[2] = {0x55ULL, 0x0ULL};
+                PipeBarrier<PIPE_V>();
+
                 Duplicate<int32_t>(scaleI32, scaleBits, evenMask,
                                    static_cast<uint8_t>(reps), 1, 1);
                 PipeBarrier<PIPE_V>();
@@ -521,6 +541,8 @@ __aicore__ inline void QBMInt8Compute<SCALE_TYPE>::Process()
                 paramL0c2Ub.deqScale = DeqScale::VDEQ16;
 
                 for (uint32_t ch = 0; ch < Q_; ch++) {
+                    const event_t scaleFreeEvent = (((iter * Q_) + ch) & 1)
+                        ? EVENT_ID1 : EVENT_ID0;
                     // Coalesce mode: single ping buffer holds all Q scales
                     // back-to-back, one per channel at offset ch * baseN.
                     // Non-coalesce: classic ping/pong by (iter*Q+ch) parity.
@@ -621,6 +643,9 @@ __aicore__ inline void QBMInt8Compute<SCALE_TYPE>::Process()
                                     uint64_t scaleOff = (Q_ == 1) ? nStart
                                         : static_cast<uint64_t>(ch) * N_ + nStart;
                                     if (scaleType_ == SCALE_UINT64) {
+                                        // The previous VDEQ using this slot must
+                                        // finish before MTE2 overwrites it.
+                                        WaitFlag<HardEvent::V_MTE2>(scaleFreeEvent);
                                         // curScale[0..nSize-1] <- scale[scaleOff..scaleOff+nSize)  (per-cb u64 path)
                                         DataCopy<uint64_t>(curScaleLT, scaleGm_[scaleOff], nSize);
                                     } else {
@@ -751,6 +776,11 @@ __aicore__ inline void QBMInt8Compute<SCALE_TYPE>::Process()
 
                     // --- Float32->uint64 encode || Cube Mmad in parallel ---
                     if (!isPerTensor_ && scaleType_ != SCALE_UINT64) {
+                        if (scaleCoalesce_ && Q_ == 1 && isFirstIter) {
+                            // Scatter is the first consumer of the FP32 DMA,
+                            // not the later VDEQ. Consume once per mTile load.
+                            WaitFlag<HardEvent::MTE2_V>(EVENT_ID4);
+                        }
                         // When fp32 coalesce fires (Q==1 only), the
                         // staging buffer holds [N] fp32s; this cb's slice
                         // starts at offset nStart.
@@ -764,6 +794,7 @@ __aicore__ inline void QBMInt8Compute<SCALE_TYPE>::Process()
                         // scaleU32[idx[i]/4] <- srcU32[i]  for i in [0, nSize)
                         //   idx = even-int32-slot byte offsets (i*8 from CreateVecIndex+Muls);
                         //   packs each fp32 word into the lo32 of u64 slot i.
+                        PipeBarrier<PIPE_V>();
                         Scatter<uint32_t>(scaleU32, srcU32, scatterIdxLT_, 0, nSize);
                         PipeBarrier<PIPE_V>();
                     }
@@ -784,7 +815,8 @@ __aicore__ inline void QBMInt8Compute<SCALE_TYPE>::Process()
                         WaitFlag<HardEvent::MTE2_V>(EVENT_ID4);
                     } else if (scaleCoalesce_ && Q_ > 1 && ch == 0) {
                         WaitFlag<HardEvent::MTE2_V>(EVENT_ID4);
-                    } else if (scaleCoalesce_ && Q_ == 1 && isFirstIter) {
+                    } else if (scaleCoalesce_ && Q_ == 1 && isFirstIter &&
+                               scaleType_ == SCALE_UINT64) {
                         WaitFlag<HardEvent::MTE2_V>(EVENT_ID4);
                     }
 
@@ -798,6 +830,9 @@ __aicore__ inline void QBMInt8Compute<SCALE_TYPE>::Process()
                                  {static_cast<uint16_t>(ngCount), static_cast<uint16_t>(mTurns), 0, 0},
                                  paramL0c2Ub);
                         PipeBarrier<PIPE_V>();
+                    }
+                    if (encodedScalePingPong && !useInnerTilePhaseD) {
+                        SetFlag<HardEvent::V_MTE2>(scaleFreeEvent);
                     }
                     // fp32 staging-free signal. Only fires when
                     // !scaleCoalesce_; in the coalesce path the cross-cb
@@ -921,6 +956,12 @@ __aicore__ inline void QBMInt8Compute<SCALE_TYPE>::Process()
                                  copyOutBuf[mStart_u * baseN_], outP_mu);
                     }
                     SetFlag<HardEvent::V_M>(l0cVMEvent);  // L0C free
+                    if (encodedScalePingPong) {
+                        // Inner-tile Phase D requires Q==1. Release only after
+                        // all partial VDEQs have consumed this cb's scale.
+                        SetFlag<HardEvent::V_MTE2>(
+                            (iter & 1) ? EVENT_ID1 : EVENT_ID0);
+                    }
                     SetFlag<HardEvent::MTE3_V>(EVENT_ID6);
                 } else {
 
@@ -1003,6 +1044,10 @@ __aicore__ inline void QBMInt8Compute<SCALE_TYPE>::Process()
         }  // close mTSuperIdx loop
 
         // === DRAIN: consume outstanding events ===
+        if (encodedScalePingPong) {
+            WaitFlag<HardEvent::V_MTE2>(EVENT_ID0);
+            WaitFlag<HardEvent::V_MTE2>(EVENT_ID1);
+        }
         // Drain both L0 ping/pong M_MTE1 tokens (primed before the loop).
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
