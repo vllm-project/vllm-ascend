@@ -123,8 +123,6 @@ templates:
       - --trust-remote-code
       - --seed
       - "1024"
-      - --model-loader-extra-config
-      - '{"enable_multithread_load":true,"num_threads":128}'
       - --speculative-config
       - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
       - --additional-config
@@ -183,8 +181,6 @@ templates:
       - --trust-remote-code
       - --seed
       - "1024"
-      - --model-loader-extra-config
-      - '{"enable_multithread_load":true,"num_threads":128}'
       - --speculative-config
       - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
       - --additional-config
@@ -245,8 +241,6 @@ templates:
       - --trust-remote-code
       - --seed
       - "1024"
-      - --model-loader-extra-config
-      - '{"enable_multithread_load":true,"num_threads":128}'
       - --speculative-config
       - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
       - --additional-config
@@ -307,8 +301,6 @@ templates:
       - --trust-remote-code
       - --seed
       - "1024"
-      - --model-loader-extra-config
-      - '{"enable_multithread_load":true,"num_threads":128}'
       - --speculative-config
       - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
       - --additional-config
