@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -242,6 +242,58 @@ def _build_attn_metadata(
         num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
     )
     return builder, common_attn_metadata, attn_metadata
+
+
+@pytest.mark.parametrize("draft_lengths", [None, [-1, 3, -1]])
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
+def test_trimmed_drafts_preserve_speculative_state_history(draft_lengths, graph_mode):
+    """Grammar-trimmed rows must stay on the spec kernels.
+
+    A row whose drafts were all trimmed still carries accepted history from
+    the previous verify in a nonzero state-table slot. Routing it through the
+    non-spec path would read slot 0 (a stale state) instead of slot
+    accepted-1, silently degrading generation quality.
+    """
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        num_speculative_blocks=3,
+        cudagraph_mode=graph_mode,
+    )
+    common = create_common_attn_metadata(
+        batch_spec=BatchSpec(seq_lens=[64, 64, 64], query_lens=[1, 4, 0]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    if draft_lengths is None:
+        # Runner path with zero scheduled draft tokens this step: drafts are
+        # not passed at all, only the accepted history survives.
+        common = replace(
+            common,
+            query_start_loc_cpu=torch.tensor([0, 1, 2, 2], dtype=torch.int32),
+            query_start_loc=common.query_start_loc_cpu,
+            num_actual_tokens=2,
+            max_query_len=1,
+        )
+    accepted = torch.tensor([4, 2, 1], dtype=torch.int32)
+    metadata = builder.build(
+        0,
+        common,
+        num_accepted_tokens=accepted,
+        num_decode_draft_tokens_cpu=(None if draft_lengths is None else torch.tensor(draft_lengths, dtype=torch.int32)),
+    )
+    # Row 0 (fully trimmed, query_len=1, has history) joins the spec path;
+    # row 1 (drafts kept) is spec; row 2 (zero-length padding) stays out.
+    assert metadata.num_spec_decodes == 2
+    torch.testing.assert_close(
+        metadata.num_accepted_tokens[:2],
+        torch.tensor([4, 2], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        metadata.spec_sequence_masks[:3],
+        torch.tensor([True, True, False]),
+    )
 
 
 def _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens: torch.Tensor) -> None:

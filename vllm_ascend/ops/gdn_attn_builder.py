@@ -696,14 +696,18 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         spec_sequence_indices: torch.Tensor | None = None
         non_spec_sequence_indices: torch.Tensor | None = None
         non_spec_conv1d_cache_indices: torch.Tensor | None = None
-        if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
+        if not self.use_spec_decode or (num_decode_draft_tokens_cpu is None and num_accepted_tokens is None):
             spec_sequence_masks = None
             num_spec_decodes = 0
         else:
-            num_reqs = num_decode_draft_tokens_cpu.numel()
+            num_reqs = m.num_reqs if num_decode_draft_tokens_cpu is None else num_decode_draft_tokens_cpu.numel()
             spec_sequence_masks_cpu = self.spec_sequence_masks_cpu[:num_reqs]
-            runtime_draft_tokens = num_decode_draft_tokens_cpu[num_decode_draft_tokens_cpu >= 0]
-            if runtime_draft_tokens.sum().item() > 0:
+            runtime_draft_tokens = (
+                num_decode_draft_tokens_cpu[num_decode_draft_tokens_cpu >= 0]
+                if num_decode_draft_tokens_cpu is not None
+                else None
+            )
+            if runtime_draft_tokens is not None and runtime_draft_tokens.sum().item() > 0:
                 torch.ge(
                     num_decode_draft_tokens_cpu,
                     0,
@@ -713,6 +717,13 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 # Dynamic speculative decoding can be enabled while this batch
                 # carries no draft tokens. Keep the normal prefill/decode split.
                 spec_sequence_masks_cpu.zero_()
+            # Grammar can remove every draft while the previous step still
+            # has accepted history in a nonzero slot. Keep single-token decode
+            # rows on the spec kernels so both conv and recurrent state use it.
+            if m.is_prefilling is not None and num_accepted_tokens is not None:
+                query_lens_cpu = torch.diff(query_start_loc_cpu)[:num_reqs]
+                has_history = m.seq_lens_cpu_upper_bound[:num_reqs] > query_lens_cpu
+                spec_sequence_masks_cpu |= ~m.is_prefilling[:num_reqs] & (query_lens_cpu == 1) & has_history
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             if num_spec_decodes == 0:
                 spec_sequence_masks = None

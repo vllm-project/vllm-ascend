@@ -562,7 +562,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta_spec.squeeze(0),
                 scale=key_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=spec_state_indices_tensor.flatten(),
+                # Requires fla_npu with [B, W] state-table support (row-stride
+                # addressing, see the accompanying fla-npu change). Passing the
+                # 2-D table keeps per-request state rows independent of packed
+                # token offsets, which is wrong for grammar-trimmed drafts.
+                ssm_state_indices=spec_state_indices_tensor,
                 num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
             ).unsqueeze(0)
         else:
