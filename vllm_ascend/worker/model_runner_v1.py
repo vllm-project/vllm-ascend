@@ -5349,12 +5349,9 @@ class NPUModelRunner(GPUModelRunner):
             isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
 
-        # Keep allocation and worker-side KV budget planning on the same
-        # connector capability gate. Mooncake V1/V2/Pull retain per-layer
-        # transfer metadata while registering the shared backing once.
-        supports_shared_backing_with_kv_transfer = (
-            self.supports_shared_backing_with_kv_transfer
-        )
+        # Match the worker's block-outermost cache budget policy: shared
+        # backing is supported only when KV transfer is disabled.
+        supports_shared_backing_with_kv_transfer = self.vllm_config.kv_transfer_config is None
 
         six_region_layout = (
             None
