@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -45,11 +46,11 @@ class FakeGVAStore:
     def __init__(self) -> None:
         self.objects: dict[str, tuple[int, int, bool]] = {}
         self.leases: set[str] = set()
-        self.calls = []
-        self.copy_result = 0
-        self.lease_result = None
-        self.allocation_result = None
-        self.commit_result = None
+        self.calls: list[tuple[Any, ...]] = []
+        self.copy_result: object = 0
+        self.lease_result: list[int] | None = None
+        self.allocation_result: list[int] | None = None
+        self.commit_result: list[int] | None = None
         self.remove_result = 0
 
     def batch_get_key_info(self, keys, flag):
@@ -143,11 +144,18 @@ def test_gva_uses_the_existing_layerwise_projection(monkeypatch) -> None:
     assert isinstance(program._transfer_region_projection, LayerwiseRegionProjection)
 
 
-def test_gva_requires_native_publication_not_the_old_wrapper_fallback() -> None:
+def test_gva_requires_native_publication_not_the_old_wrapper_fallback(monkeypatch) -> None:
     backend = FakeGVABackend()
-    backend.store.batch_write_finish = None
-    backend.batch_write_finish = lambda *args: [0]
+    monkeypatch.setattr(backend.store, "batch_write_finish", None)
+    monkeypatch.setattr(backend, "batch_write_finish", lambda *args: [0], raising=False)
     with pytest.raises(RuntimeError, match="requires native batch_write_finish"):
+        GVABackendIO(backend, make_gva_spec())
+
+
+def test_gva_rejects_an_unavailable_native_store(monkeypatch) -> None:
+    backend = FakeGVABackend()
+    monkeypatch.setattr(backend, "store", None)
+    with pytest.raises(RuntimeError, match="Memcache store is unavailable for GVA"):
         GVABackendIO(backend, make_gva_spec())
 
 

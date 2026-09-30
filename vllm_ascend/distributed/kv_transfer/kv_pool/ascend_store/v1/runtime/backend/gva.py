@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from numbers import Integral
+from typing import TYPE_CHECKING, cast
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
@@ -11,6 +12,9 @@ from ...backend import BackendSpec
 from ...program.values.evidence import BindingEvidence, RemoteObjectObservation, StoreEvidence
 from ...program.values.representation import BindingBatch, KVBinding, RemoteKVObject
 from .io import BackendIO
+
+if TYPE_CHECKING:
+    from ....backend.memcache_backend import MemcacheBackend
 
 READABLE_GVA_QUERY = 1
 GVA_SESSION_FAILURE = -1
@@ -21,8 +25,12 @@ class GVABackendIO(BackendIO):
 
     def __init__(self, backend: Backend, backend_spec: BackendSpec) -> None:
         super().__init__(backend, backend_spec)
-        backend.ensure_initialized()
-        self._store = backend.store
+        memcache_backend = cast("MemcacheBackend", backend)
+        memcache_backend.ensure_initialized()
+        store = memcache_backend.store
+        if store is None:
+            raise RuntimeError("Memcache store is unavailable for GVA")
+        self._store = store
         self._load_sessions: dict[str, tuple[int, int] | None] = {}
         self._store_sessions: dict[str, tuple[int, int]] = {}
         self._load_direction = backend_spec.backend_module.MmcDirect.COPY_G2L.value
@@ -148,7 +156,7 @@ class GVABackendIO(BackendIO):
         infos = tuple(self._store.batch_get_key_info(keys, flag))
         if len(infos) != len(keys):
             raise RuntimeError(f"batch_get_key_info returned {len(infos)} results for {len(keys)} keys")
-        regions = []
+        regions: list[tuple[int, int] | None] = []
         for info in infos:
             size = info.size()
             gvas = tuple(info.gva_list())
