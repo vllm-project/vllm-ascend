@@ -16,6 +16,8 @@ import pytest
 import torch
 from vllm.config import VllmConfig, set_current_vllm_config
 
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.ops.rotary_embedding import AscendApplyRotaryEmb
 
 SEQ_LEN = 4
@@ -47,9 +49,9 @@ def _mock_rotary_mul(values, cos, sin, rotary_mode):
 @pytest.mark.parametrize("batched", [False, True])
 @pytest.mark.parametrize("strided", [False, True])
 @pytest.mark.parametrize("rotary_dim", [PARTIAL_ROTARY_DIM, HEAD_SIZE])
-@pytest.mark.parametrize("is_neox_style", [False, True])
-def test_fused_rope_matches_complex_reference(dtype, batched, strided, rotary_dim, is_neox_style):
-    """The fused mode and coefficient layout must match the model's pairing."""
+@pytest.mark.parametrize("is_neox_style,use_fused", [(False, True), (True, True), (False, False)])
+def test_rope_matches_complex_reference(dtype, batched, strided, rotary_dim, is_neox_style, use_fused):
+    """Fused and compatibility paths must match the model's pairing."""
     generator = torch.Generator().manual_seed(1024)
     shape: tuple[int, ...] = (SEQ_LEN, NUM_HEADS, HEAD_SIZE * (2 if strided else 1))
     if batched:
@@ -76,19 +78,29 @@ def test_fused_rope_matches_complex_reference(dtype, batched, strided, rotary_di
     expected = torch.cat((rotated, x[..., rotary_dim:]), dim=-1)
 
     op = _make_op(is_neox_style=is_neox_style)
-    with patch(
-        "vllm_ascend.ops.rotary_embedding.torch_npu.npu_rotary_mul",
-        side_effect=_mock_rotary_mul,
-        create=True,
-    ) as kernel:
+    device_type = AscendDeviceType.A2 if use_fused else AscendDeviceType._310P
+    with (
+        patch(
+            "vllm_ascend.ops.rotary_embedding.get_current_hardware_profile",
+            return_value=get_hardware_profile(device_type),
+        ),
+        patch(
+            "vllm_ascend.ops.rotary_embedding.torch_npu.npu_rotary_mul",
+            side_effect=_mock_rotary_mul,
+            create=True,
+        ) as kernel,
+    ):
         actual = op.forward_oot(x, cos, sin)
-        kernel.assert_called_once()
-        assert kernel.call_args.kwargs == {"rotary_mode": "half" if is_neox_style else "interleave"}
-        _, kernel_cos, kernel_sin = kernel.call_args.args
-        expected_cos = torch.cat((cos, cos), dim=-1) if is_neox_style else cos.repeat_interleave(2, dim=-1)
-        expected_sin = torch.cat((sin, sin), dim=-1) if is_neox_style else sin.repeat_interleave(2, dim=-1)
-        torch.testing.assert_close(kernel_cos, expected_cos.reshape(1, SEQ_LEN, 1, rotary_dim))
-        torch.testing.assert_close(kernel_sin, expected_sin.reshape(1, SEQ_LEN, 1, rotary_dim))
+        if use_fused:
+            kernel.assert_called_once()
+            assert kernel.call_args.kwargs == {"rotary_mode": "half" if is_neox_style else "interleave"}
+            _, kernel_cos, kernel_sin = kernel.call_args.args
+            expected_cos = torch.cat((cos, cos), dim=-1) if is_neox_style else cos.repeat_interleave(2, dim=-1)
+            expected_sin = torch.cat((sin, sin), dim=-1) if is_neox_style else sin.repeat_interleave(2, dim=-1)
+            torch.testing.assert_close(kernel_cos, expected_cos.reshape(1, SEQ_LEN, 1, rotary_dim))
+            torch.testing.assert_close(kernel_sin, expected_sin.reshape(1, SEQ_LEN, 1, rotary_dim))
+        else:
+            kernel.assert_not_called()
 
     assert actual.shape == x.shape
     assert actual.dtype == x.dtype
@@ -127,3 +139,16 @@ def test_interleaved_rope_rejects_oversized_rotary_dim():
 
     with pytest.raises(ValueError, match="must not exceed head_dim"):
         op.forward_oot(x, cos, sin)
+
+
+@pytest.mark.parametrize(
+    "device_type,supported",
+    [
+        (AscendDeviceType.A2, True),
+        (AscendDeviceType.A3, True),
+        (AscendDeviceType.A5, True),
+        (AscendDeviceType._310P, False),
+    ],
+)
+def test_interleaved_rotary_fusion_capability(device_type, supported):
+    assert get_hardware_profile(device_type).supports(HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE) is supported

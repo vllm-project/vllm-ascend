@@ -91,6 +91,8 @@ class HardwareCapability(Enum):
     FP8_ATTENTION = auto()
     # Select the compatibility grouped-top-k router used by the fused-MoE path.
     FUSED_MOE_COMPATIBILITY = auto()
+    # Use npu_rotary_mul with adjacent pairs (rotary_mode="interleave").
+    FUSED_ROTARY_MUL_INTERLEAVE = auto()
     # Pass ``glu_alpha`` and ``glu_bias`` to the fused dequant-SwiGLU-quant operator.
     FUSED_SWIGLU_TUNING_ARGS = auto()
     # Select the compatibility GatedDeltaNet core and state-dtype implementation.
@@ -241,6 +243,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
         HardwareCapability.FLA_GDN_PREFILL,
+        HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
         HardwareCapability.GRAPH_MULS_ADD_FUSION,
         HardwareCapability.GRAPH_NORM_QUANT_FUSION,
@@ -346,6 +349,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FP8_ATTENTION,
+                    HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
                     HardwareCapability.GRAPH_MULS_ADD_FUSION,
                     HardwareCapability.GRAPH_NORM_QUANT_FUSION,
                     HardwareCapability.LOCAL_KV_COMM_RESOURCE,
