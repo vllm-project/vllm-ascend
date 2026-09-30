@@ -3,7 +3,17 @@ import gc
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.rope import rope_forward_triton
+from vllm_ascend.ops.triton.rope import rope_forward_triton, rope_forward_triton_siso
+
+IS_NEOX_STYLE = [True, False]
+DTYPES = [torch.bfloat16, torch.float16]
+SISO_HEAD_SIZES = [64, 128, 256]
+SISO_ROTARY_DIMS = [32, 64, 96, 128, 192]
+SISO_NUM_HEADS = [64]
+NUM_TOKENS = [1, 4, 8, 16, 1024]
+SEEDS = [0]
+DEFAULT_ATOL = 1e-3
+DEFAULT_RTOL = 1e-3
 
 DEVICES = [f"npu:{0}"]
 FP8_E4M3_MAX = 448.0
@@ -19,6 +29,45 @@ FP8_ROPE_CASES = [
     # sin-offset fix and UB-based dynamic tile sizing in fp8 path.
     pytest.param(17, 8, 1, 256, 192, id="large-head-non-pow2-rope"),
 ]
+
+
+def rotate_neox(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def rotate_gptj(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    x = torch.stack((-x2, x1), dim=-1)
+    return x.flatten(-2)
+
+
+def _rope_siso_pytorch_native(query, cos, sin, rope_dim, is_neox_style) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """PyTorch-native implementation equivalent to forward()."""
+    assert query is not None
+    orig_dtype = query.dtype
+    query_rot = query[..., :rope_dim].to(torch.float32)
+    head_size = query.shape[-1]
+    if rope_dim < head_size:
+        query_pass = query[..., rope_dim:]
+
+    if is_neox_style:
+        cos = cos.repeat(1, 2).unsqueeze(-2).to(torch.float32)
+        sin = sin.repeat(1, 2).unsqueeze(-2).to(torch.float32)
+    else:
+        cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2).to(torch.float32)
+        sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2).to(torch.float32)
+
+    rotate_fn = rotate_neox if is_neox_style else rotate_gptj
+    query_rot = query_rot * cos + rotate_fn(query_rot) * sin
+
+    if rope_dim < head_size:
+        query = torch.cat((query_rot.to(orig_dtype), query_pass), dim=-1)
+    else:
+        query = query_rot.to(orig_dtype)
+    return query
 
 
 def _rope_fp8_pytorch_native(
@@ -116,6 +165,48 @@ def test_rotary_embedding_triton_kernel_fp8(
         atol=0.125,
         rtol=0.125,
     )
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("num_q_heads", SISO_NUM_HEADS)
+@pytest.mark.parametrize("head_size", SISO_HEAD_SIZES)
+@pytest.mark.parametrize("rotary_dim", SISO_ROTARY_DIMS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_rotary_embedding_triton_kernel_siso(
+    is_neox_style: bool,
+    num_tokens: int,
+    num_q_heads: int,
+    head_size: int,
+    rotary_dim: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    torch.manual_seed(seed)
+    torch.set_default_device(device)
+
+    if rotary_dim == -1:
+        rotary_dim = head_size
+    # Skip invalid combinations where rotary_dim > head_size (RoPE cannot
+    # rotate more dimensions than the head has).
+    if rotary_dim > head_size:
+        pytest.skip(f"rotary_dim {rotary_dim} > head_size {head_size}")
+    sin = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
+    cos = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
+    q_trt = torch.randn(num_tokens, num_q_heads, head_size, dtype=dtype, device=device)
+    q_gold = torch.randn(num_tokens, num_q_heads, head_size, dtype=dtype, device=device)
+    q_trt.copy_(q_gold)
+    q_trt = rope_forward_triton_siso(q_trt, cos, sin, rope_dim=rotary_dim, is_neox_style=is_neox_style)
+    q_gold = _rope_siso_pytorch_native(q_gold, cos, sin, rope_dim=rotary_dim, is_neox_style=is_neox_style)
+    # Compare the results.
+    torch.testing.assert_close(q_trt.view(q_gold.size()), q_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()

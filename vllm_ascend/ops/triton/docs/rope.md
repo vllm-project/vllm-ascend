@@ -7,7 +7,7 @@ Source: `vllm_ascend/ops/triton/rope.py` (`rope_forward_triton`, `_triton_rope_f
 This kernel rotates BF16 query and key tensors with NeoX-style RoPE and writes
 separate fixed-scale `torch.float8_e4m3fn` outputs. MiniMax-M3 uses it when its
 sparse index cache has the E4M3 dtype. The ordinary Q/K path uses
-`torch_npu.npu_mrope`, and the SFA indexer path uses `torch_npu.npu_rotary_mul`.
+`torch_npu.npu_mrope`, while the SFA indexer retains `rope_forward_triton_siso`.
 
 The wrapper accepts `cos_sin_cache`, `positions`, and an explicit `rope_dim`.
 Q and K must have the same token count and head width. `rope_dim` must be even

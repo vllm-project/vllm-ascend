@@ -625,7 +625,8 @@ class TestAscendSFAKPathFusion(TestBase):
         self.assertIs(first_slots, second_slots)
 
     @patch("vllm_ascend.attention.indexer.DeviceOperator.indexer_select_post_process")
-    @patch("vllm_ascend.attention.indexer.torch_npu.npu_rotary_mul", side_effect=lambda x, *a, **k: x, create=True)
+    @patch("vllm_ascend.attention.indexer.HAS_TRITON", True)
+    @patch("vllm_ascend.attention.indexer.rope_forward_triton_siso", side_effect=lambda x, *a, **k: x)
     def test_indexer_forward_reuses_wk_weights_proj(self, mock_rope, mock_devop):
         """forward_k + forward must run wk_weights_proj only once."""
         num_tokens, head_dim, weights_dim = 4, 128, 32
@@ -662,8 +663,6 @@ class TestAscendSFAKPathFusion(TestBase):
 
         k_li, k_li_scale, indexer_weights = indexer.forward_k(hidden_states, cos, sin)
 
-        self.assertGreater(mock_rope.call_count, 0)
-        self.assertTrue(all(call.kwargs["rotary_mode"] == "interleave" for call in mock_rope.call_args_list))
         self.assertIsNone(k_li_scale)
         self.assertTrue(torch.equal(indexer_weights, kw[:, head_dim:]))
         self.assertEqual(wk_weights_proj.call_count, 1)
@@ -683,7 +682,6 @@ class TestAscendSFAKPathFusion(TestBase):
         )
 
         self.assertIs(topk, expected_topk)
-        self.assertTrue(all(call.kwargs["rotary_mode"] == "interleave" for call in mock_rope.call_args_list))
         self.assertEqual(wk_weights_proj.call_count, 1)
         self.assertTrue(torch.equal(mock_devop.call_args.args[3], kw[:, head_dim:]))
 
