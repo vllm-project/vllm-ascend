@@ -100,6 +100,23 @@ class TestRopeForwardOOT:
         assert query_out.dtype == torch.float8_e4m3fn
         assert key_out.dtype == torch.float8_e4m3fn
 
+    @pytest.mark.parametrize("is_neox_style,rotary_mode", [(True, "half"), (False, "interleave")])
+    @patch("vllm_ascend.ops.rotary_embedding.torch_npu.npu_mrope", create=True)
+    def test_non_fp8_always_uses_asc(self, mock_npu_mrope, is_neox_style, rotary_mode):
+        positions, query, key = _make_tensors()
+        cos_sin_cache = torch.empty(MAX_POS, ROTARY_DIM, dtype=query.dtype)
+        mock_npu_mrope.return_value = query, key
+
+        with patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", True):
+            query_out, key_out = rope_forward_oot(
+                positions, query, key, cos_sin_cache, HEAD_SIZE, ROTARY_DIM, is_neox_style
+            )
+
+        assert query_out.shape == query.shape
+        assert key_out.shape == key.shape
+        mock_npu_mrope.assert_called_once()
+        assert mock_npu_mrope.call_args.kwargs["rotary_mode"] == rotary_mode
+
 
 @pytest.fixture(autouse=True)
 def patch_init_side_effects():
