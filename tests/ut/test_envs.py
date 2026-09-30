@@ -44,7 +44,11 @@ class TestEnvVariables(TestBase):
 
                     for test_val in test_vals:
                         os.environ[var_name] = test_val
-                        self.assertEqual(getattr(envs_ascend, var_name), var_handler())
+                        self.assertEqual(
+                            getattr(envs_ascend, var_name),
+                            var_handler(),
+                            f"{var_name}={test_val!r}; module attribute={vars(envs_ascend).get(var_name, '<lazy>')!r}",
+                        )
 
                 finally:
                     if original_val is None:
