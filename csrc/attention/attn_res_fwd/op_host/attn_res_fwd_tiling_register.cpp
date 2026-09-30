@@ -5,12 +5,12 @@
 #include "tiling_base/tiling_templates_registry.h"
 #include "register/op_def_registry.h"
 namespace optiling {
-REGISTER_OPS_TILING_TEMPLATE(AttnResFwdFused, AttnResFwdTiling, 0);
+REGISTER_OPS_TILING_TEMPLATE(AttnResFwd, AttnResFwdTiling, 0);
 static ge::graphStatus Tiling(gert::TilingContext *context) {
     return Ops::Transformer::OpTiling::TilingRegistry::GetInstance().DoTilingImpl(context);
 }
 static ge::graphStatus Parse(gert::TilingParseContext *context) {
     return context != nullptr && context->GetPlatformInfo() != nullptr ? ge::GRAPH_SUCCESS : ge::GRAPH_FAILED;
 }
-IMPL_OP_OPTILING(AttnResFwdFused).Tiling(Tiling).TilingParse<AttnResFwdCompileInfo>(Parse);
+IMPL_OP_OPTILING(AttnResFwd).Tiling(Tiling).TilingParse<AttnResFwdCompileInfo>(Parse);
 }

@@ -14,9 +14,9 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 @pytest.mark.parametrize("with_add,save_materialized", [(False, False), (False, True), (True, False), (True, True)])
 def test_attn_res_fused_meta_shape_and_aliases(mode, tokens, optimize_prefill, with_add, save_materialized):
     try:
-        native = torch.ops._C_ascend.attn_res_fwd.fused
+        native = torch.ops._C_ascend.attn_res_fwd
     except AttributeError:
-        pytest.skip("native extension with the fused overload is required")
+        pytest.skip("native extension with attn_res_fwd is required")
     device = "meta" if mode == "meta" else "npu"
     with FakeTensorMode() if mode == "fake" else nullcontext():
         prefix = torch.empty(tokens, 7168, dtype=torch.bfloat16, device=device)

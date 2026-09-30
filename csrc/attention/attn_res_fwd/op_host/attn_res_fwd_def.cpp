@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "register/op_def_registry.h"
 namespace ops {
-class AttnResFwdFused : public OpDef {
+class AttnResFwd : public OpDef {
 public:
-    explicit AttnResFwdFused(const char *name) : OpDef(name) {
+    explicit AttnResFwd(const char *name) : OpDef(name) {
         for (const char *input : {"prefix_sum", "block_residual", "proj_weight", "norm_weight", "addend", "output_norm"}) {
             this->Input(input).ParamType(REQUIRED).DataType({ge::DT_BF16})
                 .Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
@@ -25,9 +25,9 @@ public:
         OpAICoreConfig config;
         config.DynamicCompileStaticFlag(true).DynamicFormatFlag(true).DynamicRankSupportFlag(true)
             .DynamicShapeSupportFlag(true).NeedCheckSupportFlag(false)
-            .ExtendCfgInfo("softsync.flag", "true").ExtendCfgInfo("opFile.value", "attn_res_fwd_fused_apt");
+            .ExtendCfgInfo("softsync.flag", "true").ExtendCfgInfo("opFile.value", "attn_res_fwd_apt");
         this->AICore().AddConfig("ascend950", config);
     }
 };
-OP_ADD(AttnResFwdFused);
+OP_ADD(AttnResFwd);
 }

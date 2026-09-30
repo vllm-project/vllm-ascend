@@ -18,5 +18,5 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context) {
     context->SetOutputDataType(2, context->GetInputDataType(0));
     return ge::GRAPH_SUCCESS;
 }
-IMPL_OP_INFERSHAPE(AttnResFwdFused).InferShape(InferShape).InferDataType(InferDataType);
+IMPL_OP_INFERSHAPE(AttnResFwd).InferShape(InferShape).InferDataType(InferDataType);
 }
