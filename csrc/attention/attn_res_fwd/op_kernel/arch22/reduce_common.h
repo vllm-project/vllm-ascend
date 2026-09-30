@@ -125,6 +125,46 @@ __aicore__ inline int32_t findPowerTwo(int32_t n)
 }
 
 /*!
+ * Half-interval fold of src, then WholeReduceMax into dst.
+ * NOTE: src is destroyed in-place. The caller must pad the tail to a 32-byte
+ * block (SOFTMAXSmallVec does this with SOFTMAX_PAD/zero after Exp).
+ */
+__aicore__ inline void ReduceMaxHalfInterval(const LocalTensor<float> &dst_local, const LocalTensor<float> &src_local,
+                                             int32_t count)
+{
+    if (likely(count > static_cast<int32_t>(ELEM_PER_REP_FP32))) {
+        int32_t bodyCount = findPowerTwo(count);
+        int32_t tailCount = count - bodyCount;
+        if (tailCount > 0) {
+            // Fold the tail into the first aligned block. Values beyond count
+            // are padding and therefore cannot win the max reduction.
+            Max(src_local, src_local, src_local[bodyCount],
+                static_cast<int32_t>(RoundUpFp32(static_cast<uint32_t>(tailCount))));
+            PipeBarrier<PIPE_V>();
+        }
+        while (bodyCount > static_cast<int32_t>(ELEM_PER_REP_FP32)) {
+            bodyCount = bodyCount / HALf_INTERVAL;
+            Max(src_local, src_local, src_local[bodyCount], bodyCount);
+            PipeBarrier<PIPE_V>();
+        }
+        AscendCUtils::SetMask<float>(ELEM_PER_REP_FP32);
+    } else {
+        AscendCUtils::SetMask<float>(count);
+    }
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+    if ASCEND_IS_AIV {
+        WholeReduceMax<float, false>(dst_local, src_local, MASK_PLACEHOLDER, 1, 0, 1, 0);
+    }
+#else
+    WholeReduceMax<float, false>(dst_local, src_local, MASK_PLACEHOLDER, 1, 1, 1, DEFAULT_REPEAT_STRIDE);
+#endif
+    PipeBarrier<PIPE_V>();
+    SetMaskNorm();
+    ResetMask();
+    PipeBarrier<PIPE_V>();
+}
+
+/*!
  * Half-interval fold of src, then WholeReduceSum into dst (e.g. vecMeta[n]).
  * NOTE: src is destroyed in-place. No GetValue/SetValue.
  */
@@ -135,7 +175,8 @@ __aicore__ inline void ReduceSumHalfInterval(const LocalTensor<float> &dst_local
         int32_t bodyCount = findPowerTwo(count);
         int32_t tailCount = count - bodyCount;
         if (tailCount > 0) {
-            Add(src_local, src_local, src_local[bodyCount], tailCount);
+            Add(src_local, src_local, src_local[bodyCount],
+                static_cast<int32_t>(RoundUpFp32(static_cast<uint32_t>(tailCount))));
             PipeBarrier<PIPE_V>();
         }
         while (bodyCount > ELEM_PER_REP_FP32) {
@@ -437,18 +478,28 @@ __aicore__ inline void SoftmaxSmallVec(const LocalTensor<float>& vecMeta, uint32
     PipeBarrier<PIPE_V>();
     CopyCompactFloatsUb(brcMeta, vecMeta, blockCount);
 
-    AscendCUtils::SetMask<float>(blockCount);
+    if (blockCount > ELEM_PER_REP_FP32) {
+        // Keep brcMeta intact for the subtraction below. The fold is what
+        // makes blockCount == 65 (64 body entries plus one prefix entry)
+        // complete.
+        Duplicate(vecMeta, SOFTMAX_PAD, metaAlign);
+        PipeBarrier<PIPE_V>();
+        CopyCompactFloatsUb(vecMeta, brcMeta, blockCount);
+        ReduceMaxHalfInterval(workScalar, vecMeta, static_cast<int32_t>(blockCount));
+    } else {
+        AscendCUtils::SetMask<float>(blockCount);
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
-    if ASCEND_IS_AIV {
-        WholeReduceMax<float, false>(workScalar, brcMeta, MASK_PLACEHOLDER, 1, 0, 1, 0);
-    }
+        if ASCEND_IS_AIV {
+            WholeReduceMax<float, false>(workScalar, brcMeta, MASK_PLACEHOLDER, 1, 0, 1, 0);
+        }
 #else
-    WholeReduceMax<float, false>(workScalar, brcMeta, MASK_PLACEHOLDER, 1, 1, 1, DEFAULT_REPEAT_STRIDE);
+        WholeReduceMax<float, false>(workScalar, brcMeta, MASK_PLACEHOLDER, 1, 1, 1, DEFAULT_REPEAT_STRIDE);
 #endif
-    PipeBarrier<PIPE_V>();
-    SetMaskNorm();
-    ResetMask();
-    PipeBarrier<PIPE_V>();
+        PipeBarrier<PIPE_V>();
+        SetMaskNorm();
+        ResetMask();
+        PipeBarrier<PIPE_V>();
+    }
 
     BrcbScalarRow1(brcScratch, workScalar);
     SubLastDimRow1NoBrc(brcMeta, brcMeta, brcScratch, curColNum);
@@ -456,18 +507,27 @@ __aicore__ inline void SoftmaxSmallVec(const LocalTensor<float>& vecMeta, uint32
     Exp(brcMeta, brcMeta, metaAlign);
     PipeBarrier<PIPE_V>();
 
-    AscendCUtils::SetMask<float>(blockCount);
+    if (blockCount <= ELEM_PER_REP_FP32) {
+        AscendCUtils::SetMask<float>(blockCount);
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
-    if ASCEND_IS_AIV {
-        WholeReduceSum<float, false>(workScalar, brcMeta, MASK_PLACEHOLDER, 1, 0, 1, 0);
-    }
+        if ASCEND_IS_AIV {
+            WholeReduceSum<float, false>(workScalar, brcMeta, MASK_PLACEHOLDER, 1, 0, 1, 0);
+        }
 #else
-    WholeReduceSum<float, false>(workScalar, brcMeta, MASK_PLACEHOLDER, 1, 1, 1, DEFAULT_REPEAT_STRIDE);
+        WholeReduceSum<float, false>(workScalar, brcMeta, MASK_PLACEHOLDER, 1, 1, 1, DEFAULT_REPEAT_STRIDE);
 #endif
-    PipeBarrier<PIPE_V>();
-    SetMaskNorm();
-    ResetMask();
-    PipeBarrier<PIPE_V>();
+        PipeBarrier<PIPE_V>();
+        SetMaskNorm();
+        ResetMask();
+        PipeBarrier<PIPE_V>();
+    } else {
+        // Fold the tail into the first 64 entries before the reduction. Use
+        // vecMeta as scratch so brcMeta keeps the exponentials for normalize.
+        Duplicate(vecMeta, 0.0f, metaAlign);
+        PipeBarrier<PIPE_V>();
+        CopyCompactFloatsUb(vecMeta, brcMeta, blockCount);
+        ReduceSumHalfInterval(workScalar, vecMeta, static_cast<int32_t>(blockCount));
+    }
 
     Duplicate(brcScratch, 1.0f, 1);
     PipeBarrier<PIPE_V>();
