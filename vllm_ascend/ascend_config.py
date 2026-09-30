@@ -431,7 +431,7 @@ class AscendConfig:
             "enable_dsa_cp": false,
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
-            "enable_pcp_o_proj_weight_sharding": false,
+            "enable_pcp_o_proj_weight_sharding": true,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
             "draft_window_size": null,
             "mix_placement": false,
@@ -572,7 +572,7 @@ class AscendConfig:
     enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
-    enable_pcp_o_proj_weight_sharding: bool = False
+    enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
     draft_window_size: int | None = None
     mix_placement: bool = False
