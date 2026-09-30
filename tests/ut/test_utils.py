@@ -431,6 +431,58 @@ def test_is_pd_decode_recompute_scheduler_enabled_without_config():
     assert utils.is_pd_decode_recompute_scheduler_enabled() is False
 
 
+SINGLETON_WEIGHT_SHAPES = [
+    (1, 2048),  # linear-attention beta/decay projection sharded under TP
+    (2048, 1),
+    (32, 1),
+    (1, 64),
+    (2, 32, 1),
+]
+
+
+@pytest.mark.parametrize("shape", SINGLETON_WEIGHT_SHAPES)
+def test_should_trans_nz_rejects_weights_with_a_singleton_dim(shape):
+    """aclnnMatmulWeightNz has no kernel for n == 1 / k == 1, so such weights
+    must stay ND whatever the platform or nz_mode says."""
+    mock_config = mock.MagicMock()
+    mock_config.weight_nz_mode = 2
+    weight = torch.randn(*shape, dtype=torch.float16)
+    with (
+        mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+        mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+    ):
+        assert utils._should_trans_nz(weight) is False
+
+
+@pytest.mark.parametrize("shape", SINGLETON_WEIGHT_SHAPES)
+def test_maybe_trans_nz_skips_singleton_weights_even_on_310p(shape):
+    """310P converts every supported weight to NZ, so the guard has to be
+    checked before the platform policy."""
+    mock_config = mock.MagicMock()
+    mock_config.weight_nz_mode = 2
+    with (
+        mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+        mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        mock.patch("torch_npu.npu_format_cast") as mock_cast,
+    ):
+        weight = torch.randn(*shape, dtype=torch.float16)
+        assert utils.maybe_trans_nz(weight) is weight
+        mock_cast.assert_not_called()
+
+
+def test_maybe_trans_nz_still_converts_weights_without_singleton_dims():
+    mock_config = mock.MagicMock()
+    mock_config.weight_nz_mode = 2
+    with (
+        mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+        mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+        mock.patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight) as mock_cast,
+    ):
+        weight = torch.randn(32, 64, dtype=torch.float16)
+        assert utils.maybe_trans_nz(weight) is weight
+        mock_cast.assert_called_once()
+
+
 def test_is_pd_decode_recompute_scheduler_enabled_kv_producer():
     vllm_config = mock.MagicMock()
     vllm_config.kv_transfer_config = mock.MagicMock()

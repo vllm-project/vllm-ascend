@@ -259,6 +259,15 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if weight.is_meta:
         return False
 
+    # aclnnMatmulWeightNz rejects mat2 with n == 1 or k == 1 in FRACTAL_NZ
+    # (AclNN_Parameter_Error EZ1001), which the following matmul then reports as
+    # 161002. Qwen3.6-35B-A3B hits it under TP: the linear-attention beta/decay
+    # projections shard to [1, 2048]. The guard has to run before the platform
+    # policies below, because 310P and nz_mode-driven conversion both ignore
+    # this shape restriction.
+    if weight.dim() >= 2 and (weight.shape[-1] == 1 or weight.shape[-2] == 1):
+        return False
+
     # 310P always converts to NZ.
     if is_310p():
         return True
@@ -284,6 +293,7 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 # - non-310P: follow VLLM_ASCEND_ENABLE_NZ
 # - FP32: never convert
 # - meta tensor: never convert
+# - weights with a 1 in either of the lowest two dimensions: never convert
 def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
