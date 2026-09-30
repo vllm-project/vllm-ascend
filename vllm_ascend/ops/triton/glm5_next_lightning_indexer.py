@@ -18,6 +18,8 @@ TRITON_PREFILL_MIN_TOKENS = 32
 TRITON_PREFILL_POOL_TILE = 2048
 TRITON_PACKED_CACHE_BYTES = 256 * 1024 * 1024
 NEG_INF_SENTINEL = torch.finfo(torch.float32).min
+# Masked request ends must sort after every valid token offset.
+QUERY_END_SENTINEL = torch.iinfo(torch.int32).max
 
 
 @triton.jit(do_not_specialize=["requests", "pools_count", "blocks_count"])
@@ -75,6 +77,7 @@ def _glm5_next_lightning_indexer_score_kernel(
     table_stride_r: tl.constexpr,
     table_stride_p: tl.constexpr,
     CACHE_BLOCK: tl.constexpr,
+    QUERY_END_SENTINEL: tl.constexpr,
     REQ_POW2: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     POOL: tl.constexpr,
@@ -89,7 +92,7 @@ def _glm5_next_lightning_indexer_score_kernel(
         row, chunk = tile // chunks, tile % chunks
         token = row + token_offset
         requests = tl.arange(0, REQ_POW2)
-        ends = tl.load(query_ends + requests, requests < num_reqs, other=2147483647)
+        ends = tl.load(query_ends + requests, requests < num_reqs, other=QUERY_END_SENTINEL)
         request = tl.minimum(tl.sum((token >= ends).to(tl.int32)), num_reqs - 1)
         position = tl.load(positions + token).to(tl.int32)
         visible = tl.minimum((position + 1) // POOL, tl.load(pool_lens + request))
@@ -309,6 +312,7 @@ def glm5_next_lightning_indexer_triton(
                 cache.stride(3),
                 *indexer_block_table.stride(),
                 indexer_cache.shape[1],
+                QUERY_END_SENTINEL,
                 next_power_of_2(cum_query_lens.numel()),
                 head_dim,
                 index_kpool,

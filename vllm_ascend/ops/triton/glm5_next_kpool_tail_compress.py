@@ -26,6 +26,8 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 TRITON_MAX_BLOCK_D = 128
+# Masked request ends must sort after every valid token offset.
+QUERY_END_SENTINEL = torch.iinfo(torch.int32).max
 
 
 # Keep batch-varying inputs unspecialized to avoid recompiling per step.
@@ -59,6 +61,7 @@ def _glm5_next_kpool_tail_compress_kernel(
     tail_num_blocks: tl.constexpr,
     tail_block_size: tl.constexpr,
     indexer_block_size: tl.constexpr,
+    QUERY_END_SENTINEL: tl.constexpr,
     REQ_POW2: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     POOL_SIZE: tl.constexpr,
@@ -86,7 +89,7 @@ def _glm5_next_kpool_tail_compress_kernel(
         query_ends = tl.load(
             cum_query_lens_ptr + req_offsets,
             mask=req_offsets < num_reqs,
-            other=2147483647,
+            other=QUERY_END_SENTINEL,
         )
         req_id = tl.sum(tl.where(token_idx >= query_ends, 1, 0))
         query_end = tl.load(cum_query_lens_ptr + req_id)
@@ -290,6 +293,7 @@ def glm5_next_kpool_tail_compress_and_write_cache_triton(
         tail_cache.shape[0],
         tail_cache.shape[2],
         indexer_cache.shape[1],
+        QUERY_END_SENTINEL,
         next_power_of_2(max(1, num_reqs)),
         head_dim,
         index_kpool,
