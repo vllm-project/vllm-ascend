@@ -123,7 +123,6 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     |Qwen3.5-397B-A17B|✅        |       |✅    | Ascend 950DT |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
     |Qwen3.6-27B      |✅        |       |✅    | Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144|| [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
     |Kimi-K3          |🔵        |W4A8; DSpark; FULL_DECODE_ONLY||Ascend 950DT|||✅||✅||✅||✅|✅|✅||✅|131072||[Kimi-K3](../../tutorials/models/Kimi-K3.md)|
-    |MiniMax-M3       |🔵        |MXFP8; text/image/video||Ascend 950DT Products||✅|✅||✅|✅|✅|✅|✅|✅|✅|🟡|✅|1038336|| [MiniMax-M3](../../tutorials/models/MiniMax-M3.md) |
 
 === "A2/A3"
 
