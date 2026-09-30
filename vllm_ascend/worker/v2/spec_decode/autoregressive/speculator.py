@@ -151,6 +151,8 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         # V1 parity: swap in the draft model config after validation —
         # re-validating would reject the dense head (fine-grained TP is MoE-only).
         draft_config.model_config = self.draft_model_config
+        # replace() used to re-run post_init's is_moe_model recompute; mirror it.
+        draft_config.parallel_config.is_moe_model = self.draft_model_config.is_moe
         if self.replicated_pcp:
             # TODO: Separate draft execution settings from worker topology.
             # Restore DCP only after the complete draft config reconstruction;
