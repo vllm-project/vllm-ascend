@@ -8,6 +8,15 @@ from vllm.distributed import get_dcp_group
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 
 
+def get_pcp_num_replicated_tokens(num_decode_tokens: int, is_decode_sharded: bool) -> int:
+    """Return the leading rank-local tokens that every PCP rank computes identically.
+
+    Replicated decodes need no KV gather. A sharded decode belongs to one PCP
+    rank, so its KV is gathered together with the prefill tokens.
+    """
+    return 0 if is_decode_sharded else num_decode_tokens
+
+
 def get_cp_local_query_key_lens(
     query_start_loc: torch.Tensor,
     cum_query_lens: torch.Tensor,

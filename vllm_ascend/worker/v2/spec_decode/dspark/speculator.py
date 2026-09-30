@@ -269,14 +269,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
-        sync_state = dp_sync
-        if dummy_run and skip_attn_for_dummy_run:
-            # Profiling runs the draft with its own query token count, which
-            # can differ from the target batch. Let forward_context coordinate
-            # the actual draft counts instead of reusing the target DP state.
-            # TODO: Remove this guard once main2main includes upstream vLLM
-            # #54856 (facd9a74a1), which resets the profiling DP counts.
-            sync_state = None
+        # Replicated drafts process global requests, so their token counts can
+        # differ from the sharded target's DP state.
+        sync_state = None if self.replicated_pcp else dp_sync
         with (
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(

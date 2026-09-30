@@ -1558,6 +1558,19 @@
 #       multiple kernel blocks per scheduler block. If #17451 is integrated,
 #       consolidate the duplicate runner rebind into one patch module.
 #
+#   3. `vllm.v1.worker.gpu.model_runner.dispatch_cg_and_sync_dp`
+#    Why:
+#       With sharded PCP decode, the dispatch token count is rank-local, but
+#       the runner still passes the global request count, so no uniform decode
+#       graph matches.
+#    How:
+#       When `ParallelConfig.pcp_shard_decode_requests` holds, derive the
+#       request count from the local tokens and the uniform query length.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; vLLM #52162 still passes the global request count.
+#    Future Plan:
+#       Remove once upstream dispatches sharded PCP decode with local counts.
+#
 # ** 34. File: platform/patch_vision.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.vision.FusedInputNorm.forward`
@@ -1648,4 +1661,15 @@
 #    Future Plan:
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
+#
+#   3. `vllm.config.parallel.ParallelConfig.pcp_shard_decode_requests`
+#    Why:
+#       PCP-only decode assigns each request to one PCP rank instead of
+#       replicating it on every rank. vLLM v0.30.0 has no switch for that mode.
+#    How:
+#       Add the upstream #52162 property (PCP > 1 and DCP == 1) when absent.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/52162
+#    Future Plan:
+#       Remove this patch once the paired vLLM includes #52162.
 #

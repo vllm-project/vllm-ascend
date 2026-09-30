@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, NamedTuple, TypeVar
 
 import torch
@@ -19,6 +20,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPMetadataBuilderMixin,
     build_pcp_ordered_slot_mapping,
     get_cp_local_query_key_lens,
+    get_pcp_num_replicated_tokens,
 )
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     build_sfa_dcp_replicated_block_table,
@@ -32,6 +34,7 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
     SFAForwardContext,
+    needs_pcp_kv_gather,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -185,23 +188,70 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
     ]:
         assert attn_metadata is not None, "PCP PROLOG_V3 requires attention metadata."
-        num_tokens = hidden_states.shape[0]
-        num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        # Graph padding is not included in num_decode_tokens.
-        if attn_metadata.num_prefills == 0 and not attn_metadata.pcp_has_global_prefill:
-            return super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, slot_mapping[:num_tokens])
+        return self._fused_preprocess_with_pcp_kv(
+            partial(super()._sfa_preprocess_prolog_v3, hidden_states, kv_cache, cos, sin),
+            slot_mapping[: hidden_states.shape[0]],
+            kv_cache,
+            attn_metadata,
+        )
+
+    def _sfa_preprocess_mlapo(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        *,
+        num_input_tokens: int = 0,
+        attn_metadata: M | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
+    ]:
+        assert attn_metadata is not None, "PCP MLAPO requires attention metadata."
+        return self._fused_preprocess_with_pcp_kv(
+            partial(
+                super()._sfa_preprocess_mlapo, hidden_states, kv_cache, cos, sin, num_input_tokens=num_input_tokens
+            ),
+            slot_mapping,
+            kv_cache,
+            attn_metadata,
+        )
+
+    def _fused_preprocess_with_pcp_kv(
+        self,
+        preprocess: Callable[[torch.Tensor], Any],
+        slot_mapping: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: M,
+    ) -> Any:
+        """Run a fused Q/KV preprocess, then share its KV writes across PCP.
+
+        The fused operators write the cache only for rank-local tokens. When a
+        batch needs the PCP KV gather, they write this rank's slots, and the
+        packed cache rows are then gathered into every rank's cache.
+        """
+        if not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
+            return preprocess(slot_mapping)
         local_slots = attn_metadata.pcp_prolog_local_slots
-        assert local_slots is not None, "PCP PROLOG_V3 requires local slots prepared by the metadata builder."
         global_slots = attn_metadata.pcp_prolog_global_slots
-        assert global_slots is not None, "PCP PROLOG_V3 requires global slots prepared by the metadata builder."
-        result = super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, local_slots)
+        assert local_slots is not None and global_slots is not None, (
+            "PCP fused preprocessing requires slots prepared by the metadata builder."
+        )
+        result = preprocess(local_slots)
         if not global_slots.numel():
             return result
+        num_replicated_tokens = get_pcp_num_replicated_tokens(
+            attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
+        )
         # Same stream orders the fused cache write, pack, collective and scatter.
         # C8 packs quantized K, BF16 RoPE and scales into the first cache.
         # The remaining tensors belong to the indexer and synchronize separately.
         main_cache = kv_cache[:1] if self.enable_sparse_sfa_c8 else kv_cache[:2]
-        packed = copy_pcp_kv_cache(main_cache, local_slots[num_decode_tokens:])
+        packed = copy_pcp_kv_cache(main_cache, local_slots[num_replicated_tokens:])
         group = get_pcp_group()
         gathered = group.all_gather(packed, dim=0)
         if self.enable_sparse_sfa_c8:
@@ -233,10 +283,14 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
-        if attn_metadata.num_prefills == 0 and not attn_metadata.pcp_has_global_prefill:
+        if not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
             return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots[: kv_no_split.shape[0]], attn_metadata)
-        num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs((kv_no_split, cos, sin), slots, num_decode_tokens)
+        num_replicated_tokens = get_pcp_num_replicated_tokens(
+            attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
+        )
+        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
+            (kv_no_split, cos, sin), slots, num_replicated_tokens
+        )
         assert slots.numel() == kv_no_split.shape[0], (
             "SFA PCP cache write requires one slot per gathered token: "
             f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."

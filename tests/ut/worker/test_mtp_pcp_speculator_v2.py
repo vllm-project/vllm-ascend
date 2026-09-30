@@ -390,6 +390,8 @@ def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering(cudagraph_run
 @pytest.mark.parametrize("replicated_pcp", [False, True])
 def test_graph_prefill_builds_draft_metadata(attn_architecture: str, replicated_pcp: bool) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
+    speculator.arange_np = np.arange(3, dtype=np.int32)
+    speculator.input_buffers = SimpleNamespace(query_start_loc=torch.zeros(3, dtype=torch.int32))
     speculator.replicated_pcp = replicated_pcp
     speculator.attn_architecture = attn_architecture
     speculator.input_batch = _make_padded_input_batch()
@@ -413,7 +415,7 @@ def test_graph_prefill_builds_draft_metadata(attn_architecture: str, replicated_
             is_draft_model_prefill=True,
         )
 
-    rebuild_metadata = replicated_pcp and attn_architecture in ("DSA", "SFA")
+    rebuild_metadata = replicated_pcp
     expected_metadata = global_draft_metadata if rebuild_metadata else local_draft_metadata
     assert actual == [{"draft.layer": expected_metadata}]
     assert actual[0]["draft.layer"] is expected_metadata
@@ -427,13 +429,15 @@ def test_graph_prefill_builds_draft_metadata(attn_architecture: str, replicated_
 @pytest.mark.parametrize("attn_architecture", ["GQA", "MLA"])
 def test_graph_prefill_refreshes_captured_cache_buffers(attn_architecture: str) -> None:
     speculator = object.__new__(AscendEagleSpeculator)
+    speculator.arange_np = np.arange(3, dtype=np.int32)
+    speculator.input_buffers = SimpleNamespace(query_start_loc=torch.zeros(3, dtype=torch.int32))
     speculator.replicated_pcp = True
     speculator.attn_architecture = attn_architecture
     speculator.draft_attn_layer_names = {"draft.layer"}
     metadata = SimpleNamespace(actual_seq_lengths_q=[4, 8])
     speculator.model_state = SimpleNamespace(attn_metadata={"draft.layer": metadata})
     speculator.kv_cache_config = object()
-    speculator._build_attn_metadata = MagicMock()
+    speculator._build_attn_metadata = MagicMock(return_value={"draft.layer": metadata})
 
     # These views stand in for the persistent buffers bound during capture.
     captured_blocks = torch.zeros((2, 3), dtype=torch.int32)
@@ -477,13 +481,14 @@ def test_graph_prefill_refreshes_captured_cache_buffers(attn_architecture: str) 
         captured_slots.fill_(-1)
         captured_slots[0, 0] = 123
         captured_blocks.fill_(-1)
+        speculator._build_attn_metadata.reset_mock()
 
         with patch.object(speculator_module, "build_slot_mappings_by_layer") as build_slots:
             result = speculator.build_draft_attn_metadatas(2, 8, is_draft_model_prefill=True)
 
         assert result[0]["draft.layer"] is metadata
-        speculator._build_attn_metadata.assert_not_called()
-        build_slots.assert_not_called()
+        speculator._build_attn_metadata.assert_called_once()
+        build_slots.assert_called_once()
         assert metadata.actual_seq_lengths_q == [4, 8]
         assert captured_slots.tolist() == [expected_slots + [-1] * 4]
         assert captured_blocks.tolist() == [request_blocks[req_idx], [0, 0, 0]]

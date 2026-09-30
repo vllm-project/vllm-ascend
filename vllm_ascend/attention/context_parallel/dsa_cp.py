@@ -2240,11 +2240,13 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         )
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         self._pcp_rank = get_pcp_group().rank_in_group
+        self._is_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self._hidden_restore_idx_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.int64,
             device=device,
         )
+        self._global_rope_buffers: dict[tuple[str, str], tuple[torch.Tensor, torch.Tensor]] = {}
 
     @classmethod
     def get_cudagraph_support(
@@ -2407,7 +2409,9 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         num_actual_reqs: int | None,
         common_ratio_to_sas_metadata: dict[Any, Any],
     ) -> dsa_v1.AscendDSAMetadata:
-        if local_common_attn_metadata.num_actual_tokens > 0:
+        # A captured graph still runs its padded queries, so their metadata
+        # must be refreshed even when this rank owns no tokens.
+        if local_common_attn_metadata.query_start_loc_cpu[-1] > 0:
             return super().build(
                 common_prefix_len,
                 local_common_attn_metadata,
@@ -2427,7 +2431,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             num_prefills=0,
             attn_state=local_common_attn_metadata.attn_state,
             req_metadata=None,
-            hadamard=dsa_v1.AscendDSAMetadataBuilder.hadamard,
+            hadamard=self.hadamard,
         )
 
     def build(
@@ -2454,21 +2458,37 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             global_common_attn_metadata,
             pcp_context.global_batch.num_reqs,
         )
-        # num_prefills can miss short prefills; prevent local PCP RoPE from
-        # overwriting the global RoPE buffer whenever a request is prefilling.
-        can_use_rope_cache = not bool(pcp_context.global_batch.is_prefilling_np.any())
+        # num_prefills can miss short prefills, so check the global prefill
+        # flags directly.
+        is_decode_only = not bool(pcp_context.global_batch.is_prefilling_np.any())
+        # The local build shares the runtime RoPE buffer with the global one
+        # only when both use the same positions, as replicated decode does.
         global_dsa_metadata = self._global_metadata_builder.build(
             common_prefix_len,
             global_common_attn_metadata,
             fast_build,
             num_actual_reqs=pcp_context.global_batch.num_reqs,
             common_ratio_to_sas_metadata={},
-            can_use_rope_cache=can_use_rope_cache,
+            can_use_rope_cache=is_decode_only and not self._is_decode_sharded,
         )
+        if (
+            is_decode_only
+            and self._is_decode_sharded
+            and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            # Keep the global RoPE at graph-stable addresses of its own.
+            req_metadata = global_dsa_metadata.req_metadata
+            assert req_metadata is not None
+            req_metadata.cos, req_metadata.sin = req_metadata.cos.copy_to_buffers(
+                self._global_rope_buffers, self._hidden_restore_idx_buffer.numel()
+            )
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,
             common_attn_metadata,
         )
+        if local_common_attn_metadata.num_actual_tokens == 0:
+            # The placeholder request of an empty rank is graph padding too.
+            num_actual_reqs = 0
         local_common_attn_metadata = self._build_graph_common_attn_metadata(
             local_common_attn_metadata,
             num_actual_reqs,

@@ -1388,7 +1388,7 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_attn_metadata_factory(
-    positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None
+    positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None, **extra_kwargs
 ):
     """Wrap build_attn_metadata with Ascend draft-model context.
 
@@ -1396,7 +1396,8 @@ def build_attn_metadata_factory(
     DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
     speculator path does not forward them. Attention state is left to the
     caller/backend instead of forcing the legacy speculative state. Must run inside
-    ``build_attn_metadata_wrapper()``.
+    ``build_attn_metadata_wrapper()``. ``extra_kwargs``, such as the actual
+    request and token counts of a padded graph batch, are forwarded as is.
     """
     raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
 
@@ -1407,6 +1408,7 @@ def build_attn_metadata_factory(
         kwargs["parallel_config"] = parallel_config
         if seq_lens_cpu is not None:
             kwargs["seq_lens_np"] = seq_lens_cpu.numpy()
+        kwargs.update(extra_kwargs)
         return raw(*args, **kwargs)
 
     try:

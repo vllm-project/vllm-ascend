@@ -23,6 +23,19 @@ def _use_sequence_parallel_moe(self: ParallelConfig) -> bool:
     )
 
 
+def _is_pcp_decode_sharded(self: ParallelConfig) -> bool:
+    """Whether PCP can shard decode requests across its ranks.
+
+    PCP-only execution replicates the KV cache, so each decode request can
+    have a single PCP owner. DCP shards the KV cache and therefore requires
+    every decode request to run on every participating DCP rank.
+    """
+    return self.prefill_context_parallel_size > 1 and self.decode_context_parallel_size == 1
+
+
 # Upstream additionally requires data_parallel_size > 1. On Ascend, FlashComm
 # supports the TP/EP, DP=1 topology and still needs SP's rank-local token layout.
 ParallelConfig.use_sequence_parallel_moe = property(_use_sequence_parallel_moe)
+
+if not hasattr(ParallelConfig, "pcp_shard_decode_requests"):
+    ParallelConfig.pcp_shard_decode_requests = property(_is_pcp_decode_sharded)
