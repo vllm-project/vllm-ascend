@@ -106,14 +106,15 @@ def clear_worker_local_kv(worker: Any) -> dict[str, Any]:
 
 
 def collect_worker_io_probe(worker: Any) -> dict[str, Any]:
-    """Return scalar transfer evidence, not the retained source snapshots."""
+    """Return transport-stable transfer evidence, not the retained source snapshots."""
     probe = worker._ascendstore_v1_probe
     return {
         "stored_keys": tuple(probe["stored_buffers"]),
         "stored_bytes": sum(buffer.numel() for buffers in probe["stored_buffers"].values() for buffer in buffers),
         "get_calls": probe["get_calls"],
         "loaded_keys": tuple(probe["loaded_keys"]),
-        "loaded_ranges": tuple(probe["loaded_ranges"]),
+        # Untyped nested tuples become lists across the EngineCore utility response codec.
+        "loaded_ranges": [list(token_range) for token_range in probe["loaded_ranges"]],
         "loaded_bytes": probe["loaded_bytes"],
         "local_kv_cleared": probe["local_kv_cleared"],
     }
