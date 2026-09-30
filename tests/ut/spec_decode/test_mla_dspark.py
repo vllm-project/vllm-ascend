@@ -254,6 +254,40 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
     assert events == ["enter communicator", "enter model", "capture", "exit model", "exit communicator"]
 
 
+@pytest.mark.parametrize("use_dcp", [False, True])
+def test_propose_uses_draft_decode_flags_for_dcp(monkeypatch, use_dcp):
+    spec = make_speculator()
+    spec.use_dcp = use_dcp
+    spec.max_num_reqs = 4
+    spec.max_num_tokens = 20
+    input_batch = SimpleNamespace(num_reqs=1, is_prefilling_np=np.array([True, True, True, True]))
+    captured: dict[str, Any] = {}
+    prepared_lengths = torch.tensor([12, 0, 0, 0], dtype=torch.int32)
+    prepared_flags = torch.zeros(4, dtype=torch.bool)
+    prepare = MagicMock(return_value=(prepared_lengths, prepared_flags))
+    monkeypatch.setattr(spec, "_prepare_draft_dcp_metadata_inputs", prepare)
+    monkeypatch.setattr(shared, "build_attn_metadata_wrapper", nullcontext)
+
+    @contextmanager
+    def factory(positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None):
+        captured.update(is_prefilling=is_prefilling, seq_lens_cpu=seq_lens_cpu)
+        yield
+
+    monkeypatch.setattr(shared, "build_attn_metadata_factory", factory)
+    monkeypatch.setattr(DSparkSpeculator, "propose", lambda self, *args, **kwargs: "draft")
+    result = spec.propose(input_batch, None, None, None, None, None, None, None, None, None, None)
+
+    assert result == "draft"
+    if use_dcp:
+        prepare.assert_called_once_with(1, 4, 5)
+        assert captured["seq_lens_cpu"] is prepared_lengths
+        assert captured["is_prefilling"] is prepared_flags
+    else:
+        prepare.assert_not_called()
+        assert captured["seq_lens_cpu"] is None
+        assert captured["is_prefilling"].tolist() == [True] * 4
+
+
 @pytest.mark.parametrize("architecture", [None, "GQA", "MLA"])
 def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architecture):
     spec = make_speculator()

@@ -22,6 +22,7 @@ from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFAPCPDCPImpl,
     AscendSFAPCPDCPMetadataBuilder,
     AscendSFAPCPImpl,
+    DCPGatherContext,
     resolve_sfa_impl,
     resolve_sfa_metadata_builder,
 )
@@ -650,6 +651,20 @@ def test_sfa_pcp_prefill_context_starts_weight_gather_but_decode_does_not() -> N
         )
     assert not decode.gather_full_o_proj
     impl._all_gather_o_proj_full_weight.assert_called_once()
+
+
+@pytest.mark.parametrize("async_gather", [False, True])
+def test_sfa_dsa_dcp_query_stays_async_until_indexer_cache_gather(async_gather):
+    impl = AscendSFADSADCPImpl.__new__(AscendSFADSADCPImpl)
+    handle = MagicMock() if async_gather else None
+    context = DCPGatherContext(
+        handle=handle, gathered=torch.arange(12).reshape(2, 6), restore_perm=None, split_sizes=(4, 2)
+    )
+    with patch.object(AscendSFADCPImpl, "_start_dcp_query_gather", return_value=context):
+        result = impl._start_dcp_query_gather(torch.empty(2, 4), torch.empty(2, 2))
+    assert result is context
+    if handle is not None:
+        handle.wait.assert_not_called()
 
 
 def test_sfa_cp_query_gather_axis_follows_composed_layout() -> None:
@@ -1373,3 +1388,39 @@ def test_sfa_pcp_padded_decode_skips_kv_gather():
     group.assert_not_called()
     gather.assert_not_called()
     torch.testing.assert_close(base_write.call_args.args[4], slots)
+
+
+@pytest.mark.parametrize("dcp_size", [8, 16])
+def test_sfa_pcp_dcp_builder_preserves_causal_multi_token_support(dcp_size):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=8, decode_context_parallel_size=dcp_size),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
+    )
+
+    def init_base(self, spec, layers, vllm_config, device, metadata_cls, supports_dcp_with_varlen):
+        # DSpark's causal target uses this capability in MLA's upstream guard.
+        assert supports_dcp_with_varlen
+        assert vllm_config is config
+
+    with patch.object(AscendSFADCPMetadataBuilder, "__init__", init_base):
+        builder = AscendSFAPCPDCPMetadataBuilder(object(), [], config, torch.device("cpu"))
+    assert builder.pcp_indexer_slot_mapping_buf.shape == (256,)
+
+
+@pytest.mark.parametrize("has_prefill", [False, True])
+@pytest.mark.parametrize("has_handle", [False, True])
+def test_dsa_dcp_indexer_attn_q_gather_handle(has_prefill, has_handle):
+    impl = AscendSFADSADCPImpl.__new__(AscendSFADSADCPImpl)
+    handle = Mock() if has_handle else None
+    metadata = SimpleNamespace(dcp_context=SimpleNamespace(gather_context=SimpleNamespace(handle=handle)))
+    with patch.object(impl, "_has_prefill", return_value=has_prefill):
+        result = impl._get_indexer_attn_q_gather_handle(metadata)
+    assert result is (None if has_prefill else handle)
+    if handle is not None:
+        handle.wait.assert_not_called()
+
+
+@pytest.mark.parametrize("impl_cls", [AscendSFAImpl, AscendSFADSACPImpl, AscendSFADCPImpl, AscendSFAPCPDCPImpl])
+def test_other_sfa_layouts_have_no_indexer_attn_q_gather_handle(impl_cls):
+    impl = impl_cls.__new__(impl_cls)
+    assert impl._get_indexer_attn_q_gather_handle(Mock()) is None
