@@ -11,7 +11,7 @@ def cpu_reference(prefix, addend, blocks, projection, gamma, valid, output_gamma
     if mix and valid:
         values = torch.cat((blocks[:, :valid].cpu(), raw.unsqueeze(1)), dim=1).float()
         normalized = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + epsilon)
-        logits = (normalized * gamma.cpu().float() * projection.cpu().float()).sum(-1)
+        logits = (normalized * (gamma.cpu().float() * projection.cpu().float())).sum(-1)
         materialized = (logits.softmax(-1).unsqueeze(-1) * values).sum(1).bfloat16()
     else:
         materialized = raw
