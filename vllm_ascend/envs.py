@@ -36,6 +36,12 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Opt-in KV block lifecycle tracing. Empty (default) disables all hooks.
+    # Otherwise a JSON object: directory (required), run_id, snapshots (bool),
+    # layers (integer indices), max_events/max_snapshot_bytes/max_trace_bytes
+    # (positive ints), device_metadata (bool, default true; false avoids trace D2H).
+    # Not a credential; generated records contain request IDs and cache metadata.
+    "VLLM_ASCEND_KV_TRACE": lambda: os.getenv("VLLM_ASCEND_KV_TRACE", ""),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

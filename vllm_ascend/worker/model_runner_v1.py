@@ -140,6 +140,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.debug.kv_trace import KVTrace
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -365,6 +366,15 @@ class NPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
         self.lookback_token_ids: CpuGpuBuffer | None = None
+
+        self._kv_trace = KVTrace.from_env(
+            "worker", vllm_config, tp_rank=get_tp_group().rank_in_group, pp_rank=get_pp_group().rank_in_group
+        )
+        self._kv_trace_caches = {}
+        if self._kv_trace is not None:
+            self._model_forward = self._kv_trace.observe_forward(self, self._model_forward, get_forward_context)
+            self.execute_model = self._kv_trace.observe_execution(self, self.execute_model)
+            self._update_states = self._kv_trace.observe_schedule(self, self._update_states)
 
         self.device_metadata_executor: DeviceMetadataExecutor | None = None
         self.device_metadata_providers: dict[int, DeviceMetadataTaskProvider] | None = None
@@ -3230,6 +3240,7 @@ class NPUModelRunner(GPUModelRunner):
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        _kv_trace_phase: str = "forward",
         **model_kwargs: dict[str, Any],
     ):
         assert self.model is not None
@@ -4310,7 +4321,8 @@ class NPUModelRunner(GPUModelRunner):
                     and self.vllm_config.model_config.is_moe:
                     build_force_eplb_topk(self.device, self.max_num_tokens)
                 outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds,
+                    _kv_trace_phase="warmup" if is_profile or is_graph_capturing else "dummy",
                 )
             if active_device_metadata_executor is not None and active_device_metadata_executor.submission_in_flight:
                 active_device_metadata_executor.release()
@@ -4759,6 +4771,8 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
+        if self._kv_trace is not None:
+            self._kv_trace_caches = kv_caches
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():

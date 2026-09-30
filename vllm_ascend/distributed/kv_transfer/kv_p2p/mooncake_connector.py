@@ -58,6 +58,7 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.debug.kv_trace import KVTrace
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -514,6 +515,13 @@ class KVCacheRecvingThread(threading.Thread):
 
         assert vllm_config is not None
         self.vllm_config: VllmConfig = vllm_config
+        self._kv_trace = KVTrace.from_env(
+            "transfer",
+            vllm_config,
+            engine_id=local_engine_id,
+            tp_rank=tp_rank,
+            pp_rank=get_pp_group().rank_in_group,
+        )
         self.model_config = self.vllm_config.model_config
         self.mamba_cache_mode = getattr(self.vllm_config.cache_config, "mamba_cache_mode", None)
         self.num_speculative_tokens = (
@@ -604,6 +612,8 @@ class KVCacheRecvingThread(threading.Thread):
             "remote_block_size": remote_block_size,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
+        if self._kv_trace is not None:
+            self._kv_trace.transfer("transfer.queued", trans_info)
         self.request_queue.put(trans_info)
 
     def get_and_clear_finished_requests(self) -> set[str]:
@@ -728,15 +738,23 @@ class KVCacheRecvingThread(threading.Thread):
 
         try:
             if transfer_failed:
+                if self._kv_trace is not None:
+                    self._kv_trace.transfer("transfer.skipped", req_meta)
                 self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
                 logger.warning("Skipping KV cache transfer for request. remote_request_id=%s. ", remote_request_id)
             else:
                 try:
                     logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
+                    if self._kv_trace is not None:
+                        self._kv_trace.transfer("transfer.start", req_meta)
                     self._transfer_kv_cache_all_groups(req_meta)
+                    if self._kv_trace is not None:
+                        self._kv_trace.transfer("transfer.complete", req_meta)
                     logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
                 except Exception as e:
                     transfer_failed = True
+                    if self._kv_trace is not None:
+                        self._kv_trace.transfer("transfer.error", req_meta, error_type=type(e).__name__)
                     self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
                     logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
         finally:
@@ -1744,6 +1762,7 @@ class MooncakeConnectorScheduler:
         self.ascend_config = get_ascend_config()
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
+        self._kv_trace = KVTrace.from_env("connector_scheduler", vllm_config, engine_id=engine_id)
         self.local_ip = get_ip()
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
@@ -1968,6 +1987,12 @@ class MooncakeConnectorScheduler:
                         local_full_block_ids,
                         num_external_tokens,
                     )
+                    if self._kv_trace is not None:
+                        self._kv_trace.transfer(
+                            "transfer.scheduled",
+                            dict(params, request_id=request.request_id, local_block_ids=local_block_ids),
+                            num_external_tokens=num_external_tokens,
+                        )
                 else:
                     logger.warning("Got invalid KVTransferParams. params=%s. ", params)
             else:
@@ -2050,6 +2075,15 @@ class MooncakeConnectorScheduler:
         if delay_free_blocks:
             logger.info("Delaying free of %d blocks for request %s", sum(computed_block_lens), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
+
+        if self._kv_trace is not None:
+            self._kv_trace.emit(
+                "transfer.offer",
+                request_id=request.request_id,
+                local_block_ids=computed_block_ids,
+                delay_free_blocks=delay_free_blocks,
+                num_prompt_tokens=request.num_prompt_tokens,
+            )
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -2135,6 +2169,9 @@ class MooncakeConnectorWorker:
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_group = get_tp_group()
         self.pp_rank = get_pp_group().rank_in_group
+        self._kv_trace = KVTrace.from_env(
+            "connector_worker", vllm_config, engine_id=engine_id, tp_rank=self.tp_rank, pp_rank=self.pp_rank
+        )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         self.dp_size = vllm_config.parallel_config.data_parallel_size_local
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
@@ -2768,6 +2805,10 @@ class MooncakeConnectorWorker:
                     len(done_sending),
                     len(done_recving),
                 )
+        if self._kv_trace is not None:
+            for direction, request_ids in (("send", done_sending), ("receive", done_recving)):
+                for request_id in sorted(request_ids):
+                    self._kv_trace.emit("transfer.worker_finished", direction=direction, request_id=request_id)
         return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:

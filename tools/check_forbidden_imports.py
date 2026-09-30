@@ -43,6 +43,8 @@ CHECK_IMPORTS = {
             "vllm_ascend/distributed/kv_transfer/kv_pool/cpu_offload/metadata.py",
             "vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py",
             "tests/ut/distributed/test_hccl_weight_transfer.py",
+            # Verify the scheduler context survives the existing MessageQueue protocol.
+            "tests/ut/debug/test_kv_trace.py",
         },
     ),
     "re": ForbiddenImport(
