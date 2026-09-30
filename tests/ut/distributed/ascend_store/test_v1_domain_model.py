@@ -7,6 +7,7 @@ import weakref
 from dataclasses import dataclass, replace
 from multiprocessing.reduction import ForkingPickler
 from types import SimpleNamespace
+from typing import Any, TypedDict
 
 import pytest
 import torch
@@ -219,7 +220,7 @@ class FakeBackend:
         self.store_session_copy_result: list[int] | None | Exception = []
         self.store_session_commit_result: list[int] = []
         self.store_session_revoke_result: list[int] = []
-        self.calls = []
+        self.calls: list[tuple[Any, ...]] = []
 
     def exists(self, keys):
         self.calls.append(("exists", tuple(keys)))
@@ -336,8 +337,8 @@ class FakeResources:
 class FakeBlockPool:
     def __init__(self, size=32) -> None:
         self.blocks = [SimpleNamespace(block_id=block_id, ref_cnt=1) for block_id in range(size)]
-        self.touched = []
-        self.freed = []
+        self.touched: list[tuple[int, ...]] = []
+        self.freed: list[tuple[int, ...]] = []
 
     def touch(self, blocks) -> None:
         blocks = tuple(blocks)
@@ -355,7 +356,7 @@ class FakeBlockPool:
 class FakeAvailabilityProbe:
     def __init__(self, availability: RemoteAvailability | None) -> None:
         self.availability = availability
-        self.queries = []
+        self.queries: list[LookupQuery] = []
         self.closed = False
 
     def query(self, query):
@@ -1103,9 +1104,14 @@ def test_object_identity_projection_preserves_existing_backend_keys() -> None:
     assert key == existing_key
 
 
+class _GraphCompilationOptions(TypedDict, total=False):
+    use_layerwise: bool
+    requires_exists_before_put: bool
+
+
 def test_graph_compiler_selects_fixed_graph_rules(monkeypatch) -> None:
     topology = make_topology()
-    cases = (
+    cases: tuple[tuple[KVPoolTopology, _GraphCompilationOptions, type[object], type[object], type[object]], ...] = (
         (topology, {}, ContiguousRegionProjection, IdentityRegionPartition, UnconditionalStoreAdmission),
         (
             make_topology(tp_mismatch=True),
@@ -1983,6 +1989,86 @@ def test_layerwise_load_surfaces_background_range_failure_and_closes_sessions(mo
     assert [call[0] for call in backend.calls].count("batch_get_end") == 1
     with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
         runtime.close()
+    assert resources.closed
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_layerwise_load_keeps_waiters_blocked_until_background_failure_is_published(monkeypatch, cleanup_fails) -> None:
+    backend = FakeBackend()
+    start_gate = FakeLoadStartGate(opened=False)
+    cleanup_finished = threading.Event()
+    publish_failure = threading.Event()
+    waiter_blocked = threading.Event()
+    waiter_finished = threading.Event()
+    waiter_errors: list[BaseException] = []
+    copy_range = backend.batch_copy_get
+    copy_count = 0
+
+    def fail_prefetched_range(*args):
+        nonlocal copy_count
+        copy_count += 1
+        if copy_count == 2:
+            raise RuntimeError("prefetched range failed")
+        return copy_range(*args)
+
+    def fail_session_cleanup(keys):
+        backend.calls.append(("batch_get_end", tuple(keys)))
+        return -1
+
+    monkeypatch.setattr(backend, "batch_copy_get", fail_prefetched_range)
+    if cleanup_fails:
+        monkeypatch.setattr(backend, "batch_get_end", fail_session_cleanup)
+    runtime, resources = make_layerwise_load_runtime(backend, start_gate_factory=lambda: start_gate)
+    timeline = runtime._timeline.load
+    cleanup = timeline._cleanup_after_failure
+    wait_for_completion = timeline._wait_for_completion
+
+    def pause_after_cleanup(keys=()):
+        cleanup(keys)
+        cleanup_finished.set()
+        assert publish_failure.wait(timeout=5)
+
+    def observe_wait(completed):
+        if threading.current_thread() is waiter:
+            assert not completed.is_set()
+            waiter_blocked.set()
+        wait_for_completion(completed)
+
+    def wait_for_prefetched_layer():
+        try:
+            runtime.wait_for_layer_load("layers.1.group.0")
+        except BaseException as error:
+            waiter_errors.append(error)
+        finally:
+            waiter_finished.set()
+
+    waiter = threading.Thread(target=wait_for_prefetched_layer)
+    monkeypatch.setattr(timeline, "_cleanup_after_failure", pause_after_cleanup)
+    monkeypatch.setattr(timeline, "_wait_for_completion", observe_wait)
+    load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",)),))
+    begin_kv_pool_step(runtime, load=load)
+    try:
+        runtime.start_load()
+        runtime.wait_for_layer_load("layers.0.group.0")
+        start_gate.open()
+        assert cleanup_finished.wait(timeout=2)
+        assert timeline._executor.failure is None
+        waiter.start()
+        assert waiter_blocked.wait(timeout=2), "The layer fence must not treat failed cleanup as an idle timeline"
+        assert not waiter_finished.is_set()
+    finally:
+        publish_failure.set()
+        start_gate.open()
+        if waiter.ident is not None:
+            waiter.join(timeout=2)
+        with pytest.raises(RuntimeError, match="Layerwise Load timeline terminated"):
+            runtime.close()
+
+    assert not waiter.is_alive()
+    assert len(waiter_errors) == 1
+    assert isinstance(waiter_errors[0], RuntimeError)
+    assert str(waiter_errors[0].__cause__) == "prefetched range failed"
+    assert [call[0] for call in backend.calls].count("batch_get_end") == 1
     assert resources.closed
 
 
@@ -3200,11 +3286,14 @@ def test_connector_finished_partial_tail_pins_exact_source_without_delaying_requ
 
     pool.free_blocks(pool.blocks[block_id] for block_id in (1, 2, 10, 11))
 
-    assert pool.blocks[11].ref_cnt == 1
+    assert pool.blocks[10].ref_cnt == 0
+    assert all(pool.blocks[block_id].ref_cnt == 1 for block_id in (1, 2, 11))
+    assert connector._store_source_leases.has_pending()
     store_job_id = connector._finished_checkpoint_stores[0].store_job_id
     assert store_job_id is not None
     connector._store_source_leases.release({store_job_id: 1})
-    assert pool.blocks[11].ref_cnt == 0
+    assert all(pool.blocks[block_id].ref_cnt == 0 for block_id in (1, 2, 11))
+    assert not connector._store_source_leases.has_pending()
 
 
 def test_runtime_reports_store_job_only_after_source_release_is_confirmed(monkeypatch) -> None:
@@ -3222,9 +3311,14 @@ def test_runtime_reports_store_job_only_after_source_release_is_confirmed(monkey
 
 
 def test_connector_translates_vllm_lookup_into_planner_query() -> None:
-    queries = []
+    queries: list[LookupQuery] = []
+
+    def lookup(query: LookupQuery) -> ExternalPrefixPlan:
+        queries.append(query)
+        return ExternalPrefixPlan(4, True)
+
     instance = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
-    instance.planner = SimpleNamespace(lookup=lambda query: queries.append(query) or ExternalPrefixPlan(4, True))
+    instance.planner = SimpleNamespace(lookup=lookup)
     request = SimpleNamespace(
         request_id="request",
         prompt_token_ids=None,
@@ -3256,11 +3350,14 @@ def test_connector_translates_vllm_allocation_into_planner_facts() -> None:
 
 
 def test_connector_discards_tracked_requests_after_planning_lifecycle() -> None:
-    planning_steps = []
+    planning_steps: list[TransferPlanningStep] = []
+
+    def build_step(planning_step: TransferPlanningStep) -> KVTransferStep:
+        planning_steps.append(planning_step)
+        return KVTransferStep()
+
     instance = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
-    instance.planner = SimpleNamespace(
-        build_step=lambda planning_step: planning_steps.append(planning_step) or KVTransferStep()
-    )
+    instance.planner = SimpleNamespace(build_step=build_step)
     instance._requests = {"request": SimpleNamespace()}
     instance._store_enabled = False
     instance._finished_checkpoint_stores = []
@@ -3281,7 +3378,7 @@ def test_connector_discards_tracked_requests_after_planning_lifecycle() -> None:
 
 
 def test_connector_routes_only_step_commands_to_kv_pool_runtime() -> None:
-    received = []
+    received: list[tuple[Any, ...]] = []
     step = KVTransferStep(LoadCommandBatch(), StoreCommandBatch())
     instance = AscendStoreV1Connector.__new__(AscendStoreV1Connector)
     instance.runtime = SimpleNamespace(
@@ -3342,7 +3439,7 @@ def test_backend_io_confirms_source_safety_before_native_handoff() -> None:
 
 
 def test_backend_io_preserves_layerwise_load_session_results() -> None:
-    calls = []
+    calls: list[tuple[Any, ...]] = []
 
     class Backend:
         def validate_layerwise_support(self):

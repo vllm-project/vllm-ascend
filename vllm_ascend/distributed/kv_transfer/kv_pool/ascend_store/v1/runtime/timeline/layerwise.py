@@ -647,7 +647,7 @@ class LayerwiseLoadTimeline:
 
     def _cleanup_after_failure(self, keys: tuple[str, ...] = ()) -> None:
         session = self._session
-        self._session = None
+        # Retain layer jobs until the executor publishes failure; None would let concurrent fences skip waiting.
         cleanup_keys = keys if session is None else session.session_keys
         should_close = bool(cleanup_keys) and (session is None or not session.session_end_attempted)
         if should_close:
