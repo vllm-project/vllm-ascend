@@ -1337,6 +1337,16 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         softmax_lse: torch.Tensor,
         dsa_cp_context: DSACPContext | None = None,
     ) -> torch.Tensor:
+        # The replicated MTP draft disables logical PCP, but still shares the
+        # target's physical PCP ranks and DCP-sharded KV cache.
+        if dsa_cp_context is None and get_pcp_group().world_size > 1:
+            pcp_group = get_pcp_group()
+            tp_group = get_tp_group()
+            tp_size = tp_group.world_size if self.dcp_size > pcp_group.world_size else 1
+            return torch.ops.vllm.dcp_a2a_fused(
+                sfa_output, softmax_lse, tp_size, 1, tp_group.unique_name, pcp_group.unique_name
+            )
+
         scatter_dim = 1
         if dsa_cp_context is not None:
             # DSA-CP keeps heads replicated and shards tokens. The All2All
@@ -1384,6 +1394,22 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 "Cannot fuse DCP query gather for ql_nope/q_pe with "
                 f"shapes {tuple(ql_nope.shape)} / {tuple(q_pe.shape)} "
                 f"and dtypes {ql_nope.dtype} / {q_pe.dtype}."
+            )
+
+        # Query heads are replicated across physical PCP ranks, including
+        # when the MTP draft has logical PCP disabled. Gather only distinct
+        # TP head shards; DCP == PCP already owns one complete TP shard.
+        if query_gather_dim == 1 and get_pcp_group().world_size > 1:
+            fused_q = torch.cat([ql_nope, q_pe], dim=-1).transpose(0, 1).contiguous()
+            if self.dcp_size == get_pcp_group().world_size:
+                gathered, handle = fused_q, None
+            else:
+                gathered, handle = all_gather_async(fused_q, get_tp_group())
+            return DCPGatherContext(
+                gathered=gathered,
+                handle=handle,
+                restore_perm=(1, 0, 2),
+                split_sizes=(ql_nope.shape[-1], q_pe.shape[-1]),
             )
 
         # Avoid back-to-back DCP all_gather calls for the two SFA query
@@ -1577,41 +1603,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
 
 class AscendSFAPCPDCPImpl(AscendSFADCPImpl, AscendSFAPCPImpl):
     """Composes DCP attention with PCP gathered-token cache writes."""
-
-    def _start_dcp_query_gather(
-        self,
-        ql_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-    ) -> DCPGatherContext:
-        # Decode Q is replicated across PCP ranks. Only gather the distinct
-        # TP head shards inside this PCP partition, never the full DCP group.
-        # When DCP == PCP, each DCP group owns one TP shard already.
-        fused_q = torch.cat([ql_nope, q_pe], dim=-1).transpose(0, 1).contiguous()
-        if self.dcp_size == get_pcp_group().world_size:
-            gathered, handle = fused_q, None
-        else:
-            gathered, handle = all_gather_async(fused_q, get_tp_group())
-        return DCPGatherContext(
-            gathered=gathered,
-            handle=handle,
-            restore_perm=(1, 0, 2),
-            split_sizes=(ql_nope.shape[-1], q_pe.shape[-1]),
-        )
-
-    def _merge_dcp_outputs(
-        self,
-        sfa_output: torch.Tensor,
-        softmax_lse: torch.Tensor,
-        dsa_cp_context: DSACPContext | None = None,
-    ) -> torch.Tensor:
-        pcp_group = get_pcp_group()
-        tp_group = get_tp_group()
-        # Only scatter heads that were gathered by _start_dcp_query_gather.
-        # DCP == PCP already has TP-local heads; DCP == PCP * TP has full heads.
-        tp_size = tp_group.world_size if self.dcp_size > pcp_group.world_size else 1
-        return torch.ops.vllm.dcp_a2a_fused(
-            sfa_output, softmax_lse, tp_size, 1, tp_group.unique_name, pcp_group.unique_name
-        )
 
     def exec_kv(
         self,
