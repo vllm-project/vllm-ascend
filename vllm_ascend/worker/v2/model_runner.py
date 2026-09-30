@@ -398,8 +398,6 @@ class NPUModelRunner(GPUModelRunner):
             valid_dummy_state_slots=valid_dummy_state_slots,
         )
         self.model_state.kvpp_is_dummy_run = False
-        self.kvpp.complete_forward()
-
         if dummy_run and lmhead_tp_configured() and not is_profile and self.is_last_pp_rank:
             # lmhead TP: idle ranks never call sample(); join the target head
             # here at capacity, before _dummy_run replays the dummy propose.
@@ -413,6 +411,7 @@ class NPUModelRunner(GPUModelRunner):
                 device=self.device,
             )
             self.model.compute_logits(self.execute_model_state.hidden_states[dummy_indices])
+        self.kvpp.complete_forward()
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,
