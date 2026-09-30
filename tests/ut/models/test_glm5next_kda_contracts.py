@@ -41,7 +41,7 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
         result[:, 3:] = float("nan")
         return result, None
 
-    monkeypatch.setattr(kda_ops, "_get_fla_kda_ops", lambda: (None, recurrent))
+    monkeypatch.setattr(kda_ops, "recurrent_kda", recurrent)
     destination = torch.full((1, 8, 1, 128), float("nan"), dtype=q.dtype) if direct_output else None
 
     def writeback(source, target, ends):
@@ -83,15 +83,15 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
     keep = torch.tensor([0]) if compact else None
     metadata = SimpleNamespace(
         keep_meta=keep,
-        cu_seqlens_host=torch.tensor([0, 3] if compact else [0, 1, 3]),
+        cu_seqlens_host=(0, 3) if compact else (0, 1, 3),
         cu_seqlens_kern=None,
-        chunk_indices_chunk64_host=torch.tensor([[0, 0]] if compact else [[0, 0], [1, 0]]),
+        chunk_indices_chunk64_host=(0, 0) if compact else (0, 0, 1, 0),
     )
 
     def chunk(q_arg, k_arg, v, g, beta, scale, chunk_size, **kwargs):
         assert kwargs["state_v_first"] and kwargs["use_gate_in_kernel"] and kwargs["safe_gate"]
-        assert kwargs["cu_seqlens"] == metadata.cu_seqlens_host.tolist()
-        assert kwargs["chunk_indices"] == metadata.chunk_indices_chunk64_host.reshape(-1).tolist()
+        assert kwargs["cu_seqlens"] is metadata.cu_seqlens_host
+        assert kwargs["chunk_indices"] is metadata.chunk_indices_chunk64_host
         assert kwargs["initial_state"].dtype == torch.float32
         torch.testing.assert_close(kwargs["initial_state"][0], saved[3].float())
         if not compact:
@@ -99,7 +99,7 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
         torch.testing.assert_close(beta, torch.full_like(beta, 0.5))
         return v, torch.full_like(kwargs["initial_state"], 17)
 
-    monkeypatch.setattr(kda_ops, "_get_fla_kda_ops", lambda: (chunk, None))
+    monkeypatch.setattr(kda_ops, "chunk_kda_fwd", chunk)
     monkeypatch.setattr(kda_ops, "l2norm_fwd", lambda x: x)
     out = kda.chunk_kda(
         q, q, q, q, torch.zeros(1, 3, 1), state, indices, has_initial, metadata, torch.zeros(1), torch.zeros(128), -4

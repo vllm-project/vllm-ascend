@@ -16,16 +16,13 @@
 
 """Kimi K3 integration coverage for the fused AscendC prefill operator."""
 
-import importlib
 import math
 
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from fla_npu.ops.ascendc import chunk_kda_fwd
 
-from vllm_ascend.utils import enable_custom_op
-
-enable_custom_op()
 
 CHUNK_KDA_OUTPUT_NAMES = (
     "o",
@@ -41,16 +38,6 @@ CHUNK_KDA_OUTPUT_NAMES = (
     "h",
     "initial_state",
 )
-
-
-def _has_chunk_kda_op() -> bool:
-    if hasattr(torch.ops._C_ascend, "chunk_kda_fwd"):
-        return True
-    try:
-        importlib.import_module("vllm_ascend.vllm_ascend_C")
-    except ImportError:
-        return False
-    return hasattr(torch.ops._C_ascend, "chunk_kda_fwd")
 
 
 def _l2norm(x: torch.Tensor) -> torch.Tensor:
@@ -181,8 +168,6 @@ def _is_ascend_950() -> bool:
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_kimi_k3_safe_gate_prefill_and_transposed_state_layout():
-    if not _has_chunk_kda_op():
-        pytest.skip("requires the fused chunk KDA AscendC operator")
 
     torch.manual_seed(20260720)
     tokens, heads, head_dim = 64, 1, 128
@@ -200,7 +185,7 @@ def test_kimi_k3_safe_gate_prefill_and_transposed_state_layout():
     chunk_indices = (0, 0)
 
     initial_state_kv = cache_vk.transpose(-1, -2).contiguous()
-    got = torch.ops._C_ascend.chunk_kda_fwd(
+    got = chunk_kda_fwd(
         q,
         k,
         v,
@@ -223,7 +208,7 @@ def test_kimi_k3_safe_gate_prefill_and_transposed_state_layout():
         state_v_first=True,
     )
 
-    retained = torch.ops._C_ascend.chunk_kda_fwd(
+    retained = chunk_kda_fwd(
         q,
         k,
         v.contiguous(),
@@ -271,8 +256,6 @@ def test_kimi_k3_safe_gate_prefill_and_transposed_state_layout():
 @pytest.mark.parametrize(("tokens", "heads"), [(65, 1), (131, 6)])
 @torch.inference_mode()
 def test_kimi_k3_a5_multichunk_all_outputs_match_reference(tokens, heads):
-    if not _has_chunk_kda_op():
-        pytest.skip("requires the fused chunk KDA AscendC operator")
     if not _is_ascend_950():
         pytest.skip("requires an Ascend 950 device")
 
@@ -289,7 +272,7 @@ def test_kimi_k3_a5_multichunk_all_outputs_match_reference(tokens, heads):
     cache_vk = torch.randn(1, heads, head_dim, head_dim, dtype=torch.float32, device="npu") * 0.01
     chunk_indices = tuple(value for chunk_id in range(math.ceil(tokens / 64)) for value in (0, chunk_id))
 
-    result = torch.ops._C_ascend.chunk_kda_fwd(
+    result = chunk_kda_fwd(
         q,
         k,
         v.contiguous(),
@@ -311,7 +294,7 @@ def test_kimi_k3_a5_multichunk_all_outputs_match_reference(tokens, heads):
         return_intermediate_states=False,
         state_v_first=True,
     )
-    retained = torch.ops._C_ascend.chunk_kda_fwd(
+    retained = chunk_kda_fwd(
         q,
         k,
         v.contiguous(),
@@ -350,8 +333,6 @@ def test_kimi_k3_a5_multichunk_all_outputs_match_reference(tokens, heads):
 @pytest.mark.parametrize("layout", ["BSND", "TND"])
 @torch.inference_mode()
 def test_kimi_k3_a5_model_prefill_profile_shape(layout):
-    if not _has_chunk_kda_op():
-        pytest.skip("requires the fused chunk KDA AscendC operator")
     if not _is_ascend_950():
         pytest.skip("requires an Ascend 950 device")
 
@@ -395,7 +376,7 @@ def test_kimi_k3_a5_model_prefill_profile_shape(layout):
     cu_seqlens = (0, tokens)
     chunk_indices = tuple(value for chunk_id in range(math.ceil(tokens / 64)) for value in (0, chunk_id))
 
-    result = torch.ops._C_ascend.chunk_kda_fwd(
+    result = chunk_kda_fwd(
         q,
         k,
         v.contiguous(),
@@ -417,7 +398,7 @@ def test_kimi_k3_a5_model_prefill_profile_shape(layout):
         return_intermediate_states=False,
         state_v_first=True,
     )
-    retained = torch.ops._C_ascend.chunk_kda_fwd(
+    retained = chunk_kda_fwd(
         q,
         k,
         v.contiguous(),

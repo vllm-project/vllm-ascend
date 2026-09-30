@@ -404,7 +404,7 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
 
     with (
         patch("vllm_ascend.ops.kda.l2norm_fwd", side_effect=lambda x: x),
-        patch("vllm_ascend.ops.kda._get_fla_kda_ops", return_value=(chunk_kda_fwd, None)),
+        patch("vllm_ascend.ops.kda.chunk_kda_fwd", new=chunk_kda_fwd),
     ):
         actual = attention._run_prefill(
             q,
@@ -442,7 +442,7 @@ def test_recurrent_preserves_preprocessed_beta_and_mtp_state(lower_bound, qkv_pa
     slots = torch.tensor([[2, 3, 4, 5]], dtype=torch.int32)
     accepted = torch.tensor([2], dtype=torch.int32)
     recurrent = MagicMock(return_value=(q, None))
-    with patch("vllm_ascend.ops.kda._get_fla_kda_ops", return_value=(None, recurrent)):
+    with patch("vllm_ascend.ops.kda.recurrent_kda", new=recurrent):
         output = attention._run_recurrent(q, k, v, q, beta, state, starts, slots, num_accepted_tokens=accepted)
     assert output is q
     assert recurrent.call_args.args[0] is q

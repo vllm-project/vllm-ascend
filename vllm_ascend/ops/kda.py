@@ -3,36 +3,12 @@
 """Shared fla_npu KDA execution; callers own projections and cache updates."""
 
 from collections.abc import Sequence
-from functools import lru_cache
 
 import torch
+from fla_npu.ops.ascendc import chunk_kda_fwd, recurrent_kda
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
 KDA_CHUNK_SIZE = 64
-
-
-@lru_cache(maxsize=1)
-def _get_fla_kda_ops():
-    # Load only in workers using KDA; other models do not require fla_npu.
-    try:
-        from fla_npu.ops.ascendc import chunk_kda_fwd, recurrent_kda  # type: ignore[import-not-found]
-    except ImportError as exc:
-        raise ImportError(
-            "KDA requires fla_npu with chunk_kda_fwd and recurrent_kda. "
-            "Build and install a compatible wheel from "
-            "https://github.com/flashserve/flash-linear-attention-npu."
-        ) from exc
-    return chunk_kda_fwd, recurrent_kda
-
-
-def _host_metadata(values: torch.Tensor | Sequence[int]) -> Sequence[int]:
-    # The fla_npu launcher expects host integer sequences, not tensor truth values.
-    # Production callers already prepare tuples in the attention metadata builder.
-    if isinstance(values, torch.Tensor):
-        if values.device.type != "cpu":
-            raise ValueError("KDA chunk metadata must be prepared on CPU before execution")
-        return values.reshape(-1).tolist()
-    return values
 
 
 def run_recurrent_kda(
@@ -51,7 +27,6 @@ def run_recurrent_kda(
     beta_is_preprocessed: bool = True,
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    _, recurrent_kda = _get_fla_kda_ops()
     # Recurrent KDA consumes independent Q/K/V token/head strides directly.
     output, _ = recurrent_kda(
         q,
@@ -87,15 +62,14 @@ def run_chunk_kda(
     raw_gate: torch.Tensor,
     beta: torch.Tensor,
     initial_state: torch.Tensor,
-    cu_seqlens: torch.Tensor | Sequence[int],
-    chunk_indices: torch.Tensor | Sequence[int],
+    cu_seqlens: Sequence[int],
+    chunk_indices: Sequence[int],
     a_log: torch.Tensor,
     dt_bias: torch.Tensor,
     *,
     lower_bound: float | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Consume preprocessed beta and return output plus the final VK state."""
-    chunk_kda_fwd, _ = _get_fla_kda_ops()
     output, final_state, *_ = chunk_kda_fwd(
         l2norm_fwd(q.contiguous()),
         l2norm_fwd(k.contiguous()),
@@ -107,8 +81,8 @@ def run_chunk_kda(
         layout="BSND",
         initial_state=initial_state,
         output_final_state=True,
-        cu_seqlens=_host_metadata(cu_seqlens),
-        chunk_indices=_host_metadata(chunk_indices),
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         safe_gate=lower_bound is not None,
         lower_bound=lower_bound if lower_bound is not None else -5.0,
         use_gate_in_kernel=True,

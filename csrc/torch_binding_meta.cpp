@@ -704,46 +704,6 @@ at::Tensor npu_recurrent_gated_delta_rule_310_meta(
     return output;
 }
 
-at::Tensor recurrent_kda_meta(
-    const at::Tensor& query,
-    const at::Tensor& key,
-    const at::Tensor& value,
-    const at::Tensor& gate,
-    const at::Tensor& beta,
-    at::Tensor& initial_state,
-    const at::Tensor& actual_seq_lengths,
-    const at::Tensor& ssm_state_indices,
-    const at::Tensor& a_log,
-    const at::Tensor& dt_bias,
-    const c10::optional<at::Tensor>& num_accepted_tokens,
-    double scale,
-    bool use_qk_l2norm_in_kernel,
-    bool use_gate_in_kernel,
-    bool use_beta_sigmoid_in_kernel,
-    bool allow_neg_eigval,
-    bool safe_gate,
-    double lower_bound)
-{
-    (void)query;
-    (void)key;
-    (void)gate;
-    (void)beta;
-    (void)actual_seq_lengths;
-    (void)ssm_state_indices;
-    (void)a_log;
-    (void)dt_bias;
-    (void)num_accepted_tokens;
-    (void)scale;
-    (void)use_qk_l2norm_in_kernel;
-    (void)use_gate_in_kernel;
-    (void)use_beta_sigmoid_in_kernel;
-    (void)allow_neg_eigval;
-    (void)safe_gate;
-    (void)lower_bound;
-    (void)initial_state;
-    return at::empty_symint(value.sym_sizes(), value.options());
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
     const at::Tensor& x,
     int64_t k,
@@ -1738,124 +1698,6 @@ at::Tensor chunk_fwd_o_vllm_meta(
     return o;
 }
 
-std::tuple<at::Tensor, c10::optional<at::Tensor>, c10::optional<at::Tensor>, at::Tensor, at::Tensor,
-           c10::optional<at::Tensor>, c10::optional<at::Tensor>, c10::optional<at::Tensor>,
-           c10::optional<at::Tensor>, c10::optional<at::Tensor>, c10::optional<at::Tensor>,
-           c10::optional<at::Tensor>>
-chunk_kda_fwd_meta(
-    const at::Tensor &q,
-    const at::Tensor &k,
-    const at::Tensor &v,
-    const at::Tensor &g,
-    const at::Tensor &beta,
-    double scale,
-    int64_t chunk_size,
-    c10::string_view layout,
-    const c10::optional<at::Tensor> &initial_state,
-    c10::optional<bool> output_final_state,
-    c10::optional<at::IntArrayRef> cu_seqlens,
-    c10::optional<at::IntArrayRef> chunk_indices,
-    c10::optional<bool> safe_gate,
-    c10::optional<double> lower_bound,
-    c10::optional<bool> use_gate_in_kernel,
-    const c10::optional<at::Tensor> &A_log,
-    const c10::optional<at::Tensor> &dt_bias,
-    c10::optional<bool> disable_recompute,
-    c10::optional<bool> return_intermediate_states,
-    c10::optional<bool> state_v_first)
-{
-    std::string layout_str = std::string(layout);
-    bool is_tnd = layout_str == "TND";
-    bool is_ntd = layout_str == "NTD";
-    bool is_bnsd = layout_str == "BNSD";
-    bool is_rank3 = is_tnd || is_ntd;
-    bool output_final_state_ = output_final_state.value_or(false);
-    bool use_gate_in_kernel_ = use_gate_in_kernel.value_or(false);
-    bool disable_recompute_ = disable_recompute.value_or(false);
-    bool return_intermediate_states_ = return_intermediate_states.value_or(false);
-    bool state_v_first_ = state_v_first.value_or(false);
-
-    c10::SymInt B = is_rank3 ? c10::SymInt(1) : q.sym_size(0);
-    c10::SymInt T = is_tnd ? q.sym_size(0) :
-        (is_ntd ? q.sym_size(1) : (is_bnsd ? q.sym_size(2) : q.sym_size(1)));
-    c10::SymInt K = is_rank3 ? q.sym_size(2) : q.sym_size(3);
-    c10::SymInt HV = is_tnd ? v.sym_size(1) :
-        (is_ntd ? v.sym_size(0) : (is_bnsd ? v.sym_size(1) : v.sym_size(2)));
-    c10::SymInt V = is_rank3 ? v.sym_size(2) : v.sym_size(3);
-    // symbolic-meta-ok: cu_seqlens is an IntArrayRef schema argument, not a Tensor shape.
-    c10::SymInt seq_num = cu_seqlens.has_value() ?
-        c10::SymInt(static_cast<int64_t>(cu_seqlens->size()) - 1) : B;
-    c10::SymInt total_chunks(0);
-    if (chunk_indices.has_value()) {
-        // symbolic-meta-ok: chunk_indices is an IntArrayRef schema argument, not a Tensor shape.
-        total_chunks = c10::SymInt(static_cast<int64_t>(chunk_indices->size()) / 2);
-    } else if (cu_seqlens.has_value()) {
-        int64_t concrete_total_chunks = 0;
-        // symbolic-meta-ok: cu_seqlens is an IntArrayRef schema argument, not a Tensor shape.
-        for (size_t i = 0; i + 1 < cu_seqlens->size(); ++i) {
-            concrete_total_chunks += ((*cu_seqlens)[i + 1] - (*cu_seqlens)[i] + chunk_size - 1) / chunk_size;
-        }
-        total_chunks = c10::SymInt(concrete_total_chunks);
-    } else {
-        total_chunks = (T + c10::SymInt(chunk_size - 1)) / c10::SymInt(chunk_size);
-    }
-
-    c10::SymDimVector attn_shape = is_rank3 ? c10::SymDimVector{T, HV, V}
-                                                   : c10::SymDimVector{B, T, HV, V};
-    c10::SymDimVector state_shape = state_v_first_ ? c10::SymDimVector{seq_num, HV, V, K}
-                                                   : c10::SymDimVector{seq_num, HV, K, V};
-    c10::SymDimVector matrix_shape = is_rank3 ? c10::SymDimVector{HV, T, c10::SymInt(chunk_size)}
-                                               : c10::SymDimVector{B, HV, T, c10::SymInt(chunk_size)};
-    c10::SymDimVector k_shape = is_rank3 ? c10::SymDimVector{HV, T, K}
-                                         : c10::SymDimVector{B, HV, T, K};
-    c10::SymDimVector v_shape = is_rank3 ? c10::SymDimVector{HV, T, V}
-                                         : c10::SymDimVector{B, HV, T, V};
-    c10::SymDimVector h_shape =
-        is_rank3 ? (state_v_first_ ? c10::SymDimVector{total_chunks, HV, V, K}
-                                   : c10::SymDimVector{total_chunks, HV, K, V})
-                 : (state_v_first_ ? c10::SymDimVector{B, total_chunks, HV, V, K}
-                                   : c10::SymDimVector{B, total_chunks, HV, K, V});
-
-    at::Tensor o = at::empty_symint(attn_shape, v.options());
-    c10::optional<at::Tensor> final_state;
-    if (output_final_state_) {
-        final_state = at::empty_symint(state_shape, q.options().dtype(at::kFloat));
-    }
-    c10::optional<at::Tensor> gk;
-    if (!use_gate_in_kernel_ || disable_recompute_) {
-        gk = at::empty_symint(k_shape, q.options().dtype(at::kFloat));
-    }
-    at::Tensor aqk = at::empty_symint(matrix_shape, q.options());
-    at::Tensor akk = at::empty_like(aqk);
-    c10::optional<at::Tensor> w;
-    c10::optional<at::Tensor> u;
-    c10::optional<at::Tensor> qg;
-    c10::optional<at::Tensor> kg;
-    c10::optional<at::Tensor> v_new;
-    if (disable_recompute_) {
-        w = at::empty_symint(k_shape, q.options());
-        u = at::empty_symint(v_shape, q.options());
-        qg = at::empty_symint(k_shape, q.options());
-        kg = at::empty_symint(k_shape, q.options());
-        v_new = at::empty_symint(v_shape, q.options());
-    }
-    c10::optional<at::Tensor> h;
-    if (disable_recompute_ || return_intermediate_states_) {
-        h = at::empty_symint(h_shape, q.options());
-    }
-    c10::optional<at::Tensor> initial_state_out =
-        initial_state.has_value() && initial_state->defined() ? initial_state : c10::nullopt;
-    (void)k;
-    (void)g;
-    (void)beta;
-    (void)scale;
-    (void)safe_gate;
-    (void)lower_bound;
-    (void)A_log;
-    (void)dt_bias;
-    return std::make_tuple(o, final_state, gk, aqk, akk, w, u, qg, kg, v_new, h, initial_state_out);
-}
-
 at::Tensor kda_gate_cumsum_meta(
     const at::Tensor &g,
     int64_t chunk_size,
@@ -2077,8 +1919,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o_vllm
     ops.impl("chunk_fwd_o_vllm", &vllm_ascend::meta::chunk_fwd_o_vllm_meta);
-    // chunk_kda_fwd
-    ops.impl("chunk_kda_fwd", &vllm_ascend::meta::chunk_kda_fwd_meta);
     // kda_gate_cumsum
     ops.impl("kda_gate_cumsum", &vllm_ascend::meta::kda_gate_cumsum_meta);
     // kda_layout_swap12
@@ -2092,7 +1932,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("get_physical_device_id", &vllm_ascend::meta::get_physical_device_id_meta);
     //Gemma rmsnorm meta implementation
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
-    ops.impl("recurrent_kda", &vllm_ascend::meta::recurrent_kda_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
 
@@ -2182,8 +2021,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o_vllm
     ops.impl("chunk_fwd_o_vllm", &vllm_ascend::meta::chunk_fwd_o_vllm_meta);
-    // chunk_kda_fwd
-    ops.impl("chunk_kda_fwd", &vllm_ascend::meta::chunk_kda_fwd_meta);
     // kda_gate_cumsum
     ops.impl("kda_gate_cumsum", &vllm_ascend::meta::kda_gate_cumsum_meta);
     // kda_layout_swap12
