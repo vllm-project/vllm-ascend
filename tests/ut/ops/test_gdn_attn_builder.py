@@ -8,7 +8,7 @@ import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.third_party.flash_linear_attention.ops import index as _fla_index
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -19,6 +19,8 @@ from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNAttentionBackend,
     AscendGDNAttentionMetadataBuilder,
+    AscendVariableLengthGDNAttentionBackend,
+    AscendVariableLengthGDNAttentionMetadataBuilder,
 )
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
@@ -331,8 +333,59 @@ def test_kimi_chunk_metadata_uses_linear_attention_head_count() -> None:
 
 
 def test_ascend_gdn_attention_uses_ascend_backend():
-    assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNAttentionBackend
+    assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendVariableLengthGDNAttentionBackend
+    assert (
+        AscendVariableLengthGDNAttentionBackend.get_builder_cls()
+        is AscendVariableLengthGDNAttentionMetadataBuilder
+    )
+
+
+def test_variable_length_support_is_limited_to_native_gdn_backend():
+    assert AscendVariableLengthGDNAttentionBackend.supports_device_cpu_query_lens_mismatch()
+    assert not AscendGDNAttentionBackend.supports_device_cpu_query_lens_mismatch()
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
+
+
+@pytest.mark.parametrize(
+    ("speculative_config", "expected"),
+    [
+        (None, AttentionCGSupport.UNIFORM_BATCH),
+        (
+            SimpleNamespace(method="dflash", enable_adaptive_verification=False),
+            AttentionCGSupport.UNIFORM_BATCH,
+        ),
+        (
+            SimpleNamespace(method="eagle", enable_adaptive_verification=True),
+            AttentionCGSupport.UNIFORM_BATCH,
+        ),
+        (
+            SimpleNamespace(method="dflash", enable_adaptive_verification=True),
+            AttentionCGSupport.ALWAYS,
+        ),
+    ],
+)
+def test_adaptive_dflash_cudagraph_support(speculative_config, expected):
+    vllm_config = SimpleNamespace(speculative_config=speculative_config)
+
+    assert AscendVariableLengthGDNAttentionMetadataBuilder.get_cudagraph_support(vllm_config, object()) is expected
+
+
+def test_adaptive_dflash_support_does_not_leak_to_shared_builders():
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="dflash",
+            enable_adaptive_verification=True,
+        )
+    )
+
+    assert (
+        AscendGDNAttentionMetadataBuilder.get_cudagraph_support(vllm_config, object())
+        is AttentionCGSupport.UNIFORM_BATCH
+    )
+    assert (
+        GDNAttentionMetadataBuilder310.get_cudagraph_support(vllm_config, object())
+        is AttentionCGSupport.UNIFORM_BATCH
+    )
 
 
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
@@ -540,6 +593,54 @@ def test_spec_conv1d_args_use_device_cache_and_accepted_tokens():
     assert torch.equal(
         attn_metadata.spec_decode_metadata.actual_seq_lengths,
         torch.tensor([0, 4, 4], dtype=torch.int32),
+    )
+
+
+def test_adaptive_dflash_preserves_device_lengths_and_state_rows():
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec=BatchSpec(
+            seq_lens=[3, 3],
+            query_lens=[3, 3],
+            name="adaptive_dflash_ragged_lengths",
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_attn_metadata.query_start_loc = torch.tensor([0, 2, 6], dtype=torch.int32)
+    common_attn_metadata.block_table_tensor = torch.tensor(
+        [[10, 11, 12, 13], [20, 21, 22, 23]],
+        dtype=torch.int32,
+    )
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+    )
+    num_accepted_tokens = torch.tensor([4, 2], dtype=torch.int32)
+
+    attn_metadata = builder.build(
+        0,
+        common_attn_metadata,
+        num_accepted_tokens=num_accepted_tokens,
+        num_decode_draft_tokens_cpu=torch.tensor([3, 3], dtype=torch.int32),
+    )
+
+    assert torch.equal(
+        common_attn_metadata.query_start_loc_cpu,
+        torch.tensor([0, 3, 6], dtype=torch.int32),
+    )
+    assert torch.equal(
+        attn_metadata.spec_query_start_loc,
+        torch.tensor([0, 2, 6], dtype=torch.int32),
+    )
+    assert torch.equal(
+        attn_metadata.spec_state_indices_tensor,
+        torch.tensor([[10, 11, 12, 13], [20, 21, 22, 23]], dtype=torch.int32),
+    )
+    assert torch.equal(attn_metadata.num_accepted_tokens, num_accepted_tokens)
+    assert torch.equal(
+        attn_metadata.spec_decode_metadata.actual_seq_lengths,
+        torch.tensor([0, 2, 4], dtype=torch.int32),
     )
 
 

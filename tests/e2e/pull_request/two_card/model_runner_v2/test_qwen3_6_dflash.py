@@ -26,7 +26,11 @@ from unittest.mock import patch
 import pytest
 from vllm.config import CompilationConfig
 
-from tests.e2e.pull_request.utils import SPEC_DECODE_PROMPTS, _run_speculative_decoding
+from tests.e2e.pull_request.utils import (
+    ACCEPTANCE_LENGTH_RTOL,
+    SPEC_DECODE_PROMPTS,
+    _run_speculative_decoding,
+)
 
 QWEN36_MOE_MODEL = "Qwen/Qwen3.6-35B-A3B"
 QWEN36_DFLASH_DRAFT_MODEL = "rainney/AEON-DFlash-Qwen3.6-35B-A3B"
@@ -36,17 +40,40 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 MAX_MODEL_LEN = 72320
 MAX_NUM_BATCHED_TOKENS = 16384
 GPU_MEMORY_UTILIZATION = 0.95
+# The adaptive case is a functional smoke test, so accept the full valid
+# acceptance-length range [1, num_speculative_tokens + 1].
+ADAPTIVE_ACCEPTANCE_LENGTH_RTOL = 0.78
+ADAPTIVE_SMOKE_MAX_TOKENS = 512
 
 
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize(
-    ("expected_acceptance_length", "num_speculative_tokens", "additional_config"),
+    (
+        "expected_acceptance_length",
+        "acceptance_length_rtol",
+        "num_speculative_tokens",
+        "enable_adaptive_verification",
+        "max_tokens",
+        "additional_config",
+    ),
     [
         pytest.param(
             4.0,
+            ACCEPTANCE_LENGTH_RTOL,
             7,
+            False,
+            8192,
             {"ascend_compilation_config": {"enable_npugraph_ex": False}},
             id="dflash-qwen36-35b",
+        ),
+        pytest.param(
+            4.5,
+            ADAPTIVE_ACCEPTANCE_LENGTH_RTOL,
+            7,
+            True,
+            ADAPTIVE_SMOKE_MAX_TOKENS,
+            {"ascend_compilation_config": {"enable_npugraph_ex": False}},
+            id="dflash-qwen36-35b-adaptive-verification",
         ),
     ],
 )
@@ -68,18 +95,26 @@ GPU_MEMORY_UTILIZATION = 0.95
 def test_qwen36_35b_dflash_acceptance_tp2(
     model_name,
     expected_acceptance_length,
+    acceptance_length_rtol,
     num_speculative_tokens,
+    enable_adaptive_verification,
+    max_tokens,
     additional_config,
 ):
+    speculative_config: dict[str, object] = {
+        "method": "dflash",
+        "model": QWEN36_DFLASH_DRAFT_MODEL,
+        "num_speculative_tokens": num_speculative_tokens,
+    }
+    if enable_adaptive_verification:
+        speculative_config["enable_adaptive_verification"] = True
+
     _run_speculative_decoding(
         model_name=model_name,
-        speculative_config={
-            "method": "dflash",
-            "model": QWEN36_DFLASH_DRAFT_MODEL,
-            "num_speculative_tokens": num_speculative_tokens,
-        },
+        speculative_config=speculative_config,
         example_prompts=SPEC_DECODE_PROMPTS,
         expected_acceptance_length=expected_acceptance_length,
+        acceptance_length_rtol=acceptance_length_rtol,
         runner_kwargs={
             "tensor_parallel_size": 2,
             "max_model_len": MAX_MODEL_LEN,
@@ -92,5 +127,5 @@ def test_qwen36_35b_dflash_acceptance_tp2(
             "async_scheduling": True,
         },
         is_moe=True,
-        max_tokens=8192,
+        max_tokens=max_tokens,
     )

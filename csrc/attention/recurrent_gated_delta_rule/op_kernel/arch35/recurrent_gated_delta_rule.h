@@ -61,6 +61,7 @@ public:
     __aicore__ inline RGDR(const RecurrentGatedDeltaRuleTilingData *tilingData)
     {
         B_ = tilingData->b;
+        SBlockNum_ = tilingData->sBlockNum;
         T_ = tilingData->t;
         NK_ = tilingData->nk;
         realK_ = tilingData->dk;
@@ -68,6 +69,7 @@ public:
         realV_ = tilingData->dv;
         scale_ = tilingData->scale;
         hasAcceptedTokens_ = (tilingData->hasAcceptedTokens == 1);
+        stateIndicesStride_ = tilingData->stateIndicesStride;
         hasGama_ = (tilingData->hasGama == 1);
         hasGamaK_ = (tilingData->hasGamaK == 1);
         useAddFoldReduce_ = (RGDR_ENABLE_ADD_FOLD_REDUCE != 0);
@@ -153,32 +155,72 @@ public:
         // shortfall doubles with MAX_MTP -> risk of tmpBuff overflow.
     }
 
-    __aicore__ inline void ComputeAvgload()
+    __aicore__ inline bool ValidateInputsAndComputeAvgload()
     {
         uint64_t realT = 0;
-        for (uint64_t batch_i = 1; batch_i < B_ + 1; batch_i++) {
-            realT += cuSeqlensGm_.GetValue(batch_i);
+        int32_t seqStart = cuSeqlensGm_.GetValue(0);
+        if (seqStart < 0 || static_cast<uint32_t>(seqStart) > T_) {
+            return false;
+        }
+        for (uint64_t batch_i = 0; batch_i < B_; batch_i++) {
+            const int32_t seqLen = cuSeqlensGm_.GetValue(batch_i + 1);
+            if (seqLen < 0 || seqLen > static_cast<int32_t>(MAX_MTP)) {
+                return false;
+            }
+            const int64_t seqEnd = static_cast<int64_t>(seqStart) + seqLen;
+            if (seqEnd > static_cast<int64_t>(T_)) {
+                return false;
+            }
+            if (seqLen > 0) {
+                const uint64_t stateRow = stateIndicesStride_ == 0 ? static_cast<uint64_t>(seqStart)
+                                                                   : batch_i * stateIndicesStride_;
+                const uint32_t stateSlots =
+                    stateIndicesStride_ == 0 ? static_cast<uint32_t>(seqLen) : stateIndicesStride_;
+                if (static_cast<uint32_t>(seqLen) > stateSlots) {
+                    return false;
+                }
+                uint64_t initialStateTokenIdx = stateRow;
+                if (hasAcceptedTokens_) {
+                    const int32_t acceptedTokenNum = numAcceptedTokensGm_.GetValue(batch_i);
+                    if (acceptedTokenNum <= 0 || static_cast<uint32_t>(acceptedTokenNum) > stateSlots) {
+                        return false;
+                    }
+                    initialStateTokenIdx += acceptedTokenNum - 1;
+                }
+                const int32_t initialStateSlot = ssmStateIndicesGm_.GetValue(initialStateTokenIdx);
+                if (initialStateSlot < 0 || static_cast<uint32_t>(initialStateSlot) >= SBlockNum_) {
+                    return false;
+                }
+                for (uint32_t token_i = 0; token_i < static_cast<uint32_t>(seqLen); token_i++) {
+                    const int32_t outputStateSlot = ssmStateIndicesGm_.GetValue(stateRow + token_i);
+                    if (outputStateSlot < 0 || static_cast<uint32_t>(outputStateSlot) >= SBlockNum_) {
+                        return false;
+                    }
+                }
+            }
+            realT += static_cast<uint64_t>(seqLen);
+            seqStart = static_cast<int32_t>(seqEnd);
         }
         avgload = Ceil(realT * NV_, GetBlockNum());
+        return true;
     }
 
     __aicore__ inline void Process()
     {
-        ComputeAvgload();
+        if (!ValidateInputsAndComputeAvgload()) {
+            return;
+        }
         int32_t seq1 = cuSeqlensGm_.GetValue(0);
         for (uint64_t batch_i = 0; batch_i < B_; batch_i++) {
             int32_t seqLen = cuSeqlensGm_.GetValue(batch_i+1);
-            if (seqLen <= 0) {
+            if (seqLen == 0) {
                 continue;
             }
-            if (seqLen > static_cast<int32_t>(MAX_MTP)) {
-                return;
-            }
-            if (seq1 < 0 || seq1 > static_cast<int32_t>(T_) || (seq1 + seqLen) > static_cast<int32_t>(T_)) {
-                return;
-            }
+            const int64_t seqEnd = static_cast<int64_t>(seq1) + seqLen;
             int32_t seq0 = seq1;
-            seq1 += seqLen;
+            seq1 = static_cast<int32_t>(seqEnd);
+            const uint64_t stateRow = stateIndicesStride_ == 0 ? static_cast<uint64_t>(seq0)
+                                                               : batch_i * stateIndicesStride_;
             uint32_t copyFlag = 0;
             uint64_t stateOffset;
             for (uint64_t head_i = 0; head_i < NV_; head_i++) {
@@ -187,18 +229,16 @@ public:
                 }
                 copyFlag++;
                 if (copyFlag == 1) {
-                    int32_t stateTokenIdx = seq0;
+                    uint64_t stateTokenIdx = stateRow;
                     if (hasAcceptedTokens_) {
                         int32_t acceptedTokenNum = numAcceptedTokensGm_.GetValue(batch_i);
-                        if (acceptedTokenNum <= 0 || acceptedTokenNum > seqLen) {
-                            return;
-                        }
-                        stateTokenIdx = seq0 + acceptedTokenNum - 1;
+                        stateTokenIdx = stateRow + acceptedTokenNum - 1;
                     }
-                    stateOffset = ssmStateIndicesGm_.GetValue(stateTokenIdx);
+                    const int32_t stateSlot = ssmStateIndicesGm_.GetValue(stateTokenIdx);
+                    stateOffset = static_cast<uint64_t>(stateSlot);
                     CopyInGamaBeta(seq0, seq1);
                 }
-                ProcessHead(seq0, seq1, head_i, stateOffset);
+                ProcessHead(seq0, seq1, head_i, stateOffset, stateRow);
             }
             if (hasGama_ && copyFlag != 0) {
                 gamaInQueue_.FreeTensor(gamaInUb);
@@ -491,7 +531,8 @@ private:
         }
     }
 
-    __aicore__ inline void ProcessHead(int32_t seq0, int32_t seq1, uint64_t head_i, uint64_t stateOffset)
+    __aicore__ inline void ProcessHead(int32_t seq0, int32_t seq1, uint64_t head_i, uint64_t stateOffset,
+                                      uint64_t stateRow)
     {
         uint64_t vOffset = (seq0 * NV_ + head_i) * realV_;
         uint64_t qkOffset = (seq0 * NK_ + head_i / (NV_ / NK_)) * realK_;
@@ -524,8 +565,10 @@ private:
                 uint64_t curQKOffset = (seq_i - seq0) * alignK_;
                 uint64_t curVOffset = (seq_i - seq0) * alignV_ + v_i;
                 uint64_t attnOffset = (seq_i * NV_ + head_i) * realV_ + v_i;
+                const uint64_t stateTokenIdx = stateRow + seq_i - seq0;
+                const int32_t stateSlot = ssmStateIndicesGm_.GetValue(stateTokenIdx);
                 uint64_t curStateOutOffset =
-                    ((ssmStateIndicesGm_.GetValue(seq_i) * NV_ + head_i) * realV_ + v_i) * realK_;
+                    ((static_cast<uint64_t>(stateSlot) * NV_ + head_i) * realV_ + v_i) * realK_;
                 gama_ = hasGama_ ? gamaInUb.GetValue(gbOffset) : 1;
                 beta_ = betaInUb.GetValue(gbOffset);
                 Compute(curSingleV, curQKOffset, curVOffset);
@@ -606,6 +649,7 @@ private:
     LocalTensor<float> attnInUb;
     LocalTensor<float> stateInUb;
     uint32_t B_;
+    uint32_t SBlockNum_;
     uint32_t T_;
     uint32_t NK_;
     uint32_t alignK_;
@@ -620,6 +664,7 @@ private:
     uint32_t load;
     uint32_t usedblk;
     uint32_t avgload;
+    uint32_t stateIndicesStride_;
     bool hasAcceptedTokens_;
     bool hasGama_;
     bool hasGamaK_;

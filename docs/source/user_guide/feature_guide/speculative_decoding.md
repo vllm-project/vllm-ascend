@@ -270,6 +270,41 @@ The following code configures vLLM Ascend to use speculative decoding where prop
       --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3-8B-DFlash-b16", "num_speculative_tokens": 7}'
     ```
 
+### Adaptive verification
+
+Adaptive verification lets DFlash choose how many draft tokens to verify for
+each request at every decode step. Requests with higher confidence can keep a
+longer draft, while low-confidence drafts are shortened to avoid unnecessary
+target-model computation. DFlash uses its draft logits to estimate confidence,
+so no separate confidence head is required.
+
+Enable it in `speculative_config` with model runner V2 and a full decode graph
+mode such as `FULL_DECODE_ONLY`:
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
+  --tensor-parallel-size 1 \
+  --max-model-len 4096 \
+  --max-num-seqs 256 \
+  --gpu-memory-utilization 0.8 \
+  --no-enable-prefix-caching \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+  --speculative-config '{
+    "method": "dflash",
+    "model": "z-lab/Qwen3-8B-DFlash-b16",
+    "num_speculative_tokens": 7,
+    "enable_adaptive_verification": true
+  }'
+```
+
+Adaptive verification takes effect only with model runner V2.
+This is separate from the legacy model runner V1 dynamic-speculation path
+described below. Do not set `additional_config.dynamic_spec_config` for model
+runner V2 adaptive verification.
+
+For more details, see the
+[vLLM community documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
+
 ## Speculating using DFlash2
 
 The following code configures vLLM Ascend to use speculative decoding where
@@ -675,10 +710,10 @@ Key configuration parameters:
 
 Dynamic Speculative Decoding adapts the number of draft tokens (K) at runtime, instead of always using a fixed `num_speculative_tokens`. This helps keep speculative decoding beneficial as concurrency and draft confidence change. vLLM Ascend currently provides two approaches:
 
-- **Confidence-based verify length (DSpark / DFlash)**: adjust the per-request verify length from draft confidence. DSpark uses a dedicated confidence head; DFlash is **head-free** and uses `max(softmax(logits))` of the drafted token as a confidence proxy.
+- **Legacy model runner V1 confidence-based verify length (DSpark / DFlash)**: adjust the per-request verify length from draft confidence. DSpark uses a dedicated confidence head; DFlash is **head-free** and uses `max(softmax(logits))` of the drafted token as a confidence proxy.
 - **Batch-size based (Autoregressive)**: select a shared K from concurrency ranges via `num_speculative_tokens_per_batch_size`.
 
-### Confidence-based verify length (DSpark / DFlash)
+### Legacy confidence-based verify length (model runner V1; DSpark / DFlash)
 
 This approach adapts how many drafted tokens are verified per request. It can reduce verify cost when the drafter is less confident about later tokens, while still allowing longer speculation when confidence is high.
 
