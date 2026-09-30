@@ -32,6 +32,7 @@ from vllm_ascend.attention.sfa_v1 import (
 )
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.device.device_op import BaseDeviceAdaptor, DeviceOperator
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -125,6 +126,8 @@ class TestAscendSFADeviceOperator(TestBase):
         impl.scale = 0.125
         impl.qk_rope_head_dim = 2
         impl.sfa_qsfa_tile_size = 128
+        impl.enable_sfa_split_kv = False
+        impl.dcp_group = None
         return (
             impl,
             ql_nope,
@@ -134,6 +137,145 @@ class TestAscendSFADeviceOperator(TestBase):
             actual_seq_lengths_query,
             actual_seq_lengths_key,
         )
+
+    def test_execute_sparse_flash_attention_uses_triton_split_kv(self):
+        (
+            impl,
+            ql_nope,
+            q_pe,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            actual_seq_lengths_key,
+        ) = self._make_common_inputs()
+        impl.enable_sfa_split_kv = True
+        kv_cache = (torch.randn(4, 1, 1, 8), torch.randn(4, 1, 1, 2))
+        attn_metadata.seq_lens_cpu = torch.tensor([4096])
+        attn_metadata.max_query_len = ql_nope.shape[0]
+        expected = torch.randn_like(ql_nope)
+        profile = SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED)
+
+        with (
+            patch("vllm_ascend.device.device_op.HAS_TRITON", True),
+            patch("vllm_ascend.device.device_op.get_current_hardware_profile", return_value=profile),
+            patch(
+                "vllm_ascend.ops.triton.sfa_split_kv.can_use_sfa_split_kv",
+                return_value=True,
+            ),
+            patch(
+                "vllm_ascend.ops.triton.sfa_split_kv.sparse_flash_attention_split_kv",
+                return_value=expected,
+            ) as split_kv,
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_sparse_flash_attention",
+                create=True,
+                side_effect=AssertionError("the unsplit SFA path must not run"),
+            ),
+        ):
+            result = DeviceOperator.execute_sparse_flash_attention_process(
+                impl,
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                allow_split_kv=True,
+            )
+
+        self.assertIs(result, expected)
+        split_kv.assert_called_once()
+        self.assertIs(split_kv.call_args.kwargs["query"], ql_nope)
+        self.assertIs(split_kv.call_args.kwargs["sparse_indices"], topk_indices)
+
+    def test_execute_sparse_flash_attention_split_kv_falls_back(self):
+        (
+            impl,
+            ql_nope,
+            q_pe,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            actual_seq_lengths_key,
+        ) = self._make_common_inputs()
+        impl.enable_sfa_split_kv = True
+        kv_cache = (torch.randn(4, 1, 1, 8), torch.randn(4, 1, 1, 2))
+        attn_metadata.seq_lens_cpu = torch.tensor([1024])
+        attn_metadata.max_query_len = ql_nope.shape[0]
+        expected = torch.randn_like(ql_nope)
+        profile = SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED)
+
+        with (
+            patch("vllm_ascend.device.device_op.HAS_TRITON", True),
+            patch("vllm_ascend.device.device_op.get_current_hardware_profile", return_value=profile),
+            patch(
+                "vllm_ascend.ops.triton.sfa_split_kv.can_use_sfa_split_kv",
+                return_value=False,
+            ),
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_sparse_flash_attention",
+                create=True,
+                return_value=(expected, torch.empty(0), torch.empty(0)),
+            ) as unsplit,
+        ):
+            result = DeviceOperator.execute_sparse_flash_attention_process(
+                impl,
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                allow_split_kv=True,
+            )
+
+        self.assertIs(result, expected)
+        unsplit.assert_called_once()
+
+    def test_execute_sparse_flash_attention_split_kv_falls_back_for_dcp(self):
+        (
+            impl,
+            ql_nope,
+            q_pe,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            actual_seq_lengths_key,
+        ) = self._make_common_inputs()
+        impl.enable_sfa_split_kv = True
+        impl.dcp_group = object()
+        kv_cache = (torch.randn(4, 1, 1, 8), torch.randn(4, 1, 1, 2))
+        expected = torch.randn_like(ql_nope)
+        profile = SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED)
+
+        with (
+            patch("vllm_ascend.device.device_op.HAS_TRITON", True),
+            patch("vllm_ascend.device.device_op.get_current_hardware_profile", return_value=profile),
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_sparse_flash_attention",
+                create=True,
+                return_value=(expected, torch.empty(0), torch.empty(0)),
+            ) as unsplit,
+        ):
+            result = DeviceOperator.execute_sparse_flash_attention_process(
+                impl,
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                allow_split_kv=True,
+            )
+
+        self.assertIs(result, expected)
+        unsplit.assert_called_once()
 
     def test_execute_sparse_flash_attention_returns_softmax_components(self):
         (
