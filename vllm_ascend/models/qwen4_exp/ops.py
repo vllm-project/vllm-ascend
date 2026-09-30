@@ -231,8 +231,9 @@ def qsa_select_paged_tokens(
         out = torch.empty((row_count, output_width), dtype=torch.int32, device=query.device)
     compressed_capacity = block_table.shape[1] * compressed_key_cache.shape[1]
     block_topk = token_topk // compress_ratio
-    if block_topk > compressed_capacity:
-        raise ValueError("QSA top-k exceeds the compressed cache capacity")
+    # Short requests may have less cache capacity than the selection budget.
+    # Visibility masking below limits the output to valid token positions.
+    block_topk = min(block_topk, compressed_capacity)
 
     columns = torch.arange(compressed_capacity, device=query.device)
     # Advanced paged indexing materializes one cache row. Bound the complete
