@@ -14,6 +14,8 @@ import pytest
 def test_profile_boundaries_and_call_count(monkeypatch, tmp_path, recorded_calls):
     source = Path(__file__).resolve().parents[3] / "benchmarks" / "mhc_expand.py"
     spec = importlib.util.spec_from_file_location("mhc_expand_benchmark", source)
+    assert spec is not None
+    assert spec.loader is not None
     benchmark = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(benchmark)
     events = []
