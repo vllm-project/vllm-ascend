@@ -177,6 +177,56 @@ def test_recurrent_gated_delta_rule(
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.parametrize(
+    "lengths,accepted,width",
+    [
+        ([4, 4], [1, 1], 4),
+        ([2, 4], [1, 1], 4),
+        ([2, 3], [1, 1], 3),
+        ([2, 2], [1, 1], 2),
+        ([2, 4], [4, 3], 4),
+        ([1, 4], [4, 1], 4),
+        ([0, 2, 4], [0, 4, 2], 4),
+    ],
+)
+@pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
+def test_recurrent_gated_delta_rule_state_table(lengths, accepted, width, state_dtype):
+    """Ragged token batches must preserve request ownership of state slots."""
+    num_blocks = len(lengths) * width + 2
+    table = torch.arange(1, num_blocks - 1, dtype=torch.int32).view(-1, width)
+    state = torch.arange(num_blocks, dtype=state_dtype)
+    state = state[:, None, None, None].expand(-1, 4, 128, 128).contiguous()
+    query = torch.zeros(sum(lengths), 1, 128, dtype=torch.bfloat16)
+    query[..., 0] = 1
+    value = torch.zeros(sum(lengths), 4, 128, dtype=torch.bfloat16)
+    expected_output = torch.empty_like(value)
+    expected_state = state.clone()
+    start = 0
+    for row, length in enumerate(lengths):
+        if length == 0:
+            continue
+        source = state[table[row, accepted[row] - 1]]
+        expected_output[start : start + length] = source[..., 0]
+        expected_state[table[row, :length]] = source
+        start += length
+
+    state_npu = state.npu()
+    output = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+        query=query.npu(),
+        key=torch.zeros_like(query).npu(),
+        value=value.npu(),
+        state=state_npu,
+        beta=torch.zeros(sum(lengths), 4, dtype=torch.bfloat16).npu(),
+        g=torch.zeros(sum(lengths), 4, dtype=torch.float32).npu(),
+        scale=1.0,
+        actual_seq_lengths=torch.tensor([0] + lengths, dtype=torch.int32).npu(),
+        ssm_state_indices=table.npu(),
+        num_accepted_tokens=torch.tensor(accepted, dtype=torch.int32).npu(),
+    )
+    torch.testing.assert_close(output.cpu(), expected_output, rtol=0, atol=0)
+    torch.testing.assert_close(state_npu.cpu(), expected_state, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("batch_size", [1, 4, 8])
 @pytest.mark.parametrize("mtp", [1, 2])
 @pytest.mark.parametrize("headnum", [(4, 8), (8, 16)])

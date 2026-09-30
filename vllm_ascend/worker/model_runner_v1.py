@@ -3207,11 +3207,18 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             extra_attn_metadata_args = {}
-            if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder) and not is_gdn_noop:
+            gdn_needs_spec_history = self.speculative_config is not None and num_scheduled_tokens is not None
+            if (
+                (use_spec_decode or gdn_needs_spec_history)
+                and isinstance(builder, GDNAttentionMetadataBuilder)
+                and not is_gdn_noop
+            ):
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
-                    num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
+                    num_decode_draft_tokens_cpu=(
+                        self.num_decode_draft_tokens.cpu[:num_reqs_padded] if use_spec_decode else None
+                    ),
                 )
 
             if isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):
