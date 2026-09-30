@@ -227,12 +227,15 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         self._init_packed_explicit = init_info.packed is not None
         self._init_buffer_size_explicit = init_info.packed_buffer_size_bytes is not None
         self._init_num_buffers_explicit = init_info.packed_num_buffers is not None
-        if init_info.packed is not None:
-            self.packed = init_info.packed
-        if init_info.packed_buffer_size_bytes is not None:
-            self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
-        if init_info.packed_num_buffers is not None:
-            self.packed_num_buffers = init_info.packed_num_buffers
+        self.packed = False if init_info.packed is None else init_info.packed
+        self.packed_buffer_size_bytes = (
+            DEFAULT_PACKED_BUFFER_SIZE_BYTES
+            if init_info.packed_buffer_size_bytes is None
+            else init_info.packed_buffer_size_bytes
+        )
+        self.packed_num_buffers = (
+            DEFAULT_PACKED_NUM_BUFFERS if init_info.packed_num_buffers is None else init_info.packed_num_buffers
+        )
 
         # Calculate the global rank in the trainer-worker process group
         # Must account for data parallel to get unique ranks across all workers
@@ -641,7 +644,7 @@ class HCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[HCCLTrainerIni
     def _drain_source(self, metadata) -> None:
         """Run a non-sender source pass so trainer-side collectives stay aligned."""
         with torch.npu.device(self.device):
-            for _, tensor in self._checked_iter(metadata):
+            for _, tensor in self.source:
                 del tensor
 
     def _ensure_ready(self) -> None:

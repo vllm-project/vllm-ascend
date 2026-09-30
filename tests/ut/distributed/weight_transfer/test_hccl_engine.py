@@ -13,6 +13,10 @@ from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLWeightTransferEngine,
     HCCLWeightTransferInitInfo,
 )
+from vllm_ascend.distributed.weight_transfer.packed_tensor import (
+    DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    DEFAULT_PACKED_NUM_BUFFERS,
+)
 
 
 def _make_engine():
@@ -70,6 +74,114 @@ def test_reinit_closes_previous_session_before_creating_next(_mock_device):
 
     init.assert_called_once_with("127.0.0.1", 12345, 1, 2, device=0)
     assert engine.model_update_group is not old_group
+
+
+@patch("torch.accelerator.current_device_index", return_value=0)
+def test_reinit_restores_defaults_for_omitted_parameters(_mock_device):
+    engine = _make_engine()
+    engine.parallel_config = SimpleNamespace(data_parallel_index=0, world_size=1, rank=0)
+    engine.model_update_group = MagicMock()
+
+    init_infos = [
+        (
+            HCCLWeightTransferInitInfo(
+                master_address="127.0.0.1",
+                master_port=12345,
+                rank_offset=1,
+                world_size=2,
+                packed=True,
+                packed_buffer_size_bytes=64,
+                packed_num_buffers=3,
+            ),
+            (True, 64, 3, True, True, True),
+        ),
+        (
+            HCCLWeightTransferInitInfo(
+                master_address="127.0.0.1",
+                master_port=12346,
+                rank_offset=1,
+                world_size=2,
+            ),
+            (
+                False,
+                DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+                DEFAULT_PACKED_NUM_BUFFERS,
+                False,
+                False,
+                False,
+            ),
+        ),
+        (
+            HCCLWeightTransferInitInfo(
+                master_address="127.0.0.1",
+                master_port=12347,
+                rank_offset=1,
+                world_size=2,
+                packed=True,
+                packed_num_buffers=4,
+            ),
+            (
+                True,
+                DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+                4,
+                True,
+                False,
+                True,
+            ),
+        ),
+    ]
+
+    with patch.object(
+        HCCLWeightTransferEngine,
+        "_stateless_init_process_group",
+        return_value=MagicMock(),
+    ):
+        for init_info, expected in init_infos:
+            engine.init_transfer_engine(init_info)
+            assert (
+                engine.packed,
+                engine.packed_buffer_size_bytes,
+                engine.packed_num_buffers,
+                engine._init_packed_explicit,
+                engine._init_buffer_size_explicit,
+                engine._init_num_buffers_explicit,
+            ) == expected
+
+
+@pytest.mark.parametrize(
+    ("packed", "tensor"),
+    [
+        (False, None),
+        (False, SimpleNamespace(dtype=torch.float32, shape=(3,))),
+        (True, None),
+        (True, SimpleNamespace(dtype=torch.float32, shape=(3,))),
+    ],
+)
+def test_non_sender_drains_source_without_sender_validation(packed, tensor):
+    metadata = [SimpleNamespace(name="weight", dtype=torch.float16, shape=(2,))]
+
+    class RecordingSource:
+        def __init__(self):
+            self.seen = []
+
+        def metadata(self):
+            return metadata
+
+        def __iter__(self):
+            self.seen.append("weight")
+            yield "weight", tensor
+
+    engine = _make_trainer(is_sender=False)
+    source = RecordingSource()
+    engine.source = source
+    engine.packed = packed
+    fake_npu = SimpleNamespace(device=MagicMock(return_value=nullcontext()))
+
+    with patch.object(torch, "npu", fake_npu, create=True):
+        HCCLTrainerWeightTransferEngine._broadcast(engine, metadata)
+
+    assert source.seen == ["weight"]
+    engine.client.start_weight_update.assert_not_called()
 
 
 def _make_trainer(*, is_sender: bool):
