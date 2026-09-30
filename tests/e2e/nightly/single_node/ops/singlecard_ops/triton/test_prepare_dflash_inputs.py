@@ -203,7 +203,7 @@ ACCURACY_CASES = [
         "max_num_tokens": 32,
         "max_model_len": 8192,
         "block_size": 128,
-        "physical_block_size": 384,
+        "kv_cache_block_size": 384,
         "cp_rank": 5,
         "cp_size": 16,
         "cp_interleave": 384,
@@ -269,16 +269,16 @@ def _build_positions(req_lens, position_starts):
     return values
 
 
-def _local_slot(position, block_table_row, physical_block_size, block_size, cp_rank, cp_size, cp_interleave):
+def _local_slot(position, block_table_row, kv_cache_block_size, block_size, cp_rank, cp_size, cp_interleave):
     if cp_size == 1:
         local_position = position
     else:
-        virtual_block_size = physical_block_size * cp_size
+        virtual_block_size = kv_cache_block_size * cp_size
         virtual_block_idx, virtual_offset = divmod(position, virtual_block_size)
         if (virtual_offset // cp_interleave) % cp_size != cp_rank:
             return PAD_SLOT_ID
         local_offset = (virtual_offset // (cp_interleave * cp_size)) * cp_interleave + virtual_offset % cp_interleave
-        local_position = virtual_block_idx * physical_block_size + local_offset
+        local_position = virtual_block_idx * kv_cache_block_size + local_offset
 
     block_idx = min(local_position // block_size, len(block_table_row) - 1)
     kernel_block = block_table_row[block_idx]
@@ -388,7 +388,7 @@ def _build_reference(data, case):
     num_query_per_req = case["num_query_per_req"]
     num_speculative_steps = case["num_speculative_steps"]
     block_size = case["block_size"]
-    physical_block_size = case.get("physical_block_size", block_size)
+    kv_cache_block_size = case.get("kv_cache_block_size", block_size)
     cp_rank = case.get("cp_rank", 0)
     cp_size = case.get("cp_size", 1)
     cp_interleave = case.get("cp_interleave", 1)
@@ -439,7 +439,7 @@ def _build_reference(data, case):
             ctx_pos = positions[ctx_idx]
             ref.context_positions[ctx_idx] = ctx_pos
             ref.context_slot_mapping[ctx_idx] = _local_slot(
-                ctx_pos, block_table[req_idx], physical_block_size, block_size, cp_rank, cp_size, cp_interleave
+                ctx_pos, block_table[req_idx], kv_cache_block_size, block_size, cp_rank, cp_size, cp_interleave
             )
 
         query_base = req_idx * num_query_per_req
@@ -454,7 +454,7 @@ def _build_reference(data, case):
             ref.input_ids[query_idx] = bonus_token if query_off == 0 else case["parallel_drafting_token_id"]
             ref.query_positions[query_idx] = min(query_pos, max_model_len - 1)
             ref.query_slot_mapping[query_idx] = _local_slot(
-                query_pos, block_table[req_idx], physical_block_size, block_size, cp_rank, cp_size, cp_interleave
+                query_pos, block_table[req_idx], kv_cache_block_size, block_size, cp_rank, cp_size, cp_interleave
             )
 
         for sample_local in range(num_speculative_steps):
@@ -557,7 +557,7 @@ def _cleanup():
 def _run_case(case):
     data = _build_inputs(case, "npu")
     prepare_dflash_inputs_triton(
-        *_impl_args(data, case), physical_block_size=case.get("physical_block_size", case["block_size"])
+        *_impl_args(data, case), kv_cache_block_size=case.get("kv_cache_block_size", case["block_size"])
     )
     _validate_outputs(data, case, _build_reference(data, case))
     _cleanup()
@@ -588,6 +588,6 @@ def test_prepare_dflash_inputs_partition_boundaries(num_reqs, context_len):
 def test_prepare_dflash_inputs_wrapper_forwards_dcp():
     case = next(case for case in ACCURACY_CASES if case["name"] == "dcp_physical384_kernel128")
     data = _build_inputs(case, "npu")
-    prepare_dflash_inputs(*_impl_args(data, case), physical_block_size=case["physical_block_size"])
+    prepare_dflash_inputs(*_impl_args(data, case), kv_cache_block_size=case["kv_cache_block_size"])
     _validate_outputs(data, case, _build_reference(data, case))
     _cleanup()

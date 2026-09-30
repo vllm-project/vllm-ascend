@@ -51,7 +51,7 @@ def _dflash_local_slot(
     block_table_stride,
     req_idx,
     valid,
-    physical_block_size,
+    kv_cache_block_size: tl.constexpr,
     block_size,
     cp_rank,
     CP_SIZE: tl.constexpr,
@@ -63,14 +63,14 @@ def _dflash_local_slot(
         local_positions = positions
         is_local = True
     else:
-        virtual_block_size = physical_block_size * CP_SIZE
+        virtual_block_size = kv_cache_block_size * CP_SIZE
         virtual_block_indices = positions // virtual_block_size
         virtual_block_offsets = positions % virtual_block_size
         is_local = virtual_block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
         rounds = virtual_block_offsets // (CP_INTERLEAVE * CP_SIZE)
         remainder = virtual_block_offsets % CP_INTERLEAVE
         local_offsets = rounds * CP_INTERLEAVE + remainder
-        local_positions = virtual_block_indices * physical_block_size + local_offsets
+        local_positions = virtual_block_indices * kv_cache_block_size + local_offsets
 
     block_indices = tl.minimum(local_positions // block_size, block_table_stride - 1)
     block_numbers = tl.load(
@@ -113,7 +113,6 @@ def _prepare_dflash_inputs_kernel(
     block_table_stride,
     # Scalars
     parallel_drafting_token_id,
-    physical_block_size,
     block_size,
     num_query_per_req,
     num_speculative_steps,
@@ -121,6 +120,7 @@ def _prepare_dflash_inputs_kernel(
     max_num_tokens,
     max_model_len,
     cp_rank,
+    kv_cache_block_size: tl.constexpr,
     SAMPLE_FROM_ANCHOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     CP_SIZE: tl.constexpr,
@@ -164,7 +164,7 @@ def _prepare_dflash_inputs_kernel(
         block_table_stride,
         req_idx,
         ctx_valid_mask,
-        physical_block_size,
+        kv_cache_block_size,
         block_size,
         cp_rank,
         CP_SIZE,
@@ -210,7 +210,7 @@ def _prepare_dflash_inputs_kernel(
         block_table_stride,
         req_idx,
         query_mask,
-        physical_block_size,
+        kv_cache_block_size,
         block_size,
         cp_rank,
         CP_SIZE,
@@ -327,13 +327,13 @@ def prepare_dflash_inputs_triton(
     max_model_len: int,
     sample_from_anchor: bool = False,
     *,
-    physical_block_size: int,
+    kv_cache_block_size: int,
 ) -> None:
     """Prepare DFlash inputs and KV slot mappings for a draft step.
 
     Args:
         block_size: Attention kernel block size used to index ``block_table``.
-        physical_block_size: KV cache block size used to determine DCP rank
+        kv_cache_block_size: KV cache block size used to determine DCP rank
             ownership and convert global positions to rank-local positions.
             One physical block may span multiple kernel blocks; its size must
             be divisible by ``block_size`` (for example, 384 versus 128).
@@ -363,7 +363,7 @@ def prepare_dflash_inputs_triton(
         triton.next_power_of_2(max(2, max_ctx_per_worker)),
     )
 
-    if physical_block_size % block_size != 0:
+    if kv_cache_block_size % block_size != 0:
         raise ValueError("The physical KV block size must be divisible by the kernel block size.")
 
     _prepare_dflash_inputs_kernel[(num_reqs, workers_per_req)](
@@ -391,7 +391,6 @@ def prepare_dflash_inputs_triton(
         block_table,
         block_table.stride(0),
         parallel_drafting_token_id,
-        physical_block_size,
         block_size,
         num_query_per_req,
         num_speculative_steps,
@@ -399,6 +398,7 @@ def prepare_dflash_inputs_triton(
         max_num_tokens,
         max_model_len,
         cp_rank,
+        kv_cache_block_size=kv_cache_block_size,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
         PAD_SLOT_ID=PAD_SLOT_ID,
         CP_SIZE=cp_size,
