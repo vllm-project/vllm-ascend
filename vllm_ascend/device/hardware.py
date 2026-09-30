@@ -72,9 +72,15 @@ def resolve_build_soc_version(detected_soc_version: str, compile_custom_kernels:
     """Pick the SOC_VERSION a build records, when the user set none.
 
     ``detected_soc_version`` is what ``npu-smi`` reported, empty when no NPU
-    driver is present. Without custom kernels nothing in the build depends on
-    the chip except the device type written to ``_build_info.py``, so a build
-    for unit tests can fall back instead of failing.
+    driver is present. A non-empty ``detected_soc_version`` is returned
+    immediately.
+    
+    Raises an exception if ``detected_soc_version`` is empty when
+    ``compile_custom_kernels`` is ``True``.
+
+    When ``compile_custom_kernels`` is ``False`` and ``detected_soc_version``
+    is empty, assume we are in a CPU-only scenario and return a dummy
+    SOC version.
     """
 
     if detected_soc_version:

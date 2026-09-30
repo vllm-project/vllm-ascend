@@ -109,18 +109,28 @@ def test_unknown_runtime_soc_version_is_rejected(soc_version):
 
 
 def test_detected_soc_version_wins_over_the_fallback():
-    # An NPU is present: npu-smi's answer is used whether or not kernels are
-    # being compiled, so a cached-kernel build on an A3 runner stays A3.
+    """An NPU is present: npu-smi's output is preferred regardless of the
+    value of ``COMPILE_CUSTOM_KERNELS``.
+    """
     for compile_custom_kernels in (True, False):
         assert resolve_build_soc_version("ascend910_9391", compile_custom_kernels) == "ascend910_9391"
 
 
 def test_missing_soc_version_still_fails_a_kernel_build():
+    """npi-smi should be installed and return a chip type if
+    COMPILE_CUSTOM_KERNELS is true; raise a runtime error if
+    this is not the behavior.
+    """
     with pytest.raises(RuntimeError, match="Could not determine chip type"):
         resolve_build_soc_version("", compile_custom_kernels=True)
 
 
 def test_missing_soc_version_falls_back_without_custom_kernels(caplog):
+    """Check that SOC version resolves to a dummy value when COMPILE_CUSTOM_KERNELS
+    is False and npi-smi is not installed (CPU-only scenario); check that
+    warning is logged that mentions the dummy SOC version and the
+    COMPILE_CUSTOM_KERNELS flag.
+    """
     with caplog.at_level(logging.WARNING):
         assert resolve_build_soc_version("", compile_custom_kernels=False) == CPU_ONLY_FALLBACK_SOC_VERSION
 
@@ -128,8 +138,8 @@ def test_missing_soc_version_falls_back_without_custom_kernels(caplog):
     assert "COMPILE_CUSTOM_KERNELS=0" in caplog.text
 
 
-def test_fallback_is_a_soc_version_not_a_device_type_name():
-    # Guards the whole point of the fallback: gen_build_info() feeds it to
-    # device_type_from_soc_version(), which rejects device-type names such as
-    # "A2". See https://github.com/vllm-project/vllm-ascend/issues/17785.
+def test_fallback_soc_version_is_valid():
+    """Check that the dummy SOC version for CPU-only scenarios resolves to a real
+    device.
+    """
     assert device_type_from_soc_version(CPU_ONLY_FALLBACK_SOC_VERSION) is AscendDeviceType.A2
