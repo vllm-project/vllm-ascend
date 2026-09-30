@@ -27,7 +27,6 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    enable_pcp,
     get_or_register_attention_buffer,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
@@ -214,6 +213,13 @@ def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int
 class AscendDSABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        # PCP targets select AscendDSAPCPBackend. The base backend is also
+        # used by replicated PCP=1 draft layers in the same worker; upstream
+        # checks every registered layer against the target's PCP topology.
+        return True
+
     @staticmethod
     def get_name() -> str:
         return "ASCEND_DSA"
@@ -222,18 +228,10 @@ class AscendDSABackend(AttentionBackend):
     def get_builder_cls():
         from vllm_ascend.utils import enable_dsa_cp
 
-        use_dsa_cp = enable_dsa_cp()
-        use_pcp = enable_pcp()
-        if use_dsa_cp and use_pcp:
-            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
-        if use_dsa_cp:
+        if enable_dsa_cp():
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 
             return AscendDSACPMetadataBuilder
-        if use_pcp:
-            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPMetadataBuilder
-
-            return AscendDSAPCPMetadataBuilder
         return AscendDSAMetadataBuilder
 
     @staticmethod
@@ -254,18 +252,10 @@ class AscendDSABackend(AttentionBackend):
     def get_impl_cls() -> type[AttentionImplBase[Any]]:
         from vllm_ascend.utils import enable_dsa_cp
 
-        use_dsa_cp = enable_dsa_cp()
-        use_pcp = enable_pcp()
-        if use_dsa_cp and use_pcp:
-            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
-        if use_dsa_cp:
+        if enable_dsa_cp():
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
 
             return AscendDSACPImpl
-        if use_pcp:
-            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPImpl
-
-            return AscendDSAPCPImpl
         return AscendDSAImpl
 
     @staticmethod
@@ -327,6 +317,65 @@ class AscendDSAC128StateBackend(AscendDSABackend):
         if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
             return [4, 8, 16]
         return [8, 16, 32]
+
+
+class AscendDSAPCPBackend(AscendDSABackend):
+    @staticmethod
+    def get_impl_cls():
+        _validate_dsa_pcp()
+        from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPImpl
+
+        return AscendDSAPCPImpl
+
+    @staticmethod
+    def get_builder_cls():
+        _validate_dsa_pcp()
+        from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPMetadataBuilder
+
+        return AscendDSAPCPMetadataBuilder
+
+
+class AscendDSAC4PCPBackend(AscendDSAPCPBackend, AscendDSAC4Backend):
+    pass
+
+
+class AscendDSAC128PCPBackend(AscendDSAPCPBackend, AscendDSAC128Backend):
+    pass
+
+
+class AscendDSASWAPCPBackend(AscendDSAPCPBackend, AscendDSASWABackend):
+    pass
+
+
+class AscendDSAC4StatePCPBackend(AscendDSAPCPBackend, AscendDSAC4StateBackend):
+    pass
+
+
+class AscendDSAC128StatePCPBackend(AscendDSAPCPBackend, AscendDSAC128StateBackend):
+    pass
+
+
+def _validate_dsa_pcp() -> None:
+    from vllm_ascend.utils import enable_dsa_cp
+
+    if enable_dsa_cp():
+        raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+
+
+def select_dsa_backend(backend: type[AscendDSABackend], *, use_pcp: bool) -> type[AscendDSABackend]:
+    """Bind the load-config-dependent PCP mode while preserving the DSA layout."""
+    if not use_pcp:
+        return backend
+
+    variants = {
+        AscendDSABackend: AscendDSAPCPBackend,
+        AscendDSAC4Backend: AscendDSAC4PCPBackend,
+        AscendDSAC128Backend: AscendDSAC128PCPBackend,
+        AscendDSASWABackend: AscendDSASWAPCPBackend,
+        AscendDSAC4StateBackend: AscendDSAC4StatePCPBackend,
+        AscendDSAC128StateBackend: AscendDSAC128StatePCPBackend,
+    }
+    return variants[backend]
 
 
 @dataclass
