@@ -30,12 +30,14 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInp
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import build_token_dispatch_input
+from vllm_ascend.ops.fused_moe.mega_moe import MegaMoEBackend
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
     PrepareAndFinalizeWithAll2All,
     PrepareAndFinalizeWithAllGather,
     PrepareAndFinalizeWithMC2,
+    PrepareAndFinalizeWithMegaMoE,
 )
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
     MoETokenDispatcher,
@@ -44,6 +46,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithMC2,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
@@ -247,6 +250,14 @@ class AlltoAllCommImpl(MoECommMethod):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
 
 
+class _MegaMoEBypassTokenDispatcher(MoETokenDispatcher[None]):
+    def token_dispatch(self, token_dispatch_input):
+        raise RuntimeError("A5 MegaMoE bypasses token_dispatch; use MegaMoEBackend.fused_experts instead.")
+
+    def token_combine(self, hidden_states, combine_metadata, bias=None):
+        raise RuntimeError("A5 MegaMoE bypasses token_combine; use MegaMoEBackend.fused_experts instead.")
+
+
 class FusedMC2CommImpl(MoECommMethod):
     """This implementation is for the scenarios listed below:
     1. `enable_expert_parallel=True`.
@@ -259,11 +270,13 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
+        self._is_a5_backend = get_ascend_device_type() == AscendDeviceType.A5
+        self._mega_moe_backend = MegaMoEBackend(moe_config) if self._is_a5_backend else None
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
+        if self.enable_fused_mc2 == 1 and not self._is_a5_backend and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
-        if self.enable_fused_mc2 == 1:
+        if self.enable_fused_mc2 == 1 and not self._is_a5_backend:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
@@ -276,9 +289,13 @@ class FusedMC2CommImpl(MoECommMethod):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
     def _get_token_dispatcher(self):
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            return _MegaMoEBypassTokenDispatcher()
         return TokenDispatcherWithMC2()
 
     def _get_prepare_finalize(self):
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            return PrepareAndFinalizeWithMegaMoE(self.moe_config)
         return PrepareAndFinalizeWithMC2(self.moe_config)
 
     def _init_mega_moe_symm_buffer(
@@ -449,6 +466,14 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ):
+        if self._is_a5_backend:
+            assert self._mega_moe_backend is not None
+            out, expert_tokens = self._mega_moe_backend.fused_experts(fused_experts_input)
+            return FusedExpertsResult(
+                routed_out=out,
+                expert_tokens=expert_tokens,
+            )
+
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
         )

@@ -33,6 +33,29 @@ if TYPE_CHECKING:
 _MEGA_MOE_SUPPORTED = None
 
 
+def compute_mega_moe_buffer_tokens_per_rank(
+    mega_moe_max_tokens: int,
+    execution_tokens_per_rank: int,
+    expert_parallel_size: int,
+) -> int:
+    """Compute the per-rank token capacity for the A5 MegaMoE buffer."""
+    if execution_tokens_per_rank <= 0:
+        raise ValueError(f"execution_tokens_per_rank must be positive, got {execution_tokens_per_rank}")
+    if expert_parallel_size <= 0:
+        raise ValueError(f"expert_parallel_size must be positive, got {expert_parallel_size}")
+
+    configured_tokens_per_rank = mega_moe_max_tokens // expert_parallel_size
+    buffer_tokens_per_rank = min(configured_tokens_per_rank, execution_tokens_per_rank)
+    if buffer_tokens_per_rank <= 0:
+        raise ValueError(
+            "MegaMoE per-rank token capacity must be positive: "
+            f"mega_moe_max_tokens={mega_moe_max_tokens}, "
+            f"execution_tokens_per_rank={execution_tokens_per_rank}, "
+            f"expert_parallel_size={expert_parallel_size}."
+        )
+    return buffer_tokens_per_rank
+
+
 def is_mega_moe_supported() -> bool:
     """Whether the megamoe op is available at runtime.
 
@@ -394,9 +417,9 @@ class AscendConfig:
     draft_window_size: int | None = None
     mix_placement: bool = False
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
-    # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
-    # The same value is passed as dispatch_ffn_combine's max_output_size
-    # and CANN MegaMoe buffer's max_recv_token_num.
+    # Global token ceiling for dispatch_ffn_combine. A5 MegaMoE derives its
+    # per-rank symmetric-buffer capacity from this ceiling and the current
+    # process's MC2 execution capacity.
     # This is a reference value: if the actual per-rank received token
     # count exceeds it, tokens may be truncated, causing precision
     # degradation. Do not set it too large because workspace memory scales
