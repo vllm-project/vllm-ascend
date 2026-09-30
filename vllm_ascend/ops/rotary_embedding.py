@@ -35,6 +35,7 @@ from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import enable_sp, has_rope, is_vl_model
 
@@ -707,6 +708,15 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         rotary_dim = cos.shape[-1] * 2
         if rotary_dim > head_dim:
             raise ValueError(f"rotary_dim ({rotary_dim}) must not exceed head_dim ({head_dim})")
+
+        if not self.is_neox_style and not get_current_hardware_profile().supports(
+            HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE
+        ):
+            # The legacy ACL backend only supports half pairing.
+            output = self.forward_static(x[..., :rotary_dim], cos, sin, is_neox_style=False)
+            if rotary_dim < head_dim:
+                output = torch.cat((output, x[..., rotary_dim:]), dim=-1)
+            return self._post_process(output, origin_shape, origin_dtype)
 
         # cos, sin: [seq_len, rotary_dim // 2]
         if self.is_neox_style:
