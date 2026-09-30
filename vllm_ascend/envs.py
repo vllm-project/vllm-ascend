@@ -58,7 +58,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # The version of the Ascend chip. It's used for package building.
     # If not set, we will query chip info through `npu-smi`.
     # Please make sure that the version is correct. If SOC_VERSION is unspecified
-    # when `npu-smi` is unavailable and COMPILE_CUSTOM_KERNELS is False, then 
+    # when `npu-smi` is unavailable and COMPILE_CUSTOM_KERNELS is False, then
     # SOC_VERSION defaults to a dummy value.
     "SOC_VERSION": lambda: os.getenv("SOC_VERSION", None),
     # If set, vllm-ascend will print verbose logs during compilation

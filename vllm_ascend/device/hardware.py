@@ -74,7 +74,7 @@ def resolve_build_soc_version(detected_soc_version: str, compile_custom_kernels:
     ``detected_soc_version`` is what ``npu-smi`` reported, empty when no NPU
     driver is present. A non-empty ``detected_soc_version`` is returned
     immediately.
-    
+
     Raises an exception if ``detected_soc_version`` is empty when
     ``compile_custom_kernels`` is ``True``.
 
