@@ -1060,8 +1060,14 @@ __aicore__ inline void SFAVectorService<SFAT>::MergeKv(const RunInfo &runInfo)
                         kvMergUb_, dataCopyParams);
         }
         if (constInfo.headDimRope > 0) {
-            dataCopyParams.blockLen = constInfo.headDimRope * sizeof(KV_T);
-            for (int64_t s2GmOffset = s2GmStartOffset + mte2Size; s2GmOffset < s2GmLimit; s2GmOffset++) {
+            // The already zeroed key row also holds multiple contiguous RoPE
+            // rows. Reuse it without clearing any additional UB storage.
+            int64_t zeroRopeRows = constInfo.headDim / constInfo.headDimRope;
+            for (int64_t s2GmOffset = s2GmStartOffset + mte2Size; s2GmOffset < s2GmLimit;
+                 s2GmOffset += zeroRopeRows) {
+                int64_t remainingRows = s2GmLimit - s2GmOffset;
+                int64_t copyRows = remainingRows < zeroRopeRows ? remainingRows : zeroRopeRows;
+                dataCopyParams.blockLen = copyRows * constInfo.headDimRope * sizeof(KV_T);
                 DataCopyPad(kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 + 512 * constInfo.headDim +
                                        s2GmOffset * constInfo.headDimRope],
                             kvMergUb_, dataCopyParams);

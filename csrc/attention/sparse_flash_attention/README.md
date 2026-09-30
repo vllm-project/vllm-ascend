@@ -24,6 +24,38 @@
     其中$\tilde{K},\tilde{V}$为基于某种选择算法（如`lightning_indexer`）得到的重要性较高的Key和Value，一般具有稀疏或分块稀疏的特征，$d_k$为$Q,\tilde{K}$每一个头的维度。
     本次公布的`sparse_flash_attention`是面向Sparse Attention的全新算子，针对离散访存进行了指令缩减及搬运聚合的细致优化。
 
+## Padded KV staging on A2/A3
+
+The unquantized A2/A3 V-template (`sparse_block_size` 1, 2 or 4) stages
+selected KV rows before Cube computation. When a nonempty sparse-index prefix
+leaves an invalid suffix, the kernel fills the remaining RoPE staging rows in
+contiguous chunks using the already zeroed key row. A 512-element key row holds
+eight 64-element RoPE rows. Key padding and NoPE retain their existing copies;
+fully populated tiles do not enter the padding branch.
+
+This reduces the number of RoPE padding DMA commands without clearing extra
+buffer storage. It preserves the selected
+indices, attention computation, tiling, buffer allocation and raw softmax
+statistics. The quantized and A5 kernels are separate implementations.
+
+The benchmark compares independently installed builds with identical paged
+inputs, including short and long KV caches, nonempty prefixes, fully populated
+tiles and multiple queries. Run each build in a fresh process on an idle NPU;
+repeat in an interleaved baseline/candidate order:
+
+```bash
+python benchmarks/ops/benchmark_sparse_flash_attention_kv_padding.py \
+  --label baseline-commit --output baseline-b1.json
+python benchmarks/ops/benchmark_sparse_flash_attention_kv_padding.py \
+  --label candidate-commit --output candidate-c1.json --reference baseline-b1.pt
+```
+
+Use separate package installations for the two commands. Each run saves every
+graph device-time sample and every amortized eager wall-time sample, plus input
+hashes and output tensors for bytewise comparison. Graph times exclude host
+dispatch; wall times include dispatch and synchronization across 25 calls.
+These are operator measurements and do not establish model throughput gains.
+
 ## 参数说明
 
   <table style="undefined;table-layout: fixed; width: 1080px"><colgroup>
