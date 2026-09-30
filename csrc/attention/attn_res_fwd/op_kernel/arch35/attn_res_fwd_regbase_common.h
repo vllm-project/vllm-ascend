@@ -506,7 +506,6 @@ __aicore__ inline void GroupedReduce(const LocalTensor<float> &dst,
             uint16_t blocks = static_cast<uint16_t>(hiddenSize / 512U);
             for (uint16_t block = 0; block < blocks; ++block) {
                 Duplicate(a0, 0.0f, all);
-#pragma unroll 8
                 for (uint16_t j = 0; j < 8; ++j) {
                     uint16_t i = block * 8U + j;
             if constexpr (IsSameType<T, float>::value) {
