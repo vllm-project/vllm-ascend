@@ -51,6 +51,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
+    disable_profiling_chunk_for_draft,
     disable_target_pcp_for_replicated_draft,
     prepare_replicated_pcp_config,
 )
@@ -137,12 +138,13 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             pipeline_parallel_size=1,
             decode_context_parallel_size=1 if self.replicated_pcp else dcp_size,
         )
-        draft_config = replace(
-            self.vllm_config,
-            model_config=self.draft_model_config,
-            parallel_config=parallel_config,
-            cache_config=replace(self.vllm_config.cache_config),
-        )
+        with disable_profiling_chunk_for_draft(self.vllm_config):
+            draft_config = replace(
+                self.vllm_config,
+                model_config=self.draft_model_config,
+                parallel_config=parallel_config,
+                cache_config=replace(self.vllm_config.cache_config),
+            )
         if self.replicated_pcp:
             # TODO: Separate draft execution settings from worker topology.
             # Restore DCP only after the complete draft config reconstruction;

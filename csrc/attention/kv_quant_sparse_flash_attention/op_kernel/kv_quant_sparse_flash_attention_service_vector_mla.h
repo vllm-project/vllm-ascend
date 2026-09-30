@@ -672,14 +672,19 @@ QSFAVectorService<QSFAT>::CopyInSingleKv(int64_t &mte2Size, int64_t mte3Size, in
     DataCopyPadExtParams<KV_T> padParams;
     // 当前仅支持COMBINE模式
     if (constInfo.quantScaleRepoMode == QUANT_SCALE_REPO_MODE::COMBINE) {
-        uint32_t combineBytes = (constInfo.headDim * sizeof(KV_T) + constInfo.headDimRope * sizeof(K_ROPE_T) +
+        uint32_t combineBytes = (constInfo.headDim * sizeof(KV_T) + constInfo.inputHeadDimRope * sizeof(K_ROPE_T) +
             constInfo.headDim / constInfo.tileSize * sizeof(T));
         intriParams.blockLen = combineBytes;
         uint32_t combineDim = combineBytes / sizeof(KV_T);
-        uint32_t combineDimAlign = CeilAlign(combineBytes, ConstInfo::BUFFER_SIZE_BYTE_32B) / sizeof(KV_T);
+        // Preserve the 672-byte UB row while loading only the real GM record.
+        uint32_t ropePaddingBytes = (constInfo.headDimRope - constInfo.inputHeadDimRope) * sizeof(K_ROPE_T);
+        uint32_t combineDimAlign =
+            CeilAlign(combineBytes + ropePaddingBytes, ConstInfo::BUFFER_SIZE_BYTE_32B) / sizeof(KV_T);
+        intriParams.dstStride = ropePaddingBytes / ConstInfo::BUFFER_SIZE_BYTE_32B;
         padParams.isPad = true;
         padParams.leftPadding = 0;
-        padParams.rightPadding = combineDimAlign - combineDim;
+        padParams.rightPadding =
+            CeilAlign(combineBytes, ConstInfo::BUFFER_SIZE_BYTE_32B) / sizeof(KV_T) - combineDim;
         padParams.paddingValue = 0;
         DataCopyPad(kvMergUb_[mergeMte3Idx % 2 * INPUT1_BUFFER_OFFSET / sizeof(KV_T)  + (mte2Size - mte3Size) *
                 combineDimAlign], keyGm_[keyBNBOffset * combineDim], intriParams, padParams);
@@ -707,7 +712,7 @@ __aicore__ inline void QSFAVectorService<QSFAT>::CopyInKv(int64_t &mte2Size, int
         ((keyBNBOffset1 > keyBNBOffset2 ? (keyBNBOffset1 - keyBNBOffset2) :
         (keyBNBOffset2 - keyBNBOffset1)) - constInfo.sparseBlockSize);
     uint32_t combineBytes = (constInfo.headDim * sizeof(KV_T) +
-                             constInfo.headDimRope * sizeof(K_ROPE_T) +
+                             constInfo.inputHeadDimRope * sizeof(K_ROPE_T) +
                              constInfo.headDim / constInfo.tileSize * sizeof(T));
     int64_t keySrcStride = sparseBlockSrcStride * combineBytes;
     if (unlikely(keySrcStride >= INT32_MAX || keySrcStride < 0 ||
@@ -733,10 +738,15 @@ __aicore__ inline void QSFAVectorService<QSFAT>::CopyInKv(int64_t &mte2Size, int
         if (constInfo.quantScaleRepoMode == QUANT_SCALE_REPO_MODE::COMBINE) {
             intriParams.blockLen = constInfo.sparseBlockSize * combineBytes;
             uint32_t combineDim = combineBytes / sizeof(KV_T);
-            uint32_t combineDimAlign = CeilAlign(combineBytes, ConstInfo::BUFFER_SIZE_BYTE_32B) / sizeof(KV_T);
+            // Preserve the 672-byte UB row while loading only the real GM record.
+            uint32_t ropePaddingBytes = (constInfo.headDimRope - constInfo.inputHeadDimRope) * sizeof(K_ROPE_T);
+            uint32_t combineDimAlign =
+                CeilAlign(combineBytes + ropePaddingBytes, ConstInfo::BUFFER_SIZE_BYTE_32B) / sizeof(KV_T);
+            intriParams.dstStride = ropePaddingBytes / ConstInfo::BUFFER_SIZE_BYTE_32B;
             padParams.isPad = true;
             padParams.leftPadding = 0;
-            padParams.rightPadding = combineDimAlign - combineDim;
+            padParams.rightPadding =
+                CeilAlign(combineBytes, ConstInfo::BUFFER_SIZE_BYTE_32B) / sizeof(KV_T) - combineDim;
             padParams.paddingValue = 0;
             DataCopyPad(kvMergUb_[mergeMte3Idx % 2 * INPUT1_BUFFER_OFFSET / sizeof(KV_T) + (mte2Size - mte3Size) *
                         combineDimAlign], keyGm_[startGmOffset * combineDim], intriParams, padParams);
@@ -770,7 +780,9 @@ __aicore__ inline void QSFAVectorService<QSFAT>::CopyOutMrgeResult(int64_t mte2S
     }
     PipeBarrier<PIPE_V>();
     LocalTensor<T> antiQuantScale = tmpBuff2.Get<T>();
-    LocalTensor<T> oriQuantScaleTensor = srcTensor[640].template ReinterpretCast<T>();
+    uint32_t scaleOffset =
+        (constInfo.headDim * sizeof(KV_T) + constInfo.inputHeadDimRope * sizeof(K_ROPE_T)) / sizeof(KV_T);
+    LocalTensor<T> oriQuantScaleTensor = srcTensor[scaleOffset].template ReinterpretCast<T>();
     if (dealRow == 1) {
         Brcb(antiQuantScale, oriQuantScaleTensor, 1, {1, 4});
     } else {
@@ -841,8 +853,13 @@ __aicore__ inline void QSFAVectorService<QSFAT>::CopyOutMrgeResult(int64_t mte2S
     LocalTensor<K_ROPE_T> kRopeUb = srcTensor[512].template ReinterpretCast<K_ROPE_T>();
     LocalTensor<K_ROPE_T> kRopeUbNz = outputBuff2.Get<K_ROPE_T>();
     WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
-    Copy(kRopeUbNz, kRopeUb, constInfo.headDimRope, static_cast<uint8_t>(dealRow), {static_cast<uint16_t>(dealRow), 1,
-        1, 21});
+    if (constInfo.inputHeadDimRope == 0) {
+        // Compact KV stores scales where RoPE used to start; do not read them as RoPE.
+        Duplicate(kRopeUbNz, static_cast<K_ROPE_T>(0), static_cast<uint32_t>(dealRow * constInfo.headDimRope));
+    } else {
+        Copy(kRopeUbNz, kRopeUb, constInfo.headDimRope, static_cast<uint8_t>(dealRow),
+            {static_cast<uint16_t>(dealRow), 1, 1, 21});
+    }
     SetFlag<AscendC::HardEvent::V_MTE3>(SYNC_OUTPUT_BUF2_FLAG);
     WaitFlag<AscendC::HardEvent::V_MTE3>(SYNC_OUTPUT_BUF2_FLAG);
     dataCopyParams.blockCount = constInfo.headDimRope / blockElementNum;

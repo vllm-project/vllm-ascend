@@ -20,23 +20,23 @@
 #if __has_include("../../sparse_flash_attention/arch35/common/util_regbase.h")
 #include "../../sparse_flash_attention/arch35/common/util_regbase.h"
 #else
-#include "../../../sparse_flash_attention/op_kernel/arch35/common/util_regbase.h"
+#include "../../../sparse_flash_attention/op_kernel/arch35/util_regbase.h"
 #endif
 
 #if __has_include("../../common/op_kernel/buffer.h")
 #include "../../common/op_kernel/buffer.h"
 #else
-#include "../../common/buffer.h"
+#include "../../../common/op_kernel/buffer.h"
 #endif
 #if __has_include("../../common/op_kernel/buffer_manager.h")
 #include "../../common/op_kernel/buffer_manager.h"
 #else
-#include "../../common/buffer_manager.h"
+#include "../../../common/op_kernel/buffer_manager.h"
 #endif
 #if __has_include("../../common/op_kernel/buffers_policy.h")
 #include "../../common/op_kernel/buffers_policy.h"
 #else
-#include "../../common/buffers_policy.h"
+#include "../../../common/op_kernel/buffers_policy.h"
 #endif
 
 constexpr uint64_t BLOCK_BYTE = 32;
@@ -67,6 +67,16 @@ enum class QSFATemplateMode {
 };
 
 namespace BaseApi {
+constexpr uint32_t QSFA_NOPE_DIM = 512;
+constexpr uint32_t QSFA_ROPE_DIM = 64;
+constexpr uint32_t QSFA_SCALE_BYTES = 4 * sizeof(float);
+
+__aicore__ inline uint32_t QueryInputDim(const regbaseutil::ConstInfo &info)
+{
+    // Packed KV has one byte per NoPE element and two bytes per RoPE element.
+    return QSFA_NOPE_DIM + (info.dSizeVInput - QSFA_NOPE_DIM - QSFA_SCALE_BYTES) / sizeof(uint16_t);
+}
+
 __aicore__ constexpr uint64_t Align2Func(uint64_t data) {
     return (data + 1UL) >> 1UL << 1UL; // 向上2对齐, +1移位2
 }
