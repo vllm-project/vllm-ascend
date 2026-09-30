@@ -83,8 +83,10 @@ from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
+    AscendDeviceType,
     check_ascend_device_type,
     enable_sp,
+    get_ascend_device_type,
     register_ascend_customop,
     setup_ascend_local_comm_res,
 )
@@ -1098,7 +1100,10 @@ class NPUWorker(WorkerBase):
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        if not self.use_v2_model_runner and get_ascend_device_type() == AscendDeviceType.A5:
+            self.model_runner._dummy_run(num_tokens, uniform_decode=True, num_actual_tokens=0)
+        else:
+            self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
