@@ -23,7 +23,6 @@ import torch
 import torch_npu  # noqa: F401
 from fla_npu.ops.ascendc import chunk_kda_fwd
 
-
 CHUNK_KDA_OUTPUT_NAMES = (
     "o",
     "final_state",
@@ -168,7 +167,6 @@ def _is_ascend_950() -> bool:
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_kimi_k3_safe_gate_prefill_and_transposed_state_layout():
-
     torch.manual_seed(20260720)
     tokens, heads, head_dim = 64, 1, 128
     dtype = torch.float16
