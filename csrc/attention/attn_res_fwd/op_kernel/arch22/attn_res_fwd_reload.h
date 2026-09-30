@@ -220,7 +220,7 @@ private:
         PipeBarrier<PIPE_V>();
         ReduceSumHalfInterval(scalarLocal_, outFp32_, static_cast<int32_t>(hiddenSize_));
         PipeBarrier<PIPE_V>();
-        InvRmsInPlace(scalarLocal_, hiddenSize_, normEps_, metaSoftmax_);
+        InvRmsInPlace(scalarLocal_, invHiddenSize_, normEps_, metaSoftmax_);
         if (needBackward_) {
             // inv 逐点搬 GM：Alloc→Copy→EnQue→DeQue→DataCopyPad→Free
             PipeBarrier<PIPE_V>();
@@ -361,7 +361,7 @@ private:
             Mul(vRow_, outFp32_, outFp32_, hiddenSize_);
             PipeBarrier<PIPE_V>();
             ReduceSumHalfInterval(scalarLocal_, vRow_, static_cast<int32_t>(hiddenSize_));
-            InvRmsInPlace(scalarLocal_, hiddenSize_, tiling_->outputNormEps, metaSoftmax_);
+            InvRmsInPlace(scalarLocal_, invHiddenSize_, tiling_->outputNormEps, metaSoftmax_);
             BroadcastScalarMulTensor(outFp32_, outFp32_, scalarLocal_, metaSoftmax_, metaBrc_, hiddenSize_,
                                      hiddenSizeAlignFp32_);
             LocalTensor<D_IN> weight;

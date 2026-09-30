@@ -227,7 +227,7 @@ private:
             Mul(outFp32_, vRow_, vRow_, hiddenSize_);
             PipeBarrier<PIPE_V>();
             ReduceSumHalfInterval(scalarLocal_, outFp32_, static_cast<int32_t>(hiddenSize_));
-            InvRmsInPlace(scalarLocal_, hiddenSize_, normEps_, metaSoftmax_);
+            InvRmsInPlace(scalarLocal_, invHiddenSize_, normEps_, metaSoftmax_);
             if (needBackward_) {
                 LocalTensor<float> invUb = invQue_.AllocTensor<float>();
                 CopyMetaScalarToLocal(invUb, scalarLocal_);
@@ -316,7 +316,7 @@ private:
             Mul(vRow_, outFp32_, outFp32_, hiddenSize_);
             PipeBarrier<PIPE_V>();
             ReduceSumHalfInterval(scalarLocal_, vRow_, static_cast<int32_t>(hiddenSize_));
-            InvRmsInPlace(scalarLocal_, hiddenSize_, tiling_->outputNormEps, metaSoftmax_);
+            InvRmsInPlace(scalarLocal_, invHiddenSize_, tiling_->outputNormEps, metaSoftmax_);
             BroadcastScalarMulTensor(outFp32_, outFp32_, scalarLocal_, metaSoftmax_, metaBrc_, hiddenSize_,
                                      hiddenSizeAlignFp32_);
             const bool cachedWeight = PREFILL_CACHE && tiling_->cacheOutputNorm != 0;
