@@ -127,9 +127,11 @@ that ship the library without the package). Otherwise it logs the fallback and
 uses `torch_gloo` CPU staging.
 
 STAIR leaves both per-rank and cross-node migration limits unrestricted by
-default (`-1`) so that HIXL can use the available bandwidth. With Gloo, Ascend
-sets both `rank_transfer_limit` and `cross_node_transfer_limit` to `1`, even if
-other values are configured, to avoid excessive CPU-staged transfers.
+default (`-1`) so that HIXL can use the available bandwidth. When the
+communicator falls back to Gloo automatically, Ascend clamps
+`rank_transfer_limit` and `cross_node_transfer_limit` to `1` to avoid
+excessive CPU-staged transfers; explicitly setting `torch_gloo` keeps your
+configured limits.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;

@@ -38,6 +38,7 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
+from vllm_ascend.distributed.eplb import AUTO_GLOO_FALLBACK_ATTRIBUTE
 
 # isort: off
 from vllm_ascend.utils import (
@@ -974,7 +975,11 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                 upstream_eplb_config.use_async = True
             if vllm_config.parallel_config.enable_elastic_ep:
                 raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
-            if upstream_eplb_config.communicator == "torch_gloo" and upstream_eplb_config.policy == "stair":
+            if (
+                upstream_eplb_config.communicator == "torch_gloo"
+                and getattr(upstream_eplb_config, AUTO_GLOO_FALLBACK_ATTRIBUTE, False)
+                and upstream_eplb_config.policy == "stair"
+            ):
                 stair_config = eplb_config.get("stair_config", {})
                 if not isinstance(stair_config, dict):
                     raise TypeError("additional_config.eplb_config.stair_config must be a dictionary.")
@@ -987,7 +992,9 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                     },
                 }
                 vllm_config.additional_config = {**additional_config, "eplb_config": eplb_config}
-                logger.info("Ascend EPLB uses torch_gloo; STAIR rank and cross-node transfer limits are both 1.")
+                logger.info(
+                    "Ascend EPLB fell back to torch_gloo; STAIR rank and cross-node transfer limits are both 1."
+                )
     elif {"load_collection_phase", "stair_config"} & eplb_config.keys():
         raise ValueError(
             "stair_config and load_collection_phase are only supported by Model Runner V2; "
