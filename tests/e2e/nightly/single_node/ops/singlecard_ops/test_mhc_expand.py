@@ -272,10 +272,29 @@ def test_mhc_expand_helper_graph(expand, dtype):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
     "reason",
-    ["supported", "dtype", "rank", "noncontiguous", "unaligned", "gradient", "empty", "zero_hidden", "trivial", "mult"],
+    [
+        "supported",
+        "limit",
+        "large",
+        "dtype",
+        "rank",
+        "noncontiguous",
+        "unaligned",
+        "gradient",
+        "empty",
+        "zero_hidden",
+        "trivial",
+        "mult",
+    ],
 )
 def test_mhc_expand_optional_eligibility(device, dtype, reason):
-    shape = {"unaligned": (3, 17), "empty": (0, 64), "zero_hidden": (3, 0)}.get(reason, (3, 64))
+    shape = {
+        "limit": (1024, 64),
+        "large": (1025, 64),
+        "unaligned": (3, 17),
+        "empty": (0, 64),
+        "zero_hidden": (3, 0),
+    }.get(reason, (3, 64))
     x = torch.empty(shape, device=device, dtype=torch.float32 if reason == "dtype" else dtype)
     if reason == "rank":
         x = x.unsqueeze(0)
@@ -285,10 +304,10 @@ def test_mhc_expand_optional_eligibility(device, dtype, reason):
         x.requires_grad_()
     mult = {"trivial": 1, "mult": 8}.get(reason, 4)
     result = torch.ops._C_ascend.npu_mhc_expand_if_supported(x, mult)
-    if reason != "supported":
+    if reason not in ("supported", "limit"):
         assert result is None
     else:
-        assert result.shape == (3, 4, 64)
+        assert result.shape == (shape[0], 4, 64)
         assert result.dtype == dtype
         assert result.device == x.device
         assert result.is_contiguous()
@@ -325,7 +344,7 @@ def test_mhc_expand_optional_compile_dynamic(dtype):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_mhc_expand_helper_compile_dynamic(expand, dtype):
     compiled = torch.compile(expand, backend="eager", dynamic=True, fullgraph=True)
-    for tokens, hidden in ((3, 64), (11, 128), (3, 17), (0, 64)):
+    for tokens, hidden in ((3, 64), (11, 128), (1024, 64), (1025, 64), (3, 17), (0, 64)):
         x = torch.randn(tokens, hidden, device="npu", dtype=dtype)
         assert_bits_equal(compiled(x, 4), x.unsqueeze(1).repeat(1, 4, 1))
 

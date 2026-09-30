@@ -10,7 +10,10 @@ The Python helper preserves the native path for gradients, other devices,
 unsupported dtypes, noncontiguous input, widths not divisible by 16, and
 empty expansion and stream counts other than the measured GLM multiplier 4.
 Nonaligned widths remain supported by the raw operator. Default helper dispatch
-remains limited to aligned GLM layouts measured through the production entry point.
+remains limited to aligned GLM layouts of at most 1024 tokens measured through the
+production entry point. Larger batches retain native expansion: device-only and
+graph improvements did not consistently translate to eager enqueue-to-completion
+gains at 3500 tokens. The raw operator remains available for those shapes.
 
 ## Algorithm
 
