@@ -11,14 +11,13 @@
 //
 
 #include "kernel_operator.h"
-#include "../../kernels/types.h"
 
 #include "mla_preprocess_mix_fp16.hpp"
 #include "mla_preprocess_mix_bf16.hpp"
 #include "mla_preprocess_mix_bf16_qdown.hpp"
 #include "mla_preprocess_mix_bf16_nq.hpp"
 
-#include "../op_host/tiling/mla_preprocess_tiling.h"
+#include "mla_preprocess_tiling_data.h"
 
 extern "C" __global__ __aicore__ void mla_preprocess(
     GM_ADDR hiddenState, GM_ADDR quantScale1, GM_ADDR quantOffset1, GM_ADDR wdqkv,
@@ -27,6 +26,8 @@ extern "C" __global__ __aicore__ void mla_preprocess(
     GM_ADDR bias2, GM_ADDR wuk, GM_ADDR descale1, GM_ADDR descale2, GM_ADDR ctkvScale, GM_ADDR qnopeScale, GM_ADDR q,
     GM_ADDR keycacheOut, GM_ADDR q2, GM_ADDR keycacheOut2, GM_ADDR innerOut, GM_ADDR workspace, GM_ADDR tiling)
 {
+    REGISTER_TILING_DEFAULT(MlaTilingData);
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
 #if defined(__CCE_KT_TEST__) || (__CCE_AICORE__ == 220)
     PRELOAD(2);
 #endif
@@ -38,125 +39,17 @@ extern "C" __global__ __aicore__ void mla_preprocess(
     SetNdpara(1, 0, 0);
 #endif
 
-    MlaTilingData mlaTilingData;
-    __gm__ MlaTilingData *tilingData = reinterpret_cast<__gm__ MlaTilingData *>(tiling);
+    GET_TILING_DATA_WITH_STRUCT(MlaTilingData, mlaTilingData, tiling);
 
-    mlaTilingData.tilingKey = tilingData->tilingKey;
-    mlaTilingData.n = tilingData->n;
-    mlaTilingData.hiddenStateDim = tilingData->hiddenStateDim;
-    mlaTilingData.enableRope = tilingData->enableRope;
-
-    mlaTilingData.mm1.numBatch = tilingData->mm1.numBatch;
-    mlaTilingData.mm1.m = tilingData->mm1.m;
-    mlaTilingData.mm1.k = tilingData->mm1.k;
-    mlaTilingData.mm1.n = tilingData->mm1.n;
-    mlaTilingData.mm1.m0 = tilingData->mm1.m0;
-    mlaTilingData.mm1.k0 = tilingData->mm1.k0;
-    mlaTilingData.mm1.n0 = tilingData->mm1.n0;
-    mlaTilingData.mm1.mLoop = tilingData->mm1.mLoop;
-    mlaTilingData.mm1.kLoop = tilingData->mm1.kLoop;
-    mlaTilingData.mm1.nLoop = tilingData->mm1.nLoop;
-    mlaTilingData.mm1.coreLoop = tilingData->mm1.coreLoop;
-    mlaTilingData.mm1.swizzleCount = tilingData->mm1.swizzleCount;
-    mlaTilingData.mm1.enShuffleK = tilingData->mm1.enShuffleK;
-    mlaTilingData.mm1.blockDim = tilingData->mm1.blockDim;
-    mlaTilingData.mm1.enLoadAllAmat = tilingData->mm1.enLoadAllAmat;
-    mlaTilingData.mm1.b0matPingPongBufferLen = tilingData->mm1.b0matPingPongBufferLen;
-
-    mlaTilingData.mm2.numBatch = tilingData->mm2.numBatch;
-    mlaTilingData.mm2.m = tilingData->mm2.m;
-    mlaTilingData.mm2.k = tilingData->mm2.k;
-    mlaTilingData.mm2.n = tilingData->mm2.n;
-    mlaTilingData.mm2.m0 = tilingData->mm2.m0;
-    mlaTilingData.mm2.k0 = tilingData->mm2.k0;
-    mlaTilingData.mm2.n0 = tilingData->mm2.n0;
-    mlaTilingData.mm2.mLoop = tilingData->mm2.mLoop;
-    mlaTilingData.mm2.kLoop = tilingData->mm2.kLoop;
-    mlaTilingData.mm2.nLoop = tilingData->mm2.nLoop;
-    mlaTilingData.mm2.coreLoop = tilingData->mm2.coreLoop;
-    mlaTilingData.mm2.swizzleCount = tilingData->mm2.swizzleCount;
-    mlaTilingData.mm2.enShuffleK = tilingData->mm2.enShuffleK;
-    mlaTilingData.mm2.blockDim = tilingData->mm2.blockDim;
-    mlaTilingData.mm2.enLoadAllAmat = tilingData->mm2.enLoadAllAmat;
-    mlaTilingData.mm2.b0matPingPongBufferLen = tilingData->mm2.b0matPingPongBufferLen;
-
-    mlaTilingData.mm3.numBatch = tilingData->mm3.numBatch;
-    mlaTilingData.mm3.m = tilingData->mm3.m;
-    mlaTilingData.mm3.k = tilingData->mm3.k;
-    mlaTilingData.mm3.n = tilingData->mm3.n;
-    mlaTilingData.mm3.m0 = tilingData->mm3.m0;
-    mlaTilingData.mm3.k0 = tilingData->mm3.k0;
-    mlaTilingData.mm3.n0 = tilingData->mm3.n0;
-    mlaTilingData.mm3.mLoop = tilingData->mm3.mLoop;
-    mlaTilingData.mm3.kLoop = tilingData->mm3.kLoop;
-    mlaTilingData.mm3.nLoop = tilingData->mm3.nLoop;
-    mlaTilingData.mm3.coreLoop = tilingData->mm3.coreLoop;
-    mlaTilingData.mm3.swizzleCount = tilingData->mm3.swizzleCount;
-    mlaTilingData.mm3.enShuffleK = tilingData->mm3.enShuffleK;
-    mlaTilingData.mm3.blockDim = tilingData->mm3.blockDim;
-
-    mlaTilingData.perTaskNum = tilingData->perTaskNum;
-    mlaTilingData.resTaskNum = tilingData->resTaskNum;
-    mlaTilingData.numCore = tilingData->numCore;
-
-    mlaTilingData.rmsNumCore1 = tilingData->rmsNumCore1;
-    mlaTilingData.rmsNumCol1 = tilingData->rmsNumCol1;
-    mlaTilingData.rmsNumCore2 = tilingData->rmsNumCore2;
-    mlaTilingData.rmsNumCol2 = tilingData->rmsNumCol2;
-
-    mlaTilingData.hiddenSizeQ = tilingData->hiddenSizeQ;
-    mlaTilingData.headNumQ = tilingData->headNumQ;
-    mlaTilingData.headDim = tilingData->headDim;
-    mlaTilingData.concatSize = tilingData->concatSize;
-    mlaTilingData.rotaryCoeff = tilingData->rotaryCoeff;
-    mlaTilingData.ntokens = tilingData->ntokens;
-    mlaTilingData.realCore = tilingData->realCore;
-    mlaTilingData.nlCoreRun = tilingData->nlCoreRun;
-    mlaTilingData.lCoreRun = tilingData->lCoreRun;
-    mlaTilingData.maxNPerLoopForUb = tilingData->maxNPerLoopForUb;
-    mlaTilingData.preCoreLoopTime = tilingData->preCoreLoopTime;
-    mlaTilingData.preCoreLoopNLast = tilingData->preCoreLoopNLast;
-    mlaTilingData.lastCoreLoopTime = tilingData->lastCoreLoopTime;
-    mlaTilingData.lastCoreLoopNLast = tilingData->lastCoreLoopNLast;
-
-    mlaTilingData.esqFrontCore = tilingData->esqFrontCore;
-    mlaTilingData.esqTailCore = tilingData->esqTailCore;
-    mlaTilingData.esqFrontCoreBatch = tilingData->esqFrontCoreBatch;
-    mlaTilingData.esqTailCoreBatch = tilingData->esqTailCoreBatch;
-    mlaTilingData.esqHeadNum = tilingData->esqHeadNum;
-    mlaTilingData.esqColNum = tilingData->esqColNum;
-    mlaTilingData.esqUbHeadLoop = tilingData->esqUbHeadLoop;
-    mlaTilingData.esqHeadPerLoop = tilingData->esqHeadPerLoop;
-    mlaTilingData.esqHeadTail = tilingData->esqHeadTail;
-    mlaTilingData.esqColLoop = tilingData->esqColLoop;
-    mlaTilingData.esqColTail = tilingData->esqColTail;
-
-    mlaTilingData.s1Offset = tilingData->s1Offset;
-    mlaTilingData.s2Offset = tilingData->s2Offset;
-    mlaTilingData.s3Offset = tilingData->s3Offset;
-    mlaTilingData.s4Offset = tilingData->s4Offset;
-    mlaTilingData.s5Offset = tilingData->s5Offset;
-
-    // Model-specific MLA dimensions
-    mlaTilingData.mm1OutSize = tilingData->mm1OutSize;
-    mlaTilingData.splitSizeOne = tilingData->splitSizeOne;
-    mlaTilingData.splitSizeTwo = tilingData->splitSizeTwo;
-    mlaTilingData.splitRmsNormSizeOne = tilingData->splitRmsNormSizeOne;
-    mlaTilingData.splitRmsNormSizeTwo = tilingData->splitRmsNormSizeTwo;
-    mlaTilingData.ropeSplitSizeOne = tilingData->ropeSplitSizeOne;
-    mlaTilingData.ropeSplitSizeTwo = tilingData->ropeSplitSizeTwo;
-    mlaTilingData.hiddenStrideRope = tilingData->hiddenStrideRope;
-    mlaTilingData.qkNopeHeadDim = tilingData->qkNopeHeadDim;
-    mlaTilingData.avgFactor = tilingData->avgFactor;
-    mlaTilingData.kvCacheBlockSize = tilingData->kvCacheBlockSize;
-    mlaTilingData.kvCacheStride0 = tilingData->kvCacheStride0;
-    mlaTilingData.kvCacheRopeStride0 = tilingData->kvCacheRopeStride0;
-
-    GM_ADDR s1 = workspace + static_cast<uint64_t>(mlaTilingData.s1Offset);
-    GM_ADDR s2 = workspace + static_cast<uint64_t>(mlaTilingData.s2Offset);
-    GM_ADDR s3 = workspace + static_cast<uint64_t>(mlaTilingData.s3Offset);
-    GM_ADDR s4 = workspace + static_cast<uint64_t>(mlaTilingData.s4Offset);
-    GM_ADDR s5 = workspace + static_cast<uint64_t>(mlaTilingData.s5Offset);
+    // ACLNN initializes the system-workspace state before entering the kernel.
+    // Do not overwrite it with the workspace argument; this operator's custom
+    // PpMatmul/FFTS path only uses the user portion.
+    GM_ADDR userWorkspace = AscendC::GetUserWorkspace(workspace);
+    GM_ADDR s1 = userWorkspace + static_cast<uint64_t>(mlaTilingData.s1Offset);
+    GM_ADDR s2 = userWorkspace + static_cast<uint64_t>(mlaTilingData.s2Offset);
+    GM_ADDR s3 = userWorkspace + static_cast<uint64_t>(mlaTilingData.s3Offset);
+    GM_ADDR s4 = userWorkspace + static_cast<uint64_t>(mlaTilingData.s4Offset);
+    GM_ADDR s5 = userWorkspace + static_cast<uint64_t>(mlaTilingData.s5Offset);
 
     switch (mlaTilingData.tilingKey) {
         case KEY_FP16_CACHEMODE_0_QUANTMODE_0: {
@@ -433,75 +326,4 @@ extern "C" __global__ __aicore__ void mla_preprocess(
         }
     }
     return;
-}
-
-namespace vllm_ascend {
-
-extern void mla_preprocess_impl(
-    void* stream,
-    void* hidden_state,
-    void* quant_scale1,
-    void* quant_offset1,
-    void* wdqkv,
-    void* bias1,
-    void* gamma2,
-    void* beta2,
-    void* quant_scale2,
-    void* quant_offset2,
-    void* gamma3,
-    void* sin1,
-    void* cos1,
-    void* sin2,
-    void* cos2,
-    void* keycache,
-    void* slot_mapping,
-    void* wuq,
-    void* bias2,
-    void* wuk,
-    void* descale1,
-    void* descale2,
-    void* ctkv_scale,
-    void* qnope_scale,
-    void* q,
-    void* keycache_out,
-    void* q2,
-    void* keycache_out2,
-    void* inner_out,
-    void* workspace,
-    void* tiling,
-    const uint32_t block_dim)
-{
-    mla_preprocess<<<block_dim, nullptr, stream>>>(
-        hidden_state,
-        quant_scale1,
-        quant_offset1,
-        wdqkv,
-        bias1,
-        gamma2,
-        beta2,
-        quant_scale2,
-        quant_offset2,
-        gamma3,
-        sin1,
-        cos1,
-        sin2,
-        cos2,
-        keycache,
-        slot_mapping,
-        wuq,
-        bias2,
-        wuk,
-        descale1,
-        descale2,
-        ctkv_scale,
-        qnope_scale,
-        q,
-        keycache_out,
-        q2,
-        keycache_out2,
-        inner_out,
-        workspace,
-        tiling);
-}
-
 }

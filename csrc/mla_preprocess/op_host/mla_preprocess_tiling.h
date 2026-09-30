@@ -11,17 +11,13 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 //
 
-#include <fstream>
-#include <iostream>
-#include <math.h>
-#include <stdexcept>
-#include "acl/acl.h"
-// #include "defines.h"
-// #include "torch_helper.h"
-#include "tiling/platform/platform_ascendc.h"
-#include "tiling/mla_preprocess_tiling.h"
+#include <algorithm>
+#include <cfloat>
+#include <climits>
+#include <cmath>
+#include <cstdint>
 
-// #include "aclrtlaunch_mla_preprocess.h"
+#include "../op_kernel/mla_preprocess_tiling_data.h"
 
 // namespace sglang {
 namespace mlapo {
@@ -121,13 +117,15 @@ struct PlatformInfo {
 };
 
 struct OpParam {
+    enum class InputDtype : uint32_t { FLOAT16 = 0, BFLOAT16 = 1 };
+
     uint32_t isWeightQuantized;
     uint32_t hiddenStateDim;
     uint32_t N;
     uint32_t headNum;
     int32_t cacheMode;
     QuantMode quantMode;
-    caffe2::TypeMeta inDtype;
+    InputDtype inDtype;
     bool enableInnerOut;
     bool enableRope;
     // MLA dimensions derived from tensor shapes
@@ -481,7 +479,8 @@ void MlaPreprocessTiling::EinSumQuantTiling()
     uint32_t esqHeadPerLoop = 0;  // The number of head rows per UB calculation
     uint32_t repeatMask = 0;
 
-    if (opParam.inDtype == at::kBFloat16 || opParam.quantMode == QuantMode::PER_TOKEN_SYMM_QUANT) {
+    if (opParam.inDtype == OpParam::InputDtype::BFLOAT16 ||
+        opParam.quantMode == QuantMode::PER_TOKEN_SYMM_QUANT) {
         // Move scales in at once, broadcast, and cache them all H * 32bytes
         uint32_t scaleUb = RoundUp(esqHeadNum) * CONST_32;
         // bf16 input [H', colNum](f16 + fp32 + int8), ub reuse
@@ -539,7 +538,8 @@ void MlaPreprocessTiling::SetMlapoWorkSpace()
 
     uint64_t userWorkspaceSize;
     if (opParam.isWeightQuantized == 1 &&
-        (opParam.inDtype == at::kBFloat16 || opParam.quantMode == QuantMode::PER_TOKEN_SYMM_QUANT)) {
+        (opParam.inDtype == OpParam::InputDtype::BFLOAT16 ||
+         opParam.quantMode == QuantMode::PER_TOKEN_SYMM_QUANT)) {
         userWorkspaceSize = 4 * maxWorkspaceSize + pertokenWorkspace;
     } else {
         userWorkspaceSize = 3 * maxWorkspaceSize;
@@ -556,7 +556,7 @@ void MlaPreprocessTiling::SetMlapoWorkSpace()
 void MlaPreprocessTiling::SetTilingKey()
 {
     uint64_t tilingKey = (static_cast<uint64_t>(opParam.enableInnerOut)) << 9;
-    tilingKey |= (static_cast<uint64_t>(opParam.inDtype == at::kBFloat16)) << 8;
+    tilingKey |= (static_cast<uint64_t>(opParam.inDtype == OpParam::InputDtype::BFLOAT16)) << 8;
 
     tilingKey |= static_cast<uint64_t>(opParam.cacheMode);
     tilingKey |= (static_cast<uint64_t>(opParam.quantMode) << 3);
@@ -573,7 +573,8 @@ void MlaPreprocessTiling::Init()
     tilingData->enableRope = static_cast<uint32_t>(opParam.enableRope);
     bool enDequant = (opParam.isWeightQuantized == 1);
     bool deqOnTheFly = false;
-    if (enDequant && (opParam.inDtype == at::kBFloat16 || opParam.quantMode == QuantMode::PER_TOKEN_SYMM_QUANT)) {
+    if (enDequant && (opParam.inDtype == OpParam::InputDtype::BFLOAT16 ||
+                      opParam.quantMode == QuantMode::PER_TOKEN_SYMM_QUANT)) {
         deqOnTheFly = true;
     }
 
@@ -641,199 +642,4 @@ void MlaPreprocessTiling::Init()
     return;
 }
 
-std::unordered_map<c10::string_view, uint16_t> cache_mode_map = {
-    {"kvcache", 0}, {"krope_ctkv", 1}, {"int8_nzcache", 2}, {"nzcache", 3}};
-
-std::unordered_map<c10::string_view, uint16_t> quant_mode_map = {
-    {"per_tensor_quant_asymm", 0},
-    {"per_token_quant_symm", 1},
-    {"per_token_quant_asymm", 2},
-    {"no_quant", 3}
-};
-
-template <typename MapType>
-inline int get_op_mode(const MapType &mode_map, c10::optional<c10::string_view> mode_opt, c10::string_view default_mode,
-                       const char *mode_name)
-{
-    c10::string_view mode_str = mode_opt.value_or(default_mode);
-    auto it = mode_map.find(mode_str);
-    TORCH_CHECK(it != mode_map.end(), "Unsupported ", mode_name, " value: '", mode_str, "'");
-    return it->second;
-}
-
-// Contiguous layout default for dim0: product(shape[1:]).
-inline uint64_t GetDefaultStride0FromSizes(at::IntArrayRef sizes)
-{
-    uint64_t stride = 1;
-    for (size_t dim = 1; dim < sizes.size(); ++dim) {
-        stride *= static_cast<uint64_t>(sizes[dim]);
-    }
-    return stride;
-}
-
-// Only dim0 may be non-contiguous; dims 1..N-1 must match contiguous strides.
-inline void ValidateCacheNonFirstAxisContiguous(const at::Tensor &cache, const char *tensorName)
-{
-    if (cache.dim() <= 1) {
-        return;
-    }
-    auto sizes = cache.sizes();
-    auto strides = cache.strides();
-    int64_t expectedStride = 1;
-    for (int64_t i = static_cast<int64_t>(sizes.size()) - 1; i >= 1; --i) {
-        // A size-1 axis is never traversed, so PyTorch is free to report any
-        // stride for it (unsqueeze, slicing, ...).
-        if (sizes[i] == 1) {
-            continue;
-        }
-        TORCH_CHECK(strides[i] == expectedStride,
-                    tensorName, " dim", i, " is non-contiguous: actual stride=", strides[i],
-                    ", expected contiguous stride=", expectedStride,
-                    ". Only the first axis (dim0/blockNum) may be non-contiguous.");
-        expectedStride *= sizes[i];
-    }
-}
-
-inline uint64_t GetTensorStride0(const at::Tensor &cache)
-{
-    if (cache.dim() < 1) {
-        return GetDefaultStride0FromSizes(cache.sizes());
-    }
-    return static_cast<uint64_t>(cache.stride(0));
-}
-
-// The NZ cache modes accept two equivalent spellings of the same bytes:
-//   - physical  [blockNum, C1, blockSize, C0], as the ATB/ST harnesses build it
-//   - logical   [blockNum, blockSize, numKvHeads=1, dim], as vLLM allocates it
-// Both describe a compact block of blockSize*dim elements, so only the shape
-// interpretation differs. dim2 is the only axis that tells them apart.
-inline bool IsPhysicalNzCache(const at::Tensor &cache, int32_t cacheMode)
-{
-    const bool isNzCache = (cacheMode == 2 || cacheMode == 3);
-    return isNzCache && cache.dim() == 4 && cache.size(2) != 1;
-}
-
-// blockSize: physical NZ → dim2; ND and logical NZ → dim1.
-inline uint64_t GetKvCacheBlockSize(const at::Tensor &kv_cache, int32_t cacheMode)
-{
-    auto sizes = kv_cache.sizes();
-    TORCH_CHECK(sizes.size() >= 2, "kv_cache must have at least 2 dims");
-    if (IsPhysicalNzCache(kv_cache, cacheMode)) {
-        return static_cast<uint64_t>(sizes[2]);
-    }
-    return static_cast<uint64_t>(sizes[1]);
-}
-
-// Physical NZ rope caches are [blockNum, ropeDim/16, blockSize, 16], so their
-// last axis is C0 rather than the rope dim; recover it from the C1/C0 pair.
-inline uint32_t GetRopeHeadDim(const at::Tensor &kv_cache_rope, int32_t cacheMode)
-{
-    auto sizes = kv_cache_rope.sizes();
-    TORCH_CHECK(!sizes.empty(), "kv_cache_rope must not be a scalar");
-    if (IsPhysicalNzCache(kv_cache_rope, cacheMode)) {
-        return static_cast<uint32_t>(sizes[1] * sizes[3]);
-    }
-    return static_cast<uint32_t>(sizes.back());
-}
-
-std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
-    const at::Tensor &hiddenState,
-    const at::Tensor &wdqkv,
-    const at::Tensor &wuk,
-    const at::Tensor &gamma1,
-    const at::Tensor &kv_cache,
-    const at::Tensor &kv_cache_rope,
-    c10::optional<c10::string_view> cache_mode,
-    c10::optional<c10::string_view> quant_mode,
-    bool enable_inner_out,
-    bool enable_rope
-)
-{
-    auto cacheMode = get_op_mode(cache_mode_map, cache_mode, "krope_ctkv", "cache_mode");
-    auto quantMode = get_op_mode(quant_mode_map, quant_mode, "per_token_quant_symm", "quant_mode");
-
-    platform_ascendc::PlatformAscendC *platformAscendC = platform_ascendc::PlatformAscendCManager::GetInstance();
-
-    struct PlatformInfo platformInfo;
-    platformInfo.coreNum = platformAscendC->GetCoreNum();
-    platformInfo.coreNumAic = platformAscendC->GetCoreNumAic();
-    platformInfo.coreNumAiv = platformAscendC->GetCoreNumAiv();
-    platformAscendC->GetCoreMemSize(platform_ascendc::CoreMemType::UB, platformInfo.ubSize);
-    platformAscendC->GetCoreMemSize(platform_ascendc::CoreMemType::L1, platformInfo.l1Size);
-    platformAscendC->GetCoreMemSize(platform_ascendc::CoreMemType::L2, platformInfo.l2Size);
-    platformAscendC->GetCoreMemSize(platform_ascendc::CoreMemType::L0_A, platformInfo.l0aSize);
-    platformAscendC->GetCoreMemSize(platform_ascendc::CoreMemType::L0_B, platformInfo.l0bSize);
-    platformAscendC->GetCoreMemSize(platform_ascendc::CoreMemType::L0_C, platformInfo.l0cSize);
-
-    int32_t N = hiddenState.sizes()[0];
-    int32_t headNum = wuk.sizes()[0];
-    uint32_t hiddenStateDim = hiddenState.sizes().back();
-
-    // Derive MLA dimensions from tensor shapes
-    uint32_t qkNopeHeadDim = wuk.sizes()[1];
-    uint32_t kvLoraRank = wuk.sizes()[2];
-    uint32_t qLoraRank = gamma1.sizes()[0];
-    uint32_t qkRopeHeadDim = GetRopeHeadDim(kv_cache_rope, static_cast<int32_t>(cacheMode));
-
-    ValidateCacheNonFirstAxisContiguous(kv_cache, "kv_cache");
-    ValidateCacheNonFirstAxisContiguous(kv_cache_rope, "kv_cache_rope");
-
-    OpParam opParam;
-    opParam.hiddenStateDim = hiddenStateDim;
-    opParam.N = N;
-    opParam.headNum = headNum;
-    opParam.cacheMode = static_cast<int32_t>(cacheMode);
-    opParam.quantMode = static_cast<QuantMode>(quantMode);
-    opParam.inDtype = hiddenState.options().dtype();
-    // PER_TOKEN_SYMM only has bf16 kernel instantiations (tilingKey bit8=1).
-    TORCH_CHECK(!(opParam.quantMode == QuantMode::PER_TOKEN_SYMM_QUANT && opParam.inDtype != at::kBFloat16),
-                "quant_mode=per_token_quant_symm only supports bf16 input, got ", opParam.inDtype);
-    opParam.enableInnerOut = enable_inner_out;
-    opParam.enableRope = enable_rope;
-    opParam.qLoraRank = qLoraRank;
-    opParam.qkNopeHeadDim = qkNopeHeadDim;
-    opParam.qkRopeHeadDim = qkRopeHeadDim;
-    opParam.kvLoraRank = kvLoraRank;
-    opParam.kvCacheBlockSize = GetKvCacheBlockSize(kv_cache, static_cast<int32_t>(cacheMode));
-    opParam.kvCacheStride0 = GetTensorStride0(kv_cache);
-    opParam.kvCacheRopeStride0 = GetTensorStride0(kv_cache_rope);
-    if (wdqkv.options().dtype() == at::kBFloat16 || wdqkv.options().dtype() == at::kHalf) {
-        opParam.isWeightQuantized = 0;
-    } else {
-        opParam.isWeightQuantized = 1;
-    }
-
-    MlaTilingData tilingData;
-    MlaPreprocessTiling mlaTiling(platformInfo, opParam, &tilingData);
-
-    mlaTiling.Init();
-    uint32_t blockDim = platformInfo.coreNumAic;
-
-    // workspace
-    uint64_t system_workspace_size = static_cast<uint64_t>(platformAscendC->GetLibApiWorkSpaceSize());
-    uint64_t workspace_size = system_workspace_size + tilingData.userWorkspaceSize;
-    auto options = at::TensorOptions().dtype(at::kByte).device(hiddenState.options().device());
-    auto workspace_tensor = at::empty({static_cast<int64_t>(workspace_size)}, options);
-
-    // tiling
-    int32_t bIndex = N - 1;
-    uint32_t tilingSize = sizeof(MlaTilingData);
-    static auto global_tiling_data =
-        at::empty({tilingSize * MAX_SUPPORT_TOKEN_NUMS},
-                  at::TensorOptions().dtype(at::kByte).device(hiddenState.options().device()));
-    if (bIndex >= 0 && bIndex < MAX_SUPPORT_TOKEN_NUMS) {
-        aclrtMemcpy(global_tiling_data.data_ptr<uint8_t>() + (tilingSize * bIndex), tilingSize, &tilingData, tilingSize,
-                    ACL_MEMCPY_HOST_TO_DEVICE);
-    } else {
-        // Handle the case where bIndex is out of range
-        TORCH_CHECK(false, "bIndex is out of range: ", bIndex);
-    }
-    at::Tensor tiling = at::from_blob(
-        global_tiling_data.data_ptr<uint8_t>() + (tilingSize * bIndex),
-        tilingSize,
-        at::kByte);
-
-    return std::make_tuple(workspace_tensor, tiling, blockDim);
-}
-
-}  // namespace npu_kernel
+}  // namespace mlapo
