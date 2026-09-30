@@ -239,6 +239,7 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
     layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
     nn.Module.__init__(layer)
     layer.use_sequence_parallel = True
+    layer.fuse_o_proj_mm_reduce_scatter = False
     layer.prev_valid_blocks = 0
     layer.is_block_write_layer = False
     layer.input_layernorm = nn.Identity()
