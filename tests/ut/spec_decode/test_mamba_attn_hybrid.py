@@ -19,7 +19,12 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
 def _hspec_vllm_available() -> bool:
     import importlib.util
 
-    return importlib.util.find_spec("vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator") is not None
+    try:
+        return importlib.util.find_spec("vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator") is not None
+    except ModuleNotFoundError:
+        # find_spec imports parent packages; a vLLM without the H-Spec patch
+        # has no mamba_attn_hybrid package at all.
+        return False
 
 
 def make_spec_config(method="dspark", with_mamba=False):
