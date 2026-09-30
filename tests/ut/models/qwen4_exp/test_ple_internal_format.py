@@ -12,12 +12,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
 
 from vllm_ascend.models.qwen4_exp import ple
+
+
+def test_set_internal_format_prefers_high_level_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace(allow_internal_format=True)
+    low_level_calls: list[dict] = []
+    monkeypatch.setattr(ple, "torch", SimpleNamespace(npu=SimpleNamespace(config=config)))
+    monkeypatch.setattr(ple, "torch_npu", SimpleNamespace(_C=SimpleNamespace(_npu_setOption=low_level_calls.append)))
+
+    ple._set_allow_internal_format(False)
+
+    assert config.allow_internal_format is False
+    assert low_level_calls == []
+
+
+def test_set_internal_format_falls_back_to_low_level_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # torch_npu 2.10 (910B): torch.npu.config exists but carries no attribute.
+    low_level_calls: list[dict] = []
+    monkeypatch.setattr(ple, "torch", SimpleNamespace(npu=SimpleNamespace(config=SimpleNamespace())))
+    monkeypatch.setattr(ple, "torch_npu", SimpleNamespace(_C=SimpleNamespace(_npu_setOption=low_level_calls.append)))
+
+    ple._set_allow_internal_format(False)
+
+    assert low_level_calls == [{"ALLOW_INTERNAL_FORMAT": "disable"}]
+
+
+def test_set_internal_format_without_any_api_only_warns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ple, "torch", SimpleNamespace(npu=SimpleNamespace()))
+    monkeypatch.setattr(ple, "torch_npu", SimpleNamespace(_C=SimpleNamespace()))
+
+    ple._set_allow_internal_format(False)  # must not raise
 
 
 def test_ple_internal_format_is_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
