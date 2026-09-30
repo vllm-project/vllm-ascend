@@ -202,6 +202,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         self.assertIs(situ_call["x"], gate_up_out)
         self.assertIsNone(situ_call["weight_scale"])
         self.assertIsNone(situ_call["activation_scale"])
+        torch.testing.assert_close(situ_call["group_index"], torch.tensor([2]))
         self.assertEqual(situ_call["beta"], 4.0)
         self.assertEqual(situ_call["linear_beta"], 25.0)
         self.assertIs(mock_gmm2.call_args.kwargs["bias"], w2_scale_bias)
@@ -214,6 +215,51 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         custom_ops.grouped_matmul_swiglu_quant_v2.assert_not_called()
         custom_ops.grouped_matmul_swiglu_quant_weight_nz_tensor_list.assert_not_called()
         custom_ops.npu_dequant_swiglu_quant.assert_not_called()
+
+    def test_w4a8_situ_converts_cumulative_group_list_to_counts(self):
+        hidden_states = torch.randn(3, 4, dtype=torch.bfloat16)
+        gate_up_out = torch.randn(3, 4, dtype=torch.bfloat16)
+        quantized_situ = torch.ones(3, 2, dtype=torch.int8)
+        situ_scale = torch.ones(3, dtype=torch.float32)
+        custom_ops = SimpleNamespace(
+            dequant_situ_quant=MagicMock(return_value=(quantized_situ, situ_scale)),
+        )
+
+        with (
+            patch.object(moe_mlp_module.torch.ops, "_C_ascend", custom_ops),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.DeviceOperator.npu_dynamic_quant",
+                return_value=(torch.ones(3, 4, dtype=torch.int8), torch.ones(3, 1)),
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_grouped_matmul",
+                return_value=[gate_up_out],
+                create=True,
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.DeviceOperator.npu_grouped_matmul_gmm2",
+                return_value=hidden_states,
+            ),
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.dispose_tensor"),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch.npu.current_stream",
+                return_value=MagicMock(record_event=MagicMock()),
+            ),
+        ):
+            quant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=torch.ones(2, 4, 4),
+                w1_scale=torch.ones(2, 4),
+                w2=torch.ones(2, 2, 4),
+                w2_scale=torch.ones(2, 4),
+                group_list=torch.tensor([1, 3]),
+                group_list_type=0,
+                activation=SituActivationConfig(beta=4.0, linear_beta=25.0),
+                mxfp_quant_dtype=QuantType.W4A8,
+            )
+
+        situ_group_list = custom_ops.dequant_situ_quant.call_args.kwargs["group_index"]
+        torch.testing.assert_close(situ_group_list, torch.tensor([1, 2]))
 
     def test_w4a8_swiglu_stays_on_existing_fused_path(self):
         hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)

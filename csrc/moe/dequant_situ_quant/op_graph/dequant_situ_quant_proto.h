@@ -35,10 +35,11 @@ namespace ge {
 * @li quant_scale: Reserved optional input. It must be absent.
 * @li quant_offset: Reserved optional input. It must be absent.
 * @li group_index: Optional INT64 1-D tensor with shape [experts]. Each value
-* is the number of consecutive routed rows belonging to that expert. None
-* selects the single-group shared-expert path.
+* is the number of consecutive valid routed rows belonging to that expert.
+* For a pre-dequantized BF16 input, the counts are used to skip trailing
+* dispatch-capacity rows. None selects the single-group shared-expert path.
 * For BF16 x, GMM has already applied dequantization; weight_scale,
-* activation_scale, bias, and group_index must all be absent.
+* activation_scale, and bias must all be absent.
 
 * @par Outputs:
 * @li y: INT8 tensor with shape [rows, x.shape[-1] / 2].
