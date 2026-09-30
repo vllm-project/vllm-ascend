@@ -735,7 +735,9 @@ class AscendModelSlimConfig(QuantizationConfig):
                 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 
                 logger.debug("Select AscendUnquantizedFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
-                return AscendUnquantizedFusedMoEMethod(layer.moe_config)
+                # apply() forwards this table to select_experts(). Dropping it
+                # makes sqrtsoftplus hash layers pick experts from logits only.
+                return AscendUnquantizedFusedMoEMethod(layer.moe_config, tid2eid=tid2eid)
             scheme = create_scheme_for_layer(self.quant_description, prefix, "moe", self.packed_modules_mapping)
             logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
             return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
