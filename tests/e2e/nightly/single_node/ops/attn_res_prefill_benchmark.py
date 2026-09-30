@@ -49,7 +49,7 @@ def run_case(args, valid, first=False, pp=False, no_add=False, write_idx=-1):
     prefix, addend, bank, proj, norm, output_norm = make_inputs(args.tokens, args.hidden, valid, no_add, pp)
 
     native = torch.ops._C_ascend.attn_res_fwd
-    fused = native.fused_prefill if args.prefill_kernel else native.fused
+    fused = native.fused
 
     def call():
         return fused(
@@ -65,6 +65,7 @@ def run_case(args, valid, first=False, pp=False, no_add=False, write_idx=-1):
             write_idx,
             True,
             not pp,
+            args.prefill_kernel,
         )
 
     result = call()
@@ -98,6 +99,7 @@ def run_case(args, valid, first=False, pp=False, no_add=False, write_idx=-1):
             write_idx,
             False,
             not pp,
+            args.prefill_kernel,
         )
 
     for _ in range(args.warmup):
@@ -136,7 +138,7 @@ def main():
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--write-reference", action="store_true")
     parser.add_argument("--label", required=True)
-    parser.add_argument("--prefill-kernel", action="store_true", help="Use the isolated prefill-only CANN op")
+    parser.add_argument("--prefill-kernel", action="store_true", help="Enable the fused prefill cache strategy")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--tokens", type=int, default=2048)
     parser.add_argument("--hidden", type=int, default=7168)

@@ -31,7 +31,8 @@ def assert_mix_close(actual, expected, max_abs_error=1):
 )
 @pytest.mark.parametrize("epsilon", [1e-5, 1e-6])
 @pytest.mark.parametrize("layout", ["contiguous", "block_slice"])
-def test_attn_res_fused_without_add(num_tokens, num_blocks, hidden_size, epsilon, layout):
+@pytest.mark.parametrize("optimize_prefill", [False, True])
+def test_attn_res_fused_without_add(num_tokens, num_blocks, hidden_size, epsilon, layout, optimize_prefill):
     generator = torch.Generator().manual_seed(42)
     prefix = torch.randn(num_tokens, hidden_size, generator=generator, dtype=torch.bfloat16)
     blocks = torch.randn(num_tokens, num_blocks, hidden_size, generator=generator, dtype=torch.bfloat16)
@@ -44,7 +45,7 @@ def test_attn_res_fused_without_add(num_tokens, num_blocks, hidden_size, epsilon
         inputs[1] = storage[:, 1 : num_blocks + 1, :]
         inputs[1].copy_(blocks)
     actual, raw, _ = torch.ops._C_ascend.attn_res_fwd.fused(
-        inputs[0], None, inputs[1], inputs[2], inputs[3], epsilon, num_blocks
+        inputs[0], None, inputs[1], inputs[2], inputs[3], epsilon, num_blocks, optimize_prefill=optimize_prefill
     )
     expected = cpu_mix_reference(inputs[0], inputs[1], inputs[2], inputs[3], epsilon)
 
@@ -58,9 +59,10 @@ def test_attn_res_fused_without_add(num_tokens, num_blocks, hidden_size, epsilon
 @pytest.mark.parametrize("with_add,with_norm", [(False, True), (True, False), (True, True)])
 @pytest.mark.parametrize("bank_slice", [False, True])
 @pytest.mark.parametrize("graph", [False, True])
+@pytest.mark.parametrize("optimize_prefill", [False, True])
 @torch.inference_mode()
 def test_attn_res_fused_chain_preserves_prefix_materialized_bank_and_graph(
-    tokens, valid, hidden, with_add, with_norm, bank_slice, graph
+    tokens, valid, hidden, with_add, with_norm, bank_slice, graph, optimize_prefill
 ):
     import torch_npu
 
@@ -88,6 +90,7 @@ def test_attn_res_fused_chain_preserves_prefix_materialized_bank_and_graph(
             1e-5,
             write_idx,
             True,
+            optimize_prefill=optimize_prefill,
         )
 
     # Eager warmup before capture resolves ACLNN executor resources.
@@ -140,6 +143,45 @@ def test_attn_res_fused_pp_materialization(tokens):
     torch.testing.assert_close(raw, prefix + addend, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("optimize_prefill", [False, True])
+@pytest.mark.parametrize(
+    "invalid",
+    ["valid", "write_slot", "addend", "projection", "output_norm_eps"],
+)
+def test_attn_res_fused_rejects_invalid_arguments(optimize_prefill, invalid):
+    prefix = torch.empty(2, 128, device="npu", dtype=torch.bfloat16)
+    addend = torch.empty_like(prefix)
+    bank = torch.empty(2, 3, 128, device="npu", dtype=torch.bfloat16)
+    projection = torch.empty(1, 128, device="npu", dtype=torch.bfloat16)
+    norm = torch.empty(128, device="npu", dtype=torch.bfloat16)
+    valid, write_idx, output_eps = 2, -1, 1e-5
+    if invalid == "valid":
+        valid = 4
+    elif invalid == "write_slot":
+        write_idx = 1
+    elif invalid == "addend":
+        addend = addend[:, :64]
+    elif invalid == "projection":
+        projection = projection[:, :64]
+    else:
+        output_eps = 0.0
+
+    with pytest.raises(RuntimeError, match="attn_res_fwd.fused: invalid"):
+        torch.ops._C_ascend.attn_res_fwd.fused(
+            prefix,
+            addend,
+            bank,
+            projection,
+            norm,
+            1e-5,
+            valid,
+            norm,
+            output_eps,
+            write_idx,
+            optimize_prefill=optimize_prefill,
+        )
+
+
 @pytest.mark.parametrize("valid", [0, 1, 2, 4, 8])
 @torch.inference_mode()
 def test_attn_res_prefill_cached_norm_is_reloaded_on_graph_replay(valid):
@@ -158,8 +200,19 @@ def test_attn_res_prefill_cached_norm_is_reloaded_on_graph_replay(valid):
     output_gamma = torch.randn_like(gamma)
 
     def call():
-        return torch.ops._C_ascend.attn_res_fwd.fused_prefill(
-            prefix, addend, bank, proj, gamma, 1e-5, valid, output_gamma, 1e-5, -1, True
+        return torch.ops._C_ascend.attn_res_fwd.fused(
+            prefix,
+            addend,
+            bank,
+            proj,
+            gamma,
+            1e-5,
+            valid,
+            output_gamma,
+            1e-5,
+            -1,
+            True,
+            optimize_prefill=True,
         )
 
     call()
@@ -198,8 +251,19 @@ def test_attn_res_fused_register_reductions_changed_inputs(valid, hidden):
     output_gamma = torch.randn_like(gamma)
 
     def call():
-        return torch.ops._C_ascend.attn_res_fwd.fused_prefill(
-            prefix, addend, bank, projection, gamma, 1e-6, valid, output_gamma, 1e-6, -1, True
+        return torch.ops._C_ascend.attn_res_fwd.fused(
+            prefix,
+            addend,
+            bank,
+            projection,
+            gamma,
+            1e-6,
+            valid,
+            output_gamma,
+            1e-6,
+            -1,
+            True,
+            optimize_prefill=True,
         )
 
     call()

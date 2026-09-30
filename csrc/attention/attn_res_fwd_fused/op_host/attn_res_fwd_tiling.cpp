@@ -90,8 +90,7 @@ ge::graphStatus AttnResFwdTiling::GetPlatformInfo()
 
 ge::graphStatus AttnResFwdTiling::GetShapeAttrsInfo()
 {
-    optimizePrefill_ = std::strcmp(context_->GetNodeType(), "AttnResFwdPrefill") == 0;
-    fusedChain_ = optimizePrefill_ || std::strcmp(context_->GetNodeType(), "AttnResFwdFused") == 0;
+    fusedChain_ = std::strcmp(context_->GetNodeType(), "AttnResFwdFused") == 0;
     fuseAdd_ = fusedChain_;
     OP_CHECK_IF(CheckContext() != ge::GRAPH_SUCCESS, OP_LOGE(inputParams_.opName, "Invalid context."),
                 return ge::GRAPH_FAILED);
@@ -358,6 +357,7 @@ ge::graphStatus AttnResFwdTiling::AnalyzeShapes()
         tilingData_.saveMaterialized = *attrs->GetAttrPointer<bool>(6) ? 1U : 0U;
         tilingData_.mix = *attrs->GetAttrPointer<bool>(7) ? 1U : 0U;
         tilingData_.fusedAdd = *attrs->GetAttrPointer<bool>(8) ? 1U : 0U;
+        optimizePrefill_ = *attrs->GetAttrPointer<bool>(9);
     }
 
     OP_CHECK_IF(blockShape.GetDim(0) != static_cast<int64_t>(tilingData_.numTokens),

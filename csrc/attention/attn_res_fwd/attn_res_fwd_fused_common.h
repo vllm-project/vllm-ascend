@@ -7,14 +7,14 @@
 
 namespace vllm_ascend::detail {
 
-template <bool Prefill>
 inline std::tuple<at::Tensor, at::Tensor, at::Tensor> attn_res_fwd_fused_impl(
     const at::Tensor& prefix, const c10::optional<at::Tensor>& addend,
     at::Tensor blocks, const at::Tensor& proj, const at::Tensor& norm,
     double eps, int64_t valid, const c10::optional<at::Tensor>& output_norm,
-    double output_eps, int64_t write_idx, bool save_materialized, bool mix)
+    double output_eps, int64_t write_idx, bool save_materialized, bool mix,
+    bool optimize_prefill)
 {
-    constexpr const char* op_name = Prefill ? "attn_res_fwd.fused_prefill" : "attn_res_fwd.fused";
+    constexpr const char* op_name = "attn_res_fwd.fused";
     TORCH_CHECK(prefix.dim() == 2 && blocks.dim() == 3 &&
                 blocks.size(0) == prefix.size(0) && blocks.size(2) == prefix.size(1),
                 op_name, ": invalid prefix/bank shape");
@@ -50,18 +50,10 @@ inline std::tuple<at::Tensor, at::Tensor, at::Tensor> attn_res_fwd_fused_impl(
     const auto bank_token_stride = blocks.stride(0);
     const double fused_output_eps = output_norm.has_value() ? output_eps : 0.0;
     const bool fuse_add = addend.has_value();
-    // Keep distinct ACLNN dispatch so prefill retains its tiling and kernel strategy.
-    if constexpr (Prefill) {
-        EXEC_NPU_CMD(aclnnAttnResFwdPrefill, prefix, blocks, proj, norm,
-            add_input, output_norm_input, eps, valid, bank_token_stride, write_idx,
-            fused_output_eps, save_materialized, mix, fuse_add,
-            output, raw_prefix, materialized);
-    } else {
-        EXEC_NPU_CMD(aclnnAttnResFwdFused, prefix, blocks, proj, norm,
-            add_input, output_norm_input, eps, valid, bank_token_stride, write_idx,
-            fused_output_eps, save_materialized, mix, fuse_add,
-            output, raw_prefix, materialized);
-    }
+    EXEC_NPU_CMD(aclnnAttnResFwdFused, prefix, blocks, proj, norm,
+        add_input, output_norm_input, eps, valid, bank_token_stride, write_idx,
+        fused_output_eps, save_materialized, mix, fuse_add, optimize_prefill,
+        output, raw_prefix, materialized);
     return {output, raw_prefix, materialized};
 }
 

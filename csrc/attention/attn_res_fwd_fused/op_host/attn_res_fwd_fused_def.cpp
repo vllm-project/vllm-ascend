@@ -21,6 +21,7 @@ public:
         this->Attr("save_materialized").AttrType(OPTIONAL).Bool(false);
         this->Attr("mix").AttrType(OPTIONAL).Bool(true);
         this->Attr("fuse_add").AttrType(OPTIONAL).Bool(false);
+        this->Attr("optimize_prefill").AttrType(OPTIONAL).Bool(false);
         OpAICoreConfig config;
         config.DynamicCompileStaticFlag(true).DynamicFormatFlag(true).DynamicRankSupportFlag(true)
             .DynamicShapeSupportFlag(true).NeedCheckSupportFlag(false)

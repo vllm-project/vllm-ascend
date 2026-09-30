@@ -222,7 +222,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "indexer_compress_epilog_v2"
         "recurrent_kda"
         "attn_res_fwd_fused"
-        "attn_res_fwd_prefill"
         "chunk_fwd_o_vllm"
         "chunk_kda_fwd"
         "kda_gate_cumsum"

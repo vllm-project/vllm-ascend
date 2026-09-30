@@ -49,6 +49,7 @@ def fused_reference(
     block_write_idx=-1,
     return_materialized=False,
     mix=True,
+    optimize_prefill=False,
 ):
     raw_prefix = prefix if addend is None else prefix + addend
     value = native_reference(raw_prefix, blocks[:, :valid], projection, gamma, eps) if mix and valid else raw_prefix
@@ -65,7 +66,6 @@ def fused_reference(
 @pytest.fixture(autouse=True)
 def mock_native_ops(monkeypatch):
     monkeypatch.setattr(native_reference, "fused", fused_reference, raising=False)
-    monkeypatch.setattr(native_reference, "fused_prefill", fused_reference, raising=False)
     monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", native_reference, raising=False)
 
 
@@ -79,17 +79,10 @@ def test_93_standalone_layers_use_native_residual_points_and_preserve_saved_dspa
     fused = torch.ops._C_ascend.attn_res_fwd.fused
 
     def recording_fused(*args, **kwargs):
-        fused_calls.append(args[0].clone())
+        fused_calls.append((args[0].clone(), kwargs.get("optimize_prefill")))
         return fused(*args, **kwargs)
 
-    selected_op = "fused_prefill" if optimize_prefill else "fused"
-    other_op = "fused" if optimize_prefill else "fused_prefill"
-    monkeypatch.setattr(torch.ops._C_ascend.attn_res_fwd, selected_op, recording_fused)
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("residual point reached the other phase's native operator")
-
-    monkeypatch.setattr(torch.ops._C_ascend.attn_res_fwd, other_op, forbidden)
+    monkeypatch.setattr(torch.ops._C_ascend.attn_res_fwd, "fused", recording_fused)
     torch.manual_seed(17)
     hidden = torch.randn(4, 16).to(torch.bfloat16)
     residual = torch.empty(4, 8, 16, dtype=hidden.dtype)
@@ -143,6 +136,7 @@ def test_93_standalone_layers_use_native_residual_points_and_preserve_saved_dspa
     # Standalone layer calls materialize their tail; the full model absorbs
     # this third call into the next layer's first call instead.
     assert len(fused_calls) == 93 * 3
+    assert all(prefill is optimize_prefill for _, prefill in fused_calls)
 
 
 @pytest.mark.parametrize(
@@ -176,19 +170,15 @@ def test_93_standalone_layers_use_native_residual_points_and_preserve_saved_dspa
     ],
 )
 @pytest.mark.parametrize(
-    "context_available,is_950,has_prefill_op",
-    [(True, True, True), (False, True, True), (True, False, True), (True, True, False)],
+    "context_available,is_950",
+    [(True, True), (False, True), (True, False)],
 )
-def test_prefill_kernel_requires_explicit_pure_prefill_metadata(
-    monkeypatch, metadata, expected, context_available, is_950, has_prefill_op
-):
+def test_prefill_cache_requires_explicit_pure_prefill_metadata(metadata, expected, context_available, is_950):
     path = Path(__file__).resolve().parents[3] / "vllm_ascend/models/kimi_k3.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     gate = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_use_attn_res_prefill_kernel"
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_use_attn_res_prefill_cache"
     )
-    if not has_prefill_op:
-        monkeypatch.delattr(native_reference, "fused_prefill")
 
     def get_context():
         assert context_available
@@ -201,4 +191,4 @@ def test_prefill_kernel_requires_explicit_pure_prefill_metadata(
         "is_950": lambda: is_950,
     }
     exec(compile(ast.Module(body=[gate], type_ignores=[]), str(path), "exec"), scope)
-    assert scope["_use_attn_res_prefill_kernel"]() is (expected and context_available and is_950 and has_prefill_op)
+    assert scope["_use_attn_res_prefill_cache"]() is (expected and context_available and is_950)

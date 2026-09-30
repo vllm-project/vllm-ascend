@@ -67,11 +67,11 @@ def load_classes(monkeypatch):
         IntermediateTensors=IntermediateTensors,
         cdiv=lambda x, y: (x + y - 1) // y,
         get_pp_group=lambda: state,
-        _use_attn_res_prefill_kernel=lambda: state.prefill,
+        _use_attn_res_prefill_cache=lambda: state.prefill,
     )
     source = "from __future__ import annotations\n" + ast.unparse(ast.Module(body=[layer, model], type_ignores=[]))
     exec(compile(source, str(path), "exec"), scope)
-    native = SimpleNamespace(fused=fused_reference, fused_prefill=fused_reference)
+    native = SimpleNamespace(fused=fused_reference)
     monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", native, raising=False)
     return scope["AscendKimiDecoderLayer"], scope["AscendKimiLinearModel"], state
 
