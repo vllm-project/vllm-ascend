@@ -284,7 +284,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     servers. Mooncake transfers KV cache from the Prefill engines to the Decode
     engines.
 
-    #### 5.2.1 Prepare the DP Launcher
+    #### 5.2.1.1 Prepare the DP Launcher
 
     Save the following script as `launch_online_dp.py` on both nodes. It divides
     the node's visible devices among local DP ranks and starts one vLLM process per
@@ -366,7 +366,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     | `--dp-rpc-port` | DP coordination port. It must be unused and reachable within the node group. |
     | `--vllm-start-port` | First API port; the launcher increments it for each local DP rank. |
 
-    #### 5.2.2 Start the Prefill Node
+    #### 5.2.1.2 Start the Prefill Node
 
     On the Prefill node, save the following script as `run_dp_template.sh`. Set
     `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` to the Prefill node's service IP,
@@ -456,7 +456,7 @@ and use the `main` branch with the matching vLLM revision recorded in
         --vllm-start-port 7100
     ```
 
-    #### 5.2.3 Start the Decode Node
+    #### 5.2.1.3 Start the Decode Node
 
     On the Decode node, save the following script as `run_dp_template.sh`. Set
     `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` to the Decode node's service IP,
@@ -549,7 +549,7 @@ and use the `main` branch with the matching vLLM revision recorded in
         --vllm-start-port 7100
     ```
 
-    #### 5.2.4 Deploy the PD Proxy
+    #### 5.2.1.4 Deploy the PD Proxy
 
     After all Prefill and Decode engines are ready, deploy the proxy as described
     in [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
@@ -557,7 +557,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     `<PREFILL_NODE_IP>:7103` and Decode endpoints `<DECODE_NODE_IP>:7100` through
     `<DECODE_NODE_IP>:7107`.
 
-    #### 5.2.5 Key Parameter Descriptions
+    #### 5.2.1.5 Key Parameter Descriptions
 
     - `VLLM_ENGINE_READY_TIMEOUT_S=36000` gives every Prefill and Decode engine up
       to 36,000 seconds to finish startup. This includes weight loading and Decode
@@ -665,7 +665,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     | Decode | `<DECODE_NODE_1_IP>` | 0-3 | 2 | 7100-7103 |
     | Decode | `<DECODE_NODE_2_IP>` | 4-7 | 2 | 7100-7103 |
 
-    #### 5.3.1 Prepare the DP Launcher
+    #### 5.2.2.1 Prepare the DP Launcher
 
     Save the following script as `launch_online_dp.py` on all four nodes. It
     divides the node's visible devices among local DP ranks and starts one
@@ -747,7 +747,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     | `--dp-rpc-port` | DP coordination port. It must be unused and reachable within the node group. |
     | `--vllm-start-port` | First API port; the launcher increments it for each local DP rank. |
 
-    #### 5.3.2 Start the Prefill Nodes
+    #### 5.2.2.2 Start the Prefill Nodes
 
     On each Prefill node, save the following script as `run_dp_template.sh`.
     Set `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` to the local server's service
@@ -758,16 +758,12 @@ and use the `main` branch with the matching vLLM revision recorded in
 
     set -euo pipefail
 
-    unset https_proxy
-    unset http_proxy
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
 
     NIC_NAME="<NETWORK_INTERFACE>"
     LOCAL_IP="<LOCAL_PREFILL_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_1_IP>,<PREFILL_NODE_2_IP>,<DECODE_NODE_1_IP>,<DECODE_NODE_2_IP>"
-    export ASCEND_PROCESS_LOG_PATH=/vllm-workspace/plog
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
@@ -860,7 +856,7 @@ and use the `main` branch with the matching vLLM revision recorded in
         --vllm-start-port 7100
     ```
 
-    #### 5.3.3 Start the Decode Nodes
+    #### 5.2.2.3 Start the Decode Nodes
 
     On each Decode node, save the following script as `run_dp_template.sh`.
     Set `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` to the local server's service
@@ -872,16 +868,11 @@ and use the `main` branch with the matching vLLM revision recorded in
 
     set -euo pipefail
 
-    unset https_proxy
-    unset http_proxy
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
-
     NIC_NAME="<NETWORK_INTERFACE>"
     LOCAL_IP="<LOCAL_DECODE_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_1_IP>,<PREFILL_NODE_2_IP>,<DECODE_NODE_1_IP>,<DECODE_NODE_2_IP>"
-    export ASCEND_PROCESS_LOG_PATH=/vllm-workspace/plog
     export VLLM_USE_V2_MODEL_RUNNER=0
     export VLLM_ENGINE_READY_TIMEOUT_S=360000
     export HCCL_IF_IP="$LOCAL_IP"
@@ -975,7 +966,7 @@ and use the `main` branch with the matching vLLM revision recorded in
         --vllm-start-port 7100
     ```
 
-    #### 5.3.4 Deploy the PD Proxy
+    #### 5.2.2.4 Deploy the PD Proxy
 
     After all twelve engines are ready (four Prefill and eight Decode), deploy
     the proxy as described in
@@ -1008,7 +999,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     `http://<PREFILL_NODE_1_IP>:2999/v1/chat/completions` or
     `/v1/completions`.
 
-    #### 5.3.5 Key Parameter Descriptions
+    #### 5.2.2.5 Key Parameter Descriptions
 
     - The A2 layout is 2P2D: the Prefill role spans two servers (two DP4/TP4
       ranks each) and the Decode role spans two servers (four DP8/TP2 ranks
