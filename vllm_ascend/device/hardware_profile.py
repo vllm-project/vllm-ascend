@@ -143,6 +143,10 @@ class HardwareCapability(Enum):
     NPUGRAPH_EX = auto()
     # Allow shared paged-attention decode when graph mode, shape, and model checks pass.
     PAGED_ATTENTION = auto()
+    # Use the A3 ``qsa_expand_e3`` custom operator to expand QSA selected indices.
+    QSA_E3_EXPAND = auto()
+    # Use the native ``npu_lightning_indexer`` operator for QSA top-k selection.
+    QSA_LIGHTNING_INDEXER = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
     # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
@@ -291,7 +295,11 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.RMS_NORM_CAST},
+            capabilities=_STANDARD_CAPABILITIES
+            | {
+                HardwareCapability.RMS_NORM_CAST,
+                HardwareCapability.QSA_LIGHTNING_INDEXER,
+            },
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
@@ -307,6 +315,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             | {
                 HardwareCapability.CANN_MEGAMOE,
                 HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
+                HardwareCapability.QSA_E3_EXPAND,
+                HardwareCapability.QSA_LIGHTNING_INDEXER,
             },
         ),
         AscendDeviceType._310P: HardwareProfile(
