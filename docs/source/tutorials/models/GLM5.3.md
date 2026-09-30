@@ -552,39 +552,6 @@ Before you start, prepare the following scripts on each node, following the same
 
         export VLLM_USE_FASTOKENS=1
 
-        kv_config=$(cat <<EOF
-        {
-            "kv_connector": "MultiConnector",
-            "kv_role": "kv_producer",
-            "kv_port": 30000,
-            "engine_id": "glm53-prefill-$4",
-            "kv_connector_extra_config": {
-                "connectors": [
-                    {
-                        "kv_connector": "MooncakeConnectorV1",
-                        "kv_role": "kv_producer",
-                        "kv_port": 30000,
-                        "kv_connector_extra_config": {
-                            "use_ascend_direct": true,
-                            "prefill": {"dp_size": 4, "tp_size": 8},
-                            "decode": {"dp_size": 8, "tp_size": 4}
-                        }
-                    },
-                    {
-                        "kv_connector": "AscendStoreConnector",
-                        "kv_role": "kv_producer",
-                        "kv_connector_extra_config": {
-                            "lookup_rpc_port": $((37000 + $4)),
-                            "backend": "memcache",
-                            "use_layerwise": false
-                        }
-                    }
-                ]
-            }
-        }
-        EOF
-        )
-
         vllm serve "${MODEL_PATH}" \
             --host 0.0.0.0 \
             --port "$2" \
@@ -613,7 +580,35 @@ Before you start, prepare the following scripts on each node, following the same
             --api-server-count 8 \
             --additional-config '{"enable_dsa_cp":true,"enable_fused_mc2":1,"enable_flashcomm1":true}' \
             --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp","enforce_eager":true}' \
-            --kv-transfer-config "${kv_config}"
+            --kv-transfer-config '{
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_producer",
+                "kv_port": 30000,
+                "engine_id": "glm53-prefill-'"$4"'",
+                "kv_connector_extra_config": {
+                    "connectors": [
+                        {
+                            "kv_connector": "MooncakeConnectorV1",
+                            "kv_role": "kv_producer",
+                            "kv_port": 30000,
+                            "kv_connector_extra_config": {
+                                "use_ascend_direct": true,
+                                "prefill": {"dp_size": 4, "tp_size": 8},
+                                "decode": {"dp_size": 8, "tp_size": 4}
+                            }
+                        },
+                        {
+                            "kv_connector": "AscendStoreConnector",
+                            "kv_role": "kv_producer",
+                            "kv_connector_extra_config": {
+                                "lookup_rpc_port": '$((37000 + $4))',
+                                "backend": "memcache",
+                                "use_layerwise": false
+                            }
+                        }
+                    ]
+                }
+            }'
         ```
 
     2. Decode nodes 0 and 1
@@ -651,39 +646,6 @@ Before you start, prepare the following scripts on each node, following the same
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=10
 
-        kv_config=$(cat <<EOF
-        {
-            "kv_connector": "MultiConnector",
-            "kv_role": "kv_consumer",
-            "kv_port": 30200,
-            "engine_id": "glm53-decode-$4",
-            "kv_connector_extra_config": {
-                "connectors": [
-                    {
-                        "kv_connector": "MooncakeConnectorV1",
-                        "kv_role": "kv_consumer",
-                        "kv_port": 30200,
-                        "kv_connector_extra_config": {
-                            "use_ascend_direct": true,
-                            "prefill": {"dp_size": 4, "tp_size": 8},
-                            "decode": {"dp_size": 8, "tp_size": 4}
-                        }
-                    },
-                    {
-                        "kv_connector": "AscendStoreConnector",
-                        "kv_role": "kv_consumer",
-                        "kv_connector_extra_config": {
-                            "lookup_rpc_port": $((37100 + $4)),
-                            "backend": "memcache",
-                            "use_layerwise": false
-                        }
-                    }
-                ]
-            }
-        }
-        EOF
-        )
-
         vllm serve "${MODEL_PATH}" \
             --host 0.0.0.0 \
             --port "$2" \
@@ -711,7 +673,35 @@ Before you start, prepare the following scripts on each node, following the same
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --additional-config '{"recompute_scheduler_enable":true,"enable_fused_mc2":1,"ascend_compilation_config":{"enable_static_kernel":false}}' \
             --speculative-config '{"num_speculative_tokens":5,"method":"deepseek_mtp","enforce_eager":true}' \
-            --kv-transfer-config "${kv_config}"
+            --kv-transfer-config '{
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_consumer",
+                "kv_port": 30200,
+                "engine_id": "glm53-decode-'"$4"'",
+                "kv_connector_extra_config": {
+                    "connectors": [
+                        {
+                            "kv_connector": "MooncakeConnectorV1",
+                            "kv_role": "kv_consumer",
+                            "kv_port": 30200,
+                            "kv_connector_extra_config": {
+                                "use_ascend_direct": true,
+                                "prefill": {"dp_size": 4, "tp_size": 8},
+                                "decode": {"dp_size": 8, "tp_size": 4}
+                            }
+                        },
+                        {
+                            "kv_connector": "AscendStoreConnector",
+                            "kv_role": "kv_consumer",
+                            "kv_connector_extra_config": {
+                                "lookup_rpc_port": '$((37100 + $4))',
+                                "backend": "memcache",
+                                "use_layerwise": false
+                            }
+                        }
+                    ]
+                }
+            }'
         ```
 
 Once the preparation is done, start the servers with the following command on each node. Keep all ranks running while the other nodes join; start the proxy only after every API endpoint is healthy.
