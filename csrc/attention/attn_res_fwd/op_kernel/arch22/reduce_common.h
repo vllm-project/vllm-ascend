@@ -171,39 +171,6 @@ __aicore__ inline void ReduceMaxHalfInterval(const LocalTensor<float> &dst_local
 __aicore__ inline void ReduceSumHalfInterval(const LocalTensor<float> &dst_local, const LocalTensor<float> &src_local,
                                              int32_t count)
 {
-    // Match A5 GroupedReduce: 32 lanes, sixteen additions per 512-value
-    // group, then four groups of eight lanes and a sequential eight-lane sum.
-    if (count > 0 && (count % 512) == 0 && count <= 8192) {
-        for (int32_t base = 0; base < count; base += 512) {
-            for (int32_t offset = 32; offset < 512; offset += 32) {
-                Add(src_local[base], src_local[base], src_local[base + offset], 32);
-                PipeBarrier<PIPE_V>();
-            }
-            if (base != 0) {
-                Add(src_local, src_local, src_local[base], 32);
-                PipeBarrier<PIPE_V>();
-            }
-        }
-        for (int32_t offset = 8; offset < 32; offset += 8) {
-            Add(src_local, src_local, src_local[offset], 8);
-            PipeBarrier<PIPE_V>();
-        }
-        auto indices = src_local[32].ReinterpretCast<uint32_t>();
-        Duplicate(src_local[96], 0.0f, 8);
-        PipeBarrier<PIPE_V>();
-        for (uint32_t lane = 0; lane < 8; ++lane) {
-            Duplicate(indices, lane * 4U, 8);
-            PipeBarrier<PIPE_V>();
-            Gather(src_local[64], src_local, indices, 0U, 8U);
-            PipeBarrier<PIPE_V>();
-            Add(src_local[96], src_local[96], src_local[64], 8);
-            PipeBarrier<PIPE_V>();
-        }
-        WholeReduceSum(dst_local, src_local[96], 1, 1, 1, 1, 8);
-        PipeBarrier<PIPE_V>();
-        return;
-    }
-
     if (likely(count > ELEM_PER_REP_FP32)) {
         int32_t bodyCount = findPowerTwo(count);
         int32_t tailCount = count - bodyCount;
@@ -240,221 +207,19 @@ __aicore__ inline void ReduceSumHalfInterval(const LocalTensor<float> &dst_local
  * 对齐 ops-nn RMSNorm：Sqrt + Duplicate(1.0) + Div（避免 Rsqrt / Reciprocal 融合近似）。
  * scratch 需 ≥1 个 32B 对齐块，用于存放 1.0。
  */
-// A3 memory-vector multiply-add rounds its product separately. Recover the
-// product and sum residuals before the final rounding, for the small scalar
-// and softmax calculations that use fused FP32 arithmetic on A5.
-__aicore__ inline void FmaFp32(const LocalTensor<float>& dst,
-    const LocalTensor<float>& a, const LocalTensor<float>& b,
-    const LocalTensor<float>& tmp, uint32_t count)
+__aicore__ inline void InvRmsInPlace(const LocalTensor<float> &dst, float invHiddenSize, float normEps,
+                                     const LocalTensor<float> &scratch)
 {
-    const uint32_t n = RoundUpFp32(count);
-    auto ah = tmp; auto bh = tmp[n]; auto al = tmp[2*n]; auto bl = tmp[3*n];
-    auto product = tmp[4*n]; auto error = tmp[5*n];
-    auto sum = tmp[6*n]; auto sumError = tmp[7*n];
-    Duplicate(al.ReinterpretCast<uint32_t>(), 0xfffff000U, n);
-    PipeBarrier<PIPE_V>();
-    And(ah.ReinterpretCast<uint16_t>(), a.ReinterpretCast<uint16_t>(),
-        al.ReinterpretCast<uint16_t>(), count * 2);
-    And(bh.ReinterpretCast<uint16_t>(), b.ReinterpretCast<uint16_t>(),
-        al.ReinterpretCast<uint16_t>(), count * 2);
-    Mul(product, a, b, count);
-    PipeBarrier<PIPE_V>();
-    Sub(al, a, ah, count); Sub(bl, b, bh, count);
-    Mul(error, ah, bh, count);
-    PipeBarrier<PIPE_V>();
-    Sub(error, error, product, count);
-    PipeBarrier<PIPE_V>();
-    MulAddDst(error, ah, bl, count);
-    PipeBarrier<PIPE_V>();
-    MulAddDst(error, al, bh, count);
-    PipeBarrier<PIPE_V>();
-    MulAddDst(error, al, bl, count);
-    Add(sum, product, dst, count);
-    PipeBarrier<PIPE_V>();
-    Sub(ah, sum, product, count);
-    PipeBarrier<PIPE_V>();
-    Sub(bh, sum, ah, count); Sub(al, dst, ah, count);
-    PipeBarrier<PIPE_V>();
-    Sub(bh, product, bh, count);
-    PipeBarrier<PIPE_V>();
-    Add(sumError, bh, al, count);
-    PipeBarrier<PIPE_V>();
-    Add(sumError, sumError, error, count);
-    PipeBarrier<PIPE_V>();
-    Add(dst, sum, sumError, count);
-    PipeBarrier<PIPE_V>();
-}
-
-// Correct the hardware reciprocal using the two adjacent FP32 values,
-// following A5 ReciprocalRmsNormal. Scratch contains eight aligned blocks.
-__aicore__ inline void ReciprocalRmsNormal(const LocalTensor<float>& value,
-    const LocalTensor<float>& scratch, const LocalTensor<float>& mathScratch)
-{
-    auto negative = scratch;
-    auto quotient = scratch[8];
-    auto neighbor = scratch[16];
-    auto error = scratch[24];
-    auto otherError = scratch[32];
-    auto choose = scratch[40].ReinterpretCast<uint8_t>();
-    auto original = scratch[48];
-    auto one = scratch[56];
-    Duplicate(one, 1.0f, 8);
-    Muls(negative, value, -1.0f, 1);
-    PipeBarrier<PIPE_V>();
-    Div(quotient, one, value, 1);
-    PipeBarrier<PIPE_V>();
-    Copy(original, quotient, static_cast<uint64_t>(1), 1, {1, 1, 8, 8});
-    Duplicate(error, 1.0f, 8);
-    PipeBarrier<PIPE_V>();
-    FmaFp32(error, quotient, negative, mathScratch, 1);
-    PipeBarrier<PIPE_V>();
-    Abs(error, error, 1);
-    PipeBarrier<PIPE_V>();
-    for (int32_t delta = -1; delta <= 1; delta += 2) {
-        Adds(neighbor.ReinterpretCast<int32_t>(), original.ReinterpretCast<int32_t>(), delta, 1);
-        Duplicate(otherError, 1.0f, 8);
-        PipeBarrier<PIPE_V>();
-        FmaFp32(otherError, neighbor, negative, mathScratch, 1);
-        PipeBarrier<PIPE_V>();
-        Abs(otherError, otherError, 1);
-        PipeBarrier<PIPE_V>();
-        Compare(otherError, error, delta < 0 ? CMPMODE::LE : CMPMODE::LT,
-            static_cast<uint64_t>(1), {1, 1, 1, 8, 8, 8});
-        PipeBarrier<PIPE_V>();
-        GetCmpMask(choose);
-        PipeBarrier<PIPE_V>();
-        Select(quotient, choose, neighbor, quotient, SELMODE::VSEL_CMPMASK_SPR, 8);
-        Select(error, choose, otherError, error, SELMODE::VSEL_CMPMASK_SPR, 8);
-        PipeBarrier<PIPE_V>();
-    }
-    Duplicate(mathScratch, 1.0e30f, 8);
-    PipeBarrier<PIPE_V>();
-    Compare(value, mathScratch, CMPMODE::LT, static_cast<uint64_t>(1), {1, 1, 1, 8, 8, 8});
-    PipeBarrier<PIPE_V>();
-    GetCmpMask(choose);
-    PipeBarrier<PIPE_V>();
-    Select(value, choose, quotient, original, SELMODE::VSEL_CMPMASK_SPR, 8);
-    PipeBarrier<PIPE_V>();
-}
-
-__aicore__ inline void DivNormal(const LocalTensor<float>& value,
-    const LocalTensor<float>& divisor, const LocalTensor<float>& scratch, const LocalTensor<float>& mathScratch)
-{
-    auto negative = scratch;
-    auto quotient = scratch[8];
-    auto neighbor = scratch[16];
-    auto error = scratch[24];
-    auto otherError = scratch[32];
-    auto choose = scratch[40].ReinterpretCast<uint8_t>();
-    auto original = scratch[48];
-    auto one = scratch[56];
-    Div(quotient, value, divisor, 1);
-    PipeBarrier<PIPE_V>();
-    Muls(negative, divisor, -1.0f, 1);
-    Copy(one, value, static_cast<uint64_t>(1), 1, {1, 1, 8, 8});
-    PipeBarrier<PIPE_V>();
-    Copy(original, quotient, static_cast<uint64_t>(1), 1, {1, 1, 8, 8});
-    Copy(error, one, static_cast<uint64_t>(1), 1, {1, 1, 8, 8});
-    PipeBarrier<PIPE_V>();
-    FmaFp32(error, quotient, negative, mathScratch, 1);
-    PipeBarrier<PIPE_V>();
-    Abs(error, error, 1);
-    PipeBarrier<PIPE_V>();
-    for (int32_t delta = -1; delta <= 1; delta += 2) {
-        Adds(neighbor.ReinterpretCast<int32_t>(), original.ReinterpretCast<int32_t>(), delta, 1);
-        Copy(otherError, one, static_cast<uint64_t>(1), 1, {1, 1, 8, 8});
-        PipeBarrier<PIPE_V>();
-        FmaFp32(otherError, neighbor, negative, mathScratch, 1);
-        PipeBarrier<PIPE_V>();
-        Abs(otherError, otherError, 1);
-        PipeBarrier<PIPE_V>();
-        Compare(otherError, error, delta < 0 ? CMPMODE::LE : CMPMODE::LT,
-            static_cast<uint64_t>(1), {1, 1, 1, 8, 8, 8});
-        PipeBarrier<PIPE_V>();
-        GetCmpMask(choose);
-        PipeBarrier<PIPE_V>();
-        Select(quotient, choose, neighbor, quotient, SELMODE::VSEL_CMPMASK_SPR, 8);
-        Select(error, choose, otherError, error, SELMODE::VSEL_CMPMASK_SPR, 8);
-        PipeBarrier<PIPE_V>();
-    }
-    Duplicate(mathScratch, 1.0e30f, 8);
-    PipeBarrier<PIPE_V>();
-    Compare(value, mathScratch, CMPMODE::LT, static_cast<uint64_t>(1), {1, 1, 1, 8, 8, 8});
-    PipeBarrier<PIPE_V>();
-    GetCmpMask(choose);
-    PipeBarrier<PIPE_V>();
-    Select(value, choose, quotient, original, SELMODE::VSEL_CMPMASK_SPR, 8);
-    PipeBarrier<PIPE_V>();
-}
-
-// Correct the square root using the adjacent FP32 candidates,
-// following A5 SqrtNormal. Scratch contains eight aligned blocks.
-__aicore__ inline void SqrtNormal(const LocalTensor<float>& value,
-    const LocalTensor<float>& scratch, const LocalTensor<float>& mathScratch)
-{
-    auto negative = scratch;
-    auto quotient = scratch[8];
-    auto neighbor = scratch[16];
-    auto error = scratch[24];
-    auto otherError = scratch[32];
-    auto choose = scratch[40].ReinterpretCast<uint8_t>();
-    auto original = scratch[48];
-    auto one = scratch[56];
-    Duplicate(one, 1.0f, 8);
-    PipeBarrier<PIPE_V>();
-    Sqrt(quotient, value, 1);
-    PipeBarrier<PIPE_V>();
-    Copy(original, quotient, static_cast<uint64_t>(1), 1, {1, 1, 8, 8});
-    Copy(error, value, static_cast<uint64_t>(1), 1, {1, 1, 8, 8});
-    Muls(negative, quotient, -1.0f, 1);
-    PipeBarrier<PIPE_V>();
-    FmaFp32(error, quotient, negative, mathScratch, 1);
-    PipeBarrier<PIPE_V>();
-    Abs(error, error, 1);
-    PipeBarrier<PIPE_V>();
-    for (int32_t delta = -1; delta <= 1; delta += 2) {
-        Adds(neighbor.ReinterpretCast<int32_t>(), original.ReinterpretCast<int32_t>(), delta, 1);
-        Copy(otherError, value, static_cast<uint64_t>(1), 1, {1, 1, 8, 8});
-        PipeBarrier<PIPE_V>();
-        Muls(negative, neighbor, -1.0f, 1);
-        PipeBarrier<PIPE_V>();
-        FmaFp32(otherError, neighbor, negative, mathScratch, 1);
-        PipeBarrier<PIPE_V>();
-        Abs(otherError, otherError, 1);
-        PipeBarrier<PIPE_V>();
-        Compare(otherError, error, delta < 0 ? CMPMODE::LE : CMPMODE::LT,
-            static_cast<uint64_t>(1), {1, 1, 1, 8, 8, 8});
-        PipeBarrier<PIPE_V>();
-        GetCmpMask(choose);
-        PipeBarrier<PIPE_V>();
-        Select(quotient, choose, neighbor, quotient, SELMODE::VSEL_CMPMASK_SPR, 8);
-        Select(error, choose, otherError, error, SELMODE::VSEL_CMPMASK_SPR, 8);
-        PipeBarrier<PIPE_V>();
-    }
-    Duplicate(mathScratch, 1.0e30f, 8);
-    PipeBarrier<PIPE_V>();
-    Compare(value, mathScratch, CMPMODE::LT, static_cast<uint64_t>(1), {1, 1, 1, 8, 8, 8});
-    PipeBarrier<PIPE_V>();
-    GetCmpMask(choose);
-    PipeBarrier<PIPE_V>();
-    Select(value, choose, quotient, original, SELMODE::VSEL_CMPMASK_SPR, 8);
-    PipeBarrier<PIPE_V>();
-}
-
-__aicore__ inline void InvRmsInPlace(const LocalTensor<float> &dst, uint32_t hiddenSize, float normEps,
-                                     const LocalTensor<float> &scratch, const LocalTensor<float>& mathScratch)
-{
-    Duplicate(scratch.ReinterpretCast<int32_t>(), static_cast<int32_t>(hiddenSize), ELEM_PER_BLK_FP32);
-    PipeBarrier<PIPE_V>();
-    Cast(scratch, scratch.ReinterpretCast<int32_t>(), RoundMode::CAST_RINT, ELEM_PER_BLK_FP32);
-    PipeBarrier<PIPE_V>();
-    DivNormal(dst, scratch, scratch, mathScratch);
+    Muls(dst, dst, invHiddenSize, 1);
     PipeBarrier<PIPE_V>();
     Adds(dst, dst, normEps, 1);
     PipeBarrier<PIPE_V>();
-    SqrtNormal(dst, scratch, mathScratch);
+    Sqrt(dst, dst, 1);
     PipeBarrier<PIPE_V>();
-    ReciprocalRmsNormal(dst, scratch, mathScratch);
+    Duplicate(scratch, 1.0f, ELEM_PER_BLK_FP32);
+    PipeBarrier<PIPE_V>();
+    Div(dst, scratch, dst, 1); // 1 / sqrt(meanSq + eps)
+    PipeBarrier<PIPE_V>();
 }
 
 /*! 从 meta 标量槽拷 1 个 float 到 dst；Vector Copy（PIPE_V），便于 EnQue V_MTE3 同步。
@@ -550,12 +315,7 @@ __aicore__ inline void MulAddRowByBrcBlock(const LocalTensor<float>& dst, const 
         SetMaskCount();
         SetVectorMask<float, MaskMode::COUNTER>(hiddenSize);
     }
-    // Match A5: round the FP32 product before adding it to the mixture.
-    // src is a temporary converted row and is not reused by the caller.
-    Mul<float, false>(src, src, brcOneBlock, MASK_PLACEHOLDER, 1, repeatParams);
-    PipeBarrier<PIPE_V>();
-    const BinaryRepeatParams addParams{1, 1, 1, 8, 8, 8};
-    Add<float, false>(dst, dst, src, MASK_PLACEHOLDER, 1, addParams);
+    MulAddDst<float, float, false>(dst, src, brcOneBlock, MASK_PLACEHOLDER, 1, repeatParams);
     PipeBarrier<PIPE_V>();
     if (manageMask) {
         SetMaskNorm();
@@ -707,108 +467,9 @@ __aicore__ inline void BroadcastScalarMulTensor(const LocalTensor<float>& dst, c
 /*!
  * 小 B Softmax（向量路径：WholeReduceMax/Sum + Brcb + Exp + Div）。
  */
-// Exponential range reduction and polynomial adapted from SLEEF xexpf.
-// Copyright Naoki Shibata and contributors 2010-2025.
-// Boost Software License - Version 1.0 - August 17th, 2003
-// Permission is hereby granted, free of charge, to any person or organization
-// obtaining a copy of the software and accompanying documentation covered by
-// this license (the "Software") to use, reproduce, display, distribute,
-// execute, and transmit the Software, and to prepare derivative works of the
-// Software, and to permit third-parties to whom the Software is furnished to
-// do so, all subject to the following:
-// The copyright notices in the Software and this entire statement, including
-// the above license grant, this restriction and the following disclaimer,
-// must be included in all copies of the Software, in whole or in part, and
-// all derivative works of the Software, unless such copies or derivative
-// works are solely in the form of machine-executable object code generated by
-// a source language processor.
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NON-INFRINGEMENT. IN NO EVENT
-// SHALL THE COPYRIGHT HOLDERS OR ANYONE DISTRIBUTING THE SOFTWARE BE LIABLE
-// FOR ANY DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
-// ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-// DEALINGS IN THE SOFTWARE.
-// Preserve explicit FP32 FMA and rounding boundaries across vector backends.
-__aicore__ inline void SoftmaxExpFp32(const LocalTensor<float>& x,
-    const LocalTensor<float>& fallback, const LocalTensor<float>& scratch,
-    const LocalTensor<float>& mathScratch, uint32_t count)
-{
-    if (count > 64) { Exp(x, x, count); PipeBarrier<PIPE_V>(); return; }
-    auto reduced = scratch;
-    auto qf = scratch[count];
-    auto poly = scratch[2 * count];
-    auto next = scratch[3 * count];
-    auto coefficient = scratch[4 * count];
-    auto square = scratch[5 * count];
-    auto q = scratch[6 * count].ReinterpretCast<int32_t>();
-    auto mask = scratch[7 * count].ReinterpretCast<uint8_t>();
-    Exp(fallback, x, count);
-    Maxs(reduced, x, -80.0f, count);
-    PipeBarrier<PIPE_V>();
-    Muls(qf, reduced, 1.4426950408889634074f, count);
-    PipeBarrier<PIPE_V>();
-    Cast(q, qf, RoundMode::CAST_RINT, count);
-    PipeBarrier<PIPE_V>();
-    Cast(qf, q, RoundMode::CAST_RINT, count);
-    Duplicate(coefficient, -0.693145751953125f, count);
-    PipeBarrier<PIPE_V>();
-    FmaFp32(reduced, qf, coefficient, mathScratch, count);
-    PipeBarrier<PIPE_V>();
-    Duplicate(coefficient, -1.428606765330187045e-6f, count);
-    PipeBarrier<PIPE_V>();
-    FmaFp32(reduced, qf, coefficient, mathScratch, count);
-    Duplicate(poly, 0.000198527617612853646278381f, count);
-    PipeBarrier<PIPE_V>();
-    Duplicate(next, 0.00139304355252534151077271f, count);
-    PipeBarrier<PIPE_V>();
-    FmaFp32(next, poly, reduced, mathScratch, count);
-    PipeBarrier<PIPE_V>();
-    CopyCompactFloatsUb(poly, next, count);
-    Duplicate(next, 0.00833336077630519866943359f, count);
-    PipeBarrier<PIPE_V>();
-    FmaFp32(next, poly, reduced, mathScratch, count);
-    PipeBarrier<PIPE_V>();
-    CopyCompactFloatsUb(poly, next, count);
-    Duplicate(next, 0.0416664853692054748535156f, count);
-    PipeBarrier<PIPE_V>();
-    FmaFp32(next, poly, reduced, mathScratch, count);
-    PipeBarrier<PIPE_V>();
-    CopyCompactFloatsUb(poly, next, count);
-    Duplicate(next, 0.166666671633720397949219f, count);
-    PipeBarrier<PIPE_V>();
-    FmaFp32(next, poly, reduced, mathScratch, count);
-    PipeBarrier<PIPE_V>();
-    CopyCompactFloatsUb(poly, next, count);
-    Duplicate(next, 0.5f, count);
-    PipeBarrier<PIPE_V>();
-    FmaFp32(next, poly, reduced, mathScratch, count);
-    PipeBarrier<PIPE_V>();
-    CopyCompactFloatsUb(poly, next, count);
-    Mul(square, reduced, reduced, count);
-    PipeBarrier<PIPE_V>();
-    FmaFp32(reduced, square, poly, mathScratch, count);
-    PipeBarrier<PIPE_V>();
-    Adds(poly, reduced, 1.0f, count);
-    // q is in [-115, 0]; the power of two is normal and exact.
-    Adds(q, q, 127, count);
-    PipeBarrier<PIPE_V>();
-    ShiftLeft(q, q, 23, count);
-    PipeBarrier<PIPE_V>();
-    Mul(poly, poly, q.ReinterpretCast<float>(), count);
-    Duplicate(mathScratch, -80.0f, count);
-    PipeBarrier<PIPE_V>();
-    Compare(x, mathScratch, CMPMODE::GE, static_cast<uint64_t>(count), {1, 1, 1, 8, 8, 8});
-    PipeBarrier<PIPE_V>();
-    GetCmpMask(mask);
-    PipeBarrier<PIPE_V>();
-    Select(x, mask, poly, fallback, SELMODE::VSEL_CMPMASK_SPR, count);
-    PipeBarrier<PIPE_V>();
-}
-
 __aicore__ inline void SoftmaxSmallVec(const LocalTensor<float>& vecMeta, uint32_t blockCount, uint32_t metaAlign,
                                        const LocalTensor<float>& workScalar, const LocalTensor<float>& brcMeta,
-                                       const LocalTensor<float>& brcPack, const LocalTensor<float>& mathScratch)
+                                       const LocalTensor<float>& brcPack)
 {
     const LocalTensor<float> brcScratch = brcPack;
     const int32_t curColNum = static_cast<int32_t>(blockCount);
@@ -843,43 +504,21 @@ __aicore__ inline void SoftmaxSmallVec(const LocalTensor<float>& vecMeta, uint32
     BrcbScalarRow1(brcScratch, workScalar);
     SubLastDimRow1NoBrc(brcMeta, brcMeta, brcScratch, curColNum);
 
-    SoftmaxExpFp32(brcMeta, vecMeta, brcPack, mathScratch, metaAlign);
+    Exp(brcMeta, brcMeta, metaAlign);
     PipeBarrier<PIPE_V>();
 
     if (blockCount <= ELEM_PER_REP_FP32) {
-        auto lanes = brcPack;
-        auto indices = brcPack[8].ReinterpretCast<uint32_t>();
-        auto part = brcPack[16];
-        Duplicate(lanes, 0.0f, 8);
-        PipeBarrier<PIPE_V>();
-        if (blockCount < 8) {
-            for (uint32_t j = 0; j < blockCount; ++j) {
-                Duplicate(indices, j * 4U, 8);
-                PipeBarrier<PIPE_V>();
-                Gather(part, brcMeta, indices, 0U, 8U);
-                PipeBarrier<PIPE_V>();
-                Add(lanes, lanes, part, 8);
-                PipeBarrier<PIPE_V>();
-            }
-        } else {
-            // Padded exponentials are zero; fold eight lanes before butterfly.
-            for (uint32_t j = 0; j < metaAlign; j += 8) {
-                Add(lanes, lanes, brcMeta[j], 8);
-                PipeBarrier<PIPE_V>();
-            }
-            for (uint32_t shift = 4; shift != 0; shift /= 2) {
-                for (uint32_t lane = 0; lane < 8; ++lane) {
-                    uint64_t laneMask[2] = {1ULL << lane, 0};
-                    Duplicate(indices, (lane ^ shift) * 4U, laneMask, 1, 1, 8);
-                }
-                PipeBarrier<PIPE_V>();
-                Gather(part, lanes, indices, 0U, 8U);
-                PipeBarrier<PIPE_V>();
-                Add(lanes, lanes, part, 8);
-                PipeBarrier<PIPE_V>();
-            }
+        AscendCUtils::SetMask<float>(blockCount);
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+        if ASCEND_IS_AIV {
+            WholeReduceSum<float, false>(workScalar, brcMeta, MASK_PLACEHOLDER, 1, 0, 1, 0);
         }
-        WholeReduceSum(workScalar, lanes, 1, 1, 1, 1, 8);
+#else
+        WholeReduceSum<float, false>(workScalar, brcMeta, MASK_PLACEHOLDER, 1, 1, 1, DEFAULT_REPEAT_STRIDE);
+#endif
+        PipeBarrier<PIPE_V>();
+        SetMaskNorm();
+        ResetMask();
         PipeBarrier<PIPE_V>();
     } else {
         // Fold the tail into the first 64 entries before the reduction. Use
@@ -892,7 +531,7 @@ __aicore__ inline void SoftmaxSmallVec(const LocalTensor<float>& vecMeta, uint32
 
     Duplicate(brcScratch, 1.0f, 1);
     PipeBarrier<PIPE_V>();
-    ReciprocalRmsNormal(workScalar, brcPack, mathScratch);
+    Div(workScalar, brcScratch, workScalar, 1);
     PipeBarrier<PIPE_V>();
 
     BrcbScalarRow1(brcScratch, workScalar);
@@ -903,4 +542,3 @@ __aicore__ inline void SoftmaxSmallVec(const LocalTensor<float>& vecMeta, uint32
 }
 
 #endif // REDUCE_COMMON_H_ATTN_RES_FWD
-
