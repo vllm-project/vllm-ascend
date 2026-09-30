@@ -147,6 +147,22 @@ def _validate_spec(spec: BatchSpec) -> None:
 _VLLM_CONFIG_CACHE: dict = {}
 
 
+@pytest.fixture(autouse=True)
+def _pin_v1_sfa_model_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep this V1 SFA kernel check off the default DeepSeek-V3.2 MRv2 path.
+
+    ``set_additional_forward_context`` reads TP groups on the V2 branch.
+    This file never initializes distributed groups.
+    """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setattr("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", False, raising=False)
+    monkeypatch.setattr(
+        "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
+        False,
+        raising=False,
+    )
+
+
 def _get_vllm_config(
     model: str,
     dtype: torch.dtype,
@@ -478,7 +494,7 @@ def test_sfa_sparse_flash_attention_precision(
     dtype: torch.dtype,
     tensor_parallel_size: int,
 ) -> None:
-    """SFA kernel vs fp32 dense MQA reference (decode, prefill, mixed, MTP)."""
+    """SFA V1 kernel vs fp32 dense MQA reference (decode, prefill, mixed, MTP)."""
     vllm_config = _get_vllm_config(model, dtype, tensor_parallel_size=tensor_parallel_size)
     _run_precision_check(
         BATCH_SPECS[batch_spec_name],

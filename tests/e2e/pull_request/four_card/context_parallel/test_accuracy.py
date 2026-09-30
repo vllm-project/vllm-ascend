@@ -257,6 +257,7 @@ def test_deepseek_v4_dsa_cp_prefill_decode_accuracy() -> None:
     {
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
@@ -270,6 +271,7 @@ def test_models_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
     {
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
