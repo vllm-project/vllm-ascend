@@ -179,6 +179,24 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
         attn_metadata = self.model_runner.model_state.attn_metadata
 
+        prepare_engram = getattr(self.model_runner.model_state, "prepare_engram", None)
+        if prepare_engram is not None:
+            # FULL dispatch pads every DP rank to desc.num_tokens. Use the same
+            # forward metadata as _graph_relay, before the graph consumes rows.
+            with (
+                set_current_vllm_config(self.vllm_config),
+                set_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    cudagraph_runtime_mode=desc.cg_mode,
+                    num_tokens_across_dp=torch.full([self.model_runner.dp_size], num_tokens),
+                    batch_descriptor=None,
+                    slot_mapping=None,
+                ),
+            ):
+                prepare_engram()
+
         if use_updatable_graph(attn_backend):
             return self._updatable_graph_replay(desc, attn_metadata)
         else:
