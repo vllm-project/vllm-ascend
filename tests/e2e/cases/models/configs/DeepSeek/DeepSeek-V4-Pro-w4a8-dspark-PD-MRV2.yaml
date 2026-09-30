@@ -1,4 +1,4 @@
-test_name: "DeepSeek-V4-Pro-w4a8-dspark-prefix-cache-PD-MRV2"
+test_name: "DeepSeek-V4-Pro-w4a8-dspark-PD-MRV2"
 model: "Eco-Tech/DeepSeek-V4-Pro-0813-w4a8"
 num_nodes: 4
 npu_per_node: 16
