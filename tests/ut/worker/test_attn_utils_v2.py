@@ -239,7 +239,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     "state_kwargs", [{}, {"attn_state": None}, {"attn_state": AscendAttentionState.ChunkedPrefill}]
 )
 @pytest.mark.parametrize("factory_state", [None, AscendAttentionState.ChunkedPrefill])
-def test_build_attn_metadata_factory_applies_state(monkeypatch, state_kwargs, factory_state):
+def test_build_draft_attn_metadata_applies_factory_state(monkeypatch, state_kwargs, factory_state):
     captured_kwargs = {}
 
     def raw_build_attn_metadata(*_args, **kwargs):
@@ -254,7 +254,7 @@ def test_build_attn_metadata_factory_applies_state(monkeypatch, state_kwargs, fa
     positions = torch.arange(8, dtype=torch.int32)
     is_prefilling = torch.tensor([False, False])
 
-    with attn_utils.build_attn_metadata_factory(
+    with attn_utils.build_draft_attn_metadata_factory(
         positions,
         pad=5,
         is_prefilling=is_prefilling,
@@ -1134,9 +1134,9 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
         is state.PrefillCacheHit
     )
     assert attn_utils.build_attn_state(no_spec, seq, 2, seq, seq) is state.PrefillNoCache
-    assert attn_utils.build_attn_state(mtp, seq, 2, ones, ones) is state.DecodeOnly
+    assert attn_utils.build_attn_state(mtp, seq, 2, ones, ones) is state.SpecDecoding
     assert attn_utils.build_attn_state(no_spec, seq, 2, ones, ones) is state.DecodeOnly
-    assert attn_utils.build_attn_state(mtp, seq, 2, scheduled, ones) is state.ChunkedPrefill
+    assert attn_utils.build_attn_state(mtp, seq, 2, scheduled, ones) is state.SpecDecoding
     assert attn_utils.build_attn_state(eagle, seq, 2, scheduled, ones) is state.ChunkedPrefill
     assert attn_utils.build_attn_state(chunked, seq, 2, scheduled, scheduled) is state.ChunkedPrefill
     assert attn_utils.build_attn_state(no_spec, seq, 2, scheduled, scheduled) is state.PrefillCacheHit
@@ -1210,7 +1210,7 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     monkeypatch.setattr(attn_utils, "_BUILD_ATTN_METADATA_MODULE", module)
     with attn_utils.build_attn_metadata_wrapper():
         assert module.build_attn_metadata is attn_utils.build_attn_metadata
-    with attn_utils.build_attn_metadata_factory(torch.arange(4), 2, True):
+    with attn_utils.build_draft_attn_metadata_factory(torch.arange(4), 2, True):
         forwarded = module.build_attn_metadata()
     assert forwarded["positions"].tolist() == [0, 1]
     assert forwarded["is_prefilling"] is True
