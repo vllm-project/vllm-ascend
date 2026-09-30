@@ -333,6 +333,10 @@ class MemcacheBackend(Backend):
             raise RuntimeError("Memcache key-info response length mismatch")
         rewarmed = False
         for key, info in zip(keys, infos, strict=True):
+            # A missing key yields a None entry: there is no SSD object to
+            # rewarm, and the caller treats it as not loadable.
+            if info is None:
+                continue
             # MEDIA_SSD=2 has no directly readable GVA. Query and AddLease
             # do not rewarm in the deployed SDK; only the regular Get path
             # waits for SSD -> DRAM completion. Its API requires a full-size
