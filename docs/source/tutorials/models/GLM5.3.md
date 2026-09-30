@@ -531,16 +531,16 @@ Before you start, prepare the following scripts on each node, following the same
         PYTHON_LIB_DIR=/path/to/python/lib
 
         export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_ROOT}/config/mmc-local.conf"
-        export LD_LIBRARY_PATH="${MEMCACHE_ROOT}/lib:${PYTHON_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH="${MEMCACHE_ROOT}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH}"
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
         export HCCL_EXEC_TIMEOUT=1800
         export HCCL_CONNECT_TIMEOUT=1800
-        export VLLM_HOST_IP="${local_ip}"
-        export HCCL_IF_IP="${local_ip}"
-        export GLOO_SOCKET_IFNAME="${nic_name}"
-        export TP_SOCKET_IFNAME="${nic_name}"
-        export HCCL_SOCKET_IFNAME="${nic_name}"
+        export VLLM_HOST_IP=$local_ip
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
         export HCCL_BUFFSIZE=1024
         export HCCL_OP_EXPANSION_MODE="AIV"
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -623,16 +623,16 @@ Before you start, prepare the following scripts on each node, following the same
         PYTHON_LIB_DIR=/path/to/python/lib
 
         export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_ROOT}/config/mmc-local.conf"
-        export LD_LIBRARY_PATH="${MEMCACHE_ROOT}/lib:${PYTHON_LIB_DIR}:/usr/local/lib:${LD_LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH="${MEMCACHE_ROOT}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH}"
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
         export HCCL_EXEC_TIMEOUT=1800
         export HCCL_CONNECT_TIMEOUT=1800
-        export VLLM_HOST_IP="${local_ip}"
-        export HCCL_IF_IP="${local_ip}"
-        export GLOO_SOCKET_IFNAME="${nic_name}"
-        export TP_SOCKET_IFNAME="${nic_name}"
-        export HCCL_SOCKET_IFNAME="${nic_name}"
+        export VLLM_HOST_IP=$local_ip
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
         export HCCL_BUFFSIZE=1024
         export HCCL_OP_EXPANSION_MODE="AIV"
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
