@@ -34,6 +34,7 @@ import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
+    AscendSlidingWindowMLASpec,
     register_ascend_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
@@ -48,6 +49,45 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+
+
+@pytest.mark.skipif(not hasattr(SlidingWindowMLASpec, "bounded_replay"), reason="vLLM lacks SWA bounded replay")
+@pytest.mark.parametrize("group_count", [1, 2])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_swa_only_replay_keeps_private_blocks_without_prefix_hits(group_count, wrapped):
+    register_all_kvcache_specs(None)
+    register_ascend_kv_cache_specs()
+    spec = AscendSlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=32,
+        bounded_replay=True,
+        model_version="deepseek_v41",
+    )
+    groups = []
+    for index in range(group_count):
+        name = f"swa_{index}"
+        group_spec = UniformTypeKVCacheSpecs.from_specs({name: spec}) if wrapped else spec
+        groups.append(KVCacheGroupSpec([name], group_spec))
+    cfg = KVCacheConfig(num_blocks=32, kv_cache_tensors=[], kv_cache_groups=groups)
+    coordinator = get_kv_cache_coordinator(
+        cfg,
+        max_model_len=1024,
+        enable_caching=True,
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+    free_blocks = coordinator.block_pool.get_num_free_blocks()
+    for manager in coordinator.single_type_managers:
+        assert not manager.enable_caching
+        manager.allocate_new_blocks("request", 16, 16)
+    assert coordinator.block_pool.get_num_free_blocks() == free_blocks - group_count
+    coordinator.free("request")
+    assert coordinator.block_pool.get_num_free_blocks() == free_blocks
+    assert coordinator.find_longest_cache_hit([b"a" * 32], 16) == (tuple([] for _ in groups), 0, 0)
+    assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) == wrapped for group in cfg.kv_cache_groups)
 
 
 @pytest.mark.parametrize("with_private_tail", [False, True])

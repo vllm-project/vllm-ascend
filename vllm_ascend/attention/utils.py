@@ -285,6 +285,14 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     _num_computed_tokens_cpu: torch.Tensor | None = None
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
 
+    # Per-request replay start: 0 for every request that is not replaying, else
+    # where that request's replayed run begins. A backend clamps a replaying
+    # request's sliding-window lower bound to it: below that point the window's
+    # KV is not being rebuilt -- the replayed positions are padded on the
+    # cacheable groups -- and only the shared prefix is there. ``None`` means
+    # the same as all zeros; dummy/profiling/capture batches do not fill it.
+    replay_start: torch.Tensor | None = None
+
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
         # This only use to eagle now. It will be use to enforce_eager in future.
@@ -343,6 +351,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             req_topk_buffer_generations=_slice_reqs(self.req_topk_buffer_generations),
             copy_sfa_draft_index=self.copy_sfa_draft_index,
             offload_dummy=self.offload_dummy,
+            replay_start=_slice_reqs(self.replay_start),
             req_ids_tensor=_slice_reqs(self.req_ids_tensor),
             token_to_req=(self.token_to_req[:num_actual_tokens] if self.token_to_req is not None else None),
         )
