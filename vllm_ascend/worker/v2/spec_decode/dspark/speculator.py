@@ -33,24 +33,33 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
+from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
     prepare_replicated_pcp_config,
 )
 
 
-class AscendDSparkSpeculator(DSparkSpeculator):
+class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
+    # DSpark samples via compute_draft_logits and never calls sample_draft, so
+    # the mixin sample_draft alignment is not used; instead load_draft_model
+    # wraps the draft model's compute_draft_logits to pad the LM-head input to
+    # the group-agreed capacity and trim the logits back (no _sample_sequential
+    # override, upstream sampling logic untouched).
+    _lmhead_tp_sample_draft_supported = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
+        self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
         self._init_dcp()
@@ -82,7 +91,41 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         if hasattr(model, "configure_target_aux_hidden_capture"):
             model.configure_target_aux_hidden_capture(target_model)
 
+        self._lmhead_tp_wrap_draft_logits(model)
+
         return model
+
+    def _lmhead_tp_wrap_draft_logits(self, model: torch.nn.Module) -> None:
+        """Pad/trim the DSpark draft LM head around its collectives.
+
+        DSpark feeds its vocab-sharded draft LM head directly through
+        ``compute_draft_logits`` (inside upstream ``_sample_sequential`` /
+        ``_sample_sequential_topk``), which bypasses the mixin's
+        ``sample_draft`` alignment. Wrap the method instead of overriding the
+        sampling loop: every rank feeds the group-agreed capacity
+        (``max_num_reqs * num_speculative_steps``) into the LM-head
+        collectives, then the logits are trimmed back to the real rows.
+        """
+        if not lmhead_tp_enable():
+            return
+
+        original = model.compute_draft_logits
+        capacity = lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps)
+
+        def aligned(hidden_states: torch.Tensor) -> torch.Tensor:
+            num_logits = hidden_states.shape[0]
+            if num_logits > capacity:
+                raise ValueError(
+                    f"lmhead TP DSpark draft rows ({num_logits}) exceed the group-agreed "
+                    f"capacity ({capacity} = max_num_reqs * num_speculative_steps)."
+                )
+            padded = hidden_states
+            if num_logits < capacity:
+                # Zero rows carry no draft token; they are trimmed back off.
+                padded = torch.nn.functional.pad(hidden_states, (0, 0, 0, capacity - num_logits))
+            return original(padded)[:num_logits]
+
+        model.compute_draft_logits = aligned
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:

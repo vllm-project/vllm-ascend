@@ -908,6 +908,29 @@ def lmhead_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
 
 
+def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
+    """Row capacity every rank of the lmhead-TP group must agree on;
+    cross-rank drift desyncs the collectives and hangs."""
+    return max_num_reqs * logits_rows_per_req
+
+
+def lmhead_tp_pad_rows(rows: torch.Tensor, capacity: int, formula: str) -> torch.Tensor:
+    """Zero-pad the leading dim of ``rows`` up to ``capacity`` — the one pad
+    primitive both head paths share; for 1-D indices the zero padding is the
+    safe row-0 gather index, overrun fails fast with ``formula`` named."""
+    num_rows = rows.shape[0]
+    if num_rows > capacity:
+        raise ValueError(
+            f"lmhead TP rows ({num_rows}) exceed the group-agreed capacity "
+            f"({capacity} = {formula}); the capacity formula no longer matches "
+            "upstream logits production."
+        )
+    if num_rows == capacity:
+        return rows
+    padding = (0, 0, 0, capacity - num_rows) if rows.dim() == 2 else (0, capacity - num_rows)
+    return torch.nn.functional.pad(rows, padding)
+
+
 def embedding_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size > 0
 
