@@ -55,12 +55,26 @@ logger = logging.getLogger(__name__)
 _MULTI_NODE_TEST = "tests/e2e/nightly/multi_node/scripts/test_multi_node.py"
 _INTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py"
 _EXTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py"
+_EXTERNAL_DP_CONFIG_DIR = "tests/e2e/nightly/multi_node/external_dp/config"
 
 # Ascend toolkit env files sourced before launching multi-node pytest.
 _ENV_SOURCE_FILES = (
     "/usr/local/Ascend/ascend-toolkit/set_env.sh",
     "/usr/local/Ascend/nnal/atb/set_env.sh",
 )
+
+
+def _multi_node_test_path(repo: Path, inp: BisectInput) -> str:
+    """Select the common dispatcher, with a fallback for legacy commits."""
+    if (repo / _MULTI_NODE_TEST).is_file():
+        return _MULTI_NODE_TEST
+
+    base = inp.config_base_path or ""
+    config_name = Path(inp.config_yaml).name
+    legacy_external_config = repo / _EXTERNAL_DP_CONFIG_DIR / config_name
+    if "external_dp/config" in base or "external_dp/config" in inp.config_yaml or legacy_external_config.is_file():
+        return _EXTERNAL_DP_TEST
+    return _INTERNAL_DP_TEST
 
 
 def _safe_name(name: str) -> str:
@@ -221,13 +235,7 @@ class MultiNodeRunner(BaseRunner):
         self.coord.publish_done()
 
     def _test_path(self) -> str:
-        if (self.repo / _MULTI_NODE_TEST).is_file():
-            return _MULTI_NODE_TEST
-
-        base = self.inp.config_base_path or ""
-        if "external_dp/config" in base or "external_dp/config" in self.inp.config_yaml:
-            return _EXTERNAL_DP_TEST
-        return _INTERNAL_DP_TEST
+        return _multi_node_test_path(self.repo, self.inp)
 
     def _run_multi_pytest(self, log_path: Path, job: str) -> int:
         env = self._base_env()
