@@ -273,6 +273,9 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
     model.embed_tokens = torch.nn.Embedding(4, 3)
     model.norm = torch.nn.Identity()
     model.shared_attention_state = MagicMock()
+    # forward reads the MTP buffer (None = collapse locally), which __init__
+    # normally allocates; the __new__-built fixture skips that.
+    model._mtp_hidden_buffer = None
     model._set_aux_hidden_state_layers((1, 3))
 
     class Layer(torch.nn.Module):

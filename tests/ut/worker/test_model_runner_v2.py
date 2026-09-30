@@ -32,8 +32,12 @@ def _make_runner(need_timing: bool = True):
     runner.attn_groups = []
     runner.adaptive_verification = None
     runner.use_fia = False
+    runner.sync_spec_pp_cpu_counts = False
     # Set by NPUModelRunner.__init__ on real instances.
     runner._finegrained_tp_requires_graph = False
+    # Empty groups keep prepare_dummy_attn's V4.1 ring-state prep a no-op;
+    # these tests focus on buffer refresh / upstream passthrough only.
+    runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
     return runner
 
 
@@ -329,6 +333,7 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
 def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tokens):
     runner = _make_runner()
     runner.input_buffers = AscendInputBuffers(4, 8, torch.device("cpu"))
+    runner.block_tables = Mock()
     manager = AscendPCPManager(2, 1, torch.device("cpu"), max_num_reqs=4, max_num_tokens=8)
     runner.pcp_manager = manager
     manager._local_block_tables = (torch.full((8, 2), 99, dtype=torch.int32),)
@@ -345,12 +350,19 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
     with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
         dummy = AscendInputBatch.make_dummy(num_reqs, num_tokens, runner.input_buffers)
 
-    block_tables, slots = runner.prepare_dummy_attn(dummy)
+    # execute_model stages dummy inputs before preparing attention metadata.
+    staged = manager.prepare_inputs_to_capture(dummy)
+    block_tables, slots = runner.prepare_dummy_attn(staged)
 
     for name, value in captured.items():
         expected = getattr(dummy, name)
+        assert getattr(staged, name).data_ptr() == value.data_ptr()
         torch.testing.assert_close(value[: len(expected)], expected)
-    np.testing.assert_array_equal(input_buffers.seq_lens_np[:num_reqs], dummy.seq_lens_np)
+    # Attention metadata consumes the returned batch's CPU lengths.
+    np.testing.assert_array_equal(staged.seq_lens_np, dummy.seq_lens_np)
+    np.testing.assert_array_equal(staged.seq_lens_np, staged.seq_lens.numpy())
+    assert staged.attn_state == dummy.attn_state
+    assert staged.is_dummy
     assert block_tables[0].data_ptr() == manager._local_block_tables[0].data_ptr()
     assert torch.count_nonzero(block_tables[0]) == 0
     assert slots.data_ptr() == manager._gathered_kv_slot_mappings.data_ptr()
@@ -358,13 +370,19 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
     assert torch.all(slots == -1)
 
 
-def test_prepare_dummy_attn_without_pcp_uses_upstream():
+@pytest.mark.parametrize("valid_state_slots", [False, True])
+def test_prepare_dummy_attn_without_pcp_uses_upstream(valid_state_slots):
     runner = _make_runner()
     runner.pcp_manager = None
-    dummy = object()
-    with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
-        assert runner.prepare_dummy_attn(dummy) == ((), None)
-    parent.assert_called_once_with(dummy, valid_state_slots=False)
+    # num_reqs feeds the V4.1 ring-state prep that runs after the upstream call.
+    dummy = SimpleNamespace(num_reqs=0)
+    with (
+        patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent,
+        patch("vllm_ascend.worker.v2.model_runner.prepare_v41_dummy_ring_state") as prepare_ring,
+    ):
+        assert runner.prepare_dummy_attn(dummy, valid_state_slots=valid_state_slots) == ((), None)
+    parent.assert_called_once_with(dummy, valid_state_slots=valid_state_slots)
+    prepare_ring.assert_called_once_with(runner, dummy.num_reqs)
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -429,7 +447,7 @@ def test_pcp_manager_cls():
     assert _make_runner().pcp_manager_cls is AscendPCPManager
 
 
-def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=False):
+def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=False, use_pp=False):
     self.vllm_config = vllm_config
     self.device = device
     self.compilation_config = SimpleNamespace(
@@ -437,8 +455,9 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
         mode=SimpleNamespace(),
         has_full_cudagraphs=lambda: full_graph,
     )
-    self.model_config = SimpleNamespace(enforce_eager=not full_graph)
+    self.model_config = SimpleNamespace(enforce_eager=not full_graph, architecture="Qwen3_5ForConditionalGeneration")
     self.speculative_config = object() if speculative else None
+    self.use_pp = use_pp
     self.is_last_pp_rank = True
     self.pp_handler = MagicMock()
     self.max_num_reqs = 2
@@ -493,6 +512,7 @@ def test_init_without_spec_pp():
     assert runner.input_buffers == "buf"
     assert runner.speculator is None
     assert runner.use_spec_pp is False
+    assert runner.sync_spec_pp_cpu_counts is False
     assert runner.decode_query_len == 1
 
 
@@ -522,7 +542,7 @@ def test_init_spec_pp_full_graph_and_speculator():
         patch.object(
             GPUModelRunner,
             "__init__",
-            lambda self, cfg, dev: _parent_init(self, cfg, dev, full_graph=True, speculative=True),
+            lambda self, cfg, dev: _parent_init(self, cfg, dev, full_graph=True, speculative=True, use_pp=True),
         ),
         patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController", return_value="eplb") as eplb_cls,
         patch("vllm_ascend.worker.v2.model_runner.init_speculator", return_value=speculator),
@@ -548,6 +568,7 @@ def test_init_spec_pp_full_graph_and_speculator():
     assert runner.speculator is speculator
     assert speculator.update_stream is runner.update_stream
     assert runner.use_spec_pp is False
+    assert runner.sync_spec_pp_cpu_counts is True
     install_pp.assert_not_called()
     assert runner.update_stream is not None
     assert runner.decode_query_len == 2

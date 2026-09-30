@@ -49,12 +49,7 @@ def _launch_pytest(inp: BisectInput, opt: BisectOptions, log_path: Path) -> int:
     env.setdefault("BENCHMARK_HOME", str(opt.repo_dir / "benchmark"))
     env["LWS_WORKER_INDEX"] = str(opt.node_index)
 
-    base = inp.config_base_path or ""
-    test_path = (
-        runner._EXTERNAL_DP_TEST
-        if "external_dp/config" in base or "external_dp/config" in inp.config_yaml
-        else runner._INTERNAL_DP_TEST
-    )
+    test_path = runner._multi_node_test_path(opt.repo_dir, inp)
     sources = " ; ".join(f"source {f} 2>/dev/null || true" for f in runner._ENV_SOURCE_FILES)
     bash_cmd = f"set -e ; {sources} ; exec python -m pytest -sv --show-capture=no {test_path}"
     with open(log_path, "a", encoding="utf-8") as out:

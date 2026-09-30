@@ -153,6 +153,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.scheduler_config.async_scheduling = False
         mock_vllm_config.scheduler_config.scheduler_cls = None
         mock_vllm_config.speculative_config = None
+        mock_vllm_config.engram_config = None
         mock_vllm_config.kv_transfer_config = None
         mock_vllm_config.additional_config = {}
         mock_vllm_config.compilation_config.pass_config.enable_sp = False
