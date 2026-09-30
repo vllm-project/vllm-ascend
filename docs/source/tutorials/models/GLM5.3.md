@@ -542,7 +542,7 @@ Before you start, prepare the following scripts on each node, following the same
         export TP_SOCKET_IFNAME="${nic_name}"
         export HCCL_SOCKET_IFNAME="${nic_name}"
         export HCCL_BUFFSIZE=1024
-        export HCCL_OP_EXPANSION_MODE=AIV
+        export HCCL_OP_EXPANSION_MODE="AIV"
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export TASK_QUEUE_ENABLE=1
         export VLLM_USE_V2_MODEL_RUNNER=0
@@ -553,21 +553,21 @@ Before you start, prepare the following scripts on each node, following the same
 
         vllm serve "${MODEL_PATH}" \
             --host 0.0.0.0 \
-            --port "$2" \
-            --data-parallel-size "$3" \
-            --data-parallel-rank "$4" \
-            --data-parallel-address "$5" \
-            --data-parallel-rpc-port "$6" \
-            --tensor-parallel-size "$7" \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --enable-chunked-prefill \
             --enable-prefix-caching \
             --seed 1024 \
             --served-model-name glm5 \
             --max-model-len 200000 \
-            --max-num-batched-tokens "8192" \
+            --max-num-batched-tokens 8192 \
             --trust-remote-code \
-            --max-num-seqs "64" \
+            --max-num-seqs 64 \
             --gpu-memory-utilization 0.92 \
             --async-scheduling \
             --quantization ascend \
@@ -582,14 +582,14 @@ Before you start, prepare the following scripts on each node, following the same
             --kv-transfer-config '{
                 "kv_connector": "MultiConnector",
                 "kv_role": "kv_producer",
-                "kv_port": 30000,
+                "kv_port": "30000",
                 "engine_id": "0",
                 "kv_connector_extra_config": {
                     "connectors": [
                         {
                             "kv_connector": "MooncakeConnectorV1",
                             "kv_role": "kv_producer",
-                            "kv_port": 30000,
+                            "kv_port": "30000",
                             "kv_connector_extra_config": {
                                 "use_ascend_direct": true,
                                 "prefill": {"dp_size": 4, "tp_size": 8},
@@ -600,7 +600,7 @@ Before you start, prepare the following scripts on each node, following the same
                             "kv_connector": "AscendStoreConnector",
                             "kv_role": "kv_producer",
                             "kv_connector_extra_config": {
-                                "lookup_rpc_port": 0,
+                                "lookup_rpc_port": "0",
                                 "backend": "memcache",
                                 "use_layerwise": false
                             }
@@ -634,7 +634,7 @@ Before you start, prepare the following scripts on each node, following the same
         export TP_SOCKET_IFNAME="${nic_name}"
         export HCCL_SOCKET_IFNAME="${nic_name}"
         export HCCL_BUFFSIZE=1024
-        export HCCL_OP_EXPANSION_MODE=AIV
+        export HCCL_OP_EXPANSION_MODE="AIV"
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export TASK_QUEUE_ENABLE=1
         export VLLM_USE_V2_MODEL_RUNNER=0
@@ -646,21 +646,21 @@ Before you start, prepare the following scripts on each node, following the same
 
         vllm serve "${MODEL_PATH}" \
             --host 0.0.0.0 \
-            --port "$2" \
-            --data-parallel-size "$3" \
-            --data-parallel-rank "$4" \
-            --data-parallel-address "$5" \
-            --data-parallel-rpc-port "$6" \
-            --tensor-parallel-size "$7" \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --enable-chunked-prefill \
             --enable-prefix-caching \
             --seed 1024 \
             --served-model-name glm5 \
             --max-model-len 200000 \
-            --max-num-batched-tokens "256" \
+            --max-num-batched-tokens 256 \
             --trust-remote-code \
-            --max-num-seqs "32" \
+            --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
             --async-scheduling \
             --quantization ascend \
@@ -674,14 +674,14 @@ Before you start, prepare the following scripts on each node, following the same
             --kv-transfer-config '{
                 "kv_connector": "MultiConnector",
                 "kv_role": "kv_consumer",
-                "kv_port": 30200,
+                "kv_port": "30200",
                 "engine_id": "2",
                 "kv_connector_extra_config": {
                     "connectors": [
                         {
                             "kv_connector": "MooncakeConnectorV1",
                             "kv_role": "kv_consumer",
-                            "kv_port": 30200,
+                            "kv_port": "30200",
                             "kv_connector_extra_config": {
                                 "use_ascend_direct": true,
                                 "prefill": {"dp_size": 4, "tp_size": 8},
@@ -692,7 +692,7 @@ Before you start, prepare the following scripts on each node, following the same
                             "kv_connector": "AscendStoreConnector",
                             "kv_role": "kv_consumer",
                             "kv_connector_extra_config": {
-                                "lookup_rpc_port": 0,
+                                "lookup_rpc_port": "0",
                                 "backend": "memcache",
                                 "use_layerwise": false
                             }
@@ -808,7 +808,7 @@ Only the key parameters specific to this model/scenario are described below. Adj
 - `prefill` / `decode`: Keep the same global topology (`DP4 TP8` / `DP8 TP4`) in every Mooncake connector configuration.
 - `kv_port`: Base handshake port, 30000 on Prefill and 30200 on Decode. Mooncake offsets worker ports using the DP/TP ranks; reserve the resulting ranges on each host.
 - `engine_id`: Follow the GLM-5.2 convention: `"0"` for Prefill and `"2"` for Decode.
-- `lookup_rpc_port`: Use `0` on both sides, as in the GLM-5.2 pooling examples. The Ascend Store IPC lookup path also includes the DP rank; Prefill and Decode run on separate node groups.
+- `lookup_rpc_port`: Use `"0"` on both sides, as in the GLM-5.2 pooling examples. The Ascend Store IPC lookup path also includes the DP rank; Prefill and Decode run on separate node groups.
 - `backend=memcache` / `use_layerwise=false`: Use non-layerwise MemCache pooling on both sides. Complete the pool configuration and start its metadata service before starting the vLLM instances.
 
 **Request forwarding and verification:**
