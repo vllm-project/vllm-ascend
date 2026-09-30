@@ -1,6 +1,7 @@
 import unittest
 from collections import deque
 from contextlib import nullcontext
+from dataclasses import fields
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -22,13 +23,229 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+from vllm_ascend.ascend_config import FinegrainedTPConfig
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+class TestDPPaddingPolicy(unittest.TestCase):
+    @staticmethod
+    def _make_runner(dp_rank=0):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.dp_size = 2
+        runner.dp_rank = dp_rank
+        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(enable_return_routed_experts=False))
+        runner.ascend_config = SimpleNamespace(finegrained_tp_config=FinegrainedTPConfig())
+        return runner
+
+    @staticmethod
+    def _run_sync(
+        runner,
+        tokens=(8, 32),
+        modes=(CUDAGraphMode.NONE, CUDAGraphMode.NONE),
+        comm_method=MoECommType.ALLTOALL,
+        is_draft=False,
+        mega_moe=False,
+    ):
+        module = "vllm_ascend.worker.model_runner_v1"
+
+        def all_reduce(packed_tensor, group):
+            remote_rank = 1 - runner.dp_rank
+            packed_tensor[0, remote_rank] = tokens[remote_rank]
+            packed_tensor[1, remote_rank] = modes[remote_rank].value
+
+        with (
+            patch(f"{module}.should_skip_allreduce_across_dp_group", return_value=False),
+            patch(f"{module}.get_dp_group", return_value=SimpleNamespace(cpu_group=None)),
+            patch(f"{module}.dist.all_reduce", side_effect=all_reduce),
+            patch(f"{module}.select_moe_comm_method", return_value=comm_method),
+            patch(f"{module}.use_cann_megamoe", return_value=mega_moe),
+        ):
+            return runner._sync_metadata_across_dp(
+                num_tokens=tokens[runner.dp_rank],
+                is_draft_model=is_draft,
+                cudagraph_mode=modes[runner.dp_rank],
+            )
+
+    def test_skip_dp_sync_keeps_local_token_count(self):
+        runner = self._make_runner()
+        module = "vllm_ascend.worker.model_runner_v1"
+        with (
+            patch(f"{module}.should_skip_allreduce_across_dp_group", return_value=True),
+            patch(f"{module}.dist.all_reduce") as all_reduce,
+            patch(f"{module}.select_moe_comm_method") as select_comm,
+        ):
+            maximum, across_dp, mode = runner._sync_metadata_across_dp(num_tokens=8)
+
+        self.assertEqual(maximum, 8)
+        self.assertEqual(mode, CUDAGraphMode.NONE)
+        self.assertEqual(across_dp.tolist(), [8, 8])
+        all_reduce.assert_not_called()
+        select_comm.assert_not_called()
+
+    def test_single_dp_does_not_synchronize(self):
+        runner = self._make_runner()
+        runner.dp_size = 1
+        with patch("vllm_ascend.worker.model_runner_v1.dist.all_reduce") as all_reduce:
+            self.assertEqual(runner._sync_metadata_across_dp(8), (8, None, CUDAGraphMode.NONE))
+        all_reduce.assert_not_called()
+
+    def test_sync_only_pads_for_uniform_input_consumers(self):
+        cases = (
+            ("dense_eager", None, CUDAGraphMode.NONE, False, False, False),
+            ("dense_graph", None, CUDAGraphMode.FULL, False, False, True),
+            ("allgather", MoECommType.ALLGATHER, CUDAGraphMode.NONE, False, False, True),
+            ("mc2", MoECommType.MC2, CUDAGraphMode.NONE, False, False, True),
+            ("alltoall", MoECommType.ALLTOALL, CUDAGraphMode.NONE, False, False, False),
+            ("fused_mc2", MoECommType.FUSED_MC2, CUDAGraphMode.NONE, False, False, False),
+            ("mega_moe", MoECommType.FUSED_MC2, CUDAGraphMode.NONE, False, True, True),
+            ("draft", None, CUDAGraphMode.NONE, True, False, True),
+        )
+        for name, comm_method, graph_mode, is_draft, mega_moe, should_pad in cases:
+            for dp_rank in range(2):
+                with self.subTest(name=name, dp_rank=dp_rank):
+                    maximum, across_dp, synced_mode = self._run_sync(
+                        self._make_runner(dp_rank),
+                        modes=(graph_mode, graph_mode),
+                        comm_method=comm_method,
+                        is_draft=is_draft,
+                        mega_moe=mega_moe,
+                    )
+                    self.assertEqual(maximum, 32)
+                    self.assertEqual(synced_mode, graph_mode)
+                    self.assertEqual(across_dp.tolist(), [32, 32] if should_pad else [8, 32])
+
+    def test_each_finegrained_tp_field_requires_uniform_inputs(self):
+        for field in fields(FinegrainedTPConfig):
+            for size in (0, 1, 2):
+                for comm_method in (MoECommType.ALLTOALL, MoECommType.FUSED_MC2):
+                    for tokens in ((0, 31), (8, 31)):
+                        for dp_rank in range(2):
+                            with self.subTest(
+                                field=field.name, size=size, comm_method=comm_method, tokens=tokens, dp_rank=dp_rank
+                            ):
+                                runner = self._make_runner(dp_rank)
+                                runner.ascend_config.finegrained_tp_config = FinegrainedTPConfig(**{field.name: size})
+                                maximum, across_dp, mode = self._run_sync(
+                                    runner, tokens=tokens, comm_method=comm_method
+                                )
+                                self.assertEqual(maximum, 31)
+                                self.assertEqual(mode, CUDAGraphMode.NONE)
+                                self.assertEqual(across_dp.tolist(), [31, 31] if size > 1 else list(tokens))
+
+    def test_routing_capture_keeps_uniform_eager_inputs(self):
+        for dp_rank in range(2):
+            with self.subTest(dp_rank=dp_rank):
+                runner = self._make_runner(dp_rank)
+                runner.vllm_config.model_config.enable_return_routed_experts = True
+                _, across_dp, mode = self._run_sync(runner, comm_method=MoECommType.FUSED_MC2)
+                self.assertEqual(mode, CUDAGraphMode.NONE)
+                self.assertEqual(across_dp.tolist(), [32, 32])
+
+    def test_imbalanced_and_idle_metadata_use_agreed_graph_mode(self):
+        for tokens in ((0, 32), (1, 32), (8, 32)):
+            for modes, expected_mode, should_pad in (
+                ((CUDAGraphMode.NONE, CUDAGraphMode.NONE), CUDAGraphMode.NONE, False),
+                ((CUDAGraphMode.FULL, CUDAGraphMode.NONE), CUDAGraphMode.NONE, False),
+                ((CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE), CUDAGraphMode.PIECEWISE, True),
+            ):
+                for dp_rank in range(2):
+                    with self.subTest(tokens=tokens, modes=modes, dp_rank=dp_rank):
+                        maximum, across_dp, mode = self._run_sync(self._make_runner(dp_rank), tokens, modes)
+                        self.assertEqual(maximum, 32)
+                        self.assertEqual(mode, expected_mode)
+                        self.assertEqual(across_dp.tolist(), [32, 32] if should_pad else list(tokens))
+
+
+class TestDPPaddingEplb(unittest.TestCase):
+    def test_dummy_padding_preserves_remote_metadata_for_eplb(self):
+        for dp_rank in range(2):
+            with self.subTest(dp_rank=dp_rank):
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.dp_rank = dp_rank
+                runner.uniform_decode_query_len = 1
+                runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=32, max_num_seqs=32)
+                runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
+                runner.dynamic_eplb = True
+                runner.eplb_updator = MagicMock()
+                runner.eplb_heat_collection_stage = "prefill"
+                runner.eplb_pd_thresholds = 16
+                expected_tokens = [32, 32]
+                expected_tokens[dp_rank] = 4
+                metadata = torch.tensor(expected_tokens, dtype=torch.int32)
+                runner._determine_batch_execution_and_padding = MagicMock(
+                    return_value=(CUDAGraphMode.NONE, SimpleNamespace(num_tokens=4, num_reqs=1), False, metadata, None)
+                )
+                update_status = runner.update_eplb_heat_collection_status
+
+                def stop_after_stage_selection(num_tokens, num_tokens_across_dp=None, *, update_status=update_status):
+                    update_status(num_tokens, num_tokens_across_dp)
+                    raise RuntimeError("stop before model execution")
+
+                runner.update_eplb_heat_collection_status = MagicMock(side_effect=stop_after_stage_selection)
+                with self.assertRaisesRegex(RuntimeError, "stop before model execution"):
+                    runner._dummy_run(1)
+
+                runner.update_eplb_heat_collection_status.assert_called_once_with(4, metadata)
+                self.assertEqual(metadata.tolist(), expected_tokens)
+                self.assertTrue(runner.eplb_heat_collection_status)
+
+    def test_stage_selection_uses_common_dp_maximum(self):
+        for stage in ("prefill", "decode", "all"):
+            for tokens in ((1, 32), (8, 32), (8, 16)):
+                statuses = []
+                metadata = torch.tensor(tokens, dtype=torch.int32)
+                for local_tokens in tokens:
+                    runner = NPUModelRunner.__new__(NPUModelRunner)
+                    runner.eplb_heat_collection_stage = stage
+                    runner.eplb_pd_thresholds = 16
+                    runner.update_eplb_heat_collection_status(local_tokens, metadata)
+                    statuses.append(runner.eplb_heat_collection_status)
+                expected = stage == "all" or (max(tokens) > 16 if stage == "prefill" else max(tokens) <= 16)
+                self.assertEqual(statuses, [expected, expected])
+                self.assertEqual(metadata.tolist(), list(tokens))
+
+    def test_without_dp_metadata_preserves_local_stage_selection(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.eplb_heat_collection_stage = "prefill"
+        runner.eplb_pd_thresholds = 16
+        runner.update_eplb_heat_collection_status(8)
+        self.assertFalse(runner.eplb_heat_collection_status)
+        runner.update_eplb_heat_collection_status(32)
+        self.assertTrue(runner.eplb_heat_collection_status)
+
+    def test_imbalanced_dp_ranks_enter_eplb_collectives_together(self):
+        for stage in ("prefill", "decode"):
+            for tokens in ((1, 32), (8, 16)):
+                with self.subTest(stage=stage, tokens=tokens):
+                    runners = [NPUModelRunner.__new__(NPUModelRunner) for _ in tokens]
+                    updators = [EplbUpdator.__new__(EplbUpdator) for _ in tokens]
+                    for runner, updator in zip(runners, updators):
+                        runner.eplb_heat_collection_stage = stage
+                        runner.eplb_pd_thresholds = 16
+                        updator.cur_iterations = 0
+                        updator.expert_heat_collection_interval = 3
+                        updator.algorithm_execution_interval = 1
+                        updator.num_moe_layers = 2
+                        updator.compute_and_set_moe_load = MagicMock()
+                        updator.wakeup_eplb_worker = MagicMock()
+                    for _ in range(3):
+                        for local_tokens, runner, updator in zip(tokens, runners, updators):
+                            runner.update_eplb_heat_collection_status(
+                                local_tokens, torch.tensor(tokens, dtype=torch.int32)
+                            )
+                            updator.forward_end(runner.eplb_heat_collection_status)
+                        self.assertEqual(updators[0].cur_iterations, updators[1].cur_iterations)
+                    expected_gathers = int(runners[0].eplb_heat_collection_status)
+                    for updator in updators:
+                        self.assertEqual(updator.compute_and_set_moe_load.call_count, expected_gathers)
 
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):
