@@ -26,6 +26,7 @@ from vllm.forward_context import is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
+    Gemma4RotaryEmbedding,
     MRotaryEmbedding,
     RotaryEmbedding,
     YaRNScalingRotaryEmbedding,
@@ -136,7 +137,27 @@ def _record_cos_and_sin_cache(cos_cache, sin_cache):
     _sin_cache = sin_cache
 
 
-def _record_cos_and_sin_cache_interleaved(cos_sin_cache):
+def _record_cos_and_sin_cache_interleaved(owner: "torch.nn.Module", cos_sin_cache) -> None:
+    """Publish the interleaved cos/sin pair derived from ``cos_sin_cache``.
+
+    ``cos_sin_cache`` is a non-persistent buffer of ``owner``, but the
+    de-interleaved pair every MLA/SFA rope lookup reads through the module
+    globals is a *derived* tensor pair, allocated while
+    ``NPUWorker.load_model()`` holds the sleep-mode ``weights`` mem-pool.
+    Holding them only in module globals makes them invisible to the level-2
+    wake backup, which walks ``model.named_buffers()``: a level-2 wake then
+    leaves every rope lookup reading discarded (remapped, zeroed) storage and
+    silently changes the model output, while the pointers stay valid so nothing
+    crashes. This is the ownership bug RFC #16558 describes.
+
+    Own the pair as non-persistent buffers of the module that built it, the
+    contract RFC #16558 section "Prefer model buffers or host values for static
+    state" prescribes: the globals keep the very same tensor objects, so the
+    lookup path and the addresses baked into captured ACL graphs are unchanged,
+    ``named_buffers()`` de-duplicates the shared pair, and ``persistent=False``
+    keeps them out of ``state_dict()`` and makes vLLM's layerwise reload keep
+    their bytes instead of re-materialising them from meta storage.
+    """
     global _cos_cache
     global _sin_cache
     if _cos_cache is not None or _sin_cache is not None:
@@ -145,6 +166,8 @@ def _record_cos_and_sin_cache_interleaved(cos_sin_cache):
     cos_cache, sin_cache = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2).chunk(2, dim=1)
     _cos_cache = cos_cache.squeeze(1)
     _sin_cache = sin_cache.squeeze(1)
+    owner.register_buffer("_rope_derived_cos_cache", _cos_cache, persistent=False)
+    owner.register_buffer("_rope_derived_sin_cache", _sin_cache, persistent=False)
 
 
 def update_cos_sin(positions):
@@ -245,7 +268,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         vllm_config = get_current_vllm_config()
         self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
         _record_cos_sin_cache(self.cos_sin_cache)
-        _record_cos_and_sin_cache_interleaved(self.cos_sin_cache)
+        _record_cos_and_sin_cache_interleaved(self, self.cos_sin_cache)
 
     def forward_oot(
         self,
@@ -314,15 +337,19 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         beta_fast: int = 32,
         beta_slow: int = 1,
         apply_yarn_scaling: bool = True,
+        mscale: float | None = None,
+        mscale_all_dim: float | None = None,
+        attention_factor: float | None = None,
         truncate: bool = False,
     ) -> None:
+        # vLLM main (#56446) replaced the YaRN mscale parameters with
+        # mscale/mscale_all_dim/attention_factor.
         extra_kwargs = {
-            "extrapolation_factor": extrapolation_factor,
-            "attn_factor": attn_factor,
             "beta_fast": beta_fast,
             "beta_slow": beta_slow,
-            "apply_yarn_scaling": apply_yarn_scaling,
-            # TODO: current not support actual truncate，adaptation for extra parameters to be compatible with vllm
+            "mscale": mscale,
+            "mscale_all_dim": mscale_all_dim,
+            "attention_factor": attention_factor,
             "truncate": truncate,
         }
         super().__init__(
@@ -337,6 +364,50 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
+        offsets: torch.Tensor | None = None,
+        is_neox_style_override: bool | None = None,
+        out_dtype: torch.dtype | None = None,
+    ):
+        return AscendRotaryEmbedding.forward_oot(
+            self,
+            positions,
+            query,
+            key,
+            offsets,
+            is_neox_style_override,
+            out_dtype,
+        )
+
+
+class AscendGemma4RotaryEmbedding(Gemma4RotaryEmbedding):
+    """Gemma4 proportional RoPE on the NPU rotary kernel.
+
+    Subclasses rather than reusing AscendRotaryEmbedding so Gemma4's
+    `_compute_inv_freq`, which zero-pads the non-rotated frequency pairs, keeps
+    building the cos/sin cache. Only the forward is swapped, which lets full
+    attention layers emit `npu_rotary_embedding` like the sliding ones instead
+    of an unfused rotate_half chain.
+    """
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+        is_neox_style: bool,
+        dtype: torch.dtype,
+    ) -> None:
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype)
+        vllm_config = get_current_vllm_config()
+        self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
+        _record_cos_sin_cache(self.cos_sin_cache)
+
+    def forward_oot(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
         out_dtype: torch.dtype | None = None,

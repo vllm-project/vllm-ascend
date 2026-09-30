@@ -11,7 +11,9 @@ continues to use the existing Ascend Lightning Indexer path.
   with key plane 0 and gate plane 1. All four tensor strides are passed to the
   kernels; padded blocks and noncompact planes are supported.
 - `R = index_kpool` controls pool completion, softmax and APE indexing.
-  `C >= R` is the ring capacity. The current non-MTP configuration uses C=R.
+  `C >= R` is the ring capacity. Non-MTP uses `C=R`; speculative decoding
+  uses `C=R+num_speculative_tokens`, retaining one complete pool plus all
+  not-yet-accepted lookahead rows.
 - Each request owns one tail block. Historical position p is addressed with
   `tail_block_table[request, 0]` and offset `p % C`. Absolute positions never
   select additional block-table columns.
@@ -59,11 +61,12 @@ This operator cannot reconstruct an uninitialized historical tail itself.
 
 C=R guarantees retention for monotonic non-MTP prefill/decode: each incomplete
 pool needs at most R-1 earlier rows, and all complete pools in a long query read
-the current input before seeding. It does not guarantee speculative rejection
-and replay. MTP retention/acceptance semantics and MTP numerical verification
-are deferred; retaining the existing draft route is not evidence of MTP
-correctness. Future capacity/checkpoint changes must prove the required history
-window and include their physical storage in memory accounting.
+the current input before seeding. MTP target verification writes its committed
+first row plus up to `num_speculative_tokens` candidate rows before acceptance
+is known. `C=R+num_speculative_tokens` prevents those candidates from wrapping
+onto the committed open pool. Rejection then needs only the normal logical
+length rollback: replacement tokens overwrite the rejected positions while the
+historical rows required to recompute a boundary pool remain intact.
 
 ## Verification
 

@@ -5,6 +5,7 @@ import torch
 
 from vllm_ascend.ops.triton.spec_decode.utils import (
     copy_and_expand_dflash_and_dspark_inputs_kernel,
+    prepare_inputs_padded_kernel,
 )
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.spec_decode.dflash_proposer import (
@@ -210,3 +211,96 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize("position_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("sample_from_anchor", [True, False])
+@pytest.mark.parametrize("empty_request", [0, 1, 2])
+def test_copy_and_expand_dflash_dspark_empty_valid_context(position_dtype, sample_from_anchor, empty_request):
+    """Fully rejected rows must derive query positions from their own row."""
+    init_device_properties_triton()
+    device = "npu"
+    batch_size, context_len, num_spec = 3, 6, 5
+    num_query_per_req = num_spec if sample_from_anchor else num_spec + 1
+    block_size, max_blocks = 32, 8
+    position_bases = [0, 27, 58]
+
+    # Keep the old underread inside the allocation. The sentinel makes both a
+    # first-row underread and a cross-request read fail deterministically without
+    # poisoning the NPU context.
+    sentinel = 123456789
+    position_values = [sentinel] + [base + offset for base in position_bases for offset in range(context_len)]
+    position_backing = torch.tensor(position_values, dtype=position_dtype, device=device)
+    target_positions = position_backing[1:]
+    query_start_loc = torch.arange(batch_size + 1, dtype=torch.int32, device=device) * context_len
+
+    cu_num_draft_tokens = torch.arange(1, batch_size + 1, dtype=torch.int32, device=device) * num_spec
+    valid_counts_list = [context_len] * batch_size
+    valid_counts_list[empty_request] = 0
+    valid_sampled_tokens_count = torch.tensor(valid_counts_list, dtype=torch.int64, device=device)
+    num_rejected_tokens = torch.empty(batch_size, dtype=torch.int32, device=device)
+    token_indices_to_sample = torch.empty_like(num_rejected_tokens)
+    prepare_inputs_padded_kernel[(1,)](
+        cu_num_draft_tokens,
+        valid_sampled_tokens_count,
+        query_start_loc,
+        token_indices_to_sample,
+        num_rejected_tokens,
+        batch_size,
+        BLOCK_SIZE=32,
+    )
+
+    seq_lens = torch.tensor([base + context_len for base in position_bases], dtype=torch.int32, device=device)
+    context_slot_mapping = torch.arange(batch_size * context_len, dtype=torch.int64, device=device)
+    next_token_ids = torch.arange(batch_size, dtype=torch.int32, device=device) + 100
+    block_table_cpu = torch.arange(batch_size * max_blocks, dtype=torch.int32).reshape(batch_size, max_blocks) + 1
+    block_table = block_table_cpu.to(device)
+
+    num_query_total = batch_size * num_query_per_req
+    out_input_ids = torch.empty(num_query_total, dtype=torch.int32, device=device)
+    out_context_positions = torch.empty_like(target_positions)
+    out_query_positions = torch.empty(num_query_total, dtype=position_dtype, device=device)
+    out_context_slot_mapping = torch.empty_like(context_slot_mapping)
+    out_query_slot_mapping = torch.empty(num_query_total, dtype=torch.int64, device=device)
+    out_token_indices = torch.empty(batch_size * num_spec, dtype=torch.int32, device=device)
+
+    copy_and_expand_dflash_and_dspark_inputs_kernel[(1,)](
+        next_token_ids_ptr=next_token_ids,
+        target_positions_ptr=target_positions,
+        context_slot_mapping_ptr=context_slot_mapping,
+        out_input_ids_ptr=out_input_ids,
+        out_context_positions_ptr=out_context_positions,
+        out_query_positions_ptr=out_query_positions,
+        out_context_slot_mapping_ptr=out_context_slot_mapping,
+        out_query_slot_mapping_ptr=out_query_slot_mapping,
+        out_token_indices_ptr=out_token_indices,
+        block_table_ptr=block_table,
+        block_table_stride=max_blocks,
+        query_start_loc_ptr=query_start_loc,
+        seq_lens_ptr=seq_lens,
+        num_rejected_tokens_ptr=num_rejected_tokens,
+        parallel_drafting_token_id=PARALLEL_DRAFTING_TOKEN_ID,
+        block_size=block_size,
+        num_query_per_req=num_query_per_req,
+        num_speculative_tokens=num_spec,
+        total_input_tokens=batch_size * context_len,
+        batch_size=batch_size,
+        HAS_NUM_REJECTED=True,
+        SAMPLE_FROM_ANCHOR=sample_from_anchor,
+        TILE_SIZE=_COPY_EXPAND_TILE_SIZE,
+    )
+
+    effective_seq_lens = [base + valid_count for base, valid_count in zip(position_bases, valid_counts_list)]
+    expected_positions = [
+        seq_len + query_idx for seq_len in effective_seq_lens for query_idx in range(num_query_per_req)
+    ]
+    expected_slots = [
+        int(block_table_cpu[req_idx, (seq_len + query_idx) // block_size]) * block_size
+        + (seq_len + query_idx) % block_size
+        for req_idx, seq_len in enumerate(effective_seq_lens)
+        for query_idx in range(num_query_per_req)
+    ]
+
+    assert out_query_positions.cpu().tolist() == expected_positions
+    assert out_query_slot_mapping.cpu().tolist() == expected_slots
+    assert num_rejected_tokens.cpu().tolist() == [context_len - valid_count for valid_count in valid_counts_list]

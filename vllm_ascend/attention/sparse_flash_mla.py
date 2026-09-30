@@ -60,6 +60,24 @@ def sparse_flash_mla_metadata(**kwargs):
     return metadata_op(**kwargs)
 
 
+def _ensure_sinks(kwargs: dict[str, Any]) -> None:
+    """Reject calls that omit the required per-head sinks tensor.
+
+    SparseFlashMla needs a per-head float32 sinks tensor and the caller must
+    own it. A tensor allocated here would only be referenced by these kwargs,
+    so ACL Graph capture bakes in an address that the allocator reuses as soon
+    as the call returns; replaying that graph then reads freed memory and traps
+    inside the kernel (507011). Device errors are reported asynchronously, so
+    the failure surfaces at an unrelated synchronize() rather than at the
+    operator that caused it, which makes it very hard to attribute.
+    """
+    if kwargs.get("sinks") is None:
+        raise ValueError(
+            "SparseFlashMla requires a caller-owned per-head sinks tensor; "
+            "allocating one here would not survive ACL Graph capture."
+        )
+
+
 def sparse_flash_mla(q: torch.Tensor, **kwargs):
     """Adapt existing DSA attention kwargs to SparseFlashMla BF16 KV."""
     kwargs.pop("kv_quant_mode", None)
@@ -70,5 +88,6 @@ def sparse_flash_mla(q: torch.Tensor, **kwargs):
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     _drop_paged_kv_cu_seqlens(kwargs)
     _add_compressed_kv_lengths(kwargs)
+    _ensure_sinks(kwargs)
     attention_op, _ = _get_sparse_flash_mla_ops()
     return attention_op(q, **kwargs)

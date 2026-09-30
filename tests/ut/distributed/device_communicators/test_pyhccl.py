@@ -1,6 +1,7 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import torch
 from vllm.distributed.utils import StatelessProcessGroup
 
 from tests.ut.base import TestBase
@@ -67,3 +68,62 @@ class TestPyHcclCommunicator(TestBase):
         self.assertEqual(comm.world_size, 2)
         self.assertFalse(comm.available)
         self.assertTrue(comm.disabled)
+
+    @patch("vllm_ascend.distributed.device_communicators.pyhccl.torch.npu.synchronize")
+    @patch("vllm_ascend.distributed.device_communicators.pyhccl.torch.npu.device")
+    def test_close_synchronizes_and_destroys_once(self, _mock_device, synchronize):
+        comm = PyHcclCommunicator.__new__(PyHcclCommunicator)
+        comm.available = True
+        comm.disabled = False
+        comm.device = "npu:0"
+        comm.hccl = MagicMock()
+        comm.comm = MagicMock()
+        tensor = MagicMock(device=comm.device, dtype=torch.float32)
+        tensor.data_ptr.return_value = 1
+        tensor.numel.return_value = 1
+        comm.broadcast(tensor, src=0, stream=MagicMock(npu_stream=1234))
+        calls = MagicMock()
+        calls.attach_mock(synchronize, "synchronize")
+        calls.attach_mock(comm.hccl.hcclCommDestroy, "destroy")
+
+        comm.close()
+        comm.close()
+
+        synchronize.assert_called_once_with(comm.device)
+        comm.hccl.hcclCommDestroy.assert_called_once_with(comm.comm)
+        self.assertEqual([call[0] for call in calls.mock_calls], ["synchronize", "destroy"])
+        self.assertFalse(comm.available)
+        for collective in (lambda: comm.broadcast(tensor, src=0), lambda: comm.all_reduce(tensor)):
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                collective()
+
+    def test_close_disabled_communicator(self):
+        comm = PyHcclCommunicator(group=StatelessProcessGroup(0, 1, None, None), device="npu:0")
+        comm.close()
+        comm.close()
+        self.assertTrue(comm.disabled)
+
+    @patch("vllm_ascend.distributed.device_communicators.pyhccl.torch.npu.synchronize")
+    @patch("vllm_ascend.distributed.device_communicators.pyhccl.torch.npu.device")
+    def test_close_failure_propagates_without_retry(self, _mock_device, synchronize):
+        for operation in ("synchronize", "destroy"):
+            with self.subTest(operation=operation):
+                synchronize.reset_mock(side_effect=True)
+                comm = PyHcclCommunicator.__new__(PyHcclCommunicator)
+                comm.available = True
+                comm.device = "npu:0"
+                comm.hccl = MagicMock()
+                comm.comm = MagicMock()
+                failing_call = synchronize if operation == "synchronize" else comm.hccl.hcclCommDestroy
+                failing_call.side_effect = RuntimeError("close failed")
+
+                with self.assertRaisesRegex(RuntimeError, "close failed"):
+                    comm.close()
+                comm.close()
+
+                synchronize.assert_called_once_with(comm.device)
+                if operation == "synchronize":
+                    comm.hccl.hcclCommDestroy.assert_not_called()
+                else:
+                    comm.hccl.hcclCommDestroy.assert_called_once_with(comm.comm)
+                self.assertFalse(comm.available)

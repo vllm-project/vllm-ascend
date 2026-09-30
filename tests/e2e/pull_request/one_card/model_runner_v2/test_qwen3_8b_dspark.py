@@ -97,3 +97,77 @@ def test_dspark_spec_decoding(
     golden = [0.84, 0.48, 0.32, 0.20, 0.09, 0.09, 0.02]
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
+
+
+@pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
+@pytest.mark.parametrize("dspark_model", DSPARK_MODELS)
+@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("enforce_eager", [False])
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dspark_probabilistic_spec_decoding(
+    model: str,
+    dspark_model: str,
+    max_tokens: int,
+    enforce_eager: bool,
+) -> None:
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+    num_speculative_tokens = 7
+    seed = 42
+    other_seed = 1234
+
+    def sampling_params(request_seed: int) -> SamplingParams:
+        return SamplingParams(
+            max_tokens=max_tokens,
+            temperature=0.7,
+            top_k=20,
+            top_p=0.95,
+            seed=request_seed,
+            ignore_eos=True,
+        )
+
+    with VllmRunner(
+        model,
+        max_model_len=1024,
+        enforce_eager=enforce_eager,
+        disable_log_stats=False,
+        async_scheduling=True,
+        enable_prefix_caching=False,
+        speculative_config={
+            "model": dspark_model,
+            "method": "dspark",
+            "num_speculative_tokens": num_speculative_tokens,
+            "draft_sample_method": "probabilistic",
+        },
+    ) as runner:
+        outputs = runner.model.generate(prompts, sampling_params(seed))
+        outputs_other_seed = runner.model.generate(prompts, sampling_params(other_seed))
+        metrics = runner.model.get_metrics()
+
+    def token_ids(outputs: list) -> list[list[int]]:
+        return [out.outputs[0].token_ids for out in outputs]
+
+    ids = token_ids(outputs)
+    ids_other_seed = token_ids(outputs_other_seed)
+
+    for request_ids in ids + ids_other_seed:
+        assert len(request_ids) == max_tokens
+        assert len(set(request_ids)) > 1, "Degenerate output: single repeated token"
+    assert any(a != o for a, o in zip(ids, ids_other_seed)), (
+        "Outputs identical across different seeds: probabilistic sampling likely fell back to greedy"
+    )
+    acceptance_per_pos = calculate_acceptance_per_pos(
+        metrics,
+        num_speculative_tokens,
+        Counter,
+        Vector,
+    )
+    print(f"probabilistic acceptance_per_pos: {acceptance_per_pos}")
+    golden = [0.74, 0.48, 0.36, 0.27, 0.17, 0.10, 0.04]
+    match = all(abs(a - b) < 0.2 for a, b in zip(acceptance_per_pos, golden))
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"

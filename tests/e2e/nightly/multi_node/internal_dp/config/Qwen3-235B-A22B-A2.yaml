@@ -2,6 +2,7 @@ test_name: "test Qwen3-235B-A22B multi-dp on A2"
 model: "Qwen/Qwen3-235B-A22B"
 num_nodes: 2
 npu_per_node: 8
+dp_load_balancing: internal
 env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   OMP_PROC_BIND: false

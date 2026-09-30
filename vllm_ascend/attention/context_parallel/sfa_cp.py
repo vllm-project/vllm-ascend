@@ -9,9 +9,10 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
+import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -32,9 +33,14 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadataBuilder,
     SFAForwardContext,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_dcp, split_decodes_and_prefills
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    enable_dcp,
+    split_decodes_and_prefills,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
 from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
@@ -43,7 +49,6 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_force_tmajor_restore,
     enable_sfa_dcp_replicated_indexer,
     is_pd_decode_recompute_scheduler_enabled,
-    vllm_version_is,
 )
 from vllm_ascend.weight_switch import (
     WeightLoadPartition,
@@ -51,11 +56,6 @@ from vllm_ascend.weight_switch import (
     WeightSwitchMixin,
 )
 from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
-
-if vllm_version_is("0.28.0"):
-    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -169,6 +169,61 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         assert attn_metadata.pcp_slot_mapping is not None
         return attn_metadata.pcp_slot_mapping
 
+    def _sfa_preprocess_prolog_v3(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        *,
+        attn_metadata: M | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
+    ]:
+        assert attn_metadata is not None, "PCP PROLOG_V3 requires attention metadata."
+        num_tokens = hidden_states.shape[0]
+        num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        # Graph padding is not included in num_decode_tokens.
+        if attn_metadata.num_prefills == 0 and not attn_metadata.pcp_has_global_prefill:
+            return super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, slot_mapping[:num_tokens])
+        local_slots = attn_metadata.pcp_prolog_local_slots
+        assert local_slots is not None, "PCP PROLOG_V3 requires local slots prepared by the metadata builder."
+        global_slots = attn_metadata.pcp_prolog_global_slots
+        assert global_slots is not None, "PCP PROLOG_V3 requires global slots prepared by the metadata builder."
+        result = super()._sfa_preprocess_prolog_v3(hidden_states, kv_cache, cos, sin, local_slots)
+        if not global_slots.numel():
+            return result
+        # Same stream orders the fused cache write, pack, collective and scatter.
+        # C8 packs quantized K, BF16 RoPE and scales into the first cache.
+        # The remaining tensors belong to the indexer and synchronize separately.
+        main_cache = kv_cache[:1] if self.enable_sparse_sfa_c8 else kv_cache[:2]
+        packed = copy_pcp_kv_cache(main_cache, local_slots[num_decode_tokens:])
+        group = get_pcp_group()
+        gathered = group.all_gather(packed, dim=0)
+        if self.enable_sparse_sfa_c8:
+            # Preserve packed K, RoPE and scale bytes, including FP8 storage.
+            # The paired scatter writes the same payload to the same cache.
+            packed_kv = gathered.unsqueeze(1)
+            cache_bytes = main_cache[0].view(torch.int8)
+            key, value = packed_kv, packed_kv
+            key_cache, value_cache = cache_bytes, cache_bytes
+        else:
+            k_nope, k_pe = gathered.split([kv_cache[0].shape[-1], kv_cache[1].shape[-1]], dim=-1)
+            key, value = k_nope.unsqueeze(1), k_pe.unsqueeze(1)
+            key_cache, value_cache = kv_cache[0], kv_cache[1]
+        DeviceOperator.reshape_and_cache(
+            key=key,
+            value=value,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=global_slots,
+        )
+        return result
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -178,6 +233,8 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
+        if attn_metadata.num_prefills == 0 and not attn_metadata.pcp_has_global_prefill:
+            return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots[: kv_no_split.shape[0]], attn_metadata)
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
         (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs((kv_no_split, cos, sin), slots, num_decode_tokens)
         assert slots.numel() == kv_no_split.shape[0], (
@@ -521,7 +578,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         if kv_cache is not None:
             assert fused_kv_no_split is not None
             if self.enable_sparse_sfa_c8:
-                torch_npu.npu_scatter_nd_update_(
+                DeviceOperator.scatter_cache(
                     kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
                     slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
                     fused_kv_no_split[: attn_metadata.num_actual_tokens],
@@ -625,7 +682,7 @@ class AscendSFADCPMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
         metadata_cls: type[AscendSFAMetadata] | None = None,
-        supports_dcp_with_varlen: bool = False,
+        supports_dcp_with_varlen: bool = True,
     ):
         metadata_cls = metadata_cls or AscendSFADCPMetadata
         super().__init__(
@@ -861,7 +918,7 @@ class AscendSFADCPMetadataBuilder(
         )
         kv_gather_block_ids = None
         kv_gather_block_table = None
-        if num_prefills > 0:
+        if num_prefills > 0 or metadata.pcp_has_global_prefill:
             kv_gather_block_ids, kv_gather_block_table = self._build_compact_kv_gather_metadata(
                 dcp_block_table,
                 global_dcp_block_table=global_dcp_block_table,
@@ -1026,13 +1083,28 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
                 global_dcp_num_blocks = pcp_context.global_block_table_num_blocks[pcp_cache_group_idx]
         metadata = self._build_with_metadata_view(
             common_attn_metadata,
-            lambda: self._build(common_attn_metadata, draft_index=None),
+            lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=pcp_context),
             global_dcp_block_table=global_dcp_block_table,
             global_dcp_num_blocks=global_dcp_num_blocks,
         )
         assert isinstance(metadata, AscendSFADCPMetadata)
         if pcp_ordered_indexer_slot_mapping is not None:
             metadata.pcp_slot_mapping = pcp_ordered_indexer_slot_mapping
+        if metadata.num_prefills or metadata.pcp_has_global_prefill:
+            assert metadata.dcp_context is not None
+            group = get_pcp_group()
+            num_tokens = metadata.num_input_tokens
+            rank_slots = metadata.dcp_context.slot_mapping[: group.world_size * num_tokens].view(
+                group.world_size, num_tokens
+            )
+            num_decode_tokens = metadata.num_decode_tokens
+            local_slots = rank_slots[group.rank_in_group].contiguous()
+            if num_decode_tokens and group.rank_in_group != 0:
+                # Replicated decode slots are masked outside rank 0, but each
+                # rank still writes its locally computed decode KV.
+                local_slots = torch.cat((rank_slots[0, :num_decode_tokens], local_slots[num_decode_tokens:]))
+            metadata.pcp_prolog_local_slots = local_slots
+            metadata.pcp_prolog_global_slots = rank_slots[:, num_decode_tokens:].reshape(-1)
         return metadata
 
 
@@ -1089,9 +1161,43 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=device)
         self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=device)
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        result = super().process_weights_after_loading(act_dtype)
+        self._register_remap_buffers()
+        return result
+
+    def _register_remap_buffers(self) -> None:
+        """Expose the DCP remap constants to the level-2 sleep restore path.
+
+        ``_remap_order``/``_remap_invalid_index`` are created while the
+        sleep-mode weights mem-pool is active and are read by the non-Triton
+        remap fallback in ``_remap_sparse_indices``. Attention impls are not
+        ``nn.Module`` instances, so without an owning buffer a level-2 wake
+        would leave them pointing at remapped, discarded storage. Own them as
+        non-persistent buffers of this layer's attention module, the same owner
+        pattern the DSA/SFA Hadamard buffers use.
+        """
+        static_forward_context = self.vllm_config.compilation_config.static_forward_context
+        owner = static_forward_context.get(self.layer_name)
+        if not isinstance(owner, torch.nn.Module):
+            # Integrations that do not forward ``layer_name`` to the impl still
+            # keep the projections in this impl's model tree.
+            owner = self.o_proj
+        for name, tensor in (
+            ("_dcp_sfa_remap_order", self._remap_order),
+            ("_dcp_sfa_remap_invalid_index", self._remap_invalid_index),
+        ):
+            existing = getattr(owner, name, None)
+            if existing is None:
+                owner.register_buffer(name, tensor, persistent=False)
+            elif existing is not tensor:
+                raise RuntimeError(f"DCP SFA remap buffer {name!r} is already registered with a different tensor.")
+
     @staticmethod
     def _has_prefill(attn_metadata: M) -> bool:
-        return attn_metadata.num_prefills > 0
+        # PCP ranks with no local prefill still join the DCP KV gather and use
+        # the same attention path as ranks that received prefill tokens.
+        return attn_metadata.num_prefills > 0 or attn_metadata.pcp_has_global_prefill
 
     def _record_dcp_kv_gather_context(
         self,
@@ -1258,7 +1364,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             scatter_dim = 0
 
         assert self.dcp_group is not None, "DCP output All2All requires dcp_group when dcp_size > 1."
-        return torch.ops.vllm.sfa_dcp_a2a_fused(
+        return torch.ops.vllm.dcp_a2a_fused(
             sfa_output,
             softmax_lse,
             self.dcp_size,
@@ -1503,7 +1609,7 @@ class AscendSFAPCPDCPImpl(AscendSFADCPImpl, AscendSFAPCPImpl):
         # Only scatter heads that were gathered by _start_dcp_query_gather.
         # DCP == PCP already has TP-local heads; DCP == PCP * TP has full heads.
         tp_size = tp_group.world_size if self.dcp_size > pcp_group.world_size else 1
-        return torch.ops.vllm.sfa_dcp_a2a_fused(
+        return torch.ops.vllm.dcp_a2a_fused(
             sfa_output, softmax_lse, tp_size, 1, tp_group.unique_name, pcp_group.unique_name
         )
 

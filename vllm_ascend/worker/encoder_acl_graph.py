@@ -293,9 +293,6 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         )
 
         values = capture_inputs.values
-        with torch.inference_mode():
-            output = self.model.encoder_cudagraph_forward(dict(values), path=path)
-            output_buffer = torch.empty_like(output)
 
         graph = torch.npu.NPUGraph()
         with (
@@ -303,8 +300,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             torch.inference_mode(),
             torch.npu.graph(graph, self.graph_pool),
         ):
-            output = self.model.encoder_cudagraph_forward(dict(values), path=path)
-            output_buffer.copy_(output)
+            output = weak_ref_tensors(self.model.encoder_cudagraph_forward(dict(values), path=path))
 
         graph_meta = BudgetGraphMetadata(
             token_budget=token_budget,
@@ -312,7 +308,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             max_frames_per_batch=self.max_frames_per_batch,
             graph=graph,
             input_buffers=values,
-            output_buffer=weak_ref_tensors(output_buffer),
+            output_buffer=weak_ref_tensors(output),
         )
         graph_set = self._get_graph_set(path)
         graph_set[token_budget] = graph_meta

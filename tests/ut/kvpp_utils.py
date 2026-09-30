@@ -6,7 +6,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import torch
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 
@@ -19,13 +25,19 @@ def indexer_name(index):
     return f"model.layers.{index}.self_attn.indexer.k_cache"
 
 
-def make_kvpp_config(tp=3):
+def make_kvpp_config(tp=3, pcp=1):
     return SimpleNamespace(
+        use_v2_model_runner=False,
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                name: SimpleNamespace(_kvpp_is_draft=name == layer_name(17)) for name in make_kvpp_specs()
+            }
+        ),
         additional_config={"enable_kvpp": True},
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp,
             pipeline_parallel_size=1,
-            prefill_context_parallel_size=1,
+            prefill_context_parallel_size=pcp,
             decode_context_parallel_size=1,
         ),
         model_config=SimpleNamespace(
@@ -59,6 +71,27 @@ def make_kvpp_specs():
         cache_sparse_li_c8=True,
     )
     return specs
+
+
+def make_dspark_kvpp_case(tp=3, draft_names=None):
+    config = make_kvpp_config(tp)
+    config.speculative_config.method = "dspark"
+    config.speculative_config.draft_model_config = SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=3))
+    config.speculative_config.num_speculative_tokens = 7
+    config.model_config.get_total_num_hidden_layers = lambda: 17
+    specs = make_kvpp_specs()
+    del specs[layer_name(17)]
+    # Qwen3 DSpark numbers its layers after the target. Its layer count is
+    # independent of the target's one MTP layer and of the draft token count.
+    drafts = tuple(draft_names) if draft_names is not None else tuple(layer_name(i) for i in range(17, 20))
+    for name in drafts:
+        specs[name] = FullAttentionSpec(block_size=2, num_kv_heads=2, head_size=8, dtype=torch.float16)
+    config.compilation_config = SimpleNamespace(
+        static_forward_context={
+            name: SimpleNamespace(impl=SimpleNamespace(), _kvpp_is_draft=name in drafts) for name in specs
+        }
+    )
+    return config, specs, drafts
 
 
 def make_cache_config(specs, num_blocks=3):

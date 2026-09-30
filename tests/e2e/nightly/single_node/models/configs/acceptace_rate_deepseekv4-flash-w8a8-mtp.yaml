@@ -35,6 +35,8 @@ _server_cmd: &server_cmd
   - "deepseek_v4"
   - "--api_server_count"
   - "1"
+  - "--attention_config.indexer_kv_dtype" 
+  - "int8"
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--speculative-config"
@@ -74,7 +76,6 @@ test_cases:
             "enable_cpu_binding": "true",
             "enable_shared_expert_dp": true,
             "multistream_overlap_shared_expert":true,
-            "enable_reduce_sample": false,
             "rejection_sampler_config": {
               "enable_block_verify": true,
               "enable_entropy_verify": true,
@@ -106,7 +107,6 @@ test_cases:
             "enable_cpu_binding": "false",
             "enable_shared_expert_dp": true,
             "multistream_overlap_shared_expert":true,
-            "enable_reduce_sample": false,
             "rejection_sampler_config": {
                 "enable_block_verify": false,
                 "enable_entropy_verify": false,

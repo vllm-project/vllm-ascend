@@ -27,7 +27,6 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, get_kv_cache_compression_ratio
-from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass(frozen=True)
@@ -392,8 +391,6 @@ def get_glm5_next_kv_cache_config(
     tensors: list[KVCacheTensor] = []
 
     def make_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:
-        if vllm_version_is("0.28.0"):
-            return KVCacheTensor(size=size, shared_by=layer_names)
         return KVCacheTensor(
             size=size,
             layers=layer_names,
@@ -434,6 +431,7 @@ def get_glm5_next_kv_cache_config(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
         kv_cache_groups=groups,
+        prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
     )
 
 

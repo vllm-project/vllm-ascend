@@ -264,7 +264,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertIs(out_slots, indexer_metadata.slot_mapping)
 
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    @patch("vllm_ascend.attention.indexer.torch_npu.npu_scatter_nd_update_")
+    @patch("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache")
     def test_write_cache_scatter_path(self, mock_scatter, mock_get_ascend_config):
         mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
@@ -282,11 +282,16 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertEqual(mock_scatter.call_count, 2)
         k_call, scale_call = mock_scatter.call_args_list
         self.assertEqual(k_call.args[0].data_ptr(), indexer_k_cache.data_ptr())
-        self.assertTrue(torch.equal(k_call.args[1], slot_mapping.view(-1, 1)))
+        self.assertEqual(k_call.args[1].data_ptr(), slot_mapping.data_ptr())
+        self.assertEqual(k_call.args[2].data_ptr(), k_li.data_ptr())
+        self.assertEqual(len(k_call.args), 3)
         self.assertEqual(scale_call.args[0].data_ptr(), indexer_scale_cache.data_ptr())
+        self.assertEqual(scale_call.args[1].data_ptr(), slot_mapping.data_ptr())
+        self.assertEqual(scale_call.args[2].data_ptr(), k_li_scale.data_ptr())
+        self.assertEqual(len(scale_call.args), 3)
 
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    @patch("vllm_ascend.attention.indexer.torch_npu.npu_scatter_nd_update_")
+    @patch("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache")
     def test_write_cache_without_li_c8_writes_k_only(self, mock_scatter, mock_get_ascend_config):
         mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
@@ -301,6 +306,9 @@ class TestAscendSFAIndexerBackend(TestBase):
 
         mock_scatter.assert_called_once()
         self.assertEqual(mock_scatter.call_args.args[0].data_ptr(), indexer_k_cache.data_ptr())
+        self.assertEqual(mock_scatter.call_args.args[1].data_ptr(), slot_mapping.data_ptr())
+        self.assertEqual(mock_scatter.call_args.args[2].data_ptr(), k_li.data_ptr())
+        self.assertEqual(len(mock_scatter.call_args.args), 3)
 
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
     @patch("vllm_ascend.attention.indexer.torch.ops._C_ascend.store_kv_block", create=True)
@@ -381,7 +389,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl = MagicMock()
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
-        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+        with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn):
             mock_tp_size.return_value = 2
             mock_vllm_config = MagicMock(spec=VllmConfig)
             mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=True)
@@ -423,7 +431,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
                 mock_mla_attn.impl.fused_qkv_a_proj = fused_qkv_a_proj
                 mock_mla_attn.impl.q_proj = q_proj
 
-                with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+                with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn):
                     mock_tp_size.return_value = 2
                     mock_vllm_config = MagicMock(spec=VllmConfig)
                     mock_vllm_config.model_config.hf_text_config = MagicMock(
@@ -477,7 +485,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl = MagicMock()
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
-        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+        with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn):
             attn = AscendMultiHeadLatentAttention(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_heads,
@@ -546,6 +554,18 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         self.assertIs(attn.topk_indices_buffer, buffer)
         self.assertIs(mock_impl.topk_indices_buffer, buffer)
 
+    def test_lim_topk_metadata_compaction_forwards_to_impl(self):
+        attn = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
+        mock_impl = MagicMock()
+        mock_impl.use_fused_copy_sfa = True
+        attn.mla_attn = SimpleNamespace(impl=mock_impl)
+        indices = torch.tensor([1, 5], dtype=torch.int32)
+
+        self.assertTrue(attn.uses_lim_topk_metadata)
+        attn.compact_lim_topk_metadata(indices)
+
+        mock_impl.compact_lim_topk_metadata.assert_called_once_with(indices)
+
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
     @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size")
     def test_initialization_skip_topk_consistency(self, mock_tp_size, mock_get_vllm_config):
@@ -556,7 +576,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
         with (
-            patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn) as mock_mla_attn_cls,
+            patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn) as mock_mla_attn_cls,
             patch("vllm_ascend.ops.mla.IndexerWrapper"),
         ):
             mock_tp_size.return_value = 2

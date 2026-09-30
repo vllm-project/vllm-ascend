@@ -11,6 +11,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import divide, get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -39,10 +40,8 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     MiniMaxM3TPDecodeScoreMetadata,
-    minimax_m3_index_decode_replicated,
     minimax_m3_index_tp_block_parallel_decode,
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
@@ -55,13 +54,18 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-# The bundled MsaIndexScore supports FP8. Use AscendC for both prefill and
-# decode; FP8-capable hardware scores the full local table without TP collectives.
+# The bundled MsaIndexScore includes the Ascend 950 arch35 FP8 kernel. Keep it
+# enabled for A5 prefill, while A5 decode uses its lower-latency Triton path.
 _USE_ASCENDC_INDEX_SCORE_PREFILL = True
-_USE_ASCENDC_INDEX_SCORE_DECODE = True
+_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5
 
-if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
+_MRV2_PADDING_DUMMY_KEY = "minimax_m3_mrv2_padding_dummy"
+_MRV2_DUMMY_INDEXER_TP_WARMED_KEY = "minimax_m3_mrv2_dummy_indexer_tp_warmed"
+_MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY = "minimax_m3_mrv2_skip_dummy_sparse_attn"
+
+if get_ascend_device_type() == AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
         minimax_m3_index_decode,
         minimax_m3_index_score,
@@ -69,14 +73,39 @@ if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
     )
 
 
+def _is_mrv2_idle_dp_dummy(forward_context: ForwardContext) -> bool:
+    """Return whether this is an eager MRV2 idle-DP padding-only forward."""
+    is_padding = getattr(forward_context, "is_padding", None)
+    dp_metadata = getattr(forward_context, "dp_metadata", None)
+    additional_kwargs = getattr(forward_context, "additional_kwargs", None)
+    if is_padding is None or dp_metadata is None or additional_kwargs is None:
+        return False
+
+    cached = additional_kwargs.get(_MRV2_PADDING_DUMMY_KEY)
+    if cached is not None:
+        return bool(cached)
+
+    is_dummy = False
+    if (
+        get_current_vllm_config().use_v2_model_runner
+        and forward_context.cudagraph_runtime_mode == CUDAGraphMode.NONE
+        and is_padding.numel() == 1
+        and dp_metadata.num_tokens_across_dp_cpu.numel() > 1
+        and int(dp_metadata.num_tokens_across_dp_cpu.max().item()) > 1
+    ):
+        # is_padding is an NPU tensor. Cache this device-to-host read once per
+        # model forward instead of synchronizing in every sparse layer.
+        is_dummy = bool(is_padding[0].item())
+
+    additional_kwargs[_MRV2_PADDING_DUMMY_KEY] = is_dummy
+    return is_dummy
+
+
 def _should_use_tp_sharded_index_decode(tp_size: int, num_prefills: int) -> bool:
-    # The FP8-capable decode backend scores the complete, replicated index-K
-    # cache on every TP rank. Other profiles retain TP block sharding.
-    return (
-        not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
-        and tp_size > 1
-        and num_prefills == 0
-    )
+    # The A5 Triton decode kernel operates on the complete, replicated index-K
+    # cache on every TP rank. Keep the mainline block-sharded optimization for
+    # the other device families only.
+    return get_ascend_device_type() != AscendDeviceType.A5 and tp_size > 1 and num_prefills == 0
 
 
 def _active_decode_num_reqs(
@@ -368,12 +397,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 cu_seqlens_q=decode_cu_seqlens_q,
                 context_lens=decode_context_lens,
             )
-            if (
-                _USE_ASCENDC_INDEX_SCORE_DECODE
-                and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
-                and self.tp_size > 1
-                and active_prefills == 0
-            ):
+            if _USE_ASCENDC_INDEX_SCORE_DECODE and self.tp_size > 1 and active_prefills == 0:
                 decode_metadata.tp_score = self._build_tp_score_metadata(
                     decode_metadata.block_table,
                     decode_cu_seqlens_q,
@@ -497,11 +521,32 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
-        attn_metadata = get_forward_context().attn_metadata
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
         if not isinstance(attn_metadata, dict):
             return None, None, None
         index_md = attn_metadata[self.index_cache.prefix]
         assert isinstance(index_md, AscendMiniMaxM3IndexerMetadata)
+
+        # MRV2 represents an idle DP rank as a one-token decode-like padding
+        # forward. Run the first sparse layer normally to preserve TP/HCCL
+        # communicator initialization order, then skip the repeated indexer
+        # collectives in the remaining layers. MRV1 is explicitly excluded.
+        if (
+            _USE_ASCENDC_INDEX_SCORE_DECODE
+            and index_md.num_decodes > 0
+            and index_md.num_prefills == 0
+            and get_tp_group().world_size > 1
+            and _is_mrv2_idle_dp_dummy(forward_context)
+        ):
+            if forward_context.additional_kwargs.get(
+                _MRV2_DUMMY_INDEXER_TP_WARMED_KEY,
+                False,
+            ):
+                forward_context.additional_kwargs[_MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY] = True
+                return None, None, None
+            forward_context.additional_kwargs[_MRV2_DUMMY_INDEXER_TP_WARMED_KEY] = True
+
         num_tokens = index_md.num_actual_tokens
         num_decode_tokens = index_md.num_decode_tokens
         iq = index_query[:num_tokens].view(-1, self.num_index_heads, self.index_head_dim)
@@ -516,26 +561,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             tp_group = get_tp_group()
             decode_iq = iq[:num_decode_tokens]
             if _USE_ASCENDC_INDEX_SCORE_DECODE:
-                if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
-                    decode_start_loc = torch.div(
-                        d.context_lens,
-                        self.block_size,
-                        rounding_mode="floor",
-                    ).to(dtype=torch.int32)
-                    decode_topk, decode_select_num_idx = minimax_m3_index_decode_replicated(
-                        decode_iq,
-                        kv,
-                        d.block_table,
-                        d.cu_seqlens_q,
-                        d.seq_lens,
-                        decode_start_loc,
-                        index_md.causal_mask,
-                        topk=self.topk_blocks,
-                        init_blocks=self.init_blocks,
-                        local_blocks=self.local_blocks,
-                        decode_query_len=d.decode_query_len,
-                    )
-                elif tp_group.world_size > 1 and index_md.num_prefills == 0:
+                if tp_group.world_size > 1 and index_md.num_prefills == 0:
                     decode_topk = minimax_m3_index_tp_block_parallel_decode(
                         decode_iq,
                         kv,
@@ -932,9 +958,15 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         ],
         output: torch.Tensor,
     ) -> torch.Tensor:
-        attn_metadata = get_forward_context().attn_metadata
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
         if not isinstance(attn_metadata, dict):
             return output
+        if getattr(forward_context, "additional_kwargs", {}).get(
+            _MRV2_SKIP_DUMMY_SPARSE_ATTN_KEY,
+            False,
+        ):
+            return output.zero_()
         main_md = attn_metadata[layer.layer_name]
         assert isinstance(main_md, AscendMiniMaxM3SparseMetadata)
         decode_topk, prefill_topk, decode_select_num_idx = topk_idx

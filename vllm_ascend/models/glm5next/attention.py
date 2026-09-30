@@ -32,6 +32,7 @@ from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextTailCache,
+    get_kpool_tail_ring_capacity,
 )
 
 
@@ -112,6 +113,7 @@ class Indexer(nn.Module):
             dtype=torch.float32,
             prefix=f"{prefix}.tail_cache",
             compress_ratio=self.index_kpool,
+            ring_capacity=get_kpool_tail_ring_capacity(vllm_config, self.index_kpool),
         )
         self.prefix = prefix
 

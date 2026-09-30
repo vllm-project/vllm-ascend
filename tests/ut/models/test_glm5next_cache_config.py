@@ -24,14 +24,14 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_max_memory_usage,
     get_glm5_next_pool_bytes_per_block,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
-    return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
+    return {"tokens_per_state": ratio}
 
 
-def make_config():
+def make_config(*, retention_interval: int | None = 0):
     return SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=2048),
         parallel_config=SimpleNamespace(
@@ -44,6 +44,7 @@ def make_config():
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
+            prefix_cache_retention_interval=retention_interval,
         ),
     )
 
@@ -115,13 +116,10 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
         20 * layout.main_page_size,
         20 * layout.small_page_size,
     }
-    if vllm_version_is("0.28.0"):
-        assert all(tensor.block_stride == 0 for tensor in plan.kv_cache_tensors)
-    else:
-        assert all(
-            tensor.offset == 0 and tensor.layer_stride == 0 and tensor.block_stride == tensor.size // plan.num_blocks
-            for tensor in plan.kv_cache_tensors
-        )
+    assert all(
+        tensor.offset == 0 and tensor.layer_stride == 0 and tensor.block_stride == tensor.size // plan.num_blocks
+        for tensor in plan.kv_cache_tensors
+    )
 
     placements = {
         layer_name: tensor for tensor in plan.kv_cache_tensors for layer_name in get_kv_cache_tensor_layers(tensor)
@@ -160,6 +158,19 @@ def test_standalone_mtp_layout_has_no_mamba_groups():
     assert layout.mamba_groups == ()
 
 
+@pytest.mark.parametrize("retention_interval", [None, 0, 4096])
+def test_kv_cache_config_preserves_retention_interval(retention_interval):
+    config = make_config(retention_interval=retention_interval)
+    groups = get_glm5_next_kv_cache_groups(config, make_specs())
+    layout = _get_glm5_next_cache_layout(groups)
+    assert layout is not None
+
+    budget = 10 * (layout.main_page_size + layout.small_page_size)
+    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+
+    assert plan.prefix_cache_retention_interval == retention_interval
+
+
 def test_pipeline_projection_supports_a_mamba_only_worker():
     config = make_config()
     groups = get_glm5_next_kv_cache_groups(config, make_specs())
@@ -196,7 +207,7 @@ def test_misaligned_logical_block_is_rejected():
     specs = make_specs(pool=16)
     object.__setattr__(
         specs["model.layers.3.indexer.k_cache"],
-        "compress_ratio" if vllm_version_is("0.28.0") else "tokens_per_state",
+        "tokens_per_state",
         15,
     )
     with pytest.raises(ValueError, match="divisible"):

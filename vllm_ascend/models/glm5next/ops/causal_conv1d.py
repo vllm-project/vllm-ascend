@@ -3,45 +3,10 @@
 """AscendC short convolution for GLM prefill, decode and MTP verification."""
 
 import torch
-from vllm.triton_utils import tl, triton
+from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-CONV_STATE_COPY_BLOCK_SIZE = 256
-
-
-@triton.jit
-def _copy_conv_state(
-    cache,
-    packed,
-    cache_indices,
-    starts,
-    packed_indices,
-    cache_stride,
-    index_stride,
-    num_slots,
-    STATE_LEN: tl.constexpr,
-    DIM: tl.constexpr,
-    STATE_STRIDE: tl.constexpr,
-    DIM_STRIDE: tl.constexpr,
-    WRITE_BACK: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    request = tl.program_id(0)
-    offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    slot = tl.load(cache_indices + request * index_stride).to(tl.int64)
-    active = (slot >= 0) & (slot < num_slots) & (tl.load(starts + request + 1) > tl.load(starts + request))
-    in_range = offsets < STATE_LEN * DIM
-    safe_slot = tl.where(active, slot, 0)
-    cache_offsets = safe_slot * cache_stride + offsets // DIM * STATE_STRIDE + offsets % DIM * DIM_STRIDE
-    packed_offsets = request * STATE_LEN * DIM + offsets
-    if WRITE_BACK:
-        values = tl.load(packed + packed_offsets, mask=in_range, other=0)
-        tl.store(cache + cache_offsets, values, mask=active & in_range)
-    else:
-        values = tl.load(cache + cache_offsets, mask=active & in_range, other=0)
-        tl.store(packed + packed_offsets, values, mask=in_range)
-        if tl.program_id(1) == 0:
-            tl.store(packed_indices + request, tl.where(active, request, -1))
+from vllm_ascend.ops.triton.kda.conv_state import copy_conv_state
 
 
 def causal_conv1d(
@@ -70,37 +35,33 @@ def causal_conv1d(
         state_len, dim = conv_state.shape[1:]
         kernel_state = torch.empty((requests, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
         kernel_indices = torch.empty(requests, dtype=torch.int32, device=cache_indices.device)
-        copy_grid = (requests, triton.cdiv(state_len * dim, CONV_STATE_COPY_BLOCK_SIZE))
-        copy_args = (
-            conv_state,
-            kernel_state,
-            cache_indices,
-            query_start_loc,
-            kernel_indices,
-            conv_state.stride(0),
-            cache_indices.stride(0),
-            conv_state.shape[0],
-            state_len,
-            dim,
-            conv_state.stride(1),
-            conv_state.stride(2),
+        copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=False)
+    kernel_indices = kernel_indices.contiguous()
+    if run_mode == 0:
+        result = causal_conv1d_fn(
+            x,
+            weight,
+            None,
+            conv_states=kernel_state,
+            query_start_loc=query_start_loc,
+            cache_indices=kernel_indices,
+            has_initial_state=initial_state_mode,
+            activation="silu",
+            pad_slot_id=PAD_SLOT_ID,
+            null_block_id=0,
         )
-        _copy_conv_state[copy_grid](*copy_args, WRITE_BACK=False, BLOCK=CONV_STATE_COPY_BLOCK_SIZE)
-    # Return the declared result so graph functionalization retains the call.
-    result = torch.ops._C_ascend.npu_causal_conv1d_custom(
-        output,
-        x,
-        weight,
-        conv_state=kernel_state,
-        bias_opt=None,
-        query_start_loc_opt=query_start_loc,
-        cache_indices_opt=kernel_indices,
-        initial_state_mode_opt=initial_state_mode,
-        num_accepted_tokens_opt=num_accepted_tokens,
-        activation_mode=1,
-        pad_slot_id=PAD_SLOT_ID,
-        run_mode=run_mode,
-    )
+    else:
+        result = causal_conv1d_update(
+            x,
+            kernel_state,
+            weight,
+            bias=None,
+            activation="silu",
+            conv_state_indices=kernel_indices,
+            num_accepted_tokens=num_accepted_tokens,
+            query_start_loc=query_start_loc,
+            null_block_id=0,
+        )
     if not conv_state.is_contiguous():
-        _copy_conv_state[copy_grid](*copy_args, WRITE_BACK=True, BLOCK=CONV_STATE_COPY_BLOCK_SIZE)
+        copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=True)
     return result
