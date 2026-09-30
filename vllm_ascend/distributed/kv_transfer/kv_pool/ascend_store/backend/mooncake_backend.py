@@ -60,16 +60,23 @@ def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
 
 
 class MooncakeBackend(Backend):
-    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, contribute_memory: bool = True):
+    def __init__(
+        self,
+        parallel_config: ParallelConfig,
+        lazy_init: bool = False,
+        contribute_memory: bool = True,
+        lookup_only: bool = False,
+    ):
         self.parallel_config = parallel_config
         self.config = MooncakeStoreConfig.load_from_env()
-        if self.config.protocol != "ascend":
+        if not lookup_only and self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
 
         self.store: Any | None = None
         self.local_seg: str | None = None
         self._use_fabric_mem = os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") == "1"
-        self._lazy_init = lazy_init and self._use_fabric_mem
+        self._lookup_only = lookup_only
+        self._lazy_init = lazy_init and self._use_fabric_mem and not lookup_only
         self._contribute_memory = contribute_memory
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
@@ -102,6 +109,20 @@ class MooncakeBackend(Backend):
 
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
+        if self._lookup_only:
+            ret = store.setup(
+                local_hostname=local_hostname,
+                metadata_server=self.config.metadata_server,
+                global_segment_size=0,
+                local_buffer_size=0,
+                protocol="rpc_only",
+                rdma_devices="",
+                master_server_addr=self.config.master_server_address,
+            )
+            if ret != 0:
+                raise RuntimeError(f"Initialize Mooncake lookup client failed with return code {ret}.")
+            return store
+
         ssd_kwargs = _ssd_setup_kwargs(self.config)
         # Each rank that contributes memory to the pool uses its own SSD
         # directory to avoid bucket file collisions. Key by the globally unique
@@ -162,8 +183,7 @@ class MooncakeBackend(Backend):
 
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
-        torch.npu.set_device(0)
-        return cls(parallel_config, contribute_memory=False)
+        return cls(parallel_config, contribute_memory=False, lookup_only=True)
 
     def set_device(self):
         local_rank = get_world_group().local_rank
@@ -171,6 +191,8 @@ class MooncakeBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
+        if self._lookup_only:
+            return
         if not self._use_fabric_mem:
             local_hostname = get_ip()
             global_te.get_transfer_engine(local_hostname, device_name=None)

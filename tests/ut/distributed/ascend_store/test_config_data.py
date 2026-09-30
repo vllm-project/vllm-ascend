@@ -16,7 +16,8 @@
 #
 
 import unittest
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
@@ -30,7 +31,36 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     RequestTracker,
     get_block_hashes,
+    get_kv_pool_lookup_tp_size,
+    infer_group_cache_families,
 )
+
+
+class TestLookupKeyMetadata(unittest.TestCase):
+    def test_lookup_tp_size_matches_worker_key_sharding(self):
+        self.assertEqual(get_kv_pool_lookup_tp_size(8, 4, False, False), 4)
+        self.assertEqual(get_kv_pool_lookup_tp_size(8, 4, True, False), 1)
+        self.assertEqual(get_kv_pool_lookup_tp_size(8, 4, False, True), 1)
+        self.assertEqual(get_kv_pool_lookup_tp_size(8, 4, True, False, use_align_state=True), 8)
+        self.assertEqual(get_kv_pool_lookup_tp_size(8, 4, False, False, effective_tp_size=16), 16)
+
+    def test_sparse_group_uses_mixed_cache_family(self):
+        group = SimpleNamespace(
+            kv_cache_spec=SimpleNamespace(compress_ratio=None),
+            layer_names=[],
+        )
+        self.assertEqual(infer_group_cache_families([group], None, use_sparse=True), ["mixed"])
+
+    def test_missing_spec_ratio_falls_back_to_model_ratio(self):
+        group = SimpleNamespace(
+            kv_cache_spec=SimpleNamespace(compress_ratio=None),
+            layer_names=["model.layers.0.self_attn"],
+        )
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data._get_layer_compress_ratio",
+            return_value=4,
+        ):
+            self.assertEqual(infer_group_cache_families([group], [4]), ["c4"])
 
 
 class TestKeyMetadata(unittest.TestCase):
