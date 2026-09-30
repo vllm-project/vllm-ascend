@@ -239,11 +239,9 @@ private:
                                  hiddenSizeAlignFp32_);
         Mul(outFp32_, vRow_, scoreWeight_, hiddenSize_);
         PipeBarrier<PIPE_V>();
-        // WholeReduceSum writes a 32-byte aligned destination on A3.  The compact
-        // vecMeta slot is not necessarily aligned when metaIdx is odd, so reduce
-        // into the aligned scalar scratch and copy the scalar afterwards.
-        ReduceSumHalfInterval(scalarLocal_, outFp32_, static_cast<int32_t>(hiddenSize_));
-        CopyMetaScalarToLocal(vecMeta_[metaIdx], scalarLocal_);
+        // Reduce directly into the compact score slot. WholeReduceSum emits
+        // the scalar result without the unaligned vector copy that A3 rejects.
+        ReduceSumHalfInterval(vecMeta_[metaIdx], outFp32_, static_cast<int32_t>(hiddenSize_));
         PipeBarrier<PIPE_V>();
     }
 
