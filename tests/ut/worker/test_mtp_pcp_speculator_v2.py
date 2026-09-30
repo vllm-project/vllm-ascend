@@ -209,7 +209,7 @@ def test_eagle_draft_config_disables_profiling_chunk() -> None:
     )
     speculator = object.__new__(AscendEagleSpeculator)
     speculator.vllm_config = target_config
-    speculator.draft_model_config = object()
+    speculator.draft_model_config = SimpleNamespace(hf_overrides=None)
 
     with patch.object(eagle_speculator_module, "replace", side_effect=_fake_config_replace):
         draft_config = speculator._create_draft_vllm_config()
