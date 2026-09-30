@@ -15,7 +15,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     is_a5_bf16_kv_enabled,
     resolve_dsv4_cache_dtype,
 )
-from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
+from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import AscendDeviceType
 
@@ -55,7 +55,7 @@ def _on(device_type):
 
 def test_get_dsa_attn_kv_plan_requires_vllm_config():
     with pytest.raises(TypeError):
-        get_dsa_attn_kv_plan()
+        get_dsa_attn_kv_plan()  # type: ignore[call-arg]
 
 
 def test_a5_fp8_plan_uses_flat_shared_kv():
@@ -70,6 +70,7 @@ def test_a5_bf16_plan_uses_sparse_flash_mla():
     with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(True))
         assert plan.get_dsa_sparse_attn_op() is sparse_flash_mla
+        assert plan.get_dsa_sparse_attn_metadata_op() is sparse_flash_mla_metadata
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
         assert not plan.requires_block_offset_slots
         torch.testing.assert_close(
@@ -78,9 +79,14 @@ def test_a5_bf16_plan_uses_sparse_flash_mla():
         )
 
 
-def test_non_a5_plan_preserves_shared_kv_runtime_kwargs():
-    with _on(AscendDeviceType.A3):
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
+def test_a2_a3_plan_retains_custom_shared_kv(device_type):
+    with _on(device_type):
         plan = get_dsa_attn_kv_plan(_config(True))
+        assert plan.get_dsa_sparse_attn_op() is torch.ops._C_ascend.npu_sparse_attn_sharedkv
+        assert plan.get_dsa_sparse_attn_metadata_op() is torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
+        assert not plan.uses_sparse_flash_mla
+        assert plan.layout_kv == "PA_ND"
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
         assert plan.requires_block_offset_slots
         kwargs: dict[str, Any] = {}
@@ -168,7 +174,7 @@ def test_bf16_scatter_does_not_early_return_on_all_padded_slots():
 
 def test_is_a5_bf16_kv_enabled_requires_vllm_config():
     with _on(AscendDeviceType.A5), pytest.raises(TypeError):
-        is_a5_bf16_kv_enabled()
+        is_a5_bf16_kv_enabled()  # type: ignore[call-arg]
 
 
 def test_only_explicit_bfloat16_selects_bf16_kv_on_a5():
