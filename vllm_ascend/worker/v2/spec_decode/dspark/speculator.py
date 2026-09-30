@@ -34,6 +34,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.utils import lmhead_tp_configured
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -52,8 +53,10 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
     # _sample_sequential samples via compute_draft_logits and never calls
-    # sample_draft; lmhead TP is rejected at construction instead.
-    _lmhead_tp_sample_draft_supported = False
+    # sample_draft, so the mixin sample_draft alignment is not used; instead
+    # _sample_sequential / _sample_sequential_topk pad the per-(req, step)
+    # sample hidden states to the group-agreed capacity and trim back.
+    _lmhead_tp_sample_draft_supported = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
@@ -346,4 +349,120 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 skip_attn_for_dummy_run,
                 mm_inputs,
                 is_profile=is_profile,
+            )
+
+    def _lmhead_tp_dspark_max_num_logits(self) -> int:
+        """Row capacity for the DSpark draft LM head under lmhead TP.
+
+        DSpark's real draft LM-head input is ``B * K`` (num_reqs times
+        num_speculative_steps). The capacity must agree across every rank of
+        the lmhead-TP group.
+        """
+        return self.max_num_reqs * self.num_speculative_steps
+
+    def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
+        if self._draft_topk is not None:
+            self._sample_sequential_topk(num_reqs, head_hidden)
+            return
+        if not lmhead_tp_configured():
+            return super()._sample_sequential(num_reqs, head_hidden)
+
+        n_spec = self.num_speculative_steps
+        num_sample = num_reqs * n_spec
+        capacity = self._lmhead_tp_dspark_max_num_logits()
+        if num_sample > capacity:
+            raise ValueError(
+                f"lmhead TP DSpark draft rows ({num_sample}) exceed the group-agreed "
+                f"capacity ({capacity} = max_num_reqs * num_speculative_steps)."
+            )
+
+        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+        if num_sample < capacity:
+            sample_hidden = torch.nn.functional.pad(
+                sample_hidden, (0, 0, 0, capacity - num_sample)
+            )
+
+        base_logits = self.model.compute_draft_logits(sample_hidden)
+        base_logits = base_logits[:num_sample]
+        vocab_size = base_logits.shape[-1]
+        base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
+
+        idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
+        sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
+        confidence_markov_embeds = []
+        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+
+        for i in range(n_spec):
+            markov_embed = self.model.markov_embed(prev)
+            if self.use_confidence_head:
+                confidence_markov_embeds.append(markov_embed)
+            bias = self.model.markov_bias(markov_embed)
+            logits_i = base_logits[:, i] + bias
+            draft_sampled_i = self._sample_logits(
+                logits_i, idx_map[:, i], sample_pos[:, i], i
+            )
+            self.draft_tokens[:num_reqs, i] = draft_sampled_i
+            prev = draft_sampled_i
+
+        if self.use_confidence_head:
+            confidence = self.model.compute_confidence(
+                sample_hidden[:num_sample],
+                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+            )
+            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
+                num_reqs, n_spec
+            )
+
+    def _sample_sequential_topk(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
+        if not lmhead_tp_configured():
+            return super()._sample_sequential_topk(num_reqs, head_hidden)
+
+        assert self._draft_topk is not None
+        n_spec = self.num_speculative_steps
+        num_sample = num_reqs * n_spec
+        capacity = self._lmhead_tp_dspark_max_num_logits()
+        if num_sample > capacity:
+            raise ValueError(
+                f"lmhead TP DSpark draft rows ({num_sample}) exceed the group-agreed "
+                f"capacity ({capacity} = max_num_reqs * num_speculative_steps)."
+            )
+
+        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+        if num_sample < capacity:
+            sample_hidden = torch.nn.functional.pad(
+                sample_hidden, (0, 0, 0, capacity - num_sample)
+            )
+        base_logits = self.model.compute_draft_logits(sample_hidden)
+        base_logits = base_logits[:num_sample]
+        base_logits = base_logits.view(num_reqs, n_spec, -1)
+        base_values, draft_indices = base_logits.topk(self._draft_topk, dim=-1)
+        base_logits.fill_(float("-inf"))
+        idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
+        sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
+        confidence_markov_embeds = []
+        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+
+        for i in range(n_spec):
+            markov_embed = self.model.markov_embed(prev)
+            if self.use_confidence_head:
+                confidence_markov_embeds.append(markov_embed)
+            logits_i = self.model.apply_markov_bias_gathered(
+                markov_embed,
+                base_logits[:, i],
+                base_values[:, i],
+                draft_indices[:, i],
+            )
+            draft_sampled_i = self._sample_logits(
+                logits_i, idx_map[:, i], sample_pos[:, i], i
+            )
+            self.draft_tokens[:num_reqs, i] = draft_sampled_i
+            prev = draft_sampled_i
+
+        if self.use_confidence_head:
+            confidence = self.model.compute_confidence(
+                sample_hidden[:num_sample],
+                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+            )
+            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
+                num_reqs, n_spec
             )
