@@ -240,6 +240,7 @@ def make_model(namespace, context, start, end, block_size, sp, materialized):
     for idx in range(end):
         layer = namespace["AscendKimiDecoderLayer"]()
         layer.use_sequence_parallel = sp
+        layer.fuse_o_proj_mm_reduce_scatter = False
         layer.use_attn_residuals = block_size is not None
         layer.is_moe_layer = idx % 2 == 1
         layer.input_layernorm = Norm()
