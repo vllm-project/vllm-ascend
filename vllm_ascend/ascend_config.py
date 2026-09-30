@@ -97,10 +97,6 @@ class KVPPConfig:
                 raise ValueError("KVPP supports eager execution or PIECEWISE only.")
         if not model_config.use_mla or model_config.is_hybrid:
             raise ValueError("KVPP currently supports only non-hybrid MLA models.")
-        speculative_config = vllm_config.speculative_config
-        if speculative_config is not None:
-            if speculative_config.method not in ("mtp", "dspark", "dflash", "eagle3"):
-                raise ValueError("KVPP supports speculative decoding only with MTP, DSpark, DFlash or EAGLE3.")
 
 
 @config

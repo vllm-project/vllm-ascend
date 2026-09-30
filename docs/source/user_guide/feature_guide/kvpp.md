@@ -43,10 +43,8 @@ The following table lists individual feature combinations with KVPP. It does not
 | Prefix caching | ✅ Supported | Can be combined with KVPP. |
 | Asynchronous scheduling | ✅ Supported | Can be combined with KVPP. |
 | LI-C8 and SFA-C8 cache layouts | ✅ Supported | Allocation follows the actual KV cache specifications. |
-| Fixed-step MTP | ✅ Supported | MTP caches are allocated independently and excluded from KVPP layer partitioning. |
-| DSpark, DFlash, and EAGLE3 | ✅ Supported | Draft caches remain local to the draft's TP configuration and are excluded from target ownership, scratch buffers, and broadcasts. The target must still be a non-hybrid MLA/SFA model. |
+| Speculative decoding | ✅ Supported | Follows the selected method's existing model-runner and attention-backend support. Independent draft caches are excluded from target ownership, scratch buffers, and broadcasts. |
 | Dynamic speculative decoding | ✅ Supported | Uses the speculative method's existing runner and attention-backend support; see the runner scope below. |
-| Other speculative decoding methods | ❌ Not supported | KVPP accepts only `mtp`, `dspark`, `dflash`, and `eagle3`. |
 | PCP | ✅ Supported | Requires Model Runner V2; caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
@@ -97,7 +95,7 @@ For PP, add `enable_kvpp` to the existing PP launch configuration. Each stage al
 
 ### Speculative Decoding
 
-MTP, DSpark, DFlash, and EAGLE3 can be combined with KVPP. KVPP distributes only target caches: draft caches remain independently allocated on every rank participating in the draft model, with their full memory cost included in the worker's cache budget. Draft layers do not use target scratch buffers or layer prefetch hooks. Sharing embeddings or the LM head does not imply sharing KV caches; draft layers that share target KV caches are not supported with KVPP.
+KVPP can be combined with speculative decoding supported by the selected Ascend model runner and attention backend; KVPP does not impose a method whitelist. Methods without draft KV caches, such as n-gram and suffix decoding, keep the target's KVPP cache path. For methods with independent draft caches, KVPP distributes only target caches: draft caches remain independently allocated on every rank participating in the draft model, with their full memory cost included in the worker's cache budget. Draft layers do not use target scratch buffers or layer prefetch hooks. Sharing embeddings or the LM head does not imply sharing KV caches; draft layers that share target KV caches are not supported with KVPP.
 
 Follow the target and draft model's existing launch requirements and use a matching checkpoint pair. For DFlash or EAGLE3, add the corresponding speculative configuration to the eager launch command above:
 

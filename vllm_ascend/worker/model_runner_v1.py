@@ -4943,7 +4943,11 @@ class NPUModelRunner(GPUModelRunner):
         """
         if self.ascend_config.kvpp_config.size > 1:
             self.hybrid_with_attn_and_mamba = False
-            return allocate_kvpp_cache(self.vllm_config, kv_cache_config, self.device)
+            caches = allocate_kvpp_cache(self.vllm_config, kv_cache_config, self.device)
+            specs = self._get_layer_kv_cache_specs(kv_cache_config)
+            return {
+                name: parts[0] if is_hidden_state_cache_spec(specs[name]) else parts for name, parts in caches.items()
+            }
         # init kv cache tensors
         kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, ...]] = {}
         # prefill disaggregation need the addr of cache tensor be aligned with 2M

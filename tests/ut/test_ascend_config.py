@@ -2035,7 +2035,6 @@ class TestKVPPConfig(TestBase):
             ("parallel_config", "decode_context_parallel_size", 2, "DCP"),
             ("model_config", "use_mla", False, "MLA"),
             ("model_config", "is_hybrid", True, "MLA"),
-            ("speculative_config", "method", "ngram", "speculative decoding"),
         )
         for section, field, value, message in restrictions:
             with self.subTest(field=field):
