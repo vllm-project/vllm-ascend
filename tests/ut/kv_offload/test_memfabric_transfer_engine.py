@@ -12,6 +12,7 @@ from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import 
     MEMFABRIC_ROLE_DECODE,
     MEMFABRIC_ROLE_PREFILL,
     GlobalMemfabricTE,
+    coalesce_registration_regions,
 )
 
 
@@ -92,12 +93,12 @@ def test_memfabric_registers_each_region_only_once():
 
     with patch.dict(sys.modules, {"memfabric_hybrid": _fake_memfabric(raw_engine)}):
         manager.get_transfer_engine("127.0.0.1")
-    manager.register_buffer([100, 200], [10, 20])
+    manager.register_buffer([0x1000, 0x801000], [10, 20])
     manager.register_buffer([300], [30])
 
     assert raw_engine.register_memory.call_args_list == [
-        call(100, 10),
-        call(200, 20),
+        call(0x1000, 10),
+        call(0x801000, 20),
     ]
 
 
@@ -122,3 +123,45 @@ def test_memfabric_initialization_failure_does_not_publish_session():
         manager.get_transfer_engine("127.0.0.1")
     with pytest.raises(RuntimeError, match="has not been initialized"):
         _ = manager.unique_id
+
+
+def test_coalesce_registration_regions_in_same_window():
+    ptrs, sizes = coalesce_registration_regions(
+        [0x401000, 0x402000],
+        [0x100, 0x200],
+        granularity=0x400000,
+    )
+
+    assert ptrs == [0x401000]
+    assert sizes == [0x1200]
+
+
+def test_coalesce_registration_regions_keeps_separate_windows():
+    ptrs, sizes = coalesce_registration_regions(
+        [0x1000, 0x801000],
+        [0x100, 0x200],
+        granularity=0x400000,
+    )
+
+    assert ptrs == [0x1000, 0x801000]
+    assert sizes == [0x100, 0x200]
+
+
+def test_coalesce_registration_regions_sorts_and_merges_overlaps():
+    ptrs, sizes = coalesce_registration_regions(
+        [0x2400, 0x1000],
+        [0x200, 0x1800],
+        granularity=0x1000,
+    )
+
+    assert ptrs == [0x1000]
+    assert sizes == [0x1800]
+
+
+@pytest.mark.parametrize(
+    ("ptrs", "sizes"),
+    [([0x1000], []), ([0], [1]), ([0x1000], [0])],
+)
+def test_coalesce_registration_regions_rejects_invalid_ranges(ptrs, sizes):
+    with pytest.raises(ValueError):
+        coalesce_registration_regions(ptrs, sizes)
