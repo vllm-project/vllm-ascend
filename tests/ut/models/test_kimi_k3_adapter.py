@@ -12,6 +12,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.models import kimi_k3
 from vllm_ascend.models.kimi_k3 import (
+    AscendKimiK3ForConditionalGeneration,
     AscendKimiK3MultiModalProjector,
     AscendKimiLinearModel,
 )
@@ -402,6 +403,17 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
     torch.testing.assert_close(raw_aux[0], torch.tensor([[11.0]]))
 
 
+def _make_k3_conditional_generation_for_weight_test():
+    model = AscendKimiK3ForConditionalGeneration.__new__(
+        AscendKimiK3ForConditionalGeneration
+    )
+    nn.Module.__init__(model)
+    model.mm_projector = nn.Module()
+    model.mm_projector.rot_proj = nn.Linear(2, 2, bias=False)
+    model.hf_to_vllm_mapper = object()
+    return model
+
+
 def test_projector_applies_optional_modelslim_rotation():
     class ScaleLinear(nn.Module):
         def forward(self, hidden_states):
@@ -421,8 +433,72 @@ def test_projector_applies_optional_modelslim_rotation():
             projector(image_features),
             image_features * 2,
         )
-        projector.rot_proj = None
+        del projector.rot_proj
         torch.testing.assert_close(projector(image_features), image_features)
+
+
+def test_kimi_k3_keeps_rot_proj_when_checkpoint_loads_weight(monkeypatch):
+    model = _make_k3_conditional_generation_for_weight_test()
+    weight_name = "mm_projector.rot_proj.weight"
+
+    loader = MagicMock()
+    loader.load_weights.return_value = {weight_name}
+    loader_factory = MagicMock(return_value=loader)
+    monkeypatch.setattr(kimi_k3, "AutoWeightsLoader", loader_factory)
+
+    loaded_weights = model.load_weights(iter([(weight_name, torch.eye(2))]))
+
+    loader_factory.assert_called_once_with(
+        model,
+        skip_prefixes=[],
+    )
+    assert loader.load_weights.call_args.kwargs["mapper"] is (
+        model.hf_to_vllm_mapper
+    )
+    assert loaded_weights == {weight_name}
+    assert hasattr(model.mm_projector, "rot_proj")
+
+
+def test_kimi_k3_removes_rot_proj_when_checkpoint_omits_weight(monkeypatch):
+    model = _make_k3_conditional_generation_for_weight_test()
+
+    loader = MagicMock()
+    loader.load_weights.return_value = {
+        "mm_projector.linear_1.weight",
+    }
+    loader_factory = MagicMock(return_value=loader)
+    monkeypatch.setattr(kimi_k3, "AutoWeightsLoader", loader_factory)
+
+    model.load_weights(
+        iter(
+            [
+                (
+                    "mm_projector.linear_1.weight",
+                    torch.empty(2, 2),
+                ),
+            ]
+        )
+    )
+
+    assert not hasattr(model.mm_projector, "rot_proj")
+
+
+def test_kimi_k3_skips_rot_proj_prefix_after_module_is_removed(monkeypatch):
+    model = _make_k3_conditional_generation_for_weight_test()
+    del model.mm_projector.rot_proj
+
+    loader = MagicMock()
+    loader.load_weights.return_value = set()
+    loader_factory = MagicMock(return_value=loader)
+    monkeypatch.setattr(kimi_k3, "AutoWeightsLoader", loader_factory)
+
+    loaded_weights = model.load_weights(iter(()))
+
+    loader_factory.assert_called_once_with(
+        model,
+        skip_prefixes=["mm_projector.rot_proj."],
+    )
+    assert loaded_weights == set()
 
 
 def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_path, monkeypatch):
