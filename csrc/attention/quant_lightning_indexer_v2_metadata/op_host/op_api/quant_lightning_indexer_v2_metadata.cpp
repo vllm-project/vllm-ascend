@@ -24,7 +24,7 @@
 
 using namespace op;
 namespace l0op {
-OP_TYPE_REGISTER(QuantLightningIndexerV2Metadata);
+OP_TYPE_REGISTER(VllmAscendQuantLightningIndexerV2Metadata);
 
 const aclTensor *QuantLightningIndexerV2Metadata(
     const aclTensor *cuSeqlensQOptional, const aclTensor *cuSeqlensKOptional, const aclTensor *sequsedQOptional,
@@ -37,10 +37,10 @@ const aclTensor *QuantLightningIndexerV2Metadata(
         cmpResidualKOptional, numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK,
         layoutQOptional, layoutKOptional, maskMode, cmpRatio, aicCoreNum, aivCoreNum, socVersion, metadata);
 
-    static internal::AicpuTaskSpace space("QuantLightningIndexerV2Metadata");
+    static internal::AicpuTaskSpace space("VllmAscendQuantLightningIndexerV2Metadata");
 
     auto ret = ADD_TO_LAUNCHER_LIST_AICPU(
-        QuantLightningIndexerV2Metadata,
+        VllmAscendQuantLightningIndexerV2Metadata,
         OP_ATTR_NAMES({ "num_heads_q", "num_heads_k", "head_dim", "topk", "quant_mode", "batch_size", "max_seqlen_q",
                         "max_seqlen_k", "layout_q", "layout_k", "mask_mode", "cmp_ratio", "aic_core_num",
                         "aiv_core_num", "soc_version" }),

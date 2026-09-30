@@ -16,9 +16,9 @@
 #include "register/op_def_registry.h"
 
 namespace ops {
-class QuantLightningIndexerV2 : public OpDef {
+class VllmAscendQuantLightningIndexerV2 : public OpDef {
 public:
-    explicit QuantLightningIndexerV2(const char *name) : OpDef(name)
+    explicit VllmAscendQuantLightningIndexerV2(const char *name) : OpDef(name)
     {
         this->Input("q").ParamType(REQUIRED).DataType({ge::DT_INT8}).FormatList({ge::FORMAT_ND}).AutoContiguous();
         this->Input("k").ParamType(REQUIRED).DataType({ge::DT_INT8}).FormatList({ge::FORMAT_ND}).IgnoreContiguous();
@@ -188,5 +188,5 @@ public:
         this->AICore().AddConfig("ascend950", aicore_config_95);
     }
 };
-OP_ADD(QuantLightningIndexerV2);
+OP_ADD(VllmAscendQuantLightningIndexerV2);
 } // namespace ops
