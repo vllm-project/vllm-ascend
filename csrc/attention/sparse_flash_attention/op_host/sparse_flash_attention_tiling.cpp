@@ -348,6 +348,8 @@ void SFAMlaTiling::SplitBalanced()
         // TND tensor rows bound the number of query groups, including graph
         // padding. Preserve the existing one-group-per-query kernel schedule.
         usedCoreNum_ = std::min(usedCoreNum_, sfaInfo_->s1Size);
+        // Kernel scratch regions use GetBlockNum() for their core stride.
+        coreNum_ = usedCoreNum_;
     }
 }
 
