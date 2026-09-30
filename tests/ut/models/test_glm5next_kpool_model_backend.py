@@ -140,6 +140,8 @@ def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compu
         assert result.shape == (10, 1, 7)
         assert (result[8:] == -1).all()
         select.assert_called_once()
+        assert select.call_args.kwargs["compact_indices"] is True
+        assert result is select.return_value
     else:
         assert result is None
         select.assert_not_called()
