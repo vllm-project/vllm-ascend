@@ -110,7 +110,7 @@ class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
 
 
 class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
-    def __init__(self, **kwargs):
+    def __init__(self, *, cann_mega_moe_supported: bool | None = None, **kwargs):
         super().__init__(**kwargs)
         device_group = get_mc2_group().device_group
         # TODO: Try local_rank = ep_group.rank_in_group
@@ -132,18 +132,28 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         num_tokens_per_tp_rank = mc2_tokens_capacity // tp_size
-        # Surface the per-rank capacity for CANN MegaMoe's get_symm_buffer
-        # sizing (used by FusedMC2CommImpl._get_cann_symm_buffer). Without
-        # this, MegaMoe falls back to hidden_states.shape[0] which jitters
-        # under eager mode and forces sym-buffer rebuilds every step.
+        # MegaMoe is selected for prefill as well as decode. Preserve the
+        # existing decode-derived MC2 capacity for global_bs, but size its
+        # symmetric buffer for the larger of decode and a full prefill shard.
         self.max_num_tokens_per_rank = num_tokens_per_tp_rank
+        if self.a5_need_extra_args:
+            max_num_batched_tokens = int(vllm_config.scheduler_config.max_num_batched_tokens)
+            prefill_tokens_per_tp_rank = (max_num_batched_tokens + tp_size - 1) // tp_size
+            self.max_num_tokens_per_rank = max(num_tokens_per_tp_rank, prefill_tokens_per_tp_rank)
         _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
         # When allreduce across DP is not skipped, tokens are uniform across ranks:
         # use global_bs=0 (uniform mode) and pass mc2_mask.
         # When allreduce is skipped, tokens may differ per rank:
         # use the real global_bs and do NOT pass mc2_mask.
-        self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
+        self.global_bs = (
+            _max_global_bs
+            if should_skip_allreduce_across_dp_group(
+                vllm_config,
+                cann_mega_moe_supported=cann_mega_moe_supported,
+            )
+            else 0
+        )
 
     def refresh_hccl_group(self) -> None:
         """Refresh MC2 communicator metadata after HCCL groups are recreated."""
