@@ -258,6 +258,34 @@ class TestTokenDispatcherWithMC2(TestBase):
             self.assertEqual(output.group_list_type, 0)  # group_list_type == 0
             self.assertIsInstance(output.combine_metadata, MoEMC2CombineMetadata)
 
+    def test_token_dispatch_reuses_fp32_expert_scales_for_combine(self):
+        hidden_states = torch.randn(10, 128, dtype=torch.bfloat16)
+        topk_weights = torch.randn(10, 1, dtype=torch.bfloat16)
+        topk_ids = torch.randint(0, 8, (10, 1))
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        self.dispatcher.enable_dispatch_v2 = True
+        self.dispatcher.need_expert_scale = True
+
+        with patch(
+            "torch_npu.npu_moe_distribute_dispatch_v2",
+            return_value=(torch.randn(10, 128),) * 5 + (None, None),
+            create=True,
+        ) as mock_dispatch:
+            token_dispatch_input = build_token_dispatch_input_fixture(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                expert_map=expert_map,
+            )
+            output = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+        dispatch_expert_scales = mock_dispatch.call_args.kwargs["expert_scales"]
+        self.assertEqual(dispatch_expert_scales.dtype, torch.float32)
+        self.assertIs(output.combine_metadata.topk_weights, dispatch_expert_scales)
+
+        combine_kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, output.combine_metadata)
+        self.assertIs(combine_kwargs["expert_scales"], dispatch_expert_scales)
+
     def test_w4a8_per_channel_dispatch_uses_count_group_list(self):
         hidden_states = torch.randn(10, 128)
         topk_weights = torch.randn(10, 1)
