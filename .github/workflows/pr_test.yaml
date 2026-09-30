@@ -586,7 +586,7 @@ jobs:
           TEST_GROUPS_JSON: ${{ steps.scope-all.outputs.test_groups }}
           # One-card labels, mirroring the a2b3 convention for one_card tests.
           # Change these two values if the new pools expose another card count.
-          A2B1_RUNNER_LABEL: linux-aarch64-a2b1-1
+          A2B1_RUNNER_LABEL: linux-aarch64-a2b1-1-hk-001
           A2B4_RUNNER_LABEL: linux-aarch64-a2b4-1-hk-001
         run: |
           python3 .github/workflows/scripts/a2_dual_runner_groups.py \

@@ -35,7 +35,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT_PATH = _REPO_ROOT / ".github" / "workflows" / "scripts" / "a2_dual_runner_groups.py"
 _SELECT_TESTS_PATH = _REPO_ROOT / ".github" / "workflows" / "scripts" / "select_tests.py"
 
-A2B1_LABEL = "linux-aarch64-a2b1-1"
+A2B1_LABEL = "linux-aarch64-a2b1-1-hk-001"
 A2B4_LABEL = "linux-aarch64-a2b4-1-hk-001"
 BUCKET_COUNT = 7
 

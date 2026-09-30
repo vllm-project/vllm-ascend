@@ -31,10 +31,11 @@ self-hosted-runner:
     - linux-aarch64-a2b3-2
     - linux-aarch64-a2b3-4
     - linux-aarch64-a2b3-8
-    - linux-aarch64-a2b1-1
-    - linux-aarch64-a2b1-2
-    - linux-aarch64-a2b1-4
     - linux-aarch64-a2b1-8
+    - linux-aarch64-a2b1-1-hk-001
+    - linux-aarch64-a2b1-2-hk-001
+    - linux-aarch64-a2b1-4-hk-001
+    - linux-aarch64-a2b1-8-hk-001
     - linux-aarch64-a2b4-1-hk-001
     - linux-aarch64-a2b4-2-hk-001
     - linux-aarch64-a2b4-4-hk-001
