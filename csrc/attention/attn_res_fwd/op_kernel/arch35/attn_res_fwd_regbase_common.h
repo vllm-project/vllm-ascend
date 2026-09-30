@@ -581,7 +581,7 @@ __aicore__ inline void GroupedReduce(const LocalTensor<float> &dst,
 __aicore__ inline void ReduceSquareSum(const LocalTensor<float> &dstScalar, const LocalTensor<float> &src,
                                        uint32_t hiddenSize)
 {
-    if ((hiddenSize % 64U) == 0U) {
+    if ((hiddenSize % 512U) == 0U && hiddenSize <= 8192U) {
         GroupedReduce<true>(dstScalar, src, src, dstScalar, hiddenSize, 0.0f, dstScalar);
         return;
     }
@@ -610,7 +610,7 @@ __aicore__ inline void ReduceSquareSum(const LocalTensor<float> &dstScalar, cons
 __aicore__ inline void ReduceMulSum(const LocalTensor<float> &dstScalar, const LocalTensor<float> &src0,
                                     const LocalTensor<float> &src1, uint32_t hiddenSize)
 {
-    if ((hiddenSize % 64U) == 0U) {
+    if ((hiddenSize % 512U) == 0U && hiddenSize <= 8192U) {
         GroupedReduce<false>(dstScalar, src0, src1, dstScalar, hiddenSize, 0.0f, dstScalar);
         return;
     }
@@ -662,7 +662,7 @@ template <typename T>
 __aicore__ inline void CastAndInvRms(const LocalTensor<float> &row, const LocalTensor<float> &inv,
     const LocalTensor<T> &input, uint32_t hiddenSize, float invHiddenSize, float epsilon)
 {
-    if ((hiddenSize % 64U) == 0U) {
+    if ((hiddenSize % 512U) == 0U && hiddenSize <= 8192U) {
         GroupedReduce<true, false, true>(inv, input, row, inv, hiddenSize, epsilon, row);
         return;
     }
@@ -699,7 +699,7 @@ __aicore__ inline void NormalizeAndReduceScore(const LocalTensor<float> &score,
     const LocalTensor<float> &row, const LocalTensor<float> &weight,
     const LocalTensor<float> &inv, uint32_t hiddenSize)
 {
-    if ((hiddenSize % 64U) == 0U) {
+    if ((hiddenSize % 512U) == 0U && hiddenSize <= 8192U) {
         GroupedReduce<false, true>(score, row, weight, inv, hiddenSize, 0.0f, score);
         return;
     }
