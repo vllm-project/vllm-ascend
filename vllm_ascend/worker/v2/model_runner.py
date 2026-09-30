@@ -318,6 +318,15 @@ class NPUModelRunner(GPUModelRunner):
                     module.prepare_ring_compressor(self.max_num_tokens, self.device)
         prepare_v41_source_rope(self)
 
+        # Upstream has bound every local cache; publish sealed plans before
+        # the worker can warm up, capture graphs or execute prefill requests.
+        from vllm_ascend.ops.kda_state_copy_plan import initialize_kda_state_copy
+
+        initialize_kda_state_copy(
+            self.vllm_config.compilation_config.static_forward_context,
+            self.vllm_config.scheduler_config.max_num_seqs,
+        )
+
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
@@ -686,20 +695,10 @@ class NPUModelRunner(GPUModelRunner):
     def prepare_dummy_attn(
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        if self.pcp_manager is None:
-            block_tables, slot_mappings = super().prepare_dummy_attn(
-                input_batch,
-                valid_state_slots=valid_state_slots,
-            )
-        else:
-            block_tables, slot_mappings = self.pcp_manager.prepare_dummy_attn(input_batch)
-            if valid_state_slots:
-                # Match the upstream state-slot contract in the persistent PCP views.
-                for block_table in block_tables:
-                    state_slots = torch.arange(
-                        1, block_table.shape[0] + 1, dtype=torch.int32, device=block_table.device
-                    )
-                    block_table[:, 0].copy_(state_slots)
+        block_tables, slot_mappings = super().prepare_dummy_attn(
+            input_batch,
+            valid_state_slots=valid_state_slots,
+        )
         prepare_v41_dummy_ring_state(self, input_batch.num_reqs)
         return block_tables, slot_mappings
 
