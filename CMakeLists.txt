@@ -59,6 +59,17 @@ set(VLLM_ASCEND_CUSTOM_OP
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
 )
 
+# The INT4 MSD kernel and its host implementation are supported on Ascend A3 only.
+# setup.py normalizes the 910c alias to ascend910_9392 before invoking CMake.
+string(TOLOWER "${SOC_VERSION}" VLLM_ASCEND_GMSQ_SOC_VERSION)
+set(VLLM_ASCEND_BUILD_GMSQ OFF)
+if(VLLM_ASCEND_GMSQ_SOC_VERSION MATCHES "^ascend910_93[0-9]+$")
+    set(VLLM_ASCEND_BUILD_GMSQ ON)
+    list(APPEND VLLM_ASCEND_CUSTOM_OP
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gmsq_situ_quant/op_kernel/grouped_matmul_situ_quant_kernel.cpp
+    )
+endif()
+
 set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
 )
@@ -74,6 +85,14 @@ else()
     ascendc_library(vllm_ascend_kernels SHARED
         ${VLLM_ASCEND_CUSTOM_OP}
     )
+    if(VLLM_ASCEND_BUILD_GMSQ)
+        # CANN experiment headers pulled in transitively by AscendC adv_api includes.
+        ascendc_include_directories(vllm_ascend_kernels PRIVATE
+            ${ASCEND_CANN_PACKAGE_PATH}/include
+            ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/runtime
+            ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/msprof
+        )
+    endif()
 endif()
 
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
@@ -111,6 +130,12 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+if(VLLM_ASCEND_BUILD_GMSQ)
+  target_sources(vllm_ascend_C PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gmsq_situ_quant/grouped_matmul_situ_quant.cpp
+  )
+  target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_BUILD_GMSQ)
+endif()
 if(SOC_VERSION MATCHES "ascend910_93.*")
   target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD)
   target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
