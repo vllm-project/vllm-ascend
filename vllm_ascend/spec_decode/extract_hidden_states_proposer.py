@@ -97,7 +97,6 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
                 num_tokens=num_tokens_padded,
                 is_draft_model=True,
                 cudagraph_mode=cudagraph_mode,
-                allow_dp_padding=use_cudagraphs,
             )
 
             if num_tokens_across_dp is not None:
@@ -138,10 +137,12 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
         # llm_base_proposer.dummy_run); otherwise the DP cpu_group collectives
         # desynchronize and the group deadlocks.
         (
-            num_tokens,
+            _,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
+        if num_tokens_across_dp is not None:
+            num_tokens = int(num_tokens_across_dp[self.dp_rank].item())
 
         with set_forward_context(
             None,
