@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
+import regex as re
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import KeyMetadata

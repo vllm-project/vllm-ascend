@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any, Concatenate, ParamSpec, TypeVar
@@ -32,8 +32,8 @@ _Result = TypeVar("_Result")
 
 
 @dataclass(slots=True)
-class _KVPoolStepFrame:
-    """Retain mutable Runtime state across one KV Pool step."""
+class _KVPoolStepContext:
+    """Adapt one upstream hook batch without owning cross-step executions."""
 
     step: KVTransferStep
     failed_request_ids: set[str] = field(default_factory=set)
@@ -64,8 +64,9 @@ class KVPoolRuntime:
         self._resources = resources
         self._backend_io = backend_io
         self._timeline = timeline
-        self._active_frame: _KVPoolStepFrame | None = None
-        self._load_frames: dict[str, _KVPoolStepFrame] = {}
+        self._active_step: _KVPoolStepContext | None = None
+        # One outstanding Load per request; its Timeline retains the transfer, not this step context.
+        self._pending_load_request_ids: set[str] = set()
         self._pending_store_batch: StoreBatch | None = None
         self._released_store_job_ids: set[int] = set()
         self._store_error: Exception | None = None
@@ -94,79 +95,82 @@ class KVPoolRuntime:
 
     def begin_step(self, step: KVTransferStep) -> None:
         self._raise_store_error()
-        if self._active_frame is not None:
+        if self._active_step is not None:
             raise RuntimeError("Previous KV Pool step has not ended")
-        frame = _KVPoolStepFrame(step)
+        context = _KVPoolStepContext(step)
         if self._timeline.store_enabled and step.store.commands:
             try:
-                frame.store_transfers = self._program.select_store_transfers(step.store.commands)
-                self._timeline.prepare_store(frame.store_transfers)
+                context.store_transfers = self._program.select_store_transfers(step.store.commands)
+                self._timeline.prepare_store(context.store_transfers)
                 if step.store.all_sources_ready:
-                    self._submit_store(frame)
+                    self._submit_store(context)
             except Exception as error:
                 self._store_error = error
                 raise
-        self._active_frame = frame
+        self._active_step = context
 
     def end_step(self) -> None:
-        if self._active_frame is None:
+        if self._active_step is None:
             raise RuntimeError("KV Pool step has not begun")
-        self._active_frame = None
+        self._active_step = None
 
     @staticmethod
-    def _with_active_frame(
-        method: Callable[Concatenate[KVPoolRuntime, _KVPoolStepFrame, _Parameters], _Result],
+    def _with_active_step(
+        method: Callable[Concatenate[KVPoolRuntime, _KVPoolStepContext, _Parameters], _Result],
     ) -> Callable[Concatenate[KVPoolRuntime, _Parameters], _Result]:
-        """Inject the active step frame into one runtime operation."""
+        """Inject the upstream step context into one runtime operation."""
 
         @wraps(method)
         def guarded(self: KVPoolRuntime, *args: _Parameters.args, **kwargs: _Parameters.kwargs) -> _Result:
-            if self._active_frame is None:
+            if self._active_step is None:
                 raise RuntimeError("KV Pool step has not begun")
-            return method(self, self._active_frame, *args, **kwargs)
+            return method(self, self._active_step, *args, **kwargs)
 
         return guarded
 
-    @_with_active_frame
-    def start_load(self, frame: _KVPoolStepFrame) -> None:
-        transfers = self._program.select_load_transfers(frame.step.load.commands)
+    @_with_active_step
+    def start_load(self, context: _KVPoolStepContext) -> None:
+        transfers = self._program.select_load_transfers(context.step.load.commands)
         if self._timeline.collects_load_completions:
             for transfer in transfers:
-                if transfer.request_id in self._load_frames:
+                if transfer.request_id in self._pending_load_request_ids:
                     raise RuntimeError(f"Request {transfer.request_id} already has a pending asynchronous Load")
-                self._load_frames[transfer.request_id] = frame
+            self._pending_load_request_ids.update(transfer.request_id for transfer in transfers)
         try:
             completions = self._timeline.submit_load(transfers)
         except BaseException:
-            for transfer in transfers:
-                if self._load_frames.get(transfer.request_id) is frame:
-                    del self._load_frames[transfer.request_id]
+            self._pending_load_request_ids.difference_update(transfer.request_id for transfer in transfers)
             raise
         for completion in completions:
-            self._record_load_completion(frame, completion)
-        self._raise_load_error(frame)
+            self._record_load_completion(context, completion)
+        self._raise_load_error(context)
 
-    @_with_active_frame
-    def collect_load_result(self, frame: _KVPoolStepFrame) -> LoadResult:
+    @_with_active_step
+    def collect_load_result(self, context: _KVPoolStepContext) -> LoadResult:
         completions = self._timeline.collect_load()
-        frames = [frame]
         for completion in completions:
-            owner = self._load_frames.pop(completion.request_id, None)
-            if owner is None:
-                raise RuntimeError(f"Load completion has no owning KV Pool frame: {completion.request_id}")
-            self._record_load_completion(owner, completion)
-            frames.append(owner)
-        return self._finalize_load_result(frames, (completion.request_id for completion in completions))
+            if completion.request_id not in self._pending_load_request_ids:
+                raise RuntimeError(f"Load completion has no pending execution: {completion.request_id}")
+            self._pending_load_request_ids.remove(completion.request_id)
+            self._record_load_completion(context, completion)
+        result = LoadResult(
+            frozenset(completion.request_id for completion in completions),
+            frozenset(context.failed_request_ids),
+            frozenset(context.failed_block_ids),
+        )
+        context.failed_request_ids.clear()
+        context.failed_block_ids.clear()
+        return result
 
-    @_with_active_frame
-    def wait_for_layer_load(self, frame: _KVPoolStepFrame, layer_name: str) -> None:
+    @_with_active_step
+    def wait_for_layer_load(self, context: _KVPoolStepContext, layer_name: str) -> None:
         completions = self._timeline.wait_for_load_layer(layer_name)
         for completion in completions:
-            self._record_load_completion(frame, completion)
-        self._raise_load_error(frame)
+            self._record_load_completion(context, completion)
+        self._raise_load_error(context)
 
-    @_with_active_frame
-    def save_layer(self, _frame: _KVPoolStepFrame, layer_name: str) -> None:
+    @_with_active_step
+    def save_layer(self, _context: _KVPoolStepContext, layer_name: str) -> None:
         self._raise_store_error()
         try:
             self._timeline.submit_store_layer(layer_name)
@@ -174,24 +178,24 @@ class KVPoolRuntime:
             self._store_error = error
             raise
 
-    @_with_active_frame
-    def finish_step(self, frame: _KVPoolStepFrame) -> None:
+    @_with_active_step
+    def finish_step(self, context: _KVPoolStepContext) -> None:
         self._raise_store_error()
-        if not self._timeline.store_enabled or not frame.step.store.commands or frame.store_submitted:
+        if not self._timeline.store_enabled or not context.step.store.commands or context.store_submitted:
             return
         try:
-            self._submit_store(frame)
+            self._submit_store(context)
             if self._timeline.fences_store_on_finish:
                 self.fence_previous_store()
         except Exception as error:
             self._store_error = error
             raise
 
-    def _submit_store(self, frame: _KVPoolStepFrame) -> None:
+    def _submit_store(self, context: _KVPoolStepContext) -> None:
         if self._pending_store_batch is not None:
             raise RuntimeError("Previous Store invocation has not reached its fence")
-        self._pending_store_batch = self._timeline.finish_store(frame.store_transfers)
-        frame.store_submitted = True
+        self._pending_store_batch = self._timeline.finish_store(context.store_transfers)
+        context.store_submitted = True
 
     def fence_previous_store(self) -> tuple[StoreCompletion, ...]:
         self._raise_store_error()
@@ -225,7 +229,12 @@ class KVPoolRuntime:
 
     def close(self) -> None:
         close_error: BaseException | None = None
+        # An absent batch proves no pending Store only after the Timeline has handed off prepared work.
+        store_handoff_complete = False
         try:
+            if self._pending_store_batch is None:
+                self._pending_store_batch = self._timeline.prepare_store_close()
+            store_handoff_complete = True
             self.fence_previous_store()
         except BaseException as error:
             close_error = error
@@ -235,7 +244,7 @@ class KVPoolRuntime:
             if close_error is None:
                 close_error = error
         finally:
-            if self._pending_store_batch is None:
+            if store_handoff_complete and self._pending_store_batch is None:
                 self._resources.close()
         if close_error is not None:
             raise close_error
@@ -269,29 +278,13 @@ class KVPoolRuntime:
         if self._store_error is not None:
             raise RuntimeError("KVPoolRuntime cannot continue after a previous Store failure") from self._store_error
 
-    def _record_load_completion(self, frame: _KVPoolStepFrame, completion: LoadCompletion) -> None:
+    def _record_load_completion(self, context: _KVPoolStepContext, completion: LoadCompletion) -> None:
         failure = self._program.reduce_load_completion(completion)
-        frame.failed_request_ids.update(failure.failed_request_ids)
-        frame.failed_block_ids.update(failure.failed_block_ids)
+        context.failed_request_ids.update(failure.failed_request_ids)
+        context.failed_block_ids.update(failure.failed_block_ids)
 
-    def _raise_load_error(self, frame: _KVPoolStepFrame) -> None:
-        if not frame.failed_request_ids:
+    def _raise_load_error(self, context: _KVPoolStepContext) -> None:
+        if not context.failed_request_ids:
             return
         self._timeline.abort_load()
-        raise RuntimeError(f"Hybrid KV Load failed for requests: {sorted(frame.failed_request_ids)}")
-
-    @staticmethod
-    def _finalize_load_result(
-        frames: Iterable[_KVPoolStepFrame],
-        completed_request_ids: Iterable[str],
-    ) -> LoadResult:
-        frames_by_identity = {id(frame): frame for frame in frames}
-        result = LoadResult(
-            frozenset(completed_request_ids),
-            frozenset(request_id for frame in frames_by_identity.values() for request_id in frame.failed_request_ids),
-            frozenset(block_id for frame in frames_by_identity.values() for block_id in frame.failed_block_ids),
-        )
-        for frame in frames_by_identity.values():
-            frame.failed_request_ids.clear()
-            frame.failed_block_ids.clear()
-        return result
+        raise RuntimeError(f"Hybrid KV Load failed for requests: {sorted(context.failed_request_ids)}")

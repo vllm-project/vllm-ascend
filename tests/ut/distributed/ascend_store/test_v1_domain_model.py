@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import pickle
 import threading
+import weakref
 from dataclasses import dataclass, replace
+from multiprocessing.reduction import ForkingPickler
 from types import SimpleNamespace
 
 import pytest
@@ -105,11 +106,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.
     project_remote_identities,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.evidence import (
+    BindingEvidence,
     ChunkAvailability,
     GroupAvailability,
     LoadCompletion,
     ReachablePrefix,
     RemoteObjectObservation,
+    StoreCompletion,
+    StoreEvidence,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.representation import (
     BindingBatch,
@@ -760,7 +764,7 @@ def test_vllm_adapter_captures_authoritative_parallel_coordinates(monkeypatch) -
     assert spec.topology.groups[0].key_metadata.pp_rank == 1
     assert spec.topology.groups[0].key_metadata.dcp_rank == 2
     assert spec.topology.groups[0].kv_cache_spec is cache_group.kv_cache_spec
-    assert pickle.loads(pickle.dumps(spec)) == spec
+    assert ForkingPickler.loads(ForkingPickler.dumps(spec)) == spec
 
 
 def test_vllm_adapter_uses_scheduler_resumption_as_authoritative_request_kind() -> None:
@@ -1694,6 +1698,46 @@ def test_backend_io_marks_misaligned_load_results_unknown(native_result) -> None
     assert [outcome.result_code for outcome in outcomes] == [None]
 
 
+@pytest.mark.parametrize(
+    ("succeeded", "source_released", "result_code", "expected_error"),
+    [
+        (True, True, None, None),
+        (False, True, 0, "success was not confirmed"),
+        (False, False, -1, "result codes \\[-1\\]"),
+        (True, False, 0, "source release is unknown"),
+    ],
+)
+def test_store_completion_uses_the_producer_outcome(succeeded, source_released, result_code, expected_error) -> None:
+    binding = make_binding_batch().bindings[0]
+    evidence = StoreEvidence((BindingEvidence(binding, result_code),), succeeded, source_released)
+    completion = StoreCompletion("request", evidence)
+
+    if expected_error is None:
+        KVPoolProgram.validate_store_completion(completion)
+    else:
+        with pytest.raises(RuntimeError, match=expected_error):
+            KVPoolProgram.validate_store_completion(completion)
+
+
+def test_store_completion_preserves_the_producer_error() -> None:
+    error = RuntimeError("remote publication failed")
+    completion = StoreCompletion("request", StoreEvidence((), False, True, error))
+
+    with pytest.raises(RuntimeError, match="Store failed") as failure:
+        KVPoolProgram.validate_store_completion(completion)
+
+    assert failure.value.__cause__ is error
+
+
+@pytest.mark.parametrize("native_result", [None, [0, 0], [True]])
+def test_key_range_backend_rejects_malformed_session_results(native_result) -> None:
+    backend = SimpleNamespace(batch_put_start=lambda keys, sizes: native_result)
+    backend_io = KeyRangeBackendIO(backend, make_backend_spec(type(backend)))
+
+    with pytest.raises(RuntimeError, match="batch_put_start returned"):
+        backend_io.start_store_sessions(["key"], [16])
+
+
 def test_synchronous_and_asynchronous_load_share_the_same_operation() -> None:
     backend = FakeBackend()
     backend.get_result = [0]
@@ -2074,6 +2118,28 @@ def test_layerwise_store_publishes_ranges_before_committing_shared_objects(monke
     assert resources.closed
 
 
+def test_layerwise_range_success_does_not_publish_whole_store_completion(monkeypatch) -> None:
+    backend = FakeBackend()
+    monkeypatch.setattr(torch.npu, "Event", FakeEvent)
+    runtime, _ = make_layerwise_store_runtime(backend)
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 7),))
+    begin_kv_pool_step(runtime, store=store)
+    runtime.save_layer("layers.0.group.0")
+    runtime._timeline.store._executor._queue.join()
+
+    assert runtime._pending_store_batch is None
+    assert runtime.take_released_store_job_ids() == set()
+    assert [call[0] for call in backend.calls].count("batch_copy_put") == 1
+    assert "batch_commit" not in [call[0] for call in backend.calls]
+
+    runtime.save_layer("layers.1.group.0")
+    runtime.finish_step()
+
+    assert runtime.take_released_store_job_ids() == {7}
+    assert [call[0] for call in backend.calls].count("batch_commit") == 1
+    runtime.close()
+
+
 def test_layerwise_store_runs_session_lifecycle_on_its_executor(monkeypatch) -> None:
     backend = FakeBackend()
     backend.requires_exists_before_put = True
@@ -2238,18 +2304,69 @@ def test_kv_pool_runtime_owns_active_step_lifecycle() -> None:
         runtime.end_step()
 
 
-def test_kv_pool_runtime_retains_async_load_owner_across_steps() -> None:
+def test_kv_pool_runtime_tracks_async_load_without_retaining_the_originating_step() -> None:
     backend = FakeBackend()
     backend.get_result = [0]
     runtime, _ = make_kv_pool_runtime(backend, async_load=True, store=False, registered=True)
     load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",)),))
 
+    step = KVTransferStep(load)
+    step_reference = weakref.ref(step)
+    runtime.begin_step(step)
+    runtime.start_load()
+    runtime.end_step()
+    del step
+
+    assert step_reference() is None
+    assert runtime._pending_load_request_ids == {"request"}
+    begin_kv_pool_step(runtime)
+    runtime._timeline.load._executor._queue.join()
+
+    assert runtime.collect_load_result().completed_request_ids == {"request"}
+    assert runtime._pending_load_request_ids == set()
+    runtime.close()
+
+
+@pytest.mark.parametrize(
+    ("groups", "result_codes", "failed_requests", "failed_blocks"),
+    [((0,), [-1], set(), {1}), ((0, 1), [0, -1], {"request"}, set())],
+)
+def test_kv_pool_runtime_reports_cross_step_load_failures_once(
+    groups, result_codes, failed_requests, failed_blocks
+) -> None:
+    backend = FakeBackend()
+    backend.get_result = result_codes
+    runtime, _ = make_kv_pool_runtime(backend, groups=groups, async_load=True, store=False, registered=True)
+    load = LoadCommandBatch((LoadCommand("request", TokenRange(0, 4), tuple((1,) for _ in groups), (b"a",)),))
     begin_kv_pool_step(runtime, load=load)
     runtime.start_load()
     runtime.end_step()
     begin_kv_pool_step(runtime)
     runtime._timeline.load._executor._queue.join()
 
+    result = runtime.collect_load_result()
+
+    assert result.completed_request_ids == {"request"}
+    assert result.failed_request_ids == failed_requests
+    assert result.failed_block_ids == failed_blocks
+    assert runtime.collect_load_result().failed_request_ids == set()
+    assert runtime.collect_load_result().failed_block_ids == set()
+    runtime.close()
+
+
+def test_kv_pool_runtime_rejects_overlapping_load_without_registering_other_requests() -> None:
+    runtime, _ = make_kv_pool_runtime(FakeBackend(), async_load=True, store=False, registered=True)
+    command = LoadCommand("request", TokenRange(0, 4), ((1,),), (b"a",))
+    begin_kv_pool_step(runtime, load=LoadCommandBatch((command,)))
+    runtime.start_load()
+    runtime.end_step()
+    begin_kv_pool_step(runtime, load=LoadCommandBatch((replace(command, request_id="other"), command)))
+
+    with pytest.raises(RuntimeError, match="already has a pending asynchronous Load"):
+        runtime.start_load()
+
+    assert runtime._pending_load_request_ids == {"request"}
+    runtime._timeline.load._executor._queue.join()
     assert runtime.collect_load_result().completed_request_ids == {"request"}
     runtime.close()
 
@@ -2329,6 +2446,89 @@ def test_kv_pool_runtime_close_keeps_resources_when_store_source_release_is_unkn
     with pytest.raises(RuntimeError):
         runtime.close()
     assert not resources.closed
+
+
+def test_runtime_close_collects_layerwise_store_evidence_without_finish_step(monkeypatch) -> None:
+    backend = FakeBackend()
+    monkeypatch.setattr(torch.npu, "Event", FakeEvent)
+    runtime, resources = make_layerwise_store_runtime(backend)
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 7),))
+    begin_kv_pool_step(runtime, store=store)
+    runtime.save_layer("layers.0.group.0")
+    runtime.save_layer("layers.1.group.0")
+    runtime.end_step()
+
+    runtime.close()
+
+    assert runtime.take_released_store_job_ids() == {7}
+    assert runtime._pending_store_batch is None
+    assert resources.closed
+    assert [call[0] for call in backend.calls].count("batch_commit") == 1
+    assert not runtime._timeline.store._executor.is_alive()
+
+
+def test_runtime_close_preserves_unknown_layerwise_store_source_without_finish_step(monkeypatch) -> None:
+    backend = FakeBackend()
+    backend.store_session_copy_result = RuntimeError("put failed")
+    monkeypatch.setattr(torch.npu, "Event", FakeEvent)
+    runtime, resources = make_layerwise_store_runtime(backend)
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 7),))
+    begin_kv_pool_step(runtime, store=store)
+    runtime.save_layer("layers.0.group.0")
+    runtime.end_step()
+
+    with pytest.raises(RuntimeError, match="Store failed"):
+        runtime.close()
+
+    assert runtime._pending_store_batch is not None
+    assert not runtime._pending_store_batch.completions[0].evidence.source_release_confirmed
+    assert runtime.take_released_store_job_ids() == set()
+    assert not resources.closed
+    assert "batch_revoke" in [call[0] for call in backend.calls]
+    assert not runtime._timeline.store._executor.is_alive()
+
+
+def test_runtime_close_reports_incomplete_store_but_releases_safe_sources(monkeypatch) -> None:
+    backend = FakeBackend()
+    monkeypatch.setattr(torch.npu, "Event", FakeEvent)
+    runtime, resources = make_layerwise_store_runtime(backend)
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 7),))
+    begin_kv_pool_step(runtime, store=store)
+    runtime.save_layer("layers.0.group.0")
+
+    with pytest.raises(RuntimeError, match="Store failed"):
+        runtime.close()
+
+    assert runtime.take_released_store_job_ids() == {7}
+    assert runtime._pending_store_batch is None
+    assert resources.closed
+    assert "batch_revoke" in [call[0] for call in backend.calls]
+    assert "batch_commit" not in [call[0] for call in backend.calls]
+    assert not runtime._timeline.store._executor.is_alive()
+
+
+def test_runtime_close_preserves_store_resources_when_finalization_cannot_be_handed_off(monkeypatch) -> None:
+    backend = FakeBackend()
+
+    def interrupt_range(*args, **kwargs):
+        raise KeyboardInterrupt("put interrupted")
+
+    monkeypatch.setattr(backend, "batch_copy_put", interrupt_range)
+    monkeypatch.setattr(torch.npu, "Event", FakeEvent)
+    runtime, resources = make_layerwise_store_runtime(backend)
+    store = StoreCommandBatch((RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 7),))
+    begin_kv_pool_step(runtime, store=store)
+    runtime.save_layer("layers.0.group.0")
+    runtime._timeline.store._executor.join(timeout=1)
+
+    with pytest.raises(RuntimeError, match="Layerwise Store failed"):
+        runtime.close()
+
+    assert runtime._pending_store_batch is None
+    assert runtime._timeline.store._session is not None
+    assert runtime.take_released_store_job_ids() == set()
+    assert not resources.closed
+    assert not runtime._timeline.store._executor.is_alive()
 
 
 def make_planner(availability, *, async_load=False, save_decode=False, store_enabled=True):
