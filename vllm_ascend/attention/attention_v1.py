@@ -61,6 +61,7 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.utils import vllm_version_is
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -338,6 +339,18 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
+        # vLLM main keeps speculative-decode request metadata at the real
+        # request extent, so a padded FULL-graph query tensor can exceed the
+        # last cumulative query length. FIA's TND layout requires that last
+        # entry to equal the model input token count, so append the padded tail
+        # as a final synthetic request. v0.30.0 already pads this at the request
+        # level and must stay unchanged.
+        if (
+            not vllm_version_is("0.30.0")
+            and actual_seq_lengths_q
+            and common_attn_metadata.num_input_tokens > actual_seq_lengths_q[-1]
+        ):
+            actual_seq_lengths_q = actual_seq_lengths_q + [common_attn_metadata.num_input_tokens]
         seq_lens_list = seq_lens.tolist()
         # Sequence-parallel (or cudagraph) padding makes the model runner insert a
         # dummy padding request into query_start_loc to satisfy the FIA TND-layout
