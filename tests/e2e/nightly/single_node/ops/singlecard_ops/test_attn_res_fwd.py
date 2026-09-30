@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import csv
+
 import pytest
 import torch
+import torch_npu
 
 
 def cpu_mix_reference(prefix, blocks, projection, gamma, epsilon):
@@ -282,3 +285,39 @@ def test_attn_res_fused_register_reductions_changed_inputs(valid, hidden):
         assert_mix_close(materialized, expected, max_abs_error=2 if scale == 1000.0 else 1)
         torch.testing.assert_close(output, expected_norm, rtol=1e-2, atol=1e-2)
         assert torch.isnan(bank[:, valid:]).all()
+
+
+@torch.inference_mode()
+def test_attn_res_fused_graph_profiler_name(tmp_path):
+    prefix = torch.randn(2, 128, device="npu", dtype=torch.bfloat16)
+    blocks = torch.randn(2, 1, 128, device="npu", dtype=torch.bfloat16)
+    projection = torch.randn(1, 128, device="npu", dtype=torch.bfloat16)
+    gamma = torch.randn(128, device="npu", dtype=torch.bfloat16)
+
+    def fused():
+        return torch.ops._C_ascend.attn_res_fwd(prefix, None, blocks, projection, gamma, 1e-5, 1)
+
+    fused()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        fused()
+
+    config = torch_npu.profiler._ExperimentalConfig(profiler_level=torch_npu.profiler.ProfilerLevel.Level1)
+    with torch_npu.profiler.profile(
+        activities=[torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU],
+        experimental_config=config,
+        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(str(tmp_path)),
+    ):
+        for _ in range(3):
+            graph.replay()
+        torch.npu.synchronize()
+
+    csv_files = list(tmp_path.glob("*/ASCEND_PROFILER_OUTPUT/kernel_details.csv"))
+    assert len(csv_files) == 1
+    with csv_files[0].open(newline="") as csv_file:
+        graph_ops = [
+            row for row in csv.DictReader(csv_file) if row["Type"] == "AttnResFwd" and row["Model ID"] != "4294967295"
+        ]
+    assert graph_ops
+    assert all("AttnResFwd" in row["Name"] for row in graph_ops)
