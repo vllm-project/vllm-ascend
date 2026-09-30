@@ -89,6 +89,7 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
         attention_config=AttentionConfig(),
         speculative_config=SimpleNamespace(method="dspark", use_dspark=lambda: True),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(block_size=128),
     )
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: config))
     spec = init_speculator(config, torch.device("cpu"))

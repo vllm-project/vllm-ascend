@@ -3,11 +3,9 @@ from contextlib import contextmanager
 from itertools import product as iprod
 from typing import Any
 
-import numpy as np
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
-from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
@@ -37,7 +35,10 @@ def copy_kv_cache_blocks_inplace(
     for entry in kv_caches:
         if entry is None:
             continue
-        tensors = (entry,) if isinstance(entry, torch.Tensor) else entry
+        if isinstance(entry, torch.Tensor):
+            tensors = entry.unbind(0) if entry.ndim == 5 and entry.shape[0] == 2 else (entry,)
+        else:
+            tensors = entry
         for tensor in tensors:
             if tensor is None:
                 continue
@@ -51,18 +52,13 @@ def copy_kv_cache_blocks_inplace(
         return
 
     device = cache_tensors[0].device
-    indices_np = np.array(
-        [[copy.src_block_id, copy.dst_block_id] for copy in kv_cache_block_copies],
-        dtype=np.int64,
-    )
-    indices = async_tensor_h2d(indices_np, device=device)
-    src_indices, dst_indices = indices.unbind(dim=1)
     for tensor in cache_tensors:
         assert tensor.device == device
-        assert tensor.numel() % num_blocks == 0
-        blocks = tensor.view(num_blocks, -1)
-        source_blocks = torch.index_select(blocks, 0, src_indices)
-        blocks.index_copy_(0, dst_indices, source_blocks)
+        assert tensor.shape[0] % num_blocks == 0
+        blocks = tensor.unflatten(0, (num_blocks, tensor.shape[0] // num_blocks))
+        source_blocks = torch.stack([blocks[copy.src_block_id] for copy in kv_cache_block_copies])
+        for index, copy in enumerate(kv_cache_block_copies):
+            blocks[copy.dst_block_id].copy_(source_blocks[index])
 
 
 @contextmanager
@@ -144,7 +140,7 @@ class AscendKVBlockZeroer(KVBlockZeroer):
     def init_meta(
         self,
         attn_groups_iter: Iterable["AttentionGroup"],
-        kernel_block_sizes: list[list[int]],
+        kernel_block_sizes: list[int],
         cache_dtype: str,
         runner_only_attn_layers: set[str],
         static_forward_context: dict[str, Any],
@@ -172,7 +168,7 @@ class AscendKVBlockZeroer(KVBlockZeroer):
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
-            kernel_bs = kernel_block_sizes[group.kv_cache_group_id][0]
+            kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
             ratio = spec.block_size // kernel_bs
             block_dim = 0
 

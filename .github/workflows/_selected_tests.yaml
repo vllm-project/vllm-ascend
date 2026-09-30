@@ -97,7 +97,7 @@ jobs:
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
+      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.group.image_tag }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True

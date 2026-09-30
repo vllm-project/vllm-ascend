@@ -27,6 +27,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
@@ -39,6 +40,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
     prepare_replicated_pcp_config,
@@ -136,6 +138,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
+            dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
+                self.vllm_config.cache_config.block_size
+            )
 
     def _prepare_draft_dcp_metadata_inputs(
         self, num_reqs: int, num_reqs_padded: int, step: int
