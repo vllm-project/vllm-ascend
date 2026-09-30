@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe import routed_experts as _routed_exper
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
 
+from vllm_ascend.distributed.eplb import AUTO_GLOO_FALLBACK_ATTRIBUTE
 from vllm_ascend.distributed.eplb.eplb_communicator import (
     AscendGlooEplbCommunicator,
     AscendHixlEplbCommunicator,
@@ -137,6 +138,7 @@ def _patch_parallel_config() -> None:
                 logger.info("Ascend EPLB selected hixl: a HIXL binding is available.")
             else:
                 config.eplb_config.communicator = "torch_gloo"
+                setattr(config.eplb_config, AUTO_GLOO_FALLBACK_ATTRIBUTE, True)
                 logger.info("Ascend EPLB selected torch_gloo: HIXL is unavailable (%s).", unavailable)
         original_post_init(config)
 

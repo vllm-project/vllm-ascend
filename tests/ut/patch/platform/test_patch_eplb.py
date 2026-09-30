@@ -12,6 +12,7 @@ from vllm.config import EPLBConfig, ParallelConfig, VllmConfig
 from vllm.config import parallel as parallel_module
 from vllm.platforms import current_platform
 
+from vllm_ascend.distributed.eplb import AUTO_GLOO_FALLBACK_ATTRIBUTE
 from vllm_ascend.patch.platform import patch_eplb
 
 
@@ -126,6 +127,7 @@ def test_parallel_config_auto_selects_gloo_without_hixl():
         )
 
     assert parallel_config.eplb_config.communicator == "torch_gloo"
+    assert getattr(parallel_config.eplb_config, AUTO_GLOO_FALLBACK_ATTRIBUTE, False)
     assert any("HIXL is unavailable" in call.args[0] for call in info.call_args_list)
 
 
