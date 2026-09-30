@@ -25,7 +25,9 @@ _MSA_INDEX_BLOCK_SIZE = 128
 _GBSA_MASK_MODE_CAUSAL = 1
 _GBSA_NO_QUANT = 0
 _GBSA_FP8_STATIC_CAST_P = 5
-_GBSA_SOFTMAX_PRECISION = 1
+# A2/A3 GBSA only supports mode 0 for BF16 queries. This also matches the
+# operator's default and remains valid for the quantized cache path.
+_GBSA_SOFTMAX_PRECISION = 0
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
 _FP8_E4M3_MAX = 448.0
 
@@ -220,7 +222,6 @@ def _run_generic_block_sparse_attention(
         cu_seqlens_q=cu_seqlens_q,
         seqused_kv=seq_lens,
         max_seqlen_q=max_query_len,
-        is_packed_gqa=True,
         layout_q="TND",
         layout_kv="PA_BBND",
         mask_mode=_GBSA_MASK_MODE_CAUSAL,
@@ -238,7 +239,6 @@ def _run_generic_block_sparse_attention(
         cu_seqlens_q=cu_seqlens_q,
         seqused_kv=seq_lens,
         block_table=block_table,
-        is_packed_gqa=True,
         layout_q="TND",
         layout_kv="PA_BBND",
         softmax_scale=sm_scale,
@@ -761,15 +761,8 @@ def minimax_m3_sparse_attn(
         block_size,
     )
     hardware_profile = get_current_hardware_profile()
-    supports_kv_gather_q = hardware_profile.supports(HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q)
     supports_fp8 = hardware_profile.supports(HardwareCapability.FP8_ATTENTION)
-    if not supports_kv_gather_q:
-        _minimax_m3_sparse_attn_a3(*common_args, max_query_len=max_query_len)
-        return
-
-    # The A3 CI image can predate the vendor Split-KV ACLNN package. A5
-    # already requires that package and cannot use the BF16-only A3 fallback.
-    if not supports_fp8 and not _is_minimax_sparse_attention_split_kv_available():
+    if not _is_minimax_sparse_attention_split_kv_available():
         _minimax_m3_sparse_attn_a3(*common_args, max_query_len=max_query_len)
         return
 
