@@ -48,7 +48,7 @@
 #include "attention/fused_scatter_copy_sparse_flash_attention/fused_scatter_copy_sparse_flash_attention_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
-#include "attention/attn_res_fwd_fused/attn_res_fwd_fused_torch_adpt.h"
+#include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum/kda_gate_cumsum_torch_adpt.h"
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
@@ -2786,12 +2786,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_gemma_rms_norm", torch::kPrivateUse1, &vllm_ascend::npu_gemma_rms_norm);
 
     ops.def(
-        "attn_res_fwd.fused(Tensor(b) prefix_sum, Tensor? addend, Tensor(a!) block_residual, "
+        "attn_res_fwd(Tensor(b) prefix_sum, Tensor? addend, Tensor(a!) block_residual, "
         "Tensor proj_weight, Tensor norm_weight, float norm_eps, int num_valid_blocks, "
         "Tensor? output_norm_weight=None, float output_norm_eps=1e-5, int block_write_idx=-1, "
         "bool return_materialized=False, bool mix=True, bool optimize_prefill=False) -> (Tensor(c), Tensor(b), Tensor(c))");
-    ops.impl("attn_res_fwd.fused", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd_fused);
-    ops.impl("attn_res_fwd.fused", torch::kMeta, &vllm_ascend::attn_res_fwd_fused_meta);
+    ops.impl("attn_res_fwd", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd);
+    ops.impl("attn_res_fwd", torch::kMeta, &vllm_ascend::attn_res_fwd_meta);
 
     ops.def(
         "dequant_situ_quant(Tensor x, "

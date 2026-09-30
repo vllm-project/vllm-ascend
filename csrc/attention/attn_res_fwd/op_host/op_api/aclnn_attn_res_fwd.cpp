@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "aclnn_attn_res_fwd_fused.h"
+#include "aclnn_attn_res_fwd.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_def.h"
 #include "opdev/op_executor.h"
 #include "opdev/tensor_view_utils.h"
 using namespace op;
-namespace l0op { OP_TYPE_REGISTER(AttnResFwdFused); }
+namespace l0op { OP_TYPE_REGISTER(AttnResFwd); }
 using namespace l0op;
-extern "C" aclnnStatus aclnnAttnResFwdFusedGetWorkspaceSize(
+extern "C" aclnnStatus aclnnAttnResFwdGetWorkspaceSize(
     const aclTensor *prefix, const aclTensor *blocks, const aclTensor *proj,
     const aclTensor *norm, const aclTensor *addend, const aclTensor *outputNorm,
     double eps, int64_t validBlocks, int64_t blockTokenStride, int64_t blockWriteIdx,
@@ -35,7 +35,7 @@ extern "C" aclnnStatus aclnnAttnResFwdFusedGetWorkspaceSize(
     // The torch adapter validates contiguous rows. Pass the original bank to
     // the kernel; packing its valid prefix would add a launch after every RS.
     auto *executor = exec.get();
-    auto ret = ADD_TO_LAUNCHER_LIST_AICORE(AttnResFwdFused,
+    auto ret = ADD_TO_LAUNCHER_LIST_AICORE(AttnResFwd,
         OP_INPUT(prefix, blocks, proj, norm, addend, outputNorm),
         OP_OUTPUT(output, prefixOut, materialized),
         OP_ATTR(static_cast<float>(eps), false, validBlocks, blockTokenStride,
@@ -45,7 +45,7 @@ extern "C" aclnnStatus aclnnAttnResFwdFusedGetWorkspaceSize(
     exec.ReleaseTo(executorOut);
     return ACLNN_SUCCESS;
 }
-extern "C" aclnnStatus aclnnAttnResFwdFused(
+extern "C" aclnnStatus aclnnAttnResFwd(
     void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream)
 {
     return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);

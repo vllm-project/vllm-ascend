@@ -90,7 +90,7 @@ ge::graphStatus AttnResFwdTiling::GetPlatformInfo()
 
 ge::graphStatus AttnResFwdTiling::GetShapeAttrsInfo()
 {
-    fusedChain_ = std::strcmp(context_->GetNodeType(), "AttnResFwdFused") == 0;
+    fusedChain_ = std::strcmp(context_->GetNodeType(), "AttnResFwd") == 0;
     fuseAdd_ = fusedChain_;
     OP_CHECK_IF(CheckContext() != ge::GRAPH_SUCCESS, OP_LOGE(inputParams_.opName, "Invalid context."),
                 return ge::GRAPH_FAILED);

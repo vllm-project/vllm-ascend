@@ -20,7 +20,7 @@
 using namespace AscendC;
 using namespace AttnResFwd;
 
-extern "C" __global__ __aicore__ void attn_res_fwd_fused(
+extern "C" __global__ __aicore__ void attn_res_fwd(
     GM_ADDR prefixSum, GM_ADDR blockResidual, GM_ADDR projWeight, GM_ADDR normWeight,
     GM_ADDR addend, GM_ADDR outputNorm, GM_ADDR hiddenStates, GM_ADDR prefixOut,
     GM_ADDR materialized, GM_ADDR workspaceGM, GM_ADDR tilingGM)

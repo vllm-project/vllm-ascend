@@ -582,7 +582,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         # The previous MLP add is rounded to BF16 before it becomes either a
         # DSpark raw prefix or an AttnRes input. A block boundary stores that
         # same prefix, while the mixture reads only the older valid slots.
-        return torch.ops._C_ascend.attn_res_fwd.fused(
+        return torch.ops._C_ascend.attn_res_fwd(
             prefix_sum,
             addend,
             block_residual,
@@ -626,7 +626,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             hidden_states = sp_reduce_scatter(hidden_states)
 
         mlp_valid_blocks = self.prev_valid_blocks + int(self.is_block_write_layer)
-        op = torch.ops._C_ascend.attn_res_fwd.fused
+        op = torch.ops._C_ascend.attn_res_fwd
         hidden_states, prefix_sum, _ = op(
             hidden_states if prefix_sum is None else prefix_sum,
             None if prefix_sum is None else hidden_states,
@@ -880,7 +880,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             tensors.update((f"aux_hidden_states_{i}", value) for i, value in zip(captured_layers, aux_hidden_states))
             return IntermediateTensors(tensors)
 
-        hidden_states, final_prefix, _ = torch.ops._C_ascend.attn_res_fwd.fused(
+        hidden_states, final_prefix, _ = torch.ops._C_ascend.attn_res_fwd(
             hidden_states,
             pending_mlp_output,
             residual,

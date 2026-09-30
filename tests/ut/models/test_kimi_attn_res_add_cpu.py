@@ -65,8 +65,7 @@ def fused_reference(
 
 @pytest.fixture(autouse=True)
 def mock_native_ops(monkeypatch):
-    monkeypatch.setattr(native_reference, "fused", fused_reference, raising=False)
-    monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", native_reference, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", fused_reference, raising=False)
 
 
 @pytest.mark.parametrize("optimize_prefill", [False, True])
@@ -76,13 +75,13 @@ def test_93_standalone_layers_use_native_residual_points_and_preserve_saved_dspa
     scope = load_functions()
     forward = scope["forward_attn_residual"]
     fused_calls = []
-    fused = torch.ops._C_ascend.attn_res_fwd.fused
+    fused = torch.ops._C_ascend.attn_res_fwd
 
     def recording_fused(*args, **kwargs):
         fused_calls.append((args[0].clone(), kwargs.get("optimize_prefill")))
         return fused(*args, **kwargs)
 
-    monkeypatch.setattr(torch.ops._C_ascend.attn_res_fwd, "fused", recording_fused)
+    monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", recording_fused)
     torch.manual_seed(17)
     hidden = torch.randn(4, 16).to(torch.bfloat16)
     residual = torch.empty(4, 8, 16, dtype=hidden.dtype)
