@@ -801,13 +801,9 @@ def qsa_select_paged_tokens(
 
     columns = page_table.shape[1] * k_cache.shape[1]
     block_topk = token_topk // compress_ratio
-    if block_topk > columns:
-        raise ValueError(
-            "QSA top-k exceeds the compressed cache capacity: "
-            f"block_topk={block_topk}, capacity={columns}, "
-            f"page_table_width={page_table.shape[1]}, "
-            f"storage_block_size={k_cache.shape[1]}"
-        )
+    # Limit selection to the cache capacity while preserving the fixed-width
+    # input required by the expansion kernels.
+    select_k = min(block_topk, columns)
     # torch.topk needs substantial temporary storage in addition to logits.
     # Bound the row batch so a 4096-token eager prefill does not create a
     # multi-GiB transient while decode D4 x max_num_seqs=32 remains one chunk.
@@ -818,6 +814,8 @@ def qsa_select_paged_tokens(
     )
     chunk_rows = min(rows, rows_per_chunk)
     blocks_buffer = torch.empty((chunk_rows, block_topk), dtype=torch.int32, device=q.device)
+    if select_k < block_topk:
+        blocks_buffer[:, select_k:].fill_(-1)
     for row_start in range(0, rows, rows_per_chunk):
         row_end = min(row_start + rows_per_chunk, rows)
         row_slice = slice(row_start, row_end)
@@ -831,7 +829,7 @@ def qsa_select_paged_tokens(
             compress_ratio,
         )
         blocks = blocks_buffer[: row_end - row_start]
-        blocks.copy_(torch.topk(logits, block_topk, dim=-1).indices.to(torch.int32))
+        blocks[:, :select_k].copy_(torch.topk(logits, select_k, dim=-1).indices.to(torch.int32))
         if use_e3:
             expand_qsa_block_indices_e3(
                 blocks,
