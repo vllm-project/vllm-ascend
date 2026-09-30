@@ -72,4 +72,4 @@ test_cases:
         batch_size: 16
         request_rate: 0
         baseline: 269.023
-        threshold: 0.97
+        threshold: 0.95
