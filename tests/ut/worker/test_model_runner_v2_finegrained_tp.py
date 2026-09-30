@@ -401,5 +401,5 @@ def test_production_speculators_carry_lmhead_sampling_mixin():
         AscendDFlash2Speculator,
     ):
         assert issubclass(cls, LmheadTPDraftSamplingMixin)
-    assert AscendDSparkSpeculator._lmhead_tp_sample_draft_supported is False
+    assert AscendDSparkSpeculator._lmhead_tp_sample_draft_supported is True
     assert AscendDFlash2Speculator._lmhead_tp_sample_draft_supported is False
