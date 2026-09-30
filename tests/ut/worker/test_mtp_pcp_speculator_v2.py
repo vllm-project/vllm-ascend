@@ -108,7 +108,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         cache_config=target_cache_config,
         additional_config={"scheduler_config": {"profiling_chunk_config": {"enabled": True}}},
     )
-    draft_model_config = object()
+    draft_model_config = SimpleNamespace(is_moe=False)
     captured: dict[str, SimpleNamespace] = {}
 
     def fake_replace(config, **changes):
@@ -218,7 +218,7 @@ def test_eagle_draft_config_disables_profiling_chunk() -> None:
     speculator.vllm_config = target_config
     target_config.cache_config = SimpleNamespace()
     target_config.parallel_config.decode_context_parallel_size = 1
-    speculator.draft_model_config = object()
+    speculator.draft_model_config = SimpleNamespace(is_moe=False)
 
     with (
         patch.object(eagle_speculator_module, "replace", side_effect=_fake_config_replace),
@@ -230,6 +230,7 @@ def test_eagle_draft_config_disables_profiling_chunk() -> None:
     assert target_config.additional_config is additional_config
     assert additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] == "yes"
     assert draft_config.parallel_config.pipeline_parallel_size == 1
+    assert draft_config.parallel_config.is_moe_model is False
 
 
 @pytest.mark.parametrize("replicated_pcp", [False, True])
