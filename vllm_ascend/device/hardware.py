@@ -10,6 +10,7 @@ must stay inside the device abstraction package; callers outside this package
 should consume semantic capabilities from ``device_config`` instead.
 """
 
+import logging
 from enum import Enum
 
 
@@ -48,6 +49,46 @@ _SOC_VERSION_TO_DEVICE_TYPE = {
     "ascend310p3vir04": AscendDeviceType._310P,
     "ascend310p3vir08": AscendDeviceType._310P,
 }
+
+
+# Recorded in _build_info.py when a build without custom kernels runs on a
+# machine with no NPU to detect. Must be a value device_type_from_soc_version
+# accepts; it resolves to AscendDeviceType.A2.
+CPU_ONLY_FALLBACK_SOC_VERSION = "ascend910b1"
+
+_MISSING_SOC_VERSION_ERROR = (
+    "Could not determine chip type automatically via 'npu-smi'. "
+    "This can happen in a CPU-only environment. "
+    "Please set the 'SOC_VERSION' environment variable to specify the target chip, for example:\n"
+    '  - Atlas A2: export SOC_VERSION="ascend910b1"\n'
+    '  - Atlas A3: export SOC_VERSION="ascend910_9391"\n'
+    '  - Atlas 300I: export SOC_VERSION="ascend310p1"\n'
+    '  - Atlas A5: export SOC_VERSION="<value starting with ascend950>"\n'
+    "You can also refer to the SOC_VERSION defaults in Dockerfile*."
+)
+
+
+def resolve_build_soc_version(detected_soc_version: str, compile_custom_kernels: bool) -> str:
+    """Pick the SOC_VERSION a build records, when the user set none.
+
+    ``detected_soc_version`` is what ``npu-smi`` reported, empty when no NPU
+    driver is present. Without custom kernels nothing in the build depends on
+    the chip except the device type written to ``_build_info.py``, so a build
+    for unit tests can fall back instead of failing.
+    """
+
+    if detected_soc_version:
+        return detected_soc_version
+    if compile_custom_kernels:
+        raise RuntimeError(_MISSING_SOC_VERSION_ERROR)
+    logging.warning(
+        'No NPU detected and SOC_VERSION is unset; defaulting to "%s" because '
+        "COMPILE_CUSTOM_KERNELS=0. This package is suitable for running tests/ut only: "
+        "it has no custom kernels, and it will fail check_ascend_device_type() on any "
+        "non-A2 device. Set SOC_VERSION explicitly to build for a specific target.",
+        CPU_ONLY_FALLBACK_SOC_VERSION,
+    )
+    return CPU_ONLY_FALLBACK_SOC_VERSION
 
 
 def device_type_from_soc_version(soc_version: str) -> AscendDeviceType:

@@ -1,3 +1,4 @@
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,9 +10,11 @@ from vllm_ascend.device.device_config import (
     get_device_config,
 )
 from vllm_ascend.device.hardware import (
+    CPU_ONLY_FALLBACK_SOC_VERSION,
     AscendDeviceType,
     device_type_from_runtime_soc,
     device_type_from_soc_version,
+    resolve_build_soc_version,
 )
 
 
@@ -103,3 +106,30 @@ def test_unknown_build_soc_version_is_rejected(soc_version):
 def test_unknown_runtime_soc_version_is_rejected(soc_version):
     with pytest.raises(RuntimeError, match="Cannot support runtime soc_version"):
         device_type_from_runtime_soc(soc_version)
+
+
+def test_detected_soc_version_wins_over_the_fallback():
+    # An NPU is present: npu-smi's answer is used whether or not kernels are
+    # being compiled, so a cached-kernel build on an A3 runner stays A3.
+    for compile_custom_kernels in (True, False):
+        assert resolve_build_soc_version("ascend910_9391", compile_custom_kernels) == "ascend910_9391"
+
+
+def test_missing_soc_version_still_fails_a_kernel_build():
+    with pytest.raises(RuntimeError, match="Could not determine chip type"):
+        resolve_build_soc_version("", compile_custom_kernels=True)
+
+
+def test_missing_soc_version_falls_back_without_custom_kernels(caplog):
+    with caplog.at_level(logging.WARNING):
+        assert resolve_build_soc_version("", compile_custom_kernels=False) == CPU_ONLY_FALLBACK_SOC_VERSION
+
+    assert CPU_ONLY_FALLBACK_SOC_VERSION in caplog.text
+    assert "COMPILE_CUSTOM_KERNELS=0" in caplog.text
+
+
+def test_fallback_is_a_soc_version_not_a_device_type_name():
+    # Guards the whole point of the fallback: gen_build_info() feeds it to
+    # device_type_from_soc_version(), which rejects device-type names such as
+    # "A2". See https://github.com/vllm-project/vllm-ascend/issues/17785.
+    assert device_type_from_soc_version(CPU_ONLY_FALLBACK_SOC_VERSION) is AscendDeviceType.A2

@@ -44,10 +44,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.
     "CMAKE_BUILD_TYPE": lambda: os.getenv("CMAKE_BUILD_TYPE"),
     # Whether to compile custom kernels. If not set, the default value is True.
-    # If set to False, the custom kernels will not be compiled.
-    # This configuration option should only be set to False when running UT
-    # scenarios in an environment without an NPU. Do not set it to False in
-    # other scenarios.
+    # If set to False, the custom kernels will not be compiled. Set it to False
+    # only when the kernels are already present (a restored csrc build cache) or
+    # are not needed (running UT in an environment without an NPU). A package
+    # built this way cannot serve models.
+    # When no NPU is visible, `npu-smi` cannot report the chip, so also set
+    # SOC_VERSION to the target family; otherwise the build records the default
+    # in `_build_info.py`. See the CPU-only build verification section of
+    # docs/source/getting_started/installation.md.
     "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
