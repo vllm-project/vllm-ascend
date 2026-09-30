@@ -51,8 +51,9 @@ stay on the native path. The strict raw operator retains its validation contract
 For base storage formats without caller-local core controls, snapshot sizes,
 strides, storage offsets and storage ownership before queuing ACLNN preparation
 and execution together through the framework's `RunOpApiV2`. This avoids reading
-mutable tensor metadata from the worker. Other formats and core controls retain
-the existing adapter path. Graph replay, streams, queued producer/consumer chains,
+mutable tensor metadata from the worker. Non-base formats are first converted to
+ND without modifying the input, then submitted through the existing adapter;
+caller-local core controls also retain that adapter path. Graph replay, streams, queued producer/consumer chains,
 temporary tensor lifetimes and immediate metadata changes are covered by NPU tests.
 
 Initially build and select this implementation on A2 only. Route GLM mHC

@@ -54,6 +54,27 @@ def test_mhc_expand_bit_patterns(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("tokens", [16, 17])
+@pytest.mark.parametrize("entry", ["raw", "helper", "glm"])
+def test_mhc_expand_nz_storage(dtype, tokens, entry):
+    previous = torch.npu.config.allow_internal_format
+    try:
+        torch.npu.config.allow_internal_format = True
+        # Cover all 16-bit payloads and a padded NZ row boundary.
+        bits = (torch.arange(tokens * 4096, dtype=torch.int32) % 65536 - 32768).to(torch.int16)
+        expected = bits.view(dtype).reshape(tokens, 4096)
+        x = torch_npu.npu_format_cast(expected.to("npu"), 29)
+        assert torch_npu.get_npu_format(x) == 29
+        assert x.is_contiguous()
+        fn = {"raw": torch.ops._C_ascend.npu_mhc_expand, "helper": mhc_expand, "glm": hc_expand}[entry]
+        assert_bits_equal(fn(x, 4), expected.unsqueeze(1).repeat(1, 4, 1))
+        assert_bits_equal(x, expected)
+        assert torch_npu.get_npu_format(x) == 29
+    finally:
+        torch.npu.config.allow_internal_format = previous
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("mult", [1, 2, 4, 8])
 @pytest.mark.parametrize("hidden", [1023, 1025, 8191, 8193, 16385, 32769])
 def test_mhc_expand_unaligned_output_ownership(dtype, mult, hidden):
