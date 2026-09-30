@@ -11,17 +11,17 @@ import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from tests.e2e.common.multi_node.external_dp.external_dp_config import (
-    ROUTING_DISAGGREGATED_PREFILL,
-    ExternalDPConfig,
-    RankInfo,
-)
 from tests.e2e.common.multi_node.benchmark_results import (
     build_task_entry,
     extract_hardware,
     filter_environment,
     get_vllm_version,
     write_results_json,
+)
+from tests.e2e.common.multi_node.external_dp.external_dp_config import (
+    ROUTING_DISAGGREGATED_PREFILL,
+    ExternalDPConfig,
+    RankInfo,
 )
 from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 

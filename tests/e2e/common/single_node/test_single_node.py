@@ -14,8 +14,6 @@ import pytest
 import requests
 import vllm
 
-from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
-from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 from tests.e2e.common.single_node.kv_pool_runtime import (
     create_single_node_kv_pool_manager,
 )
@@ -23,6 +21,8 @@ from tests.e2e.common.single_node.single_node_config import (
     SingleNodeConfig,
     SingleNodeConfigLoader,
 )
+from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
+from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 from tools.aisbench import run_aisbench_cases
 
 logger = logging.getLogger(__name__)

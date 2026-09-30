@@ -8,8 +8,8 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.common.kvpp import PROMPTS, complete, output_texts, server_args
-from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
+from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
 
 MODEL = "Eco-Tech/GLM-5.2-w4a8"
 TP_SIZE = 8
