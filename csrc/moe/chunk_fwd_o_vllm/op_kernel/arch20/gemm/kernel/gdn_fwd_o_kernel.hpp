@@ -204,34 +204,57 @@ public:
     static_assert(UB_GPRE_OFFSET + 512 <= UB_OUT_OFFSET,
                   "chunk_fwd_o: gPre runs into the Vec2 out tile");
 
-    // ---- NZ-native Vec1 -------------------------------------------------------
-    // On m200, Nd2Nz GM->L1 expands into many small GM->UB loads and
-    // vector copies. An aligned dense tile can instead use one GM burst
-    // followed by one strided UB->L1 descriptor per 16-column panel.
+    // ---- NZ-native prefetch ---------------------------------------------------
+    // On m200 `DataCopy(l1, gm, Nd2NzParams)` is NOT a DMA. The dav_m200 library
+    // emulates it (kernel_operator_data_copy_impl.h:176-330): 64Bx64B blocks,
+    // each a GM->UB read into an 8 KB shared temp, a masked-vadds transpose on
+    // V and widthFractal UB->L1 stores on MTE3, serialised by pool-allocated
+    // MTE2_V / V_MTE3 / MTE3_MTE2 flags. It costs 26-42x a plain contiguous
+    // load; hand-rolling is 4.1-4.3x faster and leaves V and MTE3 at baseline.
+    //
+    // ONE path for every tile, partial or whole: one GM burst, an explicit
+    // zero-fill of the NZ pad rows, then one strided UB->L1 descriptor per
+    // 16-column panel.
+    //
+    // The zero-fill is load-bearing. HandMmad sizes the zN image by
+    // HmRoundUp16(m) (hand_mmad_310p.hpp:109-111), so the consumer always reads
+    // mAl rows, while the library path wrote only `rows` of them -- the rest
+    // kept whatever an earlier body left in this L1 slot. Filling them with
+    // zeros makes a partial tile's padding deterministic instead of stale.
+    //
     // Vec1/Vec2 scratch is dead at the beginning of a body; the fences below
-    // release it before the subsequent vector work. Partial tiles retain the
-    // library path, including its padding semantics.
-    __aicore__ inline void PrefetchDenseTile(
+    // release it before the subsequent vector work.
+    __aicore__ inline void PrefetchTileNZ(
         AscendC::GlobalTensor<half> src, uint32_t rows, uint32_t cols, uint32_t l1Offset) {
-        if (rows % 16 != 0 || cols % 16 != 0 ||
-            rows * cols * sizeof(half) > 2 * UB_TILE_F32) {
-            M200Gemm::HmLoadGmToL1<ArchTag>(resource, src, cols, rows, cols, l1Offset);
-            return;
-        }
+        // cols is a head dim: always a multiple of the 16-element C0 here, so
+        // cols*2B is a multiple of 32 and no DataCopy truncation can occur.
+        const uint32_t mAl = M200Gemm::HmRoundUp16(rows);
+        // mAl*cols*2B <= 64*192*2 = 24 KB, inside the 32 KB staging region.
         auto scratch = resource.ubBuf.template GetBufferByByte<half>(UB_BRC_A_OFFSET);
         auto dst = resource.l1Buf.template GetBufferByByte<half>(l1Offset);
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID6);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID6);
+        // GM rows are contiguous (ld == cols), so the valid part is one burst.
         AscendC::DataCopy(scratch, src, rows * cols);
+        // The burst writes rows [0,rows) and the zero-fill rows [rows,mAl):
+        // DISJOINT, so V needs no order against MTE2. MTE3 reads the whole
+        // span, so it takes one pair per producer. Both pairs are self-paired,
+        // so neither branch can leave a flag outstanding.
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID6);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID6);
+        if (mAl != rows) {
+            AscendC::Duplicate<half>(scratch[rows * cols], static_cast<half>(0),
+                                     (mAl - rows) * cols);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+        }
         AscendC::DataCopyParams p;
-        p.blockCount = static_cast<uint16_t>(rows);
+        p.blockCount = static_cast<uint16_t>(mAl);
         p.blockLen = 1;
         p.srcStride = static_cast<uint16_t>(cols / 16 - 1);
         p.dstStride = 0;
         for (uint32_t column = 0; column < cols / 16; ++column) {
-            AscendC::DataCopy(dst[column * rows * 16], scratch[column * 16], p);
+            AscendC::DataCopy(dst[column * mAl * 16], scratch[column * 16], p);
         }
         // Protect the shared scratch against both the next prefetch and Vec2.
         // MTE3 -> MTE2 also chains this L1 write into the caller's MTE2_MTE1.
@@ -384,6 +407,15 @@ public:
 
         bool needRun = false;
         uint32_t maskedParity = 0;
+        // l0c2 cross-body WAR: this body's Cube2 staging copy READS L0C_C2 on V,
+        // the NEXT body's Cube2 mmad WRITES the same bank on M. HandMmad's own
+        // trailing V_M pair (H220-225) is exactly this fence, but it is compiled
+        // out by LEAN_TAIL=true at every fwd_o call site, so the caller owes it.
+        // Unlike every other fence here this one is CROSS-BODY, i.e. not
+        // self-paired, so it is tracked: set once per compute body, waited by the
+        // next compute body, and drained after the loop. Never left outstanding at
+        // kernel exit -- a leaked m200 flag poisons the next launch.
+        bool vmOutstanding = false;
         AscendC::LocalTensor<float> ubHwTensor = resource.ubBuf.template GetBufferByByte<float>(UB_HW_OFFSET);
         // v_work is HandMmad's C3 staging tile, consumed in place.
         AscendC::LocalTensor<float> ubVwTensor = resource.ubBuf.template GetBufferByByte<float>(UB_STAGE_OFFSET);
@@ -407,9 +439,9 @@ public:
                 // the previous mmads' internal MTE1_MTE2 fences.
                 GDNFwdOOffsets& cube1Offsets = cubeBlockScheduler.GetCube1Offsets();
                 const uint32_t pbt = cube1Offsets.blockTokens;
-                PrefetchDenseTile(gmQ[cube1Offsets.qkOffset],
+                PrefetchTileNZ(gmQ[cube1Offsets.qkOffset],
                     pbt, kHeadDim, Q_L1_OFFSET + maskedParity * Q_L1_SLOT);
-                PrefetchDenseTile(gmK[cube1Offsets.qkOffset],
+                PrefetchTileNZ(gmK[cube1Offsets.qkOffset],
                     pbt, kHeadDim, K_L1_OFFSET + maskedParity * K_L1_SLOT);
                 // C1's gate: only Q and K. h/v below carry their own flag, so
                 // C1 does not stall on the 64 KB it never reads.
@@ -421,7 +453,7 @@ public:
                                       M200Gemm::HmRoundUp16(kHeadDim) *
                                       M200Gemm::HmRoundUp16(vHeadDim));
                 }
-                PrefetchDenseTile(gmV[cube1Offsets.ovOffset],
+                PrefetchTileNZ(gmV[cube1Offsets.ovOffset],
                     pbt, vHeadDim, V_L1_OFFSET + maskedParity * V_L1_SLOT);
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID5);  // h/v -> next body's C2/C3
             }
@@ -429,9 +461,27 @@ public:
             if (needRun) {
                 GDNFwdOOffsets& prevOffsets = cubeBlockScheduler.GetCube23Offsets();
 
+                // Mmad takes the RAW extents (hand_mmad_310p.hpp: mp.m/n/k = m/n/k),
+                // and the cube mishandles a UNIT extent: measured on device, a
+                // blockTokens==1 sequence is wrong at every position and head count
+                // (cos 0.21 standalone) while 2,3,4,5,8,16,17 are all exact to 1e-8.
+                // Round the extents to the fractal instead. This is only legal
+                // because the prefetch now zero-fills the NZ padding, so:
+                //   - extra m rows come from zeroed q rows        -> 0
+                //   - extra n cols (Cube1) from zeroed k rows     -> 0
+                //   - extra k terms (Cube3) hit masked[r][c], c>r -> 0 by the causal mask
+                // so the rounded mmad is numerically identical for every blockTokens.
+                const uint32_t pAl = M200Gemm::HmRoundUp16(prevOffsets.blockTokens);
+
                 // h/v banks for this task were prefetched at the previous body's
                 // top; consume their flag here.
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID5);
+                // Before overwriting L0C_C2: let the previous body's staging read
+                // of that bank retire (id6, not HandMmad's own id7 on this channel).
+                if (vmOutstanding) {
+                    AscendC::WaitFlag<AscendC::HardEvent::V_M>(EVENT_ID6);
+                    vmOutstanding = false;
+                }
                 // CUBE2: h_work = q @ h. Both operands were prefetched at the top
                 // of the previous body: Q in its slot, h's zN image in its bank.
                 M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true,
@@ -440,10 +490,14 @@ public:
                     resource,
                     gmQ[prevOffsets.qkOffset], kHeadDim,
                     gmH[prevOffsets.hOffset], vHeadDim,
-                    prevOffsets.blockTokens, vHeadDim, kHeadDim,
+                    pAl, vHeadDim, kHeadDim,
                     Q_L1_OFFSET + (maskedParity ^ 1u) * Q_L1_SLOT,
                     H_L1_OFFSET + (maskedParity ^ 1u) * H_L1_SLOT,
                     UB_HW_OFFSET, L0C_C2_OFFSET);
+                // Issued on V after HandMmad's L0C_C2 -> UB staging copy (same
+                // queue, in order), so it retires only once that read is done.
+                AscendC::SetFlag<AscendC::HardEvent::V_M>(EVENT_ID6);
+                vmOutstanding = true;
 
                 // Deferred consume of the previous body's masked-tile UB->L1 store
                 // (needRun implies that body ran Vec1, so the flag is outstanding).
@@ -457,7 +511,7 @@ public:
                     resource,
                     gmV[prevOffsets.ovOffset], 0,
                     gmV[prevOffsets.ovOffset], vHeadDim,
-                    prevOffsets.blockTokens, vHeadDim, prevOffsets.blockTokens,
+                    pAl, vHeadDim, pAl,
                     MASKED_L1_OFFSET + (maskedParity ^ 1u) * MASKED_L1_SLOT,
                     V_L1_OFFSET + (maskedParity ^ 1u) * V_L1_SLOT,
                     UB_STAGE_OFFSET, L0C_C3_OFFSET);
@@ -561,7 +615,11 @@ public:
                     resource,
                     gmQ[cube1Offsets.qkOffset], kHeadDim,
                     gmK[cube1Offsets.qkOffset], kHeadDim,
-                    cube1Offsets.blockTokens, cube1Offsets.blockTokens, kHeadDim,
+                    // Rounded extents: see the pAl comment at Cube2. Both m and n
+                    // round here; the extra attn rows/cols come from zeroed q/k
+                    // padding, and Vec1's causal mask discards them regardless.
+                    M200Gemm::HmRoundUp16(cube1Offsets.blockTokens),
+                    M200Gemm::HmRoundUp16(cube1Offsets.blockTokens), kHeadDim,
                     Q_L1_OFFSET + maskedParity * Q_L1_SLOT,
                     K_L1_OFFSET + maskedParity * K_L1_SLOT,
                     UB_STAGE_OFFSET, L0C_C1_OFFSET);
@@ -590,6 +648,12 @@ public:
             needRun = true;
         }
 
+        // The last compute body's V_M set has no successor body to consume it;
+        // drain it here so nothing is outstanding at kernel exit.
+        if (vmOutstanding) {
+            AscendC::WaitFlag<AscendC::HardEvent::V_M>(EVENT_ID6);
+            vmOutstanding = false;
+        }
     }
 
     
