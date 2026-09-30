@@ -42,6 +42,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
+from vllm_ascend.quantization.methods import AscendLinearScheme
 from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
@@ -162,7 +163,13 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             self.o_proj_weight_switch_config.rank,
             dim=-1,
         )
-        partial_output = linear_method.apply(self.o_proj, local_input, bias=None)
+        if isinstance(linear_method, AscendLinearScheme):
+            # W8A8's quant_bias belongs to the complete O projection. Add it
+            # on only one rank before reducing the TP and PCP weight shards.
+            bias_rank = 0 if get_tp_group().rank_in_group == 0 and self.o_proj_weight_switch_config.rank == 0 else 1
+            partial_output = linear_method.apply(self.o_proj, local_input, bias=None, tp_rank=bias_rank)
+        else:
+            partial_output = linear_method.apply(self.o_proj, local_input, bias=None)
         partial_output = self.o_proj_weight_switch_config.group.all_reduce(partial_output)
 
         if self.o_proj.reduce_results and get_tp_group().world_size > 1:
