@@ -143,6 +143,7 @@ class TestMoECommMethod(TestBase):
         comm_impl.swiglu_alpha = 1.702
         comm_impl.swiglu_beta = 1.0
         comm_impl.mega_moe = mega_moe
+        comm_impl.mega_moe_activation_kwargs = {"glu_alpha": 1.702, "glu_bias": 1.0, "activation_clamp": 7.0}
         comm_impl.mega_moe_symm_buffer = MagicMock()
         comm_impl.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
         comm_impl.token_dispatcher.max_num_tokens_per_rank = 128
@@ -155,6 +156,7 @@ class TestMoECommMethod(TestBase):
         fused_input.quant.quant_type = QuantType.NONE
         fused_input.routing.mc2_mask = torch.ones(2, dtype=torch.bool)
         fused_input.activation = "swigluoai_uninterleave"
+        fused_input.layer.mega_moe_activation_kwargs = comm_impl.mega_moe_activation_kwargs
         weights = MoEWeights(w1=[torch.zeros(8, 16)], w2=[torch.zeros(16, 8)])
 
         for device_type in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5):
@@ -178,6 +180,66 @@ class TestMoECommMethod(TestBase):
                 self.assertIsNone(captured["x_active_mask"])
             else:
                 torch.testing.assert_close(captured["x_active_mask"], torch.ones(2, dtype=torch.int8))
+
+    def test_situ_activation_is_bound_at_initialization(self):
+        self.mock_ascend_config.enable_fused_mc2 = 1
+        self.moe_config.activation = "situ"
+        self.moe_config.activation_situ_beta = 4.0
+        self.moe_config.activation_situ_linear_beta = 25.0
+        self.moe_config.swiglu_limit = None
+        self.moe_config.swiglu_alpha = None
+        self.moe_config.swiglu_beta = None
+        calls = []
+
+        def op(*args, activation="swiglu", activation_params=None, **kwargs):
+            calls.append((activation, activation_params, kwargs))
+            return torch.empty(2, 8), torch.empty(2)
+
+        with (
+            patch.object(FusedMC2CommImpl, "_get_token_dispatcher"),
+            patch.object(FusedMC2CommImpl, "_get_prepare_finalize"),
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.is_mega_moe_supported", return_value=True),
+            patch("vllm_ascend.ops.fused_moe.moe_utils.load_cann_mega_moe_ops", return_value=(MagicMock(), op)),
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.torch.zeros"),
+        ):
+            comm = FusedMC2CommImpl(self.moe_config)
+
+        comm.mega_moe_symm_buffer = MagicMock()
+        comm.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
+        comm.token_dispatcher.max_num_tokens_per_rank = 128
+        inp = MagicMock()
+        inp.hidden_states = torch.zeros(2, 8)
+        inp.topk_ids = torch.zeros(2, 2, dtype=torch.int32)
+        inp.topk_weights = torch.ones(2, 2)
+        inp.quant.quant_type = QuantType.W4A8MXFP
+        inp.layer.mega_moe_activation_kwargs = comm.mega_moe_activation_kwargs
+        weights = MoEWeights(w1=[torch.empty(8, 8)], w2=[torch.empty(8, 8)])
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_utils.inspect.signature",
+                side_effect=AssertionError("hot-path inspection"),
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_comm_method.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
+        ):
+            comm._apply_cann_mega_moe(inp, weights, is_decode_only_node=False)
+            # A shared communicator must use the current layer's bound params.
+            inp.layer.mega_moe_activation_kwargs = {
+                "activation": "situglu",
+                "activation_params": {"beta": 2.0, "linear_beta": 17.0},
+            }
+            comm._apply_cann_mega_moe(inp, weights, is_decode_only_node=False)
+        self.assertEqual(len(calls), 2)
+        for (activation, params, kwargs), expected in zip(
+            calls, ({"beta": 4.0, "linear_beta": 25.0}, {"beta": 2.0, "linear_beta": 17.0})
+        ):
+            self.assertEqual(activation, "situglu")
+            self.assertEqual(params, expected)
+            self.assertNotIn("activation_clamp", kwargs)
+            self.assertIsNone(kwargs["x_active_mask"])
+            self.assertEqual(kwargs["weight1_type"], 296)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")
