@@ -12,7 +12,7 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ops import kda_state_copy as production
+from vllm_ascend.ops import kda_state_copy_plan as production
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])

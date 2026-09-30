@@ -20,8 +20,8 @@ from typing import TypedDict
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ops import kda_state_copy as production
-from vllm_ascend.ops.triton import kda_state_copy as kernels
+from vllm_ascend.ops import kda_state_copy_plan as production
+from vllm_ascend.ops.triton import kda_state_copy_kernel as kernels
 
 
 class BenchmarkResult(TypedDict):

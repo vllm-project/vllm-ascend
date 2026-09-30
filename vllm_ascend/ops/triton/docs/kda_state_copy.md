@@ -141,7 +141,7 @@ prepared state-copy routes, not unrelated model kernels.
 There is one lifecycle: `KDAStateCopyPlan.prepare` compiles four variants on
 scratch, `seal` validates startup configuration, and the worker publishes only
 after all layer plans are ready. Tests instantiate the same plan independently.
-`ops/triton/kda_state_copy.py` retains only the kernel and common metadata
+`ops/triton/kda_state_copy_kernel.py` retains only the kernel and common metadata
 validation, not a process-global launcher registry, signature budget, lock,
 per-call environment scan, or mutation of the JIT object's `run` method.
 

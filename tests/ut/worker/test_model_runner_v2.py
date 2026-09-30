@@ -628,7 +628,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
         assert maximum == 8
 
     with (
-        patch("vllm_ascend.ops.kda_state_copy.initialize_kda_state_copy", side_effect=_prepare_kda) as prepare_kda,
+        patch("vllm_ascend.ops.kda_state_copy_plan.initialize_kda_state_copy", side_effect=_prepare_kda) as prepare_kda,
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl") as acl_cls,
         patch(
@@ -686,7 +686,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
         assert maximum == 8
 
     with (
-        patch("vllm_ascend.ops.kda_state_copy.initialize_kda_state_copy", side_effect=_prepare_kda) as prepare_kda,
+        patch("vllm_ascend.ops.kda_state_copy_plan.initialize_kda_state_copy", side_effect=_prepare_kda) as prepare_kda,
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl"),
         patch(

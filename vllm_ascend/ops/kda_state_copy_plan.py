@@ -20,7 +20,7 @@ from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
-from vllm_ascend.ops.triton.kda_state_copy import (
+from vllm_ascend.ops.triton.kda_state_copy_kernel import (
     DEFAULT_KDA_BLOCK_SIZE,
     _configuration,
     _kda_state_copy_kernel,
@@ -29,7 +29,7 @@ from vllm_ascend.ops.triton.kda_state_copy import (
 from vllm_ascend.utils import is_950
 
 if TYPE_CHECKING:
-    from vllm_ascend.ops.triton.kda_state_copy import _CompiledKernel
+    from vllm_ascend.ops.triton.kda_state_copy_kernel import _CompiledKernel
 
 
 def supports_kda_state_copy(state: torch.Tensor) -> bool:

@@ -4691,7 +4691,7 @@ class NPUModelRunner(GPUModelRunner):
         )
         # Cache layouts are final and bound now; prepare on disposable
         # scratch storage before any warmup forward, graph capture or request.
-        from vllm_ascend.ops.kda_state_copy import initialize_kda_state_copy
+        from vllm_ascend.ops.kda_state_copy_plan import initialize_kda_state_copy
 
         initialize_kda_state_copy(
             self.compilation_config.static_forward_context,

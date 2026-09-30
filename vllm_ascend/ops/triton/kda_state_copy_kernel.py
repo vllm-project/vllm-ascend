@@ -2,7 +2,7 @@
 """KDA state-copy kernel and metadata validation for worker-owned plans.
 
 Production selects its plan by device/cache layout. The sole prepare/seal
-lifecycle lives in ops/kda_state_copy.py; independent tests use that same plan.
+lifecycle lives in ops/kda_state_copy_plan.py; independent tests use that same plan.
 This module has no launcher registry.
 
 Contract:

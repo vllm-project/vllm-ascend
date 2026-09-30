@@ -13,8 +13,8 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ops.kda_state_copy import KDAStateCopyPlan, initialize_kda_state_copy
-from vllm_ascend.ops.triton import kda_state_copy as lowlevel
+from vllm_ascend.ops.kda_state_copy_plan import KDAStateCopyPlan, initialize_kda_state_copy
+from vllm_ascend.ops.triton import kda_state_copy_kernel as lowlevel
 
 
 def _forbid_compilation(monkeypatch):
@@ -177,7 +177,7 @@ def test_real_prefill_with_native_chunk_matches_existing_path(monkeypatch):
 @torch.inference_mode()
 def test_int32_fast_path_does_not_convert_or_scan_environment(monkeypatch):
     """Serving uses the caller's aligned INT32 pointer and no config scan/JIT."""
-    from vllm_ascend.ops import kda_state_copy as production
+    from vllm_ascend.ops import kda_state_copy_plan as production
 
     state = torch.randn((8, 2, 3, 4), device="npu")
     plan = KDAStateCopyPlan.prepare(state, 16)
@@ -242,7 +242,7 @@ def test_plan_matches_pr17301_native_operator(monkeypatch, dtype, index_dtype):
 @torch.inference_mode()
 def test_auto_fp16_fallback_is_precompiled(monkeypatch, index_dtype, page_stride):
     """Unsupported dtype uses byte-copy fallback; dynamic requests never JIT."""
-    from vllm_ascend.ops import kda_state_copy as production
+    from vllm_ascend.ops import kda_state_copy_plan as production
 
     backing = torch.full((8 * page_stride + 1,), -23, device="npu", dtype=torch.float16)
     state = backing.as_strided((8, 2, 3, 4), (page_stride, 12, 4, 1), 1)
@@ -336,7 +336,7 @@ def test_production_plan_offsets_beyond_four_gib(monkeypatch):
 @torch.inference_mode()
 def test_automatic_startup_uses_fused_plan(monkeypatch):
     """Exercise automatic capability selection, not just explicit triton mode."""
-    from vllm_ascend.ops import kda_state_copy as production
+    from vllm_ascend.ops import kda_state_copy_plan as production
 
     state = torch.zeros((4, 2, 3, 4), device="npu")
     layer = SimpleNamespace(_requires_kda_state_copy=True, kv_cache=(None, state))
@@ -406,7 +406,7 @@ def test_fullgraph_state_copy_uses_sealed_context_plan(dtype, page_stride, monke
     full model engine. The context contains a real initialized layer/plan;
     only the outer engine's forward-context installation is substituted.
     """
-    from vllm_ascend.ops import kda_state_copy as production
+    from vllm_ascend.ops import kda_state_copy_plan as production
 
     backing = torch.full((8, page_stride), -23, dtype=dtype, device="npu")
     state = backing.as_strided((8, 2, 3, 4), (page_stride, 12, 4, 1))
@@ -469,7 +469,7 @@ def test_fullgraph_state_copy_uses_sealed_context_plan(dtype, page_stride, monke
 @torch.inference_mode()
 def test_fullgraph_same_layout_layers_keep_distinct_bindings(dtype, monkeypatch):
     """Trace each layer's name while sharing sealed kernels, including fallback."""
-    from vllm_ascend.ops import kda_state_copy as production
+    from vllm_ascend.ops import kda_state_copy_plan as production
 
     states = [torch.empty_strided((8, 2, 3, 4), (64, 12, 4, 1), dtype=dtype, device="npu") for _ in range(2)]
     layers = {
@@ -561,7 +561,7 @@ def test_prepare_matches_alignment_of_unaligned_scratch_backing(dtype, state_off
 @torch.inference_mode()
 def test_auto_contiguous_prefill_masks_invalid_rows(monkeypatch, index_dtype):
     """Exercise real prefill dispatch and copies; only chunk math is substituted."""
-    from vllm_ascend.ops import kda_state_copy as production
+    from vllm_ascend.ops import kda_state_copy_plan as production
     from vllm_ascend.ops import kimi_kda as kimi
 
     attention = kimi.AscendKimiK3DeltaAttention.__new__(kimi.AscendKimiK3DeltaAttention)

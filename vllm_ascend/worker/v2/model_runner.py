@@ -320,7 +320,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Upstream has bound every local cache; publish sealed plans before
         # the worker can warm up, capture graphs or execute prefill requests.
-        from vllm_ascend.ops.kda_state_copy import initialize_kda_state_copy
+        from vllm_ascend.ops.kda_state_copy_plan import initialize_kda_state_copy
 
         initialize_kda_state_copy(
             self.vllm_config.compilation_config.static_forward_context,
