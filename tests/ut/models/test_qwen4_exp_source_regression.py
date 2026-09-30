@@ -106,11 +106,7 @@ def test_qsa_public_normalization_helper_matches_upstream(monkeypatch) -> None:
     indexer.k_layernorm = torch.nn.Identity()
     indexer.rotary_emb = SimpleNamespace(mrope_section=None)
 
-    monkeypatch.setattr(
-        ascend_qsa.envs,
-        "VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE",
-        False,
-    )
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE", "0")
     monkeypatch.setattr(
         ascend_qsa,
         "apply_qsa_rope",
