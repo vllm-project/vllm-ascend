@@ -160,6 +160,8 @@ def test_qwen3_vwn_eagle3_tp2():
 
 
 def test_eagle3_sliding_window():
+    # draft_window_size is on the V2 blacklist, so this case stays on V1
+    # without an explicit runner env pin.
     method = "eagle3"
     num_speculative_tokens = 3
     draft_window_size = 512
@@ -239,7 +241,7 @@ def test_eagle3_sliding_window():
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-def test_hang():
+def test_hang(monkeypatch):
     """Reproduce the spec-decode hang fixed by vllm-ascend#10117.
 
     The server deadlocks when all of the following hold:
@@ -251,6 +253,9 @@ def test_hang():
     length saturates the boundary in (3). The model is a small random-weight
     DeepseekV3 MoE+MTP so the case runs on two cards with EP on.
     """
+    # The deadlock was fixed on the V1 proposer. Qwen3_5MoeForCausalLM now
+    # defaults to MRv2; keep this regression on V1.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     # Fail-fast: cap NPU operator execution timeout at 5 min. Without this the
     # hang deadlocks for ~9 min until CANN's default vector-core timeout
     # (~556s) fires — too long for CI.
@@ -381,7 +386,9 @@ def test_qwen36_35b_dspark_spec_decoding(
     max_tokens: int,
     enforce_eager: bool,
     compilation_config: dict,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     num_speculative_tokens = 7
     # Baseline calibrated from repeated 40-prompt CI runs.
     _run_speculative_decoding(
