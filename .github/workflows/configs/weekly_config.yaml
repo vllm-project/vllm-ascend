@@ -151,6 +151,10 @@ a3:
         config_file_path: GLM-5.2-W8A8C8-A3-Memcache-PD.yaml
         config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
+      - name: GLM-5.1-Memcache-no-Layerwise-PD
+        config_file_path: GLM-5.1-Memcache-no-Layerwise-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        size: 4
   double_node:
     test_config:
       - name: DeepSeek-V3_2-W8A8-EP_weekly

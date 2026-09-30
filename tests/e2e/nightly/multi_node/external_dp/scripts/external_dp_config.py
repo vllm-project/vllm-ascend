@@ -55,14 +55,39 @@ class NodeInfo:
     cp_size: int = 1
     sp_size: int = 1
     pp_size: int = 1
+    pp_group_id: int = 0
+    pp_layer_partition: str = ""
 
     @property
     def devices_per_rank(self) -> int:
-        return self.tp_size * self.cp_size * self.sp_size * self.pp_size
+        # Cards consumed by one DP rank on THIS node. PP crosses nodes, so each
+        # node only runs one PP stage and uses tp*cp*sp cards — pp_size does not
+        # multiply the per-node device count.
+        return self.tp_size * self.cp_size * self.sp_size
 
     @property
     def devices_per_node(self) -> int:
         return self.dp_size_local * self.devices_per_rank
+
+
+@dataclass(frozen=True)
+class PPGroup:
+    """A pipeline-parallel group: pp_size nodes forming one vLLM engine.
+
+    Nodes in the same PP group share a single vLLM engine connected via
+    ``--nnodes``/``--node-rank``/``--master-addr``. The first node
+    (``node_indices[0]``) is the engine master that exposes the API server;
+    the rest are workers without an API server.
+    """
+
+    group_id: int
+    node_indices: list[int]
+    pp_size: int
+    pp_layer_partition: str
+
+    @property
+    def master_node_index(self) -> int:
+        return self.node_indices[0]
 
 
 @dataclass(frozen=True)
@@ -93,6 +118,12 @@ class RankInfo:
     dp_address: str
     dp_rpc_port: int
     port_start: int
+    pp_group_id: int = 0
+    pp_node_rank: int = 0
+    pp_master_addr: str = ""
+    pp_nnodes: int = 1
+    pp_layer_partition: str = ""
+    is_engine_master: bool = True
 
 
 @dataclass(frozen=True)
@@ -116,6 +147,7 @@ class ExternalDPConfig:
     acceptance_rate: dict[str, Any] = field(default_factory=dict)
     api_keyword_args: dict[str, Any] | list | None = None
     expected_response: dict[str, Any] = field(default_factory=dict)
+    pp_groups: list[PPGroup] = field(default_factory=list)
 
     @property
     def is_disaggregated_prefill(self) -> bool:
@@ -201,6 +233,7 @@ class ExternalDPConfigLoader:
         launch_templates = cls._parse_templates(raw_config)
         benchmark_cases = cls._parse_benchmarks(raw_config)
         kv_pool = cls._parse_kv_pool(raw_config)
+        pp_groups = cls._build_pp_groups(nodes)
 
         config = ExternalDPConfig(
             test_name=str(raw_config.get("test_name", "external_dp_test")),
@@ -220,6 +253,7 @@ class ExternalDPConfigLoader:
             acceptance_rate=dict(raw_config.get("acceptance_rate", {})),
             api_keyword_args=raw_config.get("api_keyword_args"),
             expected_response=dict(raw_config.get("expected_response", {})),
+            pp_groups=pp_groups,
         )
         cls._validate_config(config)
         return config
@@ -311,6 +345,8 @@ class ExternalDPConfigLoader:
                     sp_size=int(node.get("sp_size", 1)),
                     dp_address=str(node["dp_address"]),
                     pp_size=int(node.get("pp_size", 1)),
+                    pp_group_id=int(node.get("pp_group_id", 0)),
+                    pp_layer_partition=str(node.get("pp_layer_partition", "")),
                 )
             )
         return nodes
@@ -351,7 +387,111 @@ class ExternalDPConfigLoader:
         cls._validate_config_sizes(config)
         cls._validate_routing(config)
         cls._validate_node_parallel_config(config)
+        cls._validate_pp_groups(config)
         cls._validate_kv_pool(config)
+
+    @staticmethod
+    def _build_pp_groups(nodes: list[NodeInfo]) -> list[PPGroup]:
+        """Aggregate nodes into PP groups by pp_group_id.
+
+        Nodes sharing the same pp_group_id form one PP group. The group
+        inherits pp_size and pp_layer_partition from its members (all members
+        must agree — enforced by _validate_pp_groups). Group ordering follows
+        ascending group_id, and node ordering within a group follows ascending
+        node_index so that node_indices[0] is the engine master.
+        """
+        by_group: dict[int, list[tuple[int, NodeInfo]]] = {}
+        for idx, node in enumerate(nodes):
+            by_group.setdefault(node.pp_group_id, []).append((idx, node))
+        groups: list[PPGroup] = []
+        for group_id in sorted(by_group):
+            members = by_group[group_id]  # list of (node_index, NodeInfo)
+            groups.append(
+                PPGroup(
+                    group_id=group_id,
+                    node_indices=[idx for idx, _ in members],
+                    pp_size=members[0][1].pp_size,
+                    pp_layer_partition=members[0][1].pp_layer_partition,
+                )
+            )
+        return groups
+
+    @staticmethod
+    def _validate_pp_groups(config: ExternalDPConfig) -> None:
+        groups = config.pp_groups
+        if not groups:
+            return
+
+        # Each node must appear in exactly one PP group, and group node indices
+        # must cover all nodes.
+        all_node_indices = set()
+        for group in groups:
+            for idx in group.node_indices:
+                if idx in all_node_indices:
+                    raise ValueError(f"node index {idx} appears in multiple PP groups")
+                all_node_indices.add(idx)
+        if all_node_indices != set(range(config.num_nodes)):
+            raise ValueError(
+                f"PP group node indices {sorted(all_node_indices)} do not cover all nodes "
+                f"(expected {list(range(config.num_nodes))})"
+            )
+
+        for group in groups:
+            # members as (node_index, NodeInfo) pairs to avoid relying on __eq__.
+            members = [(idx, config.nodes[idx]) for idx in group.node_indices]
+
+            # pp_size must be consistent across members.
+            pp_sizes = {m.pp_size for _, m in members}
+            if len(pp_sizes) > 1:
+                raise ValueError(f"PP group {group.group_id}: nodes have inconsistent pp_size {pp_sizes}")
+
+            # When pp_size == 1, nodes in this group are independent single-node
+            # engines (no PP across nodes); skip all PP-cross-node constraints.
+            # This preserves backward compatibility: existing pp_size=1 configs
+            # where all nodes share the default pp_group_id=0 remain valid.
+            if group.pp_size == 1:
+                continue
+
+            # For pp_size > 1, the group node count must equal pp_size.
+            if group.pp_size != len(members):
+                raise ValueError(
+                    f"PP group {group.group_id}: pp_size={group.pp_size} but group has {len(members)} nodes"
+                )
+
+            # PP group must use DP=1 internally (each group is a single engine).
+            for idx, m in members:
+                if m.dp_size != 1 or m.dp_size_local != 1:
+                    raise ValueError(
+                        f"PP group {group.group_id} (pp_size>1) requires dp_size=1 and "
+                        f"dp_size_local=1 on all nodes, but node {idx} "
+                        f"has dp_size={m.dp_size}, dp_size_local={m.dp_size_local}"
+                    )
+
+            # pp_layer_partition must be empty or comma-separated positive ints
+            # whose count equals pp_size.
+            partition = group.pp_layer_partition.strip()
+            if partition:
+                parts = partition.split(",")
+                if len(parts) != group.pp_size:
+                    raise ValueError(
+                        f"PP group {group.group_id}: pp_layer_partition has {len(parts)} "
+                        f"entries but pp_size={group.pp_size}"
+                    )
+                for part in parts:
+                    part = part.strip()
+                    if not part.isdigit() or int(part) <= 0:
+                        raise ValueError(
+                            f"PP group {group.group_id}: pp_layer_partition entry {part!r} is not a positive integer"
+                        )
+
+            # All members of a PP group must belong to the same routing group.
+            group_name_by_node = {}
+            for role, indices in config.routing.groups.items():
+                for idx in indices:
+                    group_name_by_node[idx] = role
+            routing_roles = {group_name_by_node.get(idx) for idx in group.node_indices}
+            if len(routing_roles) > 1:
+                raise ValueError(f"PP group {group.group_id}: nodes span multiple routing groups {routing_roles}")
 
     @staticmethod
     def _validate_config_sizes(config: ExternalDPConfig) -> None:
@@ -441,8 +581,24 @@ class RankResolver:
             raise ValueError(f"routing.groups does not assign role for node indices: {missing}")
         return role_by_index
 
-    @staticmethod
-    def _expand_node(node_index: int, role: str, node_info: NodeInfo) -> list[RankInfo]:
+    def _expand_node(self, node_index: int, role: str, node_info: NodeInfo) -> list[RankInfo]:
+        pp_group = next(
+            (g for g in self.config.pp_groups if g.group_id == node_info.pp_group_id),
+            None,
+        )
+        if pp_group is not None:
+            pp_node_rank = pp_group.node_indices.index(node_index)
+            pp_master_addr = self.config.nodes[pp_group.master_node_index].ip
+            pp_nnodes = pp_group.pp_size
+            pp_layer_partition = pp_group.pp_layer_partition
+            is_engine_master = pp_node_rank == 0
+        else:
+            pp_node_rank = 0
+            pp_master_addr = node_info.ip
+            pp_nnodes = 1
+            pp_layer_partition = ""
+            is_engine_master = True
+
         ranks: list[RankInfo] = []
         for local_rank in range(node_info.dp_size_local):
             dp_rank = node_info.dp_rank_start + local_rank
@@ -470,6 +626,12 @@ class RankResolver:
                     dp_address=node_info.dp_address,
                     dp_rpc_port=node_info.dp_rpc_port,
                     port_start=node_info.port_start,
+                    pp_group_id=node_info.pp_group_id,
+                    pp_node_rank=pp_node_rank,
+                    pp_master_addr=pp_master_addr,
+                    pp_nnodes=pp_nnodes,
+                    pp_layer_partition=pp_layer_partition,
+                    is_engine_master=is_engine_master,
                 )
             )
         return ranks
