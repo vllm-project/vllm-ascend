@@ -28,11 +28,7 @@ public:
             .ExtendCfgInfo("softsync.flag", "true").ExtendCfgInfo("opFile.value", "attn_res_fwd_apt");
         this->AICore().AddConfig("ascend950", config);
 
-        OpAICoreConfig config_a3;
-        config_a3.DynamicCompileStaticFlag(true).DynamicFormatFlag(true).DynamicRankSupportFlag(true)
-            .DynamicShapeSupportFlag(true).NeedCheckSupportFlag(false)
-            .ExtendCfgInfo("softsync.flag", "true").ExtendCfgInfo("opFile.value", "attn_res_fwd_a3");
-        this->AICore().AddConfig("ascend910_93", config_a3);
+        this->AICore().AddConfig("ascend910_93", config);
     }
 };
 OP_ADD(AttnResFwd);
