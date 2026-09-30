@@ -11,7 +11,7 @@
 // A3 exact A8W4 MSD grouped matmul + SiTU + per-token INT8 quant.
 // Packed ND/NZ weights remain in caller storage. exact_msd.h provides the
 // INT4 Cube pipeline and activation decomposition, reusing device routing and
-// the SiTU/quant epilogue below. Only the MSD launcher is exposed to the host.
+// the SiTU/quant epilogue below. The ACLNN entry is in gmm_dequant_situ_quant.cpp.
 
 #include "kernel_operator.h"
 #include "adv_api/matmul_intf.h"
@@ -1047,53 +1047,3 @@ protected:
 #include "exact_msd.h"
 
 }  // namespace
-
-// Device-side group_list parse fused single launch (production MatmulImpl GEMM),
-// ported to the fused interface. The group_list device tensor is parsed on-device
-// every forward, so the operator is correct for DYNAMIC production MoE
-// group_list (new tensor or in-place update) with zero host D2H and no glPtr in
-// any cache key.
-extern "C" __global__ __aicore__ void gmsq_msd_exact(
-    GM_ADDR x, GM_ADDR wPtrTbl, GM_ADDR scPtrTbl, GM_ADDR packedA, GM_ADDR rawAcc,
-    GM_ADDR xScale, GM_ADDR y, GM_ADDR yScale, GM_ADDR groupList,
-    int32_t E, int32_t K, int32_t N, int32_t C, int32_t glType,
-    float beta, float invBeta, int32_t hasLinear, float linBeta, float invLinBeta,
-    int32_t nzInput)
-{
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
-    GlobalTensor<int64_t> glGM;
-    glGM.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(groupList));
-    TPipe pipe;
-    if ASCEND_IS_AIC {
-        AscendC::AscendCUtils::SetOverflow(1);
-        if (nzInput != 0) {
-            GmsqExactMsdCube<MsdNzMt, true> kernel;
-            kernel.Init(wPtrTbl, packedA, rawAcc, glGM, E, K, N, glType, &pipe);
-            kernel.Process();
-        } else {
-            GmsqExactMsdCube<> kernel;
-            kernel.Init(wPtrTbl, packedA, rawAcc, glGM, E, K, N, glType, &pipe);
-            kernel.Process();
-        }
-    }
-    if ASCEND_IS_AIV {
-        GmsqExactMsdVector kernel;
-        kernel.Init(x, wPtrTbl, scPtrTbl, packedA, rawAcc, xScale, y, yScale,
-                    glGM, E, K, N, C, glType, beta, invBeta, hasLinear, linBeta,
-                    invLinBeta, &pipe);
-        kernel.Process();
-    }
-}
-
-namespace vllm_ascend {
-void gmsq_msd_exact_impl(uint32_t blockDim, void *stream, void *x, void *wPtrTbl,
-    void *scPtrTbl, void *packedA, void *rawAcc, void *xScale, void *y,
-    void *yScale, void *groupList, int32_t E, int32_t K, int32_t N,
-    int32_t C, int32_t glType, float beta, float invBeta, int32_t hasLinear,
-    float linBeta, float invLinBeta, int32_t nzInput)
-{
-    gmsq_msd_exact<<<blockDim, nullptr, stream>>>(x, wPtrTbl, scPtrTbl,
-        packedA, rawAcc, xScale, y, yScale, groupList, E, K, N, C, glType,
-        beta, invBeta, hasLinear, linBeta, invLinBeta, nzInput);
-}
-}  // namespace vllm_ascend

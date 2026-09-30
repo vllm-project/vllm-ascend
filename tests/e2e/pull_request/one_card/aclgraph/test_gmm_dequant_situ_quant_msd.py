@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Bounded A3 MSD GMSQ correctness, native NZ, and graph regressions."""
+"""Bounded A3 MSD GmmDequantSituQuant correctness, native NZ, and graph regressions."""
 
 import pytest
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 torch_npu = pytest.importorskip("torch_npu")
-pytest.importorskip("vllm_ascend.vllm_ascendC")
+pytest.importorskip("vllm_ascend.vllm_ascend_C")
 
 BETA = 4.0
 LINEAR_BETA = 25.0
@@ -15,11 +16,10 @@ LINEAR_BETA = 25.0
 @pytest.fixture(autouse=True)
 def require_a3():
     if not torch.npu.is_available():
-        pytest.skip("GMSQ MSD requires an NPU")
+        pytest.skip("GmmDequantSituQuant MSD requires an NPU")
     if not 250 <= torch_npu.npu.get_soc_version() <= 256:
-        pytest.skip("GMSQ MSD regression requires Ascend A3")
-    if not hasattr(torch.vllm_ascendC, "grouped_matmul_situ_quant"):
-        pytest.skip("GMSQ custom operator is not built")
+        pytest.skip("GmmDequantSituQuant MSD regression requires Ascend A3")
+    assert hasattr(torch.ops._C_ascend, "gmm_dequant_situ_quant"), "A3 extension must register GmmDequantSituQuant"
     previous = torch.npu.config.allow_internal_format
     torch.npu.config.allow_internal_format = True
     try:
@@ -56,7 +56,7 @@ def _layer(experts, k, n, nz, seed):
     return weights, list(encoded.unbind()), logical, scales
 
 
-def _reference(x, x_scale, layer, counts):
+def _reference(x, x_scale, layer, counts, linear_beta=LINEAR_BETA):
     outputs, scales, activations = [], [], []
     offset = 0
     for weight, weight_scale, rows in zip(layer[2], layer[3], counts):
@@ -67,7 +67,8 @@ def _reference(x, x_scale, layer, counts):
             hidden = (acc * weight_scale).half().float() * x_scale[offset : offset + rows, None]
             gate, up = hidden.chunk(2, dim=-1)
             gate = ((2 * torch.sigmoid(gate * (2 / BETA)) - 1) * torch.sigmoid(gate)) * BETA
-            up = (2 * torch.sigmoid(up * (2 / LINEAR_BETA)) - 1) * LINEAR_BETA
+            if linear_beta is not None:
+                up = (2 * torch.sigmoid(up * (2 / linear_beta)) - 1) * linear_beta
             act = gate * up
             row_max = act.abs().amax(dim=-1)
             inverse = torch.where(row_max > 0, 127 / row_max, torch.zeros_like(row_max))
@@ -97,9 +98,9 @@ def _check(output, expected, capacity):
     torch.testing.assert_close(y.float() * scale[:, None], act, rtol=2e-2, atol=2e-2)
 
 
-def _call(x, x_scale, layer, group_list, group_list_type):
-    return torch.vllm_ascendC.grouped_matmul_situ_quant(
-        x, layer[0], layer[1], x_scale, group_list, [], BETA, LINEAR_BETA, group_list_type
+def _call(x, x_scale, layer, group_list, group_list_type, linear_beta=LINEAR_BETA):
+    return torch.ops._C_ascend.gmm_dequant_situ_quant(
+        x, layer[0], layer[1], x_scale, group_list, [], BETA, linear_beta, group_list_type
     )
 
 
@@ -108,25 +109,53 @@ def _groups(counts, dtype, group_list_type):
     return groups.cumsum(0) if group_list_type == 0 else groups
 
 
-@pytest.mark.parametrize("nz", [False, True], ids=["nd", "native_nz"])
-@pytest.mark.parametrize("experts,k,n", [(2, 320, 768), (3, 576, 1280)])
+@pytest.mark.parametrize("capacity", [0, 8])
+@pytest.mark.parametrize("fake", [False, True], ids=["meta", "fake_npu"])
+def test_gmm_dequant_situ_quant_dispatcher_shape_inference(capacity, fake):
+    op_name = "_C_ascend::gmm_dequant_situ_quant"
+    assert torch._C._dispatch_has_kernel_for_dispatch_key(op_name, "PrivateUse1")
+    assert torch._C._dispatch_has_kernel_for_dispatch_key(op_name, "Meta")
+    device = "npu" if fake else "meta"
+    with FakeTensorMode() if fake else torch.device("meta"):
+        x = torch.empty((capacity, 320), dtype=torch.int8, device=device)
+        weight = torch.empty((320, 96), dtype=torch.int32, device=device)
+        weight_scale = torch.empty(768, dtype=torch.int64, device=device)
+        x_scale = torch.empty(capacity, dtype=torch.float32, device=device)
+        group_list = torch.empty(1, dtype=torch.int64, device=device)
+        # Exercise the dispatcher schema's default scalar arguments as well.
+        y, scale = torch.ops._C_ascend.gmm_dequant_situ_quant(
+            x=x,
+            weight=[weight],
+            weight_scale=[weight_scale],
+            x_scale=x_scale,
+            group_list=group_list,
+            weight_assist_matrix=[],
+        )
+        assert y.shape == (capacity, 384) and y.dtype == torch.int8
+        assert scale.shape == (capacity,) and scale.dtype == torch.float32
+        assert y.device == x.device and scale.device == x.device
+
+
+@pytest.mark.parametrize("nz", [False, True], ids=["nd_weights", "native_nz"])
+@pytest.mark.parametrize("experts,k,n", [(1, 320, 768), (2, 320, 768), (3, 576, 1280)])
 @pytest.mark.parametrize("group_list_type", [0, 1])
-def test_gmsq_msd_eager(nz, experts, k, n, group_list_type):
+@pytest.mark.parametrize("linear_beta", [None, LINEAR_BETA])
+def test_gmm_dequant_situ_quant_msd_eager(nz, experts, k, n, group_list_type, linear_beta):
     capacity = 8
     generator = torch.Generator().manual_seed(71)
     x = torch.randint(-32, 32, (capacity, k), generator=generator, dtype=torch.int8)
     x[0].zero_()  # Exercise zero activation and zero quantization scale.
     x_scale = torch.rand(capacity, generator=generator) * 0.01 + 0.001
-    counts = [3, 0] + ([2] if experts == 3 else [])
+    counts = [3, 0, 2][:experts]
     layer = _layer(experts, k, n, nz, 101)
     groups = _groups(counts, torch.int64, group_list_type).npu()
-    output = _call(x.npu(), x_scale.npu(), layer, groups, group_list_type)
-    _check(output, _reference(x, x_scale, layer, counts), capacity)
+    output = _call(x.npu(), x_scale.npu(), layer, groups, group_list_type, linear_beta)
+    _check(output, _reference(x, x_scale, layer, counts, linear_beta), capacity)
 
 
-@pytest.mark.parametrize("dtype", [torch.int64, torch.float32])
+@pytest.mark.parametrize("dtype", [torch.int64, torch.int32, torch.float32])
 @pytest.mark.parametrize("group_list_type", [0, 1])
-def test_gmsq_msd_graph_dynamic_groups(dtype, group_list_type):
+def test_gmm_dequant_situ_quant_msd_graph_dynamic_groups(dtype, group_list_type):
     # Distinct shapes, expert counts and layouts share one capture. Each call
     # must retain its own scratch storage and device-side routing metadata.
     cases = []
@@ -153,7 +182,7 @@ def test_gmsq_msd_graph_dynamic_groups(dtype, group_list_type):
 
 
 @pytest.mark.parametrize("nz", [False, True])
-def test_gmsq_msd_zero_capacity(nz):
+def test_gmm_dequant_situ_quant_msd_zero_capacity(nz):
     layer = _layer(2, 320, 768, nz, 301)
     x = torch.empty((0, 320), dtype=torch.int8)
     scale = torch.empty(0)
@@ -163,13 +192,13 @@ def test_gmsq_msd_zero_capacity(nz):
 
 
 @pytest.mark.parametrize("invalid", ["mixed", "descriptor", "noncontiguous", "expert_limit"])
-def test_gmsq_msd_rejects_invalid_weights(invalid):
+def test_gmm_dequant_situ_quant_msd_rejects_invalid_weights(invalid):
     k, n = 320, 768
-    nd = torch.zeros((k, n // 8), dtype=torch.int32, device="npu")
+    nd_weight = torch.zeros((k, n // 8), dtype=torch.int32, device="npu")
     native = torch_npu.npu_format_cast(torch.zeros((k, n // 2), dtype=torch.int8, device="npu"), 29)
     nz = native.view(torch.int32)
     if invalid == "mixed":
-        weights, message = [nd, nz], "mixed"
+        weights, message = [nd_weight, nz], "mixed"
     elif invalid == "descriptor":
         wrong = torch_npu.npu_format_cast(torch.zeros((k, n // 4), dtype=torch.float16, device="npu"), 29)
         weights, message = [wrong.view(torch.int32)], "native"
@@ -180,7 +209,7 @@ def test_gmsq_msd_rejects_invalid_weights(invalid):
         square = torch_npu.npu_format_cast(torch.zeros((k, n // 2), dtype=torch.int8, device="npu"), 29)
         weights, message = [square.view(torch.int32).transpose(0, 1)], "contiguous"
     else:
-        weights, message = [nd] * 129, "at most 128"
+        weights, message = [nd_weight] * 129, "at most 128"
     scale = torch.ones(n).view(torch.int32).to(torch.int64).npu()
     layer = weights, [scale] * len(weights)
     counts = torch.tensor([1] + [0] * (len(weights) - 1), dtype=torch.int64, device="npu")
@@ -188,7 +217,7 @@ def test_gmsq_msd_rejects_invalid_weights(invalid):
         _call(torch.ones((1, k), dtype=torch.int8, device="npu"), torch.ones(1, device="npu"), layer, counts, 1)
 
 
-def test_gmsq_msd_rechecks_nd_strides_after_warmup():
+def test_gmm_dequant_situ_quant_msd_rechecks_nd_strides_after_warmup():
     layer = _layer(1, 64, 512, False, 401)
     x = torch.ones((1, 64), dtype=torch.int8, device="npu")
     scale = torch.ones(1, device="npu")

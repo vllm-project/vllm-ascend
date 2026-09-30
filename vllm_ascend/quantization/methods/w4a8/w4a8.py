@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 
-from functools import cache
 from typing import Any
 
 import numpy as np
@@ -25,7 +24,6 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -44,29 +42,8 @@ from vllm_ascend.utils import (
 from ..base import AscendMoEScheme, QuantType
 from ..registry import register_scheme
 
-GMSQ_MAX_K = 16384
-GMSQ_M_TILE_SIZE = 128
-GMSQ_MAX_PADDED_BLOCKS = 256
-# Ascend A3 UB capacity; the native host also checks the actual platform.
-GMSQ_UB_CAPACITY_BYTES = 192 * 1024
-GMSQ_MAX_EXPERTS = 128
-GMSQ_K_ALIGNMENT = 64
-GMSQ_N_TILE_SIZE = 256
-GMSQ_PACKED_N_FACTOR = 8
 
-
-@cache
-def _get_grouped_matmul_situ_quant():
-    """Return the A3 fused GMSQ op, or None when its sidecar is unavailable."""
-    try:
-        import vllm_ascend.vllm_ascendC  # type: ignore  # noqa: F401
-
-        return torch.vllm_ascendC.grouped_matmul_situ_quant
-    except (ImportError, AttributeError):
-        return None
-
-
-def _as_gmsq_expert_weights(tensor_or_list: list[torch.Tensor] | torch.Tensor) -> list[torch.Tensor]:
+def _as_gmm_dequant_situ_quant_expert_weights(tensor_or_list: list[torch.Tensor] | torch.Tensor) -> list[torch.Tensor]:
     """Normalize W4A8 weights into one packed tensor per expert."""
     if isinstance(tensor_or_list, list):
         if len(tensor_or_list) == 1 and tensor_or_list[0].dim() >= 3:
@@ -77,7 +54,7 @@ def _as_gmsq_expert_weights(tensor_or_list: list[torch.Tensor] | torch.Tensor) -
     return [tensor_or_list]
 
 
-def _as_gmsq_expert_scales(
+def _as_gmm_dequant_situ_quant_expert_scales(
     tensor_or_list: list[torch.Tensor] | torch.Tensor,
     *,
     num_experts: int,
@@ -88,12 +65,13 @@ def _as_gmsq_expert_scales(
         tensors = list(tensors[0].unbind(0))
     if len(tensors) != num_experts:
         raise ValueError(
-            f"GMSQ weight_scale expert count mismatch: got {len(tensors)} scales for {num_experts} experts"
+            "GmmDequantSituQuant weight_scale expert count mismatch: "
+            f"got {len(tensors)} scales for {num_experts} experts"
         )
     return [tensor.reshape(-1).contiguous() for tensor in tensors]
 
 
-def _gmsq_situ_fusion_enabled(
+def _gmm_dequant_situ_quant_fusion_supported(
     *,
     hidden_states: torch.Tensor,
     w1: list[torch.Tensor] | torch.Tensor,
@@ -102,12 +80,10 @@ def _gmsq_situ_fusion_enabled(
     group_list: torch.Tensor,
     x_scale: torch.Tensor,
 ) -> bool:
-    """Whether the inputs are supported by the A3 W4A8 SiTU fused kernel."""
+    """Select the A3 W4A8 SiTU fused kernel whenever the inputs are supported."""
     if (
         get_ascend_device_type() != AscendDeviceType.A3
         or group_list_type not in (0, 1)
-        or not envs.VLLM_ASCEND_ENABLE_GMSQ_SITU
-        or _get_grouped_matmul_situ_quant() is None
         or hidden_states.dim() != 2
         or hidden_states.dtype != torch.int8
         or not hidden_states.is_contiguous()
@@ -117,16 +93,9 @@ def _gmsq_situ_fusion_enabled(
     ):
         return False
 
-    expert_weights = _as_gmsq_expert_weights(w1)
+    expert_weights = _as_gmm_dequant_situ_quant_expert_weights(w1)
     num_experts = len(expert_weights)
-    capacity = hidden_states.shape[0]
-    nonempty_experts = min(num_experts, capacity)
-    padded_blocks = nonempty_experts + (capacity - nonempty_experts) // GMSQ_M_TILE_SIZE
-    if (
-        not 0 < num_experts <= GMSQ_MAX_EXPERTS
-        or group_list.numel() < num_experts
-        or padded_blocks > GMSQ_MAX_PADDED_BLOCKS
-    ):
+    if not expert_weights or group_list.numel() < num_experts:
         return False
     expert_scales = w1_scale if isinstance(w1_scale, list) else [w1_scale]
     if len(expert_scales) == 1 and expert_scales[0].dim() >= 2 and expert_scales[0].shape[0] == num_experts:
@@ -141,38 +110,9 @@ def _gmsq_situ_fusion_enabled(
     first_weight = expert_weights[0]
     if first_weight.dim() != 2 or first_weight.dtype != torch.int32:
         return False
-    k_size, packed_n_size = first_weight.shape
-    n_size = packed_n_size * GMSQ_PACKED_N_FACTOR
-    # Keep this allocation budget in sync with native MsdUbBytes. All terms
-    # depend only on tensor metadata; routing counts stay on the device.
-    row_size = n_size // 2
-
-    def align32(size: int) -> int:
-        return (size + 31) // 32 * 32
-
-    required_ub = (
-        40960
-        + 4 * row_size
-        + max(4 * row_size, 8192)
-        + 19 * row_size
-        + 32
-        + 32
-        + 4096
-        + align32(4 * ((row_size + 1023) // 1024))
-        + align32(4 * (3 * num_experts + 4))
-    )
-    return (
-        hidden_states.shape[1] == k_size
-        and 0 < k_size <= GMSQ_MAX_K
-        and k_size % GMSQ_K_ALIGNMENT == 0
-        and n_size > 0
-        and n_size % GMSQ_N_TILE_SIZE == 0
-        and required_ub <= GMSQ_UB_CAPACITY_BYTES
-        and all(scale.numel() >= n_size for scale in expert_scales)
-        and all(
-            weight.shape == first_weight.shape and weight.dtype == torch.int32 and weight.is_contiguous()
-            for weight in expert_weights
-        )
+    return hidden_states.shape[1] == first_weight.shape[0] and all(
+        weight.shape == first_weight.shape and weight.dtype == torch.int32 and weight.is_contiguous()
+        for weight in expert_weights
     )
 
 
@@ -588,7 +528,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
 
         if mlp_compute_input.activation == MoEActivation.SITU:
-            if _gmsq_situ_fusion_enabled(
+            if _gmm_dequant_situ_quant_fusion_supported(
                 hidden_states=hidden_states,
                 w1=w1,
                 w1_scale=w1_scale,
@@ -596,14 +536,14 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 group_list=group_list,
                 x_scale=pertoken_scale,
             ):
-                gmsq_op = _get_grouped_matmul_situ_quant()
-                assert gmsq_op is not None
-                gmsq_weights = _as_gmsq_expert_weights(w1)
-                gmsq_scales = _as_gmsq_expert_scales(w1_scale, num_experts=len(gmsq_weights))
-                hidden_states, swiglu_out_scale = gmsq_op(
+                gmm_dequant_situ_quant_weights = _as_gmm_dequant_situ_quant_expert_weights(w1)
+                gmm_dequant_situ_quant_scales = _as_gmm_dequant_situ_quant_expert_scales(
+                    w1_scale, num_experts=len(gmm_dequant_situ_quant_weights)
+                )
+                hidden_states, swiglu_out_scale = torch.ops._C_ascend.gmm_dequant_situ_quant(
                     x=hidden_states,
-                    weight=gmsq_weights,
-                    weight_scale=gmsq_scales,
+                    weight=gmm_dequant_situ_quant_weights,
+                    weight_scale=gmm_dequant_situ_quant_scales,
                     x_scale=pertoken_scale.reshape(-1).to(dtype=torch.float32).contiguous(),
                     group_list=group_list,
                     weight_assist_matrix=[],
