@@ -493,7 +493,13 @@ class BaseDeviceAdaptor:
             assert len(kv_cache) == (3 if sfa_impl.enable_sparse_sfa_c8 else 4)
             assert q_li_scale is not None
             assert q_li_shape_ori is not None
-            weights = weights.to(torch.float16)
+            weights = (
+                torch.ops._C_ascend.npu_static_cast(
+                    weights, "bfloat16", "float16"
+                )
+                if weights.dtype == torch.bfloat16
+                else weights.to(torch.float16)
+            )
             topk_indices = torch.ops._C_ascend.npu_lightning_indexer_quant(
                 query=q_li.view(q_li_shape_ori),
                 key=kv_cache[indexer_cache_idx],
@@ -718,7 +724,11 @@ class BaseDeviceAdaptor:
         """Quantize indexer query for lightning_indexer.
         Non-A5: int8 quant with float16 scale."""
         q_quant, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.int8)
-        q_scale = q_scale.to(torch.float16)
+        q_scale = (
+            torch.ops._C_ascend.npu_static_cast(q_scale, "float32", "float16")
+            if q_scale.dtype == torch.float32
+            else q_scale.to(torch.float16)
+        )
         return q_quant, q_scale
 
     @staticmethod
@@ -726,13 +736,24 @@ class BaseDeviceAdaptor:
         """Quantize q and scatter kv into indexer cache.
         Non-A5: int8 quant + 2x scatter_nd_update_sk for k_cache and scale_cache."""
         q, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.int8)
-        q_scale = q_scale.to(torch.float16)
+        q_scale = (
+            torch.ops._C_ascend.npu_static_cast(q_scale, "float32", "float16")
+            if q_scale.dtype == torch.float32
+            else q_scale.to(torch.float16)
+        )
 
         kv_out = kv
         kv_scale_out = None
         if kv is not None:
             kv_out, kv_scale_out = torch_npu.npu_dynamic_quant(kv, dst_type=torch.int8)
-            kv_scale_out = kv_scale_out.unsqueeze(-1).to(torch.float16)
+            kv_scale_out = kv_scale_out.unsqueeze(-1)
+            kv_scale_out = (
+                torch.ops._C_ascend.npu_static_cast(
+                    kv_scale_out, "float32", "float16"
+                )
+                if kv_scale_out.dtype == torch.float32
+                else kv_scale_out.to(torch.float16)
+            )
             if kv_scale_out.ndim < 4:
                 kv_scale_out = kv_scale_out.unsqueeze(-1)
             torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_k_cache, slot_mapping, kv_out)
@@ -756,7 +777,11 @@ class BaseDeviceAdaptor:
     def dsa_indexer_scatter_scale_part3(kv_scale, indexer_scale_cache, slot_mapping):
         """Part3 of multi-stream indexer scatter.
         Non-A5: scatter scale_cache (float16 conversion + scatter)."""
-        kv_scale = kv_scale.to(torch.float16)
+        kv_scale = (
+            torch.ops._C_ascend.npu_static_cast(kv_scale, "float32", "float16")
+            if kv_scale.dtype == torch.float32
+            else kv_scale.to(torch.float16)
+        )
         if kv_scale.ndim < 4:
             kv_scale = kv_scale.unsqueeze(-1)
         torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_scale_cache, slot_mapping, kv_scale)
@@ -766,7 +791,14 @@ class BaseDeviceAdaptor:
         """Warmup profiling for indexer quant+scatter.
         Non-A5: int8 quant + 2x scatter with dummy cache tensors."""
         kv_dummy, kv_scale_dummy = torch_npu.npu_dynamic_quant(hidden_states, dst_type=torch.int8)
-        kv_scale_dummy = kv_scale_dummy.unsqueeze(-1).to(torch.float16)
+        kv_scale_dummy = kv_scale_dummy.unsqueeze(-1)
+        kv_scale_dummy = (
+            torch.ops._C_ascend.npu_static_cast(
+                kv_scale_dummy, "float32", "float16"
+            )
+            if kv_scale_dummy.dtype == torch.float32
+            else kv_scale_dummy.to(torch.float16)
+        )
         if kv_scale_dummy.ndim < 4:
             kv_scale_dummy = kv_scale_dummy.unsqueeze(-1)
         dummy_shape = (1, 1, 1, kv_dummy.shape[-1])
@@ -780,6 +812,10 @@ class BaseDeviceAdaptor:
     @staticmethod
     def prepare_dsa_indexer_weights(weights):
         """Non-A5: cast indexer weights to float16."""
+        if weights.dtype == torch.bfloat16:
+            return torch.ops._C_ascend.npu_static_cast(
+                weights, "bfloat16", "float16"
+            )
         return weights.to(torch.float16)
 
     @staticmethod
@@ -790,7 +826,12 @@ class BaseDeviceAdaptor:
     @staticmethod
     def prepare_dsa_indexer_key_scale(indexer_scale_cache):
         """Non-A5: cast key dequant scale to float16."""
-        return indexer_scale_cache.squeeze(-2).to(torch.float16)
+        indexer_scale = indexer_scale_cache.squeeze(-2)
+        if indexer_scale.dtype == torch.float32:
+            return torch.ops._C_ascend.npu_static_cast(
+                indexer_scale, "float32", "float16"
+            )
+        return indexer_scale.to(torch.float16)
 
     # ===== Q RMS Norm =====
 

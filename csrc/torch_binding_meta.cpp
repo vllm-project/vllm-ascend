@@ -1194,6 +1194,47 @@ at::Tensor npu_hc_pre_inv_rms_meta(const at::Tensor& x, double epsilon=1e-20)
     return yOut;
 }
 
+at::Tensor npu_bf16_to_fp32_static_cast_meta(const at::Tensor& x)
+{
+    TORCH_CHECK(x.dtype() == at::kBFloat16,
+                "bf16_to_fp32_static_cast expects a BF16 input.");
+    return at::empty_symint(x.sym_sizes(), x.options().dtype(at::kFloat));
+}
+
+at::Tensor npu_fp32_to_fp16_static_cast_meta(const at::Tensor& x)
+{
+    TORCH_CHECK(x.dtype() == at::kFloat,
+                "fp32_to_fp16_static_cast expects an FP32 input.");
+    return at::empty_symint(x.sym_sizes(), x.options().dtype(at::kHalf));
+}
+
+at::Tensor npu_bf16_to_fp16_static_cast_meta(const at::Tensor& x)
+{
+    TORCH_CHECK(x.dtype() == at::kBFloat16,
+                "bf16_to_fp16_static_cast expects a BF16 input.");
+    return at::empty_symint(x.sym_sizes(), x.options().dtype(at::kHalf));
+}
+
+at::Tensor npu_static_cast_meta(
+    const at::Tensor& x,
+    c10::string_view input_dtype,
+    c10::string_view output_dtype)
+{
+    const bool bf16_to_fp32 = input_dtype == "bfloat16" && output_dtype == "float32";
+    const bool fp32_to_bf16 = input_dtype == "float32" && output_dtype == "bfloat16";
+    const bool fp32_to_fp16 = input_dtype == "float32" && output_dtype == "float16";
+    const bool bf16_to_fp16 = input_dtype == "bfloat16" && output_dtype == "float16";
+    TORCH_CHECK(bf16_to_fp32 || fp32_to_bf16 || fp32_to_fp16 || bf16_to_fp16,
+                "npu_static_cast does not support the requested dtype pair.");
+    TORCH_CHECK((input_dtype == "bfloat16" && x.dtype() == at::kBFloat16) ||
+                    (input_dtype == "float32" && x.dtype() == at::kFloat),
+                "npu_static_cast input_dtype does not match tensor dtype.");
+    const auto output_type = output_dtype == "float32" ? at::kFloat
+        : output_dtype == "bfloat16"                   ? at::kBFloat16
+                                                        : at::kHalf;
+    return at::empty_symint(x.sym_sizes(), x.options().dtype(output_type));
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_hc_pre_sinkhorn_output_tensor(const at::Tensor& mixes, const at::Tensor& x, int64_t hc_mult)
 {
     auto xDims = x.dim();
@@ -2115,6 +2156,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_hc_pre", &vllm_ascend::meta::npu_hc_pre_meta);
     ops.impl("npu_hc_pre_v2", &vllm_ascend::meta::npu_hc_pre_meta);
     ops.impl("npu_hc_pre_inv_rms", &vllm_ascend::meta::npu_hc_pre_inv_rms_meta);
+    ops.impl("npu_static_cast", &vllm_ascend::meta::npu_static_cast_meta);
     ops.impl("npu_hc_pre_sinkhorn", &vllm_ascend::meta::npu_hc_pre_sinkhorn_meta);
     ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
     ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
