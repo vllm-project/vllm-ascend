@@ -54,6 +54,11 @@ on:
         required: false
         default: ''
         type: string
+      vllm_ref:
+        description: 'vllm commit SHA / tag / branch to install instead of the image-baked vllm (empty = keep image version)'
+        required: false
+        default: ''
+        type: string
       aop_enabled:
         description: 'Enable AOP hooks (capture / classify / skip-or-process)'
         required: false
@@ -72,8 +77,6 @@ on:
         required: false
         default: '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}'
         type: string
-      bisect_good_commit:
-        description: 'explicit good commit for bisect (overrides good_table lookup)'
       bisect_args_json:
         description: 'JSON object containing optional bisect parameters'
         required: false
@@ -234,6 +237,7 @@ jobs:
       config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
       bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
@@ -301,6 +305,7 @@ jobs:
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
       bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
@@ -390,6 +395,7 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       upload: false
 
   single-node-accuracy-tests-pr-only:
@@ -419,6 +425,7 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       upload: false
 
   clear-pre-logs:

@@ -50,6 +50,11 @@ on:
         default: main
         type: string
         description: used for pr level tests
+      vllm_ref:
+        required: false
+        default: ''
+        type: string
+        description: vllm commit SHA / tag / branch to install in each pod instead of the image-baked vllm (empty = keep image version)
       should_run:
         required: true
         type: boolean
@@ -266,6 +271,7 @@ jobs:
           is_pr_test="${{ inputs.request_id != '' }}"
           vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
           vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
+          vllm_ref="${{ inputs.vllm_ref }}"
           runner="${{ inputs.soc_version }}"
           echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
 
@@ -296,6 +302,7 @@ jobs:
             -D is_pr_test="$is_pr_test" \
             -D vllm_ascend_ref="$vllm_ascend_ref" \
             -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
+            -D vllm_ref="$vllm_ref" \
             -D pvc_name="${pvc_name:-}" \
             -D benchmark_job_name="$benchmark_job_name" \
             -D runner="$runner" \
