@@ -74,7 +74,6 @@ config:
     tp_size: 4
     pp_size: 1
     pp_group_id: 1
-    pp_layer_partition: "41,37"
     dp_address: "${NODE_2_IP}"
 
   - node_index: 3
@@ -86,7 +85,6 @@ config:
     tp_size: 4
     pp_size: 1
     pp_group_id: 1
-    pp_layer_partition: "41,37"
     dp_address: "${NODE_2_IP}"
 
 templates:
