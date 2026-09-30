@@ -150,6 +150,7 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
         num_hidden_layers=1,
         num_nextn_predict_layers=0,
     )
+    model.n_redundant_experts = 0
     loaded_calls = []
 
     def recorder(param_name, shard_id_positional):

@@ -8,16 +8,15 @@ the generic MLA/MoE implementation and the Ascend KDA backend.
 """
 
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from copy import copy
-from typing import Any
+from typing import Any, TypeVar, cast
 
 import torch
 import vllm.envs as envs
 from torch import nn
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
-    get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
@@ -38,10 +37,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.kimi_k25_vit import (
     KimiK25MultiModalProjector,
@@ -49,9 +44,7 @@ from vllm.model_executor.models.kimi_k25_vit import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
-    get_spec_layer_idx_from_weight_name,
     init_vllm_registered_model,
-    is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
 )
@@ -180,6 +173,56 @@ class AscendKimiMLP(KimiMLP):
         return x
 
 
+_WeightT = TypeVar("_WeightT", bound=tuple[str, torch.Tensor] | tuple[str, torch.Tensor, dict[str, Any]])
+
+
+def load_redundant_expert_weights(
+    model: nn.Module,
+    weights: Iterable[_WeightT],
+    num_redundant_experts: int,
+    map_weight_name: Callable[[str], str | None] | None = None,
+) -> Iterable[_WeightT]:
+    """Load replica slots while streaming the original weights to upstream.
+
+    Upstream Kimi loaders stop at the first matching expert mapping, so simply
+    adding redundant entries to that mapping would leave replicas uninitialized.
+    Use the same mapping and parameter loaders for every redundant physical ID.
+    """
+    if not num_redundant_experts or not model.config.is_moe:
+        yield from weights
+        return
+
+    params_dict = dict(model.named_parameters())
+    replica_mapping = [
+        entry
+        for entry in fused_moe_make_expert_params_mapping(
+            model,
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=model.config.num_experts,
+            num_redundant_experts=num_redundant_experts,
+        )
+        if entry[2] >= model.config.num_experts
+    ]
+    experts_unpacked = not any(name.endswith("w13_weight_packed") for name in params_dict)
+    for args in weights:
+        checkpoint_name = cast(str, args[0])
+        name = map_weight_name(checkpoint_name) if map_weight_name else checkpoint_name
+        if name is not None:
+            if experts_unpacked and name.endswith(".weight_packed"):
+                name = name.replace(".weight_packed", ".weight")
+            for param_name, weight_name, expert_id, shard_id in replica_mapping:
+                if weight_name not in name:
+                    continue
+                mapped_name = name.replace(weight_name, param_name)
+                if mapped_name not in params_dict:
+                    continue
+                param = params_dict[mapped_name]
+                param.weight_loader(param, args[1], mapped_name, expert_id=expert_id, shard_id=shard_id)
+        yield args
+
+
 def is_moe_layer_idx(config, layer_idx: int) -> bool:
     """Whether the Kimi layer at ``layer_idx`` hosts routed experts."""
     return bool(
@@ -211,17 +254,8 @@ class AscendKimiMoE(nn.Module):
         assert num_experts is not None
         assert num_experts_per_token is not None
 
-        # Load balancing settings.
         parallel_config = vllm_config.parallel_config
-        self.enable_eplb = parallel_config.enable_eplb
-        eplb_config = parallel_config.eplb_config
-        self.n_routed_experts: int = num_experts
-        self.n_redundant_experts = eplb_config.num_redundant_experts
-        self.n_logical_experts = self.n_routed_experts
-        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
-        self.ep_rank = get_ep_group().rank_in_group
-        self.ep_size = get_ep_group().device_group.size()
-        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+        num_redundant_experts = parallel_config.eplb_config.num_redundant_experts if parallel_config.enable_eplb else 0
 
         routed_expert_hidden_size = config.routed_expert_hidden_size
         self.use_latent_moe = routed_expert_hidden_size is not None
@@ -305,9 +339,17 @@ class AscendKimiMoE(nn.Module):
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
             is_sequence_parallel=use_sequence_parallel,
-            enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts,
+            enable_eplb=parallel_config.enable_eplb,
+            num_redundant_experts=num_redundant_experts,
         )
+
+        # Use the factory's validated counts, including its effective EP size.
+        moe_config = self.experts.moe_config
+        self.n_routed_experts = num_experts
+        self.n_logical_experts = moe_config.num_logical_experts
+        self.n_physical_experts = moe_config.num_experts
+        self.n_local_physical_experts = moe_config.num_local_experts
+        self.n_redundant_experts = num_redundant_experts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -642,7 +684,6 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_text_config
         self.config = config
-        self.vllm_config = vllm_config
         self.vocab_size = config.vocab_size
         parallel_config = vllm_config.parallel_config
         # Physical expert slots appended by EPLB; load_weights needs the count
@@ -709,13 +750,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         self,
         weights: Iterable[tuple[str, torch.Tensor] | tuple[str, torch.Tensor, dict[str, Any]]],
     ) -> set[str]:
-        """Load Kimi weights through vLLM's packed KDA-gate loader.
-
-        Mirrors upstream ``KimiLinearModel.load_weights`` with one addition:
-        ``n_redundant_experts`` is propagated into the expert mapping so the
-        duplicated initial expert placements receive weights when EPLB is
-        enabled.
-        """
+        """Reuse upstream loading with Ascend KDA gates and EPLB replicas."""
         params_dict = dict(self.named_parameters())
         gate_mapping = (
             (".b_proj.weight", ".fused_bfg_proj.weight", 0),
@@ -739,127 +774,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 else:
                     yield args
 
-        kda_config = self.config.linear_attn_config
-        use_full_rank_gate = bool(kda_config and kda_config.get("use_full_rank_gate", False))
-        beta_shard_id = 5 if use_full_rank_gate else 3
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".in_proj_qkvgfab", ".q_proj", 0),
-            (".in_proj_qkvgfab", ".k_proj", 1),
-            (".in_proj_qkvgfab", ".v_proj", 2),
-            (".in_proj_qkvgfab", ".b_proj", beta_shard_id),
-            (".in_proj_qkvgfab", ".f_a_proj", 4),
-            (".conv1d", ".q_conv1d", 0),
-            (".conv1d", ".k_conv1d", 1),
-            (".conv1d", ".v_conv1d", 2),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-        if use_full_rank_gate:
-            stacked_params_mapping.append((".in_proj_qkvgfab", ".g_proj", 3))
-        if getattr(self.config, "q_lora_rank", None) is not None:
-            stacked_params_mapping += [
-                (".fused_qkv_a_proj", ".q_a_proj", 0),
-                (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
-            ]
-        if self.config.is_moe:
-            # Params for weights, fp8 weight scales, fp8 activation scales
-            # (param_name, weight_name, expert_id, shard_id)
-            expert_params_mapping = fused_moe_make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="w1",
-                ckpt_down_proj_name="w2",
-                ckpt_up_proj_name="w3",
-                num_experts=self.config.num_experts,
-                num_redundant_experts=self.n_redundant_experts,
-            )
-        else:
-            expert_params_mapping = []
-        # Under the MXFP4 quant interface the routed experts register unpacked
-        # params (``w13_weight``), while the compressed-tensors checkpoint names
-        # them ``.weight_packed``. Rebind so the expert mapping resolves; scales
-        # already share the ``.weight_scale`` suffix.
-        experts_unpacked = not any(n.endswith("w13_weight_packed") for n in params_dict)
-        loaded_params: set[str] = set()
-        for args in remap_mixed_gate_weights():
-            name, loaded_weight = args[0], args[1]
-            kwargs: dict[str, Any] = args[2] if len(args) > 2 else {}
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if experts_unpacked and name.endswith(".weight_packed"):
-                name = name.replace(".weight_packed", ".weight")
-
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
-            if spec_layer is not None:
-                continue  # skip spec decode layers for main model
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                # We have mlp.experts[0].gate_proj in the checkpoint.
-                # Since we handle the experts below in expert_params_mapping,
-                # we need to skip here BEFORE we update the name, otherwise
-                # name will be updated to mlp.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping
-                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if ("mlp.experts." in name) and name not in params_dict:
-                    continue
-                name_mapped = name.replace(weight_name, param_name)
-                # Packed projections are only present on compatible layers.
-                if name_mapped not in params_dict:
-                    continue
-                name = name_mapped
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                for (
-                    expert_param_name,
-                    expert_weight_name,
-                    expert_id,
-                    expert_shard_id,
-                ) in expert_params_mapping:
-                    if expert_weight_name not in name:
-                        continue
-                    name = name.replace(expert_weight_name, expert_param_name)
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        expert_id=expert_id,
-                        shard_id=expert_shard_id,
-                    )
-                    break
-                else:
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict and not self.config.is_linear_attn:  # noqa: E501
-                        continue
-                    # Remapping the name of FP8 kv-scale.
-                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                    if remapped_name is None:
-                        continue
-                    name = remapped_name
-                    if is_pp_missing_parameter(name, self):
-                        continue
-
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                    weight_loader(param, loaded_weight, **kwargs)
-            loaded_params.add(name)
-        return loaded_params
+        return super().load_weights(
+            load_redundant_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
+        )
 
     def forward(
         self,
@@ -988,7 +905,11 @@ class KimiMixtureOfExperts(MixtureOfExperts):
 
     moe_mlp_layers: list[AscendKimiMoE]
 
-    def extract_moe_parameters(self, example_moe: AscendKimiMoE | None) -> None:
+    def extract_moe_parameters(self) -> None:
+        self.expert_weights: list[Sequence[torch.Tensor]] = []
+        self.num_expert_groups = getattr(self.config, "num_expert_group", None) or 1
+        self.moe_layers = [moe.experts for moe in self.moe_mlp_layers]
+        example_moe = self.moe_mlp_layers[-1] if self.moe_mlp_layers else None
         if example_moe is None:
             self.num_logical_experts = 0
             self.num_physical_experts = 0
@@ -1009,6 +930,7 @@ class KimiMixtureOfExperts(MixtureOfExperts):
         num_physical_experts: int,
         num_local_physical_experts: int,
     ) -> None:
+        # Rebalancing and elastic EP reuse the allocated per-rank weight slots.
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
@@ -1052,26 +974,19 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
         self.set_moe_parameters()
 
     def set_moe_parameters(self) -> None:
-        self.expert_weights = []
-        self.num_expert_groups = getattr(self.config, "num_expert_group", None) or 1
         # Global count: EPLB state is sized over every MoE layer of the model,
         # while ``moe_layers`` below only holds this PP rank's layers.
         self.num_moe_layers = sum(
             1 for layer_idx in range(self.config.num_hidden_layers) if is_moe_layer_idx(self.config, layer_idx)
         )
-        self.moe_layers = []
         self.moe_mlp_layers = []
-        example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
             assert isinstance(layer, AscendKimiDecoderLayer)
             if isinstance(layer.mlp, AscendKimiMoE):
-                # Pick the last one since the first ones may be dense layers.
-                example_moe = layer.mlp
                 self.moe_mlp_layers.append(layer.mlp)
-                self.moe_layers.append(layer.mlp.experts)
-        self.extract_moe_parameters(example_moe)
+        self.extract_moe_parameters()
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.model.dspark_aux_capture_materialized = enabled
