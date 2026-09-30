@@ -99,7 +99,7 @@ class LayerwiseBackendOperations(Protocol):
 
     def validate_support(self) -> None: ...
 
-    def start_load_sessions(self, keys: list[str]) -> tuple[int, ...]: ...
+    def start_load_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]: ...
 
     def finish_load_sessions(self, keys: list[str]) -> None: ...
 
@@ -140,6 +140,7 @@ class LayerwiseStoreTimelineProtocol(Protocol):
 class _OpenLoadSession:
     transfers: tuple[LoadTransfer, ...]
     keys: tuple[str, ...]
+    object_sizes: tuple[int, ...]
     completed: threading.Event = field(default_factory=threading.Event)
     session: _LoadSession | None = None
     completions: tuple[LoadCompletion, ...] = ()
@@ -321,7 +322,7 @@ class _StoreSession:
                     self.session_result_codes.setdefault(key, result_code)
                     self.errors_by_key.setdefault(
                         key,
-                        RuntimeError(f"batch_revoke failed with result code {result_code}"),
+                        RuntimeError(f"Store session revocation was not confirmed; result code {result_code}"),
                     )
         self.pending_finalization_keys = tuple(key for key in self.pending_finalization_keys if key not in keys)
 
@@ -429,8 +430,10 @@ class LayerwiseLoadTimeline:
             )
             if unknown_layer_ids:
                 raise ValueError(f"Unknown physical Layer IDs {unknown_layer_ids}")
-            keys = tuple(dict.fromkeys(binding.remote_object.key for binding in bindings))
-            command = _OpenLoadSession(tuple(transfers), keys)
+            object_sizes_by_key = _collect_object_sizes(bindings)
+            command = _OpenLoadSession(
+                tuple(transfers), tuple(object_sizes_by_key), tuple(object_sizes_by_key.values())
+            )
             self._executor.submit(command)
             self._wait_for_completion(command.completed)
             self._session = command.session
@@ -530,7 +533,7 @@ class LayerwiseLoadTimeline:
             command.completed.set()
 
     def _open_session(self, command: _OpenLoadSession) -> None:
-        result_codes = self._backend_io.start_load_sessions(list(command.keys))
+        result_codes = self._backend_io.start_load_sessions(list(command.keys), list(command.object_sizes))
         if len(result_codes) != len(command.keys):
             raise RuntimeError(
                 f"Layerwise Load session start returned {len(result_codes)} results for {len(command.keys)} keys"
@@ -803,13 +806,7 @@ class LayerwiseStoreTimeline:
         bindings = tuple(binding for transfer in transfers for batch in transfer.batches for binding in batch.bindings)
         if any(len(binding.local_region.region.physical_layer_ids) != 1 for binding in bindings):
             raise ValueError("Layerwise Store requires every binding to address one physical layer")
-        object_sizes_by_key: dict[str, int] = {}
-        for binding in bindings:
-            key = binding.remote_object.key
-            previous_size = object_sizes_by_key.setdefault(key, binding.remote_layout.object_size)
-            if previous_size != binding.remote_layout.object_size:
-                raise ValueError(f"Layerwise Store key {key!r} has inconsistent object sizes")
-        command = _OpenStoreSession(tuple(transfers), object_sizes_by_key)
+        command = _OpenStoreSession(tuple(transfers), _collect_object_sizes(bindings))
         self._executor.submit(command)
         self._wait_for_completion(command.completed)
         if command.session is None:
@@ -836,6 +833,16 @@ class LayerwiseStoreTimeline:
     def _raise_if_not_running(self) -> None:
         self._raise_if_failed()
         self._executor.check_running()
+
+
+def _collect_object_sizes(bindings: tuple[KVBinding, ...]) -> dict[str, int]:
+    object_sizes_by_key: dict[str, int] = {}
+    for binding in bindings:
+        key = binding.remote_object.key
+        previous_size = object_sizes_by_key.setdefault(key, binding.remote_layout.object_size)
+        if previous_size != binding.remote_layout.object_size:
+            raise ValueError(f"Layerwise key {key!r} has inconsistent object sizes")
+    return object_sizes_by_key
 
 
 def _compile_layer_ids_by_name(topology: KVPoolTopology) -> dict[str, int]:
