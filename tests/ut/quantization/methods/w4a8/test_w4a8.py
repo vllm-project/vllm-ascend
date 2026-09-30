@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import regex as re
@@ -13,6 +14,28 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
     experts = 8
     input_size = 16
     output_size = 56
+
+    def test_get_fused_mc2_weights_uses_prepared_megamoe_lists_after_flag_reset(self):
+        method = AscendW4A8DynamicFusedMoEMethod.__new__(AscendW4A8DynamicFusedMoEMethod)
+        method.use_expert_weight_list = False
+        layer = SimpleNamespace(
+            cann_mega_moe_w13_weight_list=["w1"],
+            cann_mega_moe_w13_weight_scale_list=["s1"],
+            cann_mega_moe_w2_weight_list=["w2"],
+            cann_mega_moe_w2_weight_scale_list=["s2"],
+            cann_mega_moe_w13_scale_bias_list=["b1"],
+            cann_mega_moe_w2_scale_bias_list=["b2"],
+        )
+        with patch(
+            "vllm_ascend.quantization.methods.w4a8.w4a8._EXTRA_CTX",
+            SimpleNamespace(use_mega_moe=False),
+        ):
+            weights = method.get_fused_mc2_weights(layer)
+
+        self.assertIs(weights.w1, layer.cann_mega_moe_w13_weight_list)
+        self.assertIs(weights.w2, layer.cann_mega_moe_w2_weight_list)
+        self.assertIs(weights.w1_scale, layer.cann_mega_moe_w13_weight_scale_list)
+        self.assertIs(weights.w2_scale, layer.cann_mega_moe_w2_weight_scale_list)
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_ascend_config")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config")

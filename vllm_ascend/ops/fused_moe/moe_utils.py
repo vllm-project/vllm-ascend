@@ -148,6 +148,18 @@ def load_cann_mega_moe_ops():
     return get_symm_buffer_for_mega_moe, mega_moe
 
 
+def normalize_mega_moe_weight_scales(
+    scales: torch.Tensor | list[torch.Tensor] | None,
+) -> list[torch.Tensor] | None:
+    if scales is None:
+        return None
+    scale_list = scales if isinstance(scales, list) else [scales]
+    # CANN MegaMoe expects one-dimensional per-expert scales for the Kimi K3
+    # W4A8 layout. Preserve genuine grouped scales and remove only the
+    # synthetic leading singleton produced by weight loading.
+    return [scale.squeeze(0) if scale.dim() == 2 and scale.shape[0] == 1 else scale for scale in scale_list]
+
+
 def select_mega_moe_activation_kwargs(
     mega_moe_op: Callable[..., Any],
     *,
@@ -155,17 +167,21 @@ def select_mega_moe_activation_kwargs(
     activation_clamp: float | None,
     swiglu_alpha: float,
     swiglu_beta: float,
+    situ_beta: float | None = None,
+    situ_linear_beta: float | None = None,
 ) -> dict[str, object]:
     """Build activation kwargs compatible with the installed MegaMoe wrapper.
 
-    MiniMax-M3 uses SwiGLU-OAI (``alpha=1.702``, ``beta=1.0``). Older MegaMoe
-    builds only expose ``activation_clamp`` for standard SwiGLU, while newer
-    wrappers expose either ``activation``/``activation_params`` or direct
-    alpha/beta keyword arguments. Standard SwiGLU keeps the legacy call.
+    MiniMax-M3 uses SwiGLU-OAI (``alpha=1.702``, ``beta=1.0``), while Kimi K3
+    uses SiTUGLU with model-provided beta values. Older MegaMoe builds only
+    expose ``activation_clamp`` for standard SwiGLU, while newer wrappers
+    expose either ``activation``/``activation_params`` or direct alpha/beta
+    keyword arguments. Standard SwiGLU keeps the legacy call.
     """
     kwargs: dict[str, object] = {"activation_clamp": activation_clamp}
     activation_name = getattr(activation, "value", activation)
-    if activation_name not in ("swigluoai", "swigluoai_uninterleave"):
+    is_situ = activation_name == "situ"
+    if not is_situ and activation_name not in ("swigluoai", "swigluoai_uninterleave"):
         return kwargs
 
     activation_parameter_pairs = (
@@ -204,11 +220,26 @@ def select_mega_moe_activation_kwargs(
         parameter_names.update(name for name in known_names if re.search(rf"\b{re.escape(name)}\b", signature_metadata))
 
     if {"activation", "activation_params"}.issubset(parameter_names):
+        if is_situ:
+            activation_params = {"beta": 1.0 if situ_beta is None else situ_beta}
+            if situ_linear_beta is not None:
+                activation_params["linear_beta"] = situ_linear_beta
+            kwargs.update(
+                activation="situglu",
+                activation_params=activation_params,
+            )
+            return kwargs
         kwargs.update(
             activation="swigluoai",
             activation_params={"alpha": swiglu_alpha, "beta": swiglu_beta},
         )
         return kwargs
+    if is_situ:
+        raise RuntimeError(
+            "The installed CANN MegaMoe wrapper does not expose the "
+            "activation/activation_params API required by Kimi K3 SiTUGLU. "
+            "Install a compatible cann_ops_transformer build or disable fused MC2."
+        )
     if {"glu_alpha", "glu_bias"}.issubset(parameter_names):
         kwargs.update(glu_alpha=swiglu_alpha, glu_bias=swiglu_beta)
         return kwargs

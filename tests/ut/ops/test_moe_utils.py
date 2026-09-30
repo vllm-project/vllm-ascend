@@ -10,6 +10,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import (
     _get_cann_mega_moe_quant_settings,
     _prepare_dequant_swiglu_weight_scale,
     cumsum_group_list,
+    normalize_mega_moe_weight_scales,
     select_mega_moe_activation_kwargs,
 )
 from vllm_ascend.quantization.quant_type import QuantType
@@ -71,6 +72,17 @@ class TestMegaMoeQuantSettings(unittest.TestCase):
             with self.subTest(quant_type=quant_type):
                 self.assertEqual(_get_cann_mega_moe_quant_settings(quant_type), expected)
 
+    def test_normalize_kimi_w4a8_scales_squeezes_only_leading_singleton(self):
+        per_expert = torch.ones(1, 8)
+        grouped = torch.ones(2, 8)
+
+        normalized = normalize_mega_moe_weight_scales([per_expert, grouped])
+
+        self.assertIsNotNone(normalized)
+        self.assertEqual(normalized[0].shape, (8,))
+        self.assertEqual(normalized[1].shape, (2, 8))
+        self.assertIsNone(normalize_mega_moe_weight_scales(None))
+
 
 class TestSwigluScaleHelpers(unittest.TestCase):
     def test_prepare_dequant_swiglu_weight_scale_stacks_and_casts(self):
@@ -92,6 +104,44 @@ class TestSwigluScaleHelpers(unittest.TestCase):
 
 
 class TestMegaMoeActivationKwargs(unittest.TestCase):
+    def test_select_mega_moe_activation_kwargs_maps_kimi_situ(self):
+        def mega_moe(*args, activation="swiglu", activation_clamp=None, activation_params=None):
+            return args, activation, activation_clamp, activation_params
+
+        kwargs = select_mega_moe_activation_kwargs(
+            mega_moe,
+            activation="situ",
+            activation_clamp=None,
+            swiglu_alpha=1.0,
+            swiglu_beta=0.0,
+            situ_beta=4.0,
+            situ_linear_beta=25.0,
+        )
+
+        self.assertEqual(
+            kwargs,
+            {
+                "activation": "situglu",
+                "activation_clamp": None,
+                "activation_params": {"beta": 4.0, "linear_beta": 25.0},
+            },
+        )
+
+    def test_select_mega_moe_activation_kwargs_rejects_legacy_kimi_situ(self):
+        def mega_moe(*args, activation_clamp=None):
+            return args, activation_clamp
+
+        with self.assertRaisesRegex(RuntimeError, "required by Kimi K3 SiTUGLU"):
+            select_mega_moe_activation_kwargs(
+                mega_moe,
+                activation="situ",
+                activation_clamp=None,
+                swiglu_alpha=1.0,
+                swiglu_beta=0.0,
+                situ_beta=4.0,
+                situ_linear_beta=25.0,
+            )
+
     def test_select_mega_moe_activation_kwargs_binds_swiglu_aliases(self):
         def mega_moe(*args, activation_clamp=None, swiglu_alpha=1.0, swiglu_beta=0.0):
             return args, activation_clamp, swiglu_alpha, swiglu_beta

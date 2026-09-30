@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -75,6 +76,30 @@ class TestMoECommMethod(TestBase):
         self._patch_get_ascend_config.stop()
         self._patch_get_ascend_config_module.stop()
         self._patch_get_ascend_config_forward_context.stop()
+
+    def test_prepared_megamoe_weights_select_operator_after_flag_reset(self):
+        comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.enable_fused_mc2 = 1
+        comm_impl.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
+        comm_impl._apply_cann_mega_moe = MagicMock(return_value=("output", "expert_tokens"))
+        fused_input = SimpleNamespace(layer=SimpleNamespace(cann_mega_moe_w13_weight_list=["w1"]))
+        quant_method = MagicMock()
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_comm_method._EXTRA_CTX",
+                SimpleNamespace(use_mega_moe=False, is_decode_only_node=False),
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_comm_method.moe_utils.load_cann_mega_moe_ops",
+                return_value=("buffer_op", "mega_moe_op"),
+            ) as load_ops,
+        ):
+            result = comm_impl.fused_experts(fused_input, quant_method)
+
+        load_ops.assert_called_once_with()
+        comm_impl._apply_cann_mega_moe.assert_called_once()
+        self.assertEqual(result.routed_out, "output")
+        self.assertEqual(result.expert_tokens, "expert_tokens")
 
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
