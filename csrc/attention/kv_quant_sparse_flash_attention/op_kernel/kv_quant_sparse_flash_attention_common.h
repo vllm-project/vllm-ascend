@@ -167,8 +167,9 @@ struct ConstInfo {
     uint64_t qHeadNum = 0ULL;
     uint64_t kvHeadNum;
     uint64_t headDim;
-    uint64_t headDimRope;
-    uint64_t combineHeadDim; // quantScaleRepoMode为Combine模式时=headDim+headDimRope, 否则=headDim
+    uint64_t headDimRope;      // Internal RoPE width retained for the 576-wide Cube path.
+    uint64_t inputHeadDimRope; // Actual RoPE width in GM: 0 or 64.
+    uint64_t combineHeadDim;   // Actual query row width in GM.
     uint64_t kvSeqSize = 0ULL;        // kv最大S长度
     uint64_t qSeqSize = 1ULL;         // q最大S长度
     int64_t kvCacheBlockSize = 0;    // PA场景的block size

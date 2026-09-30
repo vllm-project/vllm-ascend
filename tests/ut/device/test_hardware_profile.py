@@ -93,6 +93,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.LORA_CUSTOM_OPS,
             HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
+            HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.NPUGRAPH_EX,
