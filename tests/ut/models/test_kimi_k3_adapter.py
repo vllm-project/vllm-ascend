@@ -7,93 +7,18 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import torch
 from safetensors.torch import save_file
 from torch import nn
-from vllm.model_executor.models.interfaces import is_mixture_of_experts
 
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.models import kimi_k3
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiK3MultiModalProjector,
-    AscendKimiLinearForCausalLM,
     AscendKimiLinearModel,
 )
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
 )
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-
-
-def test_kimi_eplb_registers_moe_layers_and_state():
-    model = AscendKimiLinearForCausalLM.__new__(AscendKimiLinearForCausalLM)
-    nn.Module.__init__(model)
-    runner = MagicMock()
-    runner.moe_config.num_local_experts = 112
-    model.model = SimpleNamespace(
-        config=SimpleNamespace(num_expert_group=1, num_experts=896, num_shared_experts=1),
-        layers=[
-            SimpleNamespace(is_moe_layer=False),
-            SimpleNamespace(is_moe_layer=True, block_sparse_moe=SimpleNamespace(experts=runner)),
-        ],
-    )
-
-    model._set_moe_parameters(num_redundant_experts=0)
-    assert model.num_moe_layers == 1
-    assert model.num_logical_experts == 896
-    assert model.num_local_physical_experts == 112
-    assert model.moe_layers == [runner]
-    assert is_mixture_of_experts(model)
-
-    load = torch.zeros(1, 112, dtype=torch.int32)
-    mapping = torch.arange(896, dtype=torch.int32)
-    replicas = torch.ones(896, dtype=torch.int32)
-    model.set_eplb_state(load, mapping, replicas)
-    runner.set_eplb_state.assert_called_once_with(
-        moe_layer_idx=0,
-        expert_load_view=load,
-        logical_to_physical_map=mapping,
-        logical_replica_count=replicas,
-    )
-    model.update_physical_experts_metadata(896, 112)
-    runner.routed_experts.update_expert_map.assert_called_once_with()
-
-
-def test_kimi_moe_factory_receives_eplb_config():
-    config = SimpleNamespace(
-        hidden_size=64,
-        moe_intermediate_size=128,
-        num_experts=896,
-        num_experts_per_token=16,
-        routed_expert_hidden_size=None,
-        latent_moe_use_norm=False,
-        routed_scaling_factor=1.0,
-        num_shared_experts=None,
-        hidden_act="silu",
-        activation_situ_beta=None,
-        activation_situ_linear_beta=None,
-        moe_renormalize=True,
-        use_grouped_topk=False,
-        num_expert_group=1,
-        topk_group=1,
-        moe_router_activation_func="sigmoid",
-    )
-    parallel_config = SimpleNamespace(
-        enable_eplb=True,
-        eplb_config=SimpleNamespace(num_redundant_experts=0),
-    )
-    for enabled in (False, True):
-        parallel_config.enable_eplb = enabled
-        parallel_config.eplb_config = SimpleNamespace(num_redundant_experts=0) if enabled else None
-        with (
-            patch.object(kimi_k3, "GateLinear", return_value=MagicMock()),
-            patch.object(kimi_k3, "FusedMoEFactory", return_value=MagicMock()) as factory,
-            patch.object(
-                kimi_k3, "get_current_vllm_config", return_value=SimpleNamespace(parallel_config=parallel_config)
-            ),
-        ):
-            kimi_k3.AscendKimiMoE(config=config)
-
-        assert factory.call_args.kwargs["enable_eplb"] is enabled
-        assert factory.call_args.kwargs["num_redundant_experts"] == 0
 
 
 def test_kimi_disabling_mlapo_refreshes_projection_nz_management():

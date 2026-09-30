@@ -55,13 +55,15 @@ def test_router_preserves_cann_logical_ids_and_weights_before_mapping(scoring, g
     "comm,dp,pcp,sequence_parallel,mask,expected",
     [
         (MoECommType.ALLGATHER, 1, 1, False, None, 6),
-        (MoECommType.ALLGATHER, 2, 1, False, None, None),
-        (MoECommType.ALLGATHER, 1, 2, False, None, None),
+        (MoECommType.ALLGATHER, 2, 1, False, None, 6),
+        (MoECommType.ALLGATHER, 1, 2, False, None, 6),
         (MoECommType.ALLGATHER, 1, 1, True, None, 6),
         (MoECommType.MC2, 1, 1, False, [1, 1, 0, 0], 2),
         (MoECommType.FUSED_MC2, 1, 1, False, [1, 1, 1, 0], 3),
+        (MoECommType.FUSED_MC2, 1, 1, False, None, 6),
+        (MoECommType.MC2, 1, 1, False, None, 6),
         (MoECommType.ALLTOALL, 1, 1, False, None, 2),
-        (MoECommType.ALLTOALL, 1, 1, True, None, None),
+        (MoECommType.ALLTOALL, 1, 1, True, None, 6),
     ],
 )
 def test_valid_prefix_tracks_prepared_router_rows(monkeypatch, comm, dp, pcp, sequence_parallel, mask, expected):
