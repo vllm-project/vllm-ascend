@@ -225,6 +225,9 @@ class AscendConfig:
             "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
             ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK,
         )
+        self.block_table_no_commit_optimize = additional_config.get("block_table_no_commit_optimize", 0)
+        if self.block_table_no_commit_optimize not in (0, 1):
+            raise ValueError("block_table_no_commit_optimize must be 0 or 1")
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
