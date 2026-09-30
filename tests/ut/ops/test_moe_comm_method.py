@@ -348,9 +348,7 @@ class TestMoECommMethod(TestBase):
         self.assertEqual(params, {"beta": 4.0, "linear_beta": 25.0})
 
     def test_cann_mega_moe_maps_situ_enum_and_requires_beta(self):
-        activation, params = moe_utils.get_cann_mega_moe_activation_settings(
-            "situ", situ_beta=4.0
-        )
+        activation, params = moe_utils.get_cann_mega_moe_activation_settings("situ", situ_beta=4.0)
 
         self.assertEqual(activation, "situglu")
         self.assertEqual(params, {"beta": 4.0})
