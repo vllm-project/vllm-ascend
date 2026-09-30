@@ -280,7 +280,7 @@ class TestNPUPlatform(TestBase):
 
         self.assertTrue(vllm_config.parallel_config.eplb_config.use_async)
         self.assertEqual(vllm_config.parallel_config.eplb_config.communicator, "torch_gloo")
-        self.assertNotIn("stair_config", vllm_config.additional_config["eplb_config"])
+        self.assertNotIn("stair_config", vllm_config.additional_config.get("eplb_config", {}))
         warning.assert_called_once()
 
     def test_validate_eplb_config_limits_auto_gloo_fallback_migrations(self):
@@ -304,10 +304,10 @@ class TestNPUPlatform(TestBase):
             _validate_eplb_config(vllm_config)
 
         self.assertEqual(
-            vllm_config.additional_config["eplb_config"]["stair_config"],
+            vllm_config.additional_config.get("eplb_config", {})["stair_config"],
             {"load_window_bins": 32, "rank_transfer_limit": 1, "cross_node_transfer_limit": 1},
         )
-        parsed_config = EplbConfig(**vllm_config.additional_config["eplb_config"]).stair_config
+        parsed_config = EplbConfig(**vllm_config.additional_config.get("eplb_config", {})).stair_config
         self.assertEqual((parsed_config.rank_transfer_limit, parsed_config.cross_node_transfer_limit), (1, 1))
 
     def test_validate_eplb_config_keeps_explicit_gloo_migrations(self):
@@ -330,10 +330,10 @@ class TestNPUPlatform(TestBase):
             _validate_eplb_config(vllm_config)
 
         self.assertEqual(
-            vllm_config.additional_config["eplb_config"]["stair_config"],
+            vllm_config.additional_config.get("eplb_config", {})["stair_config"],
             {"rank_transfer_limit": -1, "cross_node_transfer_limit": 4},
         )
-        parsed_config = EplbConfig(**vllm_config.additional_config["eplb_config"]).stair_config
+        parsed_config = EplbConfig(**vllm_config.additional_config.get("eplb_config", {})).stair_config
         self.assertEqual((parsed_config.rank_transfer_limit, parsed_config.cross_node_transfer_limit), (-1, 4))
 
     def test_validate_eplb_config_keeps_explicit_hixl_when_forcing_async(self):
