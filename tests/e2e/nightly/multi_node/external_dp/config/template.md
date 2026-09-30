@@ -362,5 +362,9 @@ server_cmd_template:
 - Make sure each config index is assigned to exactly one routing group.
 - Ensure `dp_rank_start + dp_size_local <= dp_size`.
 - Ensure `dp_size_local * tp_size * cp_size * sp_size * pp_size <= npu_per_node`.
+- Set `headless: true` on a cross-node pipeline-parallel peer that must be
+  launched but does not expose an HTTP endpoint. Headless ranks are excluded
+  from proxy routing and HTTP readiness polling; their local process is still
+  monitored by the runner.
 - Set `--max-model-len` large enough for benchmark input tokens plus
   `max_out_len`.

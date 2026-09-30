@@ -55,6 +55,9 @@ class NodeInfo:
     cp_size: int = 1
     sp_size: int = 1
     pp_size: int = 1
+    # Cross-node PP peers do not expose an HTTP endpoint but still consume a
+    # node and must be launched and monitored as part of the engine.
+    headless: bool = False
 
     @property
     def devices_per_rank(self) -> int:
@@ -93,6 +96,7 @@ class RankInfo:
     dp_address: str
     dp_rpc_port: int
     port_start: int
+    headless: bool = False
 
 
 @dataclass(frozen=True)
@@ -311,6 +315,7 @@ class ExternalDPConfigLoader:
                     sp_size=int(node.get("sp_size", 1)),
                     dp_address=str(node["dp_address"]),
                     pp_size=int(node.get("pp_size", 1)),
+                    headless=bool(node.get("headless", False)),
                 )
             )
         return nodes
@@ -470,6 +475,7 @@ class RankResolver:
                     dp_address=node_info.dp_address,
                     dp_rpc_port=node_info.dp_rpc_port,
                     port_start=node_info.port_start,
+                    headless=node_info.headless,
                 )
             )
         return ranks

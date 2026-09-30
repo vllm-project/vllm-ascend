@@ -136,8 +136,8 @@ def _build_external_dp_servers(
     completion_server = ProxyServer(config.routing.proxy_host, config.routing.proxy_port)
 
     if config.is_disaggregated_prefill:
-        prefill_ranks = [r for r in ranks if r.role == "prefiller"]
-        decode_ranks = [r for r in ranks if r.role == "decoder"]
+        prefill_ranks = [r for r in ranks if r.role == "prefiller" and not r.headless]
+        decode_ranks = [r for r in ranks if r.role == "decoder" and not r.headless]
         tokenize_server = ProxyServer(prefill_ranks[0].host, prefill_ranks[0].port)
         metrics_server = ProxyServer(decode_ranks[0].host, decode_ranks[0].port)
     else:
