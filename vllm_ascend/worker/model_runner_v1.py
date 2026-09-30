@@ -5345,12 +5345,9 @@ class NPUModelRunner(GPUModelRunner):
                 and not requires_contiguous_pa_kv_cache(attn_layers.get(layer_name), self.vllm_config, spec)
             }
 
-        # Keep allocation and worker-side KV budget planning on the same
-        # connector capability gate. Mooncake V1/V2/Pull retain per-layer
-        # transfer metadata while registering the shared backing once.
-        supports_shared_backing_with_kv_transfer = (
-            self.supports_shared_backing_with_kv_transfer
-        )
+        # Match the worker's block-outermost cache budget policy: shared
+        # backing is supported only when KV transfer is disabled.
+        supports_shared_backing_with_kv_transfer = self.vllm_config.kv_transfer_config is None
 
         six_region_layout = (
             None
