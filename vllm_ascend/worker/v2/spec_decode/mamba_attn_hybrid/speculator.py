@@ -17,8 +17,7 @@ from typing import Any
 
 import torch
 from vllm.config import VllmConfig
-from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator import (
+from vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator import (  # type: ignore[import-not-found]
     MambaAttnHybridSpeculator,
 )
 
@@ -27,9 +26,7 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
 )
 
 
-class AscendMambaAttnHybridSpeculator(
-    AscendDSparkSpeculator, MambaAttnHybridSpeculator
-):
+class AscendMambaAttnHybridSpeculator(AscendDSparkSpeculator, MambaAttnHybridSpeculator):
     _speculator_name = "MambaAttnHybrid"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):

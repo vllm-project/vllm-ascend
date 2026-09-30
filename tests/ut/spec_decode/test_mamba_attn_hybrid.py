@@ -16,6 +16,12 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
 )
 
 
+def _hspec_vllm_available() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator") is not None
+
+
 def make_spec_config(method="dspark", with_mamba=False):
     config = SimpleNamespace(
         method=method,
@@ -63,9 +69,7 @@ def test_dispatch_dspark_without_mamba_capability(monkeypatch, stub_speculator_c
     def fail(*args, **kwargs):
         raise AssertionError("mamba_attn_hybrid dispatch must not be entered")
 
-    monkeypatch.setattr(
-        dispatch, "AscendMambaAttnHybridSpeculator", fail, raising=False
-    )
+    monkeypatch.setattr(dispatch, "AscendMambaAttnHybridSpeculator", fail, raising=False)
     vllm_config = make_vllm_config("dspark", with_mamba=False)
     speculator = dispatch.init_speculator(vllm_config, device=None)
     assert isinstance(speculator, AscendDSparkSpeculator)
@@ -87,9 +91,7 @@ def test_dispatch_mamba_hybrid(monkeypatch, stub_speculator_ctors):
     """When the vLLM carries the H-Spec patch, dispatch to the Ascend class."""
     from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
-    fake_mamba = type(
-        "MambaAttnHybridSpeculator", (DSparkSpeculator,), {"__init__": lambda self, v, d: None}
-    )
+    fake_mamba = type("MambaAttnHybridSpeculator", (DSparkSpeculator,), {"__init__": lambda self, v, d: None})
     fake_utils = type("M", (), {})
     fake_upstream = SimpleNamespace(MambaAttnHybridSpeculator=fake_mamba)
     monkeypatch.setitem(
@@ -175,14 +177,13 @@ def test_set_attn_mirrors_group_causal_and_preserves_group_order(monkeypatch):
     """After set_attn, _group_causal follows the drafter's dflash_causal, and
     attn_backends keeps the cache-group's original layer order."""
     from vllm.config import set_current_vllm_config
+
     from vllm_ascend.worker.v2.spec_decode.mamba_attn_hybrid.speculator import (
         AscendMambaAttnHybridSpeculator,
     )
 
     group_layers = ["model.layers.0.self_attn.attn", "model.layers.1.attn"]
-    kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(layer_names=group_layers)]
-    )
+    kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=group_layers)])
     layer_map = {name: MagicMock(get_attn_backend=MagicMock(return_value=name)) for name in group_layers}
     monkeypatch.setattr(
         "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_layers_from_vllm_config",
@@ -236,10 +237,11 @@ def test_propose_is_not_overridden_on_ascend_class():
     assert "propose" not in AscendMambaAttnHybridSpeculator.__dict__
 
 
+@pytest.mark.skipif(not _hspec_vllm_available(), reason="requires a vLLM build with H-Spec support")
 def test_propose_latent_seed_bridge(monkeypatch):
     """The upstream mamba propose fills the latent seed from fusion hidden
     states and forwards dp_sync to the DSpark proposal path."""
-    from vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator import (
+    from vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator import (  # type: ignore[import-not-found]
         MambaAttnHybridSpeculator,
     )
 
@@ -284,8 +286,9 @@ def test_propose_latent_seed_bridge(monkeypatch):
     assert captured["dp_sync"] == "sync-state"
 
 
+@pytest.mark.skipif(not _hspec_vllm_available(), reason="requires a vLLM build with H-Spec support")
 def test_propose_zero_hidden_states_without_aux(monkeypatch):
-    from vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator import (
+    from vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator import (  # type: ignore[import-not-found]
         MambaAttnHybridSpeculator,
     )
 
