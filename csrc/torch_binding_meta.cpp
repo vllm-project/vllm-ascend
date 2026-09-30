@@ -115,6 +115,30 @@ int64_t get_physical_device_id_meta(int64_t user_device_id)
     return user_device_id;
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> attn_res_fwd_meta(
+    const at::Tensor& prefix, const c10::optional<at::Tensor>& addend,
+    at::Tensor blocks, const at::Tensor& proj, const at::Tensor& norm,
+    double eps, int64_t valid, const c10::optional<at::Tensor>& output_norm,
+    double output_eps, int64_t write_idx, bool save_materialized, bool mix,
+    bool optimize_prefill)
+{
+    (void)blocks;
+    (void)proj;
+    (void)norm;
+    (void)eps;
+    (void)valid;
+    (void)output_norm;
+    (void)output_eps;
+    (void)write_idx;
+    (void)mix;
+    (void)optimize_prefill;
+
+    auto output = at::empty_symint(prefix.sym_sizes(), prefix.options());
+    auto raw_prefix = addend.has_value() ? at::empty_symint(prefix.sym_sizes(), prefix.options()) : prefix;
+    auto materialized = save_materialized ? at::empty_symint(prefix.sym_sizes(), prefix.options()) : output;
+    return {output, raw_prefix, materialized};
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale, const at::Tensor &x_scale,
     const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset,
@@ -2122,6 +2146,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", &vllm_ascend::meta::grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta);
     // Grouped matmul swiglu quant v2
     ops.impl("grouped_matmul_swiglu_quant_v2", &vllm_ascend::meta::grouped_matmul_swiglu_quant_v2_meta);
+    // Kimi K3 attention residual
+    ops.impl("attn_res_fwd", &vllm_ascend::meta::attn_res_fwd_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     ops.impl("npu_sparse_flash_mla_metadata", &vllm_ascend::meta::npu_sparse_flash_mla_metadata_meta);

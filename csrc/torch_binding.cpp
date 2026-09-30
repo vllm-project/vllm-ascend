@@ -2807,7 +2807,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor? output_norm_weight=None, float output_norm_eps=1e-5, int block_write_idx=-1, "
         "bool return_materialized=False, bool mix=True, bool optimize_prefill=False) -> (Tensor(c), Tensor(b), Tensor(c))");
     ops.impl("attn_res_fwd", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd);
-    ops.impl("attn_res_fwd", torch::kMeta, &vllm_ascend::attn_res_fwd_meta);
 
     ops.def(
         "dequant_situ_quant(Tensor x, "
