@@ -115,8 +115,11 @@ def recompute_w_u_fwd(
     BK = 64
     BV = 64
 
-    u = torch.empty_like(v)
-    w = k.new_empty(B, T, H, K)
+    # Zero-init: on the first prefill launches after engine startup the
+    # kernel can leave a few output elements unwritten, and uninitialized
+    # memory in those positions leaks NaN into the whole model.
+    u = torch.zeros_like(v)
+    w = k.new_zeros(B, T, H, K)
     beta = beta.transpose(1, 2).contiguous()
     g_cumsum = g_cumsum.transpose(1, 2).contiguous()
     recompute_w_u_fwd_kernel[(NT, B)](
