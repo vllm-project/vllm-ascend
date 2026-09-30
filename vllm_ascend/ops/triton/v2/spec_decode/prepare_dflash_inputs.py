@@ -51,9 +51,9 @@ def _dflash_local_slot(
     block_table_stride,
     req_idx,
     valid,
-    kv_cache_block_size: tl.constexpr,
     block_size,
     cp_rank,
+    KV_CACHE_BLOCK_SIZE: tl.constexpr,
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
@@ -63,14 +63,14 @@ def _dflash_local_slot(
         local_positions = positions
         is_local = True
     else:
-        virtual_block_size = kv_cache_block_size * CP_SIZE
+        virtual_block_size = KV_CACHE_BLOCK_SIZE * CP_SIZE
         virtual_block_indices = positions // virtual_block_size
         virtual_block_offsets = positions % virtual_block_size
         is_local = virtual_block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
         rounds = virtual_block_offsets // (CP_INTERLEAVE * CP_SIZE)
         remainder = virtual_block_offsets % CP_INTERLEAVE
         local_offsets = rounds * CP_INTERLEAVE + remainder
-        local_positions = virtual_block_indices * kv_cache_block_size + local_offsets
+        local_positions = virtual_block_indices * KV_CACHE_BLOCK_SIZE + local_offsets
 
     block_indices = tl.minimum(local_positions // block_size, block_table_stride - 1)
     block_numbers = tl.load(
@@ -120,7 +120,7 @@ def _prepare_dflash_inputs_kernel(
     max_num_tokens,
     max_model_len,
     cp_rank,
-    kv_cache_block_size: tl.constexpr,
+    KV_CACHE_BLOCK_SIZE: tl.constexpr,
     SAMPLE_FROM_ANCHOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     CP_SIZE: tl.constexpr,
@@ -164,9 +164,9 @@ def _prepare_dflash_inputs_kernel(
         block_table_stride,
         req_idx,
         ctx_valid_mask,
-        kv_cache_block_size,
         block_size,
         cp_rank,
+        KV_CACHE_BLOCK_SIZE,
         CP_SIZE,
         CP_INTERLEAVE,
         PAD_SLOT_ID,
@@ -210,9 +210,9 @@ def _prepare_dflash_inputs_kernel(
         block_table_stride,
         req_idx,
         query_mask,
-        kv_cache_block_size,
         block_size,
         cp_rank,
+        KV_CACHE_BLOCK_SIZE,
         CP_SIZE,
         CP_INTERLEAVE,
         PAD_SLOT_ID,
@@ -398,7 +398,7 @@ def prepare_dflash_inputs_triton(
         max_num_tokens,
         max_model_len,
         cp_rank,
-        kv_cache_block_size=kv_cache_block_size,
+        KV_CACHE_BLOCK_SIZE=kv_cache_block_size,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
         PAD_SLOT_ID=PAD_SLOT_ID,
         CP_SIZE=cp_size,
