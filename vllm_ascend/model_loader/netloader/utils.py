@@ -16,9 +16,70 @@
 
 import os
 import socket
+from typing import Any
 
 import regex as re
 from vllm.logger import logger
+
+# Match DeepSeek V4 Pro/Flash tutorials. DefaultModelLoader.DEFAULT_NUM_THREADS is 8.
+DEFAULT_MULTITHREAD_LOAD_THREADS = 128
+_DEFAULT_LOADER_EXTRA_KEYS = (
+    "enable_multithread_load",
+    "num_threads",
+    "enable_weights_track",
+)
+
+
+def disk_fallback_loader_extra_config(
+    existing_extra: Any,
+    safetensors_load_strategy: Any = None,
+) -> dict[str, Any]:
+    """Extra config DefaultModelLoader accepts on a local-disk fallback.
+
+    Netloader extras contain SOURCE/LISTEN_PORT which DefaultModelLoader
+    rejects, so fallback must strip those keys. Multithread load is kept or
+    enabled unless the user turned it off or selected a non-lazy strategy.
+    """
+    kept: dict[str, Any] = {}
+    if isinstance(existing_extra, dict):
+        for key in _DEFAULT_LOADER_EXTRA_KEYS:
+            if key in existing_extra:
+                kept[key] = existing_extra[key]
+    if safetensors_load_strategy not in (None, "lazy"):
+        return kept
+    if kept.get("enable_multithread_load") is False:
+        return kept
+    kept.setdefault("enable_multithread_load", True)
+    if kept.get("enable_multithread_load"):
+        kept.setdefault("num_threads", DEFAULT_MULTITHREAD_LOAD_THREADS)
+    return kept
+
+
+def apply_default_multithread_weight_load(load_config: Any) -> None:
+    """Keep local-disk I/O off the engine-init critical path (128 threads)."""
+    if load_config is None:
+        return
+    extra = getattr(load_config, "model_loader_extra_config", None)
+    if extra is None:
+        extra = {}
+        try:
+            load_config.model_loader_extra_config = extra
+        except Exception:
+            return
+    if not isinstance(extra, dict):
+        return
+    updated = disk_fallback_loader_extra_config(
+        extra,
+        getattr(load_config, "safetensors_load_strategy", None),
+    )
+    if not updated:
+        return
+    extra.update(updated)
+    if extra.get("enable_multithread_load"):
+        logger.info(
+            "Enabled multithread weight load by default (num_threads=%s).",
+            extra.get("num_threads"),
+        )
 
 
 def find_free_port():

@@ -37,6 +37,51 @@ from ..base import (
 )
 from ..registry import register_scheme
 
+_NZ_WARMED = False
+_NZ_THREAD_STARTED = False
+
+
+def warm_nz_format_cast(tag: str) -> None:
+    """Pay the first NZ format-cast lazy init on a tiny scratch tensor.
+
+    The first ``npu_format_cast`` on a rank is ~15-19 s; later casts are free.
+    Overlap that init with weight I/O via ``start_nz_warm_thread``.
+    """
+    del tag
+    global _NZ_WARMED
+    if _NZ_WARMED:
+        return
+    _NZ_WARMED = True
+    try:
+        scratch = maybe_trans_nz(torch.zeros((256, 256), dtype=torch.int8, device="npu"))
+        torch.npu.synchronize()
+        del scratch
+    except Exception:
+        logger.warning("NZ format-cast warmup skipped", exc_info=True)
+
+
+def start_nz_warm_thread(tag: str) -> None:
+    """Run ``warm_nz_format_cast`` on a daemon thread. Idempotent."""
+    global _NZ_THREAD_STARTED, _NZ_WARMED
+    if _NZ_THREAD_STARTED or _NZ_WARMED:
+        return
+    _NZ_THREAD_STARTED = True
+    try:
+        import threading
+
+        device = torch.npu.current_device()
+
+        def _run() -> None:
+            try:
+                torch.npu.set_device(device)
+                warm_nz_format_cast(tag)
+            except Exception:
+                logger.warning("NZ format-cast warmup thread failed", exc_info=True)
+
+        threading.Thread(target=_run, name="coldstart-nz-warm", daemon=True).start()
+    except Exception:
+        logger.warning("NZ format-cast warmup thread not started", exc_info=True)
+
 
 def scale_from_float_to_int64(scale):
     """Convert float32 scale to int64 representation."""
