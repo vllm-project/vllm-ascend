@@ -708,6 +708,13 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         if rotary_dim > head_dim:
             raise ValueError(f"rotary_dim ({rotary_dim}) must not exceed head_dim ({head_dim})")
 
+        if not self.is_neox_style:
+            # GPT-J/Kimi pairs adjacent dimensions; npu_rotary_mul uses split halves.
+            output = self.forward_static(x[..., :rotary_dim], cos, sin, is_neox_style=False)
+            if rotary_dim < head_dim:
+                output = torch.cat((output, x[..., rotary_dim:]), dim=-1)
+            return self._post_process(output, origin_shape, origin_dtype)
+
         # cos, sin: [seq_len, rotary_dim // 2]
         cos = torch.cat((cos, cos), dim=-1)
         sin = torch.cat((sin, sin), dim=-1)
