@@ -215,11 +215,11 @@ class KVPoolProgram:
         evidence = completion.evidence
         if evidence.error is not None:
             raise RuntimeError(f"Store failed for request {completion.request_id}") from evidence.error
-        failed_codes = [item.result_code for item in evidence.binding_evidence if item.result_code not in (0, None)]
-        if failed_codes:
-            raise RuntimeError(f"Store failed for request {completion.request_id} with result codes {failed_codes}")
         if not evidence.succeeded:
-            raise RuntimeError(f"Store success is unknown for request {completion.request_id}")
+            raise RuntimeError(
+                f"Store success was not confirmed for request {completion.request_id}; "
+                f"result codes {[item.result_code for item in evidence.binding_evidence]}"
+            )
         if not evidence.source_release_confirmed:
             raise RuntimeError(f"Store source release is unknown for request {completion.request_id}")
 
