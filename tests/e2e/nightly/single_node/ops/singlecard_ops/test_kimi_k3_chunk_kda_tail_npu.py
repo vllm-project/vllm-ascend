@@ -248,7 +248,6 @@ def _describe_difference(
 @pytest.mark.parametrize("metadata_mode", ["dense", "varlen"])
 @torch.inference_mode()
 def test_kimi_k3_chunk_kda_bf16_tail_is_deterministic(tokens: int, gate_mode: str, metadata_mode: str):
-
     inputs = _build_inputs(tokens)
     # Allocate both sets before the first launch so an out-of-bounds write from
     # that launch cannot change tensors allocated for the second invocation.
