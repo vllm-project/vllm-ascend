@@ -56,6 +56,8 @@ def batch():
 
 
 def test_history_preparation_defers_lookup_and_excludes_padding(state, monkeypatch):
+    # CPU-only CI uses a Triton stub without numeric helpers.
+    monkeypatch.setattr(deepseek_v41, "triton", SimpleNamespace(next_power_of_2=lambda n: 1 << (n - 1).bit_length()))
     launch = Mock()
     kernel = Mock()
     kernel.__getitem__ = Mock(return_value=launch)
