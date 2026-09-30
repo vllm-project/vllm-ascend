@@ -24,13 +24,9 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
-from vllm_ascend.ops.triton.moe_gating_topk_map_record import moe_gating_topk_map_record
 
 DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
 DEEPSEEK_V4_IMAGE_SENTINEL_COUNT = 5
-MAX_FUSED_ROUTING_EXPERTS = 128
-MAX_FUSED_ROUTING_TOP_K = 8
-MAX_FUSED_ROUTING_TOKENS = 524288
 
 
 def select_deepseek_v4_vision_experts(
@@ -141,56 +137,6 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             return False
         return True
 
-    def _try_small_expert_fused_routing(
-        self,
-        router_logits: torch.Tensor,
-        indices_type: torch.dtype | None,
-        topk_group: int,
-        num_expert_group: int,
-        renorm: int,
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Use CANN TopK and grid-owned EPLB counting when IDs are final."""
-        state = self.eplb_state
-        if (
-            state is None
-            or not getattr(state, "fused_record_allowed", False)
-            or self.capture_fn is not None
-            or _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER
-            or not router_logits.is_contiguous()
-            or router_logits.shape[0] > MAX_FUSED_ROUTING_TOKENS
-            or router_logits.shape[1] > MAX_FUSED_ROUTING_EXPERTS
-            or self.top_k > MAX_FUSED_ROUTING_TOP_K
-            or topk_group != 1
-            or num_expert_group != 1
-            or renorm != 1
-            or self.scoring_func not in ("softmax", "sigmoid")
-            or state.local_expert_count <= 0
-        ):
-            return None
-        bias = self.e_score_correction_bias
-        if bias is not None and (bias.dtype != router_logits.dtype or not bias.is_contiguous()):
-            return None
-        table = state.expert_replica_routing_table
-        load = state.expert_load_view
-        record_enabled = state.should_record_tensor
-        if table is None or load is None or record_enabled is None:
-            raise RuntimeError("Fused EPLB routing state is not initialized")
-        weights, physical_ids = moe_gating_topk_map_record(
-            router_logits,
-            bias,
-            table,
-            load,
-            record_enabled,
-            router_logits.shape[0],
-            k=self.top_k,
-            scoring=self.scoring_func,
-            routed_scaling_factor=self.routed_scaling_factor,
-            local_expert_start=state.local_expert_start,
-            local_expert_count=state.local_expert_count,
-        )
-        state.fused_map_record_active = True
-        return weights, physical_ids.to(torch.int32 if indices_type is None else indices_type)
-
     def _compute_routing(
         self,
         hidden_states: torch.Tensor,
@@ -276,9 +222,6 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             )
             return topk_weights.to(torch.float32), topk_ids.to(torch.int32 if indices_type is None else indices_type)
         norm_type = 0 if self.scoring_func == "softmax" else 1
-        fused = self._try_small_expert_fused_routing(router_logits, indices_type, topk_group, num_expert_group, renorm)
-        if fused is not None:
-            return fused
         if self.e_score_correction_bias is not None and self.e_score_correction_bias.dtype != router_logits.dtype:
             self.e_score_correction_bias = self.e_score_correction_bias.to(router_logits.dtype)
         topk_weights, topk_ids, _ = DeviceOperator.moe_gating_top_k(

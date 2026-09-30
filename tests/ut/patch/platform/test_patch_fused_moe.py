@@ -124,6 +124,36 @@ def test_adapted_router_uses_ascend_mapping_operation():
     )
 
 
+def test_adapted_router_records_at_mapping_without_touching_routing():
+    router = _Router()
+    patch_fused_moe._adapt_eplb_router(router, enable_eplb=True)
+    state = router.eplb_state
+    state.expert_replica_routing_table = torch.tensor([[3, 2]], dtype=torch.int32)
+    state.expert_load_view = torch.zeros(4, dtype=torch.int32)
+    state.should_record_tensor = torch.tensor(True)
+    state.local_expert_start = 2
+    state.local_expert_count = 2
+    state.mapping_valid_tokens = torch.tensor(1, dtype=torch.int32)
+    state.record_in_mapping_allowed = True
+    logical_ids = torch.tensor([[1]], dtype=torch.int32)
+    physical_ids = torch.tensor([[2]], dtype=torch.int32)
+
+    with patch.object(patch_fused_moe, "eplb_map_and_record", return_value=physical_ids) as map_record:
+        result = router._apply_eplb_mapping(logical_ids)
+
+    assert result is physical_ids
+    assert state.record_done_in_mapping
+    map_record.assert_called_once_with(
+        logical_ids,
+        state.expert_replica_routing_table,
+        state.expert_load_view,
+        state.should_record_tensor,
+        state.mapping_valid_tokens,
+        local_expert_start=2,
+        local_expert_count=2,
+    )
+
+
 def test_factory_shares_upstream_hash_table_with_legacy_ascend_routing():
     hash_indices_table = torch.tensor([[1, 3]], dtype=torch.int32)
     router = _Router()
