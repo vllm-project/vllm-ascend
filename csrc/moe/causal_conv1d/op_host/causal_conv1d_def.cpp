@@ -1,18 +1,17 @@
 /**
- * This program is free software, you can redistribute it and/or modify it.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Copyright (c) 2025 Tianjin University, Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * the BSD 3-Clause License (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING
- * BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  */
 
 /*!
  * \file causal_conv1d_def.cpp
- * \brief
+ * \brief CausalConv1d operator definition and registration.
  */
+
 #include "register/op_def_registry.h"
 
 namespace ops {
@@ -37,10 +36,10 @@ public:
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("convStates")
-            .ParamType(REQUIRED)
+            .ParamType(OPTIONAL)
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
             .FormatList({ge::FORMAT_ND})
-            .AutoContiguous();
+            .IgnoreContiguous();
         this->Input("queryStartLoc")
             .ParamType(OPTIONAL)
             .DataTypeList({ge::DT_INT32, ge::DT_INT64})
@@ -51,7 +50,7 @@ public:
             .DataTypeList({ge::DT_INT32, ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
-        this->Input("initialStateMode")
+        this->Input("hasInitialState")
             .ParamType(OPTIONAL)
             .DataTypeList({ge::DT_BOOL, ge::DT_INT32, ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
@@ -62,15 +61,48 @@ public:
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
 
+        this->Input("queryStartLocCpu")
+            .ParamType(OPTIONAL)
+            .DataTypeList({ge::DT_INT64})
+            .FormatList({ge::FORMAT_ND})
+            .ValueDepend(OPTIONAL)
+            .AutoContiguous();
+        this->Input("cacheIndicesCpu")
+            .ParamType(OPTIONAL)
+            .DataTypeList({ge::DT_INT64})
+            .FormatList({ge::FORMAT_ND})
+            .ValueDepend(OPTIONAL)
+            .AutoContiguous();
+        this->Input("hasInitialStateCpu")
+            .ParamType(OPTIONAL)
+            .DataTypeList({ge::DT_INT64})
+            .FormatList({ge::FORMAT_ND})
+            .ValueDepend(OPTIONAL)
+            .AutoContiguous();
+        this->Input("numAcceptedTokensCpu")
+            .ParamType(OPTIONAL)
+            .DataTypeList({ge::DT_INT64})
+            .FormatList({ge::FORMAT_ND})
+            .ValueDepend(OPTIONAL)
+            .AutoContiguous();
+
         this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
 
-        this->Attr("activationMode").AttrType(OPTIONAL).Int(0);
+        this->Attr("activation").AttrType(OPTIONAL).String("none");
+
         this->Attr("padSlotId").AttrType(OPTIONAL).Int(-1);
+        this->Attr("nullBlockId").AttrType(OPTIONAL).Int(-1);
+
         this->Attr("runMode").AttrType(OPTIONAL).Int(0);
+
+        this->Attr("headNum").AttrType(OPTIONAL).Int(0);
+
+        // vLLM-compatible upper bound for runMode=1 varlen update.
+        this->Attr("maxQueryLen").AttrType(OPTIONAL).Int(-1);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)
@@ -82,9 +114,13 @@ public:
             .ExtendCfgInfo("coreType.value", "AiCore");
         this->AICore().AddConfig("ascend910b", aicoreConfig);
         this->AICore().AddConfig("ascend910_93", aicoreConfig);
-        this->AICore().AddConfig("ascend950", aicoreConfig);
+#ifdef ASCEND_SOC_VERSION
+        if (std::string(ASCEND_SOC_VERSION) == "ascend950") {
+            this->AICore().AddConfig("ascend950", aicoreConfig);
+        }
+#endif
     }
 };
 OP_ADD(CausalConv1d);
 
-} // namespace ops
+}

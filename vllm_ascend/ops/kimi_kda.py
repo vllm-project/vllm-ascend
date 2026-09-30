@@ -24,7 +24,7 @@ from vllm.models.kimi_k3.nvidia.kda import (
 )
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -376,6 +376,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         initial_state_mode: torch.Tensor | None,
         *,
         run_mode: int,
+        max_query_len: int = -1,
         num_accepted_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output = torch.empty_like(mixed_qkv)
@@ -394,7 +395,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             num_accepted_tokens_opt=num_accepted_tokens,
             activation_mode=1,
             pad_slot_id=PAD_SLOT_ID,
+            null_block_id=NULL_BLOCK_ID,
             run_mode=run_mode,
+            max_query_len=max_query_len,
         )
 
     @torch.no_grad()
@@ -566,6 +569,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 spec_conv_meta.cache_indices,
                 None,
                 run_mode=1,
+                max_query_len=spec_conv_meta.max_query_len,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
             )
             q_spec, k_spec, v_spec = (
@@ -611,6 +615,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                     decode_meta.causal_conv1d.cache_indices,
                     None,
                     run_mode=1,
+                    max_query_len=decode_meta.causal_conv1d.max_query_len,
                 )
 
             q_non_spec, k_non_spec, v_non_spec = (

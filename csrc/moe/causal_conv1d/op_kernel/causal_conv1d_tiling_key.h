@@ -1,17 +1,15 @@
 /**
- * This program is free software, you can redistribute it and/or modify it.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Copyright (c) 2025 Tianjin University, Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * the BSD 3-Clause License (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING
- * BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  */
 
 /*!
  * \file causal_conv1d_tiling_key.h
- * \brief causal_conv1d tiling key declare
+ * \brief CausalConv1d tiling template key definitions.
  */
 
 #ifndef __CAUSAL_CONV1D_TILING_KEY_H__
@@ -44,7 +42,6 @@ ASCENDC_TPL_ARGS_DECL(CausalConv1d,
                          ASCENDC_TPL_UINT_SEL(fnPlanKey, ASCENDC_TPL_UI_LIST, FN_PLAN),                       \
                          ASCENDC_TPL_TILING_STRUCT_SEL(CausalConv1dTilingData))
 
-// Keep entries in encoded tiling-key order: real-device sub-kernel dispatch is sensitive to declaration order.
 ASCENDC_TPL_SEL(
     CAUSAL_CONV1D_TPL_SEL_ENTRY(CAUSAL_CONV1D_TPL_RUN_MODE_UPDATE, CAUSAL_CONV1D_TPL_WIDTH_RUNTIME,
                                 CAUSAL_CONV1D_TPL_FN_PLAN_INVALID),
@@ -63,4 +60,4 @@ ASCENDC_TPL_SEL(
 
 #undef CAUSAL_CONV1D_TPL_SEL_ENTRY
 
-#endif // __CAUSAL_CONV1D_TILING_KEY_H__
+#endif
