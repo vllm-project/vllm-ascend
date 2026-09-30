@@ -50,9 +50,7 @@ def check_case(optimize_prefill, tokens, hidden, blocks, seed):
         expected = (value * torch.rsqrt(value.square().mean(-1, keepdim=True) + 1e-5) * output_norm.float()).bfloat16()
 
     p, a, b, w, g, og = [None if x is None else x.npu() for x in (prefix, addend, bank, proj, norm, output_norm)]
-    outputs = torch.ops._C_ascend.attn_res_fwd(
-        p, a, b, w, g, 1e-5, blocks, og, 1e-5, -1, True, True, optimize_prefill
-    )
+    outputs = torch.ops._C_ascend.attn_res_fwd(p, a, b, w, g, 1e-5, blocks, og, 1e-5, -1, True, True, optimize_prefill)
     torch.npu.synchronize()
     pairs = [(outputs[0], expected), (outputs[2], materialized)]
     for actual, golden in pairs:
