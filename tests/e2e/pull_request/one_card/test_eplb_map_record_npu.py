@@ -37,6 +37,10 @@ def _expected_load(
     "tokens,logical_experts,top_k,physical_experts,local_start,local_count,valid_tokens",
     [
         (1, 8, 6, 8, 0, 8, 0),
+        (2, 8, 6, 8, 0, 8, 1),
+        (4, 8, 6, 8, 0, 8, 4),
+        (8, 16, 8, 16, 0, 16, 7),
+        (16, 32, 8, 32, 0, 32, 15),
         (32, 16, 8, 16, 0, 16, 31),
         (64, 32, 8, 32, 0, 32, 64),
         (65, 128, 8, 128, 64, 64, 37),

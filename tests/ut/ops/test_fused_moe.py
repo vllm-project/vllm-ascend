@@ -966,10 +966,8 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     routed_experts.use_grouped_topk = False
     routed_experts.moe_config = SimpleNamespace(
         num_experts=3,
-        dp_size=1,
         ep_rank=1,
         ep_size=2,
-        pcp_size=1,
         is_sequence_parallel=is_sequence_parallel,
     )
     routed_experts.ascend_expert_map = None
