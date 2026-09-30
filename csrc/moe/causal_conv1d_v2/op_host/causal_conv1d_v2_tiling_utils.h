@@ -1,0 +1,195 @@
+/**
+ * Copyright (c) 2025 Tianjin University, Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * the BSD 3-Clause License (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ */
+
+/*!
+ * \file causal_conv1d_v2_tiling_utils.h
+ * \brief CausalConv1dV2 tiling common constants and helpers.
+ */
+
+#ifndef CAUSAL_CONV1D_V2_TILING_UTILS_H
+#define CAUSAL_CONV1D_V2_TILING_UTILS_H
+
+#include "tiling_base/error_log.h"
+#include "tiling_base/tiling_util.h"
+#include "../op_kernel/causal_conv1d_v2_tiling_key.h"
+
+namespace optiling::causal_conv1d_v2_host {
+
+constexpr uint32_t X_INDEX = 0;
+constexpr uint32_t WEIGHT_INDEX = 1;
+constexpr uint32_t BIAS_INDEX = 2;
+constexpr uint32_t CONV_STATES_INDEX = 3;
+constexpr uint32_t QUERY_START_LOC_INDEX = 4;
+constexpr uint32_t CACHE_INDICES_INDEX = 5;
+constexpr uint32_t HAS_INITIAL_STATE_INDEX = 6;
+constexpr uint32_t NUM_ACCEPTED_TOKENS_INDEX = 7;
+constexpr uint32_t QUERY_START_LOC_CPU_INDEX = 8;
+constexpr uint32_t CACHE_INDICES_CPU_INDEX = 9;
+constexpr uint32_t HAS_INITIAL_STATE_CPU_INDEX = 10;
+constexpr uint32_t NUM_ACCEPTED_TOKENS_CPU_INDEX = 11;
+
+constexpr int32_t ATTR_ACTIVATION_INDEX = 0;
+constexpr int32_t ATTR_PAD_SLOT_ID_INDEX = 1;
+constexpr int32_t ATTR_NULL_BLOCK_ID_INDEX = 2;
+constexpr int32_t ATTR_RUN_MODE_INDEX = 3;
+constexpr int32_t ATTR_HEAD_NUM_INDEX = 4;
+constexpr int32_t ATTR_MAX_QUERY_LEN_INDEX = 5;
+
+constexpr int64_t METADATA_DTYPE_INT64 = 0;
+constexpr int64_t METADATA_DTYPE_INT32 = 1;
+constexpr int64_t METADATA_DTYPE_BOOL = 2;
+
+constexpr int64_t ASCENDC_RESERVED_WORKSPACE_SIZE = 16 * 1024 * 1024;
+
+struct CausalConv1dV2CompileInfo {
+    uint64_t ubSize = 0;
+    uint32_t coreNum = 0;
+};
+
+struct CausalConv1dV2AttrInfo {
+    int64_t activationMode = 0;
+    int64_t runMode = 0;
+    int64_t headNum = 0;
+    int64_t maxQueryLen = -1;
+    int64_t padSlotId = -1;
+    int64_t nullBlockId = -1;
+};
+
+struct ResolvedMetadataInputs {
+    uint32_t queryStartLocIndex = QUERY_START_LOC_INDEX;
+    uint32_t cacheIndicesIndex = CACHE_INDICES_INDEX;
+    uint32_t hasInitialStateIndex = HAS_INITIAL_STATE_INDEX;
+    uint32_t numAcceptedTokensIndex = NUM_ACCEPTED_TOKENS_INDEX;
+    bool queryStartLocUseCpu = false;
+    bool cacheIndicesUseCpu = false;
+    bool hasInitialStateUseCpu = false;
+    bool numAcceptedTokensUseCpu = false;
+};
+
+struct DimTileChoice {
+    int64_t baseDim = 0;
+    int64_t baseDimCnt = 0;
+    int64_t gridSize = 0;
+};
+
+struct VarlenTokenTileChoice {
+    bool enabled = false;
+    int64_t tokenBlockSize = 0;
+    int64_t tokenBlockCnt = 0;
+    int64_t gridSize = 0;
+};
+
+enum FnTilingCaseKind : int64_t {
+    FN_TILING_CASE_INVALID = 0,
+    FN_TILING_CASE_TOKEN_FIRST = 1,
+    FN_TILING_CASE_TOKEN_DIM_CO_SPLIT = 2,
+};
+
+struct TokenCoreMappingChoice {
+    int64_t tokenCoreBudget = 0;
+    int64_t tokenBlocksPerCore = 0;
+    int64_t tokenCoreTailCnt = 0;
+    int64_t blockDim = 0;
+};
+
+constexpr int64_t MAX_FN_TOKEN_SEQ_RANGE_COUNT = 128;
+
+struct FnTokenSeqRangePlan {
+    bool enabled = false;
+    int64_t rangeCount = 0;
+    int64_t tokenTileStartSeq[MAX_FN_TOKEN_SEQ_RANGE_COUNT] = {};
+    int64_t tokenTileEndSeq[MAX_FN_TOKEN_SEQ_RANGE_COUNT] = {};
+};
+
+struct FnHostPlan {
+    FnTilingCaseKind caseKind = FN_TILING_CASE_INVALID;
+    FnExecutionPlan executionPlan = FN_EXECUTION_PLAN_INVALID;
+    DimTileChoice baseDimChoice;
+    VarlenTokenTileChoice tokenBlockChoice;
+    TokenCoreMappingChoice tokenCoreMapping;
+    FnTokenSeqRangePlan tokenSeqRangePlan;
+};
+
+constexpr int64_t DIM_ALIGN_BYTES = 32;
+constexpr int64_t BF16_FP16_ELEM_BYTES = 2;
+constexpr int64_t DIM_ALIGN_ELEMS = DIM_ALIGN_BYTES / BF16_FP16_ELEM_BYTES;
+constexpr int64_t MAX_DIM_TILE_SIZE = 4096;
+constexpr int64_t FN_UB_RESERVED_BYTES = 512;
+constexpr int64_t RING_SLOT_CNT = 5;
+constexpr int64_t FN_OUT_SLOT_CNT = 2;
+constexpr int64_t FN_CALC_FP32_SLOT_CNT = 8;
+
+inline constexpr uint32_t NormalizeFnPlanTilingKey(uint32_t runModeKey, FnExecutionPlan fnExecutionPlan)
+{
+    if (runModeKey != CAUSAL_CONV1D_V2_TPL_RUN_MODE_FN) {
+        return CAUSAL_CONV1D_V2_TPL_FN_PLAN_INVALID;
+    }
+    switch (fnExecutionPlan) {
+        case FN_EXECUTION_PLAN_CUTBS:
+            return CAUSAL_CONV1D_V2_TPL_FN_PLAN_CUTBS;
+        case FN_EXECUTION_PLAN_CUTBSD:
+            return CAUSAL_CONV1D_V2_TPL_FN_PLAN_CUTBSD;
+        default:
+            return CAUSAL_CONV1D_V2_TPL_FN_PLAN_INVALID;
+    }
+}
+
+inline constexpr uint32_t NormalizeWidthTilingKey(uint32_t runModeKey, int32_t width)
+{
+    if (runModeKey != CAUSAL_CONV1D_V2_TPL_RUN_MODE_FN) {
+        return CAUSAL_CONV1D_V2_TPL_WIDTH_RUNTIME;
+    }
+    switch (width) {
+        case 2:
+            return CAUSAL_CONV1D_V2_TPL_WIDTH_2;
+        case 3:
+            return CAUSAL_CONV1D_V2_TPL_WIDTH_3;
+        case 4:
+            return CAUSAL_CONV1D_V2_TPL_WIDTH_4;
+        default:
+            return CAUSAL_CONV1D_V2_TPL_WIDTH_RUNTIME;
+    }
+}
+
+inline int64_t CeilDivInt64(int64_t x, int64_t y)
+{
+    return (x + y - 1) / y;
+}
+
+inline int64_t AlignDownInt64(int64_t value, int64_t align)
+{
+    if (align <= 0 || value <= 0) {
+        return 0;
+    }
+    return (value / align) * align;
+}
+
+inline int64_t AlignUpInt64(int64_t value, int64_t align)
+{
+    if (align <= 0 || value <= 0) {
+        return 0;
+    }
+    return CeilDivInt64(value, align) * align;
+}
+
+inline const char *GetFnTilingCaseName(FnTilingCaseKind caseKind)
+{
+    switch (caseKind) {
+        case FN_TILING_CASE_TOKEN_FIRST:
+            return "token_first";
+        case FN_TILING_CASE_TOKEN_DIM_CO_SPLIT:
+            return "token_dim_co_split";
+        default:
+            return "invalid";
+    }
+}
+
+}
+
+#endif
