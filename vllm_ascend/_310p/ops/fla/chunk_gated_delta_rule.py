@@ -315,28 +315,73 @@ def _prepare_chunk_indices_list(cu_seqlens: torch.Tensor, chunk_size: int) -> li
     return chunk_indices
 
 
-def _invert_strict_lower(strict_lower: torch.Tensor) -> torch.Tensor:
-    """Inverse of ``I - L`` for a strictly lower-triangular ``L``.
+def _invert_strict_lower_rows(strict_lower: torch.Tensor) -> torch.Tensor:
+    """Forward substitution. Stable for any width, but each row syncs the host."""
+    attn = strict_lower.clone()
+    width = attn.shape[-1]
+    for row_idx in range(1, width):
+        row = attn[..., row_idx, :row_idx].clone()
+        sub = attn[..., :row_idx, :row_idx].clone()
+        attn[..., row_idx, :row_idx] = row + (row.unsqueeze(-1) * sub).sum(-2)
+    return attn + torch.eye(width, dtype=attn.dtype, device=attn.device)
 
-    ``L`` to the power of its width is zero, so
 
-        (I - L)^{-1} = (I + L) (I + L^2) (I + L^4) ... (I + L^{n/2})
+def _product_inv_leaf(lower: torch.Tensor) -> torch.Tensor:
+    """``(I - L)^{-1}`` for a strictly lower ``L`` of width 2, 4, or 8.
 
-    The factors are contiguous matmuls on the same device as ``L``. The
-    previous per-row update cloned non-contiguous slices and reduced them
-    with ``sum``, which ran on the host and stalled the NPU between rows.
+    ``L^width = 0``, so the product stops at ``L^{width/2}``. Width 8 is the
+    largest tile whose intermediate powers stay finite for the correlated keys
+    GDN actually produces. A single product over width 64 does not.
     """
-    width = strict_lower.shape[-1]
-    if width <= 0 or width & (width - 1):
-        raise ValueError(f"strict-lower width must be a power of two, got {width}.")
-    eye = torch.eye(width, dtype=strict_lower.dtype, device=strict_lower.device)
-    inverse = eye + strict_lower
-    power = strict_lower @ strict_lower
-    # width == 2**k contributes k factors; inverse already holds (I + L).
-    for _ in range(width.bit_length() - 2):
+    width = lower.shape[-1]
+    eye = torch.eye(width, dtype=lower.dtype, device=lower.device)
+    inverse = eye + lower
+    power = lower @ lower
+    for _ in range(max(width.bit_length() - 2, 0)):
         inverse = inverse @ (eye + power)
         power = power @ power
     return inverse
+
+
+def _invert_blocked(lower: torch.Tensor) -> torch.Tensor:
+    """Block inverse of ``I - L`` for ``lower`` shaped ``[batch, width, width]``."""
+    width = lower.shape[-1]
+    if width <= 8:
+        return _product_inv_leaf(lower)
+    half = width // 2
+    top_left = lower[:, :half, :half].contiguous()
+    bot_right_src = lower[:, half:, half:].contiguous()
+    cross = lower[:, half:, :half].contiguous()
+    inverse_diag = _invert_blocked(torch.cat((top_left, bot_right_src), dim=0))
+    batch = lower.shape[0]
+    top_inv = inverse_diag[:batch]
+    bot_inv = inverse_diag[batch:]
+    # (I - L) = [[I-L11, 0], [-L21, I-L22]], so the lower-left block of the
+    # inverse is (I-L22)^{-1} L21 (I-L11)^{-1}.
+    bot_left = bot_inv.matmul(cross).matmul(top_inv)
+    top = torch.cat((top_inv, torch.zeros_like(top_inv)), dim=-1)
+    bot = torch.cat((bot_left, bot_inv), dim=-1)
+    return torch.cat((top, bot), dim=-2)
+
+
+def _invert_strict_lower(strict_lower: torch.Tensor) -> torch.Tensor:
+    """Inverse of ``I - L`` for a strictly lower-triangular ``L``.
+
+    Tiles of width 8 use the finite product ``(I+L)(I+L^2)(I+L^4)``. Larger
+    power-of-two widths are assembled with the block formula, which is a
+    handful of batched matmuls on device. The plain width-64 product overflows
+    when keys in a chunk are correlated and then MTP rejects every draft.
+    Per-row substitution matches this result but copies each row back to the
+    host; that stall is what made MTP prefill with prefix caching regress.
+    """
+    width = strict_lower.shape[-1]
+    if width <= 1:
+        return torch.eye(width, dtype=strict_lower.dtype, device=strict_lower.device)
+    if width & (width - 1):
+        return _invert_strict_lower_rows(strict_lower)
+    lead = strict_lower.shape[:-2]
+    flat = strict_lower.reshape(-1, width, width)
+    return _invert_blocked(flat).reshape(*lead, width, width)
 
 
 def _compute_kernel_inputs_from_torch_wy(

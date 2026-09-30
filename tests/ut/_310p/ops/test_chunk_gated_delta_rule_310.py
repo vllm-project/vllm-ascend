@@ -174,3 +174,21 @@ def test_invert_strict_lower_matches_row_update():
     solved = _invert_strict_lower(strict_lower)
     reference = _row_strict_lower_inverse(strict_lower)
     torch.testing.assert_close(solved, reference, rtol=1e-4, atol=1e-5)
+
+
+def test_invert_strict_lower_solves_correlated_keys():
+    """Product-form inversion overflows when keys in a chunk are aligned."""
+    torch.manual_seed(1)
+    width = 64
+    base = torch.randn(1, 1, 1, 128)
+    key = base + 0.01 * torch.randn(1, 1, width, 128)
+    key = key / key.norm(dim=-1, keepdim=True)
+    beta = torch.full((1, 1, width), 0.95)
+    gram = (key * beta.unsqueeze(-1)) @ key.transpose(-1, -2)
+    strict_lower = (-gram).tril(diagonal=-1)
+
+    solved = _invert_strict_lower(strict_lower)
+    eye = torch.eye(width, dtype=solved.dtype)
+    residual = (eye - strict_lower) @ solved - eye
+    assert torch.isfinite(solved).all()
+    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-4, rtol=1e-4)
