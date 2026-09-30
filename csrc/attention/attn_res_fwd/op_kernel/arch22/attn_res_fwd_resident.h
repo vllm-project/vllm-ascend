@@ -244,10 +244,9 @@ private:
                                      hiddenSizeAlignFp32_);
             Mul(outFp32_, vRow_, scoreWeight_, hiddenSize_);
             PipeBarrier<PIPE_V>();
-            // Keep WholeReduceSum's destination 32-byte aligned on A3; compact
-            // metadata slots can be unaligned for odd block indices.
-            ReduceSumHalfInterval(scalarLocal_, outFp32_, static_cast<int32_t>(hiddenSize_));
-            CopyMetaScalarToLocal(vecMeta_[n], scalarLocal_);
+            // Reduce directly into the compact score slot. WholeReduceSum emits
+            // the scalar result without the unaligned vector copy that A3 rejects.
+            ReduceSumHalfInterval(vecMeta_[n], outFp32_, static_cast<int32_t>(hiddenSize_));
             PipeBarrier<PIPE_V>();
         }
     }
