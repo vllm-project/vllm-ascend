@@ -380,7 +380,18 @@ __aicore__ inline void QSFAMatmulService<QSFAT>::CopyInMm1AToL1(LocalTensor<K_RO
                                                                 uint32_t headSize, uint32_t headOffset)
 {
     auto srcGm = queryGm[info.tensorAOffset + mSeqIdx * constInfo.combineHeadDim + headOffset];
-    CopyGmToL1(l1Tensor, srcGm, mSizeAct, headSize, headSize);
+    if (constInfo.inputHeadDimRope == 0) {
+        // NZ stores each 16-column group across the aligned M rows.
+        // Refresh absent columns on every Q-buffer reuse before MTE1 reads them.
+        uint32_t mSizeAlign = QSFAAlign(mSizeAct, 16U);
+        InitConstValueParams<K_ROPE_T> zeroParams(
+            1, mSizeAlign * constInfo.headDimRope * sizeof(K_ROPE_T) / ConstInfo::BUFFER_SIZE_BYTE_32B, 0,
+            static_cast<K_ROPE_T>(0));
+        InitConstValue(l1Tensor[mSizeAlign * constInfo.headDim], zeroParams);
+        CopyGmToL1(l1Tensor, srcGm, mSizeAct, constInfo.headDim, constInfo.combineHeadDim);
+    } else {
+        CopyGmToL1(l1Tensor, srcGm, mSizeAct, headSize, headSize);
+    }
 }
 
 template <typename QSFAT>

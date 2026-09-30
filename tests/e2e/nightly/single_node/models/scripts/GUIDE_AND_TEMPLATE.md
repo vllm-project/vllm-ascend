@@ -17,7 +17,7 @@ It consists of the following core components:
 
 * `tests/e2e/nightly/single_node/models/scripts/single_node_config.py`
     * Defines `SingleNodeConfig` and `SingleNodeConfigLoader`
-    * Loads YAML from `tests/e2e/nightly/single_node/models/configs/<CONFIG_YAML_PATH>`
+    * Loads YAML from `CONFIG_BASE_PATH/<CONFIG_YAML_PATH>`
     * Auto-assigns ports when `envs` contains `DEFAULT_PORT` / missing values
     * Expands `$VAR` / `${VAR}` placeholders inside commands via `_expand_values`
 
@@ -125,9 +125,9 @@ pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
 
 ### 3.1 File Location and Selection Rules
 
-* YAML files live under: `tests/e2e/nightly/single_node/models/configs/`
-* Selected by env var: `CONFIG_YAML_PATH=<YourConfig>.yaml`
-* If not set, the loader uses `SingleNodeConfigLoader.DEFAULT_CONFIG_NAME`
+* YAML files live under: `tests/e2e/cases/models/configs/<model-family>/`
+* Set `CONFIG_YAML_PATH=<YourConfig>.yaml` to select the file.
+* Set `CONFIG_BASE_PATH=tests/e2e/cases/models/configs/<model-family>` to select its directory.
 
 ### 3.2 Field Descriptions
 

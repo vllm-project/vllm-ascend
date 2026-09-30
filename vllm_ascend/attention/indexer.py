@@ -265,7 +265,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 indexer_attn_metadata.block_size,
             )
         else:
-            torch_npu.npu_scatter_nd_update_(
+            DeviceOperator.scatter_cache(
                 indexer_k_cache.view(-1, k_li.shape[-1]),
                 slot_mapping.view(-1, 1),
                 k_li.view(-1, k_li.shape[-1]),
@@ -284,7 +284,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     indexer_attn_metadata.block_size,
                 )
             else:
-                torch_npu.npu_scatter_nd_update_(
+                DeviceOperator.scatter_cache(
                     indexer_scale_cache.view(-1, k_li_scale.shape[-1]),
                     slot_mapping.view(-1, 1),
                     k_li_scale.view(-1, k_li_scale.shape[-1]),
@@ -1013,8 +1013,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         return ("slot_mapping", common_attn_metadata.slot_mapping.data_ptr())
 
     def _mask_lim_slot_mapping(self, common_attn_metadata, slot_mapping, buffer_key) -> None:
-        generations = getattr(common_attn_metadata, "req_topk_buffer_generations", None)
-        if generations is None or not get_ascend_config().sparse_kv_offload_config.use_fused_copy_sfa:
+        active = getattr(common_attn_metadata, "req_topk_buffer_active", None)
+        if active is None or not get_ascend_config().sparse_kv_offload_config.use_fused_copy_sfa:
             return
         # Only request ownership and query layout are needed; exact device
         # positions in this group's slot mapping must remain unchanged.
@@ -1029,7 +1029,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             )
             self._lim_token_masks[buffer_key] = mask
         size = slot_mapping.numel()
-        mask.np[:size] = (generations.numpy()[rows] < 0) | (positions >= ends[-1])
+        mask.np[:size] = (~active.numpy()[rows]) | (positions >= ends[-1])
         slot_mapping.masked_fill_(mask.copy_to_gpu(size), -1)
 
     def _build(
@@ -1042,15 +1042,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     ) -> AscendSFAIndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
-        if (
-            self.speculative_config is not None
-            and getattr(self.speculative_config, "method", None) == "dspark"
-            and getattr(self.speculative_config, "enable_adaptive_verification", False)
-        ):
-            # Keep the independently built indexer metadata aligned with SFA:
-            # adaptive verification records its graph-shaped token count in
-            # positions rather than common_attn_metadata.num_input_tokens.
-            num_input_tokens = common_attn_metadata.positions.shape[0]
         if self.use_dcp:
             block_table, slot_mapping = self._build_dcp_cache_metadata(
                 common_attn_metadata,

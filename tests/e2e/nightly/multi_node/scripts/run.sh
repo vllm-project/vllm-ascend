@@ -5,6 +5,8 @@ BISECT_SOC="${1:-}"
 MAX_GOOD_AGE_DAYS="${2:-3}"
 BISECT_SCENE="${3:-multi_node}"
 
+export VLLM_ASCEND_BUILD_CACHE_DIR="/root/.cache/vllm-ascend/csrc-build-cache/${BISECT_SOC:-unknown}/node-${LWS_WORKER_INDEX:-0}"
+
 # Color definitions
 GREEN="\033[0;32m"
 BLUE="\033[0;34m"
@@ -12,16 +14,7 @@ YELLOW="\033[0;33m"
 RED="\033[0;31m"
 NC="\033[0m" # No Color
 
-INTERNAL_DP_TEST_PATH="tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py"
-EXTERNAL_DP_TEST_PATH="tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py"
-
-if [ -z "${MULTI_NODE_TEST_PATH:-}" ]; then
-    if [[ "${CONFIG_BASE_PATH:-}" == *"external_dp/config"* || "${CONFIG_YAML_PATH:-}" == *"external_dp/config"* ]]; then
-        MULTI_NODE_TEST_PATH="$EXTERNAL_DP_TEST_PATH"
-    else
-        MULTI_NODE_TEST_PATH="$INTERNAL_DP_TEST_PATH"
-    fi
-fi
+MULTI_NODE_TEST_PATH="${MULTI_NODE_TEST_PATH:-tests/e2e/nightly/multi_node/scripts/test_multi_node.py}"
 
 # Configuration
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
@@ -141,7 +134,7 @@ check_npu_info() {
 
 check_and_config() {
     echo "====> Configure mirrors and git proxy"
-    git config --global url."https://shturl.cc/https://github.com/".insteadOf "https://github.com/"
+    git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
     pip config set global.trusted-host mirrors.huaweicloud.com
     export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
@@ -199,8 +192,14 @@ checkout_src() {
 
 install_vllm_ascend() {
     echo "====> Install vllm-ascend"
-    pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
-    pip install -e "$WORKSPACE/vllm-ascend"
+    pip install uv
+    export UV_SYSTEM_PYTHON=1
+    export UV_INDEX_URL="https://mirrors.huaweicloud.com/repository/pypi/simple/"
+    export UV_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+    export UV_INDEX_STRATEGY="unsafe-best-match"
+    export UV_NO_CACHE=1
+    uv pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
+    uv pip install -e "$WORKSPACE/vllm-ascend"
 }
 
 install_aisbench() {
@@ -269,14 +268,27 @@ run_tests_with_log() {
             done
         fi
         if [ ! -f "${LOG_PREFIX}/aop_done" ]; then
-            local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
+            # Per-run coordination dir under LOG_PREFIX (unique per LWS instance).
+            # The historical fixed default (/root/.cache/nightly_bisect/coord)
+            # lives on the shared PVC, so a leftover or concurrent run's state
+            # there would corrupt this run's barrier protocol.
+            local coord="${COORD_DIR:-${LOG_PREFIX}/nightly_bisect_coord}"
+            if [ -n "${COORD_DIR:-}" ]; then
+                coord="${COORD_DIR}/${LOG_PREFIX##*/}"
+            fi
             local release="${LOG_PREFIX}/aop_done"
-            mkdir -p "$coord"
-            touch "${coord}/worker_ready_${LWS_WORKER_INDEX}"
-            echo "Worker: signalling ready at ${coord}/worker_ready_${LWS_WORKER_INDEX}"
+            mkdir -p "$coord" "$LOG_PREFIX"
+            # Use the same per-run namespace for the leader's join gate.
+            touch "${LOG_PREFIX}/worker_ready_${LWS_WORKER_INDEX}"
+            echo "Worker: signalling ready at ${LOG_PREFIX}/worker_ready_${LWS_WORKER_INDEX}"
             echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
             cd "$WORKSPACE/vllm-ascend"
             build_bisect_extra_args
+            BISECT_EXTRA_ARGS+=(--run-scoped-coord)
+            # Guard the agent: under `set -e` an uncaught crash would take the
+            # whole pod down silently; instead capture the exit code and keep
+            # the logs collectable.
+            local worker_bisect_rc=0
             python -m tools.bisect.auto_bisect \
                 --scene multi_node \
                 --config-yaml "${CONFIG_YAML_PATH}" \
@@ -284,9 +296,27 @@ run_tests_with_log() {
                 --soc "$BISECT_SOC" \
                 --coord-dir "${coord}" \
                 --release-file "${release}" \
-                "${BISECT_EXTRA_ARGS[@]}"
-            while [ ! -f "$release" ]; do sleep 5; done
-            echo "Worker: release signal received, exiting"
+                "${BISECT_EXTRA_ARGS[@]}" || worker_bisect_rc=$?
+            echo "Worker: bisect agent exited (rc=${worker_bisect_rc})"
+            if [ "$worker_bisect_rc" -eq 0 ]; then
+                # Clean exit (DONE received): wait for the leader's release
+                # signal, which appears when its AOP pipeline finishes.
+                local release_timeout_s=300
+                local release_deadline=$((SECONDS + release_timeout_s))
+                while [ ! -f "$release" ]; do
+                    if [ "$SECONDS" -ge "$release_deadline" ]; then
+                        echo "Worker: timed out waiting for leader release after ${release_timeout_s}s"
+                        exit 1
+                    fi
+                    sleep 5
+                done
+                echo "Worker: release signal received, exiting"
+            else
+                # Crashed agent: nothing left to do here -- exit immediately so
+                # the failure stays visible instead of holding the pod (and its
+                # NPUs) in an endless release wait.
+                echo "Worker: bisect agent failed; exiting without waiting for the release signal"
+            fi
             exit 1
         else
             echo "Worker: leader finished successfully, exiting"
@@ -451,20 +481,31 @@ aop_pipeline() {
     echo "  Config      : ${CONFIG_YAML_PATH}"
     echo "  Bad commit  : HEAD"
     echo "  Name        : ${case_name}"
-    local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
+    # Per-run coordination dir under LOG_PREFIX (see the worker branch above).
+    local coord="${COORD_DIR:-${LOG_PREFIX}/nightly_bisect_coord}"
+    if [ -n "${COORD_DIR:-}" ]; then
+        coord="${COORD_DIR}/${LOG_PREFIX##*/}"
+    fi
     echo "  Coord dir   : ${coord}"
 
-    # Wait for all workers to signal ready
+    # Wait for workers to signal ready. The markers live under LOG_PREFIX
+    # (unique per run), NOT in the persistent coord dir: a leftover marker
+    # from a previous run would satisfy this gate instantly and the bisect
+    # would start while this run's worker has not joined (or never will).
     echo "  Waiting for workers..."
+    local ready_count
     for i in $(seq 1 30); do
-        local ready_count=0
-        for f in "${coord}"/worker_ready_*; do
+        ready_count=0
+        for f in "${LOG_PREFIX}"/worker_ready_*; do
             [ -e "$f" ] && ready_count=$((ready_count + 1))
         done
         echo "    [${i}/30] ready workers: ${ready_count}"
         if [ "$ready_count" -ge 1 ]; then break; fi
         sleep 2
     done
+    if [ "$ready_count" -lt 1 ]; then
+        echo "  WARNING: no worker signalled ready within 60s; the bisect master will abort if none joins"
+    fi
 
     cd "$WORKSPACE/vllm-ascend"
     local bisect_rc=0
@@ -491,14 +532,36 @@ clear_logs() {
 backup_ascend_logs() {
     if [ -n "${LOG_PREFIX:-}" ]; then
         local dest="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-unknown}_plogs"
-        mkdir -p "$dest"
-        cp -r /root/ascend/log/. "$dest/" 2>/dev/null || true
+        if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
+            local backup_timeout_s=120
+            if ! timeout --kill-after=5s "${backup_timeout_s}s" mkdir -p "$dest" || \
+                ! timeout --kill-after=5s "${backup_timeout_s}s" cp -r /root/ascend/log/. "$dest/" 2>/dev/null; then
+                echo "WARNING: Ascend log backup failed or timed out; continuing AOP completion"
+                return 0
+            fi
+        else
+            mkdir -p "$dest"
+            cp -r /root/ascend/log/. "$dest/" 2>/dev/null || true
+        fi
         echo "Ascend logs backed up to $dest"
     fi
 }
 
+finish_run() {
+    local rc=$?
+    backup_ascend_logs || true
+    if [ "${AOP_MULTI_ENABLED:-}" = "true" ] && [ "${LWS_WORKER_INDEX:-}" = "0" ]; then
+        echo "AOP_RUN_FINISHED:${LOG_PREFIX}:${rc}"
+    fi
+    return "$rc"
+}
+
 main() {
-    trap backup_ascend_logs EXIT
+    if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
+        trap finish_run EXIT
+    else
+        trap backup_ascend_logs EXIT
+    fi
     check_npu_info
     clear_logs
     check_and_config
