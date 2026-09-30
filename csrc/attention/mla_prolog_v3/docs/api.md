@@ -1,5 +1,7 @@
 # MlaPrologV3 API 与调用示例
 
+> English version: [api_en.md](./api_en.md)
+
 ## 1. API 总览
 
 | 通路 | API/入口 | 支持情况 |
@@ -189,10 +191,11 @@ query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm = (
 )
 ```
 
-仅在 Ascend950 构建且加载 `vllm_ascend_C` + 自定义 opp 后可用。  
-`rope_sin` / `rope_cos` 为必传位置参数：同时非空启用 RoPE，同时为空（`numel()==0`）禁用；不允许一空一非空。  
+在 Ascend910B / Ascend910_93（A2/A3）或 Ascend950 构建并加载 `vllm_ascend_C` + 自定义 opp 后可用。  
+`rope_sin` / `rope_cos` 为必传位置参数：同时非空启用 RoPE，同时为空（`numel()==0`）禁用；不允许一空一非空（A2/A3/A5 均支持该开关）。  
 `token_x` rank=2 为合轴 `(T,He)`，rank=3 为 `(B,S,He)`。  
-`kv_cache` / `kr_cache` 原地更新；不需要的 optional 输出以空 Tensor 返回。
+`kv_cache` / `kr_cache` 原地更新；不需要的 optional 输出以空 Tensor 返回。  
+A2/A3 不支持 MXFP8/FP8/HIF8 全量化及 SplitM；`weight_quant_mode` 仅 `{0,1,2}`。
 
 NZ 权重可用 `torch_npu.npu_format_cast(w.contiguous(), 29)` 转换。
 
@@ -258,7 +261,7 @@ mla_prolog_v3<<<blockDim, nullptr, stream>>>(
 
 ## 6. 已知限制
 
-- Torch schema 始终注册，实际可用性取决于 `csrc/build_aclnn.sh` 是否按 **Ascend950** 构建并安装了该自定义算子包。
+- Torch schema 始终注册，实际可用性取决于 `csrc/build_aclnn.sh` 是否按 **Ascend910B / Ascend910_93 / Ascend950** 构建并安装了该自定义算子包。
 - `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` 必须为 **FRACTAL_NZ**。
 - `Hcq=1536`，`Hckv=512`，`D=128`，`Dr=64`，`Nkv=1`；`He` 仅白名单集合；`N∈[1,128]`。
 - `weight_quant_mode` 与 `kv_cache_quant_mode` 必须落在 §2.3 合法表内。
