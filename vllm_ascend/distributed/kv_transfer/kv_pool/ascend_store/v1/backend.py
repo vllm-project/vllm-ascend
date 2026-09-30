@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
+from enum import Enum
 from types import MappingProxyType, ModuleType
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
@@ -18,7 +19,13 @@ BACKEND_IMPORTS = MappingProxyType(
     }
 )
 
-BLOCK_KEY_LAYERWISE_BACKENDS = frozenset({"mooncake"})
+
+class LayerwiseAccessKind(Enum):
+    KEY_RANGE = "key_range"
+    GVA = "gva"
+
+
+LAYERWISE_ACCESS = MappingProxyType({"mooncake": LayerwiseAccessKind.KEY_RANGE, "memcache": LayerwiseAccessKind.GVA})
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +35,7 @@ class BackendSpec:
     name: str
     backend_type: type[Backend]
     backend_module: ModuleType
-    supports_layerwise: bool
+    layerwise_access: LayerwiseAccessKind | None
     requires_exists_before_put: bool
 
 
@@ -43,6 +50,6 @@ def resolve_backend_spec(backend_name: str) -> BackendSpec:
         backend_name,
         backend_type,
         backend_module,
-        backend_name in BLOCK_KEY_LAYERWISE_BACKENDS,
+        LAYERWISE_ACCESS.get(backend_name),
         bool(getattr(backend_type, "requires_exists_before_put", True)),
     )
