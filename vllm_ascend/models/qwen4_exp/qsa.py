@@ -18,6 +18,7 @@ from typing import Protocol, TypeAlias, cast
 
 import torch
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.models.qwen4_exp.amd import (
     indexer_qsa as upstream_indexer,
 )
@@ -29,6 +30,10 @@ from vllm.models.qwen4_exp.common.qsa_cache import (
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 
 from vllm_ascend import envs
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_select_paged_tokens as qsa_select_paged_tokens_triton,
 )
@@ -324,8 +329,21 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 self.compress_ratio,
                 out,
             )
+        profile = get_current_hardware_profile()
         use_lightning = envs.VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER
+        if use_lightning and not profile.supports(HardwareCapability.QSA_LIGHTNING_INDEXER):
+            logger.warning_once(
+                "VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER is not supported on this SoC; "
+                "falling back to the portable QSA selector."
+            )
+            use_lightning = False
         use_e3 = envs.VLLM_ASCEND_ENABLE_QSA_E3V
+        if use_e3 and not profile.supports(HardwareCapability.QSA_E3_EXPAND):
+            logger.warning_once(
+                "VLLM_ASCEND_ENABLE_QSA_E3V requires the A3 qsa_expand_e3 operator, which is "
+                "unavailable on this SoC; falling back to the portable QSA expansion."
+            )
+            use_e3 = False
         if use_lightning or use_e3:
             if self._lightning_indexer_eligible(query, metadata):
                 if not use_lightning:
@@ -426,7 +444,7 @@ class AscendQSAImpl:
         key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
-        if is_950():
+        if envs.VLLM_ASCEND_FORCE_QSA_REFERENCE or is_950():
             return qsa_sparse_paged_attention_reference(
                 query[:num_tokens],
                 key_cache,
