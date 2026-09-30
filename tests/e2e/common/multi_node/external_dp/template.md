@@ -1,7 +1,7 @@
 # External DP Config Template
 
 This document shows how to write YAML configs consumed by
-`tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py`.
+`tests/e2e/common/multi_node/external_dp/test_external_dp.py`.
 
 `server_cmd_template` contains only the arguments after
 `vllm serve <model>`. The framework prepends `vllm serve` and the top-level

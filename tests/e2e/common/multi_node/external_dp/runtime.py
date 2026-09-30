@@ -16,14 +16,14 @@ from tests.e2e.common.kv_pool.config import (
     MemcacheKVPoolConfig,
     MooncakeKVPoolConfig,
 )
-from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
+from tests.e2e.common.multi_node.external_dp.external_dp_config import (
     ROUTING_DISAGGREGATED_PREFILL,
     ExternalDPConfig,
     NodeTemplate,
     RankInfo,
     replace_cluster_placeholders,
 )
-from tests.e2e.nightly.multi_node.external_dp.scripts.utils import (
+from tests.e2e.common.multi_node.external_dp.utils import (
     format_server_cmd,
     is_http_ready,
     start_logged_process,
@@ -31,7 +31,7 @@ from tests.e2e.nightly.multi_node.external_dp.scripts.utils import (
     wait_http_ready,
     wait_http_unready,
 )
-from tests.e2e.nightly.multi_node.scripts.utils import get_net_interface
+from tests.e2e.common.multi_node.utils import get_net_interface
 
 logger = logging.getLogger(__name__)
 

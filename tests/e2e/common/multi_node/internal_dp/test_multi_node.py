@@ -10,12 +10,12 @@ import pytest
 import vllm
 
 from tests.e2e.conftest import RemoteOpenAIServer
-from tests.e2e.nightly.multi_node.internal_dp.scripts.multi_node_config import (
+from tests.e2e.common.multi_node.internal_dp.multi_node_config import (
     MultiNodeConfig,
     MultiNodeConfigLoader,
     ProxyLauncher,
 )
-from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
+from tests.e2e.common.multi_node.benchmark_results import (
     build_task_entry,
     extract_hardware,
     filter_environment,

@@ -15,13 +15,13 @@ It consists of the following core components:
 
 ### 1.1 Key Files and Responsibilities
 
-* `tests/e2e/nightly/single_node/models/scripts/single_node_config.py`
+* `tests/e2e/common/single_node/single_node_config.py`
     * Defines `SingleNodeConfig` and `SingleNodeConfigLoader`
     * Loads YAML from `CONFIG_BASE_PATH/<CONFIG_YAML_PATH>`
     * Auto-assigns ports when `envs` contains `DEFAULT_PORT` / missing values
     * Expands `$VAR` / `${VAR}` placeholders inside commands via `_expand_values`
 
-* `tests/e2e/nightly/single_node/models/scripts/test_single_node.py`
+* `tests/e2e/common/single_node/test_single_node.py`
     * Declares `configs = SingleNodeConfigLoader.from_yaml_cases()` (loaded at import time)
     * `pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])` runs one test per YAML case
         * Controls server lifecycle via context managers
@@ -34,7 +34,7 @@ It consists of the following core components:
 pytest starts
   |
   v
-import tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+import tests/e2e/common/single_node/test_single_node.py
   |
   v
 configs = SingleNodeConfigLoader.from_yaml_cases()
@@ -104,15 +104,17 @@ Ensure you are in an NPU environment and have installed `pytest`, `pyyaml`, `ope
 
 ### 2.2 Local Execution
 
-The framework uses the `CONFIG_YAML_PATH` environment variable to specify the configuration file.
+The framework uses `CONFIG_BASE_PATH` to locate the configuration directory and
+`CONFIG_YAML_PATH` to select the configuration file.
 
 ```bash
 # Switch to the project root directory
 cd /vllm-workspace/vllm-ascend
 
 # Run a specific yaml test
+export CONFIG_BASE_PATH="tests/e2e/cases/models/configs/Qwen"
 export CONFIG_YAML_PATH="Qwen3-32B.yaml"
-pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+pytest -sv tests/e2e/common/single_node/test_single_node.py
 ```
 
 ### 2.3 Tips for Debugging

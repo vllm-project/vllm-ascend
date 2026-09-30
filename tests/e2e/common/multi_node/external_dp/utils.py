@@ -11,12 +11,12 @@ import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
+from tests.e2e.common.multi_node.external_dp.external_dp_config import (
     ROUTING_DISAGGREGATED_PREFILL,
     ExternalDPConfig,
     RankInfo,
 )
-from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
+from tests.e2e.common.multi_node.benchmark_results import (
     build_task_entry,
     extract_hardware,
     filter_environment,
@@ -28,7 +28,7 @@ from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_r
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from tests.e2e.nightly.multi_node.external_dp.scripts.runtime import ServerCommand
+    from tests.e2e.common.multi_node.external_dp.runtime import ServerCommand
 
 SENSITIVE_ENV_TOKENS = ("TOKEN", "SECRET", "PASSWORD", "ACCESS_KEY")
 

@@ -248,8 +248,9 @@ You can run tests with `pytest` as well. Typical examples:
 For running nightly single-node model test cases locally, refer to the following example.
 
 ```bash
+export CONFIG_BASE_PATH=tests/e2e/cases/models/configs/Qwen
 export CONFIG_YAML_PATH=Qwen3-32B.yaml
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/common/single_node/test_single_node.py
 ```
 
 For running nightly multi-node model test cases locally, refer to the `Running Locally` section in [Multi Node Test](./multi_node_test.md).

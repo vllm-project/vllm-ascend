@@ -10,11 +10,11 @@ from tests.e2e.common.kv_pool.config import (
     parse_kv_pool_config,
     validate_kv_pool_config,
 )
-from tests.e2e.nightly.multi_node.scripts.utils import (
+from tests.e2e.common.multi_node.utils import (
     load_yaml_mapping,
     resolve_cluster_ips,
 )
-from tests.e2e.nightly.multi_node.scripts.utils import (
+from tests.e2e.common.multi_node.utils import (
     resolve_current_node_index as resolve_node_index,
 )
 
@@ -227,7 +227,7 @@ class ExternalDPConfigLoader:
     @staticmethod
     def _load_yaml(yaml_path: str | None) -> dict[str, Any]:
         default_config_name = "GLM5_1-W8A8-EP-external.yaml"
-        default_config_base_path = "tests/e2e/nightly/multi_node/external_dp/config/"
+        default_config_base_path = "tests/e2e/cases/models/configs/GLM/"
         return load_yaml_mapping(
             yaml_path,
             default_name=default_config_name,
