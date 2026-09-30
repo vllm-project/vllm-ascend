@@ -24,8 +24,14 @@ def _bind_layer_kv_cache(
     validate and bind them directly.  Canonical tensors, including ordinary
     packed Mamba pages and QSA cache pages, continue through the layer hook.
     """
+    binder = getattr(layer, "bind_kv_cache", None)
+    if not callable(binder):
+        # Legacy Ascend attention layers expose only ``kv_cache``. Preserve
+        # their raw tuple view while newer cache layers use the binding hook.
+        layer.kv_cache = kv_cache
+        return
     if not isinstance(layer, MambaBase) or isinstance(kv_cache, torch.Tensor):
-        layer.bind_kv_cache(kv_cache)  # type: ignore[arg-type]
+        binder(kv_cache)
         return
 
     expected_shapes = tuple(tuple(shape) for shape in layer.get_state_shape())

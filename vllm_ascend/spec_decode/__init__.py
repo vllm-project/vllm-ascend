@@ -43,7 +43,7 @@ from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 
 def _use_qwen4_exp_mtp(speculative_config) -> bool:
     checker = getattr(speculative_config, "use_qwen4_exp_mtp", None)
-    if callable(checker) and checker():
+    if callable(checker) and checker() is True:
         return True
     draft_model_config = getattr(speculative_config, "draft_model_config", None)
     model_architectures = tuple(getattr(draft_model_config, "architectures", ()) or ())

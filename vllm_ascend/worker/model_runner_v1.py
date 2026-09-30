@@ -5109,7 +5109,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             return False
         resolve_layout = getattr(
-            self.vllm_config.cache_config,
+            getattr(self.vllm_config, "cache_config", None),
             "get_resolved_kv_cache_layout",
             None,
         )
