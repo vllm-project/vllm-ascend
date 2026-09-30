@@ -34,7 +34,8 @@ The following table lists individual feature combinations with KVPP. It does not
 | Feature or combination | Support | Conditions and limitations |
 | --- | --- | --- |
 | Eager mode | ✅ Supported | Use `--enforce-eager`. |
-| Graph mode | ❌ Not supported | KVPP currently requires eager mode. |
+| PIECEWISE graph mode | ✅ Supported | Attention and KVPP layer prefetch execute outside the captured model regions. |
+| FULL and FULL_DECODE_ONLY graph modes | ❌ Not supported | KVPP currently supports eager execution or PIECEWISE only. |
 | TP | ✅ Supported | KV caches are assigned by layer within each cache-replica group. |
 | EP | ✅ Supported | Requires an MoE model that supports EP. |
 | PP | ✅ Supported | Each PP stage allocates and broadcasts its caches independently. |
@@ -43,7 +44,9 @@ The following table lists individual feature combinations with KVPP. It does not
 | Asynchronous scheduling | ✅ Supported | Can be combined with KVPP. |
 | LI-C8 and SFA-C8 cache layouts | ✅ Supported | Allocation follows the actual KV cache specifications. |
 | Fixed-step MTP | ✅ Supported | MTP caches are allocated independently and excluded from KVPP layer partitioning. |
-| Variable-step MTP and other speculative decoding methods | ❌ Not supported | Only fixed-step MTP is supported. |
+| DSpark, DFlash, and EAGLE3 | ✅ Supported | Draft caches remain local to the draft's TP configuration and are excluded from target ownership, scratch buffers, and broadcasts. The target must still be a non-hybrid MLA/SFA model. |
+| Dynamic speculative decoding | ✅ Supported | Uses the speculative method's existing runner and attention-backend support; see the runner scope below. |
+| Other speculative decoding methods | ❌ Not supported | KVPP accepts only `mtp`, `dspark`, `dflash`, and `eagle3`. |
 | PCP | ✅ Supported | Requires Model Runner V2; caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
@@ -92,14 +95,28 @@ For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-si
 
 For PP, add `enable_kvpp` to the existing PP launch configuration. Each stage allocates its caches independently. KVPP does not change PP layer partitioning.
 
-Fixed-step MTP can be combined with KVPP, but MTP caches remain independently allocated and are excluded from KVPP layer partitioning. Follow the model-specific configuration requirements for MTP launch arguments.
+### Speculative Decoding
+
+MTP, DSpark, DFlash, and EAGLE3 can be combined with KVPP. KVPP distributes only target caches: draft caches remain independently allocated on every rank participating in the draft model, with their full memory cost included in the worker's cache budget. Draft layers do not use target scratch buffers or layer prefetch hooks. Sharing embeddings or the LM head does not imply sharing KV caches; draft layers that share target KV caches are not supported with KVPP.
+
+Follow the target and draft model's existing launch requirements and use a matching checkpoint pair. For DFlash or EAGLE3, add the corresponding speculative configuration to the eager launch command above:
+
+```bash
+--speculative-config '{"method":"dflash","model":"<matching-draft-model>","num_speculative_tokens":3,"enforce_eager":true}'
+```
+
+Set `method` to `eagle3` for an EAGLE3 draft. The draft may use GQA even when the target uses MLA. The target's auxiliary hidden states follow the existing speculative-decoding path; KVPP cache ownership does not change where target layers execute or where auxiliary outputs are collected.
+
+KVPP does not impose a fixed speculative length. Fixed lengths use the existing Model Runner V1 or V2 implementation. Batch-size-based dynamic K through `num_speculative_tokens_per_batch_size`, including K=0, follows the selected method's existing runner support. Confidence-based verification through `additional_config.dynamic_spec_config` remains a Model Runner V1 feature, and DSpark adaptive verification retains its existing runner and backend requirements. Enabling KVPP does not add a dynamic-decoding implementation to a runner that lacks one. See [Speculative Decoding](speculative_decoding.md#dynamic-speculative-decoding) for these separate dynamic mechanisms.
+
+P-EAGLE, VWN EAGLE3, and DFlash2 retain their existing model-runner and backend requirements. FULL and FULL_DECODE_ONLY remain unsupported with KVPP.
 
 ## Configuration Parameters
 
 | Parameter | Default | Description |
 | --- | --- | --- |
 | `additional_config.enable_kvpp` | `false` | Enables KVPP; the group size follows TP × PCP. |
-| `--enforce-eager` | Not enabled | Required for KVPP; graph execution is not currently supported. |
+| `--enforce-eager` | Not enabled | Selects eager execution. Without it, use `compilation_config.cudagraph_mode="PIECEWISE"`; FULL modes are not supported. |
 
 KVPP broadcasts each full layer once. No broadcast granularity or separate KVPP parallel size needs to be configured.
 
