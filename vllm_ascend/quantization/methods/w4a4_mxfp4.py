@@ -34,7 +34,13 @@ from vllm_ascend.device.mxfp_compat import (
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
+from .base import (
+    AscendLinearScheme,
+    AscendMoEScheme,
+    QuantType,
+    TPWeightGatherSpec,
+    get_moe_num_logical_experts,
+)
 from .registry import register_scheme
 
 
@@ -48,6 +54,15 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
     """
 
     model_dtype = None
+    tp_weight_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale"),
+    )
+    tp_weight_output_gather_specs = (
+        TPWeightGatherSpec("weight", gather_dim=1),
+        TPWeightGatherSpec("weight_scale", gather_dim=1),
+    )
+    supports_tp_weight_switch = True
 
     def __init__(self):
         ensure_mxfp4_linear_available("W4A4_MXFP4 linear quantization")

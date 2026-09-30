@@ -659,8 +659,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
-        torch.distributed.Work | None,
-        list[torch.distributed.Work | None] | None,
     ]:
         result = super()._maybe_store_kvcache_for_c8_n_dsacp(
             k_pe,
