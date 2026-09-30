@@ -1,5 +1,7 @@
 from types import SimpleNamespace
+from unittest.mock import Mock
 
+import pytest
 import torch
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -26,6 +28,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _merge_qsa_composite_groups,
     _prepare_qsa_composite_groups,
 )
+from vllm_ascend.worker import model_runner_v1
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -290,6 +293,33 @@ def test_main_planner_uses_one_shared_backing_geometry() -> None:
     assert all(tensor.layer_stride == layout.slot_backing_size for tensor in role_tensors)
     assert hidden_tensor.layers == ["model.cache_only_layers.0"]
     assert hidden_tensor.size == 98304
+
+
+@pytest.mark.parametrize("kv_transfer_config", [None, SimpleNamespace(kv_connector="MooncakeConnectorV1")])
+def test_six_region_allocation_requires_no_kv_transfer(monkeypatch, kv_transfer_config) -> None:
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    runner.vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+    runner.use_sparse = False
+    runner.use_compress = False
+    runner._get_layer_kv_cache_specs = Mock(return_value={})
+    runner._uses_page_strided_shared_backing = Mock(return_value=False)
+    runner._allocate_int8_cache_tensor = Mock()
+    layout = SimpleNamespace(slot_count=1, slot_backing_size=16, owners=[])
+    monkeypatch.setattr(model_runner_v1, "build_six_region_kv_cache_layout", lambda *args: layout)
+    monkeypatch.setattr(model_runner_v1, "vllm_version_is", lambda version: False)
+    monkeypatch.setattr(model_runner_v1, "get_layerwise_reuse_config", lambda config: None)
+    config = SimpleNamespace(num_blocks=1, kv_cache_groups=[], kv_cache_tensors=[])
+
+    assert runner._allocate_kv_cache_tensors(config) == {}
+
+    if kv_transfer_config is None:
+        assert runner._six_region_kv_cache_layout is layout
+        runner._allocate_int8_cache_tensor.assert_called_once_with(16, 2 * 1024 * 1024)
+    else:
+        assert runner._six_region_kv_cache_layout is None
+        runner._allocate_int8_cache_tensor.assert_not_called()
+    runner._uses_page_strided_shared_backing.assert_not_called()
 
 
 def test_runner_materializes_contiguous_six_region_views() -> None:
