@@ -18,7 +18,7 @@ logger = logging.getLogger("vllm.kv_transfer.layerwise_qos")
 
 def QosPDWritePool(*args, **kwargs):
     """Construct the optional lane pool only for an enabled connector."""
-    from mooncake.qos_pd_lane import QosPDPool
+    from mooncake.qos_pd_lane import QosPDPool  # type: ignore[import-not-found, import-untyped]
 
     class WritePool(QosPDPool):
         def write(self, qos, session, local, remote, sizes):
@@ -102,7 +102,7 @@ class LayerwiseBatch:
 
 
 def group_batches(sender, task, group_idx):
-    batches = {}
+    batches: dict[tuple[int, str], LayerwiseBatch] = {}
     for rid, meta in task.send_request.items():
         qos = sender.qos_policy.select(meta.kv_priority)
         if qos not in meta.remote_qos_te_rpc_ports:

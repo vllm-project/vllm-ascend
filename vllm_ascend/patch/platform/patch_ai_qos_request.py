@@ -34,5 +34,5 @@ def install_request_validation():
                 raise VLLMValidationError(str(exc), parameter=parameter) from exc
         return original(self, params, supported_tasks)
 
-    validate._ascend_ai_qos_validated = True
+    validate._ascend_ai_qos_validated = True  # type: ignore[attr-defined]
     InputProcessor._validate_params = validate

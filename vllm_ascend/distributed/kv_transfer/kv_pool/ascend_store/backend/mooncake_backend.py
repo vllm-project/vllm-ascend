@@ -237,7 +237,7 @@ class MooncakeBackend(Backend):
     def _setup_store(self):
         if self.qos_policy is not None:
             self.set_device()
-            from mooncake.qos_lane import QosStorePool
+            from mooncake.qos_lane import QosStorePool  # type: ignore[import-not-found, import-untyped]
 
             self.qos_pool = QosStorePool(
                 qos_values=self.qos_policy.priority_to_qos.values(),
@@ -466,15 +466,18 @@ class MooncakeBackend(Backend):
         return int(method(keys))
 
     def _transfer_request(self, request_id, priority, operation, keys, addrs, sizes):
-        qos = self.qos_policy.select(priority)
+        policy, pool = self.qos_policy, self.qos_pool
+        if policy is None or pool is None:
+            raise RuntimeError("request KV QoS policy and pool must be initialized")
+        qos = policy.select(priority)
         config = None
         if operation == "put":
             config = self._build_replicate_config()
-        if self.qos_policy.log_enabled:
+        if policy.log_enabled:
             logger.info(
                 "KV_QOS request=%s priority=%d qos=%d op=%s keys=%d", request_id, priority, qos, operation, len(keys)
             )
-        return self.qos_pool.transfer(qos, operation, keys, addrs, sizes, config)
+        return pool.transfer(qos, operation, keys, addrs, sizes, config)
 
     def get_request(self, request_id, priority, keys, addrs, sizes):
         if self.qos_policy is None:

@@ -6,6 +6,7 @@ import os
 import sys
 import threading
 from types import ModuleType, SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -32,12 +33,15 @@ def test_setup_preserves_tenant_device_capacity_and_environment(contribute):
     obj._contribute_memory = contribute
     factory = MagicMock()
     factory.return_value.default_segment = "host:5000"
-    module = ModuleType("mooncake.qos_lane")
+    module: Any = ModuleType("mooncake.qos_lane")
     module.QosStorePool = factory
-    events = []
-    factory.side_effect = lambda **kw: (
-        events.append("factory") or SimpleNamespace(default_segment="host:5000", default_store=object())
-    )
+    events: list[str | tuple[str, int]] = []
+
+    def create_pool(**kw):
+        events.append("factory")
+        return SimpleNamespace(default_segment="host:5000", default_store=object())
+
+    factory.side_effect = create_pool
     before = dict(os.environ)
     with (
         patch.dict(sys.modules, {"mooncake.qos_lane": module}),
@@ -99,8 +103,13 @@ def test_actual_layerwise_multicomponent_descriptors_and_event_order():
             group_rearrange_block_ids=[[5, 8]],
         )
         order = []
+
+        def write(*args):
+            order.append("write")
+            return 0
+
         task.wait_event.synchronize.side_effect = lambda: order.append("sync")
-        sender.engine.batch_transfer_sync_write.side_effect = lambda *a: order.append("write") or 0
+        sender.engine.batch_transfer_sync_write.side_effect = write
         sender.callback_func.side_effect = lambda *a, **k: order.append("done")
         sender.reuse_completion_callback = lambda *a: order.append("reuse")
         sender.send_queue.put(task)
@@ -111,7 +120,7 @@ def test_actual_layerwise_multicomponent_descriptors_and_event_order():
         order.clear()
         sender.qos_policy = KvQosPolicy.from_config(POLICY)
         sender.qos_pool = MagicMock()
-        sender.qos_pool.write.side_effect = lambda *a: order.append("write") or 0
+        sender.qos_pool.write.side_effect = write
         sender.send_queue.put(task)
         sender._handle_request(sender.send_queue.get())
         actual = sender.qos_pool.write.call_args.args

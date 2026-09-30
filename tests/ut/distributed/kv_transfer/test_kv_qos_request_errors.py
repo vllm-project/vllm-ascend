@@ -20,6 +20,7 @@ from http import HTTPStatus
 from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace as NS
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -28,6 +29,7 @@ VLLM = ROOT.parent / "vllm/vllm"
 
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
@@ -55,7 +57,7 @@ class RequestErrors(unittest.TestCase):
         upstream = VLLM
         if not (upstream / "exceptions.py").is_file():
             spec = importlib.util.find_spec("vllm")
-            if spec is None:
+            if spec is None or spec.origin is None:
                 raise RuntimeError("Pinned vLLM source or installation required")
             upstream = Path(spec.origin).parent
         for name in (
@@ -72,14 +74,14 @@ class RequestErrors(unittest.TestCase):
             package = ModuleType(name)
             package.__path__ = []
             sys.modules[name] = package
-        sys.modules["vllm.utils"].random_uuid = lambda: uuid.uuid4().hex
-        logger = ModuleType("vllm.logger")
+        sys.modules["vllm.utils"].__dict__["random_uuid"] = lambda: uuid.uuid4().hex
+        logger: Any = ModuleType("vllm.logger")
         logger.init_logger = lambda name: MagicMock()
         sys.modules[logger.__name__] = logger
         self.errors = load("vllm.exceptions", upstream / "exceptions.py")
         self.engine_errors = load("vllm.v1.engine.exceptions", upstream / "v1/engine/exceptions.py")
         load("vllm.entrypoints.serve.engine.protocol", upstream / "entrypoints/serve/engine/protocol.py")
-        utils = ModuleType("vllm.entrypoints.serve.exception_handling.utils")
+        utils: Any = ModuleType("vllm.entrypoints.serve.exception_handling.utils")
         utils.sanitize_message = lambda message: message
         sys.modules[utils.__name__] = utils
         self.response = load(
@@ -97,6 +99,8 @@ class RequestErrors(unittest.TestCase):
         )
 
         class Input:
+            vllm_config: NS
+
             def __init__(self):
                 self.original_calls = []
                 self.failure = None
@@ -106,12 +110,12 @@ class RequestErrors(unittest.TestCase):
                     raise self.failure
                 self.original_calls.append((params, supported_tasks))
 
-        module = ModuleType("vllm.v1.engine.input_processor")
+        module: Any = ModuleType("vllm.v1.engine.input_processor")
         module.InputProcessor = Input
         sys.modules[module.__name__] = module
         self.hook.install_request_validation()
         self.processor = Input()
-        self.qos = dict(
+        self.qos: Any = dict(
             priority_to_qos={"0": 0, "3": 3, "7": 7},
             default_priority=0,
             level_names=True,
@@ -144,8 +148,8 @@ class RequestErrors(unittest.TestCase):
             "create_streaming_error_response",
             dict(json=json, HTTPStatus=HTTPStatus),
         )
-        self.submitted = []
-        self.closed = []
+        self.submitted: list[str] = []
+        self.closed: list[str] = []
 
         async def add_request(request_id, prompt, params, **kwargs):
             self.processor._validate_params(params, ("generate",))
@@ -159,6 +163,7 @@ class RequestErrors(unittest.TestCase):
         return [output async for output in self.generate(self.engine, {}, params, request_id)]
 
     def test_all_invalid_labels_are_client_errors_before_submission(self):
+        value: object
         for value in (True, 1, 2, -1, 8, "urgent", "", "7", None, [], {}):
             with self.subTest(value=value), self.assertRaises(self.errors.VLLMValidationError) as caught:
                 asyncio.run(self.consume({"kv_priority": value}))
@@ -171,6 +176,7 @@ class RequestErrors(unittest.TestCase):
         self.assertEqual(self.processor.original_calls, [])
 
     def test_non_object_transfer_params_are_client_errors(self):
+        value: object
         for value in (True, [], "high", 7):
             with self.subTest(value=value), self.assertRaises(self.errors.VLLMValidationError) as caught:
                 asyncio.run(self.consume(value))

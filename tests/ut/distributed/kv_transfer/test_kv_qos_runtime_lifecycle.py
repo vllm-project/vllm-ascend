@@ -180,7 +180,7 @@ class ReceiveLifecycle(unittest.TestCase):
 class LayerwiseLifecycle(unittest.TestCase):
     def setUp(self):
         # Execute the real runner ordering with a fake cache and transfer queue.
-        self.events = []
+        self.events: list[str] = []
         upstream = VLLM
         if not (upstream / "distributed/kv_transfer/kv_connector/v1/base.py").is_file():
             spec = importlib.util.find_spec("vllm")

@@ -470,7 +470,7 @@ class LookupKeyServer:
         def process_request():
             while self.running:
                 if getattr(self.pool_worker.m_store, "qos_pool", None) is not None:
-                    if not self.socket.poll(100, zmq.POLLIN):
+                    if not self.socket.poll(100, zmq.POLLIN):  # type: ignore[attr-defined]
                         continue
                 all_frames = self.socket.recv_multipart(copy=False)
                 token_len = int.from_bytes(all_frames[0], byteorder="big")

@@ -258,6 +258,8 @@ class KVCacheTaskTracker:
 
 
 class KVCacheSendingThread(threading.Thread):
+    qos_stop_event: threading.Event
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -348,7 +350,7 @@ class KVCacheSendingThread(threading.Thread):
                 if stop is not None:
                     if stop.is_set():
                         return
-                    if not sock.poll(100, zmq.POLLIN):
+                    if not sock.poll(100, zmq.POLLIN):  # type: ignore[attr-defined]
                         continue
                 frames = sock.recv_multipart()
                 if len(frames) < 2:
@@ -1491,6 +1493,9 @@ class KVCacheRecvingThread(threading.Thread):
         """Choose both local engine and matching remote engine before real READ."""
         if self.qos_policy is None:
             return self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+        pool = self.qos_pool
+        if pool is None:
+            raise RuntimeError("request KV QoS pool must be initialized")
         qos = self.qos_policy.select(req_meta.get("kv_priority"))
         with self.remote_metadata_lock:
             ports = self.remote_qos_te_ports.get(req_meta["remote_engine_id"], {}).get(
@@ -1517,7 +1522,7 @@ class KVCacheRecvingThread(threading.Thread):
                 session,
                 sum(length_list),
             )
-        return self.qos_pool.read(qos, session, src_list, dst_list, length_list)
+        return pool.read(qos, session, src_list, dst_list, length_list)
 
     def _get_remote_metadata(self, remote_host: str, remote_handshake_port: int) -> None:
         """Get the metadata from the remote host."""
@@ -2061,7 +2066,8 @@ class MooncakeConnectorScheduler:
 
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids, full_block_ids, num_external_tokens) in self._reqs_need_recv.items():
-            assert req.kv_transfer_params is not None
+            if req.kv_transfer_params is None:
+                raise ValueError("P/D handoff lost kv_transfer_params")
             if self.qos_policy is not None and "kv_priority" not in req.kv_transfer_params:
                 raise ValueError("P/D handoff lost kv_priority; patched P and proxy are required")
             # For the case where there are no remote blocks to pull
@@ -2202,7 +2208,7 @@ class MooncakeConnectorWorker:
     """Implementation of Worker side methods"""
 
     qos_policy = None
-    qos_pool = None
+    qos_pool: Any | None = None
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         self._get_prefill_decode_size(vllm_config)
@@ -2286,7 +2292,7 @@ class MooncakeConnectorWorker:
             inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
             self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=device_name)
         else:
-            from mooncake.qos_pd_lane import QosPDPool
+            from mooncake.qos_pd_lane import QosPDPool  # type: ignore[import-not-found, import-untyped]
 
             self.qos_pool = QosPDPool(
                 self.side_channel_host,

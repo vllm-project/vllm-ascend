@@ -8,7 +8,9 @@ import queue
 import sys
 import threading
 import unittest
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from types import ModuleType
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
@@ -18,13 +20,14 @@ BASE = ROOT / "vllm_ascend/distributed/kv_transfer"
 
 def load(path, name):
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
 
-def method(path, cls, name, namespace):
+def method(path, cls, name, namespace, optimize=0):
     """Execute a production method unchanged with explicit dependency fixtures."""
     tree = ast.parse(path.read_text())
     node = next(c for c in tree.body if isinstance(c, ast.ClassDef) and c.name == cls)
@@ -32,7 +35,11 @@ def method(path, cls, name, namespace):
     unit = ast.Module(body=[fn], type_ignores=[])
     exec(
         compile(
-            ast.fix_missing_locations(unit), str(path), "exec", flags=__import__("__future__").annotations.compiler_flag
+            ast.fix_missing_locations(unit),
+            str(path),
+            "exec",
+            flags=__import__("__future__").annotations.compiler_flag,
+            optimize=optimize,
         ),
         namespace,
     )
@@ -114,6 +121,7 @@ class MainContracts(unittest.TestCase):
 
     def test_default_does_not_validate_supplied_value_but_validates_object(self):
         p = self.policy.KvQosPolicy.from_config(dict(self.cfg, request_priority=False, default_priority=3))
+        value: object
         for value in [None, {}, True, "not-a-level", 7]:
             self.assertEqual(p.resolve_priority({"kv_priority": value}), 3)
         with self.assertRaises(ValueError):
@@ -207,7 +215,7 @@ class MainContracts(unittest.TestCase):
             self.life.drain_queue(self.sender, self.sender.send_queue, timeout=0)
 
     def test_stop_queue_counts_sentinel_once(self):
-        q = queue.Queue()
+        q: queue.Queue[int | None] = queue.Queue()
 
         def consume():
             while True:
@@ -244,6 +252,76 @@ class MainContracts(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 fn(obj, req, "unused", [100], [200], [10])
         self.assertEqual(obj.qos_pool.read.call_count, 1)
+
+        obj.qos_pool = None
+        obj.engine = Mock()
+        with self.assertRaisesRegex(RuntimeError, "QoS pool must be initialized"):
+            fn(obj, req, "unused", [100], [200], [10])
+        obj.engine.batch_transfer_sync_read.assert_not_called()
+
+    def test_pd_missing_handoff_rejected_with_python_optimization(self):
+        for optimize in (0, 2):
+            metadata = NS(add_new_req=Mock())
+            fn = method(
+                BASE / "kv_p2p/mooncake_connector.py",
+                "MooncakeConnectorScheduler",
+                "build_connector_meta",
+                {"MooncakeConnectorMetadata": Mock(return_value=metadata)},
+                optimize=optimize,
+            )
+            for policy in (None, self.sender.qos_policy):
+                obj = NS(
+                    qos_policy=policy,
+                    _reqs_need_recv={"r": (NS(kv_transfer_params=None), [], [], 1)},
+                )
+                with self.assertRaisesRegex(ValueError, "handoff lost kv_transfer_params"):
+                    fn(obj, NS())
+            metadata.add_new_req.assert_not_called()
+
+    def test_store_uninitialized_qos_rejected_before_transfer(self):
+        fn = method(
+            BASE / "kv_pool/ascend_store/backend/mooncake_backend.py",
+            "MooncakeBackend",
+            "_transfer_request",
+            {"logger": logging.getLogger(__name__)},
+        )
+        pool = NS(transfer=Mock(return_value=[0]))
+        obj = NS(qos_policy=self.sender.qos_policy, qos_pool=pool, _build_replicate_config=Mock())
+        self.assertEqual(fn(obj, "r", 7, "get", ["key"], [[100]], [[10]]), [0])
+        pool.transfer.assert_called_once_with(7, "get", ["key"], [[100]], [[10]], None)
+        for policy, missing_pool in ((None, pool), (self.sender.qos_policy, None)):
+            obj.qos_policy, obj.qos_pool = policy, missing_pool
+            with self.assertRaisesRegex(RuntimeError, "policy and pool must be initialized"):
+                fn(obj, "r", 7, "get", ["key"], [[100]], [[10]])
+        self.assertEqual(pool.transfer.call_count, 1)
+
+    def test_store_metadata_priority_constructor_compatibility(self):
+        path = BASE / "kv_pool/ascend_store/metadata.py"
+        node = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "ReqMeta")
+        module = ModuleType("qos_metadata_roundtrip")
+        module.__dict__.update(dataclass=dataclass, field=field)
+        sys.modules[module.__name__] = module
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
+                str(path),
+                "exec",
+                flags=__import__("__future__").annotations.compiler_flag,
+            ),
+            module.__dict__,
+        )
+        cls = module.__dict__["ReqMeta"]
+        for priority in (None, 0, 3, 7):
+            kwargs = {} if priority is None else {"kv_priority": priority}
+            original = cls("r", 128, [[2, 3]], ["hash"], save_start_token=64, **kwargs)
+            self.assertEqual(original.kv_priority, priority)
+            self.assertEqual(original.req_id, "r")
+            self.assertEqual(original.save_end_token, 128)
+            self.assertEqual(original.target_token_len, 128)
+            self.assertEqual(original.save_start_token, 64)
+            self.assertEqual(original.block_ids_by_group, [[2, 3]])
+            self.assertEqual(original.block_hashes, ["hash"])
+            self.assertEqual(asdict(original)["kv_priority"], priority)
 
     def test_layerwise_peer_metadata_strict(self):
         for ports, version in [

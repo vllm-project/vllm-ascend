@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace as NS
+from typing import Any
 from unittest.mock import patch
 
 BUNDLE = Path(__file__).resolve().parents[4]
@@ -19,6 +20,7 @@ sys.path.insert(0, str(BUNDLE))
 
 def module(path, name):
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     result = importlib.util.module_from_spec(spec)
     sys.modules[name] = result
     spec.loader.exec_module(result)
@@ -91,6 +93,7 @@ class LevelContractTests(unittest.TestCase):
 
     def test_invalid_labels_and_inversions_rejected(self):
         policy = self.apply_config(self.config())
+        value: object
         for value in (None, True, 1, 2, 8, -1, 7.0, "7", "urgent", {}, []):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 policy.request_priority(NS(kv_transfer_params={"kv_priority": value}))
@@ -125,6 +128,7 @@ class LevelContractTests(unittest.TestCase):
         self.assertEqual(encoded["kv_qos"]["priority_to_qos"], {"0": 0, "3": 3, "7": 7})
 
     def test_unimplemented_domains_and_invalid_config_fail_explicitly(self):
+        value: dict[str, Any]
         for value in (
             {"op_submit": {"overrides": {"matmul": "medium"}}},
             {"collective": {}},
@@ -173,16 +177,22 @@ class LevelContractTests(unittest.TestCase):
         exceptions = sys.modules.get("vllm.exceptions")
         if exceptions is None:
             spec = importlib.util.find_spec("vllm")
-            path = Path(spec.origin).with_name("exceptions.py") if spec else BUNDLE.parent / "vllm/vllm/exceptions.py"
+            path = (
+                Path(spec.origin).with_name("exceptions.py")
+                if spec and spec.origin
+                else BUNDLE.parent / "vllm/vllm/exceptions.py"
+            )
             exceptions = module(path, "vllm.exceptions")
         seen = []
 
         class Input:
+            vllm_config: NS
+
             def _validate_params(self, params, supported_tasks):
                 seen.append((params, supported_tasks))
                 return "original"
 
-        fake = ModuleType("vllm.v1.engine.input_processor")
+        fake: Any = ModuleType("vllm.v1.engine.input_processor")
         fake.InputProcessor = Input
         sys.modules[fake.__name__] = fake
         self.request.install_request_validation()

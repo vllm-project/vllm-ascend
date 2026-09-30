@@ -17,6 +17,7 @@ import unittest
 from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace as NS
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -24,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[4]
 
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
@@ -39,17 +41,17 @@ class AscendQosConfigContract(unittest.TestCase):
             module = ModuleType(name)
             module.__path__ = [str(ROOT / "vllm_ascend")] if name == "vllm_ascend" else []
             sys.modules[name] = module
-        logger = ModuleType("vllm.logger")
+        logger: Any = ModuleType("vllm.logger")
         logger.logger = MagicMock()
         sys.modules[logger.__name__] = logger
-        math = ModuleType("vllm.utils.math_utils")
+        math: Any = ModuleType("vllm.utils.math_utils")
         math.cdiv = lambda a, b: -(a // -b)
         sys.modules[math.__name__] = math
-        hardware = ModuleType("vllm_ascend.device.hardware_profile")
+        hardware: Any = ModuleType("vllm_ascend.device.hardware_profile")
         hardware.HardwareCapability = NS(NPUGRAPH_EX="fixture")
         hardware.get_current_hardware_profile = lambda: NS(supports=lambda cap: False)
         sys.modules[hardware.__name__] = hardware
-        utils = ModuleType("vllm_ascend.utils")
+        utils: Any = ModuleType("vllm_ascend.utils")
         utils.clear_enable_sp = lambda: None
         sys.modules[utils.__name__] = utils
 
@@ -145,6 +147,7 @@ class AscendQosConfigContract(unittest.TestCase):
         self.derive.assert_not_called()
 
     def test_invalid_qos_still_rejected(self):
+        invalid: dict[str, Any]
         for invalid in (
             {"kv_transfer": {"default_priority": "urgent"}},
             {"kv_transfer": {"request_priority": "true"}},

@@ -934,7 +934,6 @@ class RequestTracker:
 
 @dataclass(init=False)
 class ReqMeta:
-    kv_priority: int | None = None
     # Request id
     req_id: str
     # End token for full-block KV save.
@@ -944,6 +943,8 @@ class ReqMeta:
     block_ids_by_group: list[list[int]]
 
     block_hashes: list[BlockHash]
+
+    kv_priority: int | None = None
 
     # First token that has not been saved before this metadata was built.
     save_start_token: int = 0
