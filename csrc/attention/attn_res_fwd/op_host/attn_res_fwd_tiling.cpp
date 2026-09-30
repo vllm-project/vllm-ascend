@@ -119,15 +119,16 @@ uint32_t AttnResFwdTiling::CalcMaxResidentRows(uint32_t hiddenSize) const
     if (hiddenSize == 0) {
         return 0;
     }
+    const uint64_t ubAvailBytes = compileInfo_.ubSize != 0 ? compileInfo_.ubSize : UB_AVAIL_BYTES;
     const uint64_t workBytes =
         static_cast<uint64_t>(4U) * hiddenSize * sizeof(float) +
         static_cast<uint64_t>(2U) * hiddenSize * sizeof(uint16_t) + UB_OVERHEAD_BYTES +
         static_cast<uint64_t>(GetMinStagingBytes()) +
         (fuseAdd_ ? static_cast<uint64_t>(hiddenSize) * sizeof(uint16_t) : 0);
-    if (workBytes >= UB_AVAIL_BYTES) {
+    if (workBytes >= ubAvailBytes) {
         return 0;
     }
-    const uint64_t remain = UB_AVAIL_BYTES - workBytes;
+    const uint64_t remain = ubAvailBytes - workBytes;
     const uint64_t perRow = static_cast<uint64_t>(hiddenSize) * sizeof(uint16_t) + sizeof(float);
     return static_cast<uint32_t>(remain / perRow);
 }
