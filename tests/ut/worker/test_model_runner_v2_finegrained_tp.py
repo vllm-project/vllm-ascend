@@ -233,7 +233,7 @@ def test_dummy_lmhead_collective_precedes_eplb(lmhead_enabled, is_profile, skip_
         return hidden_states, hidden_states
 
     with (
-        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_configured", return_value=lmhead_enabled),
+        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=lmhead_enabled),
         patch.object(GPUModelRunner, "_dummy_run", parent_dummy_run),
     ):
         runner._dummy_run(4, uniform_decode=True, is_profile=is_profile, skip_eplb=skip_eplb)
@@ -301,7 +301,7 @@ def _make_speculator(max_num_reqs=8, num_speculative_steps=1):
 
 
 def _spec_lmhead(enabled):
-    return patch("vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_configured", return_value=enabled)
+    return patch("vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable", return_value=enabled)
 
 
 def _call_sample_draft(spec, hidden_states, draft_logits=None):
@@ -373,14 +373,6 @@ def test_speculator_init_validates(draft_method, bypass, argmax, adaptive, match
         _spec_lmhead(True),
     ):
         spec._lmhead_tp_validate_draft_sampling()
-
-
-def test_speculator_validation_without_engine_config_is_noop():
-    # Validation also runs in lightweight harnesses with no engine config;
-    # it must no-op instead of failing on the config read.
-    spec = _make_speculator()
-    spec.speculative_config = SimpleNamespace(draft_sample_method="probabilistic")
-    spec._lmhead_tp_validate_draft_sampling()
 
 
 def test_production_speculators_carry_lmhead_sampling_mixin():

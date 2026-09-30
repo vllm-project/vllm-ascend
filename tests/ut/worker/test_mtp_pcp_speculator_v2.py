@@ -33,6 +33,24 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stub_ascend_config(monkeypatch):
+    # Speculators built through the real __init__ read the global ascend
+    # config during the lmhead TP construction-time validation; the stub
+    # reads as lmhead-off so validation no-ops.
+    from vllm_ascend import ascend_config as _ascend_config_module
+
+    monkeypatch.setattr(
+        _ascend_config_module,
+        "_ASCEND_CONFIG",
+        SimpleNamespace(
+            finegrained_tp_config=SimpleNamespace(lmhead_tensor_parallel_size=0),
+            ascend_compilation_config=object(),
+            eplb_config=object(),
+        ),
+    )
+
+
 def _fake_config_replace(config, **changes):
     values = vars(config).copy()
     values.update(changes)

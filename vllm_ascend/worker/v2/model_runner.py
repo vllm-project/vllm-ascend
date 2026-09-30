@@ -65,7 +65,6 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
-    lmhead_tp_configured,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
@@ -276,7 +275,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def sample_tokens(self, grammar_output):
         if (
-            lmhead_tp_configured()
+            lmhead_tp_enable()
             and self.prompt_logprobs_worker is not None
             and self.prompt_logprobs_worker.uses_prompt_logprobs.any()
         ):
@@ -398,7 +397,7 @@ class NPUModelRunner(GPUModelRunner):
             valid_dummy_state_slots=valid_dummy_state_slots,
         )
         self.model_state.kvpp_is_dummy_run = False
-        if dummy_run and lmhead_tp_configured() and not is_profile and self.is_last_pp_rank:
+        if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
             # lmhead TP: idle ranks never call sample(); join the target head
             # here at capacity, before _dummy_run replays the dummy propose.
             if self.execute_model_state is None:

@@ -908,16 +908,6 @@ def lmhead_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
 
 
-def lmhead_tp_configured() -> bool:
-    """``lmhead_tp_enable()`` that reads an uninitialized engine config as
-    off, so harness hooks that never initialize the config no-op."""
-    try:
-        return lmhead_tp_enable()
-    except RuntimeError:
-        # get_ascend_config() raises before init_ascend_config has run.
-        return False
-
-
 def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
     """Row capacity every rank of the lmhead-TP group must agree on;
     cross-rank drift desyncs the collectives and hangs."""
