@@ -5,7 +5,7 @@
 from collections.abc import Sequence
 
 import torch
-from fla_npu.ops.ascendc import chunk_kda_fwd, recurrent_kda
+from fla_npu.ops.ascendc import chunk_kda_fwd, recurrent_kda  # type: ignore[import-not-found]
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
 KDA_CHUNK_SIZE = 64
