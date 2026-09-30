@@ -12,7 +12,9 @@ from vllm_ascend.utils import enable_custom_op
 CHUNK_SIZE = 64
 
 
-def npu_chunk_gdr_fwd_h(k, w, u, g, initial_state=None, chunk_size=64):
+def npu_chunk_gdr_fwd_h(
+    k, w, u, g, initial_state=None, chunk_size=64, output_final_state=False
+):
     enable_custom_op()
     return torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k,
@@ -20,7 +22,7 @@ def npu_chunk_gdr_fwd_h(k, w, u, g, initial_state=None, chunk_size=64):
         u,
         g=g,
         initial_state=initial_state,
-        output_final_state=False,
+        output_final_state=output_final_state,
         chunk_size=chunk_size,
         save_new_value=True,
     )
@@ -68,6 +70,41 @@ def cosine(a, b):
 
 class TestChunkGatedDeltaRuleFwdH310:
     """chunk_gated_delta_rule_fwd_h kernel correctness on Ascend 310P."""
+
+    @pytest.mark.parametrize("B,HV", [(1, 4), (1, 8), (1, 12), (1, 16), (4, 4)])
+    def test_final_state_decay_across_interleaved_heads(self, B, HV):
+        """The final pipeline drain must preserve every head's g_last."""
+        DTYPE = torch.float16
+        T = K = V = 128
+        init = (
+            (torch.arange(B * HV).reshape(B, HV, 1, 1) + 1)
+            .div(128)
+            .expand(B, HV, K, V)
+            .contiguous()
+            .to(DTYPE)
+        )
+        factors = 1 + (torch.arange(B * HV).reshape(B, HV) % 5).float() / 4
+        g_chunk = (
+            -torch.log(torch.tensor(2.0))
+            * factors[:, :, None, None]
+            * (torch.arange(CHUNK_SIZE) + 1)[None, None, None, :]
+            / CHUNK_SIZE
+        )
+        g = g_chunk.expand(B, HV, 2, CHUNK_SIZE).reshape(B, HV, T).contiguous()
+        zeros = torch.zeros(B, HV, T, K, dtype=DTYPE)
+
+        _, v_new, final_state = npu_chunk_gdr_fwd_h(
+            zeros.npu(),
+            zeros.npu(),
+            zeros.npu(),
+            g.npu(),
+            initial_state=init.npu(),
+            chunk_size=CHUNK_SIZE,
+            output_final_state=True,
+        )
+        expected = init.double() * (2 * g[:, :, -1].double()).exp()[:, :, None, None]
+        assert torch.count_nonzero(v_new.cpu()) == 0
+        assert cosine(final_state.cpu(), expected) >= 0.999999
 
     @pytest.mark.parametrize(
         "B,Hg,HV,T,K,V",
