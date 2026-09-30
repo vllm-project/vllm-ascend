@@ -1041,7 +1041,7 @@ class TestNPUPlatform(TestBase):
         # dispatch/FFN/combine branch, which requires scale-bias tensors.
         fused_input = SimpleNamespace(weights=SimpleNamespace(w1_scale_bias=None, w2_scale_bias=None))
         with (
-            patch("vllm_ascend.ascend_forward_context.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True),
+            patch("vllm_ascend.ascend_forward_context._USE_V2_EXTRA_KWARGS", True),
             patch(
                 "vllm_ascend.ascend_forward_context.get_forward_context",
                 return_value=SimpleNamespace(additional_kwargs=kwargs),
