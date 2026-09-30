@@ -31,6 +31,7 @@ constexpr uint32_t MAX_REPEAT_TIME = 255;
 constexpr uint32_t ADD_FOLD_REDUCE_MIN_K = 128;
 constexpr uint16_t V_LENGTH = VECTOR_REG_WIDTH / sizeof(float);
 constexpr uint16_t TWO_V_LENGTH = 2 * V_LENGTH;
+constexpr uint64_t MAX_INIT_OUTPUT_COUNT = 0xFFFFFFFFULL;
 constexpr uint64_t INVALID_STATE_SLOT = static_cast<uint64_t>(-1);
 
 #ifndef RKDA_ENABLE_ADD_FOLD_REDUCE
@@ -233,6 +234,7 @@ public:
             ReleaseEvents();
             return;
         }
+        ZeroPaddingTail();
         uint64_t vectorCoreNum = GetBlockNum();
         uint64_t taskNum = B_ * NV_;
         for (uint64_t taskIdx = blockIdx; taskIdx < taskNum; taskIdx += vectorCoreNum) {
@@ -262,6 +264,44 @@ public:
     }
 
 private:
+    __aicore__ inline void ZeroPaddingTail()
+    {
+        if (!hasCuSeqlens_ || realV_ == 0) {
+            return;
+        }
+
+        uint64_t validTokenCount = static_cast<uint64_t>(LoadCuSeqlens(B_));
+        if (validTokenCount >= T_) {
+            return;
+        }
+
+        uint64_t coreNum = GetBlockNum();
+        if (coreNum == 0) {
+            return;
+        }
+        // Partition complete V rows so each core owns an aligned, non-overlapping GM range.
+        uint64_t totalRows = (T_ - validTokenCount) * NV_;
+        uint64_t rowsPerCore = totalRows / coreNum + static_cast<uint64_t>(totalRows % coreNum != 0);
+        uint64_t startRow = blockIdx * rowsPerCore;
+        if (startRow >= totalRows) {
+            return;
+        }
+
+        uint64_t remainingRows = totalRows - startRow;
+        if (remainingRows > rowsPerCore) {
+            remainingRows = rowsPerCore;
+        }
+        uint64_t maxRowsPerInit = MAX_INIT_OUTPUT_COUNT / realV_;
+        uint64_t outputOffset = (validTokenCount * NV_ + startRow) * realV_;
+        while (remainingRows > 0) {
+            uint64_t rowsThisInit = remainingRows < maxRowsPerInit ? remainingRows : maxRowsPerInit;
+            uint32_t elementCount = static_cast<uint32_t>(rowsThisInit * realV_);
+            matmul::InitOutput<outType>(attnOutGm_[outputOffset], elementCount, 0);
+            outputOffset += elementCount;
+            remainingRows -= rowsThisInit;
+        }
+    }
+
     __aicore__ inline bool ValidateCuSeqlens() const
     {
         if (!hasCuSeqlens_) {
