@@ -30,7 +30,7 @@ patches inside the child process before any ``EngineCore`` is instantiated.
 """
 
 from vllm.logger import logger
-from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.engine.core import EngineCore
 
 _profiling_patches_applied = False
 _original_update_from_output = None
@@ -62,7 +62,7 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
         try:
             from vllm_ascend.ascend_config import get_ascend_config
 
-            get_ascend_config().profiling_chunk_config.need_timing = False
+            get_ascend_config().scheduler_config.profiling_chunk_config.need_timing = False
         except RuntimeError:
             pass
         # Mark the scheduler so that the next scheduler_output carries
@@ -167,8 +167,8 @@ def _ensure_schedule_wrapped(scheduler):
     cls = type(scheduler)
     _original_schedule = cls.schedule
 
-    def _wrapped_schedule(self):
-        output = _original_schedule(self)
+    def _wrapped_schedule(self, throttle_prefills: bool = False):
+        output = _original_schedule(self, throttle_prefills)
         if getattr(self, "_profiling_timing_done", False) and output is not None:
             output.disable_profiling_timing = True
         return output
@@ -212,18 +212,4 @@ def _apply_profiling_patches():
 # ---------------------------------------------------------------------------
 _apply_profiling_patches()
 
-# ---------------------------------------------------------------------------
-# 2. Wrap EngineCoreProc.run_engine_core so that spawned subprocesses
-#    re-apply the patches.  When the child unpickles this wrapper it
-#    imports this module, which triggers _apply_profiling_patches() above,
-#    ensuring EngineCore.__init__ is patched before any instance is created.
-# ---------------------------------------------------------------------------
-_original_run_engine_core = EngineCoreProc.run_engine_core
-
-
-def _patched_run_engine_core(*args, **kwargs):
-    _apply_profiling_patches()
-    return _original_run_engine_core(*args, **kwargs)
-
-
-EngineCoreProc.run_engine_core = _patched_run_engine_core
+# The patch for engine core has been moved to patch_engine_core.py

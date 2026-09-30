@@ -1,3 +1,6 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
@@ -15,7 +18,7 @@ Prerequisites:
 
     $ VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6b \
         --enforce-eager \
-        --weight-transfer-config '{"backend": "nccl"}' \
+        --weight-transfer-config '{"backend": "hccl"}' \
         --load-format dummy
 
     Then run this script:
@@ -33,6 +36,8 @@ The example performs the following steps:
 * Generate text again to show normal output after the weight update.
 """
 
+import logging
+
 import requests
 import torch
 from openai import OpenAI
@@ -43,6 +48,8 @@ from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLTrainerSendWeightsArgs,
     HCCLWeightTransferEngine,
 )
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "http://localhost:8000"
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -107,15 +114,14 @@ def update_weights(
     response.raise_for_status()
 
 
-def start_weight_update(base_url: str, is_checkpoint_format: bool = True) -> None:
+def start_weight_update(base_url: str) -> None:
     """Start weight update via HTTP endpoint.
 
     Prepares the model for layerwise reload on the vLLM server side.
     Must be called before update_weights.
     """
     url = f"{base_url}/start_weight_update"
-    payload = {"is_checkpoint_format": is_checkpoint_format}
-    response = requests.post(url, json=payload, timeout=60)
+    response = requests.post(url, timeout=60)
     response.raise_for_status()
 
 
@@ -153,6 +159,10 @@ def get_world_size(base_url: str) -> int:
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
     # Get the inference world size from the vLLM server
     inference_world_size = get_world_size(BASE_URL)
     world_size = inference_world_size + 1  # +1 for the trainer
@@ -160,7 +170,7 @@ def main():
     torch.accelerator.set_device_index(device)
 
     # Load the training model
-    print(f"Loading training model: {MODEL_NAME}")
+    logger.info("Loading training model: %s", MODEL_NAME)
     train_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16)
     train_model.to(device)
 
@@ -180,13 +190,13 @@ def main():
 
     # Generate text before weight update. The output is expected to be nonsense
     # because the server is initialized with dummy weights.
-    print("-" * 50)
-    print("Generating text BEFORE weight update (expect nonsense):")
-    print("-" * 50)
+    logger.info("-" * 50)
+    logger.info("Generating text BEFORE weight update (expect nonsense):")
+    logger.info("-" * 50)
     outputs = generate_completions(client, MODEL_NAME, prompts)
     for prompt, generated_text in zip(prompts, outputs):
-        print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
-        print("-" * 50)
+        logger.info("Prompt: %r\nGenerated text: %r", prompt, generated_text)
+        logger.info("-" * 50)
 
     # Set up the communication channel between the training process and the
     # vLLM server. The trainer is rank 0, vLLM worker(s) start at rank_offset.
@@ -194,7 +204,7 @@ def main():
     master_port = get_open_port()
     rank_offset = 1
 
-    print(f"Initializing weight transfer: master={master_address}:{master_port}")
+    logger.info("Initializing weight transfer: master=%s:%s", master_address, master_port)
 
     # Initialize weight transfer on vLLM server (this is async, server will
     # wait for HCCL connection)
@@ -241,8 +251,10 @@ def main():
     # Size the packed buffer to fit the largest tensor with 128 MB headroom,
     # but keep the default 1 GB when the largest tensor is smaller than that.
     packed_buffer_size_bytes = max(max_tensor_bytes + 128 * 2**20, 2**30)
-    print(
-        f"Largest tensor: {max_tensor_bytes / 2**30:.2f} GiB, packed buffer: {packed_buffer_size_bytes / 2**30:.2f} GiB"
+    logger.info(
+        "Largest tensor: %.2f GiB, packed buffer: %.2f GiB",
+        max_tensor_bytes / 2**30,
+        packed_buffer_size_bytes / 2**30,
     )
 
     # Start the update_weights call in a separate thread since it will block
@@ -255,7 +267,7 @@ def main():
     update_thread.start()
 
     # Broadcast all weights from trainer to vLLM workers
-    print("Broadcasting weights via HCCL...")
+    logger.info("Broadcasting weights via HCCL...")
     trainer_args = HCCLTrainerSendWeightsArgs(
         group=model_update_group,
         packed=True,
@@ -277,13 +289,13 @@ def main():
 
     # Generate text after weight update. The output is expected to be normal
     # because the real weights are now loaded.
-    print("-" * 50)
-    print("Generating text AFTER weight update:")
-    print("-" * 50)
+    logger.info("-" * 50)
+    logger.info("Generating text AFTER weight update:")
+    logger.info("-" * 50)
     outputs_updated = generate_completions(client, MODEL_NAME, prompts)
     for prompt, generated_text in zip(prompts, outputs_updated):
-        print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
-        print("-" * 50)
+        logger.info("Prompt: %r\nGenerated text: %r", prompt, generated_text)
+        logger.info("-" * 50)
 
 
 if __name__ == "__main__":

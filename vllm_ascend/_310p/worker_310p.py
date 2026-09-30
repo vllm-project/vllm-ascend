@@ -15,7 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 import gc
-import subprocess
 
 import psutil
 import torch
@@ -24,36 +23,48 @@ from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
+from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 
+from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
+from vllm_ascend.utils import is_rc_device
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
-
-_IS_RC_DEVICE: bool | None = None
-
-
-def _is_rc_device() -> bool:
-    global _IS_RC_DEVICE
-    if _IS_RC_DEVICE is None:
-        try:
-            # Use lspci to detect if the device is in RC mode.
-            # In EP mode, "accelerators" typically appears in the output.
-            result = subprocess.run(["lspci"], capture_output=True, text=True, check=True)
-            _IS_RC_DEVICE = not any("accelerators" in line.strip() for line in result.stdout.splitlines())
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            # Fallback to False if lspci is unavailable or fails.
-            _IS_RC_DEVICE = False
-    return _IS_RC_DEVICE
 
 
 class NPUWorker310(NPUWorker):
+    def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
+        kv_cache_spec = self.get_kv_cache_spec()
+        layout_resolver = getattr(self.vllm_config.cache_config, "get_resolved_kv_cache_layout", None)
+        if isinstance(kv_cache_spec, dict) and callable(layout_resolver):
+            groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+            share_slots = get_310p_shared_cache_slots(groups, layout_resolver()) if groups else {}
+        else:
+            share_slots = {}
+        if share_slots:
+            # Both 310P runners alias compatible Mamba groups at each slot,
+            # matching the v0.28 shared_by allocation.
+            logger.info_once("310P reuses uniform KV cache group slots without extra budget scaling.", scope="local")
+            return available_memory
+        return super()._scale_kv_cache_memory_for_multi_group(available_memory)
+
+    def _create_model_runner(self):
+        if self.use_v2_model_runner:
+            from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
+
+            model_runner = NPUModelRunner310V2(self.vllm_config, self.device)
+            logger.info_once("Using NPUWorker310 and NPUModelRunner310V2.")
+            return model_runner
+
+        model_runner = NPUModelRunner310(self.vllm_config, self.device)
+        logger.info_once("Using NPUWorker310 and NPUModelRunner310.")
+        return model_runner
+
     def init_device(self):
         self.device = self._init_device()
         torch_npu.npu.set_compile_mode(jit_compile=False)
 
         init_workspace_manager(self.device, num_ubatches=1)
-
-        self.model_runner = NPUModelRunner310(self.vllm_config, self.device)
-        logger.info_once("Using NPUWorker310 and NPUModelRunner310.")
+        self.model_runner = self._create_model_runner()
 
     def save_sharded_state(
         self,
@@ -96,7 +107,7 @@ class NPUWorker310(NPUWorker):
             free_memory, total_memory = torch.npu.mem_get_info()
             # The host memory or device memory for RC devices refers to the available portion of memory
             # which cannot be obtained via torch.npu.mem_get_info()
-            if _is_rc_device():
+            if is_rc_device():
                 free_memory = psutil.virtual_memory().available
             torch_memory = torch.npu.memory_reserved()
             non_torch_memory_before_empty_cache = total_memory - free_memory - torch_memory
@@ -122,12 +133,17 @@ class NPUWorker310(NPUWorker):
         # Therefore, the space available for allocating KV cache and Mamba cache needs to be calculated
         # based on the already occupied space of the system memory.
 
-        if _is_rc_device():
-            self.available_kv_cache_memory_bytes = (self.requested_memory - psutil.virtual_memory().used) // 2
+        if is_rc_device():
+            vm = psutil.virtual_memory()
+            self.available_kv_cache_memory_bytes = (self.requested_memory - (vm.total - vm.available)) // 2
         else:
             self.available_kv_cache_memory_bytes = (
                 self.requested_memory - profile_result.non_kv_cache_memory - non_torch_memory_cleared_by_empty_cache
             ) // 2
+
+        self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
+            self.available_kv_cache_memory_bytes,
+        )
 
         logger.debug(profile_result)
         logger.info_once(
@@ -153,9 +169,9 @@ class NPUWorker310(NPUWorker):
         torch.npu.empty_cache()
 
         # take current memory snapshot
-        self.init_snapshot = MemorySnapshot()
+        self.init_snapshot = MemorySnapshot(device=device)
         self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
-        if _is_rc_device():
+        if is_rc_device():
             self.init_snapshot.free_memory = psutil.virtual_memory().available
             logger.info_once("Root Complex (RC) mode: host and device memory are shared.")
         if self.init_snapshot.free_memory < self.requested_memory:

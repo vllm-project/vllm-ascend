@@ -24,6 +24,26 @@ events, actual dummy slots/batch state and selected cache differences. An
 external investigation relates these to the response and tests a write mask.
 It does not require cosine calculations or a built-in response detector.
 
+## Reuse of upstream facilities
+
+Cache store, removal and clear events come from upstream `KVCacheManager.take_events()`.
+The observer records a metadata copy using the existing msgspec serializer and
+returns the original list and event objects to the scheduler's existing publisher.
+It neither drains the queue separately nor adds another publisher, hash-state
+machine or cache eviction/reset hook. Prompt `token_ids` and `extra_keys` are
+omitted from the trace copy; the original published events remain unchanged.
+
+Enable native KV events through vLLM's existing `--kv-events-config` option when
+this history is needed. The trace does not change that configuration; its
+`trace.capability` event reports whether the source is supported and enabled.
+Native events are hash-level metadata under `cache.native_event.native_event`;
+they do not supply physical block IDs or allocation epochs.
+
+The additional allocator/request observer supplies those missing physical
+identities and forward associations. It uses the existing scheduler output and
+MessageQueue transport, actual worker block tables and Mooncake metadata.
+Upstream metrics, profiler, request sampling and cache policies are retained.
+
 ## Initial P0 implementation
 
 This branch adds allocator generations, scheduler-to-worker context, and log
@@ -106,7 +126,8 @@ Event/byte budgets stop the writer rather than silently overwriting its history.
 | --- | --- | --- |
 | Cache layout | `cache.config` | Scheduler cache manager, all KV groups. |
 | Recording scope | `trace.manifest`, `trace.stop` | Installed package versions, loaded module paths, capabilities, and normal writer closure. |
-| Allocator identity | `pool.baseline`, `block.alloc`, `block.ref_change`, `block.evict`, `cache.reset` | Actual BlockPool methods; a unique pool ID and allocation generation independent of request leases. |
+| Allocator identity | `pool.baseline`, `block.alloc`, `block.ref_change` | Actual BlockPool allocation/reference methods; a unique pool ID and allocation generation independent of request leases. |
+| Native cache events | `cache.native_event` | Upstream `BlockStored`, `BlockRemoved`, `AllBlocksCleared`, when enabled through vLLM's existing KV events configuration. |
 | Schedule correlation | `schedule.dispatch`, `schedule.received`, `schedule.apply`, `mapping.mismatch` | Scheduler message, host-side application and request block-ID comparison. Not a device/kernel mapping check. |
 | Prefix cache lookup | `cache.lookup` | Matched block IDs and token count. |
 | Ownership and reuse | `block.acquire`, `block.release`, `request.blocks` | KVCacheManager allocation, cache, and free boundaries. Includes owners, reference count, and lease. |

@@ -204,6 +204,8 @@ struct RunInfo {
     int32_t oriWinLeft; \
     int32_t oriWinRight; \
     uint32_t sparseBlockSize; \
+    bool hasOriSparseIndices; \
+    uint32_t oriSparseIndexWidth; \
     uint32_t cmpRatio; \
     float softmaxScale; \
     uint32_t oriKvStride; \
@@ -240,6 +242,8 @@ struct RunInfo {
     uint32_t cmpMaxBlockNumPerBatch; \
     uint32_t oriKvStride; \
     uint32_t cmpKvStride; \
+    uint32_t hasOriSparseIndices : 1; \
+    uint32_t oriSparseIndexWidth; \
 
 
 struct ConstInfo{

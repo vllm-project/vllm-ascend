@@ -2,6 +2,7 @@ test_name: "multi-node-glm-5.1-w8a8-ep-external-dp"
 model: "Eco-Tech/GLM-5.1-w8a8"
 num_nodes: 4
 npu_per_node: 16
+dp_load_balancing: external
 
 special_dependencies:
   transformers: "5.2.0"
@@ -62,11 +63,10 @@ env_common: &env_common
   ACL_OP_INIT_MODE: "1"
   ASCEND_A3_ENABLE: "1"
   VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
-  VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+  VLLM_ENGINE_READY_TIMEOUT_S: "3000"
   HCCL_CONNECT_TIMEOUT: "1200"
   HCCL_INTRA_PCIE_ENABLE: "1"
   HCCL_INTRA_ROCE_ENABLE: "0"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
 
 
@@ -74,7 +74,6 @@ templates:
   - node_index: 0
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -100,7 +99,7 @@ templates:
       - --max-model-len
       - "131072"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -135,7 +134,6 @@ templates:
   - node_index: 1
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -161,7 +159,7 @@ templates:
       - --max-model-len
       - "131072"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -196,7 +194,6 @@ templates:
   - node_index: 2
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
       TASK_QUEUE_ENABLE: "1"
     server_cmd_template:
       - --host
@@ -225,7 +222,7 @@ templates:
       - --max-num-batched-tokens
       - "32"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1,"enable_mlapo":true}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -260,7 +257,6 @@ templates:
   - node_index: 3
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
       TASK_QUEUE_ENABLE: "1"
     server_cmd_template:
       - --host
@@ -289,7 +285,7 @@ templates:
       - --max-num-batched-tokens
       - "32"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1,"enable_mlapo":true}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code

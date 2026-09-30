@@ -19,6 +19,7 @@ main{max-width:1440px;padding-top:40px}header{padding-bottom:24px}h1{font-size:4
 <p class="lead">记录<strong>哪块数据、归谁使用、经过哪里、在观测窗口内发生了什么</strong>。</p>
 <p class="brief">模块职责：采集 KV 生命周期、映射、搬运和选定窗口差分，提供带依据的关联检索。</p>
 <div class="callout"><p><strong>边界已收敛：</strong>Trace 负责事实采集与关联查询。复读统计、标杆生成、数值诊断、写入屏蔽和因果裁定在模块之外。<a href="kv-block-trace-contract.md">模块契约与验收</a></p></div>
+<div class="callout"><p><strong>复用上游：</strong>缓存存入、移除、清空接入现有 KVEvents，沿用其事件对象和序列化，原 publisher 保持不变；本地仅补物理代次、请求关联和 forward 窗口观测。已同步 main，CPU 回归 80 项通过；历史实机结果对应各报告中的旧镜像适配。</p></div>
 <div class="callout"><p><strong>Case 4 实机已验证：</strong>原镜像基线复读 15/20，观察组复读 4/10；4 次均捕获空 batch dummy 在传输完成后改写 offset 14，请求和 epoch 查询保留全部 8 条 MLA 分量差分。日志尾部缺 stop，完整性检查仍报 incomplete。<a href="kv-block-trace-case4-validation-20260929.md">环境、原始证据与范围</a></p></div>
 <p class="brief"><strong>当前实现：</strong>BlockPool 分配代次、Scheduler→Worker 上下文、host 映射比对、pool/epoch 查询与日志完整性检查。已补充 dummy 访问的关联检索与证据来源。下方状态机、内容校验和根因分析图属于扩展/消费者参考，不作为 trace 模块必须内置的能力。<a href="../source/user_guide/feature_guide/kv_block_trace.md">使用说明</a></p>
 <details class="baseline-summary"><summary>展开版本与参考信息</summary><p class="meta">分支 <code>codex/kv-block-trace-design</code> · 实现基线 <code>a331676c</code><br>上游参考 <code>dc68bd8c4199b00631fe71eb37313f406cc66ac1</code> · 输入 <code>debug_trace.pptx</code>（24 页）。图解基线保留；当前分支已增加 P0 初版实现，CPU 和限定 NPU 验证见使用说明；真实 PD 关联已通过，native 异常与内容覆盖缺口已记录。</p></details>

@@ -53,11 +53,10 @@ jobs:
         id: auth
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ACTOR: ${{ github.event.client_payload.github.payload.comment.user.login }}
+          PR_AUTHOR: ${{ github.event.client_payload.pull_request.user.login }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
         run: |
-          ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
-          PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-
           if [ "$ACTOR" = "$PR_AUTHOR" ]; then
             echo "User $ACTOR is the PR author, authorized."
             echo "authorized=true" >> "$GITHUB_OUTPUT"
@@ -94,9 +93,9 @@ jobs:
         id: rerun
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PR_SHA: ${{ github.event.client_payload.pull_request.head.sha }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
         run: |
-          PR_SHA='${{ github.event.client_payload.pull_request.head.sha }}'
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
 
           # Get all workflow runs for this SHA, sorted by newest first.
           RUNS=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -115,12 +114,13 @@ jobs:
 
           # Dedup: keep only the latest run per workflow name (by run ID)
           CANDIDATE_RUNS=$(echo "$RUNS" | jq -r '
-            [.workflow_runs[] | {id: .id, name: .name, status: .status, conclusion: .conclusion}] |
+            [.workflow_runs[] | {id: .id, name: .name, status: .status, conclusion: .conclusion, event: .event}] |
             group_by(.name) |
             map(max_by(.id)) |
-            .[] | "\(.id)|\(.name)|\(.status)|\(.conclusion // "null")"')
+            .[] | "\(.id)|\(.name)|\(.status)|\(.conclusion // "null")|\(.event)"')
 
-          RERUNNED=""
+          RERUNNED_FAILED=""
+          RERUNNED_FULL=""
           FAILED=""
           RERUN_COUNT=0
 
@@ -130,6 +130,7 @@ jobs:
             RUN_NAME=$(echo "$RUN" | cut -d'|' -f2)
             STATUS=$(echo "$RUN" | cut -d'|' -f3)
             CONCLUSION=$(echo "$RUN" | cut -d'|' -f4)
+            EVENT=$(echo "$RUN" | cut -d'|' -f5)
 
             if [ "$STATUS" != "completed" ]; then
               echo "Skipping $RUN_NAME (ID: $RUN_ID) - still in progress."
@@ -137,43 +138,70 @@ jobs:
               continue
             fi
 
-            if [ "$CONCLUSION" != "failure" ]; then
-              echo "Skipping $RUN_NAME (ID: $RUN_ID) - conclusion is '$CONCLUSION'."
+            if [ "$EVENT" = "workflow_call" ]; then
+              echo "Skipping $RUN_NAME (ID: $RUN_ID) - reusable workflow run, rerun handled via caller job."
               continue
             fi
 
-            echo "Re-running failed jobs in $RUN_NAME (ID: $RUN_ID)..."
+            case "$CONCLUSION" in
+              failure|cancelled|timed_out|startup_failure|action_required)
+                ;;
+              *)
+                echo "Skipping $RUN_NAME (ID: $RUN_ID) - conclusion is '$CONCLUSION'."
+                continue
+                ;;
+            esac
+
+            echo "Attempting to re-run failed jobs in $RUN_NAME (ID: $RUN_ID)..."
             HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
               "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs")
+
             if [ "$HTTP_CODE" = "201" ]; then
-              echo "  -> Success."
-              RERUNNED="${RERUNNED}"$'\n'"- $RUN_NAME"
+              echo "  -> Re-run failed jobs accepted."
+              RERUNNED_FAILED="${RERUNNED_FAILED}"$'\n'"- $RUN_NAME"
               RERUN_COUNT=$((RERUN_COUNT + 1))
             else
-              echo "  -> Failed (HTTP $HTTP_CODE)."
-              FAILED="${FAILED}"$'\n'"- $RUN_NAME: API returned HTTP $HTTP_CODE"
+              echo "  -> Re-run failed jobs returned HTTP $HTTP_CODE, falling back to full rerun..."
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/rerun")
+
+              if [ "$HTTP_CODE" = "201" ]; then
+                echo "  -> Full rerun accepted."
+                RERUNNED_FULL="${RERUNNED_FULL}"$'\n'"- $RUN_NAME"
+                RERUN_COUNT=$((RERUN_COUNT + 1))
+              else
+                echo "  -> Full rerun failed (HTTP $HTTP_CODE)."
+                FAILED="${FAILED}"$'\n'"- $RUN_NAME: API returned HTTP $HTTP_CODE"
+              fi
             fi
           done <<< "$CANDIDATE_RUNS"
 
           # Build comment body
           {
             echo "comment_body<<CMTEOF"
-            if [ -n "$RERUNNED" ]; then
+            if [ -n "$RERUNNED_FAILED" ] || [ -n "$RERUNNED_FULL" ]; then
               echo "[Bot]: rerun completed."
               echo ""
-              echo "**Rerun:**$RERUNNED"
-              echo ""
+              if [ -n "$RERUNNED_FAILED" ]; then
+                echo "**Rerun (failed jobs only):**$RERUNNED_FAILED"
+                echo ""
+              fi
+              if [ -n "$RERUNNED_FULL" ]; then
+                echo "**Rerun (full workflow):**$RERUNNED_FULL"
+                echo ""
+              fi
             fi
             if [ -n "$FAILED" ]; then
-              if [ -z "$RERUNNED" ]; then
+              if [ -z "$RERUNNED_FAILED" ] && [ -z "$RERUNNED_FULL" ]; then
                 echo "[Bot]: rerun completed."
                 echo ""
               fi
               echo "**Failed:**$FAILED"
               echo ""
             fi
-            if [ -z "$RERUNNED" ] && [ -z "$FAILED" ]; then
+            if [ -z "$RERUNNED_FAILED" ] && [ -z "$RERUNNED_FULL" ] && [ -z "$FAILED" ]; then
               echo "[Bot]: rerun completed. No failed jobs found."
             fi
             echo "CMTEOF"

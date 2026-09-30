@@ -13,7 +13,8 @@ from typing import Any
 class PoolTrace:
     """Allocator identities, independent of request leases and cache contents."""
 
-    METHODS = ("get_new_blocks", "touch", "free_blocks", "_maybe_evict_cached_block", "reset_prefix_cache")
+    # Hash-level eviction/reset events already belong to upstream KVEvents.
+    METHODS = ("get_new_blocks", "touch", "free_blocks")
 
     def __init__(self, pool: Any, trace: Any):
         self.pool = pool
@@ -66,18 +67,20 @@ class PoolTrace:
                         self.epochs[block.block_id] = self.counters[block.block_id]
                         self.trace.emit("block.alloc", **self.reference(block.block_id), ref_count=block.ref_cnt)
                 elif blocks is not None:
-                    for block_id in dict.fromkeys(b.block_id for b in blocks if b.block_id != self.null_id):
+                    # Upstream routes foreign blocks to their owning pool. Its
+                    # observer records that ref change under the correct pool ID.
+                    local_ids = (
+                        b.block_id
+                        for b in blocks
+                        if b.block_id != self.null_id and getattr(b, "pool", None) in (None, self.pool)
+                    )
+                    for block_id in dict.fromkeys(local_ids):
                         self.trace.emit(
                             "block.ref_change",
                             **self.reference(block_id),
                             action=name,
                             ref_count=self.pool.blocks[block_id].ref_cnt,
                         )
-                elif name == "_maybe_evict_cached_block" and result:
-                    block = args[0] if args else kwargs["block"]
-                    self.trace.emit("block.evict", **self.reference(block.block_id), reason="cache_binding_removed")
-                elif name == "reset_prefix_cache":
-                    self.trace.emit("cache.reset", pool_id=self.pool_id, success=bool(result))
             except Exception:
                 self.epochs[:] = [None] * len(self.epochs)
                 self.trace.emit("trace.observation_error", stage=name, pool_id=self.pool_id)
@@ -197,7 +200,9 @@ class ManagerTrace:
                 return result
             try:
                 if name == "get_computed_blocks":
-                    blocks, num_tokens = result
+                    # Upstream also returns a sparse-prefix boundary. Preserve
+                    # that value for the caller; the first two fields describe hits.
+                    blocks, num_tokens = result[:2]
                     self.trace.emit(
                         "cache.lookup",
                         request_id=request.request_id,
@@ -219,6 +224,44 @@ class ManagerTrace:
             return result
 
         setattr(self.manager, name, observed)
+
+    def observe_native_events(self) -> None:
+        """Copy upstream's drained KVEvents without consuming or replacing them."""
+        original = getattr(self.manager, "take_events", None)
+        self.trace.emit(
+            "trace.capability",
+            capability="native_kv_events",
+            supported=callable(original),
+            enabled=bool(getattr(self.manager, "enable_kv_cache_events", False)),
+            source_component="KVCacheManager.take_events",
+        )
+        if not callable(original):
+            return
+
+        @functools.wraps(original)
+        def observed(*args, **kwargs):
+            events = original(*args, **kwargs)
+            if not self.trace.enabled or not events:
+                return events
+            try:
+                # KVEvents are msgspec structs; reuse their serializer and tags.
+                # Import only when upstream actually emits events.
+                import msgspec
+
+                for event in events:
+                    if not self.trace.enabled:
+                        break
+                    payload = msgspec.to_builtins(event)
+                    # This trace needs cache identity/metadata, not prompt data.
+                    payload.pop("token_ids", None)
+                    payload.pop("extra_keys", None)
+                    self.trace.emit("cache.native_event", native_event=payload, source_component="KVCacheManager")
+            except Exception:
+                self.trace.emit("trace.observation_error", stage="native_kv_events")
+                logging.getLogger(__name__).exception("KV trace could not observe upstream KVEvents")
+            return events
+
+        self.manager.take_events = observed
 
     def wrap_schedule(self, scheduler: Any) -> None:
         # Resolve the bound override, not just Scheduler.schedule: this also
@@ -285,6 +328,7 @@ def attach_manager_trace(manager: Any, trace: Any) -> None:
     manager._ascend_kv_trace = observer
     for name in ("allocate_slots", "free", "cache_blocks", "get_computed_blocks"):
         observer.wrap(name)
+    observer.observe_native_events()
     trace.emit(
         "cache.config",
         num_blocks=len(manager.block_pool.blocks),

@@ -29,56 +29,336 @@ on:
         type: string
         default: 'main'
         description: "Branch/ref to checkout"
+      base_image_branch:
+        required: false
+        type: string
+        default: ''
+        description: "Branch used to resolve the base image tag (nightly-<branch>). Defaults to vllm_ascend_branch. For PR verification builds, set to the target branch instead of the head SHA."
+      build_type:
+        required: false
+        type: string
+        default: 'release'
+        description: "Build type: 'daily' or 'release'. Daily uses swr_registry base image."
+      swr_registry:
+        required: false
+        type: string
+        default: 'swr.cn-north-12.myhuaweicloud.com'
+        description: 'SWR registry domain'
+      cann_version:
+        required: false
+        type: string
+        default: '9.1.0_20260731131545'
+        description: "CANN version for base image tag"
+      base_image_date:
+        required: false
+        type: string
+        default: 'auto'
+        description: "Base image date (YYYYMMDD). 'auto' to auto-detect latest available, or specify a custom date."
+      should_push:
+        required: false
+        type: boolean
+        default: false
+        description: "If true, login to SWR and push built images. Set to false for PR verification builds."
+      cann_swr_url:
+        required: false
+        type: string
+        default: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann'
+        description: "CANN base image URL (SWR registry) for the job container"
+      cann_image_version:
+        required: false
+        type: string
+        default: '9.1.0'
+        description: "CANN version for the job container image tag"
+      soc:
+        required: false
+        type: string
+        default: '910b'
+        description: "Ascend SoC type for the job container image tag (e.g. 910b, a3, 310p, 950)"
     secrets:
-      HW_USERNAME:
+      SWR_USERNAME:
         required: false
-      HW_TOKEN:
+      SWR_PASSWORD:
         required: false
-      GITEE_TOKEN:
+      SYNC_TOOLS_TOKEN:
         required: false
 
 jobs:
+  generate-matrix:
+    runs-on: linux-amd64-cpu-2-hk
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          if [ "${{ inputs.build_type }}" = "daily" ]; then
+            MATRIX='{"include":[{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"ubuntu"},{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"openeuler"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"openeuler"}]}'
+          else
+            MATRIX='{"include":[{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"}]}'
+          fi
+          echo "matrix=${MATRIX}" >> $GITHUB_OUTPUT
+
   build:
-    name: Build nightly-${{ inputs.target }} image
-    runs-on: ubuntu-22.04-arm
+    needs: generate-matrix
+    name: Build nightly-${{ inputs.target }}-${{ matrix.os }}-${{ matrix.arch_name }}
+    runs-on: ${{ matrix.arch_runner }}
+    container:
+      image: ${{ format('{0}:{1}-{2}-ubuntu22.04-py3.12', inputs.cann_swr_url, inputs.cann_image_version, inputs.soc) }}
+      env:
+        SOC: ${{ inputs.soc }}
+    strategy:
+      matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
+    outputs:
+      swr_registry: ${{ steps.build.outputs.swr_registry }}
+      swr_temp_registry: ${{ steps.build.outputs.swr_temp_registry }}
+      tag_prefix: ${{ steps.build.outputs.tag_prefix }}
+      full_tag: ${{ steps.build.outputs.full_tag }}
+      build_type: ${{ steps.build.outputs.build_type }}
+      swr_logged_in: ${{ steps.build.outputs.swr_logged_in }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ inputs.vllm_ascend_branch }}
 
-      - name: Login to Huawei Cloud SWR
+      - name: Login to SWR
         id: login-swr
-        if: ${{ env.HW_USERNAME != '' && env.HW_TOKEN != '' }}
-        env:
-          HW_USERNAME: ${{ secrets.HW_USERNAME }}
-          HW_TOKEN: ${{ secrets.HW_TOKEN }}
-        run: |
-          echo "$HW_TOKEN" | docker login -u "$HW_USERNAME" --password-stdin swr.cn-southwest-2.myhuaweicloud.com
+        if: ${{ inputs.should_push }}
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ inputs.swr_registry }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
 
       - name: Build nightly-${{ inputs.target }} image
-        env:
-          GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        id: build
+        shell: bash
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
-          BRANCH_TAG="${BRANCH_TAG//\//-}"
-          IMAGE="swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${BRANCH_TAG}-${{ inputs.target }}"
-          docker build \
-            --network host \
-            --platform linux/arm64 \
-            -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }} \
-            --build-arg CANN_VERSION="9.0.0" \
-            --build-arg UBUNTU_VERSION="22.04" \
-            --build-arg PYTHON_VERSION="3.12" \
-            --build-arg VLLM_ASCEND_BRANCH="${BRANCH_TAG}" \
-            --build-arg GITEE_USERNAME="${GITEE_USERNAME}" \
-            --build-arg GITEE_TOKEN="${GITEE_TOKEN}" \
-            -t "$IMAGE" .
+          BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
+          BASE_BRANCH_TAG="${{ inputs.base_image_branch }}"
+          if [ -z "$BASE_BRANCH_TAG" ]; then
+            BASE_BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
+          fi
+          BASE_BRANCH_TAG=$(echo "$BASE_BRANCH_TAG" | tr '/' '-')
 
-      - name: Push image to SWR
-        if: ${{ github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
+          if [ "${{ inputs.build_type }}" = "daily" ]; then
+            SWR_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend"
+            SWR_TEMP_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-atlas-temp"
+            TAG_PREFIX="daily"
+            BASE_IMAGE="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend"
+          else
+            SWR_REGISTRY="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend"
+            SWR_TEMP_REGISTRY="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend-temp"
+            TAG_PREFIX="nightly-ci"
+            BASE_IMAGE="${{ inputs.swr_registry }}/ascend/vllm-ascend"
+          fi
+
+          CANN_VERSION_LOWER=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
+          TAG_SUFFIX=""
+          OS_MARK=""
+          if [ "${{ matrix.os }}" = "openeuler" ]; then
+            OS_MARK="-openeuler"
+          fi
+          if [ "${{ inputs.build_type }}" = "daily" ]; then
+            # Resolve the base image date: 'auto' backtracks day-by-day from today to find
+            # the latest date for which the SWR base image exists; otherwise use the
+            # user-supplied date (YYYYMMDD).
+            if [ "${{ inputs.base_image_date }}" = "auto" ] || [ -z "${{ inputs.base_image_date }}" ]; then
+              DATE=""
+              for i in $(seq 0 30); do
+                CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
+                CANDIDATE_TAG="nightly-${BASE_BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
+                if docker buildx imagetools inspect "${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
+                  DATE="$CANDIDATE_DATE"
+                  echo "Found base image date: $DATE (tag: $CANDIDATE_TAG)"
+                  break
+                fi
+                echo "Tag $CANDIDATE_TAG not found, trying previous day..."
+              done
+              if [ -z "$DATE" ]; then
+                echo "ERROR: No base image found in the last 30 days"
+                exit 1
+              fi
+            else
+              DATE="${{ inputs.base_image_date }}"
+            fi
+            TAG_SUFFIX="-cann${CANN_VERSION_LOWER}-${DATE}"
+          fi
+
+          FULL_TAG="${TAG_PREFIX}-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}${TAG_SUFFIX}"
+          if [ "${{ inputs.build_type }}" = "daily" ]; then
+            IMAGE="${SWR_TEMP_REGISTRY}:${FULL_TAG}-${{ matrix.arch_name }}"
+          else
+            IMAGE="${SWR_REGISTRY}:${FULL_TAG}"
+          fi
+
+          BUILD_ARGS=(
+            --platform ${{ matrix.arch_platform }}
+            -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }}
+            --build-arg VLLM_ASCEND_BRANCH="${BASE_BRANCH_TAG}"
+          )
+
+          if [ -n "$TAG_SUFFIX" ]; then
+            BUILD_ARGS+=(--build-arg TAG_SUFFIX="${TAG_SUFFIX}")
+          fi
+
+          if [ -n "$OS_MARK" ]; then
+            BUILD_ARGS+=(--build-arg OS_MARK="${OS_MARK}")
+          fi
+
+          if [ -n "$BASE_IMAGE" ]; then
+            BUILD_ARGS+=(--build-arg BASE_IMAGE="${BASE_IMAGE}")
+          fi
+
+          if [ "${{ inputs.should_push }}" = "true" ]; then
+            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${IMAGE},oci-mediatypes=false,push=true" .
+          else
+            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${IMAGE},oci-mediatypes=false" .
+          fi
+
+          # Export outputs for merge job
+          exec >> $GITHUB_OUTPUT
+          echo "swr_registry=${SWR_REGISTRY}"
+          echo "swr_temp_registry=${SWR_TEMP_REGISTRY}"
+          echo "tag_prefix=${TAG_PREFIX}"
+          echo "full_tag=${FULL_TAG}"
+          echo "build_type=${{ inputs.build_type }}"
+          if [ "${{ inputs.build_type }}" = "daily" ]; then
+            echo "push_registry=${SWR_TEMP_REGISTRY}"
+          else
+            echo "push_registry=${SWR_REGISTRY}"
+          fi
+
+          if [ "${{ github.repository_owner }}" = "vllm-project" ] && [ "${{ steps.login-swr.outcome == 'success' }}" = "true" ]; then
+            echo "swr_logged_in=true"
+          else
+            echo "swr_logged_in=false"
+          fi
+
+      - name: Log image push status
+        if: ${{ inputs.should_push && github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
+        run: |
+          PUSH_REGISTRY="${{ steps.build.outputs.push_registry }}"
+          FULL_TAG="${{ steps.build.outputs.full_tag }}"
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            # release mode: the stable (no-arch) tag was already pushed by the build step.
+            echo "release stable tag pushed by build step: ${PUSH_REGISTRY}:${FULL_TAG}"
+          else
+            # daily mode: arch-suffixed tags were already pushed by the build step.
+            echo "daily arch-suffixed tag pushed by build step: ${PUSH_REGISTRY}:${FULL_TAG}-${{ matrix.arch_name }}"
+          fi
+
+      - name: Push ubuntu arm64 image to release SWR (no arch tag)
+        if: ${{ inputs.should_push && inputs.build_type == 'daily' && matrix.os == 'ubuntu' && matrix.arch_name == 'arm64' && github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
-          BRANCH_TAG="${BRANCH_TAG//\//-}"
-          docker push swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${BRANCH_TAG}-${{ inputs.target }}
+          BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
+          RELEASE_SWR_REGISTRY="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend"
+          RELEASE_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}"
+          # Release copy uses a stable tag without arch info (single-arch arm64 image)
+          RELEASE_IMAGE="${RELEASE_SWR_REGISTRY}:${RELEASE_TAG}"
+          SOURCE_IMAGE="${{ steps.build.outputs.swr_temp_registry }}:${{ steps.build.outputs.full_tag }}-${{ matrix.arch_name }}"
+          docker buildx imagetools create \
+            -t "${RELEASE_IMAGE}" \
+            "${SOURCE_IMAGE}"
+
+  merge-image:
+    name: Merge multi-arch nightly-${{ inputs.target }}
+    runs-on: linux-amd64-cpu-4
+    needs: build
+    # Run even if some matrix instances failed. Each OS variant is merged independently,
+    # only when BOTH arch images exist. Owner gate keeps it disabled in upstream forks.
+    if: ${{ inputs.should_push && always() && github.repository_owner == 'vllm-project' && inputs.build_type == 'daily' }}
+    steps:
+      - name: Login to SWR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ inputs.swr_registry }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
+
+      - name: Create multi-arch manifest
+        run: |
+          # Registry and tag are recomputed here (not from matrix outputs) so merge still
+          # works even when the last-completed matrix instance failed to push.
+          MAIN_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend"
+          TEMP_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-atlas-temp"
+
+          BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
+          BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
+          CANN_VERSION_LOWER=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
+          # Daily tag pattern: daily-<branch>-<target>[-openeuler]-cann<ver>-<date>,
+          # where <date> is the schedule daily base image date. Ubuntu and openeuler
+          # base images may be built on different days, so resolve the date per OS
+          # variant using the same backtracking logic as the build step.
+          BASE_TAG="daily-${BRANCH_TAG}-${{ inputs.target }}"
+
+          MISSING_VARIANT=0
+          MERGED_VARIANT=0
+          for OS_MARK in "" "-openeuler"; do
+            if [ "${{ inputs.base_image_date }}" = "auto" ] || [ -z "${{ inputs.base_image_date }}" ]; then
+              DATE=""
+              for i in $(seq 0 30); do
+                CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
+                CANDIDATE_TAG="nightly-${BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
+                if docker buildx imagetools inspect "${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
+                  DATE="$CANDIDATE_DATE"
+                  break
+                fi
+              done
+            else
+              DATE="${{ inputs.base_image_date }}"
+            fi
+            if [ -z "$DATE" ]; then
+              echo "::warning::Skipping ${OS_MARK:-ubuntu}: no base image date found"
+              MISSING_VARIANT=1
+              continue
+            fi
+
+            TAG="${BASE_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${DATE}"
+            MANIFEST_TAG="${MAIN_REGISTRY}:${TAG}"
+            AMD64_TAG="${TEMP_REGISTRY}:${TAG}-amd64"
+            ARM64_TAG="${TEMP_REGISTRY}:${TAG}-arm64"
+
+            # A variant merges only when BOTH arch images exist in the temp registry.
+            # ubuntu and openeuler are independent: a failure in one does not block the other.
+            if ! docker buildx imagetools inspect "${AMD64_TAG}" >/dev/null 2>&1; then
+              echo "::warning::Skipping ${TAG}: missing ${AMD64_TAG}"
+              MISSING_VARIANT=1
+              continue
+            fi
+            if ! docker buildx imagetools inspect "${ARM64_TAG}" >/dev/null 2>&1; then
+              echo "::warning::Skipping ${TAG}: missing ${ARM64_TAG}"
+              MISSING_VARIANT=1
+              continue
+            fi
+
+            echo "Creating multi-arch manifest: ${MANIFEST_TAG}"
+            docker buildx imagetools create \
+              -t "${MANIFEST_TAG}" \
+              "${AMD64_TAG}" \
+              "${ARM64_TAG}"
+            MERGED_VARIANT=1
+          done
+
+          # No variant merged at all -> fail loudly so the job is not silently green.
+          if [ "${MERGED_VARIANT}" = "0" ]; then
+            echo "::error::No variant could be merged; all arch images are missing."
+            exit 1
+          fi
+          # At least one variant merged, others skipped -> surface a warning.
+          if [ "${MISSING_VARIANT}" = "1" ]; then
+            echo "::warning::Some variants were skipped due to missing arch images."
+          fi
+
+      - name: Dispatch quay.io sync
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'ascend-gha-runners',
+              repo: 'sync-tools',
+              workflow_id: 'sync-vllm-ascend.yml',
+              ref: 'main',
+            });

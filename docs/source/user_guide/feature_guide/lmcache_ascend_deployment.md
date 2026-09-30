@@ -52,7 +52,7 @@ docker run -it \
 
 ### Manual Installation
 
-Assuming your working directory is ```/workspace``` and vllm/vllm-ascend have already been installed.
+Assuming your working directory is `/workspace` and vllm/vllm-ascend have already been installed.
 
 1. Install LMCache Repo
 
@@ -69,26 +69,4 @@ Assuming your working directory is ```/workspace``` and vllm/vllm-ascend have al
 
 ### Usage
 
-We introduce a dynamic KVConnector via LMCacheAscendConnectorV1Dynamic, therefore LMCache-Ascend Connector can be used via the kv transfer config in the two following setting.
-
-#### Online serving
-
-```bash
-python \
-    -m vllm.entrypoints.openai.api_server \
-    --port 8100 \
-    --model /data/models/Qwen/Qwen3-32B \
-    --trust-remote-code \
-    --disable-log-requests \
-    --block-size 128 \
-    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}'
-```
-
-#### Offline
-
-```python
-ktc = KVTransferConfig(
-        kv_connector="LMCacheAscendConnector",
-        kv_role="kv_both"
-    )
-```
+`LMCacheAscendConnector` is no longer registered by vllm-ascend. Use the connector registration and runtime configuration provided by the LMCache-Ascend package instead. For the current configuration examples, refer to the [LMCache-Ascend documentation](https://github.com/LMCache/LMCache-Ascend/blob/main/README.md).

@@ -44,6 +44,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
     mlaTilingData.tilingKey = tilingData->tilingKey;
     mlaTilingData.n = tilingData->n;
     mlaTilingData.hiddenStateDim = tilingData->hiddenStateDim;
+    mlaTilingData.enableRope = tilingData->enableRope;
 
     mlaTilingData.mm1.numBatch = tilingData->mm1.numBatch;
     mlaTilingData.mm1.m = tilingData->mm1.m;
@@ -147,6 +148,9 @@ extern "C" __global__ __aicore__ void mla_preprocess(
     mlaTilingData.hiddenStrideRope = tilingData->hiddenStrideRope;
     mlaTilingData.qkNopeHeadDim = tilingData->qkNopeHeadDim;
     mlaTilingData.avgFactor = tilingData->avgFactor;
+    mlaTilingData.kvCacheBlockSize = tilingData->kvCacheBlockSize;
+    mlaTilingData.kvCacheStride0 = tilingData->kvCacheStride0;
+    mlaTilingData.kvCacheRopeStride0 = tilingData->kvCacheRopeStride0;
 
     GM_ADDR s1 = workspace + static_cast<uint64_t>(mlaTilingData.s1Offset);
     GM_ADDR s2 = workspace + static_cast<uint64_t>(mlaTilingData.s2Offset);
@@ -233,6 +237,70 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             }
             break;
         }
+        case KEY_BF16_CACHEMODE_0_QUANTMODE_1: {
+            MLAPO_BF16::MLAOperation<__bf16, 0, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
+                                    QuantMode::PER_TOKEN_SYMM_QUANT>
+                opBf16Cm0Qm1(mlaTilingData, tiling);
+            opBf16Cm0Qm1.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
+                            quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
+                            bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
+                            s1, s2, s3, s4, s5);
+            if ASCEND_IS_AIC {
+                opBf16Cm0Qm1.ProcessCube();
+            }
+            if ASCEND_IS_AIV {
+                opBf16Cm0Qm1.ProcessVector();
+            }
+            break;
+        }
+        case KEY_BF16_CACHEMODE_1_QUANTMODE_1: {
+            MLAPO_BF16::MLAOperation<__bf16, 1, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
+                                    QuantMode::PER_TOKEN_SYMM_QUANT>
+                opBf16Cm1Qm1(mlaTilingData, tiling);
+            opBf16Cm1Qm1.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
+                            quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
+                            bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
+                            s1, s2, s3, s4, s5);
+            if ASCEND_IS_AIC {
+                opBf16Cm1Qm1.ProcessCube();
+            }
+            if ASCEND_IS_AIV {
+                opBf16Cm1Qm1.ProcessVector();
+            }
+            break;
+        }
+        case KEY_BF16_CACHEMODE_2_QUANTMODE_1: {
+            MLAPO_BF16::MLAOperation<__bf16, 2, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
+                                     QuantMode::PER_TOKEN_SYMM_QUANT>
+                opBf16Cm2Qm1(mlaTilingData, tiling);
+            opBf16Cm2Qm1.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
+                              quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
+                              bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
+                              s1, s2, s3, s4, s5);
+            if ASCEND_IS_AIC {
+                opBf16Cm2Qm1.ProcessCube();
+            }
+            if ASCEND_IS_AIV {
+                opBf16Cm2Qm1.ProcessVector();
+            }
+            break;
+        }
+        case KEY_BF16_CACHEMODE_3_QUANTMODE_1: {
+            MLAPO_BF16::MLAOperation<__bf16, 3, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
+                                     QuantMode::PER_TOKEN_SYMM_QUANT>
+                opBf16Cm3Qm1(mlaTilingData, tiling);
+            opBf16Cm3Qm1.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
+                              quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
+                              bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
+                              s1, s2, s3, s4, s5);
+            if ASCEND_IS_AIC {
+                opBf16Cm3Qm1.ProcessCube();
+            }
+            if ASCEND_IS_AIV {
+                opBf16Cm3Qm1.ProcessVector();
+            }
+            break;
+        }
         case KEY_BF16_CACHEMODE_1_QUANTMODE_3: {
             MLAPO_BF16_NQ::MLAOperation<__bf16, 1, DataFormat::NZ, DataFormat::NZ, DataFormat::ND>
                 opBf16Cm1Qm0(mlaTilingData, tiling);
@@ -293,6 +361,70 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             }
             if ASCEND_IS_AIV {
                 opBf16Cm3Qm0Inner.ProcessVector();
+            }
+            break;
+        }
+        case KEY_BF16_CACHEMODE_0_QUANTMODE_1_INNER: {
+            MLAPO_BF16_INNER::MLAOperation<__bf16, 0, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
+                                     QuantMode::PER_TOKEN_SYMM_QUANT>
+                opBf16Cm0Qm1Inner(mlaTilingData, tiling);
+            opBf16Cm0Qm1Inner.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
+                              quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
+                              bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
+                              s1, s2, s3, s4, s5, innerOut);
+            if ASCEND_IS_AIC {
+                opBf16Cm0Qm1Inner.ProcessCube();
+            }
+            if ASCEND_IS_AIV {
+                opBf16Cm0Qm1Inner.ProcessVector();
+            }
+            break;
+        }
+        case KEY_BF16_CACHEMODE_1_QUANTMODE_1_INNER: {
+            MLAPO_BF16_INNER::MLAOperation<__bf16, 1, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
+                                     QuantMode::PER_TOKEN_SYMM_QUANT>
+                opBf16Cm1Qm1Inner(mlaTilingData, tiling);
+            opBf16Cm1Qm1Inner.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
+                              quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
+                              bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
+                              s1, s2, s3, s4, s5, innerOut);
+            if ASCEND_IS_AIC {
+                opBf16Cm1Qm1Inner.ProcessCube();
+            }
+            if ASCEND_IS_AIV {
+                opBf16Cm1Qm1Inner.ProcessVector();
+            }
+            break;
+        }
+        case KEY_BF16_CACHEMODE_2_QUANTMODE_1_INNER: {
+            MLAPO_BF16_INNER::MLAOperation<__bf16, 2, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
+                                     QuantMode::PER_TOKEN_SYMM_QUANT>
+                opBf16Cm2Qm1Inner(mlaTilingData, tiling);
+            opBf16Cm2Qm1Inner.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
+                              quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
+                              bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
+                              s1, s2, s3, s4, s5, innerOut);
+            if ASCEND_IS_AIC {
+                opBf16Cm2Qm1Inner.ProcessCube();
+            }
+            if ASCEND_IS_AIV {
+                opBf16Cm2Qm1Inner.ProcessVector();
+            }
+            break;
+        }
+        case KEY_BF16_CACHEMODE_3_QUANTMODE_1_INNER: {
+            MLAPO_BF16_INNER::MLAOperation<__bf16, 3, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
+                                     QuantMode::PER_TOKEN_SYMM_QUANT>
+                opBf16Cm3Qm1Inner(mlaTilingData, tiling);
+            opBf16Cm3Qm1Inner.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
+                              quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
+                              bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
+                              s1, s2, s3, s4, s5, innerOut);
+            if ASCEND_IS_AIC {
+                opBf16Cm3Qm1Inner.ProcessCube();
+            }
+            if ASCEND_IS_AIV {
+                opBf16Cm3Qm1Inner.ProcessVector();
             }
             break;
         }

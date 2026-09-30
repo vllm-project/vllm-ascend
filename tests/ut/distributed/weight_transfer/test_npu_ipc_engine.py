@@ -16,7 +16,7 @@
 #
 """Regression tests for the NPU IPC weight transfer engine.
 
-These cover two bugs that broke ``examples/rl/rlhf_http_npu_ipc.py``:
+These cover the bugs that broke ``examples/rl/rlhf_http_npu_ipc.py``:
 
 1. ``NPUIPCWeightTransferEngine.__init__`` did not accept the ``model``
    argument that ``WeightTransferEngineFactory.create_engine`` passes,
@@ -28,6 +28,11 @@ These cover two bugs that broke ``examples/rl/rlhf_http_npu_ipc.py``:
    unpack (expected 2)``. Aligned with upstream vLLM's CUDA IPC engine:
    the producer stores args only and the consumer rebuilds with the
    well-known ``rebuild_npu_tensor``.
+3. The NPU IPC worker skipped the layerwise reload START/FINISH lifecycle,
+   so runtime-formatted weights were not restored before loading and graph-
+   visible storage was not preserved after loading.
+4. The packed receive path decoded tensors but never passed them to
+   ``model.load_weights``.
 """
 
 import inspect
@@ -62,6 +67,17 @@ def _patch_rebuild_npu_tensor(rebuild_func):
     )
 
 
+def _patch_reload_module(*, initialize=None, finalize=None):
+    """Provide the lazy-imported reload helpers without importing vLLM models."""
+    fake_mod = types.ModuleType("vllm.model_executor.model_loader.reload")
+    fake_mod.initialize_layerwise_reload = initialize or MagicMock()  # type: ignore[attr-defined]
+    fake_mod.finalize_layerwise_reload = finalize or MagicMock()  # type: ignore[attr-defined]
+    return patch.dict(
+        sys.modules,
+        {"vllm.model_executor.model_loader.reload": fake_mod},
+    )
+
+
 def test_init_accepts_model_argument():
     """Bug 1: __init__ must accept the optional ``model`` argument."""
     params = inspect.signature(NPUIPCWeightTransferEngine.__init__).parameters
@@ -69,16 +85,16 @@ def test_init_accepts_model_argument():
 
 
 def test_init_passes_model_to_super():
-    """Bug 1: the ``model`` argument must be forwarded to the base engine."""
-    captured = {}
+    captured: dict = {}
 
-    def fake_init(self, config, parallel_config, model=None):
-        captured["args"] = (config, parallel_config, model)
+    def fake_init_v1(self, config, vllm_config, device, model):
+        captured["args"] = (config, vllm_config, device, model)
 
-    with patch.object(npu_ipc_engine.WeightTransferEngine, "__init__", fake_init):
-        NPUIPCWeightTransferEngine("config", "parallel_config", "model")
+    with patch.object(npu_ipc_engine.WeightTransferEngine, "__init__", fake_init_v1):
+        device = torch.device("npu:0")
+        NPUIPCWeightTransferEngine("config", "vllm_config", device, "model")
 
-    assert captured["args"] == ("config", "parallel_config", "model")
+    assert captured["args"] == ("config", "vllm_config", device, "model")
 
 
 def test_unpacked_send_stores_reduce_tensor_args_only():
@@ -87,30 +103,31 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
     This matches upstream vLLM's CUDA IPC engine, which drops the rebuild
     func and relies on the consumer using the well-known rebuild function.
     """
-    npu_uuid = "node-0"
-
     rebuild_args = (None, None, None, None, None, None, 999, None)
     fake_reduce = MagicMock(return_value=("rebuild_func_sentinel", rebuild_args))
 
     captured = {}
 
-    def send_mode(update_info):
-        captured["update_info"] = update_info
-
-    trainer_args = MagicMock()
-    trainer_args.send_mode = send_mode
-    trainer_args.packed = False
-
-    iterator = iter([("model.weight", torch.zeros(3))])
-
     with patch(f"{_MODULE}.reduce_tensor", fake_reduce):
-        NPUIPCWeightTransferEngine._send_unpacked(iterator, trainer_args, npu_uuid)
+        from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+            NPUIPCTrainerWeightTransferEngine,
+        )
 
-    update_info = captured["update_info"]
-    assert isinstance(update_info.ipc_handles, list)
-    stored = update_info.ipc_handles[0][npu_uuid]
-    # Only the args tuple is stored, not a (func, args) pair.
-    assert stored == rebuild_args
+        engine = object.__new__(NPUIPCTrainerWeightTransferEngine)
+        engine.client = MagicMock()
+        engine.is_sender = True
+        engine.npu_uuid = "node-0"
+        engine._do_send = lambda **kw: captured.update(kw)
+        engine._all_gather_and_merge_handles = lambda x: x
+        engine._post_send_sync = MagicMock()
+
+        source = iter([("model.weight", torch.zeros(3))])
+        engine._send_unpacked(source)
+
+        stored = captured["ipc_handles"][0]["node-0"]
+
+        # Only the args tuple is stored, not a (func, args) pair.
+        assert stored == rebuild_args
 
 
 def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
@@ -132,28 +149,90 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
     # Sender stores 999 at index 6; the receiver must overwrite it.
     rebuild_args = (None, None, None, None, None, None, 999, None)
 
-    update_info = NPUIPCWeightTransferEngine.update_info_cls(
+    kwargs = dict(
         names=["model.weight"],
         dtype_names=["float32"],
         shapes=[[3]],
         ipc_handles=[{npu_uuid: rebuild_args}],
-        packed=False,
     )
 
-    engine = object.__new__(NPUIPCWeightTransferEngine)
-    received = {}
+    update_info = NPUIPCWeightTransferEngine.update_info_cls(**kwargs)
 
-    def load_weights(weights):
-        received["weights"] = weights
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    received: dict[str, list[tuple[str, torch.Tensor]]] = {}
+    engine.model = MagicMock()
+    engine.device = MagicMock(index=device_index)
+    engine.packed = False
+    engine.model.load_weights.side_effect = lambda weights: received.update(weights=weights)
 
     with (
         _patch_rebuild_npu_tensor(fake_rebuild),
-        patch(f"{_MODULE}.npu_generate_uuid", return_value=npu_uuid),
-        patch("torch.accelerator.current_device_index", return_value=device_index),
+        patch(f"{_MODULE}.npu_generate_uuid", return_value=npu_uuid) as mock_uuid,
     ):
-        engine.receive_weights(update_info, load_weights)
+        engine.receive_weights(update_info)
 
+    mock_uuid.assert_called_once_with()
+    engine.model.load_weights.assert_called_once()
     assert received["weights"][0][0] == "model.weight"
     assert torch.equal(received["weights"][0][1], rebuilt_weight)
     # Index 6 (device index) overwritten with the receiver's device.
     assert seen["args"][6] == device_index
+
+
+def test_start_weight_update():
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.model = MagicMock()
+    mock_init = MagicMock()
+
+    with _patch_reload_module(initialize=mock_init):
+        engine.start_weight_update()
+
+    mock_init.assert_called_once_with(engine.model)
+
+
+def test_finish_weight_update():
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.model = MagicMock()
+    engine.model_config = MagicMock()
+    mock_finalize = MagicMock()
+
+    with _patch_reload_module(finalize=mock_finalize):
+        engine.finish_weight_update()
+
+    mock_finalize.assert_called_once_with(engine.model, engine.model_config)
+
+
+def test_receive_packed_weights_loads_model():
+    packed_weights = [("model.weight", torch.tensor([1.0, 2.0, 3.0]))]
+    update_info = MagicMock(
+        tensor_sizes=[12],
+        ipc_handles={"node-0": ("packed-handle",)},
+        names=["model.weight"],
+        shapes=[[3]],
+        dtype_names=["float32"],
+    )
+
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.model = MagicMock()
+    engine.device = MagicMock(index=0)
+    engine.packed = True
+
+    with (
+        patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
+        patch(
+            f"{_MODULE}.packed_npu_ipc_consumer",
+            return_value=packed_weights,
+        ) as mock_consumer,
+    ):
+        engine.receive_weights(update_info)
+
+    mock_consumer.assert_called_once_with(
+        ipc_handle=update_info.ipc_handles,
+        physical_npu_id="node-0",
+        names=update_info.names,
+        shapes=update_info.shapes,
+        dtype_names=update_info.dtype_names,
+        tensor_sizes=update_info.tensor_sizes,
+        device_index=0,
+    )
+    engine.model.load_weights.assert_called_once_with(packed_weights)

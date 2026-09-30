@@ -96,10 +96,12 @@ def _run_recurrent_gated_delta_rule(
         if seq_len <= 0:
             continue
 
+        # Match NPU recurrent_gated_delta_rule_v310: num_accepted_tokens only
+        # selects the resume state slot (accepted-1). Do NOT truncate the
+        # current query (MTP verify still has 1+K tokens when prior accept=1).
         accepted = None
         if num_accepted_tokens is not None:
             accepted = int(num_accepted_tokens[seq_idx].item())
-            seq_len = min(seq_len, accepted)
         if seq_len <= 0:
             continue
 

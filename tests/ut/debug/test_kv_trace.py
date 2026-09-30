@@ -17,6 +17,7 @@ from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace as NS
 
+import msgspec
 import pytest
 import torch
 
@@ -207,6 +208,123 @@ class FakeManager:
 
     def get_computed_blocks(self, request):
         return NS(get_block_ids=lambda: ([1],)), 8
+
+
+@pytest.mark.parametrize("extra", [(), (128,)])
+def test_cache_lookup_preserves_upstream_sparse_prefix_boundary(tmp_path, extra):
+    trace = writer(tmp_path)
+    manager = FakeManager()
+    result = (NS(get_block_ids=lambda: ([1],)), 8, *extra)
+    manager.get_computed_blocks = lambda request: result
+    manager_module.attach_manager_trace(manager, trace)
+    assert manager.get_computed_blocks(NS(request_id="request")) is result
+    rows = events(tmp_path)
+    assert next(r for r in rows if r["event"] == "cache.lookup")["num_cached_tokens"] == 8
+    assert not any(r["event"] == "trace.observation_error" for r in rows)
+
+
+class BlockStored(msgspec.Struct, tag=True):
+    block_hashes: list[bytes]
+    token_ids: list[int]
+    extra_keys: list[str]
+    group_idx: int
+    session_id: str
+
+
+class BlockRemoved(msgspec.Struct, tag=True):
+    block_hashes: list[bytes]
+    group_idx: int
+
+
+class AllBlocksCleared(msgspec.Struct, tag=True):
+    pass
+
+
+class NativeEventManager(FakeManager):
+    def __init__(self, pending, enabled=True):
+        super().__init__()
+        self.pending = pending
+        self.enable_kv_cache_events = enabled
+        self.drain_calls = 0
+
+    def take_events(self):
+        self.drain_calls += 1
+        result, self.pending = self.pending, []
+        return result
+
+
+def test_native_events_reuse_upstream_drain_and_preserve_publisher_input(tmp_path):
+    trace = writer(tmp_path)
+    pending = [
+        BlockStored([b"hash"], [11, 12], ["private"], 1, "session"),
+        BlockRemoved([b"hash"], 1),
+        AllBlocksCleared(),
+    ]
+    encoded = msgspec.json.encode(pending)
+    manager = NativeEventManager(pending)
+    manager_module.attach_manager_trace(manager, trace)
+    manager_module.attach_manager_trace(manager, trace)  # Do not stack observers.
+    published = manager.take_events()
+    assert published is pending
+    assert manager.drain_calls == 1 and msgspec.json.encode(published) == encoded
+    assert manager.take_events() == [] and manager.drain_calls == 2
+    records = [r["native_event"] for r in events(tmp_path) if r["event"] == "cache.native_event"]
+    assert [r["type"] for r in records] == ["BlockStored", "BlockRemoved", "AllBlocksCleared"]
+    assert records[0]["block_hashes"] == msgspec.to_builtins(pending[0])["block_hashes"]
+    assert records[0]["session_id"] == "session" and records[0]["group_idx"] == 1
+    assert "token_ids" not in records[0] and "extra_keys" not in records[0]
+
+
+def test_native_events_do_not_enable_or_drain_upstream_configuration(tmp_path):
+    trace = writer(tmp_path)
+    manager = NativeEventManager([], enabled=False)
+    manager_module.attach_manager_trace(manager, trace)
+    assert not manager.enable_kv_cache_events and manager.drain_calls == 0
+    assert manager.take_events() == []
+    capability = next(r for r in events(tmp_path) if r.get("capability") == "native_kv_events")
+    assert capability["supported"] and not capability["enabled"]
+    assert not any(r["event"] == "cache.native_event" for r in events(tmp_path))
+
+
+def test_native_event_serialization_failure_preserves_upstream_result(tmp_path, monkeypatch):
+    trace = writer(tmp_path)
+    pending = [AllBlocksCleared()]
+    manager = NativeEventManager(pending)
+    manager_module.attach_manager_trace(manager, trace)
+
+    def fail(value):
+        raise ValueError("serialization failure")
+
+    monkeypatch.setattr(msgspec, "to_builtins", fail)
+    assert manager.take_events() is pending
+    assert any(r.get("stage") == "native_kv_events" for r in events(tmp_path))
+
+
+def test_disabled_trace_returns_native_events_without_serialization(tmp_path, monkeypatch):
+    trace = writer(tmp_path)
+    pending = [AllBlocksCleared()]
+    manager = NativeEventManager(pending)
+    manager_module.attach_manager_trace(manager, trace)
+    trace.close()
+
+    def unexpected(value):
+        pytest.fail("disabled trace must not serialize native events")
+
+    monkeypatch.setattr(msgspec, "to_builtins", unexpected)
+    assert manager.take_events() is pending
+
+
+def test_native_drain_error_is_not_swallowed(tmp_path):
+    trace = writer(tmp_path)
+    manager = NativeEventManager([])
+
+    def fail():
+        raise RuntimeError("upstream drain failure")
+
+    manager.take_events = fail
+    manager_module.attach_manager_trace(manager, trace)
+    with pytest.raises(RuntimeError, match="upstream drain failure"):
+        manager.take_events()
 
 
 def test_shared_blocks_release_reuse_and_allocation_failure(tmp_path):
@@ -409,15 +527,19 @@ def test_epoch_tracks_allocation_not_zero_reference_prefix_reuse(tmp_path):
     assert [r["lease"] for r in acquired] == [1, 1, 2]
     allocated = [r for r in rows if r["event"] == "block.alloc" and r["block_id"] == 0]
     assert [r["alloc_epoch"] for r in allocated] == ["1", "2"]
-    assert any(r["event"] == "block.evict" and r["alloc_epoch"] == "1" for r in rows)
+    assert not any(r["event"] in ("block.evict", "cache.reset") for r in rows)
     assert not any(r.get("block_id") == 2 for r in rows)
 
 
 def test_pool_observer_preserves_iterators_returns_errors_and_unknown_state(tmp_path):
     trace = writer(tmp_path)
     pool = AllocatorPool()
+    original_evict = pool._maybe_evict_cached_block
+    original_reset = pool.reset_prefix_cache
     observer = manager_module.attach_pool_trace(pool, trace)
     assert manager_module.attach_pool_trace(pool, trace) is observer
+    assert pool._maybe_evict_cached_block == original_evict
+    assert pool.reset_prefix_cache == original_reset
     blocks = pool.get_new_blocks(2)
     consumed = []
 
@@ -436,6 +558,22 @@ def test_pool_observer_preserves_iterators_returns_errors_and_unknown_state(tmp_
     pool.get_new_blocks(1)
     assert observer.epochs[0] == 2  # Do not repeat a generation after a gap.
     assert any(r["event"] == "trace.gap" for r in events(tmp_path))
+
+
+def test_foreign_block_free_keeps_upstream_pool_routing(tmp_path):
+    trace = writer(tmp_path)
+    local, foreign = AllocatorPool(), AllocatorPool()
+    local.free_blocks = lambda blocks: foreign.free_blocks(blocks)
+    local_observer = manager_module.attach_pool_trace(local, trace)
+    foreign_observer = manager_module.attach_pool_trace(foreign, trace)
+    local_block = local.get_new_blocks(1)[0]
+    foreign_block = foreign.get_new_blocks(1)[0]
+    foreign_block.pool = foreign
+    local.free_blocks(iter([foreign_block]))
+    refs = [r for r in events(tmp_path) if r["event"] == "block.ref_change"]
+    assert len(refs) == 1 and refs[0]["pool_id"] == foreign_observer.pool_id
+    assert refs[0]["pool_id"] != local_observer.pool_id
+    assert local_block.ref_cnt == 1 and foreign_block.ref_cnt == 0
 
 
 def test_existing_cached_content_has_unknown_epoch(tmp_path):

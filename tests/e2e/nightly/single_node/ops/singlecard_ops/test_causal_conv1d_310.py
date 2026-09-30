@@ -3,10 +3,10 @@ import torch
 import torch_npu
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_fn as causal_conv1d_fn_ref
-from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_update as causal_conv1d_update_ref
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.causal_conv1d import causal_conv1d_fn as causal_conv1d_fn_ref
+from vllm_ascend.ops.causal_conv1d import causal_conv1d_update as causal_conv1d_update_ref
 from vllm_ascend.utils import enable_custom_op
-from vllm_ascend.utils import is_310p as is_310p_hw
 
 torch_npu.npu.set_compile_mode(jit_compile=False)
 
@@ -17,7 +17,10 @@ def validate_cmp(y_cal, y_ref, device="npu"):
     torch.testing.assert_close(y_ref, y_cal, rtol=3e-03, atol=1e-02, equal_nan=True)
 
 
-@pytest.mark.skipif(not is_310p_hw(), reason="Tested separately on a 310P machine.")
+@pytest.mark.skipif(
+    get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES),
+    reason="Tested separately on a 310P machine.",
+)
 @pytest.mark.parametrize("has_initial_state", [False, True])
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])
@@ -79,9 +82,9 @@ def test_ascend_causal_conv1d_310_fn(
         weight_origin,
         bias=bias,
         conv_states=conv_states_origin,
-        query_start_loc=query_start_loc.to(torch.int64),
-        cache_indices=cache_indices.to(torch.int64),
-        initial_state_mode=has_initial_state_tensor.to(torch.int64),
+        query_start_loc=query_start_loc,
+        cache_indices=cache_indices,
+        initial_state_mode=has_initial_state_tensor,
         num_accepted_tokens=None,
         activation_mode=activation_mode,
         pad_slot_id=PAD_SLOT_ID,
@@ -91,7 +94,10 @@ def test_ascend_causal_conv1d_310_fn(
     validate_cmp(conv_states, conv_states_ref)
 
 
-@pytest.mark.skipif(not is_310p_hw(), reason="Tested separately on a 310P machine.")
+@pytest.mark.skipif(
+    get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES),
+    reason="Tested separately on a 310P machine.",
+)
 @pytest.mark.parametrize("itype", [torch.float16])
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [False, True])
@@ -132,7 +138,7 @@ def test_causal_conv1d_310_update(batch_size, dim, width, seqlen, has_bias, silu
         bias=bias,
         conv_states=conv_states_origin,
         query_start_loc=None,
-        cache_indices=conv_state_indices.to(torch.int64),
+        cache_indices=conv_state_indices,
         initial_state_mode=None,
         num_accepted_tokens=None,
         activation_mode=activation_mode,

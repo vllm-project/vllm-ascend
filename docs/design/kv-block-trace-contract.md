@@ -20,6 +20,7 @@
 
 ## 本轮完善
 
+- 2026-09-30 已同步上游 main：缓存存入/移除/清空直接复用 `KVCacheManager.take_events()` 原生事件及 msgspec 序列化，保留原事件列表、对象和 publisher；去掉本地重复的驱逐/清空钩子，不自动开启或修改上游 KVEvents 配置。物理分配代次和 dummy 差分仍由补充观测提供。
 - Linux 日志新增 host boot 与进程启动身份，防止跨启动/PID 重用混淆不同 writer。
 - Reader 从同一进程的调度上下文确定 pool，从同一 host/boot 的分配和引用记录还原 dummy 开始时的关联上下文。
 - 记录最近观测到的同进程搬运事件；跨新分配代次清除旧搬运关联。搬运上下文不是设备完成或正确性证明。
@@ -56,3 +57,5 @@
 - 保存的 Qwen、PD、DeepSeek 实测日志共 152 / 2559 / 1205 条，经过新 reader 后原始字段不变，原有完整性结论分别保持 0 / 9 / 1 项问题。它们不是此次关联补充在原 Case 4 图模式上的新验证。
 
 Case 4 实机暴露的 `cache.config.groups` 无 slots 查询问题已修复，新增回归后为 72 passed。16 个 writer 缺少 stop，完整性检查如实报 incomplete；不能把窗口证据充足表述为整份日志闭合。
+
+同步 main 与复用调整后 CPU 回归为 80 passed，新增覆盖原生事件不被重复消费/修改、序列化失败隔离、关闭采集、稀疏前缀返回值和跨 pool 释放。前述实机与性能结果属于报告记录的旧镜像适配；本次同步后的完整 main 尚未重跑 NPU workload。

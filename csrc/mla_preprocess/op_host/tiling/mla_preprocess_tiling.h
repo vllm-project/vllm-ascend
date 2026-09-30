@@ -95,6 +95,7 @@ struct MlaTilingData {
     uint32_t hiddenStateDim{7168};
 
     uint32_t isWeightQuantized{1};
+    uint32_t enableRope{1};
 
     // Model-specific MLA dimensions (derived from tensor shapes)
     uint32_t mm1OutSize{2112};        // q_lora_rank + kv_lora_rank + qk_rope_head_dim
@@ -107,6 +108,12 @@ struct MlaTilingData {
     uint32_t hiddenStrideRope{192};    // qk_nope_head_dim + qk_rope_head_dim
     uint32_t qkNopeHeadDim{128};       // for RoPE offset calc
     float avgFactor{0.000651041666f};  // 1/splitSizeTwo (1/qLoraRank), for RmsNorm avg
+
+    // KV cache dim0 (blockNum) stride support.
+    // Use uint64_t for all three so host/device ABI padding matches.
+    uint64_t kvCacheBlockSize{128};
+    uint64_t kvCacheStride0{0};
+    uint64_t kvCacheRopeStride0{0};
 };
 
 #endif  // MLAPREPROCESS_TILING_H

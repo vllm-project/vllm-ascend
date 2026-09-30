@@ -1,0 +1,67 @@
+# Memcache Pooling + Qwen3.5-397B Performance Testing
+test_cases:
+  - name: "Qwen3.5-397B-Memcache-perf"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      PYTHONHASHSEED: "0"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "1024"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      LD_PRELOAD: "/usr/lib64/libjemalloc.so.2"
+      SERVER_PORT: "DEFAULT_PORT"
+    kv_pool:
+      type: "memcache"
+      meta_service_port: 5000
+      config_store_port: 6000
+      config:
+        meta:
+          ock.mmc.log_level: "info"
+        local:
+          ock.mmc.log_level: "info"
+          ock.mmc.local_service.world_size: 256
+          ock.mmc.local_service.protocol: "device_sdma"
+          ock.mmc.local_service.dram.size: "10GB"
+    server_cmd:
+      - "--data-parallel-size"
+      - "1"
+      - "--tensor-parallel-size"
+      - "16"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--quantization"
+      - "ascend"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-num-seqs"
+      - "128"
+      - "--max-model-len"
+      - "133000"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--enable-prefix-caching"
+      - "--speculative-config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true, "enable_fused_mc2":1, "enable_flashcomm1":true}'
+      - "--kv-transfer-config"
+      - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port": "0"}}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in32768-bs400
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 64
+        max_out_len: 1500
+        batch_size: 32
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97

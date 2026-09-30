@@ -116,8 +116,13 @@ bool SparseAttnSharedkvMetadataCpuKernel::CheckSingleParam()
         return false;
     }
     // ori_win_left 校验
-    if (winLeft_ != 127) {
-        KERNEL_LOG_ERROR("ori_win_left should only be 127, but got %ld", winLeft_);
+    if (winLeft_ < 0) {
+        KERNEL_LOG_ERROR("ori_win_left should be non-negative, but got %ld", winLeft_);
+        return false;
+    }
+    // ori_win_right 校验
+    if (winRight_ < 0) {
+        KERNEL_LOG_ERROR("ori_win_right should be non-negative, but got %ld", winRight_);
         return false;
     }
     // layout_q 校验
@@ -261,7 +266,7 @@ bool SparseAttnSharedkvMetadataCpuKernel::ParamsInit()
         attentionMode_ = 1;
     } else {//SparseMode = 4
         preToken_ = (winLeft_ > -1) ? winLeft_ : INT64_MAX;
-        nextToken_ = 0;
+        nextToken_ = (winRight_ > -1) ? winRight_ : INT64_MAX;
         attentionMode_ = 1;
     }
     isS1G_ = (layoutQuery_ == "BSND" || layoutQuery_ == "BSH" || layoutQuery_ == "TND");

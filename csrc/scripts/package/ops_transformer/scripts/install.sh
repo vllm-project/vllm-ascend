@@ -214,7 +214,7 @@ check_opp_version_file() {
 
 check_docker_path() {
   docker_path="$1"
-  if [ "${docker_path}" != "/"* ]; then
+  if [[ "${docker_path}" != /* ]]; then
     echo "[OpsTransformer] [ERROR]: ERR_NO:${PARAM_INVALID};ERR_DES:Parameter --docker-root\
  must with absolute path that which is start with root directory /. Such as --docker-root=/${docker_path}"
     exitlog

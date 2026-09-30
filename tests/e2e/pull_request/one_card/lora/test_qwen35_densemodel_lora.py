@@ -1,6 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+
 import vllm
 from transformers import AutoTokenizer
 from vllm.lora.request import LoRARequest
+
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
 
 MODEL_PATH = "Qwen/Qwen3.5-4B"
 TEXT_LORA_ID = 1
@@ -50,7 +59,6 @@ def _run_text_lora_sample(
         vllm.SamplingParams(temperature=0.01, max_tokens=512),
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path),
     )
-
     generated_texts: list[str] = []
     for output in outputs:
         generated_text = output.outputs[0].text.strip()
@@ -59,7 +67,7 @@ def _run_text_lora_sample(
     return generated_texts
 
 
-def _assert_qwen35_text_lora(
+def assert_qwen35_text_lora(
     llm: vllm.LLM,
     qwen35_text_lora_files: str,
 ) -> None:
@@ -68,23 +76,21 @@ def _assert_qwen35_text_lora(
         qwen35_text_lora_files,
         TEXT_LORA_ID,
     )
-
     _assert_exact_outputs(generated_texts, TEXT_EXPECTED_LORA_OUTPUT)
 
 
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen35_text_lora(qwen35_text_lora_files):
-    llm = vllm.LLM(
-        model=MODEL_PATH,
+    with VllmRunner(
+        model_name=MODEL_PATH,
         max_model_len=4096,
         enable_lora=True,
         max_loras=2,
         max_num_seqs=4,
         max_lora_rank=8,
-        enforce_eager=True,
-        trust_remote_code=True,
-    )
-
-    _assert_qwen35_text_lora(
-        llm,
-        qwen35_text_lora_files,
-    )
+        tensor_parallel_size=1,
+    ) as vllm_runner:
+        assert_qwen35_text_lora(
+            vllm_runner.model,
+            qwen35_text_lora_files,
+        )

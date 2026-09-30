@@ -16,17 +16,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import json
-import os
-from unittest.mock import patch
-
-import requests
-from vllm.utils.network_utils import get_open_port
-
-from tests.e2e.conftest import DisaggPDProxy, RemotePDServer, VllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.utils import run_pd_disaggregation
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @wait_until_npu_memory_free()
 def test_moe_w8a8_tp_pp_ep_full_decode_only():
     """Verify W8A8 MoE generation with TP, PP, EP, and full decode only."""
@@ -51,114 +44,27 @@ def test_moe_w8a8_tp_pp_ep_full_decode_only():
 
 @wait_until_npu_memory_free()
 def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
-    """Verify W8A8 1P1D PD disaggregation with full decode only."""
-    prefiller_port = [get_open_port()]
-    decoder_port = [get_open_port()]
-    proxy_port = get_open_port()
+    """Verify the existing TP2 1P1D SFA deployment."""
+    run_pd_disaggregation(
+        model="vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
+        model_args=["--enable-expert-parallel", "--quantization", "ascend"],
+        prefill_tp_size=2,
+        prefill_pcp_size=1,
+        decode_tp_size=2,
+        async_scheduling=False,
+        use_model_runner_v2=False,
+    )
 
-    ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
-    env_dict = {
-        "LD_LIBRARY_PATH": f"/usr/local/lib:{ld_library_path}",
-    }
 
-    vllm_server_args = [
-        [
-            "--port",
-            str(prefiller_port[0]),
-            "--model",
-            "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
-            "--trust-remote-code",
-            "--enable-request-id-headers",
-            "--no-enable-prefix-caching",
-            "--enable-expert-parallel",
-            "--quantization",
-            "ascend",
-            "--max-model-len",
-            "1024",
-            "--max-num-batched-tokens",
-            "1024",
-            "--max-num-seqs",
-            "4",
-            "--tensor-parallel-size",
-            "2",
-            "--gpu-memory-utilization",
-            "0.9",
-            "--kv-transfer-config",
-            json.dumps(
-                {
-                    "kv_connector": "MooncakeConnectorV1",
-                    "kv_role": "kv_producer",
-                    "kv_port": "30000",
-                    "kv_connector_extra_config": {
-                        "prefill": {"dp_size": 1, "tp_size": 2},
-                        "decode": {"dp_size": 1, "tp_size": 2},
-                    },
-                }
-            ),
-            "--enforce-eager",
-        ],
-        [
-            "--port",
-            str(decoder_port[0]),
-            "--model",
-            "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
-            "--trust-remote-code",
-            "--enable-request-id-headers",
-            "--no-enable-prefix-caching",
-            "--enable-expert-parallel",
-            "--quantization",
-            "ascend",
-            "--max-model-len",
-            "1024",
-            "--max-num-batched-tokens",
-            "1024",
-            "--max-num-seqs",
-            "4",
-            "--tensor-parallel-size",
-            "2",
-            "--gpu-memory-utilization",
-            "0.9",
-            "--kv-transfer-config",
-            json.dumps(
-                {
-                    "kv_connector": "MooncakeConnectorV1",
-                    "kv_role": "kv_consumer",
-                    "kv_port": "30200",
-                    "kv_connector_extra_config": {
-                        "prefill": {"dp_size": 1, "tp_size": 2},
-                        "decode": {"dp_size": 1, "tp_size": 2},
-                    },
-                }
-            ),
-            "--compilation-config",
-            json.dumps(
-                {
-                    "cudagraph_mode": "FULL_DECODE_ONLY",
-                    "cudagraph_capture_sizes": [1, 2, 4, 8],
-                }
-            ),
-        ],
-    ]
-
-    with (
-        RemotePDServer(vllm_server_args, env_dict=env_dict),
-        DisaggPDProxy(
-            port=proxy_port,
-            prefiller_ports=prefiller_port,
-            decoder_ports=decoder_port,
-        ) as proxy,
-    ):
-        response = requests.post(
-            proxy.url_for("v1", "completions"),
-            json={
-                "model": "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
-                "prompt": "Hello, my name is",
-                "max_tokens": 5,
-                "temperature": 0.0,
-            },
-            timeout=600,
-        )
-        response.raise_for_status()
-        output = response.json()
-
-        assert output["choices"][0]["text"]
+@wait_until_npu_memory_free()
+def test_pd_disaggregation_w8a8_sfa_pcp_full_decode_only():
+    """Verify PCP2 prefill KV transfer to an async TP1 decode server."""
+    run_pd_disaggregation(
+        model="vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
+        model_args=["--enable-expert-parallel", "--quantization", "ascend"],
+        prefill_tp_size=1,
+        prefill_pcp_size=2,
+        decode_tp_size=1,
+        async_scheduling=True,
+        use_model_runner_v2=True,
+    )

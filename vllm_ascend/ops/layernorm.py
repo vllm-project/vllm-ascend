@@ -19,10 +19,31 @@ import torch
 from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
+from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
+from vllm_ascend.utils import enable_custom_op
+
+# Scanning quant_description is O(number of quantized tensors) and every
+# RMSNorm used to redo it. The answer is a property of the checkpoint, so
+# cache it per quant_description object. The dict is kept in the entry so its
+# id cannot be recycled by a later allocation, and the identity check makes a
+# stale entry harmless either way.
+_NORM_BIAS_IN_QUANT_DESCRIPTION: dict[int, tuple[dict, bool]] = {}
+
+
+def _quant_description_has_norm_bias(quant_description: dict) -> bool:
+    if not quant_description:
+        return False
+    cache_key = id(quant_description)
+    cached = _NORM_BIAS_IN_QUANT_DESCRIPTION.get(cache_key)
+    if cached is not None and cached[0] is quant_description:
+        return cached[1]
+    has_norm_bias = any("norm.bias" in name for name in quant_description)
+    _NORM_BIAS_IN_QUANT_DESCRIPTION[cache_key] = (quant_description, has_norm_bias)
+    return has_norm_bias
 
 
 class AscendRMSNorm(RMSNorm):
@@ -40,9 +61,8 @@ class AscendRMSNorm(RMSNorm):
         self.bias_loaded = False
 
         # quantization with anti_method m4 will generate none-zero norm bias
-        if vllm_config.quant_config is not None and any(
-            "norm.bias" in name for name in vllm_config.quant_config.quant_description
-        ):
+        quant_description = getattr(getattr(vllm_config, "quant_config", None), "quant_description", None) or {}
+        if _quant_description_has_norm_bias(quant_description):
             self.bias = torch.nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
             self.bias.weight_loader = self._bias_weight_loader
 
@@ -68,23 +88,18 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            if enable_custom_op():
-                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                    x, residual, self.weight, self.bias, self.variance_epsilon
-                )
-            else:
-                x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
-                if self.bias is not None:
-                    x.add_(self.bias)
+            import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+
+            enable_custom_op()
+            x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                x, residual, self.weight, self.bias, self.variance_epsilon
+            )
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
         if self.bias_loaded:
             x.add_(self.bias)
 
-        weight_prefetch_method = get_weight_prefetch_method()
-        weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(x)
         return x
 
 
@@ -97,7 +112,6 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         import torch_npu
 
         if residual is not None:
-            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             if enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, 1.0 + self.weight, None, self.variance_epsilon
@@ -199,3 +213,20 @@ class AscendRMSNormGated(RMSNormGated):
     def forward_oot(self, x, z=None):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
         return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)
+
+
+class AscendFusedRMSNormGated(FusedRMSNormGated):
+    """Use Ascend's fused kernel at the upstream FLA CustomOp boundary."""
+
+    def forward_oot(self, x, g, residual=None, prenorm=False, residual_in_fp32=False):
+        return rms_norm_gated(
+            x,
+            g,
+            self.weight,
+            self.bias,
+            self.activation,
+            residual=residual,
+            eps=self.eps,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+        )

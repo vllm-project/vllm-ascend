@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest.mock import patch
 
+import pytest
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
 
@@ -33,6 +34,16 @@ def format_chatml_messages(prompt: str):
     ]
 
 
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
+@pytest.mark.e2e_coverage(
+    arch="dense",
+    feature="lora,multi_lora,runtime_lora",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A2",
+    quantization="BF16",
+    graph_mode="eager",
+)
 @patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
 def test_multi_loras_with_tp_sync():
     lora_name_id_map = {}

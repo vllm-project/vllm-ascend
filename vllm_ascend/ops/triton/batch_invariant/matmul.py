@@ -371,8 +371,12 @@ def bmm_batch_invariant(a, b, *, out=None):
         raise ValueError(f"bmm_batch_invariant expects 3D tensors, got shapes {a.shape} and {b.shape}")
 
 
-def addmm_batch_invariant(bias, a, b):
-    return matmul_persistent(a, b, bias=bias)
+def addmm_batch_invariant(input_, a, b, *, beta=1, alpha=1):
+    if alpha == 1 and beta == 1 and input_.dim() == 1:
+        return matmul_persistent(a, b, bias=input_)
+
+    output = matmul_persistent(a, b)
+    return output * alpha + input_ * beta
 
 
 def matmul_batch_invariant(a, b, *, out=None):
@@ -434,7 +438,10 @@ def matmul_batch_invariant(a, b, *, out=None):
 
 
 def linear_batch_invariant(input_, weight, bias=None):
-    output = linear_persistent(input_, weight)
+    input_shape = input_.shape
+    input_2d = input_.reshape(-1, input_shape[-1])
+    output = linear_persistent(input_2d, weight)
+    output = output.reshape(input_shape[:-1] + (weight.shape[0],))
 
     if bias is not None:
         output = output + bias

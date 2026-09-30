@@ -70,7 +70,7 @@ upgrade()
                 if [ "$mrn" = o ]; then
                     break
                 elif [ "$mrn" = r ]; then
-                    [ -n "$vendor_installed_file"] && rm -rf "$vendor_installed_file"
+                    [ -n "$vendor_installed_file" ] && rm -rf "$vendor_installed_file"
                     break
                 elif [ "$mrn" = n ]; then
                     return 0

@@ -2,6 +2,7 @@ test_name: "test Qwen3-235B-A22B multi-dp"
 model: "Qwen/Qwen3-235B-A22B"
 num_nodes: 2
 npu_per_node: 16
+dp_load_balancing: internal
 env_common: &env_common
   HCCL_OP_EXPANSION_MODE: AIV
   TASK_QUEUE_ENABLE: 1
@@ -64,7 +65,8 @@ benchmarks:
     max_out_len: 1500
     batch_size: 700
     request_rate: 11.2
-    baseline: 1
+    # 2137.2098+2128.4501+2115.6099+2122.1382+2142.2571
+    baseline: 2129.13
     threshold: 0.97
   acc:
     case_type: accuracy

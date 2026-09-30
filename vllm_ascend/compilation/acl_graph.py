@@ -6,7 +6,7 @@ import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -20,9 +20,15 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
-from ..utils import weak_ref_tensors
+from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
+from .updatable_graph import (
+    ContextSource,
+    SharedSource,
+    UpdatableGraph,
+)
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
 _STREAM_RESOURCE_ERROR_CODE = "207008"
@@ -30,13 +36,7 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
     "insufficient_stream_resources",
     "stream resources are insufficient",
 )
-_STREAM_RESOURCE_GUIDANCE = (
-    "ACL graph capture failed with a known stream-resource exhaustion "
-    "signature. Consider upgrading to a newer HDK/CANN stack, reducing "
-    "cudagraph_capture_sizes, lowering max_cudagraph_capture_size, preferring "
-    "FULL or FULL_DECODE_ONLY for mostly uniform decode workloads, or "
-    "temporarily disabling graph mode to confirm the failure is capture-related."
-)
+_OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -47,8 +47,9 @@ def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
     return has_stream_resource_marker or (has_error_code and "stream resource" in lowered_message)
 
 
-def _raise_stream_resource_capture_error(exc: RuntimeError) -> None:
-    raise RuntimeError(f"{_STREAM_RESOURCE_GUIDANCE}\nOriginal error:\n{exc}") from exc
+def _is_old_hdk_capture_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in _OLD_HDK_CAPTURE_ERROR_MARKERS)
 
 
 @dataclasses.dataclass
@@ -87,13 +88,6 @@ class ACLGraphWrapper:
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
-    _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
-
-    @classmethod
-    def clear_all_graphs(cls) -> None:
-        for instance in list(cls._all_instances):
-            instance.clear_graphs()
-
     def __init__(
         self,
         runnable: Callable,
@@ -103,19 +97,23 @@ class ACLGraphWrapper:
         *,
         use_eagle: bool = False,
         enable_enpu: bool = False,
+        update_stream: torch.npu.Stream | None = None,
     ):
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.runtime_mode = runtime_mode
+
+        # A NONE runtime mode does not use ACL Graph, so avoid initializing
+        # graph-specific state (including the Ascend config lookup).
+        assert self.runtime_mode != CUDAGraphMode.NONE
+
         self.compilation_config = vllm_config.compilation_config
+        self.enable_super_kernel = get_ascend_config().ascend_compilation_config.enable_super_kernel
 
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
         self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
-        # assert runtime_mode is not NONE(no aclgraph), otherwise, we don't
-        # need to initialize a ACLGraphWrapper.
-        assert self.runtime_mode != CUDAGraphMode.NONE
         self.graph_pool = current_platform.get_global_graph_pool()
 
         if cudagraph_options is None:
@@ -126,9 +124,20 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+        self.update_stream = update_stream
+        self.attn_backend = None
+        self.draft_model_metadata: list[dict[str, Any]] = []
         _acl_graph_wrappers.add(self)
 
-        ACLGraphWrapper._all_instances.add(self)
+    def set_update_stream(self, update_stream):
+        self.update_stream = update_stream
+
+    def set_attn_backend(self, attn_backend):
+        self.attn_backend = attn_backend
+
+    def update_draft_model_metadata(self, draft_model_metadata: list[dict[str, Any]]):
+        # This has been prepared for the update full graph of MRV1.
+        self.draft_model_metadata = draft_model_metadata
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -143,13 +152,6 @@ class ACLGraphWrapper:
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
         return self.runnable
-
-    @property
-    def cudagraph_wrapper(self) -> "ACLGraphWrapper":
-        return self
-
-    def clear_graphs(self) -> None:
-        self.concrete_aclgraph_entries.clear()
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -177,13 +179,13 @@ class ACLGraphWrapper:
                 # capturing is fast, we don't need to log it for every
                 # shape. E.g. we only log it for the first subgraph in
                 # piecewise mode.
-                logger.debug("Capturing a aclgraph on (%s,%s)", self.runtime_mode.name, entry.batch_descriptor)
+                logger.debug("Capturing ACL graph (%s, %s)", self.runtime_mode.name, entry.batch_descriptor)
             # validate that aclgraph capturing is legal at this point.
             validate_cudagraph_capturing_enabled()
 
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
-            aclgraph = torch.npu.NPUGraph()
+            aclgraph = UpdatableGraph()
 
             with ExitStack() as stack:
                 if self.aclgraph_options.gc_disable:
@@ -207,7 +209,8 @@ class ACLGraphWrapper:
                 try:
                     with torch.npu.graph(aclgraph, pool=self.graph_pool):
                         # `output` is managed by pytorch's aclgraph pool
-                        output = self.runnable(*args, **kwargs)
+                        with super_kernel_scope("full_model", self.enable_super_kernel):
+                            output = self.runnable(*args, **kwargs)
                         # Join offloader's copy stream after forward to avoid
                         # unjoined stream error. The last layer's start_prefetch
                         # forks copy_stream, but wait_prefetch only happens in
@@ -222,9 +225,31 @@ class ACLGraphWrapper:
                             # any other acl graph.
                             output = weak_ref_tensors(output)
                 except RuntimeError as exc:
-                    if _is_stream_resource_capture_error(exc):
-                        _raise_stream_resource_capture_error(exc)
+                    if _is_old_hdk_capture_error(exc):
+                        raise RuntimeError(
+                            "ACL graph capture failed with an old Ascend HDK/CANN stack "
+                            "signature (`Alloc sq cq fail`). Please upgrade Ascend HDK to "
+                            "25.5.1 or later and use the matching CANN stack.\n"
+                            f"Original error:\n{exc}"
+                        ) from exc
+                    elif _is_stream_resource_capture_error(exc):
+                        raise RuntimeError(
+                            "ACL graph capture failed with a known stream-resource exhaustion "
+                            "signature. Consider reducing cudagraph_capture_sizes, lowering "
+                            "max_cudagraph_capture_size, preferring FULL or FULL_DECODE_ONLY for "
+                            "mostly uniform decode workloads, or temporarily disabling graph mode "
+                            "to confirm the failure is capture-related.\n"
+                            f"Original error:\n{exc}"
+                        ) from exc
                     raise
+
+            if self.enable_super_kernel:
+                aclgraph.super_kernel_optimize(
+                    optimize_options={
+                        "dcci_after_kernel_end": [".*"],
+                    },
+                )
+                logger.info_once("Super kernel optimization is enabled for ACL graph capture.")
 
             # here we always use weak ref for the workspaces
             # to save memory
@@ -256,7 +281,6 @@ class ACLGraphWrapper:
                 f"got {new_input_addresses}"
             )
 
-        logger.info_once("Replaying aclgraph")
         # In async scheduling or multi-threaded (MT) scenarios, it is possible that
         # the CPU's record event (from update_attn_params) for the iteration i completes
         # before the grph replay of iteration i-1.
@@ -270,8 +294,29 @@ class ACLGraphWrapper:
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
-        entry.aclgraph.replay()
+        if self.runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(self.attn_backend):
+            self._updatable_graph_replay(forward_context, entry.aclgraph)
+        else:
+            entry.aclgraph.replay()
+        logger.info_once("ACL graph replay is active (logged once).")
         return entry.output
+
+    def _updatable_graph_replay(
+        self,
+        forward_context,
+        graph: UpdatableGraph,
+    ):
+        assert self.update_stream is not None
+        if _EXTRA_CTX.is_draft_model:
+            resolved_tasks = graph.resolve_tasks(SharedSource(self.draft_model_metadata))
+        else:
+            resolved_tasks = graph.resolve_tasks(ContextSource(forward_context.attn_metadata))
+        if self.enable_enpu:
+            graph.update(self.update_stream, resolved_tasks)
+            graph.replay()
+        else:
+            graph.replay()
+            graph.update(self.update_stream, resolved_tasks)
 
 
 def weak_ref_workspaces(params):
@@ -290,32 +335,26 @@ def update_full_graph_params(
     num_tokens,
     vllm_config,
     speculative_config=None,
-    num_dcp_pcp_tokens=None,
     draft_attn_metadatas=None,
 ):
-    impl_cls = attn_backend.get_impl_cls()
-    impl_cls.update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        speculative_config,
-        num_dcp_pcp_tokens,
-        draft_attn_metadatas,
-    )
+    if use_updatable_graph(attn_backend):
+        return
 
-    from vllm_ascend.ops.gdn import update_conv1d_graph_params
+    # vLLM >= 0.27.1 (main) makes get_current_vllm_config() raise
+    # AssertionError outside set_current_vllm_config(); the SFA backend
+    # resolution in get_impl_cls() needs the config.
+    from vllm.config import set_current_vllm_config
 
-    # For GDN Attention: AscendC operate(conv1d update) update graph params
-    # No patch can be loaded, update method call is temporarily placed here
-    update_conv1d_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        _EXTRA_CTX.is_draft_model,
-        draft_attn_metadatas,
-    )
+    with set_current_vllm_config(vllm_config):
+        impl_cls = attn_backend.get_impl_cls()
+        impl_cls.update_graph_params(
+            update_stream,
+            forward_context,
+            num_tokens,
+            vllm_config,
+            speculative_config,
+            draft_attn_metadatas=draft_attn_metadatas,
+        )
 
 
 @dataclass
@@ -324,19 +363,9 @@ class GraphParams:
     workspaces: dict[int, torch.Tensor]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
-    conv1d_params: dict[int, list[tuple]]  # for causal conv1d params
-    conv1d_handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]  # for causal conv1d params handles
-    conv1d_events: dict[int, list[torch.npu.ExternalEvent]]  # for causal conv1d params events
 
 
 _graph_params: GraphParams | None = None
-
-
-def reset_graph_params():
-    global _graph_params, _draft_graph_params, _draft_graph_prefill_params
-    _graph_params = None
-    _draft_graph_params = None
-    _draft_graph_prefill_params = None
 
 
 def set_graph_params(aclgraph_capture_sizes: list[int]):
@@ -346,9 +375,6 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     _graph_params = GraphParams(
         {size: [] for size in aclgraph_capture_sizes},
         {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
     )
@@ -376,9 +402,6 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
         {size: None for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
     )
 
 
@@ -402,9 +425,6 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
     _draft_graph_prefill_params = GraphParams(
         {size: [] for size in aclgraph_capture_sizes},
         {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
     )

@@ -188,6 +188,7 @@ if (BUILD_OPEN_PROJECT)
             error_manager
             ascendalog
             unified_dlog
+            ascendcl
             -Wl,--as-needed
             -Wl,--whole-archive
             tiling_api

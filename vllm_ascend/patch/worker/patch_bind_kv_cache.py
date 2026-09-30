@@ -1,0 +1,87 @@
+from collections.abc import Sequence
+
+import torch
+import vllm.v1.worker.utils as utils
+from vllm.model_executor.layers.attention import Attention
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.worker.utils import defaultdict, extract_layer_index
+
+from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+
+
+# Without this patch, it will raise an exception when initialize kv_cache.
+# TODO To remove the patch, we need check why the original bind_kv_cache raises an NotImplementedError.
+def bind_kv_cache(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Attention],
+    runner_kv_caches: list[torch.Tensor],
+    num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+) -> None:
+    """
+    Bind the allocated KV cache to both ModelRunner and forward context so
+    that the KV cache can be used in the forward pass.
+
+    This function:
+      1) Fills the ModelRunner's kv cache list (`runner_kv_caches`) with
+         kv_caches.
+      2) Associates each attention layer in the `forward_context` with its
+         corresponding KV cache in kv_caches.
+
+    Args:
+        kv_caches: The allocated kv_caches with layer names as keys.
+        forward_context: The global forward context containing all Attention
+            layers with layer names as keys.
+        runner_kv_caches: The kv_cache declared by ModelRunner.
+    """
+    # Bind kv_caches to ModelRunner
+    assert len(runner_kv_caches) == 0
+
+    # Convert kv_caches dict to a list of tensors in the order of layer_index.
+    index2name = defaultdict(list)
+    for layer_name in kv_caches:
+        index2name[extract_layer_index(layer_name, num_attn_module)].append(layer_name)
+
+    ordered_layer_names: list[str] = []
+    for layer_index in sorted(index2name.keys()):
+        layer_names = index2name[layer_index]
+        # remove some codes for the typical case of encoder-decoder model, e.g., bart.
+        for layer_name in layer_names:
+            runner_kv_caches.append(kv_caches[layer_name])
+            ordered_layer_names.append(layer_name)
+
+    # Bind kv_caches to forward context
+    for layer_name, kv_cache in kv_caches.items():
+        forward_context[layer_name].kv_cache = kv_cache
+    # vLLM #52506 adds ReplaySSM ring trackers on main.
+    utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+
+
+utils.bind_kv_cache = bind_kv_cache
+
+
+def bind_kv_cache_to_layers(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Attention],
+    num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+) -> None:
+    """Ascend binding for vLLM main (#53781).
+
+    Upstream init_kv_cache switched from bind_kv_cache to
+    bind_kv_cache_to_layers on main, which calls each layer's bind_kv_cache
+    with the standardized single-tensor layout (vLLM #51718). Ascend
+    allocates per-layer (k, v) tuples, so assign the raw allocation directly,
+    matching the Ascend bind_kv_cache patch above.
+    """
+    for layer_name, kv_cache in kv_caches.items():
+        layer = forward_context[layer_name]
+        if isinstance(layer, DeepseekV41CacheLayer):
+            layer.bind_kv_cache(kv_cache)
+        else:
+            layer.kv_cache = kv_cache
+    ordered_layer_names = sorted(kv_caches, key=lambda name: extract_layer_index(name, num_attn_module))
+    utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+
+
+utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
