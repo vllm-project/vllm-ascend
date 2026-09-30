@@ -211,18 +211,19 @@ def rope_forward_oot(
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
     if out_dtype is not None and out_dtype != torch.float8_e4m3fn:
         raise NotImplementedError(f"Unsupported RoPE output dtype: {out_dtype}")
-    if HAS_TRITON:
+    if out_dtype == torch.float8_e4m3fn:
+        if not HAS_TRITON:
+            raise RuntimeError("float8_e4m3fn RoPE output requires Triton")
         num_tokens = query.shape[0]
-        if out_dtype == torch.float8_e4m3fn:
-            query_width = query.numel() // num_tokens
-            key_width = key.numel() // num_tokens
-            if query_width % head_size != 0 or key_width % head_size != 0:
-                head_size = key_width
-                if query_width % head_size != 0:
-                    raise ValueError(
-                        f"Cannot infer the FP8 RoPE head size from query_width={query_width}, key_width={key_width}"
-                    )
-            rotary_dim = min(rotary_dim, head_size)
+        query_width = query.numel() // num_tokens
+        key_width = key.numel() // num_tokens
+        if query_width % head_size != 0 or key_width % head_size != 0:
+            head_size = key_width
+            if query_width % head_size != 0:
+                raise ValueError(
+                    f"Cannot infer the FP8 RoPE head size from query_width={query_width}, key_width={key_width}"
+                )
+        rotary_dim = min(rotary_dim, head_size)
         query, key = rope_forward_triton(
             query.view(num_tokens, -1, head_size),
             key.view(num_tokens, -1, head_size),
@@ -233,12 +234,10 @@ def rope_forward_oot(
             out_dtype=out_dtype,
         )
     else:
-        if out_dtype == torch.float8_e4m3fn:
-            raise RuntimeError("float8_e4m3fn RoPE output requires Triton")
         # npu_mrope handles both full and partial rotary internally:
         # it splits query into queryRot[..., :rotary_dim] and queryPass[..., rotary_dim:],
         # where rotary_dim is inferred from cos_sin_cache.shape[-1].
-        rotary_mode = "half" if is_neox_style else "interleaved"
+        rotary_mode = "half" if is_neox_style else "interleave"
         query, key = torch_npu.npu_mrope(
             positions,
             query.contiguous().view(query.shape[0], -1),
