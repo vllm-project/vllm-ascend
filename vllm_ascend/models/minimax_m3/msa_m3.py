@@ -41,6 +41,7 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     MiniMaxM3TPDecodeScoreMetadata,
+    minimax_m3_index_decode_a5,
     minimax_m3_index_tp_block_parallel_decode,
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
@@ -55,10 +56,10 @@ from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-# The bundled MsaIndexScore includes the Ascend 950 arch35 FP8 kernel. Keep it
-# enabled for A5 prefill, while A5 decode uses its lower-latency Triton path.
+# The bundled MsaIndexScore supports A5 FP8. Use AscendC for both prefill and
+# decode; the A5 decode path scores the full local table without TP collectives.
 _USE_ASCENDC_INDEX_SCORE_PREFILL = True
-_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5
+_USE_ASCENDC_INDEX_SCORE_DECODE = True
 
 if get_ascend_device_type() == AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
@@ -364,7 +365,12 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 cu_seqlens_q=decode_cu_seqlens_q,
                 context_lens=decode_context_lens,
             )
-            if _USE_ASCENDC_INDEX_SCORE_DECODE and self.tp_size > 1 and active_prefills == 0:
+            if (
+                _USE_ASCENDC_INDEX_SCORE_DECODE
+                and get_ascend_device_type() != AscendDeviceType.A5
+                and self.tp_size > 1
+                and active_prefills == 0
+            ):
                 decode_metadata.tp_score = self._build_tp_score_metadata(
                     decode_metadata.block_table,
                     decode_cu_seqlens_q,
@@ -507,7 +513,26 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             tp_group = get_tp_group()
             decode_iq = iq[:num_decode_tokens]
             if _USE_ASCENDC_INDEX_SCORE_DECODE:
-                if tp_group.world_size > 1 and index_md.num_prefills == 0:
+                if get_ascend_device_type() == AscendDeviceType.A5:
+                    decode_start_loc = torch.div(
+                        d.context_lens,
+                        self.block_size,
+                        rounding_mode="floor",
+                    ).to(dtype=torch.int32)
+                    decode_topk, decode_select_num_idx = minimax_m3_index_decode_a5(
+                        decode_iq,
+                        kv,
+                        d.block_table,
+                        d.cu_seqlens_q,
+                        d.seq_lens,
+                        decode_start_loc,
+                        index_md.causal_mask,
+                        topk=self.topk_blocks,
+                        init_blocks=self.init_blocks,
+                        local_blocks=self.local_blocks,
+                        decode_query_len=d.decode_query_len,
+                    )
+                elif tp_group.world_size > 1 and index_md.num_prefills == 0:
                     decode_topk = minimax_m3_index_tp_block_parallel_decode(
                         decode_iq,
                         kv,
