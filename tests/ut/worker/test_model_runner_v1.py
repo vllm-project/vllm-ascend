@@ -2523,6 +2523,7 @@ class TestNPUModelRunnerScoreEncoderCache(unittest.TestCase):
         runner.cached = {}
         runner._pending_encoder_cache_copies = deque()
         runner.use_score_encoder_cache = use_score_encoder_cache
+        runner._offload_request_states = None
         runner.maybe_save_ec_to_connector = MagicMock()
         return runner
 
