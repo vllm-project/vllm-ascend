@@ -22,6 +22,7 @@ from typing import Any
 
 import torch
 import torch_npu
+from vllm.logger import logger
 
 
 def _get_allow_internal_format() -> bool:
@@ -32,7 +33,22 @@ def _get_allow_internal_format() -> bool:
 
 
 def _set_allow_internal_format(enabled: bool) -> None:
-    torch.npu.config.allow_internal_format = enabled
+    # Prefer the high-level config sugar where torch_npu provides it.
+    config = getattr(torch.npu, "config", None)
+    if config is not None and hasattr(config, "allow_internal_format"):
+        config.allow_internal_format = enabled
+        return
+    # torch_npu 2.10 (910B) ships an empty torch.npu.config module: assigning
+    # the attribute would succeed silently without toggling anything. Fall
+    # back to the low-level option API, which is present there.
+    set_option = getattr(torch_npu._C, "_npu_setOption", None)  # noqa: SLF001
+    if set_option is not None:
+        set_option({"ALLOW_INTERNAL_FORMAT": "enable" if enabled else "disable"})
+        return
+    logger.warning_once(
+        "No ALLOW_INTERNAL_FORMAT setter available on this torch_npu version; "
+        "the PLE short convolution follows the process-wide setting."
+    )
 
 
 def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
