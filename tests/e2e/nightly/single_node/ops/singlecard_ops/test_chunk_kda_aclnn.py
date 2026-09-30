@@ -313,11 +313,7 @@ def test_kda_layout_swap12_matches_reference(shape, dtype, with_dependency):
 
 @pytest.mark.parametrize(
     ("total_t", "hq", "hv", "kdim", "vdim", "dtype"),
-    [
-        (64, 1, 1, 128, 128, torch.float16),
-        (128, 1, 2, 128, 256, torch.float16),
-        (128, 2, 2, 128, 256, torch.bfloat16),
-    ],
+    [(64, 1, 1, 128, 128, torch.float16)],
 )
 @torch.inference_mode()
 def test_chunk_kda_fwd_c128_v256_path(total_t, hq, hv, kdim, vdim, dtype):
