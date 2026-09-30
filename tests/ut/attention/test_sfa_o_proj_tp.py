@@ -54,6 +54,7 @@ class TestAscendSFAOProjTPParams(TestBase):
             self.weight = torch.nn.Parameter(torch.randn(4, 3), requires_grad=False)
             self.weight_scale = torch.nn.Parameter(torch.randn(2, 3), requires_grad=False)
             self.quant_method = linear_method
+            self.reduce_results = True
 
     def setUp(self):
         AscendSFADSACPImpl.o_proj_full_pools.clear()
@@ -114,6 +115,28 @@ class TestAscendSFAOProjTPParams(TestBase):
         self.assertEqual(impl.o_proj.weight_scale.data_ptr(), original_scale_ptr)
         tp_group.all_gather.assert_called_once()
         self.assertTrue(torch.equal(output, gathered_output[:3]))
+
+    def test_o_proj_full_weight_stages_local_result_for_upstream_sp(self):
+        impl = self._make_impl()
+        impl._enable_o_proj_tp_full_weight_switch()
+        impl.enable_dsa_cp_with_o_proj_tp = True
+        impl.o_proj.reduce_results = False
+        local_output = torch.tensor([[3.0, 4.0, 5.0], [6.0, 7.0, 8.0]])
+        impl._apply_o_proj_full_weight = MagicMock(return_value=local_output)
+        tp_group = SimpleNamespace(rank_in_group=1, all_gather=MagicMock())
+
+        with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp_group):
+            output = impl._finalize_o_proj(
+                attn_output=torch.randn(2, 8),
+                output=torch.full((3, 3), -1.0),
+                gather_full_o_proj=True,
+            )
+
+        tp_group.all_gather.assert_not_called()
+        torch.testing.assert_close(
+            output,
+            torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [3.0, 4.0, 5.0]]),
+        )
 
     def test_prepare_native_hidden_states_slices_replicated_token_state(self):
         impl = self._make_impl()

@@ -105,6 +105,16 @@ class TPWeightSwitchMixin:
     tp_weight_output_repeat_specs: ClassVar[tuple[TPWeightRepeatSpec, ...]] = ()
     supports_tp_weight_switch: ClassVar[bool] = False
 
+    def get_tp_weight_switch_specs(
+        self,
+        *,
+        input_sharded: bool,
+    ) -> tuple[tuple[TPWeightGatherSpec, ...], tuple[TPWeightRepeatSpec, ...]]:
+        """Return the tensor specs for the layer's TP-sharded axis."""
+        if input_sharded:
+            return self.tp_weight_gather_specs, self.tp_weight_repeat_specs
+        return self.tp_weight_output_gather_specs, self.tp_weight_output_repeat_specs
+
     @staticmethod
     def split_tensor_for_tp(
         tensor: torch.Tensor,
@@ -155,14 +165,8 @@ class TPWeightSwitchMixin:
                 f"got input_size={input_size}, input_size_per_partition={input_size_per_partition}, "
                 f"output_size={output_size}, output_size_per_partition={output_size_per_partition}."
             )
-        if input_sharded:
-            gather_specs = self.tp_weight_gather_specs
-            repeat_specs = self.tp_weight_repeat_specs
-            shard_axis = "input"
-        else:
-            gather_specs = self.tp_weight_output_gather_specs
-            repeat_specs = self.tp_weight_output_repeat_specs
-            shard_axis = "output"
+        gather_specs, repeat_specs = self.get_tp_weight_switch_specs(input_sharded=input_sharded)
+        shard_axis = "input" if input_sharded else "output"
         if not gather_specs and not repeat_specs:
             raise RuntimeError(
                 f"{type(self).__name__} does not declare TP weight switch specs for a {shard_axis}-sharded layer."
