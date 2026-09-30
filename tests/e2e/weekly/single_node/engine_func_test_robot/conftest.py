@@ -44,4 +44,4 @@ def pytest_addoption(parser):
     parser.addoption("--model", action="store", default="qwen")
     parser.addoption("--imageNum", action="store", type=int, default=1)
     parser.addoption("--videoNum", action="store", type=int, default=1)
-    parser.addoption("--audioNum", action="store", type=int, default=1)
+    parser.addoption("--audioNum", action="store", type=int, default=0)
