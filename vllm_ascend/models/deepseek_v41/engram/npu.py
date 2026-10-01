@@ -18,13 +18,23 @@ import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
-from vllm_ascend.device.device_op import DeviceOperator
-
 SCALE_GROUP = 32
 # A 384M row table overflows the 32 bit offset arithmetic a single Triton tile
 # can express, so the device address of every group of rows is published
 # separately.
 CHUNK_ROWS = 1 << 22
+
+
+ACL_HOST_REG_MAPPED = 0x2
+ACL_HOST_REG_PINNED = 0x10000000
+
+
+def _host_register_flags() -> int:
+    from vllm_ascend.utils import is_950
+
+    # Ascend 950's CANN runtime rejects the A3 PINNED hint (107000).
+    # MAPPED registers both malloc-host buffers and shared-memory mappings.
+    return ACL_HOST_REG_MAPPED if is_950() else ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED
 
 
 def engram_cpu_offload(vllm_config) -> bool:
@@ -148,7 +158,7 @@ class HostUvaBuffer:
         self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
         self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
         try:
-            rc = self.lib.aclrtHostRegisterV2(self.pointer, size, DeviceOperator.host_register_flags())
+            rc = self.lib.aclrtHostRegisterV2(self.pointer, size, _host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
             address = ctypes.c_void_p()
@@ -293,7 +303,7 @@ class SharedUvaBuffer:
                     self.shm = shared_memory.SharedMemory(name=name)
             assert self.shm.size >= size
             address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
-            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, DeviceOperator.host_register_flags())
+            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, _host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
             # Registration succeeded: from here on the mapping owes exactly one
