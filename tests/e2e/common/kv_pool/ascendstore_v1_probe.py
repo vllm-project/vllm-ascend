@@ -41,19 +41,26 @@ def install_worker_io_probe(worker: Any) -> int:
     original_store, original_load = backend_io.store, backend_io.load
     original_get = runtime._resources.backend.get
 
-    def record_store(batches: Any) -> Any:
-        bindings = tuple(binding for batch in batches for binding in batch.bindings)
+    def record_store(work: Any) -> Any:
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend.arguments import (
+            materialize_ranges,
+        )
+
+        arguments = materialize_ranges(work)
         snapshots = {
-            binding.remote_object.key: _snapshot_buffers(
-                caches, binding.local_region.memory.addresses, binding.local_region.memory.sizes
+            key: _snapshot_buffers(caches, addresses, sizes)
+            for key, addresses, sizes in zip(
+                arguments.keys,
+                arguments.addresses,
+                arguments.sizes,
+                strict=True,
             )
-            for binding in bindings
         }
         # Store reaches this boundary only after its SourceReady event has been synchronized.
-        evidence = original_store(batches)
+        evidence = original_store(work)
         assert evidence.succeeded and evidence.source_release_confirmed, "The real Backend Store did not succeed"
-        assert len(evidence.binding_evidence) == len(bindings)
-        assert all(item.result_code == 0 for item in evidence.binding_evidence)
+        assert len(evidence.transfer_evidence) == len(work.sources)
+        assert all(item.result_code == 0 for item in evidence.transfer_evidence)
         probe["stored_buffers"].update(snapshots)
         return evidence
 
@@ -74,12 +81,11 @@ def install_worker_io_probe(worker: Any) -> int:
         probe["loaded_keys"].extend(keys)
         return result
 
-    def record_load(bindings: Any) -> Any:
-        evidence = original_load(bindings)
-        assert len(evidence) == len(bindings) and all(item.result_code == 0 for item in evidence)
+    def record_load(work: Any) -> Any:
+        evidence = original_load(work)
+        assert len(evidence) == len(work.sources) and all(item.result_code == 0 for item in evidence)
         probe["loaded_ranges"].extend(
-            (binding.remote_object.chunk.token_range.start_token, binding.remote_object.chunk.token_range.end_token)
-            for binding in bindings
+            (source.chunk.token_range.start_token, source.chunk.token_range.end_token) for source in work.sources
         )
         return evidence
 

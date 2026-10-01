@@ -6,6 +6,7 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 from vllm.v1.engine import EngineCoreOutputs, UtilityOutput
@@ -17,6 +18,32 @@ from tests.e2e.common.kv_pool.ascendstore_v1_probe import (
     collect_worker_io_probe,
     install_worker_io_probe,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.lowering import (
+    bind_transfer_rows,
+    enumerate_transfer_work,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.evidence import (
+    StoreEvidence,
+    TransferEvidence,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.representation import (
+    KVBlockAssignment,
+    KVBlockAssignmentBatch,
+    KVChunk,
+    PhysicalCoordinate,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.selection import (
+    TransferWork,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.transfer import (
+    BoundGroupPlan,
+    ContiguousLayoutPlan,
+    SubmissionPlan,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend.arguments import (
+    materialize_ranges,
+)
 
 
 @pytest.fixture
@@ -25,26 +52,42 @@ def worker(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     raw_bytes = cache.view(torch.uint8).flatten()
     objects: dict[str, torch.Tensor] = {}
     backend = SimpleNamespace(mode="copy")
-    bindings = tuple(
-        SimpleNamespace(
-            remote_object=SimpleNamespace(
-                key=f"key-{index}",
-                chunk=SimpleNamespace(token_range=SimpleNamespace(start_token=index * 4, end_token=(index + 1) * 4)),
-            ),
-            local_region=SimpleNamespace(memory=SimpleNamespace(addresses=(cache[index].data_ptr(),), sizes=(64,))),
-        )
-        for index in range(2)
+    layout = ContiguousLayoutPlan(
+        (0,),
+        0,
+        64,
+        0,
+        np.asarray([cache.data_ptr()], dtype=np.uint64),
+        np.asarray([64], dtype=np.uint64),
+        np.asarray([16], dtype=np.uint64),
+        np.asarray([0], dtype=np.uint64),
+        4,
     )
+    plan = BoundGroupPlan(
+        0,
+        (PhysicalCoordinate(),),
+        ("key-",),
+        (layout,),
+        (SubmissionPlan(None, (0,)),),
+        2,
+    )
+    chunks = tuple(KVChunk(0, index, TokenRange(index * 4, (index + 1) * 4), str(index)) for index in range(2))
+    rows = bind_transfer_rows(
+        plan,
+        KVBlockAssignmentBatch(
+            0,
+            tuple(KVBlockAssignment(chunk, index, 4) for index, chunk in enumerate(chunks)),
+        ),
+    )
+    work = enumerate_transfer_work((rows,))[0]
 
-    def store(batches):
-        evidence = []
-        for batch in batches:
-            for binding in batch.bindings:
-                memory = binding.local_region.memory
-                offset = memory.addresses[0] - cache.data_ptr()
-                objects[binding.remote_object.key] = raw_bytes[offset : offset + memory.sizes[0]].clone()
-                evidence.append(SimpleNamespace(result_code=0))
-        return SimpleNamespace(succeeded=True, source_release_confirmed=True, binding_evidence=evidence)
+    def store(selected_work):
+        arguments = materialize_ranges(selected_work)
+        for key, addresses, sizes in zip(arguments.keys, arguments.addresses, arguments.sizes, strict=True):
+            offset = addresses[0] - cache.data_ptr()
+            objects[key] = raw_bytes[offset : offset + sizes[0]].clone()
+        evidence = tuple(TransferEvidence(source, 0, True) for source in selected_work.sources)
+        return StoreEvidence(evidence, True, True)
 
     def get(keys, addresses, sizes):
         if backend.mode == "fail":
@@ -61,13 +104,18 @@ def worker(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
                 raw_bytes[offset : offset + lengths[0]].copy_(objects[key])
         return [0] * len(keys)
 
-    def load(selected_bindings):
-        if not selected_bindings:
+    def load(selected_work):
+        if selected_work.empty:
             return ()
-        keys = [binding.remote_object.key for binding in selected_bindings]
-        addresses = [list(binding.local_region.memory.addresses) for binding in selected_bindings]
-        sizes = [list(binding.local_region.memory.sizes) for binding in selected_bindings]
-        return tuple(SimpleNamespace(result_code=code) for code in backend.get(keys, addresses, sizes))
+        arguments = materialize_ranges(selected_work)
+        return tuple(
+            TransferEvidence(source, code)
+            for source, code in zip(
+                selected_work.sources,
+                backend.get(arguments.keys, arguments.addresses, arguments.sizes),
+                strict=True,
+            )
+        )
 
     backend.get = get
     runtime = SimpleNamespace(
@@ -87,20 +135,20 @@ def worker(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         sys.modules, "vllm.distributed.kv_transfer", SimpleNamespace(get_kv_transfer_group=lambda: connector)
     )
     monkeypatch.setattr(torch, "npu", SimpleNamespace(synchronize=Mock()), raising=False)
-    return SimpleNamespace(runtime=runtime, bindings=bindings, cache=cache, connector=connector)
+    return SimpleNamespace(runtime=runtime, work=work, cache=cache, connector=connector)
 
 
 def test_probe_verifies_real_copy_after_erasing_source(worker: SimpleNamespace) -> None:
     assert install_worker_io_probe(worker) == 4
     expected = worker.cache.clone()
-    worker.runtime._backend_io.store((SimpleNamespace(bindings=worker.bindings),))
+    worker.runtime._backend_io.store(worker.work)
     cold_evidence = clear_worker_local_kv(worker)
     worker.runtime.fence_previous_store.assert_called_once()
     assert torch.count_nonzero(worker.cache) == 0
     assert cold_evidence["get_calls"] == 0
     assert cold_evidence["local_kv_cleared"]
 
-    worker.runtime._backend_io.load(worker.bindings)
+    worker.runtime._backend_io.load(worker.work)
     assert torch.equal(worker.cache, expected)
     warm_evidence = collect_worker_io_probe(worker)
     assert warm_evidence["get_calls"] == 1
@@ -112,9 +160,9 @@ def test_probe_verifies_real_copy_after_erasing_source(worker: SimpleNamespace) 
 def test_probe_evidence_survives_collective_rpc_codec(worker: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     install_worker_io_probe(worker)
-    worker.runtime._backend_io.store((SimpleNamespace(bindings=worker.bindings),))
+    worker.runtime._backend_io.store(worker.work)
     clear_worker_local_kv(worker)
-    worker.runtime._backend_io.load(worker.bindings)
+    worker.runtime._backend_io.load(worker.work)
     evidence = collect_worker_io_probe(worker)
     outputs = EngineCoreOutputs(utility_output=UtilityOutput(call_id=1, result=UtilityResult([evidence])))
 
@@ -128,17 +176,17 @@ def test_probe_evidence_survives_collective_rpc_codec(worker: SimpleNamespace, m
 @pytest.mark.parametrize("mode", ["noop", "partial", "fail", "short", "missing"])
 def test_probe_rejects_false_get_success(worker: SimpleNamespace, mode: str) -> None:
     install_worker_io_probe(worker)
-    worker.runtime._backend_io.store((SimpleNamespace(bindings=worker.bindings),))
+    worker.runtime._backend_io.store(worker.work)
     clear_worker_local_kv(worker)
     worker.runtime._resources.backend.mode = mode
     with pytest.raises(AssertionError):
-        worker.runtime._backend_io.load(worker.bindings)
+        worker.runtime._backend_io.load(worker.work)
     assert collect_worker_io_probe(worker)["get_calls"] == 0
 
 
 def test_probe_does_not_count_an_empty_load_as_get(worker: SimpleNamespace) -> None:
     install_worker_io_probe(worker)
-    assert worker.runtime._backend_io.load(()) == ()
+    assert worker.runtime._backend_io.load(TransferWork(None, ())) == ()
     assert collect_worker_io_probe(worker)["get_calls"] == 0
 
 

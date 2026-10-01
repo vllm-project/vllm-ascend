@@ -1,4 +1,4 @@
-"""Advance layer-restricted KV bindings through Backend range sessions.
+"""Advance pre-enumerated layer work through Backend range sessions.
 
 Load exposes each completed range at its layer fence. Store accumulates layer
 ranges and publishes the remote object only when the step is finalized::
@@ -76,8 +76,14 @@ from typing import TYPE_CHECKING, Any, Protocol
 from vllm.logger import logger
 
 from ...program.spec.topology import KVPoolTopology
-from ...program.values.evidence import BindingEvidence, StoreEvidence
-from ...program.values.representation import BindingBatch, KVBinding
+from ...program.values.evidence import StoreEvidence, TransferEvidence
+from ...program.values.selection import (
+    merge_transfer_work,
+    select_work_keys,
+    selected_work_keys,
+    selected_work_sources,
+)
+from ...program.values.transfer import TransferRows, TransferSource
 from . import (
     LoadCompletion,
     LoadTimelineProtocol,
@@ -200,7 +206,9 @@ class _StoreSession:
     failed_keys: set[str] = field(default_factory=set)
     session_result_codes: dict[str, int | None] = field(default_factory=dict)
     range_result_codes: dict[tuple[str, int], int | None] = field(default_factory=dict)
-    source_release_confirmed_by_key: dict[str, bool] = field(default_factory=dict)
+    transfer_evidence_by_rows: dict[TransferRows, list[TransferEvidence]] = field(default_factory=dict)
+    source_release_confirmed_by_source: dict[tuple[int, int, tuple[int, ...], str], bool] = field(default_factory=dict)
+    unsafe_rows: set[TransferRows] = field(default_factory=set)
     errors_by_key: dict[str, Exception] = field(default_factory=dict)
 
     def open(
@@ -210,15 +218,7 @@ class _StoreSession:
         backend_io: LayerwiseBackendOperations,
     ) -> None:
         keys = tuple(object_sizes_by_key)
-        self.source_release_confirmed_by_key.update((key, True) for key in keys)
-        missing_keys = tuple(
-            dict.fromkeys(
-                binding.remote_object.key
-                for transfer in admitted_transfers
-                for batch in transfer.batches
-                for binding in batch.bindings
-            )
-        )
+        missing_keys = tuple(dict.fromkeys(_transfer_keys(admitted_transfers)))
         self.existing_keys.update(set(keys) - set(missing_keys))
         if missing_keys:
             self._start_sessions(missing_keys, object_sizes_by_key, backend_io)
@@ -227,18 +227,25 @@ class _StoreSession:
         )
 
     def record_range(self, transfer: StoreTransfer, completion: StoreCompletion) -> None:
-        transfer_keys = {binding.remote_object.key for batch in transfer.batches for binding in batch.bindings}
-        for item in completion.evidence.binding_evidence:
-            key = item.binding.remote_object.key
-            layer_id = item.binding.local_region.region.physical_layer_ids[0]
+        transfer_keys = set(_transfer_keys((transfer,)))
+        observed_keys: set[str] = set()
+        for item in completion.evidence.transfer_evidence:
+            self.transfer_evidence_by_rows.setdefault(item.source.rows, []).append(item)
+            key = item.source.key
+            observed_keys.add(key)
+            layer_id = item.source.physical_layer_ids[0]
             self.range_result_codes[key, layer_id] = item.result_code
-        if not completion.evidence.succeeded:
+            if item.result_code != 0:
+                self.failed_keys.add(key)
+            if item.source_release_confirmed is not True:
+                self.source_release_confirmed_by_source[_source_identity(item.source)] = False
+        if not observed_keys and not completion.evidence.succeeded:
             self.failed_keys.update(transfer_keys)
-        if not completion.evidence.source_release_confirmed:
-            for key in transfer_keys:
-                self.source_release_confirmed_by_key[key] = False
+        if not observed_keys and not completion.evidence.source_release_confirmed:
+            self.unsafe_rows.update(transfer.rows)
         if completion.evidence.error is not None:
-            for key in transfer_keys:
+            error_keys = observed_keys or transfer_keys
+            for key in error_keys:
                 self.errors_by_key.setdefault(key, completion.evidence.error)
 
     def finalize(
@@ -325,13 +332,25 @@ class _StoreSession:
     def _build_completions(self) -> tuple[StoreCompletion, ...]:
         completions = []
         for transfer in self.transfers:
-            bindings = tuple(binding for batch in transfer.batches for binding in batch.bindings)
-            relevant = tuple(binding for binding in bindings if binding.remote_object.key not in self.existing_keys)
-            evidence = tuple(BindingEvidence(binding, self._result_code(binding)) for binding in relevant)
-            keys = {binding.remote_object.key for binding in bindings}
+            recorded = tuple(item for rows in transfer.rows for item in self.transfer_evidence_by_rows.get(rows, ()))
+            evidence = tuple(
+                TransferEvidence(
+                    item.source,
+                    self._result_code(item.source),
+                    self.source_release_confirmed_by_source.get(
+                        _source_identity(item.source),
+                        item.source_release_confirmed,
+                    ),
+                )
+                for item in recorded
+                if item.source.key not in self.existing_keys
+            )
+            keys = set(_transfer_keys((transfer,)))
             failed = keys & self.failed_keys
             error = next((self.errors_by_key[key] for key in keys if key in self.errors_by_key), None)
-            source_release_confirmed = all(self.source_release_confirmed_by_key.get(key, True) for key in keys)
+            source_release_confirmed = not any(rows in self.unsafe_rows for rows in transfer.rows) and all(
+                item.source_release_confirmed is True for item in evidence
+            )
             completions.append(
                 StoreCompletion(
                     transfer.request_id,
@@ -341,11 +360,11 @@ class _StoreSession:
             )
         return tuple(completions)
 
-    def _result_code(self, binding: KVBinding) -> int | None:
-        key = binding.remote_object.key
+    def _result_code(self, source: TransferSource) -> int | None:
+        key = source.key
         if key in self.session_result_codes:
             return self.session_result_codes[key]
-        return self.range_result_codes.get((key, binding.local_region.region.physical_layer_ids[0]))
+        return self.range_result_codes.get((key, source.physical_layer_ids[0]))
 
 
 @dataclass(slots=True)
@@ -416,17 +435,13 @@ class LayerwiseLoadTimeline:
             self._raise_if_not_running()
             if self._session is not None:
                 raise RuntimeError("Previous Layerwise Load session has not finished")
-            bindings = tuple(binding for transfer in transfers for binding in transfer.traversal)
-            if not bindings:
+            work = tuple(item for transfer in transfers for item in transfer.work if not item.empty)
+            if not work:
                 return tuple(LoadCompletion(transfer.request_id, ()) for transfer in transfers)
-            if any(len(binding.local_region.region.physical_layer_ids) != 1 for binding in bindings):
-                raise ValueError("Layerwise Load requires every binding to address one physical layer")
-            unknown_layer_ids = sorted(
-                {binding.local_region.region.physical_layer_ids[0] for binding in bindings} - set(self._layer_order)
-            )
+            unknown_layer_ids = sorted({item.physical_layer_id for item in work} - set(self._layer_order))
             if unknown_layer_ids:
                 raise ValueError(f"Unknown physical Layer IDs {unknown_layer_ids}")
-            object_sizes_by_key = _collect_object_sizes(bindings)
+            object_sizes_by_key = _collect_object_sizes(transfers)
             command = _OpenLoadSession(
                 tuple(transfers), tuple(object_sizes_by_key), tuple(object_sizes_by_key.values())
             )
@@ -536,13 +551,13 @@ class LayerwiseLoadTimeline:
             LoadCompletion(
                 transfer.request_id,
                 tuple(
-                    BindingEvidence(binding, codes_by_key[binding.remote_object.key])
-                    for binding in transfer.traversal
-                    if codes_by_key[binding.remote_object.key] != 0
+                    TransferEvidence(source, codes_by_key[source.key])
+                    for source in selected_work_sources(transfer.work)
+                    if codes_by_key[source.key] != 0
                 ),
             )
             for transfer in command.transfers
-            if any(codes_by_key[binding.remote_object.key] != 0 for binding in transfer.traversal)
+            if any(codes_by_key[key] != 0 for key in _transfer_keys((transfer,)))
         )
         transfers_by_layer = _group_layerwise_transfers(list(command.transfers), set(session_keys))
         layer_order = tuple(layer_id for layer_id in self._layer_order if layer_id in transfers_by_layer)
@@ -564,7 +579,13 @@ class LayerwiseLoadTimeline:
                 logger.info("Layerwise %d load waits for attention compute start", layer_job.layer_id)
         if session.close_requested:
             return
-        layer_job.completions.extend(self._operation(transfer) for transfer in layer_job.transfers)
+        work = merge_transfer_work(tuple(transfer.work[0] for transfer in layer_job.transfers))
+        rows = tuple(rows for transfer in layer_job.transfers for rows in transfer.rows)
+        completion = self._operation(LoadTransfer("<layer-batch>", rows, (work,)))
+        for transfer in layer_job.transfers:
+            transfer_rows = {id(rows) for rows in transfer.rows}
+            evidence = tuple(item for item in completion.transfer_evidence if id(item.source.rows) in transfer_rows)
+            layer_job.completions.append(LoadCompletion(transfer.request_id, evidence))
 
     def _fill_prefetch_window(
         self,
@@ -801,10 +822,7 @@ class LayerwiseStoreTimeline:
             command.batch.completed.set()
 
     def _open_session(self, transfers: list[StoreTransfer]) -> _StoreSession:
-        bindings = tuple(binding for transfer in transfers for batch in transfer.batches for binding in batch.bindings)
-        if any(len(binding.local_region.region.physical_layer_ids) != 1 for binding in bindings):
-            raise ValueError("Layerwise Store requires every binding to address one physical layer")
-        command = _OpenStoreSession(tuple(transfers), _collect_object_sizes(bindings))
+        command = _OpenStoreSession(tuple(transfers), _collect_object_sizes(transfers))
         self._executor.submit(command)
         self._wait_for_completion(command.completed)
         if command.session is None:
@@ -813,9 +831,33 @@ class LayerwiseStoreTimeline:
 
     def _execute_layer_job(self, job: _StoreLayerJob) -> None:
         assert self._operation is not None
+        work = merge_transfer_work(tuple(transfer.work[0] for transfer in job.transfers))
+        rows = tuple(rows for transfer in job.transfers for rows in transfer.rows)
+        aggregate = StoreTransfer("<layer-batch>", rows, (work,))
+        completion = self._operation(aggregate, job.source_ready_event)
         for transfer in job.transfers:
-            completion = self._operation(transfer, job.source_ready_event)
-            job.session.record_range(transfer, completion)
+            transfer_rows = {id(rows) for rows in transfer.rows}
+            evidence = tuple(
+                item for item in completion.evidence.transfer_evidence if id(item.source.rows) in transfer_rows
+            )
+            error = completion.evidence.error
+            succeeded = error is None and bool(evidence) and all(item.result_code == 0 for item in evidence)
+            source_release_confirmed = (
+                all(item.source_release_confirmed is True for item in evidence)
+                if evidence
+                else completion.evidence.source_release_confirmed
+            )
+            split = StoreCompletion(
+                transfer.request_id,
+                StoreEvidence(
+                    evidence,
+                    succeeded,
+                    source_release_confirmed,
+                    error,
+                ),
+                transfer.store_job_id,
+            )
+            job.session.record_range(transfer, split)
 
     def _wait_for_completion(self, completed: threading.Event) -> None:
         while True:
@@ -833,14 +875,27 @@ class LayerwiseStoreTimeline:
         self._executor.check_running()
 
 
-def _collect_object_sizes(bindings: tuple[KVBinding, ...]) -> dict[str, int]:
+def _collect_object_sizes(transfers: Iterable[LoadTransfer | StoreTransfer]) -> dict[str, int]:
     object_sizes_by_key: dict[str, int] = {}
-    for binding in bindings:
-        key = binding.remote_object.key
-        previous_size = object_sizes_by_key.setdefault(key, binding.remote_layout.object_size)
-        if previous_size != binding.remote_layout.object_size:
-            raise ValueError(f"Layerwise key {key!r} has inconsistent object sizes")
+    for transfer in transfers:
+        for rows in transfer.rows:
+            for coordinate_index, keys in enumerate(rows.keys_by_coordinate):
+                object_size = rows.plan.object_sizes[coordinate_index]
+                for key in keys:
+                    previous_size = object_sizes_by_key.setdefault(key, object_size)
+                    if previous_size != object_size:
+                        raise ValueError(f"Layerwise key {key!r} has inconsistent object sizes")
     return object_sizes_by_key
+
+
+def _transfer_keys(transfers: Iterable[LoadTransfer | StoreTransfer]) -> tuple[str, ...]:
+    return tuple(key for transfer in transfers for key in selected_work_keys(transfer.work))
+
+
+def _source_identity(source: TransferSource) -> tuple[int, int, tuple[int, ...], str]:
+    """Identify one local source independently from its shared remote key."""
+
+    return id(source.rows), source.row_index, source.physical_layer_ids, source.key
 
 
 def _compile_layer_ids_by_name(topology: KVPoolTopology) -> dict[str, int]:
@@ -861,14 +916,14 @@ def _group_layerwise_transfers(
 ) -> dict[int, tuple[LoadTransfer, ...]]:
     grouped: dict[int, list[LoadTransfer]] = {}
     for transfer in transfers:
-        bindings_by_layer: dict[int, list[KVBinding]] = {}
-        for binding in transfer.traversal:
-            if binding.remote_object.key not in session_keys:
-                continue
-            layer_id = binding.local_region.region.physical_layer_ids[0]
-            bindings_by_layer.setdefault(layer_id, []).append(binding)
-        for layer_id, bindings in bindings_by_layer.items():
-            grouped.setdefault(layer_id, []).append(LoadTransfer(transfer.request_id, tuple(bindings)))
+        selected_work = select_work_keys(transfer.work, session_keys)
+        for work in selected_work:
+            if work.physical_layer_id is None:
+                raise ValueError("Layerwise Load received bulk execution work")
+            if not work.empty:
+                grouped.setdefault(work.physical_layer_id, []).append(
+                    LoadTransfer(transfer.request_id, transfer.rows, (work,))
+                )
     return {layer_id: tuple(layer_transfers) for layer_id, layer_transfers in grouped.items()}
 
 
@@ -876,25 +931,14 @@ def _group_layerwise_store_transfers(
     transfers: list[StoreTransfer], session_keys: set[str]
 ) -> dict[int, tuple[StoreTransfer, ...]]:
     grouped: dict[int, list[StoreTransfer]] = {}
-    claimed_keys: set[tuple[int, str]] = set()
+    claimed_keys: set[str] = set()
     for transfer in transfers:
-        bindings_by_layer_and_key: dict[tuple[int, str], list[tuple[int, KVBinding]]] = {}
-        for batch in transfer.batches:
-            for binding in batch.bindings:
-                key = binding.remote_object.key
-                if key not in session_keys:
-                    continue
-                layer_id = binding.local_region.region.physical_layer_ids[0]
-                bindings_by_layer_and_key.setdefault((layer_id, key), []).append((batch.group_id, binding))
-        bindings_by_layer_and_group: dict[int, dict[int, list[KVBinding]]] = {}
-        for layer_and_key, owned_bindings in bindings_by_layer_and_key.items():
-            if layer_and_key in claimed_keys:
-                continue
-            claimed_keys.add(layer_and_key)
-            layer_id, _ = layer_and_key
-            for group_id, binding in owned_bindings:
-                bindings_by_layer_and_group.setdefault(layer_id, {}).setdefault(group_id, []).append(binding)
-        for layer_id, bindings_by_group in bindings_by_layer_and_group.items():
-            batches = tuple(BindingBatch(group_id, tuple(bindings)) for group_id, bindings in bindings_by_group.items())
-            grouped.setdefault(layer_id, []).append(StoreTransfer(transfer.request_id, batches, transfer.store_job_id))
+        selected_work = select_work_keys(transfer.work, session_keys, claimed_keys)
+        for work in selected_work:
+            if work.physical_layer_id is None:
+                raise ValueError("Layerwise Store received bulk execution work")
+            if not work.empty:
+                grouped.setdefault(work.physical_layer_id, []).append(
+                    StoreTransfer(transfer.request_id, transfer.rows, (work,), transfer.store_job_id)
+                )
     return {layer_id: tuple(layer_transfers) for layer_id, layer_transfers in grouped.items()}

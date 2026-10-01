@@ -9,8 +9,11 @@ from typing import TYPE_CHECKING, Any, cast
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
 from ...backend import BackendSpec
-from ...program.values.evidence import BindingEvidence, RemoteObjectObservation, StoreEvidence
-from ...program.values.representation import BindingBatch, KVBinding, RemoteKVObject
+from ...program.values.evidence import RemoteObjectObservation, StoreEvidence, TransferEvidence
+from ...program.values.representation import RemoteKVObject
+from ...program.values.selection import TransferWork
+from ...program.values.transfer import TransferSource
+from .arguments import materialize_ranges
 
 if TYPE_CHECKING:
     from ....backend.memcache_backend import MemcacheBackend
@@ -41,44 +44,56 @@ class BackendIO:
             for remote_object, value in zip(remote_objects, presence, strict=True)
         )
 
-    def load(self, bindings: tuple[KVBinding, ...]) -> tuple[BindingEvidence, ...]:
-        if not bindings:
+    def load(self, work: TransferWork) -> tuple[TransferEvidence, ...]:
+        arguments = materialize_ranges(work)
+        sources = work.sources
+        if not sources:
             return ()
         native_result = self._backend.get(
-            [binding.remote_object.key for binding in bindings],
-            [list(binding.local_region.memory.addresses) for binding in bindings],
-            [list(binding.local_region.memory.sizes) for binding in bindings],
+            arguments.keys,
+            arguments.addresses,
+            arguments.sizes,
         )
         if native_result is None:
-            return self._unknown_binding_evidence(bindings)
-        result_codes = tuple(native_result)
-        if len(result_codes) != len(bindings):
-            return self._unknown_binding_evidence(bindings)
-        return tuple(BindingEvidence(binding, code) for binding, code in zip(bindings, result_codes, strict=True))
+            return self._unknown_transfer_evidence(sources)
+        try:
+            result_codes = tuple(native_result)
+        except (TypeError, ValueError):
+            return self._unknown_transfer_evidence(sources)
+        if len(result_codes) != len(sources):
+            return self._unknown_transfer_evidence(sources)
+        if any(isinstance(code, bool) or not isinstance(code, Integral) for code in result_codes):
+            return self._unknown_transfer_evidence(sources)
+        return tuple(TransferEvidence(source, int(code)) for source, code in zip(sources, result_codes, strict=True))
 
-    def store(self, batches: tuple[BindingBatch, ...]) -> StoreEvidence:
-        bindings = tuple(binding for batch in batches for binding in batch.bindings)
-        if not bindings:
+    def store(self, work: TransferWork) -> StoreEvidence:
+        if work.empty:
             return StoreEvidence((), True, source_release_confirmed=True)
 
-        keys = [binding.remote_object.key for binding in bindings]
-        addresses = [list(binding.local_region.memory.addresses) for binding in bindings]
-        sizes = [list(binding.local_region.memory.sizes) for binding in bindings]
         source_addresses_handed_off = False
         try:
-            native_put, native_args = self._prepare_put(keys, addresses, sizes)
+            arguments = materialize_ranges(work)
+            native_put, native_args = self._prepare_put(
+                arguments.keys,
+                arguments.addresses,
+                arguments.sizes,
+            )
             source_addresses_handed_off = True
             native_result = native_put(*native_args)
         except Exception as error:
             return StoreEvidence(
-                self._unknown_binding_evidence(bindings),
+                self._unknown_transfer_evidence(work.sources, not source_addresses_handed_off),
                 False,
                 not source_addresses_handed_off,
                 error,
             )
         if self._backend_spec.name == "yuanrong":
-            return StoreEvidence(self._unknown_binding_evidence(bindings), True, source_release_confirmed=True)
-        return self._store_evidence_from_aligned_results(bindings, native_result)
+            return StoreEvidence(
+                self._unknown_transfer_evidence(work.sources, True),
+                True,
+                source_release_confirmed=True,
+            )
+        return self._store_evidence_from_aligned_results(work.sources, native_result)
 
     def _prepare_put(
         self,
@@ -114,19 +129,19 @@ class BackendIO:
 
     def _store_evidence_from_aligned_results(
         self,
-        bindings: tuple[KVBinding, ...],
+        sources: tuple[TransferSource, ...],
         native_result: Any,
     ) -> StoreEvidence:
-        result_codes, error = self._interpret_store_results(len(bindings), native_result)
+        result_codes, error = self._interpret_store_results(len(sources), native_result)
         succeeded = result_codes is not None and all(code == 0 for code in result_codes)
         if result_codes is None:
-            binding_evidence = self._unknown_binding_evidence(bindings)
+            transfer_evidence = self._unknown_transfer_evidence(sources, False)
         else:
-            binding_evidence = tuple(
-                BindingEvidence(binding, code) for binding, code in zip(bindings, result_codes, strict=True)
+            transfer_evidence = tuple(
+                TransferEvidence(source, code, succeeded) for source, code in zip(sources, result_codes, strict=True)
             )
         return StoreEvidence(
-            binding_evidence,
+            transfer_evidence,
             succeeded,
             source_release_confirmed=succeeded,
             error=error,
@@ -146,11 +161,16 @@ class BackendIO:
                 f"{self._backend_spec.name} Store returned {len(result_codes)} results for {expected_count} keys"
             )
             return None, result_error
-        return result_codes, None
+        if any(isinstance(code, bool) or not isinstance(code, Integral) for code in result_codes):
+            return None, RuntimeError(f"{self._backend_spec.name} Store returned non-integer results")
+        return tuple(int(code) for code in result_codes), None
 
     @staticmethod
-    def _unknown_binding_evidence(bindings: tuple[KVBinding, ...]) -> tuple[BindingEvidence, ...]:
-        return tuple(BindingEvidence(binding, None) for binding in bindings)
+    def _unknown_transfer_evidence(
+        sources: tuple[TransferSource, ...],
+        source_release_confirmed: bool | None = None,
+    ) -> tuple[TransferEvidence, ...]:
+        return tuple(TransferEvidence(source, None, source_release_confirmed) for source in sources)
 
     @staticmethod
     def _require_result_codes(operation: str, keys: list[str], native_result: Any) -> tuple[int, ...]:
