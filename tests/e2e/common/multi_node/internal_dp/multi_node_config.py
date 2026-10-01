@@ -6,7 +6,7 @@ from typing import Any
 
 import regex as re
 
-from tests.e2e.nightly.multi_node.scripts.utils import (
+from tests.e2e.common.multi_node.utils import (
     get_available_port,
     get_net_interface,
     load_yaml_mapping,
@@ -18,7 +18,7 @@ from tests.e2e.nightly.multi_node.scripts.utils import (
 setup_logger()
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_BASE_PATH = "tests/e2e/nightly/multi_node/internal_dp/config/"
+DEFAULT_CONFIG_BASE_PATH = "tests/e2e/cases/models/configs/DeepSeek/"
 DEFAULT_SERVER_PORT = 8080
 
 

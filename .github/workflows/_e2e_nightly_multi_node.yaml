@@ -24,7 +24,7 @@ on:
         required: false
         type: string
         default: ''
-        description: override CONFIG_BASE_PATH used by the yaml loader inside the pod (defaults to nightly path)
+        description: CONFIG_BASE_PATH used by the YAML loader inside the pod
       test_frequency:
         required: false
         type: string
@@ -209,7 +209,7 @@ jobs:
 
       - name: Prepare scripts
         run: |
-          install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
+          install -D tests/e2e/common/multi_node/run.sh /root/.cache/tests/run.sh
           install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
 
       - name: Clear resources
@@ -283,7 +283,7 @@ jobs:
 
           benchmark_job_name="${{ steps.vars.outputs.benchmark_job_name }}"
 
-          jinja2 tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2 \
+          jinja2 tests/e2e/common/multi_node/lws.yaml.jinja2 \
             -D lws_name="$LWS_NAME" \
             -D log_prefix="$LOG_PREFIX" \
             -D size="$size" \

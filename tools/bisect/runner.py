@@ -50,9 +50,12 @@ from tools.bisect.version_compat import VersionAdaptationError, VersionAdapter, 
 
 logger = logging.getLogger(__name__)
 
-# Common entry for current configs. The legacy entries let bisect test commits
-# created before the common dispatcher existed.
-_MULTI_NODE_TEST = "tests/e2e/nightly/multi_node/scripts/test_multi_node.py"
+# Common entries for current configs. The legacy entries let bisect test
+# commits created before the framework moved under tests/e2e/common or before
+# the common multi-node dispatcher existed.
+_LEGACY_SINGLE_NODE_TEST = "tests/e2e/nightly/single_node/models/scripts/test_single_node.py"
+_MULTI_NODE_TEST = "tests/e2e/common/multi_node/test_multi_node.py"
+_LEGACY_MULTI_NODE_TEST = "tests/e2e/nightly/multi_node/scripts/test_multi_node.py"
 _INTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py"
 _EXTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py"
 _EXTERNAL_DP_CONFIG_DIR = "tests/e2e/nightly/multi_node/external_dp/config"
@@ -64,10 +67,19 @@ _ENV_SOURCE_FILES = (
 )
 
 
+def _single_node_test_path(repo: Path) -> str:
+    """Select the current entry, with a fallback for pre-migration commits."""
+    if (repo / SINGLE_NODE_TEST_PATH).is_file():
+        return SINGLE_NODE_TEST_PATH
+    return _LEGACY_SINGLE_NODE_TEST
+
+
 def _multi_node_test_path(repo: Path, inp: BisectInput) -> str:
     """Select the common dispatcher, with a fallback for legacy commits."""
     if (repo / _MULTI_NODE_TEST).is_file():
         return _MULTI_NODE_TEST
+    if (repo / _LEGACY_MULTI_NODE_TEST).is_file():
+        return _LEGACY_MULTI_NODE_TEST
 
     base = inp.config_base_path or ""
     config_name = Path(inp.config_yaml).name
@@ -167,7 +179,7 @@ class SingleNodeRunner(BaseRunner):
         # this trial's files.
         results_dir = self._reset_dir(self.repo / "benchmark_results")
         env = self._base_env()
-        cmd = ["python", "-m", "pytest", "-sv", "--show-capture=no", SINGLE_NODE_TEST_PATH]
+        cmd = ["python", "-m", "pytest", "-sv", "--show-capture=no", _single_node_test_path(self.repo)]
 
         rc = self._run_pytest(cmd, env, log_path)
         outcome = RunOutcome(exit_code=rc, results_dir=results_dir if results_dir.exists() else None)

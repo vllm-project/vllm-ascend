@@ -12,14 +12,14 @@ from typing import Any
 
 import requests
 
-from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
+from tests.e2e.common.multi_node.external_dp.external_dp_config import (
     ExternalDPConfig,
     ExternalDPConfigLoader,
     RankInfo,
     RankResolver,
     resolve_current_node_index,
 )
-from tests.e2e.nightly.multi_node.external_dp.scripts.runtime import (
+from tests.e2e.common.multi_node.external_dp.runtime import (
     ExternalDPProxyLauncher,
     ExternalDPServerManager,
     build_all_server_commands,
@@ -30,11 +30,11 @@ from tests.e2e.nightly.multi_node.external_dp.scripts.runtime import (
     wait_master_rank_stopped,
     wait_ranks_ready,
 )
-from tests.e2e.nightly.multi_node.external_dp.scripts.utils import (
+from tests.e2e.common.multi_node.external_dp.utils import (
     collect_logs,
     write_benchmark_results_json,
 )
-from tests.e2e.nightly.multi_node.scripts.utils import ProxyServer
+from tests.e2e.common.multi_node.utils import ProxyServer
 from tools.aisbench import run_aisbench_cases
 
 logging.basicConfig(

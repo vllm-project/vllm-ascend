@@ -14,7 +14,7 @@ YELLOW="\033[0;33m"
 RED="\033[0;31m"
 NC="\033[0m" # No Color
 
-MULTI_NODE_TEST_PATH="${MULTI_NODE_TEST_PATH:-tests/e2e/nightly/multi_node/scripts/test_multi_node.py}"
+MULTI_NODE_TEST_PATH="${MULTI_NODE_TEST_PATH:-tests/e2e/common/multi_node/test_multi_node.py}"
 
 # Configuration
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
@@ -24,9 +24,9 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BISECT_ARGS_HELPER="${SCRIPT_DIR}/bisect_args.sh"
 if [ ! -f "$BISECT_ARGS_HELPER" ]; then
-    BISECT_ARGS_HELPER="${SCRIPT_DIR}/../../scripts/bisect_args.sh"
+    BISECT_ARGS_HELPER="${SCRIPT_DIR}/../../nightly/scripts/bisect_args.sh"
 fi
-# shellcheck source=../../scripts/bisect_args.sh
+# shellcheck source=../../nightly/scripts/bisect_args.sh
 source "$BISECT_ARGS_HELPER"
 
 # The CANN install directory varies between release (cann-9.1.0) and daily

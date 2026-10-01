@@ -41,8 +41,8 @@ Verdict = Literal["PASS", "FAIL", "SKIP"]
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Nightly launch entries we reuse instead of re-implementing.
-SINGLE_NODE_TEST_PATH = "tests/e2e/nightly/single_node/models/scripts/test_single_node.py"
-MULTI_NODE_RUN_SH = "tests/e2e/nightly/multi_node/scripts/run.sh"
+SINGLE_NODE_TEST_PATH = "tests/e2e/common/single_node/test_single_node.py"
+MULTI_NODE_RUN_SH = "tests/e2e/common/multi_node/run.sh"
 
 # The "good table" lives on a fixed nightly path (PVC / shared cache). It is a
 # plain CSV so it can be eyeballed and edited by hand. Override with

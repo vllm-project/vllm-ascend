@@ -1,6 +1,6 @@
 import os
 
-from tests.e2e.nightly.multi_node.scripts.utils import (
+from tests.e2e.common.multi_node.utils import (
     get_all_ipv4,
     get_available_port,
     get_cluster_ips,
@@ -10,7 +10,7 @@ from tests.e2e.nightly.multi_node.scripts.utils import (
 )
 
 DISAGGEGATED_PREFILL_PORT = 5333
-DEFAULT_CONFIG_BASE_PATH = "tests/e2e/nightly/multi_node/internal_dp/config/"
+DEFAULT_CONFIG_BASE_PATH = "tests/e2e/cases/models/configs/DeepSeek/"
 CONFIG_BASE_PATH = os.getenv("CONFIG_BASE_PATH") or DEFAULT_CONFIG_BASE_PATH
 DEFAULT_SERVER_PORT = 8080
 

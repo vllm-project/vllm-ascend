@@ -9,18 +9,18 @@ from typing import Any
 import pytest
 import vllm
 
-from tests.e2e.conftest import RemoteOpenAIServer
-from tests.e2e.nightly.multi_node.internal_dp.scripts.multi_node_config import (
-    MultiNodeConfig,
-    MultiNodeConfigLoader,
-    ProxyLauncher,
-)
-from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
+from tests.e2e.common.multi_node.benchmark_results import (
     build_task_entry,
     extract_hardware,
     filter_environment,
     write_results_json,
 )
+from tests.e2e.common.multi_node.internal_dp.multi_node_config import (
+    MultiNodeConfig,
+    MultiNodeConfigLoader,
+    ProxyLauncher,
+)
+from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 from tools.aisbench import run_aisbench_cases
 
