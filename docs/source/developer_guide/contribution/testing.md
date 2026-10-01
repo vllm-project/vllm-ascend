@@ -38,14 +38,14 @@ A few details are easy to miss when following the container steps below:
     ```
 
   If either component is installed somewhere else, source the corresponding `set_env.sh`
-  instead; see [Installation](../getting_started/installation.md) for non-default layouts.
+  instead; see [Installation](../../getting_started/installation.md) for non-default layouts.
 - If `npu-smi` cannot report the chip inside the container, set `SOC_VERSION` explicitly, for
   example `export SOC_VERSION=ascend910b1` for A2. Without it, package builds that query the
   chip through `npu-smi` may fail.
 - On a machine without an NPU, where only unit tests are run, build with
   `export COMPILE_CUSTOM_KERNELS=0`. `vllm_ascend/envs.py` documents this option as the
   unit-test-only setting for NPU-less environments; the complete recipe is in
-  [Installation](../getting_started/installation.md).
+  [Installation](../../getting_started/installation.md).
 - If the package mirror configured below is not reachable from your network, switch to the
   Huawei Cloud package index that the "Local (CPU)" tab above configures.
 
