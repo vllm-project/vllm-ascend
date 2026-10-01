@@ -77,10 +77,39 @@ class SelectorTests(unittest.TestCase):
             m.LaunchSpec("FT_BASE", 64),
         )
 
+    def test_ft16_width_envelope_requires_initialized_p_and_qualified_ub(self):
+        m = self.mod
+        qualified_widths = (129, 192, 256, 257, 384, 512)
+        for width in qualified_widths:
+            with self.subTest(width=width):
+                self.assertEqual(
+                    m._select_layernorm_launch(65, width, 1, 40, self.params, ub_bytes=196608),
+                    m.LaunchSpec("FT_BASE", 16),
+                )
+
+        for width in qualified_widths:
+            for ub_bytes in (None, 196607):
+                with self.subTest(width=width, ub_bytes=ub_bytes):
+                    self.assertEqual(
+                        m._select_layernorm_launch(65, width, 1, 40, self.params, ub_bytes=ub_bytes),
+                        m.LaunchSpec("FT_BASE", 64),
+                    )
+
+        self.assertEqual(
+            m._select_layernorm_launch(65, 513, 1, 40, self.params, ub_bytes=196608),
+            m.LaunchSpec("FT_BASE", 64),
+        )
+        self.assertEqual(
+            m._select_layernorm_launch(65, 192, 1, None, self.params, ub_bytes=196608),
+            m.LaunchSpec("FT_BASE", 64),
+        )
+
     def test_invalid_policy_and_shape_fail_closed(self):
         m = self.mod
         with self.assertRaises(m.DispatchConfigError):
             m._select_layernorm_launch(0, 128, 1, 40, self.params)
+        with self.assertRaisesRegex(m.DispatchConfigError, "ub_bytes"):
+            m._select_layernorm_launch(65, 192, 1, 40, self.params, ub_bytes=0)
         with self.assertRaises(m.DispatchConfigError):
             m._select_layernorm_launch(
                 64,

@@ -1,9 +1,9 @@
 """Pure-scalar PR1 launch selection for the gated LayerNorm kernel.
 
 The selector deliberately knows nothing about torch, devices, or resource
-queries.  The wrapper supplies the initialized vector-core count on NPU and
-``None`` for non-NPU tensors.  A missing count therefore means that the
-upstream BASE64 launch must be retained.
+queries. The wrapper supplies the initialized vector-core count on NPU and
+``None`` for non-NPU tensors. Wide FT16 selection also receives the optional
+UB value from the existing initialized-properties getter.
 """
 
 from __future__ import annotations
@@ -20,6 +20,9 @@ class LaunchSpec(NamedTuple):
 BM_PERSIST_SINGLE = 32
 # A tile wave is one BM32 tile per initialized vector core.
 HOIST_MIN_TILE_WAVES = 16
+BM_FT16 = 16
+FT16_MAX_N_GROUP = 512
+FT16_MIN_UB_BYTES = 196_608
 
 
 @dataclass(frozen=True)
@@ -79,12 +82,14 @@ def validate_params(params) -> None:
         raise DispatchConfigError("hoist_qualified implies persist_single_qualified")
 
 
-def _validate_inputs(M, N_group, ngroups, runtime_p) -> None:
+def _validate_inputs(M, N_group, ngroups, runtime_p, ub_bytes) -> None:
     for name, value in (("M", M), ("N_group", N_group), ("ngroups", ngroups)):
         if not _is_positive_exact_int(value):
             raise DispatchConfigError(f"{name} must be a positive exact int")
     if runtime_p is not None and not _is_positive_exact_int(runtime_p):
         raise DispatchConfigError("runtime_p must be None or a positive exact int")
+    if ub_bytes is not None and not _is_positive_exact_int(ub_bytes):
+        raise DispatchConfigError("ub_bytes must be None or a positive exact int")
 
 
 def _select_layernorm_launch(
@@ -93,21 +98,26 @@ def _select_layernorm_launch(
     ngroups,
     runtime_p,
     params: DispatchParams = DEFAULT_PARAMS,
+    *,
+    ub_bytes: int | None = None,
 ) -> LaunchSpec:
-    """Select the bounded PR1 path, or the upstream BASE64 fallback.
+    """Select a qualified PR1 path, or retain the upstream BASE64 fallback.
 
-    A missing ``runtime_p`` selects the upstream BASE64 launch.  NPU callers
+    A missing ``runtime_p`` selects the upstream BASE64 launch. NPU callers
     obtain it through the existing initialized-device-properties contract.
+    Wide FT16 selection additionally requires a known UB value at or above
+    the minimum qualified resource budget.
     """
     validate_params(params)
-    _validate_inputs(M, N_group, ngroups, runtime_p)
+    _validate_inputs(M, N_group, ngroups, runtime_p, ub_bytes)
     if runtime_p is None:
         return LaunchSpec("FT_BASE", 64)
 
-    # PR1 does not own a wide-N path.  The wrapper performs the upstream
-    # BASE64 launch for this domain; keeping this result scalar makes the
-    # fallback explicit in selector tests too.
+    # FT16 is qualified only for the tested BN256/512 envelope. The wrapper
+    # supplies UB from the existing getter only for this per-group N domain.
     if N_group > 128:
+        if N_group <= FT16_MAX_N_GROUP and ub_bytes is not None and ub_bytes >= FT16_MIN_UB_BYTES:
+            return LaunchSpec("FT_BASE", BM_FT16)
         return LaunchSpec("FT_BASE", 64)
 
     if N_group < _need(params.n_persist_min, "n_persist_min"):

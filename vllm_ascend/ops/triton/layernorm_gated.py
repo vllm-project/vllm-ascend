@@ -10,11 +10,12 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.layernorm_gated_dispatch import (
+    FT16_MAX_N_GROUP,
     DispatchConfigError,
     DispatchParams,
     _select_layernorm_launch,
 )
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, get_vectorcore_num
 
 
 @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
@@ -313,19 +314,23 @@ def layer_norm_fwd_npu(
     rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
 
     runtime_p = None
+    ub_bytes = None
     if getattr(getattr(x, "device", None), "type", None) == "npu":
         runtime_p = get_vectorcore_num()
+        if 128 < group_size <= FT16_MAX_N_GROUP:
+            ub_bytes = get_ub_size_bytes()
     spec = _select_layernorm_launch(
         M,
         group_size,
         ngroups,
         runtime_p,
         _LAYERNORM_GATED_EXPERIMENTAL_PARAMS,
+        ub_bytes=ub_bytes,
     )
 
     # BASE selections reuse the upstream kernel and feature-dimension guard.
-    # Non-NPU and wide-N inputs retain BLOCK_M=64; qualified NPU inputs may
-    # use a smaller row tile.
+    # Non-NPU and unqualified wide-N inputs retain BLOCK_M=64; qualified NPU
+    # inputs may use a smaller row tile.
     if spec.impl == "FT_BASE":
         max_fused_size = 65536 // x.element_size()
         block_n = min(max_fused_size, triton.next_power_of_2(group_size))

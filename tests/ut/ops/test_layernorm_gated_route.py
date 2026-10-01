@@ -30,6 +30,7 @@ class RouteSourceTests(unittest.TestCase):
         self.assertNotIn("_is_pr1_dtype", source)
         self.assertNotIn("try_get_vectorcore_num", source)
         self.assertIn("get_vectorcore_num", source)
+        self.assertIn("get_ub_size_bytes", source)
         self.assertNotIn("qualified=qualified", source)
 
 
@@ -68,6 +69,8 @@ def _load_layernorm_with_fakes():
         "vector_cores": 40,
         "name_calls": 0,
         "getter_calls": 0,
+        "ub_size": 196608,
+        "ub_getter_calls": 0,
     }
 
     fake_torch: Any = types.ModuleType("torch")
@@ -128,6 +131,12 @@ def _load_layernorm_with_fakes():
         return state["vector_cores"]
 
     fake_utils.get_vectorcore_num = get_vectorcore_num
+
+    def get_ub_size_bytes():
+        state["ub_getter_calls"] += 1
+        return state["ub_size"]
+
+    fake_utils.get_ub_size_bytes = get_ub_size_bytes
     fake_triton_pkg.triton_utils = fake_utils
     fake_ops.triton = fake_triton_pkg
     fake_ascend.ops = fake_ops
@@ -301,7 +310,66 @@ class WrapperRouteTests(unittest.TestCase):
             self.assertEqual(state["name_calls"], before_name_calls)
 
             call(64, columns=256)
+            self.assertEqual(launches[-1][3]["BLOCK_M"], 16)
+            self.assertEqual(launches[-1][3]["BLOCK_N"], 256)
+            self.assertEqual(state["ub_getter_calls"], 1)
+
+            for group_size, block_n in (
+                (129, 256),
+                (192, 256),
+                (256, 256),
+                (257, 512),
+                (384, 512),
+                (512, 512),
+            ):
+                call(65, columns=group_size)
+                name, grid, args, kwargs = launches[-1]
+                self.assertEqual(name, "_layer_norm_fwd_1pass_kernel_npu")
+                self.assertEqual((grid, args[10], args[11]), ((5, 1), 65, group_size))
+                self.assertEqual(kwargs["BLOCK_M"], 16)
+                self.assertEqual(kwargs["BLOCK_N"], block_n)
+
+            # Routing uses per-group width, not the total tensor width.
+            before_ub_calls = state["ub_getter_calls"]
+            call(65, columns=384, group_size=128)
+            self.assertEqual(launches[-1][1], (3, 3))
+            self.assertEqual(launches[-1][2][11], 128)
+            self.assertEqual(launches[-1][3]["BLOCK_M"], 32)
+            self.assertEqual(launches[-1][3]["BLOCK_N"], 128)
+            self.assertEqual(state["ub_getter_calls"], before_ub_calls)
+
+            call(65, columns=384, group_size=192)
+            self.assertEqual(launches[-1][1], (5, 2))
+            self.assertEqual(launches[-1][2][11], 192)
+            self.assertEqual(launches[-1][3]["BLOCK_M"], 16)
+            self.assertEqual(launches[-1][3]["BLOCK_N"], 256)
+            self.assertEqual(state["ub_getter_calls"], before_ub_calls + 1)
+
+            for ub_size in (196607, None):
+                state["ub_size"] = ub_size
+                call(65, columns=192)
+                self.assertEqual(launches[-1][3]["BLOCK_M"], 64)
+                self.assertEqual(launches[-1][3]["BLOCK_N"], 256)
+
+            state["ub_size"] = 196608
+            before_ub_calls = state["ub_getter_calls"]
+            call(65, columns=513)
+            self.assertEqual(launches[-1][1], (2, 1))
             self.assertEqual(launches[-1][3]["BLOCK_M"], 64)
+            self.assertEqual(launches[-1][3]["BLOCK_N"], 1024)
+            self.assertEqual(state["ub_getter_calls"], before_ub_calls)
+
+            state["vector_cores"] = None
+            with self.assertRaisesRegex(AssertionError, "Device properties not initialized"):
+                call(65, columns=256)
+            self.assertEqual(state["ub_getter_calls"], before_ub_calls)
+            state["vector_cores"] = 40
+
+            before_ub_calls = state["ub_getter_calls"]
+            call(65, columns=256, device_type="cpu")
+            self.assertEqual(launches[-1][3]["BLOCK_M"], 64)
+            self.assertEqual(launches[-1][3]["BLOCK_N"], 256)
+            self.assertEqual(state["ub_getter_calls"], before_ub_calls)
 
             state["vector_cores"] = None
             with self.assertRaisesRegex(AssertionError, "Device properties not initialized"):
