@@ -370,6 +370,7 @@ def test_fused_qkv_keeps_non_mxfp_quantization_in_linear_apply():
 
 @pytest.mark.parametrize("lower_bound", [None, -4.0])
 def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
+    """Prepared state copy preserves fused-gate arguments and cache updates."""
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.head_dim = 2
@@ -393,9 +394,14 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
     )
     output = torch.randn_like(v)
     final_state = torch.randn(1, 1, 2, 2)
+    # This unit test bypasses worker startup; supply the plan normally bound there.
+    attention._ascend_kda_state_copy = SimpleNamespace(
+        gather=lambda state, indices, flags: state[indices].contiguous(),
+        scatter=lambda state, packed, indices: state.__setitem__(indices, packed.to(state.dtype)),
+    )
+    attention._kda_state_copy_ready = True
 
     with (
-        patch("vllm_ascend.ops.kimi_kda.clear_ssm_states"),
         patch("vllm_ascend.ops.kda.l2norm_fwd", side_effect=lambda x: x),
         patch.object(
             torch.ops._C_ascend,
@@ -533,6 +539,7 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
     attention = SimpleNamespace(
         prefix="kda",
         head_dim=2,
+        num_spec=3,
         kv_cache=(torch.zeros(1), state),
         get_parameter=lambda name: torch.empty(1),
         _run_causal_conv1d=lambda x, *args, **kwargs: x,

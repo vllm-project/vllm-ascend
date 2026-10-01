@@ -140,6 +140,7 @@ def test_dspark_spec_decoding(
     with VllmRunner(
         model,
         max_model_len=4096,
+        max_num_seqs=len(prompts),
         tensor_parallel_size=4,
         enable_expert_parallel=True,
         enforce_eager=enforce_eager,

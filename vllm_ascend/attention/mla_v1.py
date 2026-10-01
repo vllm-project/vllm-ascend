@@ -1025,6 +1025,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _v_up_proj_batch_major(self, x: torch.Tensor) -> torch.Tensor:
         """Keep the DCP result batch-major and fuse both BMM permutations."""
         x = x.view(-1, self.num_heads, self.kv_lora_rank)
+        x = x.to(dtype=self.W_UV.dtype)
         # The operator's batch dimension is num_heads, not the token count.
         if 1 <= self.num_heads * self.kv_lora_rank < TRANSPOSE_BMM_MAX_SUPPORTED_DIM:
             x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))

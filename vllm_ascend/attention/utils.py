@@ -270,7 +270,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     token_to_req: torch.Tensor | None = None
     # CPU views of runner-owned CpuGpuBuffers; never exact sequence lengths.
     req_topk_buffer_slots: torch.Tensor | None = None
-    req_topk_buffer_generations: torch.Tensor | None = None
+    req_topk_buffer_active: torch.Tensor | None = None
     copy_sfa_draft_index: int | None = None
     copy_sfa_restore_tails: bool = False
     offload_dummy: bool = False
@@ -339,7 +339,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             group_key_idx=self.group_key_idx,
             group_key_cache_idx=self.group_key_cache_idx,
             req_topk_buffer_slots=_slice_reqs(self.req_topk_buffer_slots),
-            req_topk_buffer_generations=_slice_reqs(self.req_topk_buffer_generations),
+            req_topk_buffer_active=_slice_reqs(self.req_topk_buffer_active),
             copy_sfa_draft_index=self.copy_sfa_draft_index,
             offload_dummy=self.offload_dummy,
             req_ids_tensor=_slice_reqs(self.req_ids_tensor),

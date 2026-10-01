@@ -46,7 +46,7 @@ from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
-from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
+from vllm_ascend.ops.triton.dsa_cp import BUILD_LOCAL_METADATA_BLOCK_SIZE, build_local_metadata_triton
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import enable_dsa_cp_full_o_proj
 from vllm_ascend.weight_switch import WeightSwitchConfig, WeightSwitchMixin, WeightSwitchState
@@ -1173,8 +1173,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         if query_start_loc.device.type != "cpu" and HAS_TRITON:
             assert local_query_start_loc is not None and local_seq_lens is not None
-            # Use next-power-of-2 block size to avoid wasted compute.
-            build_local_metadata_triton[(1,)](
+            grid = (triton.cdiv(num_reqs, BUILD_LOCAL_METADATA_BLOCK_SIZE),)
+            build_local_metadata_triton[grid](
                 query_start_loc,
                 seq_lens,
                 local_query_start_loc,
@@ -1183,7 +1183,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 local_end,
                 num_reqs,
                 start_pos_out if start_pos_out is not None else self._zero_i32,
-                BLOCK_NUM_REQS=triton.next_power_of_2(num_reqs),
                 COMPUTE_START_POS=start_pos_out is not None,
             )
         else:

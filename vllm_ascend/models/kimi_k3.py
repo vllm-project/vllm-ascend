@@ -78,8 +78,12 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
+from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
+from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import get_rotation_path
 
 if HAS_TRITON:
@@ -88,6 +92,38 @@ if HAS_TRITON:
     )
 else:
     apply_attn_res = None  # type: ignore[assignment]
+
+
+class AscendKimiRoutedOutputTransform(KimiRoutedOutputTransform):
+    """Fuse the latent RMSNorm and MXFP8 activation quantization on A5."""
+
+    def __init__(self, norm: RMSNorm | None, up_proj: ReplicatedLinear) -> None:
+        super().__init__(norm, up_proj)
+        self._supports_mx_norm_fusion = get_current_hardware_profile().supports(
+            HardwareCapability.DYNAMIC_MX_QUANT_FUSION
+        ) and hasattr(torch.ops.npu, "npu_rms_norm_dynamic_mx_quant")
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        scheme = getattr(getattr(self.up_proj, "quant_method", None), "quant_method", None)
+        if (
+            self.norm is not None
+            and self._supports_mx_norm_fusion
+            and isinstance(scheme, AscendW8A8MXFP8DynamicLinearMethod)
+            and scheme.group_size == 32
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.shape[-1] % 64 == 0
+            and getattr(self.norm, "bias", None) is None
+        ):
+            quantized, scale, _ = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
+                hidden_states,
+                self.norm.weight,
+                epsilon=self.norm.variance_epsilon,
+                scale_alg=scheme.dynamic_mx_quant_scale_alg,
+                dst_type=torch.float8_e4m3fn,
+            )
+            hidden_states, _ = self.up_proj((quantized, scale))
+            return hidden_states
+        return super().forward(hidden_states)
 
 
 def _apply_ascend_attn_res(
@@ -217,6 +253,7 @@ class AscendKimiMoE(nn.Module):
             self.shared_experts = None
 
         latent_quant_config = quant_config if quant_config is not None and quant_config.get_name() == "ascend" else None
+        self.routed_output_transform: KimiRoutedOutputTransform | None
         if self.use_latent_moe:
             self.routed_expert_down_proj = ReplicatedLinear(
                 hidden_size,
@@ -235,7 +272,7 @@ class AscendKimiMoE(nn.Module):
                 quant_config=latent_quant_config,
                 prefix=f"{prefix}.routed_expert_up_proj",
             )
-            self.routed_output_transform = KimiRoutedOutputTransform(
+            self.routed_output_transform = AscendKimiRoutedOutputTransform(
                 self.routed_expert_norm,
                 self.routed_expert_up_proj,
             )
@@ -508,6 +545,29 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         if self.use_sequence_parallel:
             self.self_attn.o_proj.reduce_results = False
 
+        self.fuse_o_proj_mm_reduce_scatter = self._enable_o_proj_mm_reduce_scatter(vllm_config)
+
+    def _enable_o_proj_mm_reduce_scatter(self, vllm_config: VllmConfig) -> bool:
+        if not self.use_sequence_parallel or not self.use_attn_residuals:
+            return False
+        # Fusion uses each PP stage's existing TP group and returns the same
+        # SP token shard as the separate projection and ReduceScatter.
+        if not get_current_hardware_profile().supports(HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE):
+            return False
+        if get_ascend_config().weight_nz_mode == 2:
+            return False
+        if vllm_config.lora_config is not None:
+            return False
+        o_proj = self.self_attn.o_proj
+        if KimiOProjMMReduceScatterOp.unsupported_reason(o_proj) is not None:
+            return False
+        o_proj.custom_op = KimiOProjMMReduceScatterOp(o_proj)
+        if isinstance(self.self_attn, AscendKimiMLAAttention):
+            # The MLA custom op writes into a caller-owned output buffer. Its
+            # token dimension must match the fused projection's TP shard.
+            self.self_attn.mla_attn.output_token_shard_size = o_proj.tp_size
+        return True
+
     def _run_self_attn(
         self,
         positions: torch.Tensor,
@@ -544,7 +604,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             hidden_states=hidden_states,
             positions=positions,
         )
-        if self.use_sequence_parallel:
+        if self.use_sequence_parallel and not self.fuse_o_proj_mm_reduce_scatter:
             hidden_states = sp_reduce_scatter(hidden_states)
 
         prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
