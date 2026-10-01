@@ -8,7 +8,8 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 
 from ...coordinates import TokenRange
 from ...protocol.lookup import TailKeyBoundary
-from .representation import KVBinding, RemoteKVObject
+from .representation import RemoteKVObject
+from .transfer import TransferSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,24 +46,25 @@ class RemoteObjectObservation:
 
 
 @dataclass(frozen=True, slots=True)
-class BindingEvidence:
-    """Backend-normalized result code attached to one exact transfer binding."""
+class TransferEvidence:
+    """Backend-normalized result code attached to one submitted request row."""
 
-    binding: KVBinding
+    source: TransferSource
     result_code: int | None
+    source_release_confirmed: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class StoreEvidence:
     """Authoritative outcome at the producer's current Store execution granularity.
 
-    Binding codes retain diagnostics; consumers use the success summary rather than
+    Per-row codes retain diagnostics; consumers use the success summary rather than
     deriving it again. A layer range can succeed before its remote object is committed;
     session finalization supplies the whole-transfer outcome consumed by Runtime.
-    Source release independently confirms this operation no longer reads its bindings.
+    Source release independently confirms this operation no longer reads its source rows.
     """
 
-    binding_evidence: tuple[BindingEvidence, ...]
+    transfer_evidence: tuple[TransferEvidence, ...]
     succeeded: bool
     source_release_confirmed: bool
     error: Exception | None = None
@@ -73,7 +75,7 @@ class LoadCompletion:
     """Load evidence published when one selected transfer completes."""
 
     request_id: str
-    binding_evidence: tuple[BindingEvidence, ...]
+    transfer_evidence: tuple[TransferEvidence, ...]
 
 
 @dataclass(frozen=True, slots=True)

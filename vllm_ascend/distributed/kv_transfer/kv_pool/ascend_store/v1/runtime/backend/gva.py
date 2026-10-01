@@ -1,16 +1,17 @@
-"""Execute existing KV bindings through Memcache GVA sessions."""
+"""Execute bound transfer work through Memcache GVA sessions."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from numbers import Integral
 from typing import TYPE_CHECKING, cast
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
 from ...backend import BackendSpec
-from ...program.values.evidence import BindingEvidence, RemoteObjectObservation, StoreEvidence
-from ...program.values.representation import BindingBatch, KVBinding, RemoteKVObject
+from ...program.values.evidence import RemoteObjectObservation, StoreEvidence, TransferEvidence
+from ...program.values.representation import RemoteKVObject
+from ...program.values.selection import TransferWork
+from .arguments import ResolvedGVABatches, ResolvedGVASessions, materialize_gva
 from .io import BackendIO
 
 if TYPE_CHECKING:
@@ -33,6 +34,10 @@ class GVABackendIO(BackendIO):
         self._store = store
         self._load_sessions: dict[str, tuple[int, int] | None] = {}
         self._store_sessions: dict[str, tuple[int, int]] = {}
+        self._resolved_load_sessions: ResolvedGVASessions = {}
+        self._resolved_store_sessions: ResolvedGVASessions = {}
+        self._resolved_load_batches: ResolvedGVABatches = {}
+        self._resolved_store_batches: ResolvedGVABatches = {}
         self._load_direction = backend_spec.backend_module.MmcDirect.COPY_G2L.value
         self._store_direction = backend_spec.backend_module.MmcDirect.COPY_L2G.value
         self.validate_support()
@@ -53,6 +58,8 @@ class GVABackendIO(BackendIO):
         )
 
     def start_load_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
+        self._resolved_load_sessions.clear()
+        self._resolved_load_batches.clear()
         if not keys:
             return ()
         if any(key in self._load_sessions for key in keys):
@@ -76,6 +83,8 @@ class GVABackendIO(BackendIO):
         return tuple(result_codes)
 
     def finish_load_sessions(self, keys: list[str]) -> None:
+        self._resolved_load_sessions.clear()
+        self._resolved_load_batches.clear()
         leased_keys = [key for key in keys if key in self._load_sessions]
         if not leased_keys:
             return
@@ -86,6 +95,8 @@ class GVABackendIO(BackendIO):
             del self._load_sessions[key]
 
     def start_store_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
+        self._resolved_store_sessions.clear()
+        self._resolved_store_batches.clear()
         if not keys:
             return ()
         if any(key in self._store_sessions for key in keys):
@@ -106,31 +117,55 @@ class GVABackendIO(BackendIO):
                 del self._store_sessions[key]
         return tuple(result_codes)
 
-    def load(self, bindings: tuple[KVBinding, ...]) -> tuple[BindingEvidence, ...]:
-        if not bindings:
+    def load(self, work: TransferWork) -> tuple[TransferEvidence, ...]:
+        if work.empty:
             return ()
-        copy_args = self._copy_arguments(bindings, self._load_sessions)
-        result_code = self._store.batch_copy(*copy_args, self._load_direction)
+        arguments = materialize_gva(
+            work,
+            self._load_sessions,
+            self._resolved_load_sessions,
+            self._resolved_load_batches,
+        )
+        result_code = self._store.batch_copy(
+            arguments.remote_addresses.tolist(),
+            arguments.local_addresses.tolist(),
+            arguments.sizes.tolist(),
+            self._load_direction,
+        )
         if isinstance(result_code, bool) or not isinstance(result_code, Integral):
             raise RuntimeError("GVA batch_copy returned a non-integer result")
         # The native API reports the whole batch, not independently completed keys.
-        return tuple(BindingEvidence(binding, int(result_code)) for binding in bindings)
+        return tuple(TransferEvidence(source, int(result_code)) for source in work.sources)
 
-    def store(self, batches: tuple[BindingBatch, ...]) -> StoreEvidence:
-        bindings = tuple(binding for batch in batches for binding in batch.bindings)
-        if not bindings:
+    def store(self, work: TransferWork) -> StoreEvidence:
+        if work.empty:
             return StoreEvidence((), True, source_release_confirmed=True)
         source_handed_off = False
         try:
-            copy_args = self._copy_arguments(bindings, self._store_sessions)
+            arguments = materialize_gva(
+                work,
+                self._store_sessions,
+                self._resolved_store_sessions,
+                self._resolved_store_batches,
+            )
             source_handed_off = True
-            result_code = self._store.batch_copy(*copy_args, self._store_direction)
+            result_code = self._store.batch_copy(
+                arguments.remote_addresses.tolist(),
+                arguments.local_addresses.tolist(),
+                arguments.sizes.tolist(),
+                self._store_direction,
+            )
             if isinstance(result_code, bool) or not isinstance(result_code, Integral):
                 raise RuntimeError("GVA batch_copy returned a non-integer result")
         except Exception as error:
-            return StoreEvidence(self._unknown_binding_evidence(bindings), False, not source_handed_off, error)
+            return StoreEvidence(
+                self._unknown_transfer_evidence(work.sources, not source_handed_off),
+                False,
+                not source_handed_off,
+                error,
+            )
         succeeded = result_code == 0
-        evidence = tuple(BindingEvidence(binding, int(result_code)) for binding in bindings)
+        evidence = tuple(TransferEvidence(source, int(result_code), succeeded) for source in work.sources)
         return StoreEvidence(evidence, succeeded, source_release_confirmed=succeeded)
 
     def commit_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
@@ -143,12 +178,17 @@ class GVABackendIO(BackendIO):
         for key, code in zip(keys, result_codes, strict=True):
             if code == 0:
                 del self._store_sessions[key]
+        self._resolved_store_sessions.clear()
+        self._resolved_store_batches.clear()
         return result_codes
 
     def revoke_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
         # Native failed-write notification deletes by key, even after a duplicate allocation.
         # Do not delete another writer's object; leave uncertain write leases to Backend expiry.
-        return tuple(GVA_SESSION_FAILURE if self._store_sessions.pop(key, None) is not None else 0 for key in keys)
+        result = tuple(GVA_SESSION_FAILURE if self._store_sessions.pop(key, None) is not None else 0 for key in keys)
+        self._resolved_store_sessions.clear()
+        self._resolved_store_batches.clear()
+        return result
 
     def _query_regions(self, keys: list[str], flag: int = READABLE_GVA_QUERY) -> tuple[tuple[int, int] | None, ...]:
         if not keys:
@@ -169,21 +209,3 @@ class GVABackendIO(BackendIO):
                 raise RuntimeError("GVA sessions require exactly one integer address per object")
             regions.append((int(gvas[0]), int(size)) if gvas[0] > 0 else None)
         return tuple(regions)
-
-    @staticmethod
-    def _copy_arguments(
-        bindings: tuple[KVBinding, ...], sessions: Mapping[str, tuple[int, int] | None]
-    ) -> tuple[list[int], list[int], list[int]]:
-        gvas, addresses, sizes = [], [], []
-        for binding in bindings:
-            key = binding.remote_object.key
-            region = sessions.get(key)
-            layout = binding.remote_layout
-            if region is None or region[1] != layout.object_size:
-                raise RuntimeError(f"GVA binding has no matching session for key {key!r}")
-            memory = binding.local_region.memory
-            for offset, address, size in zip(layout.offsets, memory.addresses, memory.sizes, strict=True):
-                gvas.append(region[0] + offset)
-                addresses.append(address)
-                sizes.append(size)
-        return gvas, addresses, sizes
