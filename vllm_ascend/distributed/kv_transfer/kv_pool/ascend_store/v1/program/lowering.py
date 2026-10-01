@@ -341,8 +341,8 @@ def _lower_pipeline_partitions(
     block_capacity: int,
 ) -> BoundGroupPlan:
     layers = _group_segments_by_layer(segments)
-    coordinates = []
-    layouts = []
+    coordinates: list[PhysicalCoordinate] = []
+    layouts: list[ContiguousLayoutPlan] = []
     first_physical_layer = 0
     for pipeline_rank, layer_count in enumerate(partitions):
         last_physical_layer = first_physical_layer + layer_count

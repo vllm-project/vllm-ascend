@@ -66,10 +66,10 @@ ResolvedGVABatches = dict[GVABatchSignature, ResolvedGVABatch]
 def materialize_ranges(work: TransferWork) -> MaterializedRanges:
     """Evaluate static affine geometry for the selected request rows."""
 
-    keys = []
-    addresses = []
-    sizes = []
-    offsets = []
+    keys: list[str] = []
+    addresses: list[list[int]] = []
+    sizes: list[list[int]] = []
+    offsets: list[list[int]] = []
     for span in work.spans:
         rows = span.rows
         if len(span.layout_indices) == 1 and isinstance(
@@ -229,9 +229,9 @@ def resolve_gva_sessions(
             session_rows = resolved.get(cache_key)
             selection_id = 0 if span.selection is None else id(span.selection)
             if session_rows is None:
-                object_bases = np.zeros(rows.row_count, dtype=np.uint64)
-                object_sizes = np.zeros(rows.row_count, dtype=np.uint64)
-                available = np.zeros(rows.row_count, dtype=np.bool_)
+                object_bases: np.ndarray = np.zeros(rows.row_count, dtype=np.uint64)
+                object_sizes: np.ndarray = np.zeros(rows.row_count, dtype=np.uint64)
+                available: np.ndarray = np.zeros(rows.row_count, dtype=np.bool_)
                 for row_index, key in enumerate(keys):
                     session = sessions.get(key)
                     if session is None:
@@ -309,7 +309,7 @@ def _materialize_contiguous_gva(
             )
             resolved_batches[signature] = batch
     if batch is None:
-        empty = np.empty(0, dtype=np.uint64)
+        empty: np.ndarray = np.empty(0, dtype=np.uint64)
         return MaterializedGVA(empty, empty, empty)
 
     local = layout.bases[None, :] + batch.block_ids[:, None] * layout.block_strides[None, :]

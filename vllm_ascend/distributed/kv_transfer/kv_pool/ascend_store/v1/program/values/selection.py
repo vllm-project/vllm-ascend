@@ -322,7 +322,7 @@ def _merge_row_domains(domains: set[RowIndices]) -> tuple[range, ...]:
     if not ranges:
         return ()
 
-    merged = []
+    merged: list[range] = []
     for candidate in sorted(ranges, key=lambda item: (item.start, item.stop)):
         if merged and candidate.start <= merged[-1].stop:
             previous = merged[-1]
