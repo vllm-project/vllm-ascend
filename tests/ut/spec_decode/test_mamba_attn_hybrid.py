@@ -4,6 +4,8 @@
 """Unit tests for the Ascend mamba_attn_hybrid (H-Spec) speculator dispatch
 and its Ascend adaptation contracts."""
 
+import importlib.util
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -11,14 +13,15 @@ import pytest
 import torch
 
 from vllm_ascend.worker.v2 import spec_decode as dispatch
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
+    AscendDFlashSpeculator,
+)
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     AscendDSparkSpeculator,
 )
 
 
 def _hspec_vllm_available() -> bool:
-    import importlib.util
-
     try:
         return importlib.util.find_spec("vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator") is not None
     except ModuleNotFoundError:
@@ -27,7 +30,7 @@ def _hspec_vllm_available() -> bool:
         return False
 
 
-def make_spec_config(method="dspark", with_mamba=False):
+def _make_spec_config(method="dspark", with_mamba=False):
     config = SimpleNamespace(
         method=method,
         use_dspark=lambda: method == "dspark",
@@ -39,7 +42,7 @@ def make_spec_config(method="dspark", with_mamba=False):
     return config
 
 
-def make_vllm_config(method="dspark", with_mamba=False, **parallel):
+def _make_vllm_config(method="dspark", with_mamba=False, **parallel):
     parallel_config = SimpleNamespace(
         decode_context_parallel_size=1,
         prefill_context_parallel_size=1,
@@ -48,7 +51,7 @@ def make_vllm_config(method="dspark", with_mamba=False, **parallel):
         **parallel,
     )
     return SimpleNamespace(
-        speculative_config=make_spec_config(method, with_mamba),
+        speculative_config=_make_spec_config(method, with_mamba),
         parallel_config=parallel_config,
     )
 
@@ -75,21 +78,18 @@ def test_dispatch_dspark_without_mamba_capability(monkeypatch, stub_speculator_c
         raise AssertionError("mamba_attn_hybrid dispatch must not be entered")
 
     monkeypatch.setattr(dispatch, "AscendMambaAttnHybridSpeculator", fail, raising=False)
-    vllm_config = make_vllm_config("dspark", with_mamba=False)
+    vllm_config = _make_vllm_config("dspark", with_mamba=False)
     speculator = dispatch.init_speculator(vllm_config, device=None)
     assert isinstance(speculator, AscendDSparkSpeculator)
     assert "dspark" in stub_speculator_ctors
 
 
-def test_dispatch_dflash_without_mamba_capability(stub_speculator_ctors, monkeypatch):
-    """Same guard for dflash, which is dispatched before dspark."""
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dflash.speculator.AscendDFlashSpeculator.__init__",
-        lambda self, vllm_config, device: None,
-    )
-    vllm_config = make_vllm_config("dflash", with_mamba=False)
+def test_dispatch_dflash_without_mamba_capability(monkeypatch):
+    """Same guard for dflash, which is dispatched after dspark."""
+    monkeypatch.setattr(AscendDFlashSpeculator, "__init__", lambda self, vllm_config, device: None)
+    vllm_config = _make_vllm_config("dflash", with_mamba=False)
     speculator = dispatch.init_speculator(vllm_config, device=None)
-    assert speculator is not None
+    assert isinstance(speculator, AscendDFlashSpeculator)
 
 
 def test_dispatch_mamba_hybrid(monkeypatch, stub_speculator_ctors):
@@ -100,16 +100,16 @@ def test_dispatch_mamba_hybrid(monkeypatch, stub_speculator_ctors):
     fake_utils = type("M", (), {})
     fake_upstream = SimpleNamespace(MambaAttnHybridSpeculator=fake_mamba)
     monkeypatch.setitem(
-        __import__("sys").modules,
+        sys.modules,
         "vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator",
         fake_upstream,
     )
     monkeypatch.setitem(
-        __import__("sys").modules,
+        sys.modules,
         "vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.utils",
         fake_utils,
     )
-    vllm_config = make_vllm_config("mamba_attn_hybrid", with_mamba=True)
+    vllm_config = _make_vllm_config("mamba_attn_hybrid", with_mamba=True)
     speculator = dispatch.init_speculator(vllm_config, device=None)
     from vllm_ascend.worker.v2.spec_decode.mamba_attn_hybrid.speculator import (
         AscendMambaAttnHybridSpeculator,
@@ -121,9 +121,7 @@ def test_dispatch_mamba_hybrid(monkeypatch, stub_speculator_ctors):
 
 def test_mamba_dispatch_missing_upstream_fails_fast(monkeypatch):
     """A vLLM without the H-Spec patch yields a clear NotImplementedError."""
-    import sys
-
-    vllm_config = make_vllm_config("mamba_attn_hybrid", with_mamba=True)
+    vllm_config = _make_vllm_config("mamba_attn_hybrid", with_mamba=True)
     # Block both the ascend speculator and its upstream base from importing.
     monkeypatch.setitem(
         sys.modules,
@@ -145,7 +143,7 @@ def test_mamba_rejects_dcp_and_pcp():
     )
 
     for dcp, pcp in ((2, 1), (1, 2)):
-        vllm_config = make_vllm_config(
+        vllm_config = _make_vllm_config(
             "mamba_attn_hybrid",
             with_mamba=True,
             decode_context_parallel_size=dcp,
@@ -190,11 +188,6 @@ def test_set_attn_mirrors_group_causal_and_preserves_group_order(monkeypatch):
     group_layers = ["model.layers.0.self_attn.attn", "model.layers.1.attn"]
     kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=group_layers)])
     layer_map = {name: MagicMock(get_attn_backend=MagicMock(return_value=name)) for name in group_layers}
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_layers_from_vllm_config",
-        lambda *a, **k: layer_map,
-        raising=False,
-    )
     monkeypatch.setattr(
         "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_layers_from_vllm_config",
         lambda *a, **k: layer_map,
