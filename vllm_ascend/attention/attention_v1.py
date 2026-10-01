@@ -347,12 +347,16 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # (speculative) decode where one request spans several query tokens:
         # single-token decode never pads requests beyond the query start loc,
         # and prefill (including the EAGLE drafter's merged prefill) reuses the
-        # target's num_input_tokens while its own query is shorter. The V2 runner
-        # reports speculative decode as ChunkedPrefill, so decide from the
-        # per-request is_prefilling flags (falling back to the state when they
-        # are unavailable). v0.30.0 already pads this at the request level and
-        # stays unchanged behind vllm_version_is().
-        if not vllm_version_is("0.30.0"):
+        # target's num_input_tokens while its own query is shorter. Only the V2
+        # runner needs this: it applies the metadata to the FULL graph at every
+        # replay, while V1 bakes actual_seq_lengths_q into the captured graph
+        # (and trims the query to its last entry), so padding there only changes
+        # the captured graph. The V2 runner reports speculative decode as
+        # ChunkedPrefill, so decide from the per-request is_prefilling flags
+        # (falling back to the state when they are unavailable). v0.30.0 already
+        # pads this at the request level and stays unchanged behind
+        # vllm_version_is().
+        if not vllm_version_is("0.30.0") and self.vllm_config.use_v2_model_runner:
             is_prefilling = common_attn_metadata.is_prefilling
             if is_prefilling is None:
                 decode_like = common_attn_metadata.attn_state in (
