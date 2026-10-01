@@ -415,8 +415,18 @@ public:
                     PrefetchTileNZ(gmVUpdateWorkspace[stage2Offsets.vWorkOffset],
                                    stage2Offsets.blockTokens, vHeadDim,
                                    HM_L1B_OFFSET, /*pfSlot=*/1);
+                    // A (k, read column-major as k.T) hand-rolled too, now that
+                    // HandMmad allows A_FROM_L1 together with A_COL_MAJOR. The
+                    // col-major path wants the zN image of the stored [k, m]
+                    // block at l1aC0Stride = kR = HmRoundUp16(blockTokens),
+                    // which is exactly what PrefetchTileNZ writes for
+                    // rows = blockTokens: same bytes the Nd2Nz produced, without
+                    // the 64Bx64B emulation.
+                    PrefetchTileNZ(gmK[stage2Offsets.wkOffset],
+                                   stage2Offsets.blockTokens, kHeadDim,
+                                   HM_L1A_OFFSET, /*pfSlot=*/0);
                     M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false,
-                                       /*A_FROM_L1=*/false, /*A_COL_MAJOR=*/true,
+                                       /*A_FROM_L1=*/true, /*A_COL_MAJOR=*/true,
                                        /*B_FROM_L1=*/true,
                                        /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true, /*NO_M_MTE1=*/true>(
                         resource,
