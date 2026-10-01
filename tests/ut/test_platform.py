@@ -26,6 +26,7 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
+    vllm_version_is,
 )
 
 
@@ -158,6 +159,8 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         mock_vllm_config.parallel_config.nnodes_within_dp = 1
         mock_vllm_config.use_v2_model_runner = False
+        # vLLM main exposes aux_output_config; the release has no such field.
+        mock_vllm_config.aux_output_config = None if vllm_version_is("0.30.0") else MagicMock(enabled=False)
         mock_vllm_config.parallel_config.enable_eplb = False
         mock_vllm_config.parallel_config.enable_elastic_ep = False
         mock_vllm_config.parallel_config.eplb_config = MagicMock(

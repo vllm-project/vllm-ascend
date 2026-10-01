@@ -58,7 +58,7 @@ class AscendGateLinear(GateLinear):
 
     else:
 
-        def __init__(
+        def __init__(  # type: ignore[misc]
             self,
             input_size: int,
             output_size: int,

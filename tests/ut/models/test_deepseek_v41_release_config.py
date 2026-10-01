@@ -14,7 +14,7 @@ from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config as UpstreamDeepseekV41Config
 
 from vllm_ascend.models import register_model
-from vllm_ascend.utils import normalize_deepseek_v41_config
+from vllm_ascend.utils import normalize_deepseek_v41_config, vllm_version_is
 
 
 def make_v41_config(**kwargs):
@@ -35,9 +35,16 @@ def test_released_config_loads_through_vllm_registry(tmp_path):
     )
 
     config = get_config(tmp_path, trust_remote_code=False)
+    config = normalize_deepseek_v41_config(config)
 
     assert isinstance(config, UpstreamDeepseekV41Config)
-    assert config.is_mm_prefix_lm
+    if vllm_version_is("0.30.0"):
+        # The release sets the mm-prefix flags on the flattened config itself.
+        assert config.is_mm_prefix_lm
+    else:
+        # vLLM main moved the mm-prefix decision to the model-arch config
+        # converter, so the flattened released config no longer carries it.
+        assert not hasattr(config, "is_mm_prefix_lm")
     # vLLM main (#56554) removed the compressor-alignment pad.
     assert not hasattr(config, "mm_prefix_span_leading_pad_modulus")
 
@@ -91,9 +98,14 @@ def test_released_config_names_are_available_to_runtime():
     ):
         assert not hasattr(config, name)
     assert config.engram_rotation_config == _rotation_config()
-    # The released CausalLM architecture still carries the complete vision path.
-    assert config.is_mm_prefix_lm
-    assert config.mm_prefix_clamp_sliding_window
+    if vllm_version_is("0.30.0"):
+        # The release still carries the complete vision path on the config.
+        assert config.is_mm_prefix_lm
+        assert config.mm_prefix_clamp_sliding_window
+    else:
+        # vLLM main moved the mm-prefix flags to the model-arch config converter.
+        assert not hasattr(config, "is_mm_prefix_lm")
+        assert not hasattr(config, "mm_prefix_clamp_sliding_window")
     # vLLM main (#56554) removed the compressor-alignment pad.
     assert not hasattr(config, "mm_prefix_span_leading_pad_modulus")
 

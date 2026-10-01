@@ -422,7 +422,12 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
     )
     state = default.AscendModelState.__new__(default.AscendModelState)
     state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
-    state.max_model_len = 32
+    # vLLM main (#58149) made max_model_len a read-only property backed by
+    # model_config; v0.30.0 keeps the plain instance attribute.
+    if vllm_version_is("0.30.0"):
+        state.max_model_len = 32
+    else:
+        state.model_config = SimpleNamespace(max_model_len=32)
     state.kvpp_runtime = runner.kvpp
     runner.model_state = state
     batch = SimpleNamespace(
@@ -887,7 +892,10 @@ def _run_prepare_inputs(
         ),
         patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
     ):
-        return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc), batch
+        # vLLM main (#56456) added num_active_loras to prepare_inputs.
+        if vllm_version_is("0.30.0"):
+            return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc), batch
+        return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc, 0), batch
 
 
 def test_prepare_inputs_common_path():

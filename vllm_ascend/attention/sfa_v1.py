@@ -398,7 +398,7 @@ class AscendSFABackend(AttentionBackend):
         return resolve_sfa_impl(get_current_vllm_config())
 
     @supports_kernel_block_spec
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes() -> list[int]:  # type: ignore[misc]
         return [128]
 
 

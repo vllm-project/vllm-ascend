@@ -96,7 +96,7 @@ class AscendAttentionBackend310(AscendAttentionBackend):
         return AscendAttentionMetadataBuilder310
 
     @supports_kernel_block_spec
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes() -> list[int]:  # type: ignore[misc]
         return [128, 64]
 
 

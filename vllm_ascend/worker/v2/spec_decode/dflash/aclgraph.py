@@ -87,7 +87,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
 
     else:
 
-        def capture(
+        def capture(  # type: ignore[misc]
             self,
             forward_fn: Callable,
             input_buffers: InputBuffers,
@@ -96,7 +96,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             kv_cache_config: KVCacheConfig,
             max_model_len: int,
             causal: bool | Mapping[int, bool] = False,
-            precompute_context_kv: Callable[[int], None] = None,
+            precompute_context_kv: Callable[[int], None] | None = None,
             progress_bar_desc: str = "Capturing CUDA graphs",
         ) -> None:
             """Capture ACL graphs for DFlash."""

@@ -142,7 +142,7 @@ class AscendAttentionBackend(AttentionBackend):
             value_caches[dst_indices] = value_caches[src_indices]
 
     @supports_kernel_block_spec
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes() -> list[int]:  # type: ignore[misc]
         return [128]
 
 

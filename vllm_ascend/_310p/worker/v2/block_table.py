@@ -94,7 +94,7 @@ class Ascend310PBlockTables(BlockTables):
 
     else:
 
-        def __init__(
+        def __init__(  # type: ignore[misc]
             self,
             block_sizes: list[int],
             max_num_reqs: int,

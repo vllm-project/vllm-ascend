@@ -36,7 +36,7 @@ class AscendFABackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @supports_kernel_block_spec
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes() -> list[int]:  # type: ignore[misc]
         return [128]
 
 

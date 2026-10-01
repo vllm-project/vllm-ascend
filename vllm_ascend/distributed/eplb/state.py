@@ -137,6 +137,7 @@ class AscendEplbState(_eplb_state.EplbState):
     """Keep Ascend routing and load-recording state around upstream EPLB."""
 
     cuda_device_index: int | None
+    device_index: int | None
 
     def __init__(
         self,
