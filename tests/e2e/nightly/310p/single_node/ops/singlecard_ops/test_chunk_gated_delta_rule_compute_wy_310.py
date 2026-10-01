@@ -179,7 +179,9 @@ def test_cgdr_310_npu_wy_matches_torch_wy_e2e(monkeypatch, batch, tokens, q_head
 
 def test_chunk_gated_delta_rule_310_uses_npu_wy(monkeypatch):
     """Kept for nightly compatibility; covered more thoroughly by parametrized e2e above."""
-    test_cgdr_310_npu_wy_matches_torch_wy_e2e(monkeypatch, 1, 128, 2, 2, 64, 64)
+    # FwdH/FwdO require value_dim >= 128; WY's standalone 64-wide output
+    # support does not extend to the full GDN chain.
+    test_cgdr_310_npu_wy_matches_torch_wy_e2e(monkeypatch, 1, 128, 2, 2, 64, 128)
 
 
 def _colleague_precision_inputs(seed=42, g_scale=1.0, dim=64):
@@ -263,6 +265,57 @@ def test_compute_wy_correlated_qk_uses_stable_fp32_path():
     assert torch.isfinite(out[2]).all().item(), "w_kernel contains NaN/Inf"
     assert torch.isfinite(out[3]).all().item(), "u_kernel contains NaN/Inf"
     _assert_compute_wy_close(out, ref)
+
+
+@pytest.mark.parametrize("decay", [0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1.0, 2.0])
+def test_compute_wy_correlated_keys_avoid_finite_cancellation_error(decay):
+    """Finite doubling results can be wrong, including when batch == 1.
+
+    Random independent keys hide transient growth of powers of A. Correlated
+    unit keys exercise both sides of the stability gate and the former
+    compensated-doubling interval. Use CPU FP32 reference and FP64 cosine;
+    merely checking finiteness or one global model-output cosine is insufficient.
+    """
+    enable_custom_op()
+    torch.manual_seed(42)
+    dim = 128
+    q = torch.full((1, CHUNK_SIZE, 1, dim), dim**-0.5, dtype=torch.float16)
+    k = q.clone()
+    v = (torch.randn(1, CHUNK_SIZE, 1, dim) * 0.1).half()
+    g = torch.full((1, CHUNK_SIZE, 1), -decay, dtype=torch.float32)
+    beta = torch.full((1, CHUNK_SIZE, 1), 0.8, dtype=torch.float16)
+    ref = chunk_mod._compute_kernel_inputs_from_torch_wy(q, k, v, g, beta, CHUNK_SIZE)
+    inputs = tuple(tensor.npu() for tensor in (q, k, v, g, beta))
+    first = None
+    for _ in range(3):
+        actual = tuple(
+            tensor.cpu()
+            for tensor in torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(*inputs, CHUNK_SIZE)
+        )
+        for index in (2, 3):
+            assert torch.isfinite(actual[index]).all(), f"nonfinite WY output {index}, decay={decay}"
+            cosine = _cosine(actual[index], ref[index])
+            assert cosine >= 0.999999, f"output={index}, decay={decay}, cosine={cosine}"
+        if first is not None:
+            for tensor, expected in zip(actual, first):
+                torch.testing.assert_close(tensor, expected, rtol=0, atol=0)
+        first = actual
+
+
+def test_compute_wy_cumulative_g_matches_reference():
+    """Cover grouped heads and multiple chunks with non-constant decay."""
+    enable_custom_op()
+    inputs_cpu = _make_inputs_cpu(tokens=128, q_heads=2, v_heads=8, g_scale=2.0)
+    ref = chunk_mod._compute_kernel_inputs_from_torch_wy(*inputs_cpu, CHUNK_SIZE)
+    inputs = tuple(tensor.npu() for tensor in inputs_cpu)
+    first = None
+    for _ in range(3):
+        actual = torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(*inputs, CHUNK_SIZE)[4].cpu()
+        assert torch.isfinite(actual).all()
+        torch.testing.assert_close(actual, ref[4], rtol=1e-6, atol=1e-5)
+        if first is not None:
+            torch.testing.assert_close(actual, first, rtol=0, atol=0)
+        first = actual
 
 
 def test_cgdr_310_colleague_shape_npu_wy_vs_torch_wy(monkeypatch):
