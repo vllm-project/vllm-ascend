@@ -29,18 +29,16 @@ constexpr uint32_t FLOAT_VEC_LEN = 64;
 // and V loaded only in pass 2 (~178KB peak instead of ~242KB).
 constexpr uint32_t MAX_SAFE_HEAD_DIM = 128;
 constexpr uint32_t DOUBLING_ROUNDS = 6;  // log2(64)
-// Gate for the scalar fp32 fallback. The old 0.75 bound was chosen "for ample
-// headroom" but sends realistic chunks (row sums of |βK·Kᵀ⊙Λ| routinely exceed
-// 1) down a 2016-serial-Axpy path that costs ~60us/RHS — measured as ~85% of
-// the whole op. fp16 headroom through the doubling products tolerates far more;
-// 4.0 keeps the truly pathological chunks (and NaN) on the exact fp32 path and
-// is validated by the 9-shape adversarial cosine battery.
-constexpr float FP32_FS_ROW_SUM_THRESHOLD = 2.5f;
-// Above this row-sum the compensated doubling's fp16 hi/lo split can overflow
-// to NaN (T outgrows half range). Swept on gate-trip data: row sums 13.6 are
-// exact (cos 1.0000000), 19.2 overflow — 14.0 keeps every validated case on
-// the fast path and routes the rest to the exact scalar solve.
-constexpr float COMP_DOUBLING_MAX_ROW_SUM = 14.0f;
+// Doubling is safe only in a contractive regime. A is nilpotent, but its
+// intermediate powers can grow enormously before cancelling; a finite final
+// T does not certify accuracy. Real model chunks with row sums around 4 lost
+// >20% relative W accuracy even with compensated products. Restore the
+// conservative bound and use FP32 forward substitution outside it.
+constexpr float FP32_FS_ROW_SUM_THRESHOLD = 0.75f;
+// Disable compensated doubling: its former [2.5, 14) admission interval did
+// not bound cancellation error. Keep its implementation for this diagnostic
+// patch; it is unreachable because the lower/upper bounds now coincide.
+constexpr float COMP_DOUBLING_MAX_ROW_SUM = FP32_FS_ROW_SUM_THRESHOLD;
 
 __aicore__ inline uint32_t AlignUp(uint32_t value, uint32_t align) { return (value + align - 1) / align * align; }
 __aicore__ inline uint16_t BytesToBlocks(uint32_t bytes) { return static_cast<uint16_t>(AlignUp(bytes, BLOCK_BYTES) / BLOCK_BYTES); }
@@ -332,14 +330,17 @@ class KernelComputeWy {
                                           LocalTensor<float> expGLocal, LocalTensor<float> gRaw,
                                           LocalTensor<float> loadScratch, uint32_t loadScratchElems) {
     LoadHeadScalarChunk(gGm_, gRaw, loadScratch, loadScratchElems, b, tokenStart, vHeadIdx, vNumHead_);
-    // Inclusive prefix sum as a 6-round vector scan (was a 64-step scalar RMW
-    // loop — one of the serial scalar hotspots behind the 0.73 issue ratio).
-    Adds(gLocal, gRaw, 0.0f, FIXED_CHUNK_SIZE);
-    PipeBarrier<PIPE_V>();
-    for (uint32_t sh = 1; sh < FIXED_CHUNK_SIZE; sh <<= 1) {
-      Add(gLocal[sh], gLocal[sh], gLocal, FIXED_CHUNK_SIZE - sh);
-      PipeBarrier<PIPE_V>();
+    // A shifted in-place vector scan aliases source and destination at
+    // non-block-aligned offsets (sh=1,2,4). Device memcheck reports illegal UB
+    // accesses there. Keep the small scan scalar until an aligned, non-aliasing
+    // vector implementation has its own correctness/sanitizer coverage.
+    SyncEvent<HardEvent::V_S>(HardEvent::V_S);
+    float cumulative = 0.0f;
+    for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
+      cumulative += gRaw.GetValue(i);
+      gLocal.SetValue(i, cumulative);
     }
+    SyncEvent<HardEvent::S_V>(HardEvent::S_V);
     Exp(expGLocal, gLocal, FIXED_CHUNK_SIZE);
     PipeBarrier<PIPE_V>();
     // The GM store below runs on MTE3 and reads the V-written scan result; a
