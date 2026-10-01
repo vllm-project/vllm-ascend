@@ -438,7 +438,12 @@ class LayerwiseLoadTimeline:
             work = tuple(item for transfer in transfers for item in transfer.work if not item.empty)
             if not work:
                 return tuple(LoadCompletion(transfer.request_id, ()) for transfer in transfers)
-            unknown_layer_ids = sorted({item.physical_layer_id for item in work} - set(self._layer_order))
+            layer_ids = {item.physical_layer_id for item in work}
+            if None in layer_ids:
+                raise ValueError("Layerwise Load work requires a physical Layer ID")
+            unknown_layer_ids = sorted(
+                layer_id for layer_id in layer_ids if layer_id is not None and layer_id not in self._layer_order
+            )
             if unknown_layer_ids:
                 raise ValueError(f"Unknown physical Layer IDs {unknown_layer_ids}")
             object_sizes_by_key = _collect_object_sizes(transfers)
