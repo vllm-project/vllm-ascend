@@ -38,11 +38,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.v1.core.kv_cache_coordinator import SpecGroup
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
+    SlidingWindowSpec,
 )
 
 from vllm_ascend.patch.platform import patch_kv_cache_coordinator as mod
@@ -79,18 +81,20 @@ class _FakeBlockPool:
 class _FakeFAManager:
     def __init__(self, **kwargs):
         self.use_eagle = False
+        self.block_size = kwargs["block_size"]
 
 
 class _FakeMambaManager:
     def __init__(self, **kwargs):
         self.use_eagle = False
+        self.block_size = kwargs["block_size"]
 
 
 def _fake_manager_factory(**kwargs):
     spec = kwargs["kv_cache_spec"]
     if isinstance(spec, MambaSpec):
-        return _FakeMambaManager()
-    return _FakeFAManager()
+        return _FakeMambaManager(block_size=spec.block_size)
+    return _FakeFAManager(block_size=spec.block_size)
 
 
 def _hybrid_config(
@@ -156,6 +160,7 @@ def test_eagle_fallback_flags_only_full_attention_group(monkeypatch):
 
 def test_no_eagle_group_when_speculative_decoding_disabled(monkeypatch):
     coordinator = _make_coordinator(monkeypatch, use_eagle=False)
+    assert coordinator.group_block_sizes == (128, 1536)
     assert coordinator.eagle_group_ids == set()
     assert all(not manager.use_eagle for manager in coordinator.single_type_managers)
 
@@ -175,6 +180,41 @@ def test_coordinator_uses_resolved_retention_interval(monkeypatch, retention_int
         retention_interval=retention_interval,
     )
     assert coordinator.retention_interval == retention_interval
+
+
+@pytest.mark.parametrize("prompt_tokens", [1152, 1153, 1300, 2048, 2176])
+def test_sparse_retention_keeps_reachable_small_eagle_page(prompt_tokens):
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.eagle_group_ids = {1}
+    coordinator.enable_partial_hash_hits = False
+    coordinator.scheduler_block_size = 1024
+    coordinator.group_block_sizes = (1024, 128)
+    request = SimpleNamespace(num_prompt_tokens=prompt_tokens)
+    boundaries = coordinator.get_replay_boundaries(request)
+    spec = SlidingWindowSpec(block_size=128, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=128)
+    mask = SlidingWindowManager.reachable_block_mask(
+        start_block=0,
+        end_block=prompt_tokens // 128,
+        alignment_tokens=1024,
+        kv_cache_spec=spec,
+        use_eagle=True,
+        retention_interval=0,
+        reachable_boundaries=boundaries,
+    )
+    # Every legal nonzero hit needs the page before and after its boundary.
+    # These prompts must retain the checkpoint at 1024, even if a later
+    # extension can also reach another checkpoint.
+    assert mask[7:9] == [True, True]
+    assert 1024 in boundaries
+
+
+def test_sparse_retention_does_not_require_uncomputed_eagle_page():
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.eagle_group_ids = {1}
+    coordinator.enable_partial_hash_hits = False
+    coordinator.scheduler_block_size = 1024
+    coordinator.group_block_sizes = (1024, 128)
+    assert coordinator.get_replay_boundaries(SimpleNamespace(num_prompt_tokens=1151)) == (0,)
 
 
 # ---------------------------------------------------------------------------

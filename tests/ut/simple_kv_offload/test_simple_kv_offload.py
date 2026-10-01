@@ -224,6 +224,50 @@ def test_register_kv_caches_keeps_kv_views_of_one_allocation(
     assert worker.cpu_kv_caches["layer.1"].shape == (8, page_elems)
 
 
+def test_offload_copies_packed_page_once_and_matches_pool_capacity(monkeypatch):
+    """Latent/RoPE views and overlay aliases must not duplicate physical pages."""
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Stream=lambda: object()), raising=False)
+    monkeypatch.setattr(worker_module, "is_pin_memory_available", lambda: False)
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker._backend = SimpleNamespace(init=lambda *args: None)
+    worker.cpu_capacity_bytes = 256
+    descriptor = SimpleNamespace(layers=["packed", "overlay"], block_stride=16, size=128, offset=0, layer_stride=0)
+    worker.kv_cache_config = SimpleNamespace(
+        num_blocks=4,
+        kv_cache_tensors=[descriptor],
+    )
+    # Leading alignment padding, four 16-byte pages, and unused tuple padding.
+    backing = torch.arange(160, dtype=torch.uint8)
+    latent = backing.as_strided((4, 8), (16, 1), storage_offset=16)
+    rope = backing.as_strided((4, 8), (16, 1), storage_offset=24)
+    worker.register_kv_caches({"packed": (latent, rope), "overlay": (latent, rope)})
+    assert list(worker.gpu_kv_caches) == ["packed"]
+    assert torch.equal(worker.gpu_kv_caches["packed"].view(torch.uint8), backing[16:80].view(4, 16))
+    # The scheduler budgets the whole 128-byte backing, including tuple padding.
+    assert worker.num_cpu_blocks == 4 * 256 // 128
+    assert worker.cpu_kv_caches["packed"].shape == (8, 16)
+
+
+def test_descriptor_path_does_not_merge_separately_allocated_components(monkeypatch):
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Stream=lambda: object()), raising=False)
+    monkeypatch.setattr(worker_module, "is_pin_memory_available", lambda: False)
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker._backend = SimpleNamespace(init=lambda *args: None)
+    worker.cpu_capacity_bytes = 256
+    worker.kv_cache_config = SimpleNamespace(
+        num_blocks=4,
+        kv_cache_tensors=[SimpleNamespace(layers=["layer"], size=64, offset=0, layer_stride=0, block_stride=8)],
+    )
+    # Padding in two independent allocations must not make them one packed page.
+    key = torch.zeros(64, dtype=torch.uint8)[:32].view(4, 8)
+    value = torch.ones(64, dtype=torch.uint8)[:32].view(4, 8)
+    worker.register_kv_caches({"layer": (key, value)})
+    assert list(worker.gpu_kv_caches) == ["layer", "layer.1"]
+    assert worker.num_cpu_blocks == 16
+    assert torch.equal(worker.gpu_kv_caches["layer"], key)
+    assert torch.equal(worker.gpu_kv_caches["layer.1"], value)
+
+
 def test_get_finished_records_store_barrier_on_npu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
