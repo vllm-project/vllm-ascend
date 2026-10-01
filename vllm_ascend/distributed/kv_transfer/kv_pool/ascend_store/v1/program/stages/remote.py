@@ -9,14 +9,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import Po
 
 from ..spec.topology import KVPoolGroupTopology, KVPoolTopology
 from ..values.representation import (
-    KVChunk,
     KVChunkBatch,
     PhysicalCoordinate,
     RemoteKVObject,
     RemoteObjectBatch,
     RemoteObjectKey,
     RemoteObjectKeyBatch,
-    TransferLayoutBatch,
 )
 
 
@@ -119,38 +117,6 @@ class RemoteObjectProjection:
             raise ValueError(f"Remote object key groups {group_ids} do not match compiled groups {self.group_ids}")
         return tuple(self._project_lookup_batch(batch) for batch in batches)
 
-    def project_transfer(
-        self,
-        layout_batch: TransferLayoutBatch,
-        object_keys: RemoteObjectKeyBatch,
-    ) -> RemoteObjectBatch:
-        if layout_batch.group_id != object_keys.group_id:
-            raise ValueError(
-                f"Transfer layout group {layout_batch.group_id} does not match remote object key group "
-                f"{object_keys.group_id}"
-            )
-        templates = {item.chunk: _RemoteKeyTemplate.compile(item.base_key) for item in object_keys.keys}
-        projected: dict[tuple[KVChunk, PhysicalCoordinate], RemoteKVObject] = {}
-        remote_objects = []
-        for layout in layout_batch.layouts:
-            chunk = layout.local_region.region.chunk
-            coordinate = layout.remote_layout.coordinate
-            try:
-                template = templates[chunk]
-            except KeyError as error:
-                raise ValueError(f"KV transfer layout has no remote object key: {chunk}") from error
-            object_identity = chunk, coordinate
-            remote_object = projected.get(object_identity)
-            if remote_object is None:
-                remote_object = RemoteKVObject(
-                    chunk,
-                    template.render(self._rank_values(layout_batch.group_id, coordinate)),
-                    coordinate,
-                )
-                projected[object_identity] = remote_object
-            remote_objects.append(remote_object)
-        return RemoteObjectBatch(layout_batch.group_id, tuple(remote_objects))
-
     def _project_lookup_batch(self, batch: RemoteObjectKeyBatch) -> RemoteObjectBatch:
         representations = self._representations_by_group[batch.group_id]
         if len(representations) == 1:
@@ -168,20 +134,6 @@ class RemoteObjectProjection:
             for item, template in zip(batch.keys, templates, strict=True)
         )
         return RemoteObjectBatch(batch.group_id, objects)
-
-    def _rank_values(self, group_id: int, coordinate: PhysicalCoordinate) -> tuple[str, str, str]:
-        dcp_rank, head_rank, pp_rank = self._base_rank_values[group_id]
-        if coordinate.dcp_rank is not None:
-            dcp_rank = str(coordinate.dcp_rank)
-        if coordinate.head_rank is not None:
-            head_rank = str(coordinate.head_rank)
-        if coordinate.effective_tp_rank is not None:
-            head_rank = str(coordinate.effective_tp_rank)
-        if coordinate.pp_rank is not None:
-            pp_rank = str(coordinate.pp_rank)
-        if coordinate.consumer_pp_slice is not None:
-            pp_rank = str(coordinate.consumer_pp_slice)
-        return dcp_rank, head_rank, pp_rank
 
 
 def _required_rank_span(key: str, field: str) -> tuple[int, int]:

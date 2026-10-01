@@ -8,11 +8,10 @@ from functools import wraps
 from typing import Any, Concatenate, ParamSpec, TypeVar
 
 import torch
-from vllm.logger import logger
 
 from ...attention_fence import reset_attention_compute_start_gate
 from ..backend import LayerwiseAccessKind
-from ..program.program import KVPoolProgram
+from ..program.program import BoundKVPoolProgram, KVPoolProgram
 from ..program.values.evidence import (
     LoadCompletion,
     StoreCompletion,
@@ -66,7 +65,8 @@ class KVPoolRuntime:
             backend_io = layerwise_backend
         else:
             backend_io = BackendIO(resources.backend, resources.backend_spec)
-        self._program = program
+        self._unbound_program = program
+        self._program: BoundKVPoolProgram | None = None
         self._resources = resources
         self._backend_io = backend_io
         self._timeline = timeline
@@ -90,14 +90,14 @@ class KVPoolRuntime:
     def bind_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         try:
             memory_geometry = self._resources.bind_kv_caches(kv_caches)
-            self._program.bind_memory(memory_geometry)
+            self._program = self._unbound_program.bind_memory(memory_geometry, self._resources.num_blocks)
             self._timeline.start()
         except BaseException:
             self.close()
             raise
 
     def lookup(self, request: LookupRequest) -> LookupResult:
-        return self._program.lookup(request, self._backend_io.observe_objects)
+        return self._bound_program.lookup(request, self._backend_io.observe_objects)
 
     def begin_step(self, step: KVTransferStep) -> None:
         self._raise_store_error()
@@ -106,7 +106,7 @@ class KVPoolRuntime:
         context = _KVPoolStepContext(step)
         if self._timeline.store_enabled and step.store.commands:
             try:
-                context.store_transfers = self._program.select_store_transfers(step.store.commands)
+                context.store_transfers = self._bound_program.select_store_transfers(step.store.commands)
                 self._timeline.prepare_store(context.store_transfers)
                 if step.store.all_sources_ready:
                     self._submit_store(context)
@@ -136,7 +136,7 @@ class KVPoolRuntime:
 
     @_with_active_step
     def start_load(self, context: _KVPoolStepContext) -> None:
-        transfers = self._program.select_load_transfers(context.step.load.commands)
+        transfers = self._bound_program.select_load_transfers(context.step.load.commands)
         if self._timeline.collects_load_completions:
             for transfer in transfers:
                 if transfer.request_id in self._pending_load_request_ids:
@@ -220,7 +220,7 @@ class KVPoolRuntime:
             self._pending_store_batch = None
         for completion in completions:
             try:
-                self._program.validate_store_completion(completion)
+                self._bound_program.validate_store_completion(completion)
             except Exception as error:
                 self._store_error = error
                 raise
@@ -256,14 +256,10 @@ class KVPoolRuntime:
             raise close_error
 
     def _execute_load(self, transfer: LoadTransfer) -> LoadCompletion:
-        return self._program.execute_load(transfer, self._backend_io.load)
+        return self._bound_program.execute_load(transfer, self._backend_io.load)
 
     def _admit_store_transfers(self, transfers: list[StoreTransfer]) -> list[StoreTransfer]:
-        try:
-            return self._select_admitted_store_transfers(transfers)
-        except Exception as error:
-            logger.error("Layerwise Store admission failed; preserving all transfers: %s", error)
-            return transfers
+        return self._select_admitted_store_transfers(transfers)
 
     def _execute_store(self, transfer: StoreTransfer, source_ready_event: Any) -> StoreCompletion:
         try:
@@ -273,19 +269,19 @@ class KVPoolRuntime:
         return self._execute_store_transfer(admitted_transfers[0], source_ready_event)
 
     def _select_admitted_store_transfers(self, transfers: list[StoreTransfer]) -> list[StoreTransfer]:
-        targets = self._program.store_admission_targets(transfers)
+        targets = self._bound_program.store_admission_targets(transfers)
         observations = self._backend_io.observe_objects(targets)
-        return self._program.admit_store_transfers(transfers, observations)
+        return self._bound_program.admit_store_transfers(transfers, observations)
 
     def _execute_store_transfer(self, transfer: StoreTransfer, source_ready_event: Any) -> StoreCompletion:
-        return self._program.execute_store(transfer, source_ready_event.synchronize, self._backend_io.store)
+        return self._bound_program.execute_store(transfer, source_ready_event.synchronize, self._backend_io.store)
 
     def _raise_store_error(self) -> None:
         if self._store_error is not None:
             raise RuntimeError("KVPoolRuntime cannot continue after a previous Store failure") from self._store_error
 
     def _record_load_completion(self, context: _KVPoolStepContext, completion: LoadCompletion) -> None:
-        failure = self._program.reduce_load_completion(completion)
+        failure = self._bound_program.reduce_load_completion(completion)
         context.failed_request_ids.update(failure.failed_request_ids)
         context.failed_block_ids.update(failure.failed_block_ids)
 
@@ -294,3 +290,9 @@ class KVPoolRuntime:
             return
         self._timeline.abort_load()
         raise RuntimeError(f"Hybrid KV Load failed for requests: {sorted(context.failed_request_ids)}")
+
+    @property
+    def _bound_program(self) -> BoundKVPoolProgram:
+        if self._program is None:
+            raise RuntimeError("KV Pool program is unavailable before cache registration")
+        return self._program

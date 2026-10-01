@@ -6,8 +6,8 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from ..values.evidence import RemoteObjectObservation
-from ..values.representation import BindingBatch, RemoteKVObject
-from ..values.selection import StoreTransfer
+from ..values.representation import RemoteKVObject
+from ..values.selection import StoreTransfer, select_work_keys
 
 
 class StoreAdmission(Protocol):
@@ -61,20 +61,14 @@ class BackendExistenceStoreAdmission:
 
 def _unique_remote_objects(transfers: Sequence[StoreTransfer]) -> tuple[RemoteKVObject, ...]:
     objects_by_key = {
-        binding.remote_object.key: binding.remote_object
+        remote_object.key: remote_object
         for transfer in transfers
-        for batch in transfer.batches
-        for binding in batch.bindings
+        for rows in transfer.rows
+        for remote_object in rows.remote_objects
     }
     return tuple(objects_by_key.values())
 
 
 def _select_transfer_bindings(transfer: StoreTransfer, admitted_keys: set[str]) -> StoreTransfer:
-    batches = tuple(
-        BindingBatch(
-            batch.group_id,
-            tuple(binding for binding in batch.bindings if binding.remote_object.key in admitted_keys),
-        )
-        for batch in transfer.batches
-    )
-    return StoreTransfer(transfer.request_id, batches, transfer.store_job_id)
+    work = select_work_keys(transfer.work, admitted_keys)
+    return StoreTransfer(transfer.request_id, transfer.rows, work, transfer.store_job_id)

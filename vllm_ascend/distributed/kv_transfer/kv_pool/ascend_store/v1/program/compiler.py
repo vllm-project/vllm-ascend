@@ -11,14 +11,7 @@ from .stages.admission import BackendExistenceStoreAdmission, StoreAdmission, Un
 from .stages.block import compile_block_resolutions
 from .stages.chunk import CheckpointChunkProjection, SemanticChunkProjection
 from .stages.ownership import compile_store_ownership
-from .stages.partition import IdentityRegionPartition, PipelineRegionPartition, RegionPartition
 from .stages.reachability import HybridReachability, ReachableRegionSelection, UnitaryReachability
-from .stages.region import (
-    ContiguousRegionProjection,
-    LayerwiseRegionProjection,
-    StridedRegionProjection,
-    TransferRegionProjection,
-)
 from .stages.remote import RemoteObjectProjection
 
 
@@ -38,6 +31,8 @@ def compile_kv_pool_program(spec: KVPoolCompilationSpec) -> KVPoolProgram:
     align_state_group_ids = frozenset(group.group_id for group in transfer_groups if group.uses_align_state)
     has_align_state = bool(align_state_group_ids)
 
+    if topology.tp_partition.tp_mismatch and len(transfer_groups) != 1:
+        raise ProgramCompilationError("TP-mismatched transfer requires exactly one transferable KV cache group")
     if use_layerwise and topology.tp_partition.tp_mismatch:
         raise ProgramCompilationError("Layerwise region projection cannot yet be composed with TP mismatch")
     if topology.tp_partition.tp_mismatch and has_align_state:
@@ -80,20 +75,6 @@ def compile_kv_pool_program(spec: KVPoolCompilationSpec) -> KVPoolProgram:
         None,
         topology.hash_block_size,
     )
-    transfer_region_projection: TransferRegionProjection
-    if use_layerwise:
-        transfer_region_projection = LayerwiseRegionProjection(topology)
-    elif topology.tp_partition.tp_mismatch:
-        transfer_region_projection = StridedRegionProjection(topology)
-    else:
-        transfer_region_projection = ContiguousRegionProjection(topology)
-
-    region_partition: RegionPartition
-    if consumer_partitions is not None and len(consumer_partitions) > 1:
-        region_partition = PipelineRegionPartition(consumer_partitions)
-    else:
-        region_partition = IdentityRegionPartition()
-
     store_admission: StoreAdmission
     if backend_spec.requires_exists_before_put:
         store_admission = BackendExistenceStoreAdmission()
@@ -122,8 +103,6 @@ def compile_kv_pool_program(spec: KVPoolCompilationSpec) -> KVPoolProgram:
         local_block_resolution=local_block_resolution,
         checkpoint_block_resolution=checkpoint_block_resolution,
         store_ownership_selection=compile_store_ownership(topology, align_state_group_ids),
-        transfer_region_projection=transfer_region_projection,
-        region_partition=region_partition,
         store_admission=store_admission,
         backend_name=spec.backend_name,
         schedule=schedule,

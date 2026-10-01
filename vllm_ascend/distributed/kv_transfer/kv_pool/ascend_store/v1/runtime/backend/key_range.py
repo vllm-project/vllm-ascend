@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from numbers import Integral
 
-from ...program.values.evidence import BindingEvidence, StoreEvidence
-from ...program.values.representation import BindingBatch, KVBinding
+from ...program.values.evidence import StoreEvidence, TransferEvidence
+from ...program.values.selection import TransferWork
+from .arguments import materialize_key_ranges
 from .io import BackendIO
 
 
@@ -21,23 +22,19 @@ class KeyRangeBackendIO(BackendIO):
     def start_store_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
         return self._require_result_codes("batch_put_start", keys, self._backend.batch_put_start(keys, object_sizes))
 
-    def load(self, bindings: tuple[KVBinding, ...]) -> tuple[BindingEvidence, ...]:
-        if not bindings:
+    def load(self, work: TransferWork) -> tuple[TransferEvidence, ...]:
+        arguments = materialize_key_ranges(work)
+        if not arguments.keys:
             return ()
-        bindings_by_key = self._group_bindings_by_key(bindings)
-        keys = list(bindings_by_key)
         native_result = self._backend.batch_copy_get(
-            keys,
-            [
-                [address for binding in bindings_by_key[key] for address in binding.local_region.memory.addresses]
-                for key in keys
-            ],
-            [[size for binding in bindings_by_key[key] for size in binding.local_region.memory.sizes] for key in keys],
-            [[offset for binding in bindings_by_key[key] for offset in binding.remote_layout.offsets] for key in keys],
+            arguments.keys,
+            arguments.addresses,
+            arguments.sizes,
+            arguments.offsets,
         )
-        result_codes = self._require_result_codes("batch_copy_get", keys, native_result)
-        codes_by_key = dict(zip(keys, result_codes, strict=True))
-        return tuple(BindingEvidence(binding, codes_by_key[binding.remote_object.key]) for binding in bindings)
+        result_codes = self._require_result_codes("batch_copy_get", arguments.keys, native_result)
+        codes_by_key = dict(zip(arguments.keys, result_codes, strict=True))
+        return tuple(TransferEvidence(source, codes_by_key[source.key]) for source in work.sources)
 
     def finish_load_sessions(self, keys: list[str]) -> None:
         native_result = self._backend.batch_get_end(keys)
@@ -46,47 +43,40 @@ class KeyRangeBackendIO(BackendIO):
         if native_result != 0:
             raise RuntimeError(f"batch_get_end failed with result code {native_result}")
 
-    def store(self, batches: tuple[BindingBatch, ...]) -> StoreEvidence:
-        bindings = tuple(binding for batch in batches for binding in batch.bindings)
-        if not bindings:
+    def store(self, work: TransferWork) -> StoreEvidence:
+        if work.empty:
             return StoreEvidence((), True, source_release_confirmed=True)
-        bindings_by_key = self._group_bindings_by_key(bindings)
-        keys = list(bindings_by_key)
         source_addresses_handed_off = False
         try:
+            arguments = materialize_key_ranges(work)
             source_addresses_handed_off = True
             native_result = self._backend.batch_copy_put(
-                keys,
-                [
-                    [address for binding in bindings_by_key[key] for address in binding.local_region.memory.addresses]
-                    for key in keys
-                ],
-                [
-                    [size for binding in bindings_by_key[key] for size in binding.local_region.memory.sizes]
-                    for key in keys
-                ],
-                [
-                    [offset for binding in bindings_by_key[key] for offset in binding.remote_layout.offsets]
-                    for key in keys
-                ],
+                arguments.keys,
+                arguments.addresses,
+                arguments.sizes,
+                arguments.offsets,
             )
         except Exception as error:
             return StoreEvidence(
-                self._unknown_binding_evidence(bindings),
+                self._unknown_transfer_evidence(work.sources, not source_addresses_handed_off),
                 False,
                 not source_addresses_handed_off,
                 error,
             )
 
-        result_codes, result_error = self._interpret_store_results(len(keys), native_result)
+        result_codes, result_error = self._interpret_store_results(len(arguments.keys), native_result)
         succeeded = result_codes is not None and all(code == 0 for code in result_codes)
-        codes_by_key = None if result_codes is None else dict(zip(keys, result_codes, strict=True))
-        binding_evidence = tuple(
-            BindingEvidence(binding, None if codes_by_key is None else codes_by_key[binding.remote_object.key])
-            for binding in bindings
+        codes_by_key = None if result_codes is None else dict(zip(arguments.keys, result_codes, strict=True))
+        transfer_evidence = tuple(
+            TransferEvidence(
+                source,
+                None if codes_by_key is None else codes_by_key[source.key],
+                False if codes_by_key is None else codes_by_key[source.key] == 0,
+            )
+            for source in work.sources
         )
         return StoreEvidence(
-            binding_evidence,
+            transfer_evidence,
             succeeded,
             source_release_confirmed=succeeded,
             error=result_error,
@@ -97,10 +87,3 @@ class KeyRangeBackendIO(BackendIO):
 
     def revoke_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
         return self._require_result_codes("batch_revoke", keys, self._backend.batch_revoke(keys))
-
-    @staticmethod
-    def _group_bindings_by_key(bindings: tuple[KVBinding, ...]) -> dict[str, list[KVBinding]]:
-        bindings_by_key: dict[str, list[KVBinding]] = {}
-        for binding in bindings:
-            bindings_by_key.setdefault(binding.remote_object.key, []).append(binding)
-        return bindings_by_key
