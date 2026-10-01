@@ -105,7 +105,18 @@ CATLASS_DEVICE void HandMmad(
     auto l0b = res.l0BBuf.template GetBufferByByte<half>(0);
     auto l0c = res.l0CBuf.template GetBufferByByte<float>(l0cOff);
 
-    static_assert(!(A_FROM_L1 && A_COL_MAJOR), "pick one A source");
+    // A_FROM_L1 and A_COL_MAJOR are INDEPENDENT and may be combined. The first
+    // says who stages the tile; the second only says how the L1->L0A load reads
+    // it (srcStride 1, ifTranspose, one contiguous fractal stream). The previous
+    // `static_assert(!(A_FROM_L1 && A_COL_MAJOR), "pick one A source")` read
+    // A_COL_MAJOR as a source selector and forbade the pair.
+    //
+    // With both set, l1AOff must hold the zN image of the stored [k, m] block at
+    // l1aC0Stride = kR = HmRoundUp16(k) -- exactly what a hand-rolled UB->L1
+    // store with blockCount = HmRoundUp16(rows) and rows = k produces. fwd_h's
+    // Stage2 uses this to avoid the dav_m200 Nd2Nz emulation (26-42x a plain
+    // load; see yaml_spec B7.2), and the caller then owes the MTE3->MTE1 order
+    // that the skipped GM->L1 path would have chained through MTE2_MTE1.
     const uint32_t mR = HmRoundUp16(m), nR = HmRoundUp16(n), kR = HmRoundUp16(k);
     const uint32_t l1aC0Stride = A_COL_MAJOR ? kR : mR;    // zN of the STORED matrix
     const uint32_t l1bC0Stride = B_COL_MAJOR ? nR : kR;    // nZ(kR,nR).stride(1)/C0 : zN(kR,nR)

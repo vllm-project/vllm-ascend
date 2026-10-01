@@ -36,6 +36,14 @@ template<
 class GDNFwdHKernel {
 public:
     
+    // NOTE on ArchTag: Catlass's Arch::AtlasA2 is the 910B descriptor and
+    // understates this chip (UB 192K vs a real 248K usable, L1 512K vs 1M, L0C
+    // 128K vs 256K -- Ascend310P3.ini + CANN's __NPU_ARCH__==2002 branch). It is
+    // NOT swapped here: the vnew epilogue takes its ArchTag from
+    // DispatchPolicy::ArchTag and its ctor takes Arch::Resource<ArchTag>&, so
+    // changing it changes the Resource<> instantiation and breaks that call.
+    // Fixing it properly means changing the epilogue policy too; the staging
+    // below avoids needing the extra UB at all.
     using ArchTag = Arch::AtlasA2;
     using CubeScheduler = typename Catlass::Gemm::Block::BlockSchedulerGdnFwdHCube;
 
@@ -172,6 +180,71 @@ public:
     static constexpr uint32_t UB_UPD_H16   = 96 * 1024;   // f16 tile, <=48 KB
     static constexpr uint32_t UB_UPD_NDOUT = 144 * 1024;  // final-state + exp(g_last) scratch
 
+    // ---- hand-rolled GM->L1 NZ staging --------------------------------------
+    // Staged through the LOW half of the cube's own staging window, which is
+    // dead at prefetch time: each prefetch runs immediately before the mmad that
+    // writes HM_STAGE via its L0C->UB copy, and the previous task's staging was
+    // already deformatted out to HM_ND and consumed by the epilogue. The closing
+    // MTE3_V pair below orders our MTE3 reads of the scratch before that later
+    // V-pipe staging write. Same trick chunk_fwd_o uses (it stages through
+    // Vec1's own buffer, "dead at the beginning of a body").
+    // Two 24KB slots (24KB = 64 rows x 192 cols f16, the largest tile here) so
+    // back-to-back prefetches do not serialise on one scratch: 48K <= the 64K
+    // HM_STAGE window.
+    static constexpr uint32_t UB_PF_OFFSET = HM_STAGE_OFFSET;
+    static constexpr uint32_t UB_PF_SLOT   = 24 * 1024;
+    static_assert(UB_PF_OFFSET + 2 * UB_PF_SLOT <= HM_ND_OFFSET,
+                  "fwd_h: prefetch staging must stay inside the HM_STAGE window");
+
+    // Replaces `DataCopy(l1, gm, Nd2NzParams)`, which on m200 is NOT a DMA: the
+    // dav_m200 library emulates it in 64Bx64B blocks, each a GM->UB read, a
+    // masked-vadds transpose on V and a UB->L1 store on MTE3, serialised by
+    // three flag pairs per block -- 26-42x a plain contiguous load
+    // (yaml_spec B7.2). Hand-rolling is 4.1-4.3x faster and, more importantly
+    // here, collapses ~340 scalar issue cyc per call to ~170-200: fwd_h is
+    // SCALAR-bound (device: 239.5-269.8us of a 416.5us kernel) and intrinsic
+    // issue cost is independent of transfer size, so call count is the budget.
+    //
+    // Same routine as chunk_fwd_o's PrefetchTileNZ. The pad rows are zero-filled
+    // so a partial tile's NZ padding is deterministic rather than whatever the
+    // previous task left in the slot.
+    __aicore__ inline void PrefetchTileNZ(
+        AscendC::GlobalTensor<half> src, uint32_t rows, uint32_t cols,
+        uint32_t l1Offset, uint32_t pfSlot) {
+        const uint32_t mAl = M200Gemm::HmRoundUp16(rows);
+        auto scratch = resource.ubBuf.template GetBufferByByte<half>(
+            UB_PF_OFFSET + pfSlot * UB_PF_SLOT);
+        auto dst = resource.l1Buf.template GetBufferByByte<half>(l1Offset);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID6);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID6);
+        // GM rows are contiguous (ld == cols), so the valid part is one burst.
+        AscendC::DataCopy(scratch, src, rows * cols);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID6);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID6);
+        if (mAl != rows) {
+            AscendC::Duplicate<half>(scratch[rows * cols], static_cast<half>(0),
+                                     (mAl - rows) * cols);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+        }
+        AscendC::DataCopyParams p;
+        p.blockCount = static_cast<uint16_t>(mAl);
+        p.blockLen = 1;
+        p.srcStride = static_cast<uint16_t>(cols / 16 - 1);
+        p.dstStride = 0;
+        for (uint32_t column = 0; column < cols / 16; ++column) {
+            AscendC::DataCopy(dst[column * mAl * 16], scratch[column * 16], p);
+        }
+        // The consumer is MTE1 (HandMmad's L1->L0 load) and these call sites pass
+        // NO_MTE1_MTE2, so HandMmad issues no MTE2_MTE1 of its own to chain
+        // through: the MTE3->MTE1 order is ours to provide.
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID6);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID6);
+        // Protect the scratch against the next prefetch and any later V reader.
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+    }
+
     // m-tile of the resident bank <-> UB, one strided descriptor each way.
     // zN(kR, v): fractal column nf stride kR*16 elems; a tile is nFracs runs of
     // mActual*16 elems starting at mOff*16.
@@ -268,7 +341,15 @@ public:
                     AscendC::DataCopy(bank, gmH[stage1Offsets.hSrcOffset],
                                       kHeadDim * vHeadDim);
                 }
-                M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/false,
+                // A (w) hand-rolled into L1 instead of HandMmad's Nd2Nz: the
+                // library path is the 26-42x emulation (see PrefetchTileNZ).
+                // C0Stride matches -- HandMmad would have used
+                // l1aC0Stride = mR = HmRoundUp16(blockTokens), which is exactly
+                // the blockCount PrefetchTileNZ writes.
+                PrefetchTileNZ(gmW[stage1Offsets.wOffset],
+                               stage1Offsets.blockTokens, kHeadDim,
+                               HM_L1A_OFFSET, /*pfSlot=*/0);
+                M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true,
                                    /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/true,
                                    /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true, /*NO_M_MTE1=*/true>(
                     resource,
@@ -326,22 +407,26 @@ public:
                         AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
                         AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
                     }
-                    // v_update (B) loaded once.
-                    {
-                        AscendC::Nd2NzParams pb;
-                        pb.ndNum = 1;
-                        pb.nValue = stage2Offsets.blockTokens;
-                        pb.dValue = vHeadDim;
-                        pb.srcNdMatrixStride = 0;
-                        pb.srcDValue = vHeadDim;
-                        pb.dstNzC0Stride = (stage2Offsets.blockTokens + 15) / 16 * 16;
-                        pb.dstNzNStride = 1;
-                        pb.dstNzMatrixStride = 0;
-                        auto l1B = resource.l1Buf.template GetBufferByByte<half>(HM_L1B_OFFSET);
-                        AscendC::DataCopy(l1B, gmVUpdateWorkspace[stage2Offsets.vWorkOffset], pb);
-                    }
+                    // v_update (B) loaded once. Hand-rolled: the Nd2NzParams form
+                    // this replaced was the 26-42x dav_m200 emulation, and its
+                    // dstNzC0Stride was (blockTokens+15)/16*16 == the mAl
+                    // blockCount PrefetchTileNZ writes, so the L1 image is
+                    // byte-identical.
+                    PrefetchTileNZ(gmVUpdateWorkspace[stage2Offsets.vWorkOffset],
+                                   stage2Offsets.blockTokens, vHeadDim,
+                                   HM_L1B_OFFSET, /*pfSlot=*/1);
+                    // A (k, read column-major as k.T) hand-rolled too, now that
+                    // HandMmad allows A_FROM_L1 together with A_COL_MAJOR. The
+                    // col-major path wants the zN image of the stored [k, m]
+                    // block at l1aC0Stride = kR = HmRoundUp16(blockTokens),
+                    // which is exactly what PrefetchTileNZ writes for
+                    // rows = blockTokens: same bytes the Nd2Nz produced, without
+                    // the 64Bx64B emulation.
+                    PrefetchTileNZ(gmK[stage2Offsets.wkOffset],
+                                   stage2Offsets.blockTokens, kHeadDim,
+                                   HM_L1A_OFFSET, /*pfSlot=*/0);
                     M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false,
-                                       /*A_FROM_L1=*/false, /*A_COL_MAJOR=*/true,
+                                       /*A_FROM_L1=*/true, /*A_COL_MAJOR=*/true,
                                        /*B_FROM_L1=*/true,
                                        /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true, /*NO_M_MTE1=*/true>(
                         resource,
