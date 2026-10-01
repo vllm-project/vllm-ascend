@@ -94,6 +94,17 @@ def make_inputs(dtype, lengths, capacity, page_size, heads=64, rope_dim=0, block
     return inputs, cpu
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("heads", [1, 7, 16, 31, 63, 128])
+@pytest.mark.parametrize("lengths", [(1,), (3,), (20,), (21,)])
+@pytest.mark.parametrize("mode", [0, 3])
+@torch.inference_mode()
+def test_active_core_head_boundaries(dtype, heads, lengths, mode):
+    assert enable_custom_op()
+    inputs, cpu = make_inputs(dtype, lengths, 17, 128, heads=heads, mode=mode)
+    check_outputs(torch.ops._C_ascend.npu_sparse_flash_attention(**inputs), cpu)
+
+
 def check_outputs(outputs, cpu):
     output, maximum, total = [tensor.cpu().double() for tensor in outputs]
     assert output.shape == cpu["query"].shape
