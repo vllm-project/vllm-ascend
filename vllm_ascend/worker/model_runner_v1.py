@@ -210,14 +210,9 @@ from vllm_ascend.utils import (
     model_uses_kpool_indexer,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
-    vllm_version_is,
     weak_ref_tensor,
     weak_ref_tensors,
 )
-
-if vllm_version_is("0.30.0"):
-    from vllm.v1.outputs import RoutedExpertsLists, RoutedExpertsTensors
-
 from vllm_ascend.worker.dcp_utils import (
     DCPAsyncSpecDecodeRebuildResult,
     DCPDummyRunMetadata,
@@ -2956,7 +2951,6 @@ class NPUModelRunner(GPUModelRunner):
             async_output_copy_stream=self.async_output_copy_stream,
             vocab_size=self.input_batch.vocab_size,
             num_nans=num_nans_device,
-            **({"routed_experts": routed_experts_snapshot} if vllm_version_is("0.30.0") else {}),
         )
         self.input_batch.set_async_sampled_token_ids(
             async_output.sampled_token_ids_cpu,
