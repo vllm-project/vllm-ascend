@@ -174,6 +174,15 @@ class DeepseekV41LayerMetadata:
         return self.swa.cos[layer_name][:num_tokens], self.swa.sin[layer_name][:num_tokens]
 
 
+@dataclass
+class DeepseekV41PreparedIndexer:
+    query: torch.Tensor
+    weights: torch.Tensor
+    quantized_query: torch.Tensor | None = None
+    query_scale: torch.Tensor | None = None
+    quantize_done: Any = None
+
+
 def compressed_slot_mapping(slot_mapping: torch.Tensor, ratio: int) -> torch.Tensor:
     """Convert original-token physical slots to completed compressed slots.
 
@@ -296,10 +305,64 @@ class AscendDSAV41Impl:
 
     def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
         hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
-        q, qr = self.multistream_preprocess(attn, hidden_states, cos, sin, metadata.swa)
-        if self.role.is_kv_source:
-            self._write_compressed_source(attn, hidden_states, positions, cos, sin, metadata)
-        return q, qr
+        return self.multistream_preprocess(attn, hidden_states, cos, sin, metadata.swa)
+
+    def _indexer_hidden_states(self, hidden_states, metadata):
+        return hidden_states[: metadata.swa.num_actual_tokens]
+
+    def _prepare_indexer_inputs(self, attn, hidden_states, qr, cos, sin, metadata):
+        if not self.role.has_long_context or not self.role.is_index_source:
+            return None
+        hidden_states = self._indexer_hidden_states(hidden_states, metadata)
+        indexer = attn.indexer
+        main_stream = torch.npu.current_stream()
+        aux_stream = dsv4_dsa_overlap_stream()
+
+        query = indexer.project_query(qr)
+        weights_start = main_stream.record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            aux_stream.wait_event(weights_start)
+            weights = indexer.project_weights(hidden_states)
+            weights_done = aux_stream.record_event()
+        indexer.apply_query_rope(query, cos, sin)
+        main_stream.wait_event(weights_done)
+        return DeepseekV41PreparedIndexer(query=query, weights=weights)
+
+    @staticmethod
+    def _should_quantize_indexer(prepared, metadata):
+        return prepared is not None and prepared.query.shape[0] > 0 and metadata.indexer.cache.max_cache_seq_len > 0
+
+    def _quantize_indexer_query(self, attn, prepared, metadata):
+        if not self._should_quantize_indexer(prepared, metadata):
+            return
+
+        main_stream = torch.npu.current_stream()
+        aux_stream = dsv4_dsa_overlap_stream()
+        quantize_start = main_stream.record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            aux_stream.wait_event(quantize_start)
+            prepared.quantized_query, prepared.query_scale = attn.indexer.quantize_query(prepared.query)
+            prepared.quantize_done = aux_stream.record_event()
+
+    def _write_forward_compressed_source(
+        self,
+        attn,
+        hidden_states,
+        positions,
+        cos,
+        sin,
+        metadata,
+        prepared_indexer,
+    ):
+        return self._write_compressed_source(
+            attn,
+            self._indexer_hidden_states(hidden_states, metadata),
+            positions,
+            cos,
+            sin,
+            metadata,
+            prepared_indexer=prepared_indexer,
+        )
 
     def _project_output(self, attn, output, hidden_states, metadata, *, projected):
         padded = output
@@ -385,13 +448,16 @@ class AscendDSAV41Impl:
         cos,
         sin,
         metadata,
+        *,
+        prepared_indexer=None,
     ):
         compressor = attn.compressor
         compressor_metadata = metadata.compressor
         indexer_metadata = metadata.indexer
         ratio = self.role.compress_ratio
         if ratio == 1:
-            latent = compressor(hidden_states)
+            self._quantize_indexer_query(attn, prepared_indexer, metadata)
+            latent = compressor.norm(compressor.wkv(hidden_states))
             # C1 source positions are the current token positions. Reuse the
             # query RoPE selected by the SWA metadata builder instead of
             # indexing the global table a second time.
@@ -403,6 +469,9 @@ class AscendDSAV41Impl:
             state_metadata = compressor_metadata.state
             wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, state_metadata.c2_metadata_group_id)
             hidden_states_fp32 = hidden_states.float()
+            # Finish the Vector cast before overlapping query quantization
+            # with the Cube projection on the current stream.
+            self._quantize_indexer_query(attn, prepared_indexer, metadata)
             kv = compressor.wkv(hidden_states_fp32)
             score = compressor.wgate(hidden_states_fp32)
             latent = compressor.pool_projected(kv, score, state_metadata)
@@ -437,8 +506,18 @@ class AscendDSAV41Impl:
             latent.squeeze(1),
         )
 
-    def _select_sparse_indices(self, attn, hidden_states, qr, positions, cos, sin, metadata):
-        hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
+    def _select_sparse_indices(
+        self,
+        attn,
+        hidden_states,
+        qr,
+        positions,
+        cos,
+        sin,
+        metadata,
+        prepared_indexer=None,
+    ):
+        hidden_states = self._indexer_hidden_states(hidden_states, metadata)
         if not self.role.has_long_context:
             return None
         shared = attn.shared_state
@@ -447,20 +526,26 @@ class AscendDSAV41Impl:
 
         context = get_forward_context().no_compile_layers
         source_layer = context[self.index_k_source_prefix]
-        selected, candidates = attn.indexer.select(
-            hidden_states,
-            qr,
-            positions,
-            cos,
-            sin,
-            source_layer.kv_cache[0],
-            metadata.indexer.cache,
+        select_kwargs = dict(
             is_candidate_source=self.role.is_candidate_source,
             uses_candidate_filter=self.role.uses_candidate_filter,
             candidate_topk_blocks=self.topology.candidate_topk_blocks,
             candidate_block_size=self.topology.candidate_block_size,
             candidates=shared.candidates[: hidden_states.shape[0]],
             output_indices=shared.topk_indices[: hidden_states.shape[0]],
+        )
+        assert prepared_indexer is not None
+        if prepared_indexer.quantize_done is not None:
+            torch.npu.current_stream().wait_event(prepared_indexer.quantize_done)
+        selected, candidates = attn.indexer.select_projected(
+            prepared_indexer.query,
+            prepared_indexer.weights,
+            positions,
+            source_layer.kv_cache[0],
+            metadata.indexer.cache,
+            quantized_query=prepared_indexer.quantized_query,
+            query_scale=prepared_indexer.query_scale,
+            **select_kwargs,
         )
         # An empty long-context cache returns a [tokens, 0] sentinel without
         # writing output_indices. Publish "no slot" for FULL graph capture;
@@ -549,7 +634,29 @@ class AscendDSAV41Impl:
             positions = metadata.positions[:num_tokens]
             cos, sin = metadata.rope(attn.rotary_emb.layername, num_tokens)
             q, qr = self._prepare_queries(attn, hidden_states, positions, cos, sin, metadata)
-            compressed_indices = self._select_sparse_indices(attn, hidden_states, qr, positions, cos, sin, metadata)
+            prepared_indexer = self._prepare_indexer_inputs(attn, hidden_states, qr, cos, sin, metadata)
+            if self.role.is_kv_source:
+                self._write_forward_compressed_source(
+                    attn,
+                    hidden_states,
+                    positions,
+                    cos,
+                    sin,
+                    metadata,
+                    prepared_indexer,
+                )
+            else:
+                self._quantize_indexer_query(attn, prepared_indexer, metadata)
+            compressed_indices = self._select_sparse_indices(
+                attn,
+                hidden_states,
+                qr,
+                positions,
+                cos,
+                sin,
+                metadata,
+                prepared_indexer=prepared_indexer,
+            )
             attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
             torch.ops._C_ascend.inplace_partial_rotary_mul(
                 attention_output.unsqueeze(1),
