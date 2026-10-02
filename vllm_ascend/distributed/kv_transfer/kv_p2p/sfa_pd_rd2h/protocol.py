@@ -10,6 +10,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
 
+from vllm_ascend.distributed.kv_transfer.utils.utils import is_swa_cache_layer
+
 BATCH_KV_TRANSFER_PARAMS = "batch_kv_transfer_params"
 MF_META = b"mf_meta"
 READ_READY_BATCH = b"read_ready_batch"
@@ -39,7 +41,11 @@ def infer_sfa_component_group_ids(kv_cache_config: Any) -> tuple[int, int]:
         layer_names = list(getattr(group, "layer_names", ()) or ())
         if indexer_group_id is None and any("indexer" in name.lower() for name in layer_names):
             indexer_group_id = group_id
-        if main_group_id is None and any("indexer" not in name.lower() for name in layer_names):
+        # A DSV4 SWA-cache-only group is not the main group: its fused tensor
+        # is not a transferred SFAPD component.
+        if main_group_id is None and any(
+            "indexer" not in name.lower() and not is_swa_cache_layer(name) for name in layer_names
+        ):
             main_group_id = group_id
 
     if main_group_id is None:

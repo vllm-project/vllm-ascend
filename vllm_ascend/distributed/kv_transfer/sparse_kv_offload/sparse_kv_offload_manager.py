@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.distributed.kv_transfer.utils.utils import is_swa_cache_layer
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 # Main BF16 cache:
@@ -590,7 +591,22 @@ class SparseKVOffloadManager:
         return tuple(cache_or_caches)
 
     def _register_offload_layers(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        self.offload_layer_names = [layer_name for layer_name in kv_caches if "indexer" not in layer_name]
+        # DSV4 SWA cache layers expose a single fused tensor that is neither a
+        # main K/V pair nor an indexer cache; including them would corrupt the
+        # per-layer CPU-pool pairing and the MTP layer inference below.
+        swa_layer_names = [name for name in kv_caches if is_swa_cache_layer(name)]
+        if swa_layer_names:
+            logger.warning(
+                "Sparse KV offload skips %d DSV4 SWA cache layers (e.g. %s); "
+                "their window KV is not offloaded.",
+                len(swa_layer_names),
+                swa_layer_names[0],
+            )
+        self.offload_layer_names = [
+            layer_name
+            for layer_name in kv_caches
+            if "indexer" not in layer_name and not is_swa_cache_layer(layer_name)
+        ]
         if not self.offload_layer_names:
             raise ValueError("Sparse KV offload did not find SFA KV cache layers.")
 

@@ -373,7 +373,7 @@ class MembPullReadThread(threading.Thread):
         p_block_len = p_meta["block_len"]
         p_block_size_scale = p_meta.get("block_size_scale", [1] * len(p_base_addrs))
         main_tensor_count = int(p_meta.get("main_tensor_count", 2))
-        if main_tensor_count != 2 or len(p_base_addrs) < main_tensor_count:
+        if main_tensor_count not in (1, 2) or len(p_base_addrs) < main_tensor_count:
             raise RuntimeError(
                 f"MembPull P metadata for {layer_name} must expose two main K/V "
                 f"tensors, got main_tensor_count={main_tensor_count}, "

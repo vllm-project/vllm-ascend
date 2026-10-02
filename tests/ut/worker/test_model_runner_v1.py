@@ -2111,6 +2111,193 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             base_offset + tuple_stride + small_spec.page_size_bytes * num_blocks,
         )
 
+    def test_dsv4_layerwise_component_lane_uses_one_sized_backing(self):
+        small_name = "model.layers.1.self_attn.indexer.k_cache"
+        large_name = "model.layers.2.self_attn.indexer.k_cache"
+        small_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+            model_version="deepseek_v4",
+            **_ratio_kwargs(1),
+        )
+        large_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.int8,
+            scale_dim=1,
+            scale_dtype=torch.float16,
+            model_version="deepseek_v4",
+            **_ratio_kwargs(1),
+        )
+        specs = {small_name: small_spec, large_name: large_spec}
+        group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+        self.assertIsNotNone(group_spec)
+        assert group_spec is not None
+        num_blocks = 3
+        descriptor_size = num_blocks * large_spec.page_size_bytes
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=descriptor_size,
+                    layers=[small_name, large_name],
+                    layer_stride=0,
+                    block_stride=0,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[small_name, large_name],
+                    kv_cache_spec=group_spec,
+                )
+            ],
+        )
+        runner = self._build_runner()
+        runner.use_compress = True
+        runner._allocate_int8_cache_tensor = MagicMock(
+            side_effect=lambda numel, _alignment: torch.zeros(
+                numel,
+                dtype=torch.int8,
+            )
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(
+            kv_cache_config,
+            layerwise_reuse_applied=True,
+        )
+
+        runner._allocate_int8_cache_tensor.assert_called_once_with(
+            descriptor_size,
+            2 * 1024 * 1024,
+        )
+        self.assertEqual(
+            raw_caches[small_name].untyped_storage().data_ptr(),
+            raw_caches[large_name].untyped_storage().data_ptr(),
+        )
+        self.assertEqual(
+            raw_caches[small_name].storage_offset(),
+            raw_caches[large_name].storage_offset(),
+        )
+        self.assertEqual(
+            raw_caches[small_name].numel(),
+            num_blocks * small_spec.page_size_bytes,
+        )
+        self.assertEqual(raw_caches[large_name].numel(), descriptor_size)
+
+    def test_identical_attention_layerwise_lane_shares_kv_allocations(self):
+        layer_names = [
+            "model.layers.1.self_attn.attn",
+            "model.layers.3.self_attn.attn",
+        ]
+        spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.bfloat16,
+        )
+        num_blocks = 3
+        descriptor_size = num_blocks * spec.page_size_bytes
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=descriptor_size,
+                    layers=layer_names,
+                    layer_stride=0,
+                    block_stride=0,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=layer_names,
+                    kv_cache_spec=spec,
+                )
+            ],
+        )
+        runner = self._build_runner()
+        runner._allocate_int8_cache_tensor = MagicMock(
+            side_effect=lambda numel, _alignment: torch.zeros(numel, dtype=torch.int8)
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(
+            kv_cache_config,
+            layerwise_reuse_applied=True,
+        )
+
+        self.assertEqual(runner._allocate_int8_cache_tensor.call_count, 2)
+        self.assertIs(raw_caches[layer_names[0]][0], raw_caches[layer_names[1]][0])
+        self.assertIs(raw_caches[layer_names[0]][1], raw_caches[layer_names[1]][1])
+
+    def test_mixed_sfa_indexer_layerwise_lane_shares_one_backing(self):
+        bf16_name = "model.layers.1.self_attn.indexer.k_cache"
+        c8_name = "model.layers.3.self_attn.indexer.k_cache"
+        bf16_spec = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+        )
+        c8_spec = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.int8,
+            scale_dim=1,
+            scale_dtype=torch.float16,
+            cache_sparse_li_c8=True,
+        )
+        specs = {bf16_name: bf16_spec, c8_name: c8_spec}
+        group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+        assert group_spec is not None
+        num_blocks = 3
+        descriptor_size = num_blocks * max(
+            bf16_spec.page_size_bytes,
+            c8_spec.page_size_bytes,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=descriptor_size,
+                    layers=[bf16_name, c8_name],
+                    layer_stride=0,
+                    block_stride=0,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[bf16_name, c8_name],
+                    kv_cache_spec=group_spec,
+                )
+            ],
+        )
+        runner = self._build_runner()
+        runner._allocate_int8_cache_tensor = MagicMock(
+            side_effect=lambda numel, _alignment: torch.zeros(numel, dtype=torch.int8)
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(
+            kv_cache_config,
+            layerwise_reuse_applied=True,
+        )
+
+        runner._allocate_int8_cache_tensor.assert_called_once_with(
+            descriptor_size,
+            2 * 1024 * 1024,
+        )
+        self.assertEqual(
+            raw_caches[bf16_name][0].untyped_storage().data_ptr(),
+            raw_caches[c8_name][0].untyped_storage().data_ptr(),
+        )
+        self.assertEqual(
+            raw_caches[c8_name][0].untyped_storage().data_ptr(),
+            raw_caches[c8_name][1].untyped_storage().data_ptr(),
+        )
+
     def test_reshape_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
         runner.sparse_kv_offload_enabled = False
