@@ -21,6 +21,7 @@ import torch_npu
 
 from vllm_ascend.utils import maybe_trans_nz
 
+from .qbmm_custom import custom_qbmm_enabled, ensure_registered, qbmm
 from .registry import register_scheme
 from .w8a8_base import AscendW8A8Linear310pScheme
 
@@ -50,6 +51,14 @@ class AscendW8A8SLinearMethod310(AscendW8A8Linear310pScheme):
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
 
+        if custom_qbmm_enabled():
+            return qbmm(
+                x,
+                layer.weight.data.transpose(0, 1),
+                layer.deq_scale,
+                bias=quant_bias,
+                output_dtype=layer.params_dtype,
+            )
         return torch_npu.npu_quant_matmul(
             x,
             layer.weight.data.transpose(0, 1),
@@ -59,6 +68,7 @@ class AscendW8A8SLinearMethod310(AscendW8A8Linear310pScheme):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        ensure_registered()
         expanding_factor = layer.weight.data.shape[1]
         layer.aclnn_input_scale = layer.input_scale.data.repeat(expanding_factor)
         layer.aclnn_input_scale_reciprocal = 1.0 / layer.aclnn_input_scale.data
