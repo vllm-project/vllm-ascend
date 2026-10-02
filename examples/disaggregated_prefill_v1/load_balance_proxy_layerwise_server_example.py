@@ -496,7 +496,10 @@ async def _handle_completions(api: str, request: Request):
         request_id = await proxy_state.next_req_id()
         request_ids_api = get_api_request_ids(api, request_id, req_data)
         proxy_state.register_request_batch(request_id, request_ids_api, req_data, request_length, api)
+        # Preserve the public priority when constructing D's handshake request.
+        incoming_priority = {k: v for k, v in (req_data.get("kv_transfer_params") or {}).items() if k == "kv_priority"}
         req_data["kv_transfer_params"] = {
+            **incoming_priority,
             "do_remote_decode": False,
             "do_remote_prefill": True,
             "metaserver": f"http://{global_args.host}:{global_args.port}/v1/metaserver",

@@ -303,6 +303,10 @@ class NPUPlatform(Platform):
     @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
         # Adapt the global patch here.
+        from vllm_ascend.ai_qos import register_cli
+
+        register_cli(parser)
+
         from vllm_ascend.utils import adapt_patch
 
         adapt_patch(is_global_patch=True)
@@ -464,6 +468,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        from vllm_ascend.ai_qos import apply_config
+
+        apply_config(vllm_config)
         # Lazy import vllm/vllm-ascend to avoid circular import
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
