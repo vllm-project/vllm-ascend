@@ -92,6 +92,13 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
         patch(f"{QUANT_MOE}.moe_lora_apply_w13") as apply_w13,
         patch(f"{QUANT_MOE}.moe_lora_apply_w2") as apply_w2,
         patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
+        # The gmm2 milestone is only recorded when the shared-expert
+        # multistream overlap is enabled; enable it so the event-returning
+        # contract is exercised here.
+        patch(
+            "vllm_ascend.ops.fused_moe.moe_mlp.get_ascend_config",
+            return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+        ),
     ):
         extra_ctx.moe_comm_type = comm_type
         output, output_event = quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
@@ -163,6 +170,10 @@ def test_dynamic_int8_lora_reads_weights_from_layer_via_quant_method() -> None:
         patch(f"{QUANT_MOE}.moe_lora_apply_w13"),
         patch(f"{QUANT_MOE}.moe_lora_apply_w2"),
         patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
+        patch(
+            "vllm_ascend.ops.fused_moe.moe_mlp.get_ascend_config",
+            return_value=SimpleNamespace(multistream_overlap_shared_expert=True),
+        ),
     ):
         extra_ctx.moe_comm_type = MoECommType.ALLGATHER
         output, output_event = quant_apply_mlp_with_moe_lora(

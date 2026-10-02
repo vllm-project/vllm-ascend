@@ -19,15 +19,29 @@ import torch
 import torch_npu
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 
 
+def maybe_record_event() -> torch.npu.Event | None:
+    """Record an NPU event on the current stream for the shared-expert overlap.
+
+    Host-side record_event is expensive, and the events are consumed only by
+    the shared-expert side stream, which exists solely when multistream overlap
+    is enabled (the wait sites in shared_experts.py gate on the same flag);
+    skip the record entirely when it is off.
+    """
+    if get_ascend_config().multistream_overlap_shared_expert:
+        return torch.npu.current_stream().record_event()
+    return None
+
+
 def apply_moe_mlp(
     mlp_compute_input: MoEMlpComputeInput,
     quant_method,
-) -> tuple[torch.Tensor, torch.npu.Event]:
+) -> tuple[torch.Tensor, torch.npu.Event | None]:
     """
     Unified MoE MLP entry.
     Quant path is dispatched by each FusedMoEMethod with explicit typed kernel flags.
@@ -52,7 +66,7 @@ def apply_moe_mlp(
         hidden_states = _unified_apply_activation(mlp_compute_input, hidden_states, quant_method)
         hidden_states, act_out_scale = quant_method.apply_act_quant(mlp_compute_input, hidden_states)
 
-    before_gmm2_evt = torch.npu.current_stream().record_event()
+    before_gmm2_evt = maybe_record_event()
     hidden_states = quant_method.apply_gmm2(mlp_compute_input, hidden_states, act_out_scale)
     return hidden_states, before_gmm2_evt
 
