@@ -87,6 +87,8 @@ class AscendSFAIndexerMetadata:
     num_decode_tokens: int = 0
     # Optional selection supplied by the owning attention implementation.
     # Projection, rope and cache writes continue to use this backend.
+    # The selector receives ``(q_li, weights, indexer, metadata, q_li_scale)``;
+    # ``q_li_scale`` is set only when LI C8 has already quantized ``q_li``.
     topk_selector: Any | None = None
 
 
@@ -492,7 +494,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         topk_selector = getattr(indexer_metadata, "topk_selector", None)
         if topk_selector is not None:
-            return topk_selector(q_li, weights, self, indexer_metadata)
+            return topk_selector(q_li, weights, self, indexer_metadata, q_li_scale)
         return DeviceOperator.indexer_select_post_process(
             q_li,
             q_li_scale,

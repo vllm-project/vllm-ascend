@@ -1,7 +1,7 @@
 """Regression tests for SFA KV-offload attention metadata."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -14,7 +14,7 @@ from vllm_ascend.attention.sfa_kv_offload import (  # noqa: E402
     AscendSFAKVOffloadMetadataBuilder,
     AscendSFAOffloadMetadata,
 )
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder  # noqa: E402
+from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata, AscendSFAMetadataBuilder  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (  # noqa: E402
     FSA_EXTERNAL_PLAN_READY_MARKER,
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
@@ -46,7 +46,13 @@ def _make_boundary_decode_metadata():
 )
 def test_pd_decode_consumer_is_derived_from_kv_role(kv_transfer_config, expected):
     vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
-    with patch.object(AscendSFAMetadataBuilder, "__init__", return_value=None) as init:
+    with (
+        patch.object(AscendSFAMetadataBuilder, "__init__", return_value=None) as init,
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.get_ascend_config",
+            return_value=SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(use_fused_copy_sfa=False)),
+        ),
+    ):
         builder = AscendSFAKVOffloadMetadataBuilder(
             kv_cache_spec=None,
             layer_names=[],
@@ -369,34 +375,57 @@ def test_fused_overlap_common_inputs_are_reused_only_within_one_forward():
     )
 
 
-@pytest.mark.parametrize("li_c8", [None, False, True])
-def test_fused_offload_c8_guard_uses_indexer_state(li_c8):
-    class ReachedDeviceSetup(Exception):
-        pass
-
-    def init_base(self, *args, **kwargs):
-        self.enable_sparse_sfa_c8 = False
-        self.has_indexer = li_c8 is not None
-        self.indexer = None if li_c8 is None else SimpleNamespace(enable_sparse_li_c8=li_c8)
-        self.vllm_config = SimpleNamespace(
-            cache_config=SimpleNamespace(block_size=128),
-            scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=8192),
-        )
-
-    config = SimpleNamespace(
-        sparse_kv_offload_config=SimpleNamespace(
-            use_fused_overlap=False, use_fused_copy_sfa=True, topk_buffer_size=8192
-        )
+def test_c8_quant_lim():
+    n_head, head_dim, num_decodes, tokens, blocks = 32, 128, 2, 2, 8
+    impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
+    impl.lim_slot_map = torch.full((num_decodes * 2, blocks * head_dim), -(1 << 31), dtype=torch.int32)
+    impl.lim_topk_src = torch.zeros((tokens, 1, 2048), dtype=torch.int32)
+    impl.lim_topk_dst = torch.zeros_like(impl.lim_topk_src)
+    impl.lim_topk_misses = torch.zeros(tokens, dtype=torch.int32)
+    impl.lim_miss_src = torch.empty((num_decodes, 32768), dtype=torch.int32)
+    impl.lim_miss_dst = torch.empty_like(impl.lim_miss_src)
+    impl.lim_misses = torch.zeros(num_decodes, dtype=torch.int32)
+    impl.lim_reuse_request_count = 0
+    impl._copy_sfa_metadata = SimpleNamespace(
+        copy_sfa_pool_entries=torch.arange(num_decodes, dtype=torch.int32),
+        num_decode_tokens=tokens,
+        copy_sfa_prefix_lens=torch.full((num_decodes,), 4096, dtype=torch.int32),
+        copy_sfa_cache_tokens=torch.full((num_decodes,), 2048, dtype=torch.int32),
+        copy_sfa_query_ends=torch.tensor([1, 2], dtype=torch.int32),
+        copy_sfa_seq_lens=torch.full((num_decodes,), 8192, dtype=torch.int32),
+        lim_request_state=torch.tensor([-2, -3], dtype=torch.int32),
+        copy_sfa_reuse_logical_lens=None,
     )
-    module = "vllm_ascend.attention.sfa_kv_offload"
-    expected = NotImplementedError if li_c8 else ReachedDeviceSetup
-    with (
-        patch.object(AscendSFAImpl, "__init__", init_base),
-        patch(f"{module}.enable_dsa_cp", return_value=False),
-        patch(f"{module}.get_ascend_config", return_value=config),
-        patch(f"{module}.torch.device", side_effect=ReachedDeviceSetup),
-        pytest.raises(expected) as exc,
+    query = torch.randint(-8, 8, (tokens * n_head, head_dim), dtype=torch.int8)
+    query_scale = torch.ones(tokens * n_head, dtype=torch.float16)
+    weights = torch.randn(tokens, n_head, dtype=torch.bfloat16)
+    indexer = SimpleNamespace(
+        enable_sparse_li_c8=True,
+        n_head=n_head,
+        head_dim=head_dim,
+        k_cache=SimpleNamespace(
+            kv_cache=(
+                torch.zeros((blocks, head_dim, 1, head_dim), dtype=torch.int8),
+                torch.zeros((blocks, head_dim, 1, 1), dtype=torch.float16),
+            )
+        ),
+    )
+    indexer_metadata = SimpleNamespace(block_table=torch.zeros((num_decodes, blocks), dtype=torch.int32))
+    m_c8 = MagicMock()
+    m_bf16 = MagicMock()
+    with patch(
+        "vllm_ascend.attention.sfa_kv_offload.torch.ops._C_ascend",
+        SimpleNamespace(npu_fused_quant_lightning_indexer_manage=m_c8, npu_fused_lightning_indexer_manage=m_bf16),
     ):
-        AscendSFAKVOffloadImpl(1, 128, 1.0, 1, None, None, "auto", None, "decoder", None)
-    if li_c8:
-        assert "does not support sparse LI C8" in str(exc.value)
+        result = impl._lim_select(query, weights, indexer, indexer_metadata, query_scale)
+
+    assert m_c8.called
+    assert not m_bf16.called
+    op_weights, q_scale, op_query, key_scale, index_key = m_c8.call_args.args[:5]
+    assert op_weights.dtype == torch.bfloat16
+    assert tuple(q_scale.shape) == (tokens, n_head) and q_scale.dtype == torch.float16
+    assert tuple(op_query.shape) == (tokens, n_head, head_dim) and op_query.dtype == torch.int8
+    assert tuple(key_scale.shape) == (blocks, head_dim, 1)
+    assert index_key.dtype == torch.int8
+    assert result.data_ptr() == impl.lim_topk_src.data_ptr()
+    torch.testing.assert_close(result, impl.lim_topk_src[:tokens])
