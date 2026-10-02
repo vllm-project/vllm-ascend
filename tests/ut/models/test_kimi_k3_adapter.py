@@ -142,27 +142,46 @@ def test_k3_dspark_reports_draft_attention_causality():
 def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
+    model.config = SimpleNamespace(
+        is_moe=False,
+        is_linear_attn=True,
+        linear_attn_config={},
+        q_lora_rank=None,
+        num_hidden_layers=1,
+        num_nextn_predict_layers=0,
+    )
+    model.n_redundant_experts = 0
+    loaded_calls = []
+
+    def recorder(param_name, shard_id_positional):
+        def weight_loader(param, loaded_weight, *args, **kwargs):
+            shard_id = kwargs.pop("loaded_shard_id", None)
+            if shard_id_positional and args:
+                shard_id = args[0]
+            loaded_calls.append((param_name, loaded_weight.flatten()[0].item(), shard_id))
+
+        return weight_loader
+
     layer = nn.Module()
     layer.self_attn = nn.Module()
     layer.self_attn.fused_bfg_proj = nn.Module()
     packed_weight = nn.Parameter(torch.empty(6, 4))
+    packed_weight.weight_loader = recorder("layers.0.self_attn.fused_bfg_proj.weight", True)
     layer.self_attn.fused_bfg_proj.register_parameter("weight", packed_weight)
-    layer.self_attn.fused_bfg_proj.register_parameter("f_a_weight", nn.Parameter(torch.empty(1)))
-    layer.self_attn.fused_bfg_proj.register_parameter("f_b_weight", nn.Parameter(torch.empty(1)))
+    f_a_weight = nn.Parameter(torch.empty(1))
+    f_a_weight.weight_loader = recorder("layers.0.self_attn.fused_bfg_proj.f_a_weight", False)
+    layer.self_attn.fused_bfg_proj.register_parameter("f_a_weight", f_a_weight)
+    f_b_weight = nn.Parameter(torch.empty(1))
+    f_b_weight.weight_loader = recorder("layers.0.self_attn.fused_bfg_proj.f_b_weight", False)
+    layer.self_attn.fused_bfg_proj.register_parameter("f_b_weight", f_b_weight)
     layer.router = nn.Linear(4, 1, bias=False)
+    layer.router.weight.weight_loader = recorder("layers.0.router.weight", False)
+    layer.self_attn.o_proj = nn.Module()
+    o_proj_weight = nn.Parameter(torch.empty(1))
+    o_proj_weight.weight_loader = recorder("layers.0.self_attn.o_proj.weight", False)
+    layer.self_attn.o_proj.register_parameter("weight", o_proj_weight)
     model.layers = nn.ModuleList([layer])
 
-    remaining = []
-
-    def fake_upstream_load_weights(_self, weights):
-        remaining.extend(weights)
-        return {name for name, *_ in remaining}
-
-    monkeypatch.setattr(
-        kimi_k3.UpstreamKimiLinearModel,
-        "load_weights",
-        fake_upstream_load_weights,
-    )
     source_weights = [
         ("layers.0.router.weight", torch.full((1, 4), 0.5)),
         ("layers.0.self_attn.g_proj.weight", torch.full((1,), 1.0)),
@@ -174,16 +193,16 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
 
     loaded = model.load_weights(iter(source_weights))
 
-    assert remaining[0] == source_weights[0]
-    assert remaining[-1] == source_weights[-1]
-    assert [name for name, _, _ in remaining[1:5]] == [
+    assert [name for name, _, _ in loaded_calls] == [
+        "layers.0.router.weight",
         "layers.0.self_attn.fused_bfg_proj.weight",
         "layers.0.self_attn.fused_bfg_proj.f_a_weight",
         "layers.0.self_attn.fused_bfg_proj.f_b_weight",
         "layers.0.self_attn.fused_bfg_proj.weight",
+        "layers.0.self_attn.o_proj.weight",
     ]
-    assert [loaded_weight.item() for _, loaded_weight, _ in remaining[1:5]] == [1.0, 2.0, 3.0, 4.0]
-    assert [kwargs["loaded_shard_id"] for _, _, kwargs in remaining[1:5]] == [2, None, None, 0]
+    assert [loaded_weight for _, loaded_weight, _ in loaded_calls] == [0.5, 1.0, 2.0, 3.0, 4.0, 5.0]
+    assert [shard_id for _, _, shard_id in loaded_calls[1:5]] == [2, None, None, 0]
     assert loaded == {
         "layers.0.self_attn.fused_bfg_proj.weight",
         "layers.0.self_attn.fused_bfg_proj.f_a_weight",
