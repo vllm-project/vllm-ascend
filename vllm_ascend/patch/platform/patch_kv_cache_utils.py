@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
+    iter_layer_specs,
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
@@ -376,6 +377,72 @@ def _get_max_layers_per_page_size(spec: UniformTypeKVCacheSpecs) -> int:
     return spec.get_max_layers_per_page_size()
 
 
+def _get_trailing_mtp_layer(vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]) -> str | None:
+    if not any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.values()):
+        return next(reversed(kv_cache_spec), None)
+
+    # Both NPU runners append Mamba specs after attention specs. Qwen MTP
+    # decoders use full attention, so their last registered attention layer
+    # remains last among the full-attention specs, but not in the whole dict.
+    draft_config = vllm_config.speculative_config.draft_model_config
+    architectures = getattr(draft_config.hf_config, "architectures", None) if draft_config is not None else None
+    if not architectures or not all(arch in ("Qwen3NextMTP", "Qwen3_5MTP", "Qwen3_5MoeMTP") for arch in architectures):
+        return None
+    # Cache-only/MLA subclasses may also derive from FullAttentionSpec. The
+    # ordering rule is only established for this plain attention + Mamba layout.
+    if any(type(spec) is not FullAttentionSpec and not isinstance(spec, MambaSpec) for spec in kv_cache_spec.values()):
+        return None
+    return next((name for name in reversed(kv_cache_spec) if type(kv_cache_spec[name]) is FullAttentionSpec), None)
+
+
+def _ascend_annotate_eagle_groups(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+    kv_cache_groups: list[KVCacheGroupSpec],
+    use_trailing_layer_fallback: bool | None = None,
+    *,
+    use_deepseek_v4_fallback: bool = False,
+) -> None:
+    """Backport vLLM #55390 while accounting for Ascend's Mamba ordering.
+
+    Accept the old keyword until the vLLM release lane adopts #55390. Older
+    general-group callers pass neither keyword, so infer MTP in that case.
+    An explicit new-style False still disables positional inference.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or not spec_config.use_eagle_block_drop():
+        return
+
+    for group in kv_cache_groups:
+        if any(getattr(spec, "non_causal_multi_token_decode", False) for spec in iter_layer_specs(group.kv_cache_spec)):
+            group.is_eagle_group = True
+
+    if use_trailing_layer_fallback is None:
+        use_trailing_layer_fallback = spec_config.method == "mtp" or use_deepseek_v4_fallback
+    if not use_trailing_layer_fallback or not spec_config.use_eagle():
+        return
+    model_config = vllm_config.model_config
+    if spec_config.method != "mtp" and (
+        model_config is None or model_config.hf_config.model_type not in ("deepseek_v4", "deepseek_v41")
+    ):
+        return
+
+    # Groups must partition the supplied mapping before positional inference.
+    # The packed caller may already have excluded hidden-state cache layers.
+    names = [name for group in kv_cache_groups for name in group.layer_names]
+    if len(names) != len(kv_cache_spec) or set(names) != set(kv_cache_spec):
+        return
+    last_layer = _get_trailing_mtp_layer(vllm_config, kv_cache_spec)
+    if last_layer is None:
+        return
+    # Like upstream, this locates only the final draft group. Multiple draft
+    # caches spanning distinct groups need explicit draft-layer metadata.
+    for group in kv_cache_groups:
+        if last_layer in group.layer_names:
+            group.is_eagle_group = True
+            break
+
+
 def _ascend_get_packed_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -394,7 +461,7 @@ def _ascend_get_packed_kv_cache_groups(
         vllm_config,
         kv_cache_spec,
         groups,
-        use_deepseek_v4_fallback=True,
+        use_trailing_layer_fallback=True,
     )
     vllm.v1.core.kv_cache_utils._warn_if_unannotated_eagle_mamba(
         vllm_config,
@@ -620,6 +687,7 @@ def _ascend_get_kv_cache_config_from_groups(
 
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+vllm.v1.core.kv_cache_utils._annotate_eagle_groups = _ascend_annotate_eagle_groups
 assert _orig_get_packed_kv_cache_groups is not None
 vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
