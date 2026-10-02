@@ -20,6 +20,9 @@ Earlier integration validation used vLLM
 
 The rebase preserves the optimized 310P calculations, adapts integration to
 upstream interfaces and uses the upstream `chunk_fwd_o_vllm` operator name.
+The new compute-WY operator also follows upstream's kernel-build policy
+without `-Werror`. FwdH uses the current contiguous-state contract instead of
+the removed initial-state-stride attribute.
 
 ## State-layout contract
 
@@ -52,14 +55,13 @@ The separately preserved HQ_TEST integration is not modified by this cleanup.
 
 ## Validation boundaries
 
-The FwdH launcher matches the headers present in the rebased tree: arch20 and
-arch22 use four template parameters; arch35 retains its upstream tile-shape
-and per-key-gate dispatch. The 310P entry has twelve arguments without `gk`;
-non-310P entries retain the upstream thirteen-argument ABI. Tiling keys are
-default for arch20/arch22 and select tile shapes only for arch35. Per-key gates
-are rejected for kernels that do not implement them. Source-contract and
-host-stub compilation tests cover these architecture routes; they are not a
-CANN build or NPU correctness test.
+The FwdH launcher matches the headers present in the rebased tree: arch20 uses
+four template parameters, arch22 uses six, and arch35 has eight with defaults
+for its additional options. The non-310P dispatch and architecture-specific
+headers are preserved from upstream. The 310P entry has twelve arguments
+without the unused `gk` input; non-310P entries retain the upstream
+thirteen-argument ABI. Source-contract and host-stub compilation tests cover
+these architecture routes; they are not a CANN build or NPU correctness test.
 
 Prior integrated standalone and e2e results remain evidence for their exact
 recorded source, binaries, environment and configuration. They are not a new

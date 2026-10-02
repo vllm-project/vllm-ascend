@@ -37,12 +37,17 @@ namespace AscendC {
 inline GM_ADDR GetUserWorkspace(GM_ADDR workspace) { return workspace; }
 }
 namespace Catlass::Gemm::Kernel {
-#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 310)
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ != 200)
 struct GDNFwdHTileShapes128 {};
 struct GDNFwdHTileShapes256 {};
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 310)
 template<class Input, class Gate, class State, class Workspace,
          class TileShapes = GDNFwdHTileShapes128, bool KGated = false,
          bool ScalarGated = true, bool UseExp2 = false>
+#else
+template<class Input, class Gate, class State, class Workspace,
+         class TileShapes = GDNFwdHTileShapes128, bool KGated = false>
+#endif
 struct GDNFwdHKernel {
     void Init(GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR,
               GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR) {}
@@ -92,7 +97,7 @@ class FwdHLauncherContractTests(unittest.TestCase):
         )
 
     def test_real_headers_match_architecture_contracts(self):
-        for arch, template_count, init_count in (("arch20", 4, 12), ("arch22", 4, 12), ("arch35", 8, 13)):
+        for arch, template_count, init_count in (("arch20", 4, 12), ("arch22", 6, 13), ("arch35", 8, 13)):
             with self.subTest(arch=arch):
                 source = (OP_KERNEL / arch / "gemm/kernel/gdn_fwd_h_kernel.hpp").read_text(encoding="utf-8")
                 match = re.search(r"template\s*<([^>]+)>\s*class\s+GDNFwdHKernel", source)
@@ -101,7 +106,7 @@ class FwdHLauncherContractTests(unittest.TestCase):
                 init = re.search(r"\bvoid\s+Init\((.*?)\)", source, re.DOTALL)
                 self.assertIsNotNone(init)
                 self.assertEqual(len(init.group(1).split(",")), init_count)
-                self.assertEqual(bool(re.search(r"\bgk\b", init.group(1))), arch == "arch35")
+                self.assertEqual(bool(re.search(r"\bgk\b", init.group(1))), arch != "arch20")
 
     def test_architecture_includes_exist(self):
         includes = re.findall(r'^#include\s+"(arch[^"\n]+)"', self.source, re.MULTILINE)
@@ -115,8 +120,15 @@ class FwdHLauncherContractTests(unittest.TestCase):
         command = [self.compiler, "-std=c++17", "-E", "-P", "-x", "c++"]
         if architecture is not None:
             command.append(f"-D__CCE_AICORE__={architecture}")
-        result = subprocess.run([*command, "-"], input=render_host_stub(self.source),
-                                text=True, encoding="utf-8", capture_output=True, timeout=20, check=True)
+        result = subprocess.run(
+            [*command, "-"],
+            input=render_host_stub(self.source),
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            timeout=20,
+            check=True,
+        )
         return result.stdout
 
     def test_entry_abi_for_each_architecture(self):
@@ -128,12 +140,12 @@ class FwdHLauncherContractTests(unittest.TestCase):
                 self.assertEqual(len(entries[0].split(",")), 12 if architecture == 200 else 13)
                 self.assertEqual(bool(re.search(r"\bgk\b", entries[0])), architecture != 200)
 
-    def test_tile_shape_dispatch_is_arch35_only(self):
-        for architecture in (200, 220, None):
-            source = self.preprocess_source(architecture)
-            self.assertNotIn("GDNFwdHTileShapes", source)
-            self.assertNotIn("ChunkGatedDeltaRuleFwdHDispatch", source)
-        self.assertIn("ChunkGatedDeltaRuleFwdHDispatch", self.preprocess_source(310))
+    def test_tile_shape_dispatch_is_non_310p_only(self):
+        source = self.preprocess_source(200)
+        self.assertNotIn("GDNFwdHTileShapes", source)
+        self.assertNotIn("ChunkGatedDeltaRuleFwdHDispatch", source)
+        for architecture in (220, 310, None):
+            self.assertIn("ChunkGatedDeltaRuleFwdHDispatch", self.preprocess_source(architecture))
 
     def test_host_stub_syntax_for_all_existing_architecture_routes(self):
         for architecture in (200, 220, 310, None):
@@ -143,12 +155,18 @@ class FwdHLauncherContractTests(unittest.TestCase):
 
     def test_host_stub_rejects_six_parameter_regression(self):
         mutated = self.source.replace(
-            "float, float, workspaceType>", "float, float, workspaceType, int, false>", 1
+            "float, float, workspaceType>", "float, float, workspaceType, int, false>"
         )
         self.assertNotEqual(mutated, self.source)
-        result = self.compile_source(mutated, 220)
+        result = self.compile_source(mutated, 200)
         self.assertNotEqual(result.returncode, 0, "Negative control unexpectedly compiled")
         self.assertRegex(result.stderr, r"wrong number of template arguments|too many template arguments")
+
+    def test_initial_state_seed_is_310p_only(self):
+        binding = (ROOT / "csrc/torch_binding.cpp").read_text(encoding="utf-8")
+        start = binding.index("#ifdef ASCEND_PLATFORM_310P\n    // 310P NZ h contract:")
+        end = binding.index("#endif\n    bool save_new_value_", start)
+        self.assertIn(".permute({0, 1, 4, 2, 3, 5})", binding[start:end])
 
 
 if __name__ == "__main__":
