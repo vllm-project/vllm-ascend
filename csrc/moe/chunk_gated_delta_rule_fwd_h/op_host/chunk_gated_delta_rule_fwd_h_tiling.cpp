@@ -99,6 +99,11 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     int64_t chunkSize = *(attrPtr->GetAttrPointer<int64_t>(ATTR_CHUNK_SIZE_IDX));
 
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+    const bool supportsKeyGates =
+        ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950;
+    OP_CHECK_IF(useGk && !supportsKeyGates,
+                OP_LOGE(context->GetNodeName(), "Per-key gates require the arch35 FwdH kernel."),
+                return ge::GRAPH_FAILED);
 
     ChunkGatedDeltaRuleFwdHTilingContext tilingCtx{};
     tilingCtx.seqlen = kStorageShape.GetDim(DIM_SEQLEN);
@@ -137,10 +142,9 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     ChunkGatedDeltaRuleFwdHTilingProcessor processor(tilingCtx);
     processor.Process(plainTiling, blockDim, workspaceSize);
 
-    // 310P only ships KERNEL_TASK_TYPE_DEFAULT; keep key 0 so BinaryGetFunctionByEntry succeeds.
-    // Newer arches use keys 1/2 to select TileShapes128/256.
+    // arch20/arch22 use the default key; only arch35 dispatches TileShapes128/256.
     uint32_t tilingKey = TILING_KEY_DEFAULT;
-    if (ascendcPlatform.GetSocVersion() != platform_ascendc::SocVersion::ASCEND310P) {
+    if (supportsKeyGates) {
         tilingKey = plainTiling.vHeadDim > V_DIM_128 ? TILING_KEY_V256 : TILING_KEY_V128;  // gitleaks:allow
     }
     context->SetTilingKey(tilingKey);

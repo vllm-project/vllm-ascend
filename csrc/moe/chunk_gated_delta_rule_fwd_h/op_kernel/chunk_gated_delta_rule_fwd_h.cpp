@@ -25,15 +25,21 @@
 
 using namespace Catlass;
 
-#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
-// 310P keeps the arch20 kernel ABI: no TileShapes/kGated templates and no gk path.
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ != 310)
+// arch20/arch22 expose four template parameters and no per-key gate input.
 // 310P code generation omits the unused optional gk input from the kernel entry.
 extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd_h(GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g,
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ != 200)
+                                                         GM_ADDR gk,
+#endif
                                                          GM_ADDR inital_state, GM_ADDR cu_seqlens,
                                                          GM_ADDR chunk_indices, GM_ADDR h, GM_ADDR v_new,
                                                          GM_ADDR final_state, GM_ADDR workspace, GM_ADDR tiling)
 {
-    // 310P binary codegen cannot register non-default tiling keys here; host forces key 0.
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ != 200)
+    (void)gk;
+#endif
+    // The legacy arch20/arch22 dispatch uses the default tiling key.
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
 
     GM_ADDR user = AscendC::GetUserWorkspace(workspace);
