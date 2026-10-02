@@ -1880,6 +1880,21 @@ class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
         tensor[tuple(idx)] = value
         return tensor
 
+    @staticmethod
+    def clipped_swiglu(
+        hidden_states: torch.Tensor,
+        swiglu_limit: float,
+        swiglu_alpha: float,
+        swiglu_beta: float,
+    ) -> torch.Tensor:
+        hidden_size = hidden_states.shape[-1] // 2
+        gate = hidden_states[..., :hidden_size].clamp(max=swiglu_limit)
+        up = hidden_states[..., hidden_size:].clamp(
+            min=-swiglu_limit,
+            max=swiglu_limit,
+        )
+        return gate * torch.sigmoid(swiglu_alpha * gate) * (up + swiglu_beta)
+
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
     adaptor_by_family = {
