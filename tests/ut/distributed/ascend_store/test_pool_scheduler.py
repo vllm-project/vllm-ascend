@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendStoreKVConnectorWorkerMetadata,
     LoadSpec,
     ReqMeta,
     RequestTracker,
@@ -72,6 +73,7 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.cache_config.block_size = block_size
     config.cache_config.hash_block_size = block_size
     config.cache_config.prefix_cache_retention_interval = 0
+    config.scheduler_config.async_scheduling = False
     config.model_config.model = "org/llama-7b"
     config.model_config.use_mla = False
     config.model_config.hf_text_config = MagicMock(spec=[])
@@ -530,6 +532,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = block_size
         config.cache_config.hash_block_size = block_size
+        config.scheduler_config.async_scheduling = False
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -889,6 +892,167 @@ class TestKVPoolSchedulerUpdateFinished(unittest.TestCase):
                 scheduler._loading_req_ids = initial
                 scheduler.update_finished_recving(finished)
                 self.assertEqual(scheduler._loading_req_ids, expected)
+
+
+class TestKVPoolSchedulerSuffixSave(unittest.TestCase):
+    def _make_scheduler(self, role="kv_both"):
+        scheduler = KVPoolScheduler(make_config(role, {"backend": "memcache"}), use_layerwise=True)
+        scheduler.store_scheduler.supports_explicit_write_finish = True
+        return scheduler
+
+    def _build_new(self, scheduler, req_id="r1", loaded=32):
+        request = SimpleNamespace(
+            req_id=req_id,
+            num_computed_tokens=loaded,
+            prompt_token_ids=list(range(64)),
+            block_ids=[0, 1, 2, 3],
+        )
+        scheduler._unfinished_requests[req_id] = (SimpleNamespace(block_hashes=[b"h"] * 4), [])
+        if loaded:
+            scheduler.load_specs[req_id] = LoadSpec(0, loaded, can_load=True)
+        output = SimpleNamespace(
+            scheduled_new_reqs=[request],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[]),
+            num_scheduled_tokens={req_id: 64 - loaded},
+            finished_req_ids=set(),
+            preempted_req_ids=set(),
+        )
+        return scheduler.build_connector_meta(output).requests[0]
+
+    def test_partial_hit_last_prefill_saves_new_suffix(self):
+        scheduler = self._make_scheduler()
+        meta = self._build_new(scheduler)
+        self.assertTrue(meta.can_save)
+        self.assertTrue(meta.load_spec.can_load)
+        self.assertEqual((meta.save_start_token, meta.save_end_token), (32, 64))
+        self.assertTrue(meta.is_last_chunk)
+        self.assertIsNotNone(meta.save_plan_id)
+        self.assertEqual(scheduler._request_trackers["r1"].num_saved_tokens, 64)
+
+    def test_capability_scope(self):
+        exclusions = [
+            ("backend_name", "mooncake"),
+            ("use_layerwise_transfer", False),
+            ("layerwise_offload", True),
+            ("use_hybrid", True),
+            ("use_eagle", True),
+            ("grouped_block_size", [16, 16]),
+            ("num_speculative_blocks_by_group", {0: 1}),
+            ("tp_size", 2),
+            ("pp_size", 2),
+            ("pcp_size", 2),
+            ("dcp_size", 2),
+            ("_discard_partial_chunks", False),
+        ]
+        self.assertTrue(self._make_scheduler()._can_save_with_load())
+        for name, value in exclusions:
+            with self.subTest(name=name):
+                scheduler = self._make_scheduler()
+                setattr(scheduler, name, value)
+                self.assertFalse(scheduler._can_save_with_load())
+        for support, async_scheduling in ((False, False), (MagicMock(), False), (True, True)):
+            with self.subTest(support=support, async_scheduling=async_scheduling):
+                scheduler = self._make_scheduler()
+                scheduler.store_scheduler.supports_explicit_write_finish = support
+                scheduler.vllm_config.scheduler_config.async_scheduling = async_scheduling
+                meta = self._build_new(scheduler)
+                self.assertFalse(meta.can_save)
+                self.assertIsNone(meta.save_plan_id)
+                self.assertEqual(scheduler._request_trackers["r1"].num_saved_tokens, 0)
+
+    def test_pure_save_and_consumer_do_not_create_mixed_plans(self):
+        scheduler = self._make_scheduler()
+        meta = self._build_new(scheduler, loaded=0)
+        self.assertTrue(meta.can_save)
+        self.assertIsNone(meta.load_spec)
+        self.assertIsNone(meta.save_plan_id)
+        scheduler = self._make_scheduler("kv_consumer")
+        meta = self._build_new(scheduler)
+        self.assertFalse(meta.can_save)
+        self.assertIsNone(meta.save_plan_id)
+
+    def test_single_group_recurrent_cache_is_not_a_full_attention_cache(self):
+        scheduler = self._make_scheduler()
+        scheduler.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer.0"],
+                    MambaSpec(
+                        shapes=((4,),),
+                        dtypes=(torch.float32,),
+                        block_size=16,
+                        mamba_cache_mode="align",
+                        num_speculative_blocks=0,
+                    ),
+                )
+            ]
+        )
+        self.assertFalse(scheduler.use_hybrid)
+        self.assertEqual(scheduler.num_speculative_blocks_by_group, {})
+        self.assertFalse(scheduler._can_save_with_load())
+
+    def test_uniform_full_attention_group_keeps_suffix_save_capability(self):
+        scheduler = self._make_scheduler()
+        attention_spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        scheduler.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer.0", "layer.1"],
+                    UniformTypeKVCacheSpecs.from_specs({"layer.0": attention_spec, "layer.1": attention_spec}),
+                )
+            ]
+        )
+        self.assertTrue(scheduler._can_save_with_load())
+
+    def test_cancelled_plan_rolls_back_without_block_pool(self):
+        scheduler = self._make_scheduler()
+        meta = self._build_new(scheduler)
+        scheduler.update_connector_output(
+            SimpleNamespace(
+                kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata(
+                    cancelled_save_plan_ids={meta.save_plan_id}
+                )
+            )
+        )
+        self.assertEqual(scheduler._request_trackers["r1"].num_saved_tokens, 0)
+        self.assertEqual(scheduler._pending_save_plans, {})
+
+    def test_successful_plan_keeps_progress_and_clears_pending(self):
+        scheduler = self._make_scheduler()
+        self._build_new(scheduler)
+        scheduler.update_connector_output(
+            SimpleNamespace(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata())
+        )
+        self.assertEqual(scheduler._request_trackers["r1"].num_saved_tokens, 64)
+        self.assertEqual(scheduler._pending_save_plans, {})
+
+    def test_cancellation_does_not_roll_back_replaced_tracker_or_new_progress(self):
+        for replace_tracker in (False, True):
+            with self.subTest(replace_tracker=replace_tracker):
+                scheduler = self._make_scheduler()
+                meta = self._build_new(scheduler)
+                if replace_tracker:
+                    scheduler._request_trackers["r1"] = RequestTracker("r1", 80, num_saved_tokens=80)
+                else:
+                    scheduler._request_trackers["r1"].num_saved_tokens = 80
+                scheduler.update_connector_output(
+                    SimpleNamespace(
+                        kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata(
+                            cancelled_save_plan_ids={meta.save_plan_id}
+                        )
+                    )
+                )
+                self.assertEqual(scheduler._request_trackers["r1"].num_saved_tokens, 80)
+                self.assertEqual(scheduler._pending_save_plans, {})
+
+    def test_plan_ids_are_not_reused_after_request_replacement(self):
+        scheduler = self._make_scheduler()
+        first = self._build_new(scheduler)
+        scheduler.update_connector_output(
+            SimpleNamespace(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata())
+        )
+        second = self._build_new(scheduler)
+        self.assertGreater(second.save_plan_id, first.save_plan_id)
 
 
 class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):

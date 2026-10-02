@@ -1314,6 +1314,28 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.store.batch_is_exist.return_value = [1]
         self.assertEqual(b.exists(["k1"]), [1])
 
+    def test_explicit_write_finish_capability_checks_actual_sdk(self):
+        for finish, expected in ((None, False), (0, False), (MagicMock(), True)):
+            with self.subTest(finish=finish):
+                backend = self._make_backend()
+                backend.store = SimpleNamespace(batch_write_finish=finish)
+                self.assertEqual(backend.supports_explicit_write_finish, expected)
+
+        backend.store = SimpleNamespace()
+        self.assertFalse(backend.supports_explicit_write_finish)
+
+    def test_explicit_write_finish_capability_initializes_lazy_store(self):
+        backend = self._make_backend()
+        backend.store = None
+
+        def initialize():
+            backend.store = SimpleNamespace(batch_write_finish=MagicMock())
+
+        with patch.object(backend, "ensure_initialized", side_effect=initialize) as ensure_initialized:
+            self.assertTrue(backend.supports_explicit_write_finish)
+
+        ensure_initialized.assert_called_once_with()
+
     def test_batch_is_readable_uses_valid_gva_metadata(self):
         b = self._make_backend()
         readable = MagicMock()
