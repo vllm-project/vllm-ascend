@@ -2027,11 +2027,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_vllm
         final_state_out = at::empty({1}, k.options());
     }
 
+#ifdef ASCEND_PLATFORM_310P
     // 310P NZ h contract: h slot 0 carries the zN(K,V) f16 image of
     // initial_state (zeros otherwise); the kernel seeds its L1-resident state
     // bank from it with one flat burst and never reads initial_state itself.
-    // Harmless on other SoCs, whose kernels overwrite slot 0 in their own
-    // layout before use.
     if (initial_state_.defined() && K % 16 == 0 && V % 16 == 0) {
         auto nz = initial_state_.to(k.scalar_type())
                       .reshape({-1, HV, K / 16, 16, V / 16, 16})
@@ -2055,6 +2054,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_vllm
         }
     }
 
+#endif
     bool save_new_value_ = save_new_value.value_or(true);
     bool use_exp2_ = use_exp2.value_or(false);
     bool transpose_state_layout_ = transpose_state_layout.value_or(false);
