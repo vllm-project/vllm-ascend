@@ -44,10 +44,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.
     "CMAKE_BUILD_TYPE": lambda: os.getenv("CMAKE_BUILD_TYPE"),
     # Whether to compile custom kernels. If not set, the default value is True.
-    # If set to False, the custom kernels will not be compiled.
-    # This configuration option should only be set to False when running UT
-    # scenarios in an environment without an NPU. Do not set it to False in
-    # other scenarios.
+    # If set to False, the custom kernels will not be compiled. Set it to False
+    # only when the kernels are already present (a restored csrc build cache) or
+    # are not needed (running UT in an environment without an NPU).
     "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
@@ -57,7 +56,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     "C_COMPILER": lambda: os.getenv("C_COMPILER", None),
     # The version of the Ascend chip. It's used for package building.
     # If not set, we will query chip info through `npu-smi`.
-    # Please make sure that the version is correct.
+    # Please make sure that the version is correct. If SOC_VERSION is unspecified
+    # when `npu-smi` is unavailable and COMPILE_CUSTOM_KERNELS is False, then
+    # SOC_VERSION defaults to a dummy value.
     "SOC_VERSION": lambda: os.getenv("SOC_VERSION", None),
     # If set, vllm-ascend will print verbose logs during compilation
     "VERBOSE": lambda: bool(int(os.getenv("VERBOSE", "0"))),
