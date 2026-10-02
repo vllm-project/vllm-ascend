@@ -130,7 +130,7 @@ class TestW8A8FusedMoEMethod(unittest.TestCase):
             ),
             patch("torch_npu.npu_grouped_matmul", return_value=["int32_out"], create=True) as mock_gmm,
             patch(
-                "torch.ops._C_ascend.npu_dequant_swiglu_quant",
+                "torch_npu.npu_dequant_swiglu_quant",
                 return_value=("out", "scale"),
                 create=True,
             ) as mock_dequant,
