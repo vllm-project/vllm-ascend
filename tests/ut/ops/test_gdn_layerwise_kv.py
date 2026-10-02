@@ -32,6 +32,7 @@ from vllm_ascend.ops.gdn import (
 from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNPrefillMetadata,
+    _build_non_spec_chunked_prefill_metadata,
 )
 
 
@@ -132,6 +133,98 @@ def _make_prefill_metadata(device: torch.device | str = "cpu") -> GDNAttentionMe
         chunk=Mock(),
     )
     return metadata
+
+
+def test_fla_prefill_uses_host_metadata_with_strided_ssm_cache():
+    model = _GDNForwardWrapper()
+    ssm_storage = torch.zeros(16)
+    model.ssm_state = torch.as_strided(
+        ssm_storage,
+        size=(2, 1, 2, 2),
+        stride=(8, 4, 2, 1),
+    )
+    model.ssm_state[1].fill_(2)
+    assert not model.ssm_state.is_contiguous()
+
+    metadata = _make_prefill_metadata()
+    metadata.prefill_state_indices = torch.tensor([1], dtype=torch.int64)
+    chunk_metadata = _build_non_spec_chunked_prefill_metadata(
+        SimpleNamespace(),
+        metadata.prefill_query_start_loc,
+        torch.device("cpu"),
+        build_device_metadata=False,
+    )
+    metadata.non_spec_prefill_metadata.chunk = chunk_metadata
+    for field in (
+        "chunk_indices_chunk64",
+        "chunk_offsets_chunk64",
+        "update_chunk_offsets_chunk64",
+        "final_chunk_indices_chunk64",
+        "chunk_indices_large_block",
+        "block_indices_cumsum",
+    ):
+        assert getattr(chunk_metadata, field) is None
+
+    forward_context = ForwardContext(
+        no_compile_layers={model.prefix: model},
+        attn_metadata={model.prefix: metadata},
+        slot_mapping={},
+    )
+    mixed_qkv = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+    core_attn_out = torch.empty(2, 1, 2)
+    gating = (
+        torch.zeros(1, 2, 1),
+        torch.ones(1, 2, 1),
+    )
+    fused_op = object()
+
+    def gather_state(state, indices, has_initial_state, **kwargs):
+        assert state is model.ssm_state
+        assert kwargs == {}
+        assert has_initial_state.tolist() == [True]
+        return state.index_select(0, indices).contiguous()
+
+    def scatter_state(state, indices, values):
+        assert state is model.ssm_state
+        state.index_copy_(0, indices, values)
+
+    def fla_prefill(**kwargs):
+        assert kwargs["prebuilt_meta"] is chunk_metadata
+        assert kwargs["fused_fwd"] is fused_op
+        return kwargs["v"].clone(), kwargs["initial_state"] + 1
+
+    with (
+        override_forward_context(forward_context),
+        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch(
+            "vllm_ascend.ops.gdn.get_current_hardware_profile",
+            return_value=SimpleNamespace(supports=lambda _: True),
+        ),
+        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=fused_op),
+        patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
+        patch("vllm_ascend.ops.gdn.DeviceOperator.fla_gdn_prefill", side_effect=fla_prefill) as fla_mock,
+        patch("vllm_ascend.ops.gdn.gather_ssm_states", side_effect=gather_state) as gather_mock,
+        patch("vllm_ascend.ops.gdn.scatter_ssm_states_", side_effect=scatter_state) as scatter_mock,
+        patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule") as triton_fallback,
+        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: x.clone()),
+        patch("vllm_ascend.ops.gdn.wait_for_kv_layer_from_connector"),
+        patch("vllm_ascend.ops.gdn.record_attention_compute_start"),
+        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+    ):
+        AscendGatedDeltaNetAttention._forward_core(
+            model,
+            mixed_qkv,
+            torch.zeros(2, 1),
+            torch.zeros(2, 1),
+            core_attn_out,
+        )
+
+    gather_mock.assert_called_once()
+    scatter_mock.assert_called_once()
+    fla_mock.assert_called_once()
+    triton_fallback.assert_not_called()
+    torch.testing.assert_close(model.ssm_state[0], torch.zeros_like(model.ssm_state[0]))
+    torch.testing.assert_close(model.ssm_state[1], torch.full_like(model.ssm_state[1], 3))
 
 
 def test_connector_observes_updated_gdn_state_for_each_compiled_call():
