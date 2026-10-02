@@ -56,8 +56,6 @@ def test_selective_scan_varlen_no_item_sync_shape():
     C = torch.randn(total, dstate)
     query_start_loc = torch.tensor([0, 3, 3, 5], dtype=torch.int32)
 
-    out = selective_scan_fn_npu(
-        u, delta, A, B, C, None, None, None, False, query_start_loc
-    )
+    out = selective_scan_fn_npu(u, delta, A, B, C, None, None, None, False, query_start_loc)
     assert out.shape == u.shape
     assert torch.isfinite(out).all()

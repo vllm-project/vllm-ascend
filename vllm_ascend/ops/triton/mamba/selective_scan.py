@@ -211,9 +211,7 @@ def selective_scan_fn_npu(
     z: torch.Tensor | None = _z if isinstance(_z, torch.Tensor) else None
     delta_bias: torch.Tensor | None = _delta_bias if isinstance(_delta_bias, torch.Tensor) else None
     delta_softplus: bool = bool(_delta_softplus)
-    query_start_loc: torch.Tensor | None = (
-        _query_start_loc if isinstance(_query_start_loc, torch.Tensor) else None
-    )
+    query_start_loc: torch.Tensor | None = _query_start_loc if isinstance(_query_start_loc, torch.Tensor) else None
 
     return _selective_scan_impl(
         u,
