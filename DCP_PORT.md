@@ -1,5 +1,72 @@
 # DCP decode port to v0.26
 
+## 2026-10-03 review maintenance
+
+Backport the reviewed shared-operator fixes from main PR16350 at `75408a056`.
+The exchange, merge, query, store and sparse-index-remap module bytes match that
+revision. Keep the release scheduler-config lookup and registered-op signatures;
+do not import main-only PCP/indexer APIs or change the release base.
+
+- Use finite `safe_max` before subtracting all-invalid LSE rows.
+- Use the release's existing centralized VectorCore initialization/helper.
+- Preserve exact DCP8/interleave128 bitwise remap. Other public configurations
+  now use verified INT64 Torch arithmetic and order-preserving compaction;
+  integer sort may use AICPU, so this is a correctness fallback, not a speedup.
+- Of 44 constexpr arguments in the four active DCP/store modules, retain 10
+  static IR/tile/layout constants and one measured `LSE_RANK_STRIDE` exception;
+  make 26 runtime arguments and remove seven unnecessary arguments. Retained
+  constexpr names are uppercase. Normal runtime strides may retain JIT
+  unit/divisibility metadata; exact workload values are not constexpr keys.
+- Delete the unused legacy standalone remap kernel introduced by this PR.
+  Its CPU attention-routing regressions remain without importing dead code.
+
+The LSE rank-stride exception still specializes merge by T. In the September28
+same-input T192 msprof ablation: all strides runtime85.59us, only this stride
+static52.63us, all strides static49.22us, all except this stride static85.62us.
+Making everything runtime regressed the full path14.4%; keeping the one measured
+exception recovered it. This is reused evidence from byte-identical helpers,
+not a newly measured release serving benchmark.
+
+Complete pack/AllToAll/FP32 merge/BF16 cast evidence from PR16350, old optimized
+`5db959926` versus the shared helper revision (not unoptimized OFF versus ON):
+
+| Metric | Before | Revised |
+|---|---:|---:|
+| 13-shape cold first-call sum | 54.713s | 50.041s |
+| New-process disk-cache reuse sum | 0.377s | 0.390s |
+| Rank0 NPU binaries | 26 | 21 |
+| Rank0 complete cache bytes | 1846715 | 2160178 |
+| Native-LSE T48 complete graph interval | 96.77us | 89.50us |
+| Native-LSE T192 complete graph interval | 208.85us | 210.21us |
+
+Cold values sum the slowest rank's synchronized first call at each of
+T1/2/6/12/13/16/32/48/64/96/128/191/192, including JIT/load/launch, not pure compiler
+time. Steady values use msprof,200 graph replays, max8ranks per replay then mean.
+One pair/sweep, not confidence intervals. Cache bytes increase despite fewer
+variants. No new release HTTP TPOT, SuperMem or larger-than192 claim is made.
+
+Tests add nonuniform T13/191/192, mixed/all-invalid ranks, independent FP64
+reference and changing graph inputs. FP32 acceptance is
+`1e-6 + 8 * eps32 * sum(abs(weighted contributions))`; registered BF16 additionally
+permits half a local BF16 ULP. The historical strict BF16 test is unchanged.
+Query tests use distinct token/head bit patterns, both input strides, retained
+graph buffers and reverse replay of older buckets. Merge precision covers
+ranks2/8, both layouts, three dtypes and D127/496/512/513. Store tests cover two
+capacities and invalid slots. Single-card precision remains in
+`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/`.
+
+Fresh local checks:113 CPU tests pass; changed-file pre-commit/manual and test
+mypy targets3.10/3.11/3.12 pass. Fresh release-source NPU checks also pass:
+35 remap cases,48 merge cases,two store-capacity cases; eight ranks each pass
+nonuniform and uniform registered graph tests and two query-stride cases.
+Imported release module/test hashes are checked against the exported tree.
+
+This bounded operator run uses vLLM Python source pinned to
+`d02df748bf9efd99022f1a062597dc3cb3808485`, with image native dependencies.
+Generated image version metadata still reports0.28.0 and is separately pinned
+and disclosed; it is not the Python source revision. This is not a full release
+installation or fresh serving/performance run. The original model service is untouched.
+
 ## 2026-09-15 larger-batch validation
 
 O/LSE eligibility now follows `min(max_num_batched_tokens, 192)` instead of
@@ -69,8 +136,8 @@ Current status: local source refresh and CPU checks complete; no new NPU run.
 | Indexer store | Existing native quantization plus fused scale conversion/key-scale stores |
 
 Removed the old five-operation remap priority from the attention caller.
-The old standalone sfa_dcp_remap helper remains as historical code, but no
-production caller imports it. The ordinary upstream remap routing/fallbacks
+The unused standalone sfa_dcp_remap helper was removed in the October3 review
+maintenance; its CPU caller-routing regressions remain. The ordinary upstream remap routing/fallbacks
 now apply. The decode_only argument is retained for existing caller compatibility.
 O/LSE/Q/store code and their existing guards are unchanged.
 

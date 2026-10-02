@@ -2,7 +2,6 @@
 """Fallback/routing checks without constructing a serving model."""
 
 import ast
-import importlib.util
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,10 +10,6 @@ import pytest
 import torch
 
 ROOT = Path(__file__).resolve().parents[3]
-spec = importlib.util.spec_from_file_location("dcp_remap_under_test", ROOT / "vllm_ascend/ops/triton/sfa_dcp_remap.py")
-remap = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = remap
-spec.loader.exec_module(remap)
 
 
 def method():
@@ -26,8 +21,6 @@ def method():
     namespace = {
         "torch": torch,
         "HAS_TRITON": False,
-        "can_fuse_remap": remap.can_fuse_remap,
-        "fused_remap": remap.fused_remap,
     }
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
     return namespace["_remap_sparse_indices"], namespace
@@ -83,7 +76,6 @@ def test_other_ownership_contracts_never_enter_fusion(attribute, value):
 def test_empty_fallback_and_configured_topk_limit():
     run, _ = method()
     empty = torch.empty((0, 1, 2048), dtype=torch.int32)
-    assert not remap.can_fuse_remap(empty)
     assert run(instance(2048), empty, decode_only=True).shape == empty.shape
     with pytest.raises(RuntimeError, match="exceeds configured index_topk"):
         run(instance(8), torch.zeros((1, 9), dtype=torch.int32), decode_only=True)

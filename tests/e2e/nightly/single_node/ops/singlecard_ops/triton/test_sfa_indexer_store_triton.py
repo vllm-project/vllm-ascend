@@ -9,17 +9,18 @@ torch_npu = pytest.importorskip("torch_npu")
 from vllm_ascend.ops.triton.sfa_indexer_store import can_fuse_store, store_indexer_key_scale  # noqa: E402
 
 
-def test_native_quantized_cache_bytes_and_changing_graph_slots():
+@pytest.mark.parametrize("capacity", [256, 512])
+def test_native_quantized_cache_bytes_and_changing_graph_slots(capacity):
     torch.npu.set_device(0)
     retained = []
-    capacity, width = 256, 128
+    width = 128
     for rows in (1, 6, 12):
         x = torch.randn(rows, width, dtype=torch.bfloat16, device="npu")
         keys, scales = torch_npu.npu_dynamic_quant(x, dst_type=torch.int8)
         slots = torch.arange(rows, dtype=torch.int64, device="npu") + 7
         backing = torch.full((capacity * (width + 2) + 64,), 19, dtype=torch.int8, device="npu")
-        cache = backing[: capacity * width].view(2, 128, 1, width)
-        scale_cache = backing[capacity * width : -64].view(torch.float16).view(2, 128, 1, 1)
+        cache = backing[: capacity * width].view(capacity // 128, 128, 1, width)
+        scale_cache = backing[capacity * width : -64].view(torch.float16).view(capacity // 128, 128, 1, 1)
         assert can_fuse_store(cache, scale_cache, slots, rows)
         for _ in range(5):
             store_indexer_key_scale(keys, scales, slots, cache, scale_cache)
@@ -34,6 +35,10 @@ def test_native_quantized_cache_bytes_and_changing_graph_slots():
             selected = torch.arange(rows, dtype=torch.int64) + 3 + step
             if step % 2:
                 selected[-1] = -1
+            elif step % 4 == 0:
+                selected[-1] = capacity - 1
+            else:
+                selected[-1] = capacity
             slots.copy_(selected)
             backing.fill_(19)
             scale_cache.fill_(3.25)
@@ -41,7 +46,7 @@ def test_native_quantized_cache_bytes_and_changing_graph_slots():
             torch.npu.synchronize()
             expected_keys = torch.full((capacity, width), 19, dtype=torch.int8)
             expected_scales = torch.full((capacity, 1), 3.25, dtype=torch.float16)
-            valid = selected >= 0
+            valid = (selected >= 0) & (selected < capacity)
             expected_keys[selected[valid]] = fresh_keys.cpu()[valid]
             expected_scales[selected[valid], 0] = fresh_scales.to(torch.float16).cpu()[valid]
             assert torch.equal(cache.view(capacity, width).cpu(), expected_keys)
