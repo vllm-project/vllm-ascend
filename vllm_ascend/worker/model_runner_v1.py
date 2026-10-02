@@ -3747,11 +3747,16 @@ class NPUModelRunner(GPUModelRunner):
             if isinstance(builder, GDNAttentionMetadataBuilder) and not is_gdn_noop:
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args["num_actual_reqs"] = num_reqs
-                if use_spec_decode:
-                    extra_attn_metadata_args.update(
-                        num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
-                        num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
-                    )
+                # Grammar can trim every draft, so a step may schedule no draft
+                # tokens at all while GDN rows still carry accepted history
+                # from the previous verify. Keep passing it through.
+                extra_attn_metadata_args.update(
+                    num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
+                    num_decode_draft_tokens_cpu=(
+                        self.num_decode_draft_tokens.cpu[:num_reqs_padded]
+                        if use_spec_decode else None
+                    ),
+                )
 
             if isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):
                 if for_cudagraph_capture:
