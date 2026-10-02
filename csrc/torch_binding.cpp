@@ -583,10 +583,60 @@ void transpose_kv_cache_by_block(
     int64_t splitNum,
     int64_t layerNum)
 {
+    TORCH_CHECK(layerNum >= 0 && kCache.size() == layerNum && vCache.size() == layerNum,
+                "K/V cache lists must match layerNum");
+    TORCH_CHECK(blockSize > 0 && headNum > 0 && headDim > 0 && splitNum > 0 && headNum % splitNum == 0,
+                "Invalid KV block dimensions or splitNum");
+    TORCH_CHECK(blockIDs.dim() == 1 && blockIDs.scalar_type() == at::kLong && blockIDs.is_contiguous(),
+                "blockIDs must be a contiguous 1D int64 tensor");
+    if (layerNum == 0) {
+        return;
+    }
 
-    EXEC_NPU_CMD(aclnnTransposeKvCacheByBlock, kCache, vCache, blockIDs,
-                 blockSize, headNum, headDim, splitNum, layerNum);
+    // Only the block axis may have gaps. The kernel still transposes a dense
+    // [blockSize, headNum, headDim] payload inside each selected block.
+    auto checkCache = [&](const at::Tensor &cache) {
+        TORCH_CHECK(cache.dim() == 4 && cache.size(1) == blockSize &&
+                    cache.size(2) == headNum && cache.size(3) == headDim,
+                    "KV caches must have shape [blocks, blockSize, headNum, headDim]");
+        TORCH_CHECK(cache.device() == blockIDs.device() && cache.scalar_type() == kCache[0].scalar_type(),
+                    "KV caches must have the same dtype and be on the blockIDs device");
+        int64_t denseStride = 1;
+        for (int64_t dim = 3; dim > 0; --dim) {
+            TORCH_CHECK(cache.size(dim) == 1 || cache.stride(dim) == denseStride,
+                        "KV caches must be contiguous within each block");
+            denseStride *= cache.size(dim);
+        }
+        TORCH_CHECK(cache.stride(0) >= denseStride, "KV cache blocks must not overlap");
+    };
+    for (int64_t layer = 0; layer < layerNum; ++layer) {
+        checkCache(kCache[layer]);
+        checkCache(vCache[layer]);
+        TORCH_CHECK(kCache[layer].size(0) == vCache[layer].size(0),
+                    "K/V caches must have the same number of blocks");
+    }
+    if (blockIDs.numel() == 0) {
+        return;
+    }
 
+    // ACLNN tiling does not reliably expose dynamic-input strides. Pass the
+    // physical strides explicitly, without copying or replacing the caches.
+    // Consecutive layers with the same K/V strides retain one fused launch.
+    for (int64_t begin = 0; begin < layerNum;) {
+        int64_t kBlockStride = kCache[begin].stride(0);
+        int64_t vBlockStride = vCache[begin].stride(0);
+        int64_t end = begin + 1;
+        while (end < layerNum && kCache[end].stride(0) == kBlockStride &&
+               vCache[end].stride(0) == vBlockStride) {
+            ++end;
+        }
+        int64_t groupLayers = end - begin;
+        auto kGroup = kCache.slice(begin, groupLayers);
+        auto vGroup = vCache.slice(begin, groupLayers);
+        EXEC_NPU_CMD(aclnnTransposeKvCacheByBlock, kGroup, vGroup, blockIDs,
+                     blockSize, headNum, headDim, splitNum, groupLayers, kBlockStride, vBlockStride);
+        begin = end;
+    }
 }
 
 void npu_scatter_pa_kv_cache(
