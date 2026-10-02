@@ -44,7 +44,6 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
-from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
@@ -617,11 +616,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             fla_gdn_prefill_op = _get_fla_gdn_prefill_op() if use_fla_gdn_prefill else None
             if fla_gdn_prefill_op is not None:
-                initial_state = gather_ssm_states(
-                    ssm_state,
-                    prefill_state_indices,
-                    prefill_has_initial_state,
-                )
+                initial_state = ssm_state[prefill_state_indices]
+                clear_ssm_states(initial_state, prefill_has_initial_state)
                 (core_attn_out_non_spec, last_recurrent_state) = DeviceOperator.fla_gdn_prefill(
                     q=query_non_spec,
                     k=key_non_spec,
@@ -633,24 +629,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
                     fused_fwd=fla_gdn_prefill_op,
                 )
-                scatter_ssm_states_(
-                    ssm_state,
-                    prefill_state_indices,
-                    last_recurrent_state.to(ssm_state.dtype).contiguous(),
-                )
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
             # Use the fused CANN operator when available (probed once, cached on
             # the class) and applicable. It only supports the non-PCP case; fall
             # back to the Triton pipeline under PCP or if the op is unavailable.
             elif AscendGatedDeltaNetAttention._probe_fused_chunk() and get_pcp_group().world_size == 1:
-                # Gather only the selected rows. Generic advanced indexing first
-                # materializes the complete cache when ssm_state has a padded
-                # batch stride under the hybrid KV-cache manager.
-                initial_state = gather_ssm_states(
-                    ssm_state,
-                    prefill_state_indices,
-                    prefill_has_initial_state,
-                    output_dtype=torch.bfloat16,
-                )
+                # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
+                # directly, so no transpose is needed. Advanced indexing already
+                # returns a copy, safe to clear in place.
+                initial_state = ssm_state[prefill_state_indices]
+                clear_ssm_states(initial_state, prefill_has_initial_state)
                 core_attn_out_non_spec, last_recurrent_state = (
                     AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
                         q=query_non_spec,
@@ -663,11 +651,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         scale=key_non_spec.shape[-1] ** -0.5,
                     )
                 )
-                scatter_ssm_states_(
-                    ssm_state,
-                    prefill_state_indices,
-                    last_recurrent_state,
-                )
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
             else:
                 initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
                 clear_ssm_states(initial_state, prefill_has_initial_state)
