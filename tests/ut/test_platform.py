@@ -12,8 +12,10 @@ from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 from tests.ut.base import TestBase
+from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.distributed.eplb import AUTO_GLOO_FALLBACK_ATTRIBUTE
 from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
@@ -269,6 +271,8 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.eplb_config = MagicMock(
             use_async=False,
             communicator="torch_gloo",
+            policy="stair",
+            **{AUTO_GLOO_FALLBACK_ATTRIBUTE: False},
         )
 
         with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning") as warning:
@@ -276,6 +280,76 @@ class TestNPUPlatform(TestBase):
 
         self.assertTrue(vllm_config.parallel_config.eplb_config.use_async)
         self.assertEqual(vllm_config.parallel_config.eplb_config.communicator, "torch_gloo")
+        self.assertNotIn("stair_config", vllm_config.additional_config.get("eplb_config", {}))
+        warning.assert_called_once()
+
+    def test_validate_eplb_config_limits_auto_gloo_fallback_migrations(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.eplb_config.policy = "stair"
+        vllm_config.parallel_config.eplb_config.communicator = "torch_gloo"
+        setattr(vllm_config.parallel_config.eplb_config, AUTO_GLOO_FALLBACK_ATTRIBUTE, True)
+        vllm_config.additional_config = {
+            "eplb_config": {
+                "stair_config": {
+                    "load_window_bins": 32,
+                    "rank_transfer_limit": -1,
+                    "cross_node_transfer_limit": -1,
+                }
+            }
+        }
+
+        with patch.dict("os.environ", {}, clear=True):
+            _validate_eplb_config(vllm_config)
+
+        self.assertEqual(
+            vllm_config.additional_config["eplb_config"]["stair_config"],
+            {"load_window_bins": 32, "rank_transfer_limit": 1, "cross_node_transfer_limit": 1},
+        )
+        parsed_config = EplbConfig(**vllm_config.additional_config["eplb_config"]).stair_config
+        self.assertEqual((parsed_config.rank_transfer_limit, parsed_config.cross_node_transfer_limit), (1, 1))
+
+    def test_validate_eplb_config_keeps_explicit_gloo_migrations(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.eplb_config.policy = "stair"
+        vllm_config.parallel_config.eplb_config.communicator = "torch_gloo"
+        setattr(vllm_config.parallel_config.eplb_config, AUTO_GLOO_FALLBACK_ATTRIBUTE, False)
+        vllm_config.additional_config = {
+            "eplb_config": {
+                "stair_config": {
+                    "rank_transfer_limit": -1,
+                    "cross_node_transfer_limit": 4,
+                }
+            }
+        }
+
+        with patch.dict("os.environ", {}, clear=True):
+            _validate_eplb_config(vllm_config)
+
+        self.assertEqual(
+            vllm_config.additional_config["eplb_config"]["stair_config"],
+            {"rank_transfer_limit": -1, "cross_node_transfer_limit": 4},
+        )
+        parsed_config = EplbConfig(**vllm_config.additional_config["eplb_config"]).stair_config
+        self.assertEqual((parsed_config.rank_transfer_limit, parsed_config.cross_node_transfer_limit), (-1, 4))
+
+    def test_validate_eplb_config_keeps_explicit_hixl_when_forcing_async(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=False,
+            communicator="hixl",
+        )
+
+        with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning") as warning:
+            _validate_eplb_config(vllm_config)
+
+        self.assertTrue(vllm_config.parallel_config.eplb_config.use_async)
+        self.assertEqual(vllm_config.parallel_config.eplb_config.communicator, "hixl")
         warning.assert_called_once()
 
     def test_validate_eplb_config_rejects_nccl_before_sync_normalization(self):
@@ -356,6 +430,19 @@ class TestNPUPlatform(TestBase):
             patch.dict("os.environ", {}, clear=True),
             self.assertRaisesRegex(ValueError, "got 'nixl'"),
         ):
+            _validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_async_allows_hixl_communicator(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.enable_elastic_ep = False
+        vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=True,
+            communicator="hixl",
+        )
+
+        with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_allows_load_collection_phase_with_dbo_and_spec_decode(

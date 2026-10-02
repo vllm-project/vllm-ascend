@@ -83,8 +83,9 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 
 Select MRv2 explicitly when the model or environment does not select it by
 default. Enable expert parallelism and upstream EPLB. Ascend selects STAIR
-as the upstream policy default and selects the Gloo communicator automatically;
-movement is asynchronous only. The STAIR defaults do not require tuning.
+as the upstream policy default and automatically uses HIXL when available,
+falling back to Gloo otherwise. Movement is asynchronous only. The STAIR
+defaults do not require tuning.
 
 ```bash
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -115,10 +116,22 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | `policy` | `stair` on Ascend | Select `stair` for the Ascend policy or `default` for upstream-policy comparison experiments. |
 | `log_balancedness` | `false` | Log expert balancedness metrics. |
 | `log_balancedness_interval` | `1` | Interval between balancedness log entries. |
-| `communicator` | `None` | Leave unset for automatic Gloo selection, or set `torch_gloo`. |
+| `communicator` | Auto (`None`) on Ascend | Leave unset to use HIXL when available and Gloo otherwise; set `hixl` or `torch_gloo` to select a backend explicitly. |
 
 These fields may also be passed together as JSON through `--eplb-config`.
 They must not be placed in `--additional-config` for MRv2.
+Automatic selection uses HIXL when either the official `hixl` Python package
+distributed with CANN HIXL is importable or vllm_ascend's ctypes binding can
+load the local toolkit libraries (`libcann_hixl.so`, for CANN distributions
+that ship the library without the package). Otherwise it logs the fallback and
+uses `torch_gloo` CPU staging.
+
+STAIR leaves both per-rank and cross-node migration limits unrestricted by
+default (`-1`) so that HIXL can use the available bandwidth. When the
+communicator falls back to Gloo automatically, Ascend clamps
+`rank_transfer_limit` and `cross_node_transfer_limit` to `1` to avoid
+excessive CPU-staged transfers; explicitly setting `torch_gloo` keeps your
+configured limits.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;
@@ -156,8 +169,13 @@ vllm serve Qwen/Qwen3-30B-A3B \
 
 !!! IMPORTANT
 
-    MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to asynchronous Gloo movement. It rejects legacy `dynamic_eplb`, recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as
-    well as communicators other than Gloo. Validate the target model, topology, graph mode, and traffic independently before production use.
+    MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to
+    asynchronous movement. It rejects elastic EP, legacy `dynamic_eplb`,
+    recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as
+    well as communicators other than Gloo and HIXL. HIXL requires the CANN HIXL
+    runtime and working device connectivity on every EPLB rank. Validate the
+    target model, topology, graph mode, and traffic independently before
+    production use.
 
 ### Model Runner V1: Legacy EPLB
 

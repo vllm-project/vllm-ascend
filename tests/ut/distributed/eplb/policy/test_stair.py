@@ -498,6 +498,22 @@ class TestStairLoadStatistics(unittest.TestCase):
 
         self.assertIsNone(StairEplbPolicy._migration_sources(current, target, 1, 0, expert_sources, np.array([0, 1])))
 
+    def test_migration_sources_scale_with_unlimited_budgets(self):
+        current = np.arange(42).reshape(42, 1)
+        current[33:41] = 0
+        current[0] = 1
+        target = np.full_like(current, -1)
+        target[:32] = 0
+        target[41] = 1
+        expert_sources = [np.where(current == expert)[0].tolist() for expert in range(42)]
+        node_ids = np.zeros(42, dtype=np.int64)
+        node_ids[41] = 1
+
+        sources = StairEplbPolicy._migration_sources(current, target, -1, -1, expert_sources, node_ids)
+
+        np.testing.assert_array_equal(sources[:32, 0], np.tile(np.arange(33, 41), 4))
+        self.assertEqual(sources[41, 0], 0)
+
     def test_migration_sources_follow_multi_hop_augmenting_path(self):
         current = np.array([[3, 4, 5], [0, 2, 6], [0, 1, 7], [1, 8, 9]])
         partial_target = np.full_like(current, -1)
@@ -663,6 +679,26 @@ class TestStairLoadStatistics(unittest.TestCase):
         )
 
         self.assertIsNone(plan)
+
+    def test_plan_layer_caps_unlimited_replica_changes_at_redundancy(self):
+        current = np.array([[0, 1], [0, 2]])
+        with (
+            patch.object(
+                StairEplbPolicy,
+                "incremental_replica_candidates",
+                return_value=[np.array([2, 1, 1])],
+            ) as candidates,
+            patch.object(StairEplbPolicy, "lpt_placement", return_value=None),
+        ):
+            StairEplbPolicy.plan_layer(
+                np.array([[8.0, 7.0, 6.0]]),
+                np.ones(1, dtype=np.int64),
+                current,
+                np.array([0, 1]),
+                StairConfig(rank_transfer_limit=-1, cross_node_transfer_limit=-1),
+            )
+
+        self.assertEqual(candidates.call_args.args[3], 1)
 
     def test_plan_layer_skips_noop(self):
         self.assertIsNone(
