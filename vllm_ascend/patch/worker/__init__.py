@@ -82,3 +82,4 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+import vllm_ascend.patch.worker.patch_turboquant_310  # noqa  # TurboQuant Tier 0 (inert unless VLLM_ASCEND_TURBOQUANT=1)
