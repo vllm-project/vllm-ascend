@@ -408,7 +408,10 @@ def _prepend_env_path(env_name: str, path: str) -> None:
 
 
 def bootstrap_custom_op_env(*, include_vendor_lib: bool = False) -> None:
-    vendor_path = os.path.join(_CUSTOM_OP_BASE_DIR, "_cann_ops_custom", "vendors", _CUSTOM_OP_VENDOR_DIR)
+    cann_root = os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/cann")
+    system_vendor_path = os.path.join(cann_root, "opp", "vendors", _CUSTOM_OP_VENDOR_DIR)
+    repo_vendor_path = os.path.join(_CUSTOM_OP_BASE_DIR, "_cann_ops_custom", "vendors", _CUSTOM_OP_VENDOR_DIR)
+    vendor_path = system_vendor_path if os.path.exists(system_vendor_path) else repo_vendor_path
     if not os.path.exists(vendor_path):
         return
     _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_path)
