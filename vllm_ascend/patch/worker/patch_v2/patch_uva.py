@@ -132,21 +132,29 @@ class UvaBufferWrapper:
         self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self._np: np.ndarray = self._cpu.numpy()
         self._modified_indices: set[int] = set()
-        self._uva: torch.Tensor = self._cpu if is_uva_available() else torch.zeros_like(self._cpu, device="npu")
+        requested_real_uva = is_uva_available()
+        if requested_real_uva:
+            import vllm_ascend.vllm_ascend_C  # noqa: F401
+
+        view = torch.ops._C_ascend.get_npu_view_from_cpu_tensor(self._cpu) if requested_real_uva else None
+        self._use_real_uva = view is not None
+        if requested_real_uva and not self._use_real_uva:
+            logger.warning_once("Pinned CPU memory is not mapped for NPU UVA; using the async H2D fallback")
+        self._uva: torch.Tensor = view if view is not None else torch.zeros_like(self._cpu, device="npu")
 
     def _mark_cpu_modified(self, key: int):
         self._modified_indices.add(key)
 
     @property
     def cpu(self):
-        return self._cpu if is_uva_available() else MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
+        return self._cpu if self._use_real_uva else MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
 
     @property
     def np(self):
-        return self._np if is_uva_available() else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
+        return self._np if self._use_real_uva else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
 
     def _sync_dirty_rows(self) -> None:
-        if not is_uva_available() and self._modified_indices:
+        if not self._use_real_uva and self._modified_indices:
             dirty_rows = sorted(self._modified_indices)
             n_dirty = len(dirty_rows)
             if dirty_rows[0] == 0 and dirty_rows[-1] == n_dirty - 1:
