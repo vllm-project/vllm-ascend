@@ -906,6 +906,8 @@ class MiniMaxM3DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
         if is_sparse_attention_layer:
+            logger.info(f"Layer {layer_idx} is a MiniMax-M3 sparse attention layer.")
+        if is_sparse_attention_layer:
             self.self_attn = MiniMaxM3SparseAttention(
                 **attn_kwargs,
                 sparse_cfg=sparse_attention_config,
