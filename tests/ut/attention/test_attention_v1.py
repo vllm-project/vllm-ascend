@@ -456,6 +456,79 @@ class TestAscendAttentionBackendImpl(TestBase):
             kv_sharing_target_layer_name="producer_layer",
         )
 
+    def _encoder_impl(self, sliding_window):
+        return AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=sliding_window,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name=None,
+        )
+
+    def _encoder_metadata(self, cumulative_lengths):
+        metadata = MagicMock()
+        metadata.actual_seq_lengths_q = list(cumulative_lengths)
+        return metadata
+
+    def _run_encoder_attention(self, impl, query, cumulative_lengths, output=None):
+        captured = {}
+        output = torch.zeros_like(query) if output is None else output
+
+        def fake_fusion_attention(**kwargs):
+            captured.update(kwargs)
+            return (torch.zeros_like(kwargs["query"]),)
+
+        metadata = self._encoder_metadata(cumulative_lengths)
+        with patch.object(attn_module.torch_npu, "npu_fusion_attention", side_effect=fake_fusion_attention):
+            returned = impl._forward_encoder_attention(query, query, query, metadata, output)
+        return captured, returned, output
+
+    def test_encoder_attention_without_sliding_window_keeps_maskless_call(self):
+        query = torch.zeros(8, 8 * 64)
+        captured, _, _ = self._run_encoder_attention(self.impl, query, [4, 8])
+
+        self.assertNotIn("atten_mask", captured)
+        self.assertNotIn("sparse_mode", captured)
+        self.assertEqual(captured["actual_seq_qlen"], [4, 8])
+        self.assertEqual(captured["input_layout"], "TND")
+
+    def test_encoder_attention_applies_sliding_window_band_mask(self):
+        impl = self._encoder_impl(65)
+        query = torch.zeros(512, 8 * 64)
+        captured, _, _ = self._run_encoder_attention(impl, query, [512])
+
+        self.assertEqual(captured["sparse_mode"], 0)
+        mask = captured["atten_mask"]
+        self.assertEqual(mask.shape, (512, 512))
+        self.assertEqual(mask.dtype, torch.bool)
+        # The window boundary is inclusive: |i - j| <= sliding_window - 1.
+        self.assertFalse(mask[100, 164])
+        self.assertTrue(mask[100, 165])
+
+    def test_encoder_attention_skips_mask_when_sequence_fits_in_window(self):
+        impl = self._encoder_impl(65)
+        query = torch.zeros(64, 8 * 64)
+        captured, _, _ = self._run_encoder_attention(impl, query, [64])
+
+        self.assertNotIn("atten_mask", captured)
+        self.assertNotIn("sparse_mode", captured)
+
+    def test_encoder_attention_trims_padding_rows_before_masking(self):
+        impl = self._encoder_impl(65)
+        query = torch.arange(519 * 8 * 64, dtype=torch.float32).reshape(519, 8 * 64)
+        captured, returned, output = self._run_encoder_attention(impl, query, [512])
+
+        # The band must be no larger than the query token count.
+        self.assertEqual(captured["query"].shape[0], 512)
+        self.assertEqual(captured["atten_mask"].shape, (512, 512))
+        self.assertIs(returned, output)
+        self.assertTrue(torch.equal(output[:512], torch.zeros(512, 8 * 64)))
+
     def test_hnd_layout_is_recorded_during_initialization(self):
         with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "HND"):
             impl = AscendAttentionBackendImpl(
