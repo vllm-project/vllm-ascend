@@ -8,6 +8,7 @@ the generic MLA/MoE implementation and the Ascend KDA backend.
 """
 
 import math
+from bisect import bisect_left
 from copy import copy
 
 import torch
@@ -18,6 +19,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
@@ -85,6 +87,14 @@ from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import get_rotation_path
+from vllm_ascend.worker.v2.pp_utils import (
+    PPTransportDataType,
+    add_pp_transport_tensors,
+    get_pp_transport_tensors,
+)
+from vllm_ascend.worker.v2.pp_utils import (
+    make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
+)
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.kimi_k3.attention_residual import (  # type: ignore[import-untyped]
@@ -498,6 +508,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                reduce_results=not use_sequence_parallel,
                 prefix=f"{prefix}.mlp",
                 use_sequence_parallel=use_sequence_parallel,
                 activation_situ_beta=config.activation_situ_beta,
@@ -625,6 +636,14 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
     """Kimi text model assembled from the Ascend decoder layer."""
 
+    # The Ascend forward path carries cumulative auxiliary states across PP
+    # via IntermediateTensors (see pp_utils.PPTransportDataType).
+    supports_aux_hidden_states_over_pp = True
+    # Upstream's reserve_aux_intermediate_tensor_slots / relay_aux_hidden_states
+    # read this via getattr to name and forward the receive-buffer aux slots;
+    # it must equal pp_utils' transport key prefix so both sides agree.
+    AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
+
     packed_modules_mapping = {
         name: list(shards) for name, shards in UpstreamPackedKimiLinearModel.packed_modules_mapping.items()
     }
@@ -643,12 +662,20 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         config = vllm_config.model_config.hf_text_config
         self.config = config
         self.vocab_size = config.vocab_size
-        parallel_config = vllm_config.parallel_config
+        # Only the last PP stage loads the drafter. Select its aux contract
+        # on every stage before upstream reserves receive buffers/relay slots.
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and spec_config.method == "dspark":
+            draft_config = spec_config.draft_model_config.hf_config
+            self.dspark_aux_capture_materialized = draft_config.model_type == "qwen3" and any(
+                arch in ("DSparkDraftModel", "Qwen3DSparkModel") for arch in (draft_config.architectures or ())
+            )
         # vLLM's generic MoE SP switch currently requires DP > 1. K3 also
         # needs the same rank-local token layout for the TP/EP, DP=1 topology
         # that FlashComm used before the standard SP operators were available.
+        parallel_config = vllm_config.parallel_config
         self.use_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
+            (parallel_config.pipeline_parallel_size == 1 or vllm_config.use_v2_model_runner)
             and parallel_config.enable_expert_parallel
             and parallel_config.tensor_parallel_size > 1
         )
@@ -699,6 +726,33 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, "num_attention_heads must be divisible by world_size"
 
+    def _cache_aux_pp_layout(self) -> None:
+        super()._cache_aux_pp_layout()
+        if (
+            self.config.attn_res_block_size is None
+            or not self.dspark_aux_capture_materialized
+            or not model_parallel_is_initialized()
+        ):
+            return
+        pp = get_pp_group()
+        if not pp.is_first_rank:
+            # A materialized state at start_layer belongs to this stage,
+            # unlike the raw state emitted by the preceding stage.
+            self._aux_slot_base_cached = bisect_left(self.aux_hidden_state_layers, self.start_layer)
+        if pp.is_last_rank:
+            self._aux_upstream_total_cached = self._aux_slot_base_cached
+
+    def make_empty_intermediate_tensors(self, batch_size, dtype, device):
+        if self.config.attn_res_block_size is None:
+            return super().make_empty_intermediate_tensors(batch_size, dtype, device)
+        # Materialized DSpark states are captured before a layer; raw states
+        # are captured after the preceding layer. Handle a PP cut at either.
+        return make_pp_empty_intermediate_tensors(
+            self,
+            super().make_empty_intermediate_tensors,
+            include_start_layer=not self.dspark_aux_capture_materialized,
+        )(batch_size, dtype, device)
+
     def load_weights(self, weights):
         """Route mixed-precision KDA gates through vLLM's packed loader."""
         params_dict = dict(self.named_parameters())
@@ -743,6 +797,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 **kwargs,
             )
 
+        full_num_tokens = positions.shape[0]
         if get_pp_group().is_first_rank:
             hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
             residual = None
@@ -751,22 +806,27 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        full_num_tokens = positions.shape[0]
+        materialized_aux = self.dspark_aux_capture_materialized
+        aux_hidden_states = get_pp_transport_tensors(intermediate_tensors, PPTransportDataType.AUX_HIDDEN_STATES)
         if self.use_sequence_parallel:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
+                # Every stage starts with a full-token padding mask, even
+                # though only the first stage starts with full activations.
                 forward_context.is_padding = sp_padding_mask(
                     forward_context.is_padding,
-                    hidden_states,
+                    positions,
                 )
+            # Every stage starts from full-sequence tensors - the previous
+            # stage closed its sequence-parallel region at the boundary -
+            # and keeps its own shard afterwards, matching DeepSeek V4.
             hidden_states = sp_shard(hidden_states)
-            assert residual is None, "Sequence parallelism is not supported with pipeline parallelism"
-
-        if self.dspark_aux_capture_materialized:
-            aux_hidden_states: list[torch.Tensor] = []
-        else:
+            if residual is not None:
+                residual = sp_shard(residual)
+            aux_hidden_states = [sp_shard(aux) for aux in aux_hidden_states]
+        if not materialized_aux and get_pp_group().is_first_rank:
             aux_hidden_states = self._maybe_add_hidden_state(
-                [],
+                aux_hidden_states,
                 self.start_layer,
                 hidden_states,
                 residual,
@@ -788,7 +848,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
         ):
-            if self.dspark_aux_capture_materialized and layer_idx in self.aux_hidden_state_layers:
+            if materialized_aux and layer_idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(
                     _apply_ascend_attn_res(
                         hidden_states,
@@ -803,7 +863,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 hidden_states=hidden_states,
                 residual=residual,
             )
-            if not self.dspark_aux_capture_materialized and (layer_idx + 1) in self.aux_hidden_state_layers:
+            if not materialized_aux and (layer_idx + 1) in self.aux_hidden_state_layers:
                 self._maybe_add_hidden_state(
                     aux_hidden_states,
                     layer_idx + 1,
@@ -812,12 +872,17 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 )
 
         if not get_pp_group().is_last_rank:
-            assert not self.use_sequence_parallel, "Sequence parallelism is not supported with pipeline parallelism"
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                    "residual": residual,
-                }
+            if self.use_sequence_parallel:
+                # The next PP rank expects full-sequence tensors; close the
+                # sequence-parallel region before crossing the boundary so the
+                # upstream PP transport only sees replicated tensors.
+                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+                residual = sp_all_gather(residual)[:full_num_tokens]
+                aux_hidden_states = [sp_all_gather(aux)[:full_num_tokens] for aux in aux_hidden_states]
+            return add_pp_transport_tensors(
+                IntermediateTensors({"hidden_states": hidden_states, "residual": residual}),
+                PPTransportDataType.AUX_HIDDEN_STATES,
+                aux_hidden_states,
             )
 
         hidden_states = _apply_ascend_attn_res(
