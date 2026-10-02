@@ -202,6 +202,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "moe_gating_top_k_with_map"
         "scatter_nd_update_sk"
         "add_rms_norm_bias"
         "moe_gating_top_k_hash"
