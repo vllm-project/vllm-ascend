@@ -6,6 +6,9 @@
 
 #include "aclnn_chunk_kda_fwd.h"
 #include "chunk_kda_fwd.h"
+#include "aclnn_chunk_kda_fwd_v2.h"
+#include "chunk_kda_fwd_three_stage.h"
+#include <cmath>
 #include "../../../kda_layout_swap12/op_host/op_api/kda_layout_swap12.h"
 
 #include <algorithm>
@@ -76,6 +79,11 @@ struct ChunkKdaFwdParams {
     const aclTensor *kgOut = nullptr;
     const aclTensor *vNewOut = nullptr;
     const aclTensor *hOut = nullptr;
+    double epsilon = 1.0e-6;
+    bool useQkL2normInKernel = false;
+    bool useBetaSigmoidInKernel = false;
+    bool allowNegEigval = false;
+    bool useExp2 = true;
 };
 
 struct KdaShapeInfo {
@@ -561,6 +569,97 @@ bool IsAscend950()
     const char *socName = aclrtGetSocName();
     return socName != nullptr && std::strstr(socName, "Ascend950") != nullptr;
 }
+bool AllOutputsContiguous(const ChunkKdaFwdParams &params)
+{
+    const aclTensor *outputs[] = {
+        params.attnOut,     params.finalStateOut, params.gkOut, params.aqkOut,
+        params.akkOut,      params.wOut,          params.uOut,  params.qgOut,
+        params.kgOut,       params.vNewOut,       params.hOut};
+    for (const aclTensor *output : outputs) {
+        if (output != nullptr && !IsContiguous(output)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// V2 场景判据：三个独立算子的公共约束（BF16、K=V=128、chunk=64、输出可直接写回、
+// cu_seqlens 严格递增）全部满足时才允许走组合实现。
+bool CanUseThreeStagePath(const ChunkKdaFwdParams &params, const KdaShapeInfo &info)
+{
+    if (params.q->GetDataType() != DataType::DT_BF16) {
+        return false;
+    }
+    if (info.kDim != 128 || info.vDim != 128) {
+        return false;
+    }
+    if (params.chunkSize != 64) {
+        return false;
+    }
+    // 本算子的 L2 允许 cuSeqlens 非递减（即空序列），三个独立算子要求严格递增。
+    if (params.cuSeqlensOptional != nullptr) {
+        const aclIntArray *cuSeqlens = params.cuSeqlensOptional;
+        for (size_t idx = 0; idx + 1 < cuSeqlens->Size(); ++idx) {
+            if ((*cuSeqlens)[idx] >= (*cuSeqlens)[idx + 1]) {
+                return false;
+            }
+        }
+    }
+    // 状态的 shape 与 FP32 约束已由 CheckParams 校验；三算子链沿用同一契约。
+    return AllOutputsContiguous(params);
+}
+
+l0op::KdaFwdThreeStageArgs MakeThreeStageArgs(const ChunkKdaFwdParams &params,
+                                              const KdaShapeInfo &info)
+{
+    l0op::KdaFwdThreeStageArgs args;
+    args.q = params.q;
+    args.k = params.k;
+    args.v = params.v;
+    args.g = params.g;
+    args.beta = params.beta;
+    args.aLog = params.aLogOptional;
+    args.dtBias = params.dtBiasOptional;
+    args.initialState = params.initialStateOptional;
+    args.cuSeqlens = params.cuSeqlensOptional;
+    args.chunkIndices = params.chunkIndicesOptional;
+    args.layout = params.layout;
+    // 公开 attnOut 固定 sequence-major：rank-4 为 BSND，rank-3 为 TND。
+    args.attnLayout = info.isRank3 ? "TND" : "BSND";
+    args.scale = params.scale;
+    args.epsilon = params.epsilon;
+    args.lowerBound = params.lowerBound;
+    args.chunkSize = params.chunkSize;
+    args.safeGate = params.safeGate;
+    args.useGateInKernel = params.useGateInKernel;
+    args.stateVFirst = params.stateVFirst;
+    args.useQkL2normInKernel = params.useQkL2normInKernel;
+    args.useBetaSigmoidInKernel = params.useBetaSigmoidInKernel;
+    args.allowNegEigval = params.allowNegEigval;
+    args.useExp2 = params.useExp2;
+    args.batch = info.batch;
+    args.qkHeads = info.hNum;
+    args.valueHeads = info.hvNum;
+    args.seqLen = info.seqlen;
+    args.kDim = info.kDim;
+    args.vDim = info.vDim;
+    args.seqNum = info.seqNum;
+    args.totalChunks = info.totalChunks;
+    args.packed = info.isRank3;
+    args.attnOut = params.attnOut;
+    args.finalStateOut = params.finalStateOut;
+    args.gkOut = params.gkOut;
+    args.aqkOut = params.aqkOut;
+    args.akkOut = params.akkOut;
+    args.wOut = params.wOut;
+    args.uOut = params.uOut;
+    args.qgOut = params.qgOut;
+    args.kgOut = params.kgOut;
+    args.vNewOut = params.vNewOut;
+    args.hOut = params.hOut;
+    return args;
+}
+
 } // namespace
 
 aclnnStatus aclnnChunkKdaFwdGetWorkspaceSize(
@@ -826,6 +925,97 @@ aclnnStatus aclnnChunkKdaFwd(void *workspace, uint64_t workspaceSize,
     L2_DFX_PHASE_2(aclnnChunkKdaFwd);
     CHECK_COND(CommonOpExecutorRun(workspace, workspaceSize, executor, stream) == ACLNN_SUCCESS,
                ACLNN_ERR_INNER, "ChunkKdaFwd launch failed.");
+    return ACLNN_SUCCESS;
+}
+
+aclnnStatus aclnnChunkKdaFwdV2GetWorkspaceSize(
+    const aclTensor *q,
+    const aclTensor *k,
+    const aclTensor *v,
+    const aclTensor *g,
+    const aclTensor *beta,
+    const aclTensor *aLogOptional,
+    const aclTensor *dtBiasOptional,
+    const aclTensor *initialStateOptional,
+    const aclIntArray *cuSeqlensOptional,
+    const aclIntArray *chunkIndicesOptional,
+    const char *layout,
+    double scale,
+    int64_t chunkSize,
+    bool safeGate,
+    double lowerBound,
+    bool useGateInKernel,
+    bool stateVFirst,
+    double epsilon,
+    bool useQkL2normInKernel,
+    bool useBetaSigmoidInKernel,
+    bool allowNegEigval,
+    bool useExp2,
+    const aclTensor *attnOut,
+    const aclTensor *finalStateOut,
+    const aclTensor *gkOut,
+    const aclTensor *aqkOut,
+    const aclTensor *akkOut,
+    const aclTensor *wOut,
+    const aclTensor *uOut,
+    const aclTensor *qgOut,
+    const aclTensor *kgOut,
+    const aclTensor *vNewOut,
+    const aclTensor *hOut,
+    uint64_t *workspaceSize,
+    aclOpExecutor **executor)
+{
+    ChunkKdaFwdParams params{
+        q, k, v, g, beta, aLogOptional, dtBiasOptional, initialStateOptional,
+        cuSeqlensOptional, chunkIndicesOptional, layout, scale, chunkSize,
+        safeGate, lowerBound, useGateInKernel, stateVFirst, attnOut, finalStateOut, gkOut,
+        aqkOut, akkOut, wOut, uOut, qgOut, kgOut, vNewOut, hOut};
+    params.epsilon = epsilon;
+    params.useQkL2normInKernel = useQkL2normInKernel;
+    params.useBetaSigmoidInKernel = useBetaSigmoidInKernel;
+    params.allowNegEigval = allowNegEigval;
+    params.useExp2 = useExp2;
+    CHECK_COND(std::isfinite(static_cast<float>(epsilon)) && epsilon > 0.0,
+               ACLNN_ERR_PARAM_INVALID, "epsilon must be finite and positive.");
+    CHECK_COND(!allowNegEigval || useBetaSigmoidInKernel, ACLNN_ERR_PARAM_INVALID,
+               "allowNegEigval requires beta sigmoid.");
+    L2_DFX_PHASE_1(
+        aclnnChunkKdaFwdV2,
+        DFX_IN(q, k, v, g, beta, aLogOptional, dtBiasOptional, initialStateOptional,
+               cuSeqlensOptional, chunkIndicesOptional, layout, scale, chunkSize,
+               safeGate, lowerBound, useGateInKernel, stateVFirst, epsilon,
+               useQkL2normInKernel, useBetaSigmoidInKernel, allowNegEigval, useExp2),
+        DFX_OUT(attnOut, finalStateOut, gkOut, aqkOut, akkOut, wOut, uOut,
+                qgOut, kgOut, vNewOut, hOut));
+
+    auto uniqueExecutor = CREATE_EXECUTOR();
+    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
+    auto executorPtr = uniqueExecutor.get();
+    KdaFwdLayout parsedLayout = KdaFwdLayout::BSND;
+    KdaShapeInfo info;
+    CHECK_RET(CheckParams(params, parsedLayout, info) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+    CHECK_RET(ContiguousInputs(params, executorPtr) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+
+    // V2 只实现三个独立算子的组合路径；场景不满足时由 Python 入口回落到
+    // aclnnChunkKdaFwd，因此这里直接返回参数错误并说明要求。
+    CHECK_COND(CanUseThreeStagePath(params, info), ACLNN_ERR_PARAM_INVALID,
+               "ChunkKdaFwdV2 只支持三算子组合场景：q/k/v 为 BF16、K=V=128、chunk_size=64、"
+               "公开输出连续且 cu_seqlens 严格递增，请改用 aclnnChunkKdaFwd。");
+    const aclnnStatus threeStageStatus =
+        l0op::KdaFwdThreeStage(MakeThreeStageArgs(params, info), executorPtr);
+    CHECK_RET(threeStageStatus == ACLNN_SUCCESS, threeStageStatus);
+
+    *workspaceSize = uniqueExecutor->GetWorkspaceSize();
+    uniqueExecutor.ReleaseTo(executor);
+    return ACLNN_SUCCESS;
+}
+
+aclnnStatus aclnnChunkKdaFwdV2(void *workspace, uint64_t workspaceSize,
+                               aclOpExecutor *executor, aclrtStream stream)
+{
+    L2_DFX_PHASE_2(aclnnChunkKdaFwdV2);
+    CHECK_COND(CommonOpExecutorRun(workspace, workspaceSize, executor, stream) == ACLNN_SUCCESS,
+               ACLNN_ERR_INNER, "ChunkKdaFwdV2 launch failed.");
     return ACLNN_SUCCESS;
 }
 
