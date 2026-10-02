@@ -37,6 +37,22 @@ def init_speculator(
         )
 
         return ExtractHiddenStatesSpeculator(vllm_config, device)
+    # H-Spec (mamba_attn_hybrid) exists only in vLLM builds carrying the
+    # H-Spec patch; guard with getattr so vLLM versions without the method
+    # never hit an AttributeError here, regardless of the requested method.
+    use_mamba_hybrid = getattr(speculative_config, "use_mamba_attn_hybrid", None)
+    if callable(use_mamba_hybrid) and use_mamba_hybrid():
+        try:
+            from vllm_ascend.worker.v2.spec_decode.mamba_attn_hybrid.speculator import (
+                AscendMambaAttnHybridSpeculator,
+            )
+        except ImportError as e:
+            raise NotImplementedError(
+                "mamba_attn_hybrid requires a vLLM build with H-Spec support "
+                "(missing vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid); "
+                f"underlying import error: {e}"
+            ) from e
+        return AscendMambaAttnHybridSpeculator(vllm_config, device)
     if speculative_config.use_dspark():
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,
