@@ -143,81 +143,126 @@ class _KernelLaunchRecorder:
     def __init__(self, kernel):
         self.kernel = kernel
         self.grids = []
+        self.launch_kwargs = []
 
     def __getitem__(self, grid):
         self.grids.append(grid)
-        return self.kernel[grid]
+        launch = self.kernel[grid]
+
+        def record_launch(*args, **kwargs):
+            self.launch_kwargs.append(kwargs)
+            return launch(*args, **kwargs)
+
+        return record_launch
 
 
 @pytest.mark.parametrize(
-    ("kernel_name", "fixed_rows", "seed"),
+    ("rows_kind", "kernel_name", "dtype", "is_rms_norm", "has_bias", "has_gate", "norm_before_gate"),
     [
         pytest.param(
-            "_layer_norm_fwd_persistent_kernel_npu",
-            None,
-            0x1F3A5C8,
-            id="persistent-rmsnorm-post-gate-boundary",
+            "before",
+            "_layer_norm_fwd_1pass_kernel_npu",
+            torch.bfloat16,
+            True,
+            False,
+            True,
+            True,
+            id="below-hoist-threshold-rmsnorm-post-gate",
         ),
         pytest.param(
+            "at",
             "_layer_norm_fwd_persistent_hoist_kernel_npu",
-            None,
-            0x1F3A5C8,
-            id="hoist-rmsnorm-post-gate-boundary",
+            torch.float16,
+            False,
+            True,
+            True,
+            False,
+            id="hoist-threshold-layernorm-pre-gate-fp16",
         ),
         pytest.param(
+            "above",
             "_layer_norm_fwd_persistent_hoist_kernel_npu",
-            65536,
-            42,
+            torch.bfloat16,
+            True,
+            False,
+            True,
+            True,
+            id="above-hoist-threshold-rmsnorm-post-gate",
+        ),
+        pytest.param(
+            "large",
+            "_layer_norm_fwd_persistent_hoist_kernel_npu",
+            torch.bfloat16,
+            True,
+            False,
+            True,
+            True,
             id="hoist-rmsnorm-post-gate-large-m",
         ),
     ],
 )
 @torch.inference_mode()
-def test_layer_norm_fwd_npu_persistent_routes(
+def test_layer_norm_fwd_npu_hoist_routes(
+    rows_kind,
     kernel_name,
-    fixed_rows,
-    seed,
+    dtype,
+    is_rms_norm,
+    has_bias,
+    has_gate,
+    norm_before_gate,
     monkeypatch,
 ):
     vector_cores = get_vectorcore_num()
-    # Pick the first row of the qualifying tile, rather than assuming P=40.
-    first_tile = (
-        (vector_cores + 3) // 4 if kernel_name == "_layer_norm_fwd_persistent_kernel_npu" else 16 * vector_cores
-    )
-    rows = fixed_rows if fixed_rows is not None else (first_tile - 1) * 32 + 1
-    if fixed_rows is not None and (rows + 31) // 32 < first_tile:
-        pytest.skip("M=65536 does not reach the HOIST threshold on this device")
+    threshold = 16 * vector_cores
+    rows = {
+        "before": threshold - 1,
+        "at": threshold,
+        "above": threshold + 1,
+        "large": 65536,
+    }[rows_kind]
     shape = (rows, 128)
 
     original_kernel = getattr(layernorm_gated, kernel_name)
     recorder = _KernelLaunchRecorder(original_kernel)
     monkeypatch.setattr(layernorm_gated, kernel_name, recorder)
 
-    # Match the prior B3 case semantics; the boundary cases also reuse its seed.
-    generator = torch.Generator(device="cpu").manual_seed(seed)
-    x = torch.randn(shape, generator=generator, dtype=torch.bfloat16).to(DEVICE)
-    weight = torch.randn((128,), generator=generator, dtype=torch.bfloat16).to(DEVICE)
-    z = torch.randn(shape, generator=generator, dtype=torch.bfloat16).to(DEVICE)
+    generator = torch.Generator(device="cpu").manual_seed(0x1F3A5C8)
+    x = torch.randn(shape, generator=generator, dtype=dtype).to(DEVICE)
+    weight = torch.randn((128,), generator=generator, dtype=dtype).to(DEVICE)
+    bias = torch.randn((128,), generator=generator, dtype=dtype).to(DEVICE) if has_bias else None
+    z = torch.randn(shape, generator=generator, dtype=dtype).to(DEVICE) if has_gate else None
     eps = 1e-6
 
     actual, actual_mean, actual_rstd = layer_norm_fwd_npu(
         x,
         weight,
-        None,
+        bias,
         eps,
         z=z,
         group_size=128,
-        norm_before_gate=True,
-        is_rms_norm=True,
+        norm_before_gate=norm_before_gate,
+        is_rms_norm=is_rms_norm,
     )
-    expected, expected_mean, expected_rstd = layer_norm_gated_ref(x, weight, None, eps, z, 128, True, True)
+    expected, expected_mean, expected_rstd = layer_norm_gated_ref(
+        x, weight, bias, eps, z, 128, norm_before_gate, is_rms_norm
+    )
 
-    assert recorder.grids == [(min(vector_cores, (rows + 31) // 32),)]
-    rtol, atol = TOLERANCES[torch.bfloat16]
+    if rows_kind == "before":
+        assert recorder.grids == [((rows + 15) // 16, 1)]
+        assert recorder.launch_kwargs[-1]["BLOCK_M"] == 16
+        assert recorder.launch_kwargs[-1]["BLOCK_N"] == 128
+    else:
+        assert recorder.grids == [(min(vector_cores, (rows + 31) // 32),)]
+        assert recorder.launch_kwargs[-1]["BLOCK_M"] == 32
+        assert recorder.launch_kwargs[-1]["BLOCK_N"] == 128
+    rtol, atol = TOLERANCES[dtype]
     torch.testing.assert_close(actual.float().cpu(), expected.float(), rtol=rtol, atol=atol)
     torch.testing.assert_close(actual_rstd.cpu(), expected_rstd, rtol=rtol, atol=atol)
-    assert actual_mean is None
-    assert expected_mean is None
+    if is_rms_norm:
+        assert actual_mean is None
+        assert expected_mean is None
+    else:
+        torch.testing.assert_close(actual_mean.cpu(), expected_mean, rtol=rtol, atol=atol)
 
 
 @torch.inference_mode()

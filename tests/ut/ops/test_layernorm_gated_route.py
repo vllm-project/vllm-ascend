@@ -246,13 +246,12 @@ class WrapperRouteTests(unittest.TestCase):
 
             call(289)
             name, grid, args, kwargs = launches[-1]
-            self.assertEqual(name, "_layer_norm_fwd_persistent_kernel_npu")
-            self.assertEqual(grid, (10,))
-            self.assertEqual(len(args), 15)
-            self.assertEqual((args[13], args[14]), (10, 1))
-            self.assertEqual((kwargs["BLOCK_M"], kwargs["BLOCK_N"]), (32, 128))
-            self.assertEqual(launches[-1][3]["NORM_BEFORE_GATE"], True)
-            self.assertEqual(launches[-1][3]["IS_RMS_NORM"], False)
+            self.assertEqual(name, "_layer_norm_fwd_1pass_kernel_npu")
+            self.assertEqual(grid, (19, 1))
+            self.assertEqual(len(args), 13)
+            self.assertEqual((kwargs["BLOCK_M"], kwargs["BLOCK_N"]), (16, 128))
+            self.assertEqual(kwargs["NORM_BEFORE_GATE"], True)
+            self.assertEqual(kwargs["IS_RMS_NORM"], False)
 
             rms_result = call(
                 289,
@@ -262,7 +261,7 @@ class WrapperRouteTests(unittest.TestCase):
                 is_rms_norm=True,
             )
             name, grid, args, kwargs = launches[-1]
-            self.assertEqual(name, "_layer_norm_fwd_persistent_kernel_npu")
+            self.assertEqual(name, "_layer_norm_fwd_1pass_kernel_npu")
             self.assertIsNone(args[3])
             self.assertIsNotNone(args[4])
             self.assertIsNone(rms_result[1])
@@ -270,6 +269,19 @@ class WrapperRouteTests(unittest.TestCase):
             self.assertIs(rms_result[2], args[6])
             self.assertEqual(kwargs["NORM_BEFORE_GATE"], False)
             self.assertEqual(kwargs["IS_RMS_NORM"], True)
+
+            call(639)
+            self.assertEqual(launches[-1][0], "_layer_norm_fwd_1pass_kernel_npu")
+            self.assertEqual(launches[-1][1], (40, 1))
+            self.assertEqual(launches[-1][3]["BLOCK_M"], 16)
+
+            call(640)
+            name, grid, args, kwargs = launches[-1]
+            self.assertEqual(name, "_layer_norm_fwd_persistent_hoist_kernel_npu")
+            self.assertEqual(grid, (20,))
+            self.assertEqual(len(args), 14)
+            self.assertEqual(args[13], 20)
+            self.assertEqual(kwargs["BLOCK_M"], 32)
 
             call(20449)
             name, grid, args, kwargs = launches[-1]

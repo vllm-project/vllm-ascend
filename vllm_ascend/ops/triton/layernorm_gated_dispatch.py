@@ -2,84 +2,35 @@
 
 The selector deliberately knows nothing about torch, devices, or resource
 queries. The wrapper supplies the initialized vector-core count on NPU and
-``None`` for non-NPU tensors. Wide FT16 selection also receives the optional
+None for non-NPU tensors. Wide FT16 selection also receives the optional
 UB value from the existing initialized-properties getter.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Literal, NamedTuple
 
 
 class LaunchSpec(NamedTuple):
-    impl: Literal["FT_BASE", "FT_PERSIST", "FT_PERSIST_HOIST"]
+    impl: Literal["FT_BASE", "FT_PERSIST_HOIST"]
     block_m: int
 
 
-BM_PERSIST_SINGLE = 32
-# A tile wave is one BM32 tile per initialized vector core.
-HOIST_MIN_TILE_WAVES = 16
+BM_SMALL = 16
+BM_MULTI = 32
+BM_HOIST = 32
+HOIST_MIN_ROWS_PER_CORE = 16
 BM_FT16 = 16
 FT16_MAX_N_GROUP = 512
 FT16_MIN_UB_BYTES = 196_608
 
 
-@dataclass(frozen=True)
-class DispatchParams:
-    """M-axis routing policy for the per-group width ``N_group``.
-
-    ``bm_*`` are row-tile heights. ``k_persist_num/den`` is the minimum
-    BM32 tile count per vector core for persistent execution; ``None`` means
-    that a route has not been configured and is rejected if reached.
-    """
-
-    bm_small: int | None = None
-    bm_multi: int | None = None
-    k_persist_num: int | None = None
-    k_persist_den: int | None = None
-    n_persist_min: int = 1
-    hoist_qualified: bool = False
-    persist_single_qualified: bool = False
-
-
-DEFAULT_PARAMS = DispatchParams()
-
-
 class DispatchConfigError(ValueError):
-    """Raised when a selector input or policy is not materialized."""
+    """Raised when a selector input is invalid."""
 
 
 def _is_positive_exact_int(value) -> bool:
     return type(value) is int and value > 0
-
-
-def _ceil_div(value: int, divisor: int) -> int:
-    if not _is_positive_exact_int(value) or not _is_positive_exact_int(divisor):
-        raise DispatchConfigError("ceil-div inputs must be positive exact ints")
-    return (value + divisor - 1) // divisor
-
-
-def _need(value, name: str):
-    if value is None:
-        raise DispatchConfigError(f"{name} not materialized")
-    return value
-
-
-def validate_params(params) -> None:
-    if type(params) is not DispatchParams:
-        raise DispatchConfigError("params must be a DispatchParams instance")
-    for name in ("hoist_qualified", "persist_single_qualified"):
-        if type(getattr(params, name)) is not bool:
-            raise DispatchConfigError(f"{name} must be an exact bool")
-    if not _is_positive_exact_int(params.n_persist_min):
-        raise DispatchConfigError("n_persist_min must be a positive exact int")
-    for name in ("bm_small", "bm_multi", "k_persist_num", "k_persist_den"):
-        value = getattr(params, name)
-        if value is not None and not _is_positive_exact_int(value):
-            raise DispatchConfigError(f"{name} must be None or a positive exact int")
-    if params.hoist_qualified and not params.persist_single_qualified:
-        raise DispatchConfigError("hoist_qualified implies persist_single_qualified")
 
 
 def _validate_inputs(M, N_group, ngroups, runtime_p, ub_bytes) -> None:
@@ -97,52 +48,34 @@ def _select_layernorm_launch(
     N_group,
     ngroups,
     runtime_p,
-    params: DispatchParams = DEFAULT_PARAMS,
     *,
     ub_bytes: int | None = None,
 ) -> LaunchSpec:
-    """Select a qualified PR1 path, or retain the upstream BASE64 fallback.
+    """Select the qualified PR1 path, or retain the upstream BASE64 fallback.
 
-    A missing ``runtime_p`` selects the upstream BASE64 launch. NPU callers
+    A missing runtime_p selects the upstream BASE64 launch. NPU callers
     obtain it through the existing initialized-device-properties contract.
     Wide FT16 selection additionally requires a known UB value at or above
     the minimum qualified resource budget.
     """
-    validate_params(params)
     _validate_inputs(M, N_group, ngroups, runtime_p, ub_bytes)
     if runtime_p is None:
         return LaunchSpec("FT_BASE", 64)
 
     # FT16 is qualified only for the tested BN256/512 envelope. The wrapper
-    # supplies UB from the existing getter only for this per-group N domain.
+    # supplies UB from the existing initialized-properties getter only here.
     if N_group > 128:
         if N_group <= FT16_MAX_N_GROUP and ub_bytes is not None and ub_bytes >= FT16_MIN_UB_BYTES:
             return LaunchSpec("FT_BASE", BM_FT16)
         return LaunchSpec("FT_BASE", 64)
 
-    if N_group < _need(params.n_persist_min, "n_persist_min"):
-        return LaunchSpec("FT_BASE", _need(params.bm_small, "bm_small"))
+    if N_group < 128:
+        return LaunchSpec("FT_BASE", BM_SMALL)
 
-    bm_persist = BM_PERSIST_SINGLE if ngroups == 1 else _need(params.bm_multi, "bm_multi")
+    # Keep grouped N=128 execution on the qualified non-persistent BASE32 path.
+    if ngroups > 1:
+        return LaunchSpec("FT_BASE", BM_MULTI)
 
-    # The only qualified multi-group PR1 route is BASE32 at N_group=128.
-    if N_group == 128 and ngroups > 1:
-        return LaunchSpec("FT_BASE", bm_persist)
-
-    # A persistent launch is considered once its tile count reaches a
-    # calibrated fraction of the initialized vector-core count.
-    persist_tiles = _ceil_div(M, bm_persist) * ngroups
-    if (
-        persist_tiles * _need(params.k_persist_den, "k_persist_den")
-        < _need(params.k_persist_num, "k_persist_num") * runtime_p
-    ):
-        return LaunchSpec("FT_BASE", _need(params.bm_small, "bm_small"))
-
-    if ngroups == 1:
-        if params.hoist_qualified and persist_tiles >= HOIST_MIN_TILE_WAVES * runtime_p:
-            return LaunchSpec("FT_PERSIST_HOIST", BM_PERSIST_SINGLE)
-        if params.persist_single_qualified:
-            return LaunchSpec("FT_PERSIST", BM_PERSIST_SINGLE)
-        return LaunchSpec("FT_BASE", BM_PERSIST_SINGLE)
-
-    return LaunchSpec("FT_BASE", _need(params.bm_multi, "bm_multi"))
+    if HOIST_MIN_ROWS_PER_CORE * runtime_p <= M:
+        return LaunchSpec("FT_PERSIST_HOIST", BM_HOIST)
+    return LaunchSpec("FT_BASE", BM_SMALL)
