@@ -24,6 +24,62 @@ def _add_delta_bias(delta: torch.Tensor, delta_bias: torch.Tensor) -> torch.Tens
     return delta + delta_bias.reshape(shape)
 
 
+def _prepare_delta(
+    delta: torch.Tensor,
+    delta_bias: torch.Tensor | None,
+    delta_softplus: bool,
+) -> torch.Tensor:
+    if delta_bias is not None:
+        delta = _add_delta_bias(delta, delta_bias)
+    if delta_softplus:
+        delta = F.softplus(delta)
+    return delta
+
+
+def _scan_sequence(
+    u: torch.Tensor,
+    delta: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    D: torch.Tensor | None,
+    z: torch.Tensor | None,
+) -> torch.Tensor:
+    """Run selective scan for one sequence: inputs are ``(seqlen, dim/dstate)``."""
+    seqlen, dim = u.shape
+    dstate = A.shape[-1]
+
+    if seqlen == 0:
+        return u.new_empty((0, dim))
+
+    # Prefetch decay / input terms for the whole sequence to cut per-step work.
+    # dA: (L, dim, dstate), dBu: (L, dim, dstate)
+    dA = torch.exp(A.unsqueeze(0) * delta.unsqueeze(-1))
+    dBu = delta.unsqueeze(-1) * B.unsqueeze(1) * u.unsqueeze(-1)
+
+    # Decode (L==1) is the hot path for serving; keep it allocation-light.
+    if seqlen == 1:
+        h = dBu[0]
+        y = (C[0].unsqueeze(0) * h).sum(-1)
+        if D is not None:
+            y = y + D * u[0]
+        if z is not None:
+            y = y * torch.sigmoid(z[0])
+        return y.unsqueeze(0)
+
+    h = torch.zeros(dim, dstate, device=u.device, dtype=torch.float32)
+    ys = torch.empty(seqlen, dim, device=u.device, dtype=torch.float32)
+    for t in range(seqlen):
+        h = dA[t] * h + dBu[t]
+        y_t = (C[t].unsqueeze(0) * h).sum(-1)
+        if D is not None:
+            y_t = y_t + D * u[t]
+        if z is not None:
+            y_t = y_t * torch.sigmoid(z[t])
+        ys[t] = y_t
+    return ys
+
+
 def _selective_scan_impl(
     u: torch.Tensor,
     delta: torch.Tensor,
@@ -37,94 +93,76 @@ def _selective_scan_impl(
     query_start_loc: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Unified selective scan supporting both 3-D batch and 2-D varlen."""
+    delta = _prepare_delta(delta, delta_bias, delta_softplus)
+
+    u_f = u.float()
+    delta_f = delta.float()
+    A_f = A.float()
+    B_f = B.float()
+    C_f = C.float()
+    D_f = D.float() if D is not None else None
+    z_f = z.float() if z is not None else None
 
     if query_start_loc is not None:
-        # Packed varlen: (total_tokens, dim)
-        dim = u.shape[-1]
-        dstate = A.shape[-1]
-        num_seqs = query_start_loc.shape[0] - 1
-
-        if delta_bias is not None:
-            delta = _add_delta_bias(delta, delta_bias)
-        if delta_softplus:
-            delta = F.softplus(delta)
-
-        u_f = u.float()
-        delta_f = delta.float()
-        A_f = A.float()
-        B_f = B.float()
-        C_f = C.float()
-        D_f = D.float() if D is not None else None
-        z_f = z.float() if z is not None else None
-
-        out = torch.zeros_like(u_f)
-
-        for s in range(num_seqs):
-            start = int(query_start_loc[s].item())
-            end = int(query_start_loc[s + 1].item())
+        # Packed varlen: (total_tokens, dim). Pull offsets to host once to avoid
+        # per-sequence .item() syncs on the NPU hot path.
+        starts_ends = query_start_loc.detach().to("cpu").tolist()
+        out = torch.empty_like(u_f)
+        for s in range(len(starts_ends) - 1):
+            start = int(starts_ends[s])
+            end = int(starts_ends[s + 1])
             if end <= start:
                 continue
-
-            h = torch.zeros(dim, dstate, device=u.device, dtype=torch.float32)
-
-            for t in range(start, end):
-                dt = delta_f[t]  # (dim,)
-                ut = u_f[t]  # (dim,)
-                bt = B_f[t]  # (dstate,)
-                ct = C_f[t]  # (dstate,)
-
-                dA = torch.exp(A_f * dt.unsqueeze(-1))  # (dim, dstate)
-                h = dA * h + dt.unsqueeze(-1) * bt.unsqueeze(0) * ut.unsqueeze(-1)
-                y_t = (ct.unsqueeze(0) * h).sum(-1)
-
-                if D_f is not None:
-                    y_t = y_t + D_f * ut
-                if z_f is not None:
-                    y_t = y_t * F.sigmoid(z_f[t])
-
-                out[t] = y_t
-
+            out[start:end] = _scan_sequence(
+                u_f[start:end],
+                delta_f[start:end],
+                A_f,
+                B_f[start:end],
+                C_f[start:end],
+                D_f,
+                None if z_f is None else z_f[start:end],
+            )
         return out.to(u.dtype)
 
-    else:
-        # Batch mode: (batch, dim, seqlen)
-        batch, dim, seqlen = u.shape
-        dstate = A.shape[-1]
+    # Batch mode: (batch, dim, seqlen)
+    batch, dim, seqlen = u.shape
 
-        if delta_bias is not None:
-            delta = _add_delta_bias(delta, delta_bias)
-        if delta_softplus:
-            delta = F.softplus(delta)
+    if seqlen == 0:
+        return u.new_empty((batch, dim, 0))
 
-        u_f = u.float()
-        delta_f = delta.float()
-        A_f = A.float()
-        B_f = B.float()
-        C_f = C.float()
-        D_f = D.float() if D is not None else None
-        z_f = z.float() if z is not None else None
+    # (batch, L, dim/dstate) layout is friendlier for the shared sequence kernel.
+    u_bt = u_f.transpose(1, 2).contiguous()
+    delta_bt = delta_f.transpose(1, 2).contiguous()
+    B_bt = B_f.transpose(1, 2).contiguous()
+    C_bt = C_f.transpose(1, 2).contiguous()
+    z_bt = None if z_f is None else z_f.transpose(1, 2).contiguous()
 
-        h = torch.zeros(batch, dim, dstate, device=u.device, dtype=torch.float32)
-        out = torch.zeros(batch, dim, seqlen, device=u.device, dtype=torch.float32)
+    if seqlen == 1:
+        # h0 = 0 ⇒ first step is just dBu; skip dA materialization.
+        dt = delta_bt[:, 0]  # (batch, dim)
+        ut = u_bt[:, 0]
+        bt = B_bt[:, 0]
+        ct = C_bt[:, 0]
+        h = dt.unsqueeze(-1) * bt.unsqueeze(1) * ut.unsqueeze(-1)
+        y = (ct.unsqueeze(1) * h).sum(-1)
+        if D_f is not None:
+            y = y + D_f.unsqueeze(0) * ut
+        if z_bt is not None:
+            y = y * torch.sigmoid(z_bt[:, 0])
+        return y.unsqueeze(-1).to(u.dtype)
 
-        for t in range(seqlen):
-            dt = delta_f[:, :, t]  # (batch, dim)
-            ut = u_f[:, :, t]  # (batch, dim)
-            bt = B_f[:, :, t]  # (batch, dstate)
-            ct = C_f[:, :, t]  # (batch, dstate)
-
-            dA = torch.exp(A_f.view(1, -1, dstate) * dt.unsqueeze(-1))
-            h = dA * h + dt.unsqueeze(-1) * bt.unsqueeze(1) * ut.unsqueeze(-1)
-            y_t = (ct.unsqueeze(1) * h).sum(-1)
-
-            if D_f is not None:
-                y_t = y_t + D_f.unsqueeze(0) * ut
-            if z_f is not None:
-                y_t = y_t * F.sigmoid(z_f[:, :, t])
-
-            out[:, :, t] = y_t
-
-        return out.to(u.dtype)
+    out = torch.empty(batch, seqlen, dim, device=u.device, dtype=torch.float32)
+    for b in range(batch):
+        out[b] = _scan_sequence(
+            u_bt[b],
+            delta_bt[b],
+            A_f,
+            B_bt[b],
+            C_bt[b],
+            D_f,
+            None if z_bt is None else z_bt[b],
+        )
+    return out.transpose(1, 2).contiguous().to(u.dtype)
 
 
 def selective_scan_fn_npu(
@@ -139,21 +177,6 @@ def selective_scan_fn_npu(
     Uses ``*args, **kwargs`` for maximum compatibility with the upstream
     ``selective_scan_fn`` signature.
     """
-    # Canonical parameter names in positional order (matches upstream).
-    _names = (
-        "u",
-        "delta",
-        "A",
-        "B",
-        "C",
-        "D",
-        "z",
-        "delta_bias",
-        "delta_softplus",
-        "query_start_loc",
-        "cache_seqlens",
-        "head_dim",
-    )
 
     def _get(name: str, idx: int) -> object:
         if name in kwargs:
@@ -184,11 +207,13 @@ def selective_scan_fn_npu(
     A: torch.Tensor = _A
     B: torch.Tensor = _B
     C: torch.Tensor = _C
-    D: torch.Tensor | None = _D if isinstance(_D, torch.Tensor) else None  # type: ignore[assignment]
-    z: torch.Tensor | None = _z if isinstance(_z, torch.Tensor) else None  # type: ignore[assignment]
-    delta_bias: torch.Tensor | None = _delta_bias if isinstance(_delta_bias, torch.Tensor) else None  # type: ignore[assignment]
+    D: torch.Tensor | None = _D if isinstance(_D, torch.Tensor) else None
+    z: torch.Tensor | None = _z if isinstance(_z, torch.Tensor) else None
+    delta_bias: torch.Tensor | None = _delta_bias if isinstance(_delta_bias, torch.Tensor) else None
     delta_softplus: bool = bool(_delta_softplus)
-    query_start_loc: torch.Tensor | None = _query_start_loc if isinstance(_query_start_loc, torch.Tensor) else None  # type: ignore[assignment]
+    query_start_loc: torch.Tensor | None = (
+        _query_start_loc if isinstance(_query_start_loc, torch.Tensor) else None
+    )
 
     return _selective_scan_impl(
         u,
