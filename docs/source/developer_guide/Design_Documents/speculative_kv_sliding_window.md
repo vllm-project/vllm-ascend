@@ -8,9 +8,9 @@ draft, the mean acceptance length dropped from ~5 to ~1 at 32k context, making
 speculation a net loss.
 
 The KV sliding window caps the **draft model's attention** to the most recent
-`draft_window_size` tokens. The target model is untouched - it always attends
-to the full context, so generation quality is preserved; only the draft reads
-a shorter, in-distribution window. On acceptance-collapsed drafts this
+`draft_window_size` tokens. The target model is untouched by this setting, so
+generation quality is preserved; only the draft reads a shorter,
+in-distribution window. On acceptance-collapsed drafts this
 restores acceptance (the same GLM-5.2 draft recovered from ~1.0 to ~4.7-5.5
 at 32k, up to +381% end-to-end throughput in the original evaluation).
 
@@ -28,6 +28,15 @@ target's own layers, so windowing the draft would window the target); for a
 DSpark draft that was natively trained together with a DeepSeek-V4 target, a
 warning is logged because the draft is already long-context stable and
 windowing degrades acceptance.
+
+For Qwen3-based DSpark drafts, this setting also changes the draft attention
+layers' KV cache specs to sliding-window specs before cache groups are built.
+The scheduler can therefore replace logical blocks outside the window with
+the null block and return their physical blocks to the shared pool. This
+physical eviction is limited to the DSpark draft KV groups; target-model KV
+groups keep their original cache specs. Other draft families currently use
+the setting only to limit the KV range read by attention unless their native
+model already exposes a sliding-window cache spec.
 
 ## Window math
 
@@ -58,9 +67,12 @@ capped at the same `windowed_len`.
 
 Two invariants hold throughout:
 
-- **slot_mapping is never windowed.** Draft KV writes still go through the
-  full block table at absolute positions, so the cache stays coherent for the
-  target model and for window sizes changed between steps.
+- **slot_mapping never uses the cropped attention table.** Draft KV writes go
+  through the full *logical* block table at absolute positions. For Qwen3
+  DSpark physical eviction, old logical entries can be null blocks, while the
+  current tail always maps to live physical blocks. The configured window is
+  fixed for the lifetime of the service and cannot be enlarged mid-request to
+  recover already-evicted KV.
 - **Only what FIA reads is capped.** The FIA kernel's KV-length inputs are the
   NPU `seq_lens` tensor plus CPU mirrors (`seq_lens_cpu`, `_seq_lens_cpu`,
   `seq_lens_cpu_upper_bound`); all of them are windowed with the same
@@ -85,6 +97,16 @@ There are two apply points because of how the drafts construct metadata:
   building. The adapter is therefore applied **after** the per-group overwrite
   and before `builder.build_for_drafting`, so FIA reads the windowed clone of
   the per-group table instead of the full one.
+
+For Qwen3 DSpark, `AscendQwen3DSparkForCausalLM` additionally translates
+`draft_window_size` into the DFlash backbone's `use_swa` /
+`swa_window_size` configuration before its attention layers are constructed.
+Those layers consequently publish `SlidingWindowSpec` rather than
+`FullAttentionSpec`, which makes the engine-core `SlidingWindowManager`
+physically recycle blocks outside the committed-token window. Graph replay
+remains address-stable because the KV pool tensor and the adapter's cropped
+block-table buffer are persistent; only the block IDs copied into that buffer
+change between steps.
 
 ## MRV2 status
 
@@ -116,3 +138,4 @@ and the two invariants above carry over unchanged.
 
 - Shared window adapter: `vllm_ascend/spec_decode/utils.py`
 - MRV1 proposer (apply points, config validation): `vllm_ascend/spec_decode/llm_base_proposer.py`
+- Qwen3 DSpark physical KV eviction setup: `vllm_ascend/models/qwen3_dspark.py`
