@@ -290,7 +290,7 @@ class TestChunkFwdOVllm310:
         enable_custom_op()
         first = None
         for repeat in range(3):
-            actual = torch.ops._C_ascend.chunk_fwd_o(
+            actual = torch.ops._C_ascend.chunk_fwd_o_vllm(
                 qn, qn, vn, hn, 1.0 / dim, g=gn, cu_seqlens=cu,
                 chunk_indices=indices, chunk_size=CHUNK_SIZE,
                 transpose_state_layout=False,
