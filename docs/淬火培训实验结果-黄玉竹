@@ -1,0 +1,110 @@
+root@b596a8ff7ee3:/workspace/scripts# ll
+total 8
+drwxr-xr-x. 2 root root  62 Jul 22 05:05 ./
+drwxr-xr-x. 1 root root 102 Jul 22 05:00 ../
+-rw-r--r--. 1 root root 489 Jul 22 04:29 qwen2.5-omni-model.sh
+-rw-r--r--. 1 root root 336 Jul 22 04:16 test.sh
+root@b596a8ff7ee3:/workspace/scripts# bash test.sh 
+INFO 07-22 05:09:35 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 07-22 05:09:35 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 07-22 05:09:35 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 07-22 05:09:35 [__init__.py:239] Platform plugin ascend is activated
+INFO 07-22 05:09:43 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 07-22 05:09:43 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+usage: vllm [-h] [-v] {chat,complete,serve,launch,bench,collect-env,run-batch} ...
+vllm: error: unrecognized arguments:  
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+test.sh: line 4: --served-model-name: command not found
+root@b596a8ff7ee3:/workspace/scripts# vi test.sh 
+root@b596a8ff7ee3:/workspace/scripts# curl http://localhost:8000/v1/models
+{"object":"list","data":[{"id":"Qwen-Omni","object":"model","created":1784697257,"owned_by":"vllm","root":"/workspace/shared_assets/QuenchingAction/Infer/Model/models/Qwen2.5-Omni-7B/","parent":null,"max_model_len":32768,"permission":[{"id":"modelperm-b934f72357cd4cfd","object":"model_permission","created":1784697257,"allow_create_engine":false,"allow_sampling":true,"allow_logprobs":true,"allow_search_indices":false,"allow_view":true,"allow_fine_tuning":false,"organization":"*","group":null,"is_blocking":false}]}]}root@b596a8ff7ee3:/workspace/scripts# 
+root@b596a8ff7ee3:/workspace/scripts# 
+root@b596a8ff7ee3:/workspace/scripts# vi test.sh                            
+root@b596a8ff7ee3:/workspace/scripts# bash test.sh 
+INFO 07-22 05:15:10 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 07-22 05:15:10 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 07-22 05:15:10 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 07-22 05:15:10 [__init__.py:239] Platform plugin ascend is activated
+INFO 07-22 05:15:17 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 07-22 05:15:17 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+Namespace(subparser='bench', bench_type='serve', dispatch_function=<function BenchmarkServingSubcommand.cmd at 0xffff09b3ec00>, trust_remote_code=False, seed=0, num_prompts=80, dataset_name='random', no_stream=False, dataset_path=None, no_oversample=False, skip_chat_template=False, enable_multimodal_chat=False, disable_shuffle=False, custom_output_len=256, spec_bench_output_len=256, spec_bench_category=None, sonnet_input_len=550, sonnet_output_len=150, sonnet_prefix_len=200, sharegpt_output_len=None, blazedit_min_distance=0.0, blazedit_max_distance=1.0, asr_max_audio_len_sec=inf, asr_min_audio_len_sec=0.0, random_input_len=3500, random_output_len=1500, random_range_ratio=0.0, random_prefix_len=0, random_batch_size=1, no_reranker=False, random_mm_base_items_per_request=1, random_mm_num_mm_items_range_ratio=0.0, random_mm_limit_mm_per_prompt={'image': 255, 'video': 1}, random_mm_bucket_config={(256, 256, 1): 0.5, (720, 1280, 1): 0.5, (720, 1280, 16): 0.0}, hf_subset=None, hf_split=None, hf_name=None, hf_output_len=None, prefix_repetition_prefix_len=256, prefix_repetition_suffix_len=256, prefix_repetition_num_prefixes=10, prefix_repetition_output_len=128, label=None, backend='vllm', base_url=None, host='127.0.0.1', port=8000, endpoint='/v1/completions', header=None, max_concurrency=20, model='/workspace/shared_assets/QuenchingAction/Infer/Model/models/Qwen2.5-Omni-7B', input_len=None, output_len=None, tokenizer=None, tokenizer_mode='auto', use_beam_search=False, logprobs=None, request_rate=inf, burstiness=1.0, disable_tqdm=False, num_warmups=0, profile=False, save_result=True, save_detailed=False, append_result=False, metadata=None, result_dir='./', result_filename=None, ignore_eos=False, percentile_metrics=None, metric_percentiles='99', goodput=None, request_id_prefix='bench-044a3fd0-', top_p=None, top_k=None, min_p=None, temperature=None, frequency_penalty=None, presence_penalty=None, repetition_penalty=None, served_model_name='Qwen-Omni', lora_modules=None, ramp_up_strategy=None, ramp_up_start_rps=None, ramp_up_end_rps=None, ready_check_timeout_sec=0, extra_body=None, skip_tokenizer_init=False, insecure=False, plot_timeline=False, timeline_itl_thresholds=[25.0, 50.0], plot_dataset_stats=False)
+INFO 07-22 05:15:22 [datasets.py:631] Sampling input_len from [3500, 3500] and output_len from [1500, 1500]
+WARNING: vllm bench serve no longer sets temperature==0 (greedy) in requests by default. The default will be determined on the server side and can be model/API specific. For the old behavior, include --temperature=0.
+Starting initial single prompt test run...
+Skipping endpoint ready check.
+Starting main benchmark run...
+Traffic request rate: inf
+Burstiness factor: 1.0 (Poisson process)
+Maximum request concurrency: 20
+100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 80/80 [02:32<00:00,  1.91s/it]
+tip: install termplotlib and gnuplot to plot the metrics
+============ Serving Benchmark Result ============
+Successful requests:                     80        
+Failed requests:                         0         
+Maximum request concurrency:             20        
+Benchmark duration (s):                  152.68    
+Total input tokens:                      280000    
+Total generated tokens:                  120000    
+Request throughput (req/s):              0.52      
+Output token throughput (tok/s):         785.93    
+Peak output token throughput (tok/s):    940.00    
+Peak concurrent requests:                25.00     
+Total token throughput (tok/s):          2619.78   
+---------------Time to First Token----------------
+Mean TTFT (ms):                          1290.15   
+Median TTFT (ms):                        791.65    
+P99 TTFT (ms):                           5150.06   
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          24.55     
+Median TPOT (ms):                        24.80     
+P99 TPOT (ms):                           25.12     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           24.55     
+Median ITL (ms):                         22.19     
+P99 ITL (ms):                            155.17    
+==================================================
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+root@b596a8ff7ee3:/workspace/scripts# ll
+total 12
+drwxr-xr-x. 2 root root  136 Jul 22 05:17 ./
+drwxr-xr-x. 1 root root  102 Jul 22 05:00 ../
+-rw-r--r--. 1 root root  489 Jul 22 04:29 qwen2.5-omni-model.sh
+-rw-r--r--. 1 root root  333 Jul 22 05:14 test.sh
+-rw-r--r--. 1 root root 1132 Jul 22 05:17 vllm-infqps-concurrency20-Qwen2.5-Omni-7B-20260722-051758.json
+root@b596a8ff7ee3:/workspace/scripts# cat vllm-infqps-concurrency20-Qwen2.5-Omni-7B-20260722-051758.json 
+{"date": "20260722-051758", "endpoint_type": "vllm", "backend": "vllm", "label": null, "model_id": "/workspace/shared_assets/QuenchingAction/Infer/Model/models/Qwen2.5-Omni-7B", "tokenizer_id": "/workspace/shared_assets/QuenchingAction/Infer/Model/models/Qwen2.5-Omni-7B", "num_prompts": 80, "request_rate": "inf", "burstiness": 1.0, "max_concurrency": 20, "duration": 152.6848404998891, "completed": 80, "failed": 0, "total_input_tokens": 280000, "total_output_tokens": 120000, "request_throughput": 0.5239550942849373, "request_goodput": null, "output_throughput": 785.9326414274059, "total_token_throughput": 2619.775471424686, "max_output_tokens_per_s": 940.0, "max_concurrent_requests": 25, "rtfx": 0.0, "mean_ttft_ms": 1290.1461445115274, "median_ttft_ms": 791.6509850183502, "std_ttft_ms": 1184.863995417632, "p99_ttft_ms": 5150.0618473254135, "mean_tpot_ms": 24.55165786882617, "median_tpot_ms": 24.797767658424057, "std_tpot_ms": 0.6560193375929384, "p99_tpot_ms": 25.11616565259776, "mean_itl_ms": 24.551658025683974, "median_itl_ms": 22.186004905961454, "std_itl_ms": 17.540640993611284, "p99_it
+root@b596a8ff7ee3:/workspace/scripts# ll
+total 12
+drwxr-xr-x. 2 root root  136 Jul 22 05:17 ./
+drwxr-xr-x. 1 root root  102 Jul 22 05:00 ../
+-rw-r--r--. 1 root root  489 Jul 22 04:29 qwen2.5-omni-model.sh
+-rw-r--r--. 1 root root  333 Jul 22 05:14 test.sh
+-rw-r--r--. 1 root root 1132 Jul 22 05:17 vllm-infqps-concurrency20-Qwen2.5-Omni-7B-20260722-051758.json
+root@b596a8ff7ee3:/workspace/scripts# cat qwen2.5-omni-model.sh 
+export VLLM_USE_MODELSCOPE=True
+export MODEL_PATH="/workspace/shared_assets/QuenchingAction/Infer/Model/models/Qwen2.5-Omni-7B/"
+export LOCAL_MEDIA_PATH=$HOME/.cache/vllm/assets/vllm_public_assets/
+
+vllm serve "${MODEL_PATH}" \
+--host 0.0.0.0 \
+--port 8000 \
+--served-model-name Qwen-Omni \
+--allowed-local-media-path ${LOCAL_MEDIA_PATH} \
+--trust-remote-code \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--no-enable-prefix-caching \
+--safetensors-load-strategy eager
+root@b596a8ff7ee3:/workspace/scripts# cat test.sh 
+vllm bench serve \
+  --backend vllm \
+  --model /workspace/shared_assets/QuenchingAction/Infer/Model/models/Qwen2.5-Omni-7B \
+  --served-model-name Qwen-Omni \
+  --port 8000 \
+  --dataset-name random \
+  --random-input 3500 \
+  --random-output 1500 \
+  --max-concurrency 20 \
+  --num-prompts 80 \
+  --save-result \
+  --result-dir ./
+root@b596a8ff7ee3:/workspace/scripts# 
