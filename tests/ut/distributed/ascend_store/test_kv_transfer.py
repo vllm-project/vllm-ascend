@@ -498,6 +498,31 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                     self.assertEqual(len(saved), 6)
                     self.assertEqual(len(set(saved)), 6)
 
+    def test_handle_request_puts_missing_keys(self):
+        t, store = self._make_thread([1, 0, 1, 0])
+        t.token_database.prepare_values = MagicMock(wraps=t.token_database.prepare_values)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[0, 1, 2, 3],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+            current_event=None,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertEqual(len(store.put_calls), 1)
+        keys, addrs, sizes = store.put_calls[0]
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(addrs, [[1001], [1003]])
+        self.assertEqual(sizes, [[16], [16]])
+        t.token_database.prepare_values.assert_called_once_with(
+            [16, 48],
+            [32, 64],
+            [1, 3],
+            kv_cache_group_id=0,
+        )
+
     def test_handle_request_save_decisions(self):
         cases = [
             ([1, 0, 1, 0], "kv_producer", True, 1, 2),
@@ -542,6 +567,27 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 2)
         store.exists.assert_not_called()
+
+    def test_handle_request_starts_at_unsaved_watermark(self):
+        t, store = self._make_thread([0, 0])
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            save_start_token=32,
+            block_ids=[0, 1, 2, 3],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+            current_event=None,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        keys, addrs, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 2)
+        self.assertTrue(keys[0].endswith("@6832"))
+        self.assertTrue(keys[1].endswith("@6833"))
+        self.assertEqual(addrs, [[1002], [1003]])
 
     def test_handle_request_keeps_exists_check_for_kv_events(self):
         t, store = self._make_thread([1, 0], enable_kv_event=True)
@@ -663,6 +709,34 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 1)
+
+    def test_handle_request_skips_all_true_store_filter(self):
+        store = FakeStore([0, 0])
+        db = MaskedFakeTokenDatabase(masks=([True, True],))
+        db.process_token_key_strings_with_block_ids = MagicMock(wraps=db.process_token_key_strings_with_block_ids)
+        t = KVCacheStoreSendingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            put_step=1,
+            kv_role="kv_producer",
+            ready_event=threading.Event(),
+            group_uses_align_state=[False],
+        )
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        self.assertIsNone(db.process_token_key_strings_with_block_ids.call_args.kwargs["chunk_filter"])
 
     def test_handle_request_skips_compressed_hit_in_raw_token_domain(self):
         t, store = self._make_thread([0, 0], block_size=64)
@@ -802,6 +876,82 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         t._handle_request(req)
         keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
+
+    def test_handle_request_skips_all_true_load_filter(self):
+        store = FakeStore()
+        db = MaskedFakeTokenDatabase(masks=([True, True],))
+        db.process_token_key_strings_with_block_ids = MagicMock(wraps=db.process_token_key_strings_with_block_ids)
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True, token_len=32)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            load_spec=load_spec,
+        )
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        self.assertIsNone(db.process_token_key_strings_with_block_ids.call_args.kwargs["chunk_filter"])
+
+    def test_handle_request_batches_values_per_group_in_order(self):
+        store = FakeStore()
+        db = ChunkedTokenDatabase(
+            [KeyMetadata("m", 0, 0, 0, 0), KeyMetadata("m", 0, 0, 0, 0, kv_cache_group_id=1)],
+            [16, 32],
+            None,
+            hash_block_size=16,
+        )
+        db.set_group_buffers(
+            {0: [1000], 1: [2000]},
+            {0: [16], 1: [32]},
+            {0: [16], 1: [32]},
+            group_num_layers={0: 1, 1: 1},
+        )
+        db.prepare_values = MagicMock(wraps=db.prepare_values)
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=[16, 32],
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True, token_len=32)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids_by_group=[[1, 2], [3]],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            load_spec=load_spec,
+            kv_cache_group_ids=[0, 1],
+        )
+
+        t.request_queue.put(req)
+        t._handle_request(req)
+
+        keys, addrs, sizes = store.get_calls[0]
+        self.assertEqual(len(keys), 3)
+        self.assertEqual(addrs, [[1016], [1032], [2096]])
+        self.assertEqual(sizes, [[16], [16], [32]])
+        self.assertEqual(db.prepare_values.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["kv_cache_group_id"] for call in db.prepare_values.call_args_list],
+            [0, 1],
+        )
 
 
 class TestLayerBatchBuilder(unittest.TestCase):
