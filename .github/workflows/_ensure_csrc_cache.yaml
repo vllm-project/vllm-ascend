@@ -192,7 +192,7 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v2-ARM64-9.2.0_20260928212200-910b-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
+          key: vllm-ascend-build-v2-ARM64-9.1.0-910b-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
           lookup-only: 'true'
 
       - name: Look up csrc cache (a3-arm64-ubuntu)
@@ -205,7 +205,7 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v2-ARM64-9.2.0_20260928212200-a3-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
+          key: vllm-ascend-build-v2-ARM64-9.1.0-a3-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
           lookup-only: 'true'
 
       - name: Look up csrc cache (310p-arm64-ubuntu)
@@ -218,7 +218,7 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v2-ARM64-9.2.0_20260928212200-310p-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
+          key: vllm-ascend-build-v2-ARM64-9.1.0-310p-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
           lookup-only: 'true'
 
       - name: Look up csrc cache (a5-arm64-ubuntu)

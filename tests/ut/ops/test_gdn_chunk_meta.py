@@ -194,9 +194,10 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             raising=False,
         )
         monkeypatch.setattr(
-            chunk,
-            "fla_chunk_gated_delta_rule_fwd_h",
+            torch.ops._C_ascend,
+            "chunk_gated_delta_rule_fwd_h",
             lambda *args, **kwargs: (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state")),
+            raising=False,
         )
         monkeypatch.setattr(
             torch.ops._C_ascend,
@@ -277,8 +278,8 @@ def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolis
     monkeypatch.setattr(chunk, "solve_tril", lambda *args, **kwargs: _DummyTensor("A_solved"))
     monkeypatch.setattr(chunk, "recompute_w_u_fwd", lambda *args, **kwargs: (_DummyTensor("w"), _DummyTensor("u")))
     monkeypatch.setattr(
-        chunk,
-        "fla_chunk_gated_delta_rule_fwd_h",
+        torch.ops._C_ascend,
+        "chunk_gated_delta_rule_fwd_h",
         lambda *args, **kwargs: (
             captured.update(
                 {
@@ -288,6 +289,7 @@ def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolis
             )
             or (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state"))
         ),
+        raising=False,
     )
     monkeypatch.setattr(
         torch.ops._C_ascend,
@@ -381,9 +383,10 @@ def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
     monkeypatch.setattr(chunk, "solve_tril", lambda *a, **kw: _DummyTensor("A_solved"))
     monkeypatch.setattr(chunk, "recompute_w_u_fwd", lambda *a, **kw: (_DummyTensor("w"), _DummyTensor("u")))
     monkeypatch.setattr(
-        chunk,
-        "fla_chunk_gated_delta_rule_fwd_h",
+        torch.ops._C_ascend,
+        "chunk_gated_delta_rule_fwd_h",
         lambda *a, **kw: (_DummyTensor("h"), _DummyTensor("v_new"), rank0_fs),
+        raising=False,
     )
     monkeypatch.setattr(
         chunk,

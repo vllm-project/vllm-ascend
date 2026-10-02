@@ -398,7 +398,7 @@ def test_prepare_attn_propagates_actual_request_count_to_metadata_builder():
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
     return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
 )
-def test_mamba_cache_reshape_uses_page_strided_state_tensors(_mock_config):
+def test_mamba_cache_reshape_returns_contiguous_state_tensors(_mock_config):
     spec = _mamba_spec()
     kv_cache_config = _kv_cache_config(spec)
 
@@ -428,12 +428,10 @@ def test_mamba_cache_reshape_uses_page_strided_state_tensors(_mock_config):
     assert ssm_state.shape == (3, 2, 2)
     assert conv_state.dtype == torch.float16
     assert ssm_state.dtype == torch.float32
-    assert not conv_state.is_contiguous()
-    assert not ssm_state.is_contiguous()
-    assert conv_state.stride(0) * conv_state.element_size() == spec.page_size_bytes
-    assert ssm_state.stride(0) * ssm_state.element_size() == spec.page_size_bytes
+    assert conv_state.is_contiguous()
+    assert ssm_state.is_contiguous()
     assert conv_state.data_ptr() == raw_cache.data_ptr()
-    assert ssm_state.data_ptr() - raw_cache.data_ptr() == (conv_state[0].numel() * conv_state.element_size())
+    assert ssm_state.data_ptr() - raw_cache.data_ptr() == (conv_state.numel() * conv_state.element_size())
 
 
 @patch(
@@ -534,18 +532,14 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     conv_state, ssm_state = mamba_states
     assert conv_state.shape == (2, 2)
     assert ssm_state.shape == (2, 4)
-    assert not conv_state.is_contiguous()
-    assert not ssm_state.is_contiguous()
-    assert conv_state.stride(0) * conv_state.element_size() == mamba_spec.page_size_bytes
-    assert ssm_state.stride(0) * ssm_state.element_size() == mamba_spec.page_size_bytes
+    assert conv_state.is_contiguous()
+    assert ssm_state.is_contiguous()
     assert conv_state.data_ptr() == raw_cache.data_ptr()
-    assert ssm_state.data_ptr() - raw_cache.data_ptr() == (conv_state[0].numel() * conv_state.element_size())
-    assert key_cache.data_ptr() == raw_cache.data_ptr()
-    assert value_cache.data_ptr() - raw_cache.data_ptr() == 8
-    assert key_cache.stride(0) * key_cache.element_size() == attention_spec.page_size_bytes
-    assert value_cache.stride(0) * value_cache.element_size() == attention_spec.page_size_bytes
-    assert not key_cache.is_contiguous()
-    assert not value_cache.is_contiguous()
+    assert ssm_state.data_ptr() - raw_cache.data_ptr() == (conv_state.numel() * conv_state.element_size())
+    assert key_cache.data_ptr() == ssm_state.data_ptr()
+    assert value_cache.data_ptr() - raw_cache.data_ptr() == 24
+    assert key_cache.is_contiguous()
+    assert value_cache.is_contiguous()
     assert mtp_key_cache.shape == key_cache.shape
     assert mtp_value_cache.shape == value_cache.shape
     assert mtp_key_cache.data_ptr() - key_cache.data_ptr() == 40
@@ -795,21 +789,14 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
     ]
     raw_caches = _allocate_kv_cache(kv_cache_config, {}, torch.device("cpu"))
     caches = _reshape_kv_cache_v2(groups, raw_caches, "auto", [128] * len(groups), {}, kv_cache_config)
-
-    def group_by_logical_block(cache):
-        assert cache.shape[0] % num_blocks == 0
-        splits = cache.shape[0] // num_blocks
-        return cache.unflatten(0, (num_blocks, splits))
-
     # Group virtual kernel blocks back into scheduler blocks. The groups alias
     # one backing by design, but only the SAME scheduler block ID may overlap.
-    target_caches = [
-        group_by_logical_block(tensor) for name in ("target.full", "target.gdn") for tensor in caches[name]
-    ]
+    target_caches = [tensor.view(num_blocks, -1) for name in ("target.full", "target.gdn") for tensor in caches[name]]
     for name in ("draft.sliding", "draft.full"):
         for cache in caches[name]:
+            assert cache.is_contiguous()
             assert cache.shape[1] == 128
-            draft_cache = group_by_logical_block(cache)
+            draft_cache = cache.view(num_blocks, -1)
             for block_id in range(num_blocks):
                 raw_caches["target.full"].zero_()
                 before = [tensor.clone() for tensor in target_caches]

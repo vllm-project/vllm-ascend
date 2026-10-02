@@ -97,7 +97,7 @@ jobs:
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
     container:
-      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.group.image_tag }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -260,56 +260,6 @@ jobs:
             uv pip install -e . --no-build-isolation
           fi
 
-      - name: Install FLA NPU for selected tests
-        if: ${{ matrix.group.npu_type == 'a2' || matrix.group.npu_type == 'a3' || matrix.group.npu_type == 'a5' }}
-        env:
-          NPU_TYPE: ${{ matrix.group.npu_type }}
-          GIT_PROXY: https://gh-proxy.test.osinfra.cn/
-        run: |
-          set -euo pipefail
-          FLA_VERSION=26.9.1+deva4a7958
-          FLA_RELEASE_TAG=v26.9.1-beta2
-          case "$NPU_TYPE:$(uname -m)" in
-            a2:aarch64)
-              FLA_WHL="flash_linear_attention_npu_a2-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"
-              FLA_SHA256=7c3d3d07419a9cb1a17ca0d683d4d5de82d69c6523ada96396c9d6d0317e583a
-              ;;
-            a2:x86_64)
-              FLA_WHL="flash_linear_attention_npu_a2-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"
-              FLA_SHA256=c51b11871b5e8a66b6a0612ef95ea446fd96ba3d8d02b693d93a7b7b5f1b1d0f
-              ;;
-            a3:aarch64)
-              FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"
-              FLA_SHA256=6a6f298a23fbc4902e8379a469696bca1cce108db8159d9c5bf6dfe819a22d58
-              ;;
-            a3:x86_64)
-              FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"
-              FLA_SHA256=da53bc5cd19fc7968c38c3b2684910012243ee9c1ae20cbc86a9667626614ff9
-              ;;
-            a5:aarch64)
-              FLA_WHL="flash_linear_attention_npu_a5-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"
-              FLA_SHA256=014ccd0cce4f21f4b030341a42e6be3065c2e6a436e7595e629de9d5c0547c48
-              ;;
-            a5:x86_64)
-              FLA_WHL="flash_linear_attention_npu_a5-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"
-              FLA_SHA256=2f7eef7be3cafdda698f533063dea67bf581fd6837488304c0f5f1a5e67a2fd8
-              ;;
-            *)
-              echo "::error::Unsupported FLA NPU target: $NPU_TYPE:$(uname -m)"
-              exit 1
-              ;;
-          esac
-          FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}"
-          if [ -n "${GIT_PROXY:-}" ]; then
-            FLA_DOWNLOAD_URL="${GIT_PROXY}${FLA_DOWNLOAD_URL}"
-          fi
-          curl --fail --location --show-error --silent --retry 3 --retry-delay 5 --retry-all-errors \
-            "$FLA_DOWNLOAD_URL" -o "/tmp/$FLA_WHL"
-          echo "$FLA_SHA256  /tmp/$FLA_WHL" | sha256sum --check
-          uv pip install --no-deps "/tmp/$FLA_WHL"
-          python3 -c "import fla_npu.ops.ascendc"
-          rm -f "/tmp/$FLA_WHL"
-
       - name: Verify required AscendC custom ops are registered (310p)
         if: ${{ matrix.group.npu_type == '310p' }}
         run: |
@@ -331,22 +281,9 @@ jobs:
         env:
           SOC_VERSION: ascend910b1
           COMPILE_CUSTOM_KERNELS: 0
-          GIT_PROXY: https://gh-proxy.test.osinfra.cn/
         run: |
-          set -euo pipefail
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          FLA_WHL=flash_linear_attention_npu_a3-26.9.1+deva4a7958-py3-none-manylinux_2_34_x86_64.whl
-          FLA_SHA256=da53bc5cd19fc7968c38c3b2684910012243ee9c1ae20cbc86a9667626614ff9
-          FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-beta2/$FLA_WHL"
-          if [ -n "${GIT_PROXY:-}" ]; then
-            FLA_DOWNLOAD_URL="${GIT_PROXY}${FLA_DOWNLOAD_URL}"
-          fi
-          curl --fail --location --show-error --silent --retry 3 --retry-delay 5 --retry-all-errors \
-            "$FLA_DOWNLOAD_URL" -o "/tmp/$FLA_WHL"
-          echo "$FLA_SHA256  /tmp/$FLA_WHL" | sha256sum --check
-          uv pip install --no-deps "/tmp/$FLA_WHL"
-          rm -f "/tmp/$FLA_WHL"
           uv pip install -e .
 
       - name: Uninstall Triton for 310P tests
