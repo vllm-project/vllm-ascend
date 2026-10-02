@@ -200,10 +200,7 @@ class AscendMLADecodeMetadata:
 
 @dataclass
 class AscendMLAMetadata:
-    """Metadata for MLACommon.
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Runtime metadata shared by Ascend MLA prefill and decode paths."""
 
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
@@ -255,10 +252,7 @@ M = TypeVar("M", bound=AscendMLAMetadata)
 
 
 class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Build runtime metadata for Ascend multi-head latent attention."""
 
     decode_metadata_cls: type[AscendMLADecodeMetadata] = AscendMLADecodeMetadata
 
@@ -810,10 +804,7 @@ class PrefillMLAPreprocessResult(NamedTuple):
 
 
 class AscendMLAImpl(MLAAttentionImpl):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Ascend implementation of multi-head latent attention."""
 
     # ``W_UV``/``W_UK_T`` are injected during ``process_weights_after_loading``
     # through ``replace_parameter``, which is ``setattr``-based and therefore
