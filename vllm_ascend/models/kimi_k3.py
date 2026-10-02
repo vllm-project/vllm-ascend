@@ -84,7 +84,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import get_rotation_path
+from vllm_ascend.utils import get_rotation_path, vllm_version_is
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.kimi_k3.attention_residual import (  # type: ignore[import-untyped]
@@ -126,40 +126,98 @@ class AscendKimiRoutedOutputTransform(KimiRoutedOutputTransform):
         return super().forward(hidden_states)
 
 
-def _apply_ascend_attn_res(
-    prefix_sum: torch.Tensor,
-    block_residual: torch.Tensor,
-    proj: ReplicatedLinear,
-    norm: RMSNorm,
-    num_valid_blocks: int,
-) -> torch.Tensor:
-    """Apply Kimi's canonical learned residual mixture with native ops."""
-    if num_valid_blocks <= 0:
-        return prefix_sum
+if vllm_version_is("0.30.0"):
 
-    if apply_attn_res is not None and prefix_sum.device.type == "npu" and prefix_sum.numel() > 0:
-        return apply_attn_res(
-            prefix_sum,
-            block_residual,
-            proj,
-            norm,
-            num_valid_blocks,
+    def _apply_ascend_attn_res(
+        prefix_sum: torch.Tensor,
+        block_residual: torch.Tensor,
+        proj: ReplicatedLinear,
+        norm: RMSNorm,
+        num_valid_blocks: int,
+    ) -> torch.Tensor:
+        """Apply Kimi's canonical learned residual mixture with native ops."""
+        if num_valid_blocks <= 0:
+            return prefix_sum
+
+        if apply_attn_res is not None and prefix_sum.device.type == "npu" and prefix_sum.numel() > 0:
+            return apply_attn_res(
+                prefix_sum,
+                block_residual,
+                proj,
+                norm,
+                num_valid_blocks,
+            )
+
+        values = torch.cat(
+            (
+                block_residual[:, :num_valid_blocks, :],
+                prefix_sum.unsqueeze(1),
+            ),
+            dim=1,
         )
+        values_fp32 = values.float()
+        inverse_rms = torch.rsqrt(values_fp32.square().mean(-1, keepdim=True) + norm.variance_epsilon)
+        normalized_without_gamma = values_fp32 * inverse_rms
+        score_weight = norm.weight.float() * proj.weight.squeeze(0).float()
+        scores = (normalized_without_gamma * score_weight).sum(-1)
+        probabilities = scores.softmax(-1).unsqueeze(1)
+        return torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
 
-    values = torch.cat(
-        (
-            block_residual[:, :num_valid_blocks, :],
-            prefix_sum.unsqueeze(1),
-        ),
-        dim=1,
-    )
-    values_fp32 = values.float()
-    inverse_rms = torch.rsqrt(values_fp32.square().mean(-1, keepdim=True) + norm.variance_epsilon)
-    normalized_without_gamma = values_fp32 * inverse_rms
-    score_weight = norm.weight.float() * proj.weight.squeeze(0).float()
-    scores = (normalized_without_gamma * score_weight).sum(-1)
-    probabilities = scores.softmax(-1).unsqueeze(1)
-    return torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
+else:
+
+    def _apply_ascend_attn_res(
+        prefix_sum: torch.Tensor,
+        block_residual: torch.Tensor,
+        proj: ReplicatedLinear,
+        norm: RMSNorm,
+        num_valid_blocks: int,
+        *,
+        delta: torch.Tensor | None = None,
+        output_norm: RMSNorm | None = None,
+        block_write_idx: int = -1,
+    ) -> torch.Tensor:
+        """Apply Kimi's canonical learned residual mixture with native ops.
+
+        vLLM main (#50592/#50593) threads a `delta` into the prefix and fuses the
+        input norm (`output_norm`) and the block write (`block_write_idx`) into
+        the same call; the v0.30.0 release passes none of them.
+        """
+        if delta is not None:
+            # Mirror attn_res: accumulate the delta into the prefix stream in
+            # place so the caller's `prefix_sum` reflects it.
+            prefix_sum.add_(delta)
+        if block_write_idx >= 0:
+            block_residual[:, block_write_idx, :].copy_(prefix_sum)
+
+        if num_valid_blocks <= 0:
+            mixed = prefix_sum
+        elif apply_attn_res is not None and prefix_sum.device.type == "npu" and prefix_sum.numel() > 0:
+            mixed = apply_attn_res(
+                prefix_sum,
+                block_residual,
+                proj,
+                norm,
+                num_valid_blocks,
+            )
+        else:
+            values = torch.cat(
+                (
+                    block_residual[:, :num_valid_blocks, :],
+                    prefix_sum.unsqueeze(1),
+                ),
+                dim=1,
+            )
+            values_fp32 = values.float()
+            inverse_rms = torch.rsqrt(values_fp32.square().mean(-1, keepdim=True) + norm.variance_epsilon)
+            normalized_without_gamma = values_fp32 * inverse_rms
+            score_weight = norm.weight.float() * proj.weight.squeeze(0).float()
+            scores = (normalized_without_gamma * score_weight).sum(-1)
+            probabilities = scores.softmax(-1).unsqueeze(1)
+            mixed = torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
+
+        if output_norm is not None:
+            mixed = output_norm(mixed)
+        return mixed
 
 
 class AscendKimiMLP(KimiMLP):
@@ -576,50 +634,111 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         # Ascend attention returns its output instead of filling an AMD buffer.
         return self.self_attn(positions=positions, hidden_states=hidden_states)
 
-    def forward_attn_residual(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        block_residual: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run Kimi attention residuals with Ascend attention and MoE."""
-        prefix_sum: torch.Tensor | None = hidden_states
-        hidden_states = _apply_ascend_attn_res(
-            prefix_sum,
-            block_residual,
-            self.self_attention_res_proj,
-            self.self_attention_res_norm,
-            self.prev_valid_blocks,
-        )
-        if self.is_block_write_layer:
-            assert prefix_sum is not None
-            block_residual[:, self.block_write_idx, :].copy_(prefix_sum)
-            prefix_sum = None
+    if vllm_version_is("0.30.0"):
 
-        hidden_states = self.input_layernorm(hidden_states)
-        if self.use_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)
-            hidden_states = hidden_states[: positions.shape[0]]
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            positions=positions,
-        )
-        if self.use_sequence_parallel and not self.fuse_o_proj_mm_reduce_scatter:
-            hidden_states = sp_reduce_scatter(hidden_states)
+        def forward_attn_residual(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            block_residual: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            """Run Kimi attention residuals with Ascend attention and MoE."""
+            prefix_sum: torch.Tensor | None = hidden_states
+            hidden_states = _apply_ascend_attn_res(
+                prefix_sum,
+                block_residual,
+                self.self_attention_res_proj,
+                self.self_attention_res_norm,
+                self.prev_valid_blocks,
+            )
+            if self.is_block_write_layer:
+                assert prefix_sum is not None
+                block_residual[:, self.block_write_idx, :].copy_(prefix_sum)
+                prefix_sum = None
 
-        prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
-        mlp_valid_blocks = self.prev_valid_blocks + (1 if self.is_block_write_layer else 0)
-        hidden_states = _apply_ascend_attn_res(
-            prefix_sum,
-            block_residual,
-            self.mlp_res_proj,
-            self.mlp_res_norm,
-            mlp_valid_blocks,
-        )
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = prefix_sum + hidden_states
-        return hidden_states, block_residual
+            hidden_states = self.input_layernorm(hidden_states)
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)
+                hidden_states = hidden_states[: positions.shape[0]]
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                positions=positions,
+            )
+            if self.use_sequence_parallel and not self.fuse_o_proj_mm_reduce_scatter:
+                hidden_states = sp_reduce_scatter(hidden_states)
+
+            prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
+            mlp_valid_blocks = self.prev_valid_blocks + (1 if self.is_block_write_layer else 0)
+            hidden_states = _apply_ascend_attn_res(
+                prefix_sum,
+                block_residual,
+                self.mlp_res_proj,
+                self.mlp_res_norm,
+                mlp_valid_blocks,
+            )
+            hidden_states = self.post_attention_layernorm(hidden_states)
+            hidden_states = self.mlp(hidden_states)
+            hidden_states = prefix_sum + hidden_states
+            return hidden_states, block_residual
+
+    else:
+
+        def forward_attn_residual(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            block_residual: torch.Tensor,
+            prefix_delta: torch.Tensor | None,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            """Run Kimi attention residuals with Ascend attention and MoE.
+
+            Mirrors upstream vLLM main (#50592/#50593): `prefix_delta` is folded
+            into the prefix stream before each attn-res mixture, the input and
+            post-attention norms are fused into the mixture via `output_norm`,
+            and the layer returns ``(prefix_sum, block_residual, hidden_states)``.
+            """
+            prefix_sum: torch.Tensor | None = hidden_states
+            hidden_states = _apply_ascend_attn_res(
+                prefix_sum,
+                block_residual,
+                self.self_attention_res_proj,
+                self.self_attention_res_norm,
+                self.prev_valid_blocks,
+                delta=prefix_delta,
+                output_norm=self.input_layernorm,
+                block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
+            )
+            if self.is_block_write_layer:
+                prefix_sum = None
+
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)
+                hidden_states = hidden_states[: positions.shape[0]]
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                positions=positions,
+            )
+            if self.use_sequence_parallel:
+                hidden_states = sp_reduce_scatter(hidden_states)
+
+            if prefix_sum is None:
+                prefix_sum = hidden_states
+                prefix_delta = None
+            else:
+                prefix_delta = hidden_states
+
+            mlp_valid_blocks = self.prev_valid_blocks + (1 if self.is_block_write_layer else 0)
+            hidden_states = _apply_ascend_attn_res(
+                prefix_sum,
+                block_residual,
+                self.mlp_res_proj,
+                self.mlp_res_norm,
+                mlp_valid_blocks,
+                delta=prefix_delta,
+                output_norm=self.post_attention_layernorm,
+            )
+            hidden_states = self.mlp(hidden_states)
+            return prefix_sum, block_residual, hidden_states
 
 
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
@@ -784,49 +903,99 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
 
-        for layer_idx, layer in enumerate(
-            self.layers[self.start_layer : self.end_layer],
-            start=self.start_layer,
-        ):
-            if self.dspark_aux_capture_materialized and layer_idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(
-                    _apply_ascend_attn_res(
+        if vllm_version_is("0.30.0"):
+            for layer_idx, layer in enumerate(
+                self.layers[self.start_layer : self.end_layer],
+                start=self.start_layer,
+            ):
+                if self.dspark_aux_capture_materialized and layer_idx in self.aux_hidden_state_layers:
+                    aux_hidden_states.append(
+                        _apply_ascend_attn_res(
+                            hidden_states,
+                            residual,
+                            layer.self_attention_res_proj,
+                            layer.self_attention_res_norm,
+                            layer.prev_valid_blocks,
+                        )
+                    )
+                hidden_states, residual = layer(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                )
+                if not self.dspark_aux_capture_materialized and (layer_idx + 1) in self.aux_hidden_state_layers:
+                    self._maybe_add_hidden_state(
+                        aux_hidden_states,
+                        layer_idx + 1,
                         hidden_states,
                         residual,
-                        layer.self_attention_res_proj,
-                        layer.self_attention_res_norm,
-                        layer.prev_valid_blocks,
                     )
-                )
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-            )
-            if not self.dspark_aux_capture_materialized and (layer_idx + 1) in self.aux_hidden_state_layers:
-                self._maybe_add_hidden_state(
-                    aux_hidden_states,
-                    layer_idx + 1,
-                    hidden_states,
-                    residual,
+
+            if not get_pp_group().is_last_rank:
+                assert not self.use_sequence_parallel, "Sequence parallelism is not supported with pipeline parallelism"
+                return IntermediateTensors(
+                    {
+                        "hidden_states": hidden_states,
+                        "residual": residual,
+                    }
                 )
 
-        if not get_pp_group().is_last_rank:
-            assert not self.use_sequence_parallel, "Sequence parallelism is not supported with pipeline parallelism"
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                    "residual": residual,
-                }
+            hidden_states = _apply_ascend_attn_res(
+                hidden_states,
+                residual,
+                self.output_attn_res_proj,
+                self.output_attn_res_norm,
+                attn_res_block_num,
             )
+        else:
+            prefix_delta: torch.Tensor | None = None
+            for layer_idx, layer in enumerate(
+                self.layers[self.start_layer : self.end_layer],
+                start=self.start_layer,
+            ):
+                if self.dspark_aux_capture_materialized and layer_idx in self.aux_hidden_state_layers:
+                    aux_hidden_states.append(
+                        _apply_ascend_attn_res(
+                            hidden_states + prefix_delta if prefix_delta is not None else hidden_states,
+                            residual,
+                            layer.self_attention_res_proj,
+                            layer.self_attention_res_norm,
+                            layer.prev_valid_blocks,
+                        )
+                    )
+                hidden_states, residual, prefix_delta = layer(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                    prefix_delta=prefix_delta,
+                )
+                if not self.dspark_aux_capture_materialized and (layer_idx + 1) in self.aux_hidden_state_layers:
+                    self._maybe_add_hidden_state(
+                        aux_hidden_states,
+                        layer_idx + 1,
+                        hidden_states + prefix_delta if prefix_delta is not None else hidden_states,
+                        residual,
+                    )
 
-        hidden_states = _apply_ascend_attn_res(
-            hidden_states,
-            residual,
-            self.output_attn_res_proj,
-            self.output_attn_res_norm,
-            attn_res_block_num,
-        )
+            if not get_pp_group().is_last_rank:
+                assert not self.use_sequence_parallel, "Sequence parallelism is not supported with pipeline parallelism"
+                if prefix_delta is not None:
+                    hidden_states = hidden_states + prefix_delta
+                return IntermediateTensors(
+                    {
+                        "hidden_states": hidden_states,
+                        "residual": residual,
+                    }
+                )
+
+            hidden_states = _apply_ascend_attn_res(
+                hidden_states,
+                residual,
+                self.output_attn_res_proj,
+                self.output_attn_res_norm,
+                attn_res_block_num,
+                delta=prefix_delta,
+            )
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
