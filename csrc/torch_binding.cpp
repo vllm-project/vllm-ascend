@@ -607,7 +607,10 @@ void transpose_kv_cache_by_block(
                         "KV caches must be contiguous within each block");
             denseStride *= cache.size(dim);
         }
-        TORCH_CHECK(cache.stride(0) >= denseStride, "KV cache blocks must not overlap");
+        TORCH_CHECK(cache.size(0) <= 1 || cache.stride(0) >= denseStride,
+                    "KV cache blocks must not overlap");
+        TORCH_CHECK(cache.size(0) > 0 || blockIDs.numel() == 0,
+                    "Nonempty blockIDs require nonempty KV caches");
     };
     for (int64_t layer = 0; layer < layerNum; ++layer) {
         checkCache(kCache[layer]);
@@ -622,12 +625,17 @@ void transpose_kv_cache_by_block(
     // ACLNN tiling does not reliably expose dynamic-input strides. Pass the
     // physical strides explicitly, without copying or replacing the caches.
     // Consecutive layers with the same K/V strides retain one fused launch.
+    auto getBlockStride = [&](const at::Tensor &cache) -> int64_t {
+        // A singleton block axis never advances, so its stride is arbitrary.
+        // Normalize it for both layer grouping and the tiling overlap check.
+        return cache.size(0) > 1 ? cache.stride(0) : blockSize * headNum * headDim;
+    };
     for (int64_t begin = 0; begin < layerNum;) {
-        int64_t kBlockStride = kCache[begin].stride(0);
-        int64_t vBlockStride = vCache[begin].stride(0);
+        int64_t kBlockStride = getBlockStride(kCache[begin]);
+        int64_t vBlockStride = getBlockStride(vCache[begin]);
         int64_t end = begin + 1;
-        while (end < layerNum && kCache[end].stride(0) == kBlockStride &&
-               vCache[end].stride(0) == vBlockStride) {
+        while (end < layerNum && getBlockStride(kCache[end]) == kBlockStride &&
+               getBlockStride(vCache[end]) == vBlockStride) {
             ++end;
         }
         int64_t groupLayers = end - begin;
