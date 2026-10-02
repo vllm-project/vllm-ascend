@@ -77,6 +77,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Ernie4.5-Moe                  | 🔵        |                                                                      | A2/A3 |
 | Gemma-2                       | 🔵        |                                                                      | A2/A3 |
 | Gemma-3                       | 🔵        |                                                                      | A2/A3 |
+| HRM-Text-1B                   | 🔵        | BF16 PrefixLM; set `max-num-batched-tokens=4096`                     | A2    |
 | Phi-3/4                       | 🔵        |                                                                      | A2/A3 |
 | Mistral/Mistral-Instruct      | 🔵        |                                                                      | A2/A3 |
 | Hy3-preview                   | 🔵        |                                                                      | A3    |
