@@ -408,6 +408,16 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         # The mm_hash not in cache or the req_id set is empty
         if not self.cached.get(mm_hash, None):
             return
+        # `cached` counts referencing requests, not positions, so one request
+        # that repeats an item (an image carried across conversation turns) has
+        # a single reference covering every occurrence. Hold it until the last
+        # occurrence is freed: dropping it at the first makes the entry
+        # evictable while the request still needs it, and the encoder then
+        # recomputes an item it already has.
+        if any(
+            request.mm_features[other_id].identifier == mm_hash for other_id in self.request_cached_ids.get(req_id, ())
+        ):
+            return
         self.cached[mm_hash].discard(req_id)
         if self.cached[mm_hash]:
             return
