@@ -118,6 +118,81 @@ class TestTransposeKvCacheByBlock(unittest.TestCase):
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()
 
+    def test_block_strides_preserve_storage(self):
+        # Cover full-load and split-block kernels, including a split tail.
+        for dtype in (torch.float16, torch.bfloat16):
+            for block_size, num_heads in ((16, 4), (128, 8), (127, 8)):
+                for layouts in ((1, 1), (2, 2), (3, 3), (1, 2, 3)):
+                    with self.subTest(dtype=dtype, block_size=block_size, num_heads=num_heads, layouts=layouts):
+                        block_num, head_dim, split_num = 5, 128, 2
+                        block_ids = [4, 1]
+                        k_caches, v_caches, backings, expected_backings = [], [], [], []
+                        expected_k, expected_v = [], []
+                        for stride_factor in layouts:
+                            # Guard blocks on both ends also exercise nonzero storage_offset.
+                            if stride_factor == 2:
+                                backing = torch.randn(
+                                    block_num + 2, 2, block_size, num_heads, head_dim, dtype=dtype, device="npu"
+                                )
+                                expected = backing.cpu()
+                                backings.append(backing)
+                                expected_backings.append(expected)
+                                k_caches.append(backing[1:-1, 0])
+                                v_caches.append(backing[1:-1, 1])
+                                expected_k.append(expected[1:-1, 0])
+                                expected_v.append(expected[1:-1, 1])
+                            else:
+                                # K/V may have different physical strides; gaps must stay untouched.
+                                for caches, expected_caches, factor in (
+                                    (k_caches, expected_k, stride_factor),
+                                    (v_caches, expected_v, 1 if stride_factor == 1 else 4),
+                                ):
+                                    backing = torch.randn(
+                                        block_num + 2, factor, block_size, num_heads, head_dim, dtype=dtype, device="npu"
+                                    )
+                                    expected = backing.cpu()
+                                    backings.append(backing)
+                                    expected_backings.append(expected)
+                                    caches.append(backing[1:-1, factor - 1])
+                                    expected_caches.append(expected[1:-1, factor - 1])
+
+                        for cache in expected_k + expected_v:
+                            for block_id in block_ids:
+                                selected = cache[block_id].clone()
+                                cache[block_id].copy_(
+                                    selected.reshape(split_num, block_size, -1).transpose(0, 1).reshape_as(selected)
+                                )
+                        views = k_caches + v_caches
+                        metadata = [(cache.data_ptr(), cache.stride(), cache.storage_offset()) for cache in views]
+                        ids = torch.tensor(block_ids, dtype=torch.int64, device="npu")
+                        torch.ops._C_ascend.transpose_kv_cache_by_block(
+                            k_caches, v_caches, ids, block_size, num_heads, head_dim, split_num, len(layouts)
+                        )
+                        torch.npu.synchronize()
+
+                        # Compare whole allocations, including other K/V views, gaps and guard blocks.
+                        for actual, expected in zip(backings, expected_backings):
+                            torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+                        self.assertEqual(
+                            metadata, [(cache.data_ptr(), cache.stride(), cache.storage_offset()) for cache in views]
+                        )
+
+    def test_rejects_noncontiguous_block_payload(self):
+        backing = torch.randn(3, 16, 4, 256, dtype=torch.float16, device="npu")
+        cache = backing[..., ::2]
+        before = backing.cpu()
+        ids = torch.tensor([1], dtype=torch.int64, device="npu")
+        with self.assertRaisesRegex(RuntimeError, "contiguous within each block"):
+            torch.ops._C_ascend.transpose_kv_cache_by_block([cache], [cache], ids, 16, 4, 128, 2, 1)
+        torch.testing.assert_close(backing.cpu(), before, rtol=0, atol=0)
+
+    def test_empty_block_ids_preserve_cache(self):
+        backing = torch.randn(3, 2, 16, 4, 128, dtype=torch.float16, device="npu")
+        before = backing.cpu()
+        ids = torch.empty(0, dtype=torch.int64, device="npu")
+        torch.ops._C_ascend.transpose_kv_cache_by_block([backing[:, 0]], [backing[:, 1]], ids, 16, 4, 128, 2, 1)
+        torch.testing.assert_close(backing.cpu(), before, rtol=0, atol=0)
+
     def assert_tensors_almost_equal(self, actual, expected, dtype):
         """Check if two tensors are approximately equal (considering floating point errors)"""
         self.assertEqual(actual.shape, expected.shape, "Shape mismatch")
