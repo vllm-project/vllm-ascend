@@ -347,6 +347,21 @@ class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class AscendSpecDecodeDraftSlidingWindowSpec(SlidingWindowSpec):
+    """A spec-decode draft's own sliding-window cache beside a pooled layout.
+
+    Draft blocks never join prefix hashing (mirroring the GLM-Next kpool
+    tail's exclusion): a small draft block size must not drag the engine's
+    ``cache_config.block_size`` below the platform-aligned target blocks
+    through the engine core's ``min(participating)`` recomputation.
+    """
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
 def register_ascend_kv_cache_specs() -> None:
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 
