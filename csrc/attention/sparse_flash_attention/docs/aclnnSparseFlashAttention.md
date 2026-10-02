@@ -346,7 +346,8 @@ aclnnStatus aclnnSparseFlashAttention(
       <td>
           <ul>
                 <li>True表示返回，False表示不返回；默认值为False。</li>
-                <li>该参数仅在训练且layout_kv不为PA_BSND场景支持。</li>
+                <li>支持推理的PA_BSND场景；DCP decode使用softmax_max + log(softmax_sum)合并各rank的局部注意力结果。</li>
+                <li>A2/A3的TND、PA_BSND、sparse_mode=0、sparse_block_size=1场景下，某行无有效稀疏索引时，attention输出和softmax_sum为0，重构的LSE为负无穷。</li>
           </ul>
       </td>
       <td>BOOL</td>
@@ -501,7 +502,8 @@ aclnnStatus aclnnSparseFlashAttention(
 - 该接口支持推理场景下使用。
 - N1支持1~64和128。
 - block_size为一个block的token数，block_size取值为16的倍数，且最大支持1024。
-- 参数query中的D和key、value的D值相等为512，参数query_rope中的Dr和key_rope的Dr值相等为64。
+- 参数query中的D和key、value的D值相等为512。使用RoPE时，query_rope与key_rope的Dr相等且为64。
+- Atlas A2/A3支持NoPE：query_rope和key_rope同时省略，Dr为0。Ascend 950要求传入Dr为64的RoPE。
 - 参数query、key、value的数据类型必须保持一致。
 - 支持sparse_block_size整除block_size。
     - <term>Ascend 950PR&950DT 系列产品</term>：
