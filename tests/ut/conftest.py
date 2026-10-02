@@ -148,6 +148,9 @@ if not _npu_available:
     torch.npu.current_stream = MagicMock(return_value=_default_npu_stream)
     torch.npu.set_device = MagicMock()
     torch.npu.set_stream = MagicMock()
+    # Eager-mode default: auto-generated MagicMock attributes are truthy,
+    # which would make every is_current_stream_capturing() probe "capturing".
+    torch.npu.is_current_stream_capturing = MagicMock(return_value=False)
     torch.npu.synchronize = MagicMock()
     # Use "cpu" so torch.empty / Tensor.new_empty(device=...) work on CPU runners.
     # Returning an int (e.g. 0) is treated as a CUDA/NPU ordinal and breaks tensor alloc.
@@ -288,20 +291,26 @@ def _clear_enable_sp_before_test():
 @pytest.fixture(autouse=True)
 def _reset_stream_globals_before_test():
     """Avoid cross-test leakage from utils.current_stream() caching."""
+    import vllm_ascend.attention.dsa_v1 as dsa_v1_mod
     import vllm_ascend.ops.fused_moe.moe_utils as moe_utils_mod
     import vllm_ascend.utils as utils_mod
+    from vllm_ascend.overlap.streams import reset_stream_registry
 
-    utils_mod._CURRENT_STREAM = None
-    utils_mod._GLOBAL_STREAM = None
-    if hasattr(utils_mod, "_SHARED_EXPERTS_CALCULATION_STREAM"):
-        utils_mod._SHARED_EXPERTS_CALCULATION_STREAM = None
-    moe_utils_mod.COMM_STREAM = None
+    def reset() -> None:
+        # Accessors cache into module globals; the registry caches underneath
+        # them, so all compatibility layers must be reset together.
+        reset_stream_registry()
+        utils_mod._CURRENT_STREAM = None
+        utils_mod._GLOBAL_STREAM = None
+        if hasattr(utils_mod, "_SHARED_EXPERTS_CALCULATION_STREAM"):
+            utils_mod._SHARED_EXPERTS_CALCULATION_STREAM = None
+        utils_mod._CP_CHUNKEDPREFILL_COMM_STREAM = None
+        dsa_v1_mod._DSV4_DSA_OVERLAP_STREAM = None
+        moe_utils_mod.COMM_STREAM = None
+
+    reset()
     yield
-    utils_mod._CURRENT_STREAM = None
-    utils_mod._GLOBAL_STREAM = None
-    if hasattr(utils_mod, "_SHARED_EXPERTS_CALCULATION_STREAM"):
-        utils_mod._SHARED_EXPERTS_CALCULATION_STREAM = None
-    moe_utils_mod.COMM_STREAM = None
+    reset()
 
 
 @pytest.fixture(autouse=True)
