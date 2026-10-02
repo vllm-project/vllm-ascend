@@ -16,14 +16,14 @@ def run_forward(rows, state="decode", ranks=8, cache_supported=True, has_indexer
     source = ROOT / "vllm_ascend/attention/sfa_v1.py"
     tree = ast.parse(source.read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendSFAImpl")
-    methods = [
+    methods: list[ast.stmt] = [
         n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in ("forward", "indexer_select_pre_process")
     ]
     events = []
     slots = torch.arange(rows, dtype=torch.int64) + 3
     keys = torch.arange(rows * 128, dtype=torch.int64).remainder(127).to(torch.int8).view(rows, 128)
     scales = torch.full((rows,), 1.0006, dtype=torch.float32)
-    cache = (
+    cache: tuple[torch.Tensor, ...] = (
         torch.zeros(32, 2),
         torch.zeros(32, 2),
         torch.zeros(32, 128, dtype=torch.int8),
