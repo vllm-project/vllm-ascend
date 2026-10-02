@@ -26,6 +26,7 @@ from types import NoneType
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
@@ -1250,7 +1251,36 @@ class NPUWorker(WorkerBase):
             self.parallel_config.decode_context_parallel_size,
         )
         init_ascend_model_parallel(self.parallel_config)
+        self._warmup_pipeline_parallel_p2p()
         ensure_ec_transfer_initialized(self.vllm_config)
+
+    def _warmup_pipeline_parallel_p2p(self) -> None:
+        """Initialize adjacent PP HCCL links before Mooncake/HIXL is created."""
+        pp = get_pp_group()
+        if pp.world_size == 1:
+            return
+
+        probe = torch.ones(1, dtype=torch.float32, device="npu")
+        logger.info(
+            "PP HCCL warmup before Mooncake: ranks=%s local_pp_rank=%s",
+            pp.ranks,
+            pp.rank_in_group,
+        )
+        # Initialize one adjacent pair at a time: HCCL may block while creating
+        # the communicator even for isend/irecv. The CPU barrier prevents an
+        # uninvolved rank from initializing a later pair or Mooncake too early.
+        for src_stage in range(pp.world_size - 1):
+            work = None
+            if pp.rank_in_group == src_stage:
+                work = dist.isend(probe, dst=pp.ranks[src_stage + 1], group=pp.device_group)
+            elif pp.rank_in_group == src_stage + 1:
+                work = dist.irecv(probe, src=pp.ranks[src_stage], group=pp.device_group)
+            if work is not None:
+                work.wait()
+                torch.npu.synchronize()
+            dist.barrier(group=pp.cpu_group)
+
+        logger.info("PP HCCL warmup completed: ranks=%s", pp.ranks)
 
     def get_supported_pooling_tasks(self):
         return self.model_runner.get_supported_pooling_tasks()
