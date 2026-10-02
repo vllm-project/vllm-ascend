@@ -296,12 +296,17 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
 
     uint32_t n2 = info.K;
     uint32_t k2 = info.N / 2;
+    // The C workspace is shared by GMM1 (writes N cols/row) and GMM2 (writes K cols/row),
+    // so its row stride must be max(N, K); the A workspace is shared by x (K/row) and
+    // the permuted intermediate (N/2 per row).
+    uint32_t cRowWidth = std::max(info.N, info.K);
+    uint32_t aRowWidth = std::max(info.K, k2);
 
     uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK *sizeof(int32_t) +
                             info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 2 +
                             info.maxOutputSize * sizeof(float) * 2 +
-                            info.maxOutputSize * n2 * sizeof(int16_t) +
-                            info.maxOutputSize * info.K * sizeof(int8_t) +
+                            info.maxOutputSize * cRowWidth * sizeof(int16_t) +
+                            info.maxOutputSize * aRowWidth * sizeof(int8_t) +
                             info.worldSize  * sizeof(int32_t) * 16 +
                             (info.expertPerRank + info.worldSize) * sizeof(int32_t) * 16;
 
