@@ -140,6 +140,7 @@ public:
         uint32_t epilogueGranularity;
         optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData;
         float swigluLimit;
+        float swigluAlpha;
         //--------------
 
         // Methods
@@ -164,7 +165,8 @@ public:
             GM_ADDR ptrWorkspace_, GM_ADDR gmExpertTokenNums_, int32_t ubMoveNum_,
             GM_ADDR ptrXActiveMask_,
             optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_,
-            float swigluLimit_
+            float swigluLimit_,
+            float swigluAlpha_
         ) : problemShape(problemShape_),
             EP(EP_), listLen(listLen_), expertPerRank(expertPerRank_), maxOutputSize(maxOutputSize_),
             rank(rank_), rankSize(rankSize_), topK(topK_),
@@ -182,7 +184,8 @@ public:
             ptrWorkspace(ptrWorkspace_), ptrExpertTokenNums(gmExpertTokenNums_), ubMoveNum(ubMoveNum_),
             ptrXActiveMask(ptrXActiveMask_),
             moeInitRoutingQuantV2TilingData(moeInitRoutingQuantV2TilingData_),
-            swigluLimit(swigluLimit_)
+            swigluLimit(swigluLimit_),
+            swigluAlpha(swigluAlpha_)
         {
         }
     };
@@ -928,7 +931,7 @@ private:
             int64_t gmOffsetC = layoutC.GetOffset(offsetC);
             int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
             blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD],
-                gmPerTokenScale2[rowStartThisCore], resource, params.epilogueCoreNum, params.swigluLimit, params.problemShape.k());
+                gmPerTokenScale2[rowStartThisCore], resource, params.epilogueCoreNum, params.swigluLimit, params.swigluAlpha, params.problemShape.k());
         }
         AscendC::SyncAll<true>();
         // Synchronization signal: SwiGLU notifies GMM2 [1]
@@ -947,7 +950,7 @@ private:
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
                 blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD],
-                    gmPerTokenScale2[rowStartThisCore], resource, coreNum, params.swigluLimit, params.problemShape.k());
+                    gmPerTokenScale2[rowStartThisCore], resource, coreNum, params.swigluLimit, params.swigluAlpha, params.problemShape.k());
             }
             AscendC::SyncAll<true>();
             // Synchronization signal: SwiGLU notifies GMM2 [2]

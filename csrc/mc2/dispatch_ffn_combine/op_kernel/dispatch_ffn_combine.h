@@ -104,6 +104,7 @@ private:
     int32_t EP;
     int32_t listLen;
     float swigluLimit;
+    float swigluAlpha;
 
     optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData;
     uint64_t initRoutingQuantTilingKey;
@@ -146,6 +147,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
     maxOutputSize = tilingData.dispatchFFNCombineInfo.maxOutputSize;
     listLen = tilingData.dispatchFFNCombineInfo.listLen;
     swigluLimit = tilingData.dispatchFFNCombineInfo.swigluLimit;
+    swigluAlpha = tilingData.dispatchFFNCombineInfo.swigluAlpha;
 
     m0 = tilingData.cocTiling.m0;
     k0 = tilingData.cocTiling.k0;
@@ -281,7 +283,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
         outGM_, layoutD1, layoutD2,
         expertIdGM_, moeInitRoutingQuantV2Scale, moeInitRoutingQuantV2Offset,
         expertTokensBeforeCapacity, probs_,
-        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, moeInitRoutingQuantV2TilingData, swigluLimit};
+        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, moeInitRoutingQuantV2TilingData, swigluLimit, swigluAlpha};
     //Call kernel
     MatmulKernel kernel(params);
     kernel(params);
