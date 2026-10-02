@@ -189,7 +189,9 @@ class TestTransposeKvCacheByBlock(unittest.TestCase):
         stride_pairs = ((0, 1), (1, 0), (dense_stride - 1, dense_stride + 1), (dense_stride, dense_stride))
         for dtype in (torch.float16, torch.bfloat16):
             with self.subTest(dtype=dtype):
-                k_caches, v_caches, backings, expected_backings = [], [], [], []
+                k_caches: list[torch.Tensor] = []
+                v_caches: list[torch.Tensor] = []
+                backings, expected_backings = [], []
                 for k_stride, v_stride in stride_pairs:
                     backing = torch.randn(3, 2, block_size, num_heads, head_dim, dtype=dtype, device="npu")
                     expected = backing.cpu()
