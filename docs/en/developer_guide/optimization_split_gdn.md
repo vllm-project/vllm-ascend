@@ -2,8 +2,8 @@
 
 Branch: `GruntovDima/opt-gdn-updated`.
 
-Historical base: `2ee50f3847e4873e61d280911b2a24d85f5278d6`.
-This scope cleanup is not a rebase to current upstream main.
+Upstream base after rebase: `02615df12c0ad44bb7401cfc5c654fe16bebb7d0`.
+Historical integration base: `2ee50f3847e4873e61d280911b2a24d85f5278d6`.
 Earlier integration validation used vLLM
 `ee0da84ab9e04ac7610e28580af62c365e898389` (0.24 API).
 
@@ -18,8 +18,8 @@ Earlier integration validation used vLLM
 - Necessary operator build integration and regression tests.
 - Initial-state packing required by the paired FwdH/FwdO state-layout contract.
 
-The scope cleanup does not change native kernel, tiling, operator registration,
-build or C++ binding code relative to the preceding branch snapshot.
+The rebase preserves the optimized 310P calculations, adapts integration to
+upstream interfaces and uses the upstream `chunk_fwd_o_vllm` operator name.
 
 ## State-layout contract
 
@@ -51,6 +51,15 @@ unrelated normalization/fusion experiments are also outside this scope.
 The separately preserved HQ_TEST integration is not modified by this cleanup.
 
 ## Validation boundaries
+
+The FwdH launcher matches the headers present in the rebased tree: arch20 and
+arch22 use four template parameters; arch35 retains its upstream tile-shape
+and per-key-gate dispatch. The 310P entry has twelve arguments without `gk`;
+non-310P entries retain the upstream thirteen-argument ABI. Tiling keys are
+default for arch20/arch22 and select tile shapes only for arch35. Per-key gates
+are rejected for kernels that do not implement them. Source-contract and
+host-stub compilation tests cover these architecture routes; they are not a
+CANN build or NPU correctness test.
 
 Prior integrated standalone and e2e results remain evidence for their exact
 recorded source, binaries, environment and configuration. They are not a new
