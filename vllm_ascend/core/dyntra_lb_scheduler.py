@@ -30,6 +30,10 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import DyntraLBConfig
+from vllm_ascend.core.disagg_stats import (
+    DisaggPrefillStatsMixin,
+    adjust_disagg_prefill_stats,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.scheduler import Scheduler as _SchedulerBase
@@ -412,12 +416,16 @@ class DyntraLBPolicyMixin(_SchedulerBase):
         self,
         request: Request,
         delay_free_blocks: bool = False,
-    ) -> dict[str, Any] | None | tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    ) -> dict[str, Any] | None:
         self._lb_paused_req_ids.discard(request.request_id)
         return super()._free_request(request, delay_free_blocks)
 
 
-class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
+# NOTE: DisaggPrefillStatsMixin must stay LAST here: at class-creation time
+# the platform patch has already rebound ``Scheduler`` to BalanceScheduler,
+# which itself inherits the mixin — mixin-first would create an inconsistent
+# MRO. Correctness depends on platform patches loading before this module.
+class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler, DisaggPrefillStatsMixin):
     prefill_capacity_bound: bool
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
@@ -820,6 +828,11 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                             num_prompt_tokens=request.num_prompt_tokens,
                             num_local_cached_tokens=num_new_local_computed_tokens,
                             num_external_cached_tokens=num_external_computed_tokens,
+                        )
+                        connector_prefix_cache_hits = adjust_disagg_prefill_stats(
+                            request,
+                            num_new_local_computed_tokens,
+                            connector_prefix_cache_hits,
                         )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
