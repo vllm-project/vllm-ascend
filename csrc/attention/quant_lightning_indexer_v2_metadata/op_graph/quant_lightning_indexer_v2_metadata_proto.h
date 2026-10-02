@@ -20,7 +20,7 @@
 
 namespace ge {
 
-REG_OP(QuantLightningIndexerV2Metadata)
+REG_OP(VllmAscendQuantLightningIndexerV2Metadata)
     .OPTIONAL_INPUT(cu_seqlens_q, TensorType({DT_INT32}))
     .OPTIONAL_INPUT(cu_seqlens_k, TensorType({DT_INT32}))
     .OPTIONAL_INPUT(seqused_q, TensorType({DT_INT32}))
@@ -42,7 +42,7 @@ REG_OP(QuantLightningIndexerV2Metadata)
     .ATTR(aic_core_num, Int, 0)
     .ATTR(aiv_core_num, Int, 0)
     .ATTR(soc_version, String, "")
-    .OP_END_FACTORY_REG(QuantLightningIndexerV2Metadata)
+    .OP_END_FACTORY_REG(VllmAscendQuantLightningIndexerV2Metadata)
 }  // namespace ge
 
 #endif
