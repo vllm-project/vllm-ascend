@@ -33,12 +33,87 @@ from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
+    AscendDeviceType,
     dispose_tensor,
+    get_ascend_device_type,
     maybe_trans_nz,
 )
 
 from ..base import AscendMoEScheme, QuantType
 from ..registry import register_scheme
+
+
+def _as_gmm_dequant_situ_quant_expert_weights(tensor_or_list: list[torch.Tensor] | torch.Tensor) -> list[torch.Tensor]:
+    """Normalize W4A8 weights into one packed tensor per expert."""
+    if isinstance(tensor_or_list, list):
+        if len(tensor_or_list) == 1 and tensor_or_list[0].dim() >= 3:
+            return list(tensor_or_list[0].unbind(0))
+        return tensor_or_list
+    if tensor_or_list.dim() >= 3:
+        return list(tensor_or_list.unbind(0))
+    return [tensor_or_list]
+
+
+def _as_gmm_dequant_situ_quant_expert_scales(
+    tensor_or_list: list[torch.Tensor] | torch.Tensor,
+    *,
+    num_experts: int,
+) -> list[torch.Tensor]:
+    """Normalize W4A8 scales into one contiguous carrier per expert."""
+    tensors = tensor_or_list if isinstance(tensor_or_list, list) else [tensor_or_list]
+    if len(tensors) == 1 and tensors[0].dim() >= 2 and tensors[0].shape[0] == num_experts:
+        tensors = list(tensors[0].unbind(0))
+    if len(tensors) != num_experts:
+        raise ValueError(
+            "GmmDequantSituQuant weight_scale expert count mismatch: "
+            f"got {len(tensors)} scales for {num_experts} experts"
+        )
+    return [tensor.reshape(-1).contiguous() for tensor in tensors]
+
+
+def _gmm_dequant_situ_quant_fusion_supported(
+    *,
+    hidden_states: torch.Tensor,
+    w1: list[torch.Tensor] | torch.Tensor,
+    w1_scale: list[torch.Tensor] | torch.Tensor,
+    group_list_type: int,
+    group_list: torch.Tensor,
+    x_scale: torch.Tensor,
+) -> bool:
+    """Select the A3 W4A8 SiTU fused kernel whenever the inputs are supported."""
+    if (
+        get_ascend_device_type() != AscendDeviceType.A3
+        or group_list_type not in (0, 1)
+        or hidden_states.dim() != 2
+        or hidden_states.dtype != torch.int8
+        or not hidden_states.is_contiguous()
+        or group_list.dim() != 1
+        or group_list.dtype not in (torch.int64, torch.int32, torch.float32)
+        or x_scale.numel() < hidden_states.shape[0]
+    ):
+        return False
+
+    expert_weights = _as_gmm_dequant_situ_quant_expert_weights(w1)
+    num_experts = len(expert_weights)
+    if not expert_weights or group_list.numel() < num_experts:
+        return False
+    expert_scales = w1_scale if isinstance(w1_scale, list) else [w1_scale]
+    if len(expert_scales) == 1 and expert_scales[0].dim() >= 2 and expert_scales[0].shape[0] == num_experts:
+        expert_scales = list(expert_scales[0].unbind(0))
+    # Keep normalization a view: copying scales here changes metadata-cache
+    # pointers on every call and is incompatible with capture-time reuse.
+    if len(expert_scales) != num_experts or any(
+        scale.dtype != torch.int64 or not scale.is_contiguous() for scale in expert_scales
+    ):
+        return False
+
+    first_weight = expert_weights[0]
+    if first_weight.dim() != 2 or first_weight.dtype != torch.int32:
+        return False
+    return hidden_states.shape[1] == first_weight.shape[0] and all(
+        weight.shape == first_weight.shape and weight.dtype == torch.int32 and weight.is_contiguous()
+        for weight in expert_weights
+    )
 
 
 @register_scheme("W4A8_DYNAMIC", "moe")
@@ -453,6 +528,36 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
 
         if mlp_compute_input.activation == MoEActivation.SITU:
+            if _gmm_dequant_situ_quant_fusion_supported(
+                hidden_states=hidden_states,
+                w1=w1,
+                w1_scale=w1_scale,
+                group_list_type=group_list_type,
+                group_list=group_list,
+                x_scale=pertoken_scale,
+            ):
+                gmm_dequant_situ_quant_weights = _as_gmm_dequant_situ_quant_expert_weights(w1)
+                gmm_dequant_situ_quant_scales = _as_gmm_dequant_situ_quant_expert_scales(
+                    w1_scale, num_experts=len(gmm_dequant_situ_quant_weights)
+                )
+                hidden_states, swiglu_out_scale = torch.ops._C_ascend.gmm_dequant_situ_quant(
+                    x=hidden_states,
+                    weight=gmm_dequant_situ_quant_weights,
+                    weight_scale=gmm_dequant_situ_quant_scales,
+                    x_scale=pertoken_scale.reshape(-1).to(dtype=torch.float32).contiguous(),
+                    group_list=group_list,
+                    weight_assist_matrix=[],
+                    beta=1.0
+                    if mlp_compute_input.activation_situ_beta is None
+                    else mlp_compute_input.activation_situ_beta,
+                    linear_beta=mlp_compute_input.activation_situ_linear_beta,
+                    group_list_type=group_list_type,
+                )
+                dispose_tensor(mlp_compute_input.hidden_states)
+                if swiglu_out_scale.dim() == 1:
+                    swiglu_out_scale = swiglu_out_scale.unsqueeze(-1)
+                return hidden_states, swiglu_out_scale
+
             # SituAndMul: run the dequantized gmm1 first, then fuse the situ
             # activation with dynamic output quantization (Kimi K3 W4A8).
             # W4A8 only supports per-channel weights (is_per_channel_weight is
