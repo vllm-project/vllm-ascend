@@ -357,6 +357,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # Reset indices to zeros to prevent stale values from prior
         # dummy runs to cause out-of-bounds indexing during capture.
         self.last_token_indices.zero_()
+        self.idx_mapping.zero_()
 
         # Capture the prefill routine (model forward + compute_logits +
         # sample).
