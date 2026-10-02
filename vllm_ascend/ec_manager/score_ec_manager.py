@@ -501,7 +501,6 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         """
         self.cached.clear()
         self.request_cached_ids.clear()
-        self.freeable.clear()
         self.promoting.clear()
         self.cpu_get_encoder_mm_hashes.clear()
         self.npu_freed.clear()
