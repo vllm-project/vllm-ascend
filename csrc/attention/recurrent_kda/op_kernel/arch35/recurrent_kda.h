@@ -733,21 +733,77 @@ private:
         }
     }
 
+    // The common KDA head fits in two FP32 vector registers. Keep each state
+    // row live across decay, delta correction and the output dot product,
+    // preserving the original two-half reduction and FP32 operation order.
+    __aicore__ inline void Compute128(uint32_t rows, uint64_t qkOffset, uint64_t vOffset)
+    {
+        __ubuf__ float *state = (__ubuf__ float *)stateInUb.GetPhyAddr();
+        __ubuf__ float *gate = (__ubuf__ float *)gateInUb.GetPhyAddr() + qkOffset;
+        __ubuf__ float *key = (__ubuf__ float *)kInUb.GetPhyAddr() + qkOffset;
+        __ubuf__ float *query = (__ubuf__ float *)qInUb.GetPhyAddr() + qkOffset;
+        __ubuf__ float *value = (__ubuf__ float *)vInUb.GetPhyAddr() + vOffset;
+        __ubuf__ float *output = (__ubuf__ float *)attnInUb.GetPhyAddr();
+        uint16_t rowCount = static_cast<uint16_t>(rows);
+        float beta = beta_;
+        __VEC_SCOPE__ {
+            RegTensor<float> g0, g1, k0, k1, q0, q1;
+            RegTensor<float> s0, s1, p0, p1, sum, delta;
+            MaskReg all = CreateMask<float, MaskPattern::ALL>();
+            DataCopy(g0, gate);
+            DataCopy(g1, gate + V_LENGTH);
+            DataCopy(k0, key);
+            DataCopy(k1, key + V_LENGTH);
+            DataCopy(q0, query);
+            DataCopy(q1, query + V_LENGTH);
+            for (uint16_t row = 0; row < rowCount; ++row) {
+                DataCopy(s0, state + row * TWO_V_LENGTH);
+                DataCopy(s1, state + row * TWO_V_LENGTH + V_LENGTH);
+                Mul(s0, s0, g0, all);
+                Mul(s1, s1, g1, all);
+                Mul(p0, s0, k0, all);
+                Mul(p1, s1, k1, all);
+                Add(p0, p0, p1, all);
+                ReduceSum(sum, p0, all);
+                Duplicate(sum, sum, all);
+                DataCopy<float, LoadDist::DIST_BRC_B32>(delta, value + row);
+                Sub(delta, delta, sum, all);
+                Muls(delta, delta, beta, all);
+                Mul(p0, delta, k0, all);
+                Mul(p1, delta, k1, all);
+                Add(s0, s0, p0, all);
+                Add(s1, s1, p1, all);
+                DataCopy(state + row * TWO_V_LENGTH, s0, all);
+                DataCopy(state + row * TWO_V_LENGTH + V_LENGTH, s1, all);
+                Mul(p0, s0, q0, all);
+                Mul(p1, s1, q1, all);
+                Add(p0, p0, p1, all);
+                ReduceSum(sum, p0, all);
+                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(output + row, sum, all);
+            }
+        }
+    }
+
     __aicore__ inline void Compute(uint32_t curSingleV, uint64_t curQKOffset, uint64_t curVOffset)
     {
-        MatVecMul(stateInUb, gateInUb[curQKOffset], stateInUb, curSingleV);
-        AscendC::PipeBarrier<PIPE_V>();
-        MatVecMul(stateInUb, kInUb[curQKOffset], broadTmpInUb, curSingleV);
-        AscendC::PipeBarrier<PIPE_V>();
-        ReduceSumDispatch(deltaInUb, broadTmpInUb, curSingleV);
-        AscendC::PipeBarrier<PIPE_V>();
-        Sub(deltaInUb, vInUb[curVOffset], deltaInUb, curSingleV);
-        AscendC::PipeBarrier<PIPE_V>();
-        Muls(deltaInUb, deltaInUb, beta_, curSingleV);
-        AscendC::PipeBarrier<PIPE_V>();
-        ProcessKQ(deltaInUb, kInUb[curQKOffset], stateInUb, qInUb[curQKOffset], broadTmpInUb, curSingleV);
-        AscendC::PipeBarrier<PIPE_V>();
-        ReduceSumDispatch(attnInUb, broadTmpInUb, curSingleV);
+        if (realK_ == TWO_V_LENGTH) {
+            Compute128(curSingleV, curQKOffset, curVOffset);
+            AscendC::PipeBarrier<PIPE_V>();
+        } else {
+            MatVecMul(stateInUb, gateInUb[curQKOffset], stateInUb, curSingleV);
+            AscendC::PipeBarrier<PIPE_V>();
+            MatVecMul(stateInUb, kInUb[curQKOffset], broadTmpInUb, curSingleV);
+            AscendC::PipeBarrier<PIPE_V>();
+            ReduceSumDispatch(deltaInUb, broadTmpInUb, curSingleV);
+            AscendC::PipeBarrier<PIPE_V>();
+            Sub(deltaInUb, vInUb[curVOffset], deltaInUb, curSingleV);
+            AscendC::PipeBarrier<PIPE_V>();
+            Muls(deltaInUb, deltaInUb, beta_, curSingleV);
+            AscendC::PipeBarrier<PIPE_V>();
+            ProcessKQ(deltaInUb, kInUb[curQKOffset], stateInUb, qInUb[curQKOffset], broadTmpInUb, curSingleV);
+            AscendC::PipeBarrier<PIPE_V>();
+            ReduceSumDispatch(attnInUb, broadTmpInUb, curSingleV);
+        }
         LocalTensor<outType> attnOutLocal = attnOutQueue_.AllocTensor<outType>();
         if (shouldStoreState_) {
             LocalTensor<stateType> stateOutLocal = stateOutQueue_.AllocTensor<stateType>();

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import pytest
 import torch
 import torch.nn.functional as F
 import torch_npu  # noqa: F401
@@ -262,3 +263,92 @@ def test_kimi_k3_tp16_recurrent_kda_non_contiguous_qkv_and_state_pool():
     used_slots = set(state_indices_cpu.tolist())
     untouched_slots = [slot for slot in range(state_capacity) if slot not in used_slots]
     torch.testing.assert_close(state_view[untouched_slots], state_before[untouched_slots], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("padding", [0, 2])
+@torch.inference_mode()
+def test_recurrent_kda_speculative_graph_state_snapshots(padding: int):
+    """Keep all four speculative states correct after changing graph inputs."""
+    torch.manual_seed(20260921)
+    batch, steps, heads, dim = 16, 4, 12, 128
+    tokens = batch * steps
+    active_tokens = (batch - padding) * steps
+    capacity = tokens + 4
+    qkv_cpu = torch.randn(1, tokens, 3 * heads * dim, dtype=torch.bfloat16) * 0.2
+    gate_cpu = torch.randn(1, tokens, heads, dim, dtype=torch.bfloat16) * 0.2
+    beta_cpu = torch.randn(1, tokens, heads, dtype=torch.float32).sigmoid()
+    a_log_cpu = torch.randn(heads) * 0.1
+    dt_bias_cpu = torch.randn(heads, dim) * 0.1
+    state_cpu = torch.randn(capacity, heads, dim, dim) * 0.01
+    indices_cpu = (torch.arange(tokens, dtype=torch.int32) + 2).reshape(batch, steps)
+    cu_seqlens_host = [min(i * steps, active_tokens) for i in range(batch + 1)]
+    if padding:
+        indices_cpu[-padding:] = -1
+
+    qkv = qkv_cpu.npu()
+    q, k, v = [part.view(1, tokens, heads, dim) for part in qkv.chunk(3, dim=-1)]
+    gate, beta = gate_cpu.npu(), beta_cpu.npu()
+    state_backing = torch.full((capacity, 2, heads, dim, dim), 7.0, device="npu")
+    state = state_backing[:, 0]
+    state.copy_(state_cpu)
+    cu_seqlens = torch.tensor(cu_seqlens_host, device="npu", dtype=torch.int32)
+    indices = indices_cpu.npu()
+    accepted = torch.ones(batch, device="npu", dtype=torch.int32)
+    a_log, dt_bias = a_log_cpu.npu(), dt_bias_cpu.npu()
+
+    def run():
+        return torch.ops._C_ascend.recurrent_kda(
+            q,
+            k,
+            v,
+            gate,
+            beta,
+            state,
+            cu_seqlens,
+            indices,
+            a_log,
+            dt_bias,
+            num_accepted_tokens=accepted,
+            scale=dim**-0.5,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            safe_gate=True,
+        )
+
+    run()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        output = run()
+    state.copy_(state_cpu)
+    expected_state = state_cpu
+    unused = [0, 1, *range(active_tokens + 2, capacity)]
+    for accepted_count in range(1, steps + 1):
+        qkv_cpu.add_(0.015625)
+        gate_cpu.sub_(0.015625)
+        qkv.copy_(qkv_cpu)
+        gate.copy_(gate_cpu)
+        accepted.fill_(accepted_count)
+        q_cpu, k_cpu, v_cpu = [part.view(1, tokens, heads, dim) for part in qkv_cpu.chunk(3, dim=-1)]
+        expected_output, expected_state = recurrent_kda_reference(
+            q_cpu[:, :active_tokens],
+            k_cpu[:, :active_tokens],
+            v_cpu[:, :active_tokens],
+            gate_cpu[:, :active_tokens],
+            beta_cpu[:, :active_tokens],
+            expected_state,
+            cu_seqlens=cu_seqlens_host,
+            ssm_state_indices=indices_cpu,
+            A_log=a_log_cpu,
+            dt_bias=dt_bias_cpu,
+            num_accepted_tokens=torch.full((batch,), accepted_count, dtype=torch.int32),
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            safe_gate=True,
+        )
+        graph.replay()
+        torch.npu.synchronize()
+        torch.testing.assert_close(output[:, :active_tokens].cpu(), expected_output, rtol=0.02, atol=0.002)
+        torch.testing.assert_close(state.cpu(), expected_state, rtol=0.02, atol=0.002)
+        torch.testing.assert_close(state[unused].cpu(), state_cpu[unused], rtol=0, atol=0)
+        assert torch.all(state_backing[:, 1] == 7.0)
