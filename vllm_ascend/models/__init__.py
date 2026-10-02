@@ -89,3 +89,14 @@ def register_model():
     ModelRegistry.register_model(
         "LlamaForCausalLMEagle3", "vllm_ascend.models.llama_eagle3:AscendEagle3LlamaForCausalLM"
     )
+    # Ascend Qwen3.5-VL/dense: fused matmul+allreduce for row-parallel
+    # linears under TP (MC2); overwrites the upstream architecture mapping,
+    # same pattern as AscendDeepseekV4ForConditionalGeneration (see PR #15457).
+    ModelRegistry.register_model(
+        "Qwen3_5ForConditionalGeneration",
+        "vllm_ascend.models.qwen3_5_mc2:AscendQwen3_5ForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
+        "Qwen3_5MoeForConditionalGeneration",
+        "vllm_ascend.models.qwen3_5_mc2:AscendQwen3_5MoeForConditionalGeneration",
+    )
