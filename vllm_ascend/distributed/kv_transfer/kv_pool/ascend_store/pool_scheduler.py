@@ -122,7 +122,11 @@ class KVPoolScheduler:
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
-        if self.use_layerwise and len(cacheable_block_sizes) != len(self.original_block_size):
+        if (
+            self.use_layerwise
+            and self.backend_name != "memcache"
+            and len(cacheable_block_sizes) != len(self.original_block_size)
+        ):
             raise ValueError("AscendStore private KV state requires non-layerwise transfer")
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
@@ -382,7 +386,10 @@ class KVPoolScheduler:
         protocol helper enumerates all stages and head/TP ranks.
         """
         assert self.layerwise_keys is not None
-        return self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, self.tp_size // self.put_step)
+        head_or_tp_ranks = (
+            self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
+        )
+        return self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)
 
     def _get_layerwise_hit_tokens(
         self,
@@ -692,7 +699,7 @@ class KVPoolScheduler:
             # containing the last token; num_tokens - lcm_block_size equals
             # that boundary only for lcm-aligned prompts and over-trims
             # unaligned prompts whose hit stops exactly on the boundary.
-            final_block_start = (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
+            final_block_start = max(0, request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
             hit_reaches_final_block = num_external_hit_tokens > final_block_start
             if hit_reaches_final_block:
                 num_external_hit_tokens = max(
