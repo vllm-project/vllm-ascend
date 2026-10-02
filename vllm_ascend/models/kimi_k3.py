@@ -75,7 +75,6 @@ from vllm.models.kimi_k3.nvidia.model import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -84,14 +83,24 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import get_rotation_path
+from vllm_ascend.utils import get_rotation_path, is_950
 
-if HAS_TRITON:
-    from vllm_ascend.ops.triton.kimi_k3.attention_residual import (  # type: ignore[import-untyped]
-        apply_attn_res,
-    )
-else:
-    apply_attn_res = None  # type: ignore[assignment]
+
+def _use_attn_res_prefill_cache() -> bool:
+    """Enable weight caching only for explicit pure-prefill A5 requests."""
+    if not is_forward_context_available():
+        return False
+    metadata = get_forward_context().attn_metadata
+    if not isinstance(metadata, dict) or not metadata:
+        return False
+    for layer_metadata in metadata.values():
+        prefills = getattr(layer_metadata, "num_prefills", None)
+        decodes = getattr(layer_metadata, "num_decodes", None)
+        if type(prefills) is not int or type(decodes) is not int or prefills <= 0 or decodes != 0:
+            return False
+        if getattr(layer_metadata, "spec_sequence_masks", None) is not None:
+            return False
+    return is_950()
 
 
 class AscendKimiRoutedOutputTransform(KimiRoutedOutputTransform):
@@ -124,42 +133,6 @@ class AscendKimiRoutedOutputTransform(KimiRoutedOutputTransform):
             hidden_states, _ = self.up_proj((quantized, scale))
             return hidden_states
         return super().forward(hidden_states)
-
-
-def _apply_ascend_attn_res(
-    prefix_sum: torch.Tensor,
-    block_residual: torch.Tensor,
-    proj: ReplicatedLinear,
-    norm: RMSNorm,
-    num_valid_blocks: int,
-) -> torch.Tensor:
-    """Apply Kimi's canonical learned residual mixture with native ops."""
-    if num_valid_blocks <= 0:
-        return prefix_sum
-
-    if apply_attn_res is not None and prefix_sum.device.type == "npu" and prefix_sum.numel() > 0:
-        return apply_attn_res(
-            prefix_sum,
-            block_residual,
-            proj,
-            norm,
-            num_valid_blocks,
-        )
-
-    values = torch.cat(
-        (
-            block_residual[:, :num_valid_blocks, :],
-            prefix_sum.unsqueeze(1),
-        ),
-        dim=1,
-    )
-    values_fp32 = values.float()
-    inverse_rms = torch.rsqrt(values_fp32.square().mean(-1, keepdim=True) + norm.variance_epsilon)
-    normalized_without_gamma = values_fp32 * inverse_rms
-    score_weight = norm.weight.float() * proj.weight.squeeze(0).float()
-    scores = (normalized_without_gamma * score_weight).sum(-1)
-    probabilities = scores.softmax(-1).unsqueeze(1)
-    return torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
 
 
 class AscendKimiMLP(KimiMLP):
@@ -568,6 +541,28 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             self.self_attn.mla_attn.output_token_shard_size = o_proj.tp_size
         return True
 
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        prepared_attn_input: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+        defer_mlp_add: bool = False,
+        optimize_prefill: bool = False,
+        **kwargs,
+    ):
+        if self.use_attn_residuals:
+            assert residual is not None
+            return self.forward_attn_residual(
+                positions,
+                hidden_states,
+                residual,
+                prepared_attn_input=prepared_attn_input,
+                defer_mlp_add=defer_mlp_add,
+                optimize_prefill=optimize_prefill,
+            )
+        return super().forward(positions, hidden_states, residual, **kwargs)
+
     def _run_self_attn(
         self,
         positions: torch.Tensor,
@@ -576,27 +571,50 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         # Ascend attention returns its output instead of filling an AMD buffer.
         return self.self_attn(positions=positions, hidden_states=hidden_states)
 
+    def prepare_attn_residual(
+        self,
+        prefix_sum: torch.Tensor,
+        block_residual: torch.Tensor,
+        addend: torch.Tensor | None = None,
+        return_materialized: bool = False,
+        optimize_prefill: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # The previous MLP add is rounded to BF16 before it becomes either a
+        # DSpark raw prefix or an AttnRes input. A block boundary stores that
+        # same prefix, while the mixture reads only the older valid slots.
+        return torch.ops._C_ascend.attn_res_fwd(
+            prefix_sum,
+            addend,
+            block_residual,
+            self.self_attention_res_proj.weight,
+            self.self_attention_res_norm.weight,
+            self.self_attention_res_norm.variance_epsilon,
+            self.prev_valid_blocks,
+            self.input_layernorm.weight,
+            self.input_layernorm.variance_epsilon,
+            self.block_write_idx if self.is_block_write_layer else -1,
+            return_materialized,
+            optimize_prefill=optimize_prefill,
+        )
+
     def forward_attn_residual(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         block_residual: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run Kimi attention residuals with Ascend attention and MoE."""
-        prefix_sum: torch.Tensor | None = hidden_states
-        hidden_states = _apply_ascend_attn_res(
-            prefix_sum,
-            block_residual,
-            self.self_attention_res_proj,
-            self.self_attention_res_norm,
-            self.prev_valid_blocks,
-        )
+        prepared_attn_input: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+        defer_mlp_add: bool = False,
+        optimize_prefill: bool = False,
+    ):
+        """Each residual point runs one native add/AttnRes/RMSNorm kernel."""
+        if prepared_attn_input is None:
+            prepared_attn_input = self.prepare_attn_residual(
+                hidden_states, block_residual, optimize_prefill=optimize_prefill
+            )
+        hidden_states, prefix_sum, _ = prepared_attn_input
         if self.is_block_write_layer:
-            assert prefix_sum is not None
-            block_residual[:, self.block_write_idx, :].copy_(prefix_sum)
             prefix_sum = None
 
-        hidden_states = self.input_layernorm(hidden_states)
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)
             hidden_states = hidden_states[: positions.shape[0]]
@@ -607,18 +625,38 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         if self.use_sequence_parallel and not self.fuse_o_proj_mm_reduce_scatter:
             hidden_states = sp_reduce_scatter(hidden_states)
 
-        prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
-        mlp_valid_blocks = self.prev_valid_blocks + (1 if self.is_block_write_layer else 0)
-        hidden_states = _apply_ascend_attn_res(
-            prefix_sum,
+        mlp_valid_blocks = self.prev_valid_blocks + int(self.is_block_write_layer)
+        op = torch.ops._C_ascend.attn_res_fwd
+        hidden_states, prefix_sum, _ = op(
+            hidden_states if prefix_sum is None else prefix_sum,
+            None if prefix_sum is None else hidden_states,
             block_residual,
-            self.mlp_res_proj,
-            self.mlp_res_norm,
+            self.mlp_res_proj.weight,
+            self.mlp_res_norm.weight,
+            self.mlp_res_norm.variance_epsilon,
             mlp_valid_blocks,
+            self.post_attention_layernorm.weight,
+            self.post_attention_layernorm.variance_epsilon,
+            optimize_prefill=optimize_prefill,
         )
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = prefix_sum + hidden_states
+        mlp_output = self.mlp(hidden_states)
+        if defer_mlp_add:
+            # Only the enclosing model uses this contract. It materializes the
+            # prefix in the next fused residual point before any aux capture,
+            # or at the PP/final-output boundary before publishing a tensor.
+            return prefix_sum, block_residual, mlp_output
+        # Standalone decoder calls have no next residual point to absorb this.
+        hidden_states, _, _ = op(
+            prefix_sum,
+            mlp_output,
+            block_residual,
+            self.mlp_res_proj.weight,
+            self.mlp_res_norm.weight,
+            self.mlp_res_norm.variance_epsilon,
+            0,
+            mix=False,
+            optimize_prefill=optimize_prefill,
+        )
         return hidden_states, block_residual
 
 
@@ -699,6 +737,21 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, "num_attention_heads must be divisible by world_size"
 
+    def make_empty_intermediate_tensors(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> IntermediateTensors:
+        tensors = super().make_empty_intermediate_tensors(batch_size, dtype, device)
+        if self.config.attn_res_block_size is not None:
+            for layer_idx in sorted(set(self.aux_hidden_state_layers)):
+                if layer_idx < self.start_layer:
+                    tensors.tensors[f"aux_hidden_states_{layer_idx}"] = torch.empty(
+                        (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                    )
+        return tensors
+
     def load_weights(self, weights):
         """Route mixed-precision KDA gates through vLLM's packed loader."""
         params_dict = dict(self.named_parameters())
@@ -746,10 +799,16 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         if get_pp_group().is_first_rank:
             hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
             residual = None
+            aux_hidden_states: list[torch.Tensor] = []
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+            aux_hidden_states = [
+                intermediate_tensors[f"aux_hidden_states_{layer_idx}"]
+                for layer_idx in sorted(set(self.aux_hidden_state_layers))
+                if layer_idx < self.start_layer
+            ]
 
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:
@@ -762,11 +821,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Sequence parallelism is not supported with pipeline parallelism"
 
-        if self.dspark_aux_capture_materialized:
-            aux_hidden_states: list[torch.Tensor] = []
-        else:
+        if not self.dspark_aux_capture_materialized:
             aux_hidden_states = self._maybe_add_hidden_state(
-                [],
+                aux_hidden_states,
                 self.start_layer,
                 hidden_states,
                 residual,
@@ -784,49 +841,59 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
 
+        optimize_attn_res_prefill = _use_attn_res_prefill_cache()
+        pending_mlp_output = None
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
         ):
+            prepared = layer.prepare_attn_residual(
+                hidden_states,
+                residual,
+                pending_mlp_output,
+                return_materialized=self.dspark_aux_capture_materialized and layer_idx in self.aux_hidden_state_layers,
+                optimize_prefill=optimize_attn_res_prefill,
+            )
+            if layer_idx > self.start_layer and not self.dspark_aux_capture_materialized:
+                self._maybe_add_hidden_state(aux_hidden_states, layer_idx, prepared[1], None)
             if self.dspark_aux_capture_materialized and layer_idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(
-                    _apply_ascend_attn_res(
-                        hidden_states,
-                        residual,
-                        layer.self_attention_res_proj,
-                        layer.self_attention_res_norm,
-                        layer.prev_valid_blocks,
-                    )
-                )
-            hidden_states, residual = layer(
+                aux_hidden_states.append(prepared[2])
+            hidden_states, residual, pending_mlp_output = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
+                prepared_attn_input=prepared,
+                defer_mlp_add=True,
+                optimize_prefill=optimize_attn_res_prefill,
             )
-            if not self.dspark_aux_capture_materialized and (layer_idx + 1) in self.aux_hidden_state_layers:
-                self._maybe_add_hidden_state(
-                    aux_hidden_states,
-                    layer_idx + 1,
-                    hidden_states,
-                    residual,
-                )
 
+        if not get_pp_group().is_last_rank and pending_mlp_output is not None:
+            hidden_states = hidden_states + pending_mlp_output
         if not get_pp_group().is_last_rank:
             assert not self.use_sequence_parallel, "Sequence parallelism is not supported with pipeline parallelism"
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                    "residual": residual,
-                }
-            )
+            # A capture exactly at the PP boundary belongs to the next stage.
+            # Transport earlier captures with stable keys matching its receive
+            # buffers; each tensor retains token dimension zero for slicing.
+            tensors = {"hidden_states": hidden_states, "residual": residual}
+            captured_layers = sorted(i for i in set(self.aux_hidden_state_layers) if i < self.end_layer)
+            assert len(captured_layers) == len(aux_hidden_states)
+            tensors.update((f"aux_hidden_states_{i}", value) for i, value in zip(captured_layers, aux_hidden_states))
+            return IntermediateTensors(tensors)
 
-        hidden_states = _apply_ascend_attn_res(
+        hidden_states, final_prefix, _ = torch.ops._C_ascend.attn_res_fwd(
             hidden_states,
+            pending_mlp_output,
             residual,
-            self.output_attn_res_proj,
-            self.output_attn_res_norm,
+            self.output_attn_res_proj.weight,
+            self.output_attn_res_norm.weight,
+            self.output_attn_res_norm.variance_epsilon,
             attn_res_block_num,
+            optimize_prefill=optimize_attn_res_prefill,
         )
+        if not self.dspark_aux_capture_materialized and pending_mlp_output is not None:
+            self._maybe_add_hidden_state(aux_hidden_states, self.end_layer, final_prefix, None)
+        if self.dspark_aux_capture_materialized and self.end_layer in self.aux_hidden_state_layers:
+            aux_hidden_states.append(hidden_states)
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
