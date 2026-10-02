@@ -7,6 +7,7 @@ from vllm_ascend._310p.ops.fla.idex import (
     prepare_chunk_offsets_310,
 )
 from vllm_ascend._310p.spec_decode.llm_base_proposer_310 import AscendSpecDecodeBaseProposer310
+from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.utils import is_rc_device
 
@@ -27,6 +28,8 @@ AscendSpecDecodeBaseProposer._run_merged_draft = (  # type: ignore[method-assign
 # not exist in the triton version used on 310P CI, and NPU does not use these
 # CUDA warmup kernel anyway.
 QwenGatedDeltaNetAttention._warmup_prefill_kernels = lambda self, qkv_or_qkvz, v_dim: None  # type: ignore[method-assign]
+QwenGatedDeltaNetAttention._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
+QwenGatedDeltaNetAttention.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
 QwenGatedDeltaNetAttention._forward_core = AscendGatedDeltaNetAttention310._forward_core
 QwenGatedDeltaNetAttention.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
 

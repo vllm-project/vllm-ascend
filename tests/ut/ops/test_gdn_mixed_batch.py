@@ -136,17 +136,18 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
     recurrent_calls: list[dict[str, torch.Tensor]] = []
 
     def causal_conv1d(
+        output: torch.Tensor,
         input_tensor: torch.Tensor,
-        *args,
+        conv_weights: torch.Tensor,
         **kwargs,
-    ) -> torch.Tensor:
-        del args, kwargs
-        return input_tensor.clone()
+    ) -> None:
+        del conv_weights, kwargs
+        output.copy_(input_tensor)
 
-    def recurrent_gated_delta_rule(query, key, value, state, **kwargs) -> torch.Tensor:
-        recurrent_calls.append({"query": query, "key": key, "value": value, "state": state, **kwargs})
+    def recurrent_gated_delta_rule(**kwargs) -> torch.Tensor:
+        recurrent_calls.append(kwargs)
         # Returning V makes the merged output easy to validate.
-        return value.clone()
+        return kwargs["value"].clone()
 
     def chunk_gated_delta_rule(**kwargs):
         return kwargs["v"].clone(), kwargs["initial_state"].clone()
@@ -172,7 +173,6 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
             return_value=gating,
         ),
         patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
-        patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=False),
         patch("vllm_ascend.ops.gdn.clear_ssm_states"),
         patch(
             "vllm_ascend.ops.gdn.gather_ssm_states",
@@ -185,9 +185,18 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
             side_effect=chunk_gated_delta_rule,
         ) as chunk_mock,
         patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
-        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
-        patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
-        patch("vllm_ascend.ops.gdn.recurrent_gated_delta_rule", side_effect=recurrent_gated_delta_rule),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_causal_conv1d_custom",
+            side_effect=causal_conv1d,
+            create=True,
+        ),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_recurrent_gated_delta_rule",
+            side_effect=recurrent_gated_delta_rule,
+            create=True,
+        ),
     ):
         AscendGatedDeltaNetAttention._forward_core(
             layer,

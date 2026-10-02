@@ -9,6 +9,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 SUPPORTED_DP_LOAD_BALANCING = {"internal", "external"}
+DEFAULT_DP_LOAD_BALANCING = "external"
 
 
 def resolve_config_path(
@@ -32,11 +33,7 @@ def resolve_dp_load_balancing(
     yaml_path: str | None = None,
     config_base_path: str | None = None,
 ) -> str:
-    """Read ``dp_load_balancing`` from the case YAML.
-
-    The path fallback only supports configs from before the field was added.
-    New and migrated configs must declare the field explicitly.
-    """
+    """Read ``dp_load_balancing`` from the case YAML."""
     path = resolve_config_path(yaml_path, config_base_path)
     with path.open(encoding="utf-8") as config_file:
         config = yaml.safe_load(config_file)
@@ -45,10 +42,9 @@ def resolve_dp_load_balancing(
 
     mode = config.get("dp_load_balancing")
     if mode is None:
-        normalized_path = path.as_posix()
-        mode = "external" if "/external_dp/" in f"/{normalized_path}" else "internal"
+        mode = DEFAULT_DP_LOAD_BALANCING
         logger.warning(
-            "%s does not declare dp_load_balancing; using legacy path fallback: %s",
+            "%s does not declare dp_load_balancing; using default: %s",
             path,
             mode,
         )
