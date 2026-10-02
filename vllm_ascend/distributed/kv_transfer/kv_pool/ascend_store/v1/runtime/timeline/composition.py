@@ -1,0 +1,179 @@
+"""Bind a compiled KV Pool schedule to runtime timeline state."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
+from ...program.spec.schedule import KVPoolSchedule, LoadScheduleKind, StoreScheduleKind
+from ...program.spec.topology import KVPoolTopology
+from ...program.values.evidence import LoadCompletion, StoreCompletion
+from ...program.values.selection import LoadTransfer, StoreTransfer
+from . import LoadTimelineProtocol, StoreBatch, StoreTimelineProtocol
+from .bulk import AsyncLoadTimeline, LoadTimeline, StoreTimeline
+from .layerwise import (
+    LayerwiseBackendOperations,
+    LayerwiseLoadTimeline,
+    LayerwiseLoadTimelineProtocol,
+    LayerwiseStoreTimeline,
+    LayerwiseStoreTimelineProtocol,
+)
+
+LoadOperation = Callable[[LoadTransfer], LoadCompletion]
+StoreOperation = Callable[[StoreTransfer, Any], StoreCompletion]
+StoreAdmission = Callable[[list[StoreTransfer]], list[StoreTransfer]]
+
+
+class KVPoolTimelineRuntime:
+    """Own runtime timelines selected by one compiled Load/Store schedule."""
+
+    def __init__(self, schedule: KVPoolSchedule, topology: KVPoolTopology) -> None:
+        self._schedule = schedule
+        self._topology = topology
+        self._load: LoadTimelineProtocol | None = None
+        self._store: StoreTimelineProtocol | LayerwiseStoreTimelineProtocol | None = None
+        self._layerwise_load: LayerwiseLoadTimelineProtocol | None = None
+        self._bulk_store: StoreTimelineProtocol | None = None
+        self._layerwise_store: LayerwiseStoreTimelineProtocol | None = None
+        self._source_ready_event_factory: Callable[[], Any] | None = None
+
+    @property
+    def store_enabled(self) -> bool:
+        return self._schedule.store_enabled
+
+    @property
+    def fences_store_on_finish(self) -> bool:
+        return self._schedule.fences_store_on_finish
+
+    @property
+    def collects_load_completions(self) -> bool:
+        return self.load.collects_completions
+
+    @property
+    def load(self) -> LoadTimelineProtocol:
+        if self._load is None:
+            raise RuntimeError("KV Pool timeline resources have not been bound")
+        return self._load
+
+    @property
+    def store(self) -> StoreTimelineProtocol | LayerwiseStoreTimelineProtocol | None:
+        return self._store
+
+    def bind_resources(
+        self,
+        thread_initializer: Callable[[], None],
+        source_ready_event_factory: Callable[[], Any],
+        load_operation: LoadOperation,
+        store_operation: StoreOperation,
+        store_transfer_operation: StoreOperation,
+        store_admission: StoreAdmission,
+        layerwise_backend: LayerwiseBackendOperations | None,
+        start_gate_factory: Callable[[], Any],
+    ) -> None:
+        if self._load is not None:
+            raise RuntimeError("KV Pool timeline resources are already bound")
+        if self._schedule.requires_layerwise_backend and layerwise_backend is None:
+            raise TypeError("Layerwise timeline requires layerwise Backend operations")
+
+        load_timeline: LoadTimelineProtocol
+        if self._schedule.load_kind is LoadScheduleKind.LAYERWISE:
+            assert layerwise_backend is not None
+            load_timeline = LayerwiseLoadTimeline(
+                self._topology,
+                layerwise_backend,
+                self._schedule.layerwise_prefetch_layers,
+                thread_initializer,
+                start_gate_factory,
+            )
+            self._layerwise_load = load_timeline
+        elif self._schedule.load_kind is LoadScheduleKind.ASYNC:
+            load_timeline = AsyncLoadTimeline(thread_initializer)
+        else:
+            load_timeline = LoadTimeline()
+        load_timeline.bind_operation(load_operation)
+        self._load = load_timeline
+
+        if self._schedule.store_kind is StoreScheduleKind.LAYERWISE:
+            assert layerwise_backend is not None
+            layerwise_store = LayerwiseStoreTimeline(self._topology, layerwise_backend, thread_initializer)
+            layerwise_store.bind_admission(store_admission)
+            layerwise_store.bind_operation(store_transfer_operation)
+            self._layerwise_store = layerwise_store
+            self._store = layerwise_store
+        elif self._schedule.store_kind is StoreScheduleKind.ASYNC:
+            store = StoreTimeline(thread_initializer)
+            store.bind_operation(store_operation)
+            self._bulk_store = store
+            self._store = store
+        self._source_ready_event_factory = source_ready_event_factory
+
+    def start(self) -> None:
+        if self._store is not None:
+            self._store.start()
+        self.load.start()
+
+    def submit_load(self, transfers: list[LoadTransfer]) -> tuple[LoadCompletion, ...]:
+        return tuple(self.load.submit(transfers))
+
+    def collect_load(self) -> tuple[LoadCompletion, ...]:
+        return tuple(self.load.collect())
+
+    def wait_for_load_layer(self, layer_name: str) -> tuple[LoadCompletion, ...]:
+        if self._layerwise_load is None:
+            return ()
+        return tuple(self._layerwise_load.wait_for_layer(layer_name))
+
+    def abort_load(self) -> None:
+        self.load.abort()
+
+    def prepare_store(self, transfers: list[StoreTransfer]) -> None:
+        if self._layerwise_store is not None:
+            self._layerwise_store.prepare(transfers)
+
+    def submit_store_layer(self, layer_name: str) -> None:
+        if self._layerwise_store is None:
+            return
+        self._layerwise_store.submit_layer(layer_name, self._record_source_ready)
+
+    def finish_store(self, transfers: list[StoreTransfer]) -> StoreBatch:
+        if self._store is None:
+            raise RuntimeError("KV Pool program has no Store timeline")
+        if self._layerwise_store is not None:
+            return self._layerwise_store.finalize()
+        if self._bulk_store is None:
+            raise RuntimeError("KV Pool program has no bulk Store timeline")
+        return self._bulk_store.submit(transfers, self._record_source_ready())
+
+    def wait_store(self, batch: StoreBatch) -> tuple[StoreCompletion, ...]:
+        if self._store is None:
+            return ()
+        return self._store.wait(batch)
+
+    def prepare_store_close(self) -> StoreBatch | None:
+        """Hand unfinished Store work to Runtime before closing its executor."""
+
+        if self._layerwise_store is None:
+            return None
+        return self._layerwise_store.prepare_close()
+
+    def close(self) -> None:
+        close_error: BaseException | None = None
+        if self._store is not None:
+            try:
+                self._store.close()
+            except BaseException as error:
+                close_error = error
+        try:
+            self.load.close()
+        except BaseException as error:
+            if close_error is None:
+                close_error = error
+        if close_error is not None:
+            raise close_error
+
+    def _record_source_ready(self) -> Any:
+        if self._source_ready_event_factory is None:
+            raise RuntimeError("KV Pool timeline resources have not been bound")
+        source_ready_event = self._source_ready_event_factory()
+        source_ready_event.record()
+        return source_ready_event
