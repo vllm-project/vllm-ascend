@@ -1082,9 +1082,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
     ):
         """Hash on device with upstream NgramHashState, then look up head shards.
 
-        Calls without the device metadata (dummy runs) participate with empty
-        hashes. History is the current chunk, then the runner's prompt
-        lookback window, then the slot cache the hash state fills itself.
+        Calls without request boundaries (dummy runs) use empty hashes. V1
+        combines prompt lookback with slot-cache history; MRV2 supplies the
+        full device lookback and does not require block/slot metadata.
         """
         config = self.config
         if not engram_enabled(config):
@@ -1105,8 +1105,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             # means no hash rows: fall back to the dummy-hash path below, which
             # is what an idle replica does in every other graph mode.
             and query_start_loc.numel() > 1
-            and block_table is not None
-            and block_table.shape[0] > 0
+            and (not hash_state.use_slot_cache or (block_table is not None and block_table.shape[0] > 0))
         )
         # A DP-sharded lookup is collective, so a replica that skips the hash
         # still has to reach it: it participates with no valid rows and no
@@ -1123,6 +1122,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             image_pad_token_id = getattr(config, "image_pad_token_id", image_token_id + 1)
             dead = engram_dead_mask(input_ids, image_token_id, image_pad_token_id)
             if lookback_token_ids is None:
+                if not hash_state.use_slot_cache:
+                    raise RuntimeError("MRV2 Engram requires device lookback_token_ids")
                 lookback_token_ids = input_ids.new_full((query_start_loc.numel() - 1, hash_state.lookback_depth), -1)
             hashes = hash_state(
                 input_ids,
@@ -1325,6 +1326,13 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
     requires_raw_input_tokens = True
     _DEFERRED_WEIGHT_MARKERS: tuple[str, ...] = ()
     _DEFERRED_WEIGHT_PREFIXES = ("aligner.", "vision.", "image_", "mtp.")
+
+    @staticmethod
+    def get_model_state_cls():
+        # Worker imports stay lazy, as in the upstream model-state contract.
+        from vllm_ascend.worker.v2.model_states.deepseek_v41 import AscendDeepseekV41ModelState
+
+        return AscendDeepseekV41ModelState
 
     def prepare_engram_inputs(
         self,

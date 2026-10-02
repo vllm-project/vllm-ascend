@@ -26,7 +26,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 if TYPE_CHECKING:
@@ -41,65 +41,6 @@ class AscendModelState(DefaultModelState):
     pcp_context: "AscendPCPAttentionContext | None" = None
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
-
-    def _get_engram_device_inputs(self, input_batch: AscendInputBatch) -> dict[str, torch.Tensor]:
-        """Device request coordinates for upstream NgramHashState."""
-        layer_name = getattr(self.model, "engram_cache_layer_name", None)
-        kv_cache_config = getattr(self, "kv_cache_config", None)
-        if layer_name is None or kv_cache_config is None:
-            return {}
-        if self.kvpp_is_dummy_run or ring_state_update_skipped():
-            return {}
-        group_id = next(
-            (
-                group_id
-                for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-                if layer_name in group.layer_names
-            ),
-            None,
-        )
-        if group_id is None:
-            return {}
-        block_tables: tuple[torch.Tensor, ...] | None
-        slot_mappings: torch.Tensor | None
-        if self.pcp_context is not None:
-            batch = self.pcp_context.global_batch
-            block_tables = self.pcp_context.global_block_tables
-            slot_mappings = self.pcp_context.global_slot_mappings
-        else:
-            batch = input_batch
-            block_tables = getattr(self, "block_tables", None)
-            slot_mappings = getattr(self, "slot_mappings", None)
-        if block_tables is None or slot_mappings is None or group_id >= len(block_tables):
-            return {}
-        return {
-            "query_start_loc": batch.query_start_loc,
-            "slot_mapping": slot_mappings[group_id],
-            "block_table": block_tables[group_id][: batch.num_reqs],
-        }
-
-    def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
-        model_inputs = super().prepare_inputs(input_batch, req_states)
-        prepare_engram_inputs = getattr(self.model, "prepare_engram_inputs", None)
-        if prepare_engram_inputs is None:
-            return model_inputs
-        num_tokens = input_batch.num_tokens_after_padding
-        model_inputs.update(
-            prepare_engram_inputs(
-                input_batch.input_ids[:num_tokens],
-                input_batch.positions[:num_tokens],
-                num_tokens,
-                **self._get_engram_device_inputs(input_batch),
-            )
-        )
-        return model_inputs
-
-    def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
-        model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
-        prepare_engram_graph_inputs = getattr(self.model, "prepare_engram_graph_inputs", None)
-        if prepare_engram_graph_inputs is not None:
-            model_inputs.update(prepare_engram_graph_inputs(num_tokens))
-        return model_inputs
 
     def prepare_attn(
         self,
