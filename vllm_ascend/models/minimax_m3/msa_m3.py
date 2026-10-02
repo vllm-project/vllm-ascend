@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.utils import supports_kernel_block_spec
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     MiniMaxM3TPDecodeScoreMetadata,
@@ -171,8 +172,8 @@ class AscendMiniMaxM3IndexerBackend(AttentionBackend):
     def get_supported_head_sizes(cls) -> list[int]:
         return [128]
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    @supports_kernel_block_spec
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:  # type: ignore[misc]
         return [128]
 
     @classmethod
@@ -757,8 +758,8 @@ class AscendMiniMaxM3SparseBackend(AttentionBackend):
     def get_supported_head_sizes(cls) -> list[int]:
         return [128]
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    @supports_kernel_block_spec
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:  # type: ignore[misc]
         return [128]
 
     @classmethod

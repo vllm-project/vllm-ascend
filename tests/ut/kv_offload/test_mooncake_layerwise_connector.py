@@ -1443,7 +1443,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         group = MagicMock()
         group.kv_cache_spec = UniformTypeKVCacheSpecs(
             block_size=16,
-            kv_cache_specs={layer_name: SimpleNamespace(block_size=16, cache_sparse_sfa_c8=True)},
+            kv_cache_specs={layer_name: SimpleNamespace(block_size=16, cache_sparse_sfa_c8=True, dcp_sharded=False)},
         )
         group.layer_names = [layer_name]
         kv_cache_config = MagicMock()

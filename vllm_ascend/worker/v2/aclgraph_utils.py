@@ -32,7 +32,6 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -49,9 +48,18 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
+
+if vllm_version_is("0.30.0"):
+    from vllm.v1.worker.gpu.cp_utils import (
+        maybe_prepare_dcp_local_seq_lens as _prepare_dcp_local_seq_lens,
+    )
+else:
+    from vllm.v1.worker.gpu.cp_utils import (
+        prepare_dcp_local_seq_lens as _prepare_dcp_local_seq_lens,
+    )
 
 
 def _prepare_pcp_inputs_to_capture(
@@ -83,15 +91,16 @@ def _prepare_pcp_inputs_to_capture(
     slot_mappings = pcp_manager.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
 
-    input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
-        input_buffers.dcp_local_seq_lens,
-        input_batch.seq_lens,
-        input_batch.num_reqs,
-        _block_tables.cp_size,
-        _block_tables.cp_rank,
-        _block_tables.cp_interleave,
-        num_reqs_padded=input_batch.num_reqs_after_padding,
-    )
+    if _block_tables.cp_size > 1:
+        input_batch.dcp_local_seq_lens = _prepare_dcp_local_seq_lens(
+            input_buffers.dcp_local_seq_lens,
+            input_batch.seq_lens,
+            input_batch.num_reqs,
+            _block_tables.cp_size,
+            _block_tables.cp_rank,
+            _block_tables.cp_interleave,
+            num_reqs_padded=input_batch.num_reqs_after_padding,
+        )
 
     attn_metadata = model_state.prepare_attn(
         input_batch,
@@ -323,6 +332,19 @@ class ModelWithContext(nn.Module):
 
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor):
         return self.original_model.compute_confidence(head_hidden, markov_embed)
+
+    if not vllm_version_is("0.30.0"):
+
+        def __getattr__(self, name: str):
+            # vLLM #57632 moved the draft context-K/V precompute into the
+            # capture path, which reaches model methods through this wrapper.
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                original_model = self._modules.get("original_model")
+                if original_model is None:
+                    raise
+                return getattr(original_model, name)
 
 
 @contextmanager

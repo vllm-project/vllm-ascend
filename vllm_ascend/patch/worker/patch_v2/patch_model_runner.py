@@ -6,6 +6,7 @@ from contextlib import AbstractContextManager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
 
@@ -34,11 +35,16 @@ def initialize_kv_cache(
     block_sizes = []
     max_num_blocks_per_group = []
     slot_mapping_enabled = []
+    dcp_sharded = []
     for kv_cache_group in kv_cache_config.kv_cache_groups:
         spec = kv_cache_group.kv_cache_spec
         block_sizes.append(spec.block_size)
         layer_spec = spec.first_spec if isinstance(spec, upstream.UniformTypeKVCacheSpecs) else spec
         slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
+        # vLLM main lets each cache type report whether it is DCP-sharded;
+        # v0.30.0 has no such field and always treats caches as sharded.
+        if not vllm_version_is("0.30.0"):
+            dcp_sharded.append(spec.dcp_sharded)
         # Let each cache type account for CP. Attention KV is DCP-sharded,
         # while Mamba/GDN recurrent state is replicated across DCP ranks.
         max_num_blocks = spec.max_num_blocks_per_req(self.vllm_config, block_table_max_model_len)
@@ -79,7 +85,6 @@ def initialize_kv_cache(
     self.adaptive_verification = upstream.maybe_create_adaptive_verification_manager(
         enable_adaptive_verification=getattr(self.speculator, "enable_adaptive_verification", False),
         attn_groups=self.attn_groups,
-        attn_cg_support=attn_cg_support,
         req_states=self.req_states,
         query_start_loc=self.input_buffers.query_start_loc,
         num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
@@ -87,8 +92,12 @@ def initialize_kv_cache(
         vllm_config=self.vllm_config,
         target_layer_names=target_attn_layer_names,
         additional_attn_cg_support=additional_attn_cg_support,
+        **({"attn_cg_support": attn_cg_support} if vllm_version_is("0.30.0") else {}),
     )
 
+    block_tables_kwargs = {}
+    if not vllm_version_is("0.30.0"):
+        block_tables_kwargs["dcp_sharded"] = dcp_sharded
     self.block_tables = upstream.BlockTables(
         block_sizes=block_sizes,
         max_num_reqs=self.max_num_reqs,
@@ -100,6 +109,7 @@ def initialize_kv_cache(
         cp_size=self.dcp_size,
         cp_rank=self.dcp_rank,
         cp_interleave=self.cp_interleave,
+        **block_tables_kwargs,
     )
     self.pcp_manager = upstream.pcp.maybe_build_pcp_manager(
         self.vllm_config,
@@ -189,6 +199,11 @@ def initialize_kv_cache(
         self.kv_connector = upstream.NO_OP_KV_CONNECTOR
     else:
         self.kv_connector = upstream.get_kv_connector(self.vllm_config, kv_caches_dict)
+        # vLLM main carries routed-experts output through the AuxOutput
+        # connector, which the V2 NPUModelRunner relies on via super().
+        # v0.30.0 has no aux_output_config and still uses the legacy capturer.
+        if not vllm_version_is("0.30.0") and self.vllm_config.aux_output_config.enabled:
+            self.aux_output_connector = upstream.get_aux_output_connector(self.model, self.vllm_config, kv_cache_config)
 
 
 upstream.copy_kv_cache_blocks_inplace = copy_kv_cache_blocks_inplace
