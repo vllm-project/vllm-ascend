@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 import zmq
-from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
@@ -25,6 +24,17 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.heartbeat import (
+    DEFAULT_KV_LEASE_DURATION,
+    HEARTBEAT_MAX_ATTEMPTS,
+    HEARTBEAT_MSG,
+    HEARTBEAT_VERSION,
+    LEASE_IO_TIMEOUT_MS,
+    MooncakeHeartbeatThread,
+    renew_heartbeat_leases,
+    validate_lease_duration,
+    validate_positive_int,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -50,6 +60,8 @@ if TYPE_CHECKING:
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
 ACK_MSG = b"ACK"
+CONTROL_IO_TIMEOUT_MS = 1000
+DONE_MAX_ATTEMPTS = 3
 
 
 class MooncakeSchedulerSendingThread(threading.Thread):
@@ -67,6 +79,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         dcp_size: int,
         use_kv_pp: bool,
         ready_event: threading.Event,
+        kv_lease_duration: float = DEFAULT_KV_LEASE_DURATION,
     ) -> None:
         super().__init__(daemon=True, name="MooncakeSchedulerSendingThread")
         encoder = msgspec.msgpack.Encoder()
@@ -77,6 +90,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         self.pcp_size = pcp_size
         self.dcp_size = dcp_size
         self.engine_id = engine_id
+        self.kv_lease_duration = kv_lease_duration
         self.use_kv_pp = use_kv_pp
         if self.use_kv_pp and self.dcp_size != 1:
             raise ValueError(f"Mooncake KVPP cannot be combined with DCP, got dcp_size={self.dcp_size}")
@@ -313,7 +327,9 @@ class MooncakeSchedulerSendingThread(threading.Thread):
 
     def add_delayed_request(self, request_id: str, delay_start_time: float) -> None:
         with self.state_lock:
-            self.delayed_free_requests[request_id] = delay_start_time
+            if request_id in self.finished_request_ids:
+                return
+            self.delayed_free_requests[request_id] = delay_start_time + self.kv_lease_duration
             if request_id in self.early_finished_requests:
                 self.early_finished_requests.remove(request_id)
                 self._mark_finished_locked(request_id)
@@ -361,10 +377,19 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 elif msg[0] == DONE_RECVING_MSG and len(msg) == 2:
                     self._handle_finished_request(str(msg[1]))
                     sock.send_multipart((identity, b"", ACK_MSG))
+                elif msg[0] == HEARTBEAT_MSG and len(msg) == 3:
+                    accepted = self._handle_heartbeat(msg[1], msg[2])
+                    sock.send_multipart((identity, b"", ACK_MSG if accepted else b"REJECTED"))
                 else:
                     logger.warning("Unexpected Mooncake scheduler control message: %s", msg)
             except Exception:
                 logger.exception("Failed to handle Mooncake scheduler control message")
+
+    def _handle_heartbeat(self, engine_id: str, request_ids: Any) -> bool:
+        if engine_id != self.engine_id:
+            return False
+        with self.state_lock:
+            return renew_heartbeat_leases(self.delayed_free_requests, request_ids, self.kv_lease_duration)
 
     def _handle_finished_request(self, request_id: str) -> None:
         with self.state_lock:
@@ -383,27 +408,32 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         self.finished_requests.put(request_id)
 
     def _retrieve_expired_requests_locked(self) -> None:
-        current_time = time.time()
-        while self.delayed_free_requests:
-            request_id = next(iter(self.delayed_free_requests))
-            delay_start_time = self.delayed_free_requests[request_id]
-            if current_time - delay_start_time <= envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
-                break
-
+        current_time = time.monotonic()
+        # Renewals change deadline order independently of insertion order.
+        expired = [req_id for req_id, deadline in self.delayed_free_requests.items() if deadline <= current_time]
+        for request_id in expired:
             self._mark_finished_locked(request_id)
             logger.error(
-                "Force freed expired Mooncake request %s after %s seconds",
+                "Force freed expired Mooncake request %s (lease duration %s seconds)",
                 request_id,
-                envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                self.kv_lease_duration,
             )
 
 
 class MooncakeSchedulerRecvingThread(threading.Thread):
-    """Send scheduler-level completion messages from D to P."""
+    """Send D-to-P DONE messages and wait for ACK, independently of heartbeats."""
 
-    def __init__(self, ready_event: threading.Event) -> None:
+    def __init__(
+        self,
+        ready_event: threading.Event,
+        *,
+        io_timeout_ms: int = CONTROL_IO_TIMEOUT_MS,
+        max_attempts: int = DONE_MAX_ATTEMPTS,
+    ) -> None:
         super().__init__(daemon=True, name="MooncakeSchedulerRecvingThread")
         self.ready_event = ready_event
+        self.io_timeout_ms = io_timeout_ms
+        self.max_attempts = max_attempts
         self.request_queue: queue.Queue[tuple[str, int, str]] = queue.Queue()
         self.encoder = msgspec.msgpack.Encoder()
         self.remote_sockets: dict[str, deque[Any]] = defaultdict(deque)
@@ -416,31 +446,28 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
     def run(self) -> None:
         self.ready_event.set()
         while True:
-            request = self.request_queue.get()
+            self._process_next_request()
 
-            try:
-                self._send_done_recving(*request)
-            except Exception:
-                logger.exception(
-                    "Failed to send Mooncake scheduler completion for request %s",
-                    request[2],
-                )
-                self.request_queue.put(request)
-            finally:
-                self.request_queue.task_done()
+    def _process_next_request(self) -> None:
+        remote_host, remote_port, request_id = self.request_queue.get()
+        try:
+            self._send_done_recving(remote_host, remote_port, request_id)
+        except Exception:
+            logger.exception("Dropping failed Mooncake DONE for request %s", request_id)
+        finally:
+            self.request_queue.task_done()
 
     def _send_done_recving(self, remote_host: str, remote_port: int, request_id: str) -> None:
         path = make_zmq_path("tcp", remote_host, remote_port)
         sock = self._get_remote_socket(path)
         try:
+            # Bounded DONE attempts; the heartbeat thread owns separate sockets.
             ensure_zmq_send(
-                sock,
-                self.encoder.encode((DONE_RECVING_MSG, request_id)),
-                path,
+                sock, self.encoder.encode((DONE_RECVING_MSG, request_id)), path, max_retries=self.max_attempts
             )
-            response = ensure_zmq_recv(sock, path)
+            response = ensure_zmq_recv(sock, path, max_retries=self.max_attempts)
             if response != ACK_MSG:
-                raise RuntimeError(f"Unexpected Mooncake scheduler completion response: {response!r}")
+                raise RuntimeError(f"Unexpected Mooncake scheduler control response: {response!r}")
         except Exception:
             sock.close(linger=0)
             raise
@@ -461,8 +488,8 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
                 socket_type=zmq.REQ,  # type: ignore[attr-defined]
                 bind=False,
             )
-            sock.setsockopt(zmq.SNDTIMEO, 1000)  # type: ignore[attr-defined]
-            sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.SNDTIMEO, self.io_timeout_ms)  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.RCVTIMEO, self.io_timeout_ms)  # type: ignore[attr-defined]
             return sock
 
     def _return_remote_socket(self, path: str, sock: Any) -> None:
@@ -491,12 +518,37 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self._reqs_recv_info: dict[str, tuple[str, int, str]] = {}
         self._sending_thread: MooncakeSchedulerSendingThread | None = None
         self._recving_thread: MooncakeSchedulerRecvingThread | None = None
+        self._heartbeat_thread: MooncakeHeartbeatThread | None = None
+        duration = self.kv_transfer_config.get_from_extra_config("kv_lease_duration", DEFAULT_KV_LEASE_DURATION)
+        self._kv_lease_duration = validate_lease_duration(duration)
 
         if self.kv_transfer_config.is_kv_consumer:
+            get_extra = self.kv_transfer_config.get_from_extra_config
+            # Validate every option before starting either background thread.
+            control_timeout = validate_positive_int(
+                "control_io_timeout_ms", get_extra("control_io_timeout_ms", CONTROL_IO_TIMEOUT_MS)
+            )
+            done_attempts = validate_positive_int(
+                "done_max_attempts", get_extra("done_max_attempts", DONE_MAX_ATTEMPTS)
+            )
+            lease_timeout = validate_positive_int(
+                "lease_io_timeout_ms", get_extra("lease_io_timeout_ms", LEASE_IO_TIMEOUT_MS)
+            )
+            heartbeat_attempts = validate_positive_int(
+                "heartbeat_max_attempts", get_extra("heartbeat_max_attempts", HEARTBEAT_MAX_ATTEMPTS)
+            )
             recving_ready_event = threading.Event()
-            self._recving_thread = MooncakeSchedulerRecvingThread(recving_ready_event)
+            self._recving_thread = MooncakeSchedulerRecvingThread(
+                recving_ready_event, io_timeout_ms=control_timeout, max_attempts=done_attempts
+            )
             self._recving_thread.start()
             recving_ready_event.wait()
+            heartbeat_ready_event = threading.Event()
+            self._heartbeat_thread = MooncakeHeartbeatThread(
+                heartbeat_ready_event, io_timeout_ms=lease_timeout, max_attempts=heartbeat_attempts
+            )
+            self._heartbeat_thread.start()
+            heartbeat_ready_event.wait()
 
     def set_xfer_handshake_metadata_from_workers(
         self,
@@ -517,12 +569,22 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             self.dcp_size,
             self.ascend_config.kvpp_config.size > 1,
             ready_event,
+            kv_lease_duration=self._kv_lease_duration,
         )
         self._sending_thread.start()
         if not ready_event.wait(timeout=10):
             raise RuntimeError("Timed out starting Mooncake scheduler sending thread")
         if not self._sending_thread.is_alive():
             raise RuntimeError("Mooncake scheduler sending thread failed to start")
+
+    def on_new_request(self, request: "Request") -> None:
+        super().on_new_request(request)
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.start_request(request.request_id, request.kv_transfer_params)
+
+    def _stop_heartbeat(self, request_id: str) -> None:
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.stop_request(request_id)
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """Return prompt tokens that will be loaded from a remote producer."""
@@ -586,6 +648,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 else:
                     if self._recving_thread is None:
                         raise RuntimeError("Producer Mooncake scheduler cannot acknowledge a receive request")
+                    self._stop_heartbeat(request.request_id)
                     self._recving_thread.add_request(*remote)
             else:
                 logger.warning("Got invalid KVTransferParams. params=%s.", params)
@@ -623,6 +686,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         block_ids: BlockIds,
     ) -> tuple[bool, dict[str, Any] | None]:
         """Expose completed producer blocks for a remote READ transfer."""
+        self._stop_heartbeat(request.request_id)
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeConnector request_finished: request_status=%s, kv_transfer_params=%s",
@@ -648,7 +712,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 num_computed_blocks,
                 request.request_id,
             )
-            delay_start_time = time.time()
+            delay_start_time = time.monotonic()
             self._reqs_need_send[request.request_id] = delay_start_time
             if self._sending_thread is None:
                 raise RuntimeError("Mooncake scheduler metadata has not been initialized")
@@ -657,7 +721,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 delay_start_time,
             )
 
-        return delay_free_blocks, {
+        transfer_params: dict[str, Any] = {
             "do_remote_prefill": True,
             "do_remote_decode": False,
             "remote_block_ids": computed_block_ids,
@@ -668,6 +732,9 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             "remote_port": self.side_channel_port,
             "last_token_id": request.output_token_ids[-1],
         }
+        if delay_free_blocks:
+            transfer_params.update(kv_lease_version=HEARTBEAT_VERSION, kv_lease_duration=self._kv_lease_duration)
+        return delay_free_blocks, transfer_params
 
     def update_connector_output(
         self,
@@ -676,6 +743,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         # D side: this output has already aggregated completion from all
         # workers. Send one scheduler-to-scheduler ACK for the request.
         for req_id in connector_output.finished_recving or ():
+            self._stop_heartbeat(req_id)
             remote = self._reqs_recv_info.pop(req_id, None)
             if remote is not None:
                 if self._recving_thread is None:
