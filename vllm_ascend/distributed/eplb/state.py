@@ -51,6 +51,9 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
     def __init__(self) -> None:
         super().__init__()
         self.expert_replica_routing_table: torch.Tensor | None = None
+        self.record_done_in_mapping = False
+        self.record_in_mapping_allowed = False
+        self.mapping_valid_tokens: torch.Tensor | int | None = None
         self.local_expert_start = 0
         self.local_expert_count = 0
 

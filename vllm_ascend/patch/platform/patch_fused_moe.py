@@ -42,6 +42,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMo
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb.state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
+from vllm_ascend.ops.triton.eplb_map_record import eplb_map_and_record
 
 _EPLB_ROUTER_ADAPTED = "_vllm_ascend_eplb_router_adapted"
 
@@ -79,6 +80,21 @@ def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
     expert_replica_routing_table = eplb_state.expert_replica_routing_table
     if expert_replica_routing_table is None:
         raise RuntimeError("Ascend EPLB expert replica routing table is not initialized.")
+    if eplb_state.record_in_mapping_allowed:
+        valid_tokens = eplb_state.mapping_valid_tokens
+        if valid_tokens is None or eplb_state.should_record_tensor is None or eplb_state.expert_load_view is None:
+            raise RuntimeError("Ascend EPLB map+record state is not initialized.")
+        physical_ids = eplb_map_and_record(
+            topk_ids,
+            expert_replica_routing_table,
+            eplb_state.expert_load_view,
+            eplb_state.should_record_tensor,
+            valid_tokens,
+            local_expert_start=eplb_state.local_expert_start,
+            local_expert_count=eplb_state.local_expert_count,
+        )
+        eplb_state.record_done_in_mapping = True
+        return physical_ids
     return torch.ops.vllm.ascend_eplb_map_to_physical(
         topk_ids,
         expert_replica_routing_table,
