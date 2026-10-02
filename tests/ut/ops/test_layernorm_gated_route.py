@@ -244,17 +244,17 @@ class WrapperRouteTests(unittest.TestCase):
             self.assertIs(returned[1], args[5])
             self.assertIs(returned[2], args[6])
 
-            call(289)
+            call(288)
             name, grid, args, kwargs = launches[-1]
             self.assertEqual(name, "_layer_norm_fwd_1pass_kernel_npu")
-            self.assertEqual(grid, (19, 1))
+            self.assertEqual(grid, (18, 1))
             self.assertEqual(len(args), 13)
             self.assertEqual((kwargs["BLOCK_M"], kwargs["BLOCK_N"]), (16, 128))
             self.assertEqual(kwargs["NORM_BEFORE_GATE"], True)
             self.assertEqual(kwargs["IS_RMS_NORM"], False)
 
             rms_result = call(
-                289,
+                288,
                 bias=False,
                 z=True,
                 norm_before_gate=False,
@@ -265,15 +265,23 @@ class WrapperRouteTests(unittest.TestCase):
             self.assertIsNone(args[3])
             self.assertIsNotNone(args[4])
             self.assertIsNone(rms_result[1])
-            self.assertEqual(rms_result[2].shape, (289,))
+            self.assertEqual(rms_result[2].shape, (288,))
             self.assertIs(rms_result[2], args[6])
             self.assertEqual(kwargs["NORM_BEFORE_GATE"], False)
             self.assertEqual(kwargs["IS_RMS_NORM"], True)
 
             call(639)
-            self.assertEqual(launches[-1][0], "_layer_norm_fwd_1pass_kernel_npu")
-            self.assertEqual(launches[-1][1], (40, 1))
-            self.assertEqual(launches[-1][3]["BLOCK_M"], 16)
+            self.assertEqual(launches[-1][0], "_layer_norm_fwd_persistent_hoist_kernel_npu")
+            self.assertEqual(launches[-1][1], (20,))
+            self.assertEqual(launches[-1][3]["BLOCK_M"], 32)
+
+            call(289)
+            name, grid, args, kwargs = launches[-1]
+            self.assertEqual(name, "_layer_norm_fwd_persistent_hoist_kernel_npu")
+            self.assertEqual(grid, (10,))
+            self.assertEqual(len(args), 14)
+            self.assertEqual(args[13], 10)
+            self.assertEqual(kwargs["BLOCK_M"], 32)
 
             call(640)
             name, grid, args, kwargs = launches[-1]
@@ -385,7 +393,7 @@ class WrapperRouteTests(unittest.TestCase):
 
             state["vector_cores"] = None
             with self.assertRaisesRegex(AssertionError, "Device properties not initialized"):
-                call(289)
+                call(288)
 
             for device_type in ("cpu", "cuda"):
                 before_getter_calls = state["getter_calls"]

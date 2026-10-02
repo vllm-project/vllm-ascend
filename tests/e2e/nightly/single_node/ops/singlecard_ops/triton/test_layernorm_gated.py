@@ -167,7 +167,7 @@ class _KernelLaunchRecorder:
             False,
             True,
             True,
-            id="below-hoist-threshold-rmsnorm-post-gate",
+            id="before-quarter-wave-rmsnorm-post-gate",
         ),
         pytest.param(
             "at",
@@ -177,7 +177,7 @@ class _KernelLaunchRecorder:
             True,
             True,
             False,
-            id="hoist-threshold-layernorm-pre-gate-fp16",
+            id="quarter-wave-boundary-layernorm-pre-gate-fp16",
         ),
         pytest.param(
             "above",
@@ -187,7 +187,7 @@ class _KernelLaunchRecorder:
             False,
             True,
             True,
-            id="above-hoist-threshold-rmsnorm-post-gate",
+            id="above-quarter-wave-rmsnorm-post-gate",
         ),
         pytest.param(
             "large",
@@ -213,9 +213,9 @@ def test_layer_norm_fwd_npu_hoist_routes(
     monkeypatch,
 ):
     vector_cores = get_vectorcore_num()
-    threshold = 16 * vector_cores
+    threshold = (vector_cores + 3) // 4 * 32 - 31
     rows = {
-        "before": threshold - 1,
+        "before": max(1, threshold - 1),
         "at": threshold,
         "above": threshold + 1,
         "large": 65536,
@@ -247,7 +247,8 @@ def test_layer_norm_fwd_npu_hoist_routes(
         x, weight, bias, eps, z, 128, norm_before_gate, is_rms_norm
     )
 
-    if rows_kind == "before":
+    uses_hoist = 4 * ((rows + 31) // 32) >= vector_cores
+    if not uses_hoist:
         assert recorder.grids == [((rows + 15) // 16, 1)]
         assert recorder.launch_kwargs[-1]["BLOCK_M"] == 16
         assert recorder.launch_kwargs[-1]["BLOCK_N"] == 128

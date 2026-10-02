@@ -40,15 +40,15 @@ class SelectorTests(unittest.TestCase):
             self.mod.LaunchSpec("FT_BASE", 64),
         )
 
-    def test_single_group_uses_exact_rows_per_core_boundary(self):
+    def test_single_group_uses_integer_quarter_wave_boundary(self):
         m = self.mod
-        for rows in (128, 288, 289, 639):
+        for rows in (128, 288):
             with self.subTest(rows=rows):
                 self.assertEqual(
                     m._select_layernorm_launch(rows, 128, 1, 40),
                     m.LaunchSpec("FT_BASE", 16),
                 )
-        for rows in (640, 641, 20449, 65536):
+        for rows in (289, 290, 639, 640, 641, 20449, 65536):
             with self.subTest(rows=rows):
                 self.assertEqual(
                     m._select_layernorm_launch(rows, 128, 1, 40),
@@ -57,15 +57,29 @@ class SelectorTests(unittest.TestCase):
 
     def test_boundary_scales_with_runtime_vector_core_count(self):
         m = self.mod
-        self.assertEqual(m._select_layernorm_launch(767, 128, 1, 48), m.LaunchSpec("FT_BASE", 16))
-        self.assertEqual(
-            m._select_layernorm_launch(768, 128, 1, 48),
-            m.LaunchSpec("FT_PERSIST_HOIST", 32),
-        )
-        self.assertEqual(
-            m._select_layernorm_launch(769, 128, 1, 48),
-            m.LaunchSpec("FT_PERSIST_HOIST", 32),
-        )
+        for rows, expected in (
+            (352, m.LaunchSpec("FT_BASE", 16)),
+            (353, m.LaunchSpec("FT_PERSIST_HOIST", 32)),
+            (354, m.LaunchSpec("FT_PERSIST_HOIST", 32)),
+        ):
+            with self.subTest(rows=rows):
+                self.assertEqual(m._select_layernorm_launch(rows, 128, 1, 48), expected)
+
+    def test_quarter_wave_boundary_uses_exact_integer_tiles(self):
+        m = self.mod
+        for runtime_p in (1, 3, 7, 39, 41):
+            tiles_needed = (runtime_p + 3) // 4
+            boundary = (tiles_needed - 1) * m.BM_HOIST + 1
+            with self.subTest(runtime_p=runtime_p):
+                self.assertEqual(
+                    m._select_layernorm_launch(boundary, 128, 1, runtime_p),
+                    m.LaunchSpec("FT_PERSIST_HOIST", 32),
+                )
+                if boundary > 1:
+                    self.assertEqual(
+                        m._select_layernorm_launch(boundary - 1, 128, 1, runtime_p),
+                        m.LaunchSpec("FT_BASE", 16),
+                    )
 
     def test_small_group_multi_group_and_wide_n_routes(self):
         m = self.mod

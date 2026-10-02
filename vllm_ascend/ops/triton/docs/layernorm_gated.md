@@ -29,11 +29,11 @@
 ## Constraints
 
 - `N` must be divisible by `group_size`; `weight` and optional `bias` have shape `[N]`; optional `z` and `out` have shape `[M, N]`. The wrapper checks these conditions and the last-dimension strides. Resource tiling and the routes below use the **per-group** width `N_group=group_size`, not total `N` (for example, total `N=384` with `group_size=128` has three groups of width 128).
-- For `N_group<128`, the NPU selector uses BASE16. At `N_group=128`, grouped inputs use BASE32; a single group uses BASE16 when `M < 16P` and HOIST32 when `M >= 16P`, where `P` is the initialized vector-core count. This candidate threshold expresses 16 input rows per vector core (half a BM32 row wave); it does not use a ceil-div tile count. Multi-group persistent execution is not enabled.
+- For `N_group<128`, the NPU selector uses BASE16. At `N_group=128`, grouped inputs use BASE32; a single group uses HOIST32 when `4 * ceil(M / 32) >= P`, where `P` is the initialized vector-core count. The BM32 tiles need to cover at least one quarter of the initialized runtime vector cores: the boundary is M=289 for P=40 and M=353 for P=48. This is an integer tile-count rule, not a measured optimal crossover. Multi-group persistent execution is not enabled.
 - For `128 < N_group <= 512`, NPU calls use FT_BASE with `BLOCK_M=16` when the initialized vector-core count is available and `get_ub_size_bytes()` returns at least 196608 bytes. `BLOCK_N` is 256 for `N_group` 129–256 and 512 for 257–512. The existing getter may return its compatibility default or debugging override; its value is a routing input, not an independent compiler-resource measurement. Missing or lower UB in the scalar selector, `N_group>512`, and non-NPU calls retain BASE64. An uninitialized vector-core count continues to raise rather than falling back. The width is the per-group `N_group`, not total `N`.
 - BASE retains its existing `65536 / element_size` feature-width guard. That guard does not qualify other full-tile resource buckets; PR1 does not add N-axis chunking, and `N_group>512` remains on the original BASE64 route.
 - Route selection depends on shape, group count, and the initialized vector-core count, not on tensor values. No claim is made here that every route is faster on every supported device or dtype.
-- The two-path choice accepts about a 1% relative tradeoff at B4/P40 M=640 and M=2560 to remove the separate PERSIST implementation; M=1280 was near parity and M=10240 favored HOIST. Those four measurements do not establish global non-inferiority or an exact crossover. In particular, M=289–639 and the final public-wrapper route remain pending device validation.
+- Forced HOIST32 evidence at B4/P40 M=289 was near parity with BASE16; at M=639 it improved the BASE16 control and was mixed against the former PERSIST32 path. These forced comparisons support a bounded engineering selector decision, not final-source public-route qualification or an optimal crossover. New actual public-wrapper NPU validation remains pending.
 
 ## Origin and Differences
 
@@ -45,7 +45,7 @@
 
 ## Test Cases
 
-- Host selector and wrapper-route tests check the M=16P boundary and nearby rows, grouped BASE32, the FT16 `N_group`/UB envelope (including N513 and grouped inputs), non-NPU fallbacks, and launch arguments without an NPU:
+- Host selector and wrapper-route tests check the integer quarter-wave tile boundary and nearby rows, grouped BASE32, the FT16 `N_group`/UB envelope (including N513 and grouped inputs), non-NPU fallbacks, and launch arguments without an NPU:
 
   ```bash
   python -m unittest discover -s tests/ut/ops -p 'test_layernorm_gated_*.py'

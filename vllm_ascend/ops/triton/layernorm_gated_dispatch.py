@@ -19,7 +19,7 @@ class LaunchSpec(NamedTuple):
 BM_SMALL = 16
 BM_MULTI = 32
 BM_HOIST = 32
-HOIST_MIN_ROWS_PER_CORE = 16
+HOIST_QUARTER_WAVE_DIVISOR = 4
 BM_FT16 = 16
 FT16_MAX_N_GROUP = 512
 FT16_MIN_UB_BYTES = 196_608
@@ -76,6 +76,7 @@ def _select_layernorm_launch(
     if ngroups > 1:
         return LaunchSpec("FT_BASE", BM_MULTI)
 
-    if HOIST_MIN_ROWS_PER_CORE * runtime_p <= M:
+    hoist_tiles = (M + BM_HOIST - 1) // BM_HOIST
+    if HOIST_QUARTER_WAVE_DIVISOR * hoist_tiles >= runtime_p:
         return LaunchSpec("FT_PERSIST_HOIST", BM_HOIST)
     return LaunchSpec("FT_BASE", BM_SMALL)
