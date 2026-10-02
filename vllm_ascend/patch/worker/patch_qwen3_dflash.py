@@ -12,6 +12,20 @@ def precompute_and_store_context_kv(
     context_positions: torch.Tensor,
     context_slot_mapping: torch.Tensor | None = None,
 ) -> None:
+    """CAPTURE_FUSION_V2: Optimized context KV precompute for DFlash.
+
+    Optimizations vs original:
+    1. Batch per-layer k_norm into stacked-weight RMSNorm (saves L-1 kernels)
+    2. Avoid intermediate .contiguous() by keeping GEMM output in layer-major layout
+    3. Remove wasteful .clone() for the RoPE dummy key: key=None makes the
+       NPU RoPE path (forward_oot -> npu_mrope) use a 1-head throwaway buffer
+
+    Correctness fixes vs original:
+    4. k_norm.variance_epsilon (vllm RMSNorm has no .eps attribute)
+    5. Rebind RoPE output from the return value: the Ascend RoPE path is
+       out-of-place (mutates_args=[]), so discarding the return value
+       leaves K un-rotated in the KV cache
+    """
     if not hasattr(self, "_num_attn_layers"):
         self._build_fused_kv_buffers()
 
@@ -21,35 +35,50 @@ def precompute_and_store_context_kv(
     hd = self._head_dim
     nkv = self._num_kv_heads
 
-    # --- Fused KV projection (one GEMM for all layers) ---
+    # --- Step 1: Fused KV projection (one GEMM for all layers) ---
     normed_context_states = self.hidden_norm(context_states)
     all_kv_flat = F.linear(normed_context_states, self._fused_kv_weight, self._fused_kv_bias)
-    # Single contiguous copy that separates K/V and transposes to
-    # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
-    # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
-    all_kv = all_kv_flat.view(num_ctx, L, 2, nkv, hd).permute(2, 1, 0, 3, 4).contiguous()
-    all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
-    all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
+    # all_kv_flat: [num_ctx, L * 2 * nkv * hd]
+    # Reshape to [L, 2, num_ctx, nkv, hd] (layer-major) without .contiguous()
+    # by using the fact that the fused weight is already layer-major ordered
+    all_kv = all_kv_flat.view(num_ctx, L, 2, nkv, hd).permute(1, 2, 0, 3, 4)
+    # all_kv: [L, 2, num_ctx, nkv, hd] (view, not contiguous)
+    all_k = all_kv[:, 0]  # [L, num_ctx, nkv, hd]
+    all_v = all_kv[:, 1]  # [L, num_ctx, nkv, hd]
 
-    # --- Per-layer RMSNorm K (3D: [num_ctx, nkv, hd] per layer) ---
-    all_k_normed = torch.empty_like(all_k)
-    for i in range(L):
-        k_norm_layer = self.layers[i].self_attn.k_norm
-        all_k_normed[i] = k_norm_layer(all_k[i])
+    # --- Step 2: Batched per-layer K RMSNorm ---
+    # Stack per-layer k_norm weights into a single tensor for batched application
+    if not hasattr(self, "_stacked_k_norm_weights"):
+        self._stacked_k_norm_weights = torch.stack(
+            [self.layers[i].self_attn.k_norm.weight.detach() for i in range(L)]
+        )  # [L, hd]
+        self._k_norm_eps = self.layers[0].self_attn.k_norm.variance_epsilon
 
-    # --- Fused RoPE across all layers ---
-    # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
-    # In-place RoPE: pass K as the "query" arg with key=None.
-    all_k_flat = all_k_normed.view(L * num_ctx, kv)
+    # all_k: [L, num_ctx, nkv, hd], weight: [L, hd] -> broadcast over nkv
+    # RMSNorm: x * rsqrt(mean(x^2) + eps) * weight
+    k_flat = all_k.reshape(L, num_ctx * nkv, hd).float()
+    variance = k_flat.pow(2).mean(dim=-1, keepdim=True)
+    k_normed = (k_flat * torch.rsqrt(variance + self._k_norm_eps)).to(all_k.dtype)
+    # Apply per-layer weights: [L, 1, 1, hd] broadcast over [L, num_ctx, nkv, hd]
+    k_norm_weight = self._stacked_k_norm_weights.unsqueeze(1).unsqueeze(1)
+    all_k_normed = k_normed.reshape(L, num_ctx, nkv, hd) * k_norm_weight
+
+    # --- Step 3: RoPE (K-only, no full-tensor clone) ---
+    # key=None makes the NPU RoPE path (forward_oot -> npu_mrope) use a
+    # 1-head throwaway key buffer instead of a clone of K.
+    # NOTE: the Ascend RoPE path is out-of-place (registered with
+    # mutates_args=[]), so the rotated K must be rebound from the return
+    # value; discarding it would leave K un-rotated in the KV cache.
+    all_k_flat = all_k_normed.reshape(L * num_ctx, kv).contiguous()
     positions_repeated = context_positions.repeat(L)
-    tmpv = all_k_flat.clone()
-    self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, tmpv)
+    all_k_flat, _ = self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, None)
 
     if context_slot_mapping is None:
         return
 
-    # --- Per-layer cache insert ---
+    # --- Step 4: Per-layer cache insert (keep per-layer, but K is now contiguous) ---
     all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
+    all_v_contig = all_v.contiguous()
     per_layer = isinstance(context_slot_mapping, (list, tuple))
     for i in range(L):
         slot_mapping = context_slot_mapping[i] if per_layer else context_slot_mapping
@@ -60,7 +89,7 @@ def precompute_and_store_context_kv(
         attn.impl.do_kv_cache_update(
             attn,
             all_k_final[i],
-            all_v[i],
+            all_v_contig[i],
             kv_cache,
             slot_mapping,
         )
