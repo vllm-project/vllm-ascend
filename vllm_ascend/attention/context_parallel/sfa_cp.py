@@ -24,6 +24,7 @@ from vllm_ascend.attention.sfa_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.ops.triton.sfa_dcp_query import can_prepare_query, prepare_query_head_major, unpack_query
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -35,6 +36,7 @@ class DCPGatherContext(NamedTuple):
     handle: torch.distributed.Work | None
     restore_perm: tuple[int, ...] | None
     split_sizes: tuple[int, ...]
+    query_prepared: bool = False
 
 
 @dataclass
@@ -485,6 +487,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     ) -> tuple[torch.Tensor, ...]:
         if context.handle is not None:
             context.handle.wait()
+        if context.query_prepared:
+            return unpack_query(context.gathered)
         gathered = context.gathered
         if context.restore_perm is not None:
             gathered = gathered.permute(context.restore_perm).contiguous()
@@ -505,7 +509,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         gathered, handle = all_gather_async(x.permute(perm).contiguous(), self.dcp_group)
         return gathered, handle, restore_perm
 
-    def _remap_sparse_indices(self, topk_indices: torch.Tensor) -> torch.Tensor:
+    def _remap_sparse_indices(self, topk_indices: torch.Tensor, *, decode_only: bool = False) -> torch.Tensor:
         if self.dcp_size <= 1:
             return topk_indices
 
@@ -607,6 +611,18 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 "Cannot fuse DCP query gather for ql_nope/q_pe with "
                 f"shapes {tuple(ql_nope.shape)} / {tuple(q_pe.shape)} "
                 f"and dtypes {ql_nope.dtype} / {q_pe.dtype}."
+            )
+
+        # Both callers reach this path only after excluding prefill/mixed batches.
+        if query_gather_dim == 1 and self.dcp_size == 8 and can_prepare_query(ql_nope, q_pe):
+            prepared = prepare_query_head_major(ql_nope, q_pe)
+            gathered, handle = all_gather_async(prepared, self.dcp_group)
+            return DCPGatherContext(
+                gathered=gathered,
+                handle=handle,
+                restore_perm=(1, 0, 2),
+                split_sizes=(ql_nope.shape[-1], q_pe.shape[-1]),
+                query_prepared=True,
             )
 
         # Avoid back-to-back DCP all_gather calls for the two SFA query
@@ -739,7 +755,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             # the DSA token shards first, then remap for this receiver rank's
             # DCP-local KV shard.
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
-        topk_indices = self._remap_sparse_indices(topk_indices)
+        topk_indices = self._remap_sparse_indices(topk_indices, decode_only=True)
         ql_nope, q_pe = self._finish_dcp_gather(gather_context)
         sfa_output, softmax_max, softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
             self,

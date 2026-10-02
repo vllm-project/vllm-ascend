@@ -8,6 +8,8 @@ from vllm.distributed.parallel_state import _groups
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.triton.sfa_dcp_exchange import can_exchange, exchange
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 
@@ -351,6 +353,17 @@ def fused_sfa_dcp_lse_combine(
     return output
 
 
+def _configured_decode_token_budget() -> int | None:
+    """Use the current engine budget; standalone operator tests have no engine."""
+    try:
+        config = get_ascend_config()
+    except RuntimeError as error:
+        if str(error) != "Ascend config is not initialized. Please call init_ascend_config first.":
+            raise
+        return None
+    return config.vllm_config.scheduler_config.max_num_batched_tokens
+
+
 def sfa_dcp_a2a_fused_combine(
     sfa_output: torch.Tensor,
     softmax_lse: torch.Tensor,
@@ -359,6 +372,13 @@ def sfa_dcp_a2a_fused_combine(
     group: dist.ProcessGroup,
 ) -> torch.Tensor:
     """Run stride-aware pack, one HCCL All2All, and fused LSE combine."""
+    # Native head-sharded decode only; DSA-CP and other geometry keep the
+    # upstream pack/combine. Stay inside the existing custom-op boundary.
+    if dcp_size == 8 and scatter_dim == 1 and can_exchange(sfa_output, softmax_lse):
+        # can_exchange retains a manual cap of 192; larger inputs are untested.
+        budget = _configured_decode_token_budget()
+        if budget is None or sfa_output.shape[0] <= budget:
+            return exchange(sfa_output, softmax_lse, group).to(sfa_output.dtype)
     send = pack_sfa_dcp_output_lse(
         sfa_output,
         softmax_lse,
