@@ -12,7 +12,9 @@ from vllm_ascend.utils import enable_custom_op
 CHUNK_SIZE = 64
 
 
-def npu_chunk_gdr_fwd_h(k, w, u, g, initial_state=None, chunk_size=64):
+def npu_chunk_gdr_fwd_h(
+    k, w, u, g, initial_state=None, chunk_size=64, output_final_state=False
+):
     enable_custom_op()
     return torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k,
@@ -20,7 +22,7 @@ def npu_chunk_gdr_fwd_h(k, w, u, g, initial_state=None, chunk_size=64):
         u,
         g=g,
         initial_state=initial_state,
-        output_final_state=False,
+        output_final_state=output_final_state,
         chunk_size=chunk_size,
         save_new_value=True,
     )
@@ -38,6 +40,7 @@ def cpu_reference(k, w, u, g, initial_state=None, chunk_size=64):
 
     for c in range(NT):
         t0 = c * chunk_size
+        head_groups = HV // Hg
         W_chunk = w[:, :, t0 : t0 + chunk_size, :]
         ws = torch.einsum("bhik,bhkv->bhiv", W_chunk, h)
         g_chunk = g[:, :, t0 : t0 + chunk_size]
@@ -47,7 +50,9 @@ def cpu_reference(k, w, u, g, initial_state=None, chunk_size=64):
             vn = u[:, :, t0 + i, :] - ws[:, :, i, :]
             v_new[:, :, t0 + i, :] = vn
             v_update[:, :, i, :] = gi_cum.unsqueeze(-1).exp() * vn
-        K_chunk = k[:, :, t0 : t0 + chunk_size, :]
+        K_chunk = k[:, :, t0 : t0 + chunk_size, :].repeat_interleave(
+            head_groups, dim=1
+        )
         h_work = torch.einsum("bhik,bhiv->bhkv", K_chunk, v_update)
         h = h * g_chunk[:, :, -1:].unsqueeze(-1).exp() + h_work
         h_chunks.append(h.clone())
@@ -66,18 +71,54 @@ def cosine(a, b):
 class TestChunkGatedDeltaRuleFwdH310:
     """chunk_gated_delta_rule_fwd_h kernel correctness on Ascend 310P."""
 
+    @pytest.mark.parametrize("B,HV", [(1, 4), (1, 8), (1, 12), (1, 16), (4, 4)])
+    def test_final_state_decay_across_interleaved_heads(self, B, HV):
+        """The final pipeline drain must preserve every head's g_last."""
+        DTYPE = torch.float16
+        T = K = V = 128
+        init = (
+            (torch.arange(B * HV).reshape(B, HV, 1, 1) + 1)
+            .div(128)
+            .expand(B, HV, K, V)
+            .contiguous()
+            .to(DTYPE)
+        )
+        factors = 1 + (torch.arange(B * HV).reshape(B, HV) % 5).float() / 4
+        g_chunk = (
+            -torch.log(torch.tensor(2.0))
+            * factors[:, :, None, None]
+            * (torch.arange(CHUNK_SIZE) + 1)[None, None, None, :]
+            / CHUNK_SIZE
+        )
+        g = g_chunk.expand(B, HV, 2, CHUNK_SIZE).reshape(B, HV, T).contiguous()
+        zeros = torch.zeros(B, HV, T, K, dtype=DTYPE)
+
+        _, v_new, final_state = npu_chunk_gdr_fwd_h(
+            zeros.npu(),
+            zeros.npu(),
+            zeros.npu(),
+            g.npu(),
+            initial_state=init.npu(),
+            chunk_size=CHUNK_SIZE,
+            output_final_state=True,
+        )
+        expected = init.double() * (2 * g[:, :, -1].double()).exp()[:, :, None, None]
+        assert torch.count_nonzero(v_new.cpu()) == 0
+        assert cosine(final_state.cpu(), expected) >= 0.999999
+
     @pytest.mark.parametrize(
         "B,Hg,HV,T,K,V",
         [
             (1, 1, 1, 128, 128, 128),
             (1, 2, 2, 128, 128, 128),
+            (1, 16, 32, 128, 128, 128),
         ],
     )
     def test_h_state_correctness(self, B, Hg, HV, T, K, V):
         torch.manual_seed(42)
         DTYPE = torch.float16
         k = torch.randn(B, Hg, T, K, dtype=DTYPE) * 0.1
-        w = torch.randn(B, Hg, T, K, dtype=DTYPE) * 0.1
+        w = torch.randn(B, HV, T, K, dtype=DTYPE) * 0.1
         u = torch.randn(B, HV, T, V, dtype=DTYPE) * 0.1
         g = (-torch.rand(B, HV, T) * 0.1).float()
         init = torch.randn(B, HV, K, V, dtype=DTYPE) * 0.01
@@ -91,27 +132,40 @@ class TestChunkGatedDeltaRuleFwdH310:
             initial_state=init.npu(),
             chunk_size=CHUNK_SIZE,
         )
-        h_npu = h_out.cpu().float()
+        # The 310P producer and FwdO consumer share zN(K,V) state images.
+        # Decode that physical layout before comparing with the ND reference.
+        h_npu = (
+            h_out.cpu()
+            .reshape(B, HV, -1, V // 16, K // 16, 16, 16)
+            .permute(0, 1, 2, 4, 5, 3, 6)
+            .reshape(B, HV, -1, K, V)
+            .float()
+        )
         NT = T // CHUNK_SIZE
 
         for c in range(min(NT + 1, h_npu.shape[2])):
             ref = h_ref[c].flatten()
             npu = h_npu[0, :, c].flatten()
             cos = cosine(npu, ref)
-            assert cos >= 0.99, f"h[{c}] cos={cos:.6f} too low"
+            finite_by_head = torch.isfinite(h_npu[0, :, c]).flatten(1).all(1)
+            assert cos >= 0.99, (
+                f"h[{c}] cos={cos:.6f} too low; "
+                f"nonfinite_heads={(~finite_by_head).nonzero().flatten().tolist()}"
+            )
 
     @pytest.mark.parametrize(
         "B,Hg,HV,T,K,V",
         [
             (1, 1, 1, 128, 128, 128),
             (1, 2, 2, 128, 128, 128),
+            (1, 16, 32, 128, 128, 128),
         ],
     )
     def test_v_new_correctness(self, B, Hg, HV, T, K, V):
         torch.manual_seed(42)
         DTYPE = torch.float16
         k = torch.randn(B, Hg, T, K, dtype=DTYPE) * 0.1
-        w = torch.randn(B, Hg, T, K, dtype=DTYPE) * 0.1
+        w = torch.randn(B, HV, T, K, dtype=DTYPE) * 0.1
         u = torch.randn(B, HV, T, V, dtype=DTYPE) * 0.1
         g = (-torch.rand(B, HV, T) * 0.1).float()
         init = torch.randn(B, HV, K, V, dtype=DTYPE) * 0.01
@@ -133,7 +187,11 @@ class TestChunkGatedDeltaRuleFwdH310:
             ref = vn_ref[:, :, t0:t1].flatten()
             npu = vn_npu[:, :, t0:t1].flatten()
             cos = cosine(npu, ref)
-            assert cos >= 0.99, f"v_new chunk {c} cos={cos:.6f} too low"
+            finite_by_head = torch.isfinite(vn_npu[:, :, t0:t1]).flatten(2).all(2)
+            assert cos >= 0.99, (
+                f"v_new chunk {c} cos={cos:.6f} too low; "
+                f"nonfinite_heads={(~finite_by_head[0]).nonzero().flatten().tolist()}"
+            )
 
     def test_no_nan(self):
         torch.manual_seed(42)
