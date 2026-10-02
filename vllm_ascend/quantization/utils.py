@@ -28,6 +28,7 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     FP8_METHOD,
+    enable_sfa,
 )
 
 # TODO(zzzzzz198): Currently three formats(float8_e8m0fnu, float4_e2m1fn_x2, hifloat8) have to be
@@ -265,6 +266,8 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
 
 
 def enable_fa_quant(vllm_config, layer_name=None) -> bool:
+    if enable_sfa(vllm_config):
+        return False
     cache_config = getattr(vllm_config, "cache_config", None)
     if cache_config is None or cache_config.cache_dtype not in ["fp8", "int8"]:
         return False
