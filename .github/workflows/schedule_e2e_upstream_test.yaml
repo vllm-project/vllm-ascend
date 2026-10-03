@@ -34,10 +34,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
   UV_INDEX_STRATEGY: unsafe-best-match
-  UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
   UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
@@ -93,11 +91,8 @@ jobs:
               npu-smi info
               cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-          - name: Config mirrors
+          - name: Install packages
             run: |
-              sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-              pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-              pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
               apt-get update -y
               apt install git zstd -y
               git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -232,11 +227,8 @@ jobs:
               npu-smi info
               cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-          - name: Config mirrors
+          - name: Install packages
             run: |
-              sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-              pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-              pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
               apt-get update -y
               apt install git zstd -y
               git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -362,11 +354,8 @@ jobs:
               npu-smi info
               cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-          - name: Config mirrors
+          - name: Install packages
             run: |
-              sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-              pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-              pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
               apt-get update -y
               apt install git zstd -y
               git config --global --add safe.directory "$GITHUB_WORKSPACE"
