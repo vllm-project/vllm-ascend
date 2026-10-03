@@ -7,8 +7,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from ..batch import KVTransferBatch
-from ..evidence import LoadCompletion, StoreCompletion
+from ..runtime.batch import KVTransferBatch
+from ..runtime.evidence import LoadCompletion, StoreCompletion
 
 
 class LoadTimelineProtocol(Protocol):

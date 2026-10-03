@@ -12,7 +12,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 from ..backend import BackendSpec
 
 if TYPE_CHECKING:
-    from ..program.spec.topology import KVPoolGroupTopology
+    from ..topology import KVPoolGroupTopology
 
 _GVA_ALIGNMENT = 2 * 1024 * 1024
 

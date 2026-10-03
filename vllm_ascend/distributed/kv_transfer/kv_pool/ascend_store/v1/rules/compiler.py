@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from functools import partial
 from typing import cast
 
 import numpy as np
 
 from ..backend import LayerwiseAccessKind, resolve_backend_spec
-from ..program.spec.compilation import KVPoolCompilationSpec
-from ..program.spec.topology import KVPoolTopology
-from ..program.stages.reachability import HybridReachability, UnitaryReachability
+from ..topology import KVPoolTopology
 from .identity import (
     BlockRows,
     KeyAxes,
@@ -33,12 +32,25 @@ from .memory import (
     key_range_arguments,
     required_object_sizes,
 )
+from .reachability import HybridReachability, UnitaryReachability
 
 RuleBinder = Callable[..., "KVPoolRules"]
 
 
+@dataclass(frozen=True, slots=True)
+class KVPoolRuleSpec:
+    """Resolved configuration that selects one callable KV rule family."""
+
+    topology: KVPoolTopology
+    backend_name: str
+    max_model_len: int
+    use_layerwise: bool = False
+    use_eagle: bool = False
+    retention_interval: int | None = None
+
+
 class KVPoolRules:
-    """Fully bound Φ: static callables plus one shared memory rule."""
+    """Configuration-selected callables plus one shared memory rule."""
 
     __slots__ = (
         "admit_store",
@@ -107,12 +119,12 @@ class KVPoolRules:
 
 
 def compile_kv_pool_rules(
-    spec: KVPoolCompilationSpec,
+    spec: KVPoolRuleSpec,
     *,
     layerwise_full_key: LayerwiseFullKey | None = None,
     layerwise_partial_key: LayerwisePartialKey | None = None,
 ) -> RuleBinder:
-    """Complete θ selection and return the μ registration binder.
+    """Select configuration-dependent rules and return the memory binder.
 
     The returned callable is the only intermediate value.  Once registered
     memory is supplied it returns a final ``KVPoolRules`` object; there is no
@@ -120,14 +132,13 @@ def compile_kv_pool_rules(
     """
 
     topology = spec.topology
-    schedule = spec.schedule
     groups = topology.transfer_groups
     align_state_group_ids = frozenset(group.group_id for group in groups if group.uses_align_state)
     _validate_static_rules(spec, align_state_group_ids, layerwise_full_key)
 
     _, lookup_chunks, load_rows = bind_chunk_rules(topology)
     if len(groups) == 1 and not align_state_group_ids:
-        reachability = UnitaryReachability(
+        reachability: UnitaryReachability | HybridReachability = UnitaryReachability(
             topology.transfer_group_ids[0],
             spec.max_model_len,
             topology.cache_transfer_granularity,
@@ -150,7 +161,7 @@ def compile_kv_pool_rules(
     )
     ownership = bind_store_ownership(topology)
     checkpoint_rows = bind_checkpoint_rule(topology, ownership)
-    if schedule.requires_layerwise_backend:
+    if spec.use_layerwise:
         store_rows = load_rows if _is_layerwise_store_leader(topology) else _discard_store_rows
     else:
         store_rows = partial(_store_rows, load_rows, ownership)
@@ -159,7 +170,7 @@ def compile_kv_pool_rules(
     format_ranges: Callable
     memory_data_plane: MemoryDataPlane
     required_object_sizes_rule: Callable | None = None
-    if not schedule.requires_layerwise_backend:
+    if not spec.use_layerwise:
         format_ranges = _bulk_arguments
         memory_data_plane = "bulk"
     elif backend.layerwise_access is LayerwiseAccessKind.GVA:
@@ -372,25 +383,24 @@ def _key_range_arguments(
 
 
 def _validate_static_rules(
-    spec: KVPoolCompilationSpec,
+    spec: KVPoolRuleSpec,
     align_state_group_ids: frozenset[int],
     layerwise_full_key: LayerwiseFullKey | None,
 ) -> None:
     topology = spec.topology
-    schedule = spec.schedule
     groups = topology.transfer_groups
     if topology.tp_partition.tp_mismatch and len(groups) != 1:
         raise ValueError("TP-mismatched transfer requires exactly one transferable KV cache group")
     if topology.tp_partition.tp_mismatch and align_state_group_ids:
         raise ValueError("Mamba align-state transfer cannot be composed with TP mismatch")
-    if topology.tp_partition.tp_mismatch and schedule.requires_layerwise_backend:
+    if topology.tp_partition.tp_mismatch and spec.use_layerwise:
         raise ValueError("Layerwise transfer cannot be composed with TP mismatch")
     partitions = topology.consumer_pipeline_partitions
     if topology.tp_partition.tp_mismatch and partitions is not None and len(partitions) > 1:
         raise ValueError("Consumer pipeline projection cannot be composed with TP mismatch")
-    if schedule.requires_layerwise_backend and partitions is not None and len(partitions) > 1:
+    if spec.use_layerwise and partitions is not None and len(partitions) > 1:
         raise ValueError("Layerwise transfer cannot be composed with consumer pipeline projection")
-    if schedule.requires_layerwise_backend and align_state_group_ids:
+    if spec.use_layerwise and align_state_group_ids:
         raise ValueError("Layerwise transfer does not support Mamba align-state groups")
-    if schedule.requires_layerwise_backend and layerwise_full_key is None:
+    if spec.use_layerwise and layerwise_full_key is None:
         raise ValueError("Layerwise rules require the Backend-bound full-key function")

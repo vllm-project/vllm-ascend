@@ -19,7 +19,6 @@ from vllm.v1.core import kv_cache_utils
 from .planning.availability import LookupQuery
 from .planning.ownership import StoreSourceLeases
 from .planning.planner import TransferPlanner
-from .program.spec.topology import kv_cache_spec_uses_align_state
 from .protocol.rpc import LookupServer
 from .protocol.transfer import (
     CheckpointStoreCommand,
@@ -30,6 +29,7 @@ from .protocol.transfer import (
 )
 from .runtime.result import LoadResult
 from .runtime.runtime import KVPoolRuntime
+from .topology import kv_cache_spec_uses_align_state
 from .vllm_adapter import (
     adapt_scheduler_output,
     create_kv_pool_runtime,

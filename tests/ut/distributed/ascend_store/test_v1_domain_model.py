@@ -35,34 +35,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.planning.step i
     ScheduledRequestKind,
     TransferPlanningStep,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.compiler import (
-    ProgramCompilationError,
-    compile_kv_pool_program,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.compilation import (
-    KVPoolCompilationSpec,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.schedule import (
-    KVPoolSchedule,
-    LoadScheduleKind,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.topology import (
-    KVPoolGroupTopology,
-    KVPoolLayerTopology,
-    resolve_group_layers,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.reachability import (
-    HybridReachability,
-    UnitaryReachability,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.evidence import (
-    ChunkAvailability,
-    GroupAvailability,
-    ReachablePrefix,
-    StoreCompletion,
-    StoreEvidence,
-    TransferEvidence,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.lookup import (
     LookupCodec,
     LookupRequest,
@@ -78,14 +50,24 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     StateCheckpointSource,
     StoreCommandBatch,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.reachability import (
+    ChunkAvailability,
+    GroupAvailability,
+    HybridReachability,
+    ReachablePrefix,
+    UnitaryReachability,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import (
+    KVPoolGroupTopology,
+    KVPoolLayerTopology,
+    resolve_group_layers,
+)
 
 from .v1.helpers import (
     FakeBackend,
     FakeEvent,
-    make_backend_spec,
     make_runtime,
     make_topology,
-    make_work,
 )
 
 
@@ -175,25 +157,6 @@ def test_small_value_and_codec_contracts_share_one_domain_smoke_test() -> None:
     assert codec.decode_result(codec.encode_result(result)) == result
 
 
-def test_compiler_rejects_each_unsupported_static_composition(monkeypatch) -> None:
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program import compiler
-
-    monkeypatch.setattr(compiler, "resolve_backend_spec", lambda _name: make_backend_spec())
-    cases = (
-        (
-            make_topology(tp_mismatch=True, consumer_pipeline_partitions=(1, 1)),
-            LoadScheduleKind.SYNC,
-            "Consumer pipeline",
-        ),
-        (make_topology(tp_mismatch=True), LoadScheduleKind.LAYERWISE, "TP mismatch"),
-        (make_topology(consumer_pipeline_partitions=(1, 1)), LoadScheduleKind.LAYERWISE, "consumer pipeline"),
-    )
-    for topology, load_kind, message in cases:
-        schedule = KVPoolSchedule(load_kind, None, 2)
-        with pytest.raises(ProgramCompilationError, match=message):
-            compile_kv_pool_program(KVPoolCompilationSpec(topology, "fake", schedule, 64))
-
-
 def test_reachability_matrix_preserves_contiguous_and_partial_tail_semantics() -> None:
     unitary = UnitaryReachability(0, max_model_len=64, cache_transfer_granularity=4)
     selection = unitary.select_for_lookup((b"a", b"b", b"c"), TokenRange(0, 12))
@@ -243,30 +206,6 @@ def test_reachability_matrix_preserves_contiguous_and_partial_tail_semantics() -
         12,
         (TailKeyBoundary(0, 12), TailKeyBoundary(1, 12)),
     )
-
-
-def test_store_completion_uses_transfer_source_evidence_without_reinterpreting_it() -> None:
-    source = make_work(layerwise=False).sources[0]
-    cases = (
-        (StoreEvidence((TransferEvidence(source, 0),), True, True), None),
-        (StoreEvidence((TransferEvidence(source, 0),), False, True), "success was not confirmed"),
-        (StoreEvidence((TransferEvidence(source, -1),), False, False), "result codes"),
-        (StoreEvidence((TransferEvidence(source, 0),), True, False), "source release is unknown"),
-    )
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.program import BoundKVPoolProgram
-
-    for evidence, message in cases:
-        completion = StoreCompletion("request", evidence)
-        if message is None:
-            BoundKVPoolProgram.validate_store_completion(completion)
-        else:
-            with pytest.raises(RuntimeError, match=message):
-                BoundKVPoolProgram.validate_store_completion(completion)
-
-    cause = RuntimeError("publication failed")
-    with pytest.raises(RuntimeError, match="Store failed") as failure:
-        BoundKVPoolProgram.validate_store_completion(StoreCompletion("request", StoreEvidence((), False, True, cause)))
-    assert failure.value.__cause__ is cause
 
 
 def test_bulk_runtime_store_success_and_failure_preserve_source_safety(monkeypatch) -> None:

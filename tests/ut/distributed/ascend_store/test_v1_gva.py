@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -15,22 +16,21 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     LayerwiseAccessKind,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.compilation import (
-    KVPoolCompilationSpec,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.schedule import (
-    KVPoolSchedule,
-    LoadScheduleKind,
-    StoreScheduleKind,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transfer import (
     KVTransferStep,
     RangeStoreCommand,
     StoreCommandBatch,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import compile_kv_pool_rules
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import (
+    KVPoolRuleSpec,
+    compile_kv_pool_rules,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend import (
     GVABackendIO,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.batch import (
+    KVGroupBatch,
+    KVTransferBatch,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.resources import (
     GVAObjectLayout,
@@ -39,14 +39,17 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.resourc
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.runtime import (
     KVPoolRuntime,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.timeline.schedule import (
+    KVPoolSchedule,
+    LoadScheduleKind,
+    StoreScheduleKind,
+)
 
 from .v1.helpers import (
     FakeBackend,
     FakeEvent,
     FakeResources,
-    make_memory_geometry,
     make_topology,
-    make_work,
 )
 
 
@@ -146,24 +149,60 @@ def make_gva_runtime():
     topology = make_topology()
     schedule = KVPoolSchedule(LoadScheduleKind.LAYERWISE, StoreScheduleKind.LAYERWISE, 2)
     backend_spec = make_gva_spec()
-    resources = FakeResources(backend, backend_spec, make_memory_geometry(topology))
-    spec = KVPoolCompilationSpec(topology, "memcache", schedule, 64)
+    resources = FakeResources(backend, backend_spec, topology)
+    rule_spec = KVPoolRuleSpec(topology, "memcache", 64, use_layerwise=True)
     with patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.rules.resolve_backend_spec",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.compiler.resolve_backend_spec",
         return_value=backend_spec,
     ):
         rule_binder = compile_kv_pool_rules(
-            spec,
+            rule_spec,
             layerwise_full_key=lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
         )
     runtime = KVPoolRuntime(
-        spec,
+        topology,
+        schedule,
         rule_binder,
         resources,
         source_ready_event_factory=FakeEvent,
     )
     runtime.bind_kv_caches({"cache": object()})
     return runtime, resources, backend.store
+
+
+def make_gva_binding(block_ids: tuple[int, ...] = (1, 3)):
+    backend = FakeGVABackend()
+    topology = make_topology()
+    backend_spec = make_gva_spec()
+    resources = FakeResources(backend, backend_spec, topology)
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.compiler.resolve_backend_spec",
+        return_value=backend_spec,
+    ):
+        binder = compile_kv_pool_rules(
+            KVPoolRuleSpec(topology, "memcache", 64, use_layerwise=True),
+            layerwise_full_key=lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
+        )
+    rules = binder(**resources.bind_kv_caches({"cache": object()}))
+    backend_io = GVABackendIO(backend, backend_spec)
+    backend_io.bind_rules(rules)
+
+    hashes = tuple(f"h{index}" for index in range(len(block_ids)))
+    ids = np.asarray(block_ids, dtype=np.uint64)
+    counts = np.full(len(block_ids), 4, dtype=np.uint64)
+    request_splits = np.asarray([0, len(block_ids)], dtype=np.intp)
+    for values in (ids, counts, request_splits):
+        values.flags.writeable = False
+    group = KVGroupBatch(
+        0,
+        ids,
+        counts,
+        rules.load_keys(0, hashes),
+        request_splits,
+        (0, 1),
+        rules.object_size(0),
+    )
+    return backend_io, KVTransferBatch(("request",), (group,), (17,)), backend.store
 
 
 def test_backend_selection_fixes_access_kind_once(monkeypatch) -> None:
@@ -220,73 +259,63 @@ def test_gva_initialization_validates_native_capabilities_and_registered_layout(
 
 
 def test_gva_readability_changes_only_after_publication() -> None:
-    backend = FakeGVABackend()
-    backend_io = GVABackendIO(backend, make_gva_spec())
-    work = make_work(physical_layer_id=0, block_ids=(1,))
-    remote_object = work.remote_objects[0]
-    key = remote_object.key
+    backend_io, batch, store = make_gva_binding((1,))
+    key = batch.selected_keys()[0]
 
     assert backend_io.start_store_sessions([key], [64]) == (0,)
-    assert not backend_io.observe_objects((remote_object,))[0].readable
-    assert backend_io.store(work).succeeded
-    assert not backend_io.observe_objects((remote_object,))[0].readable
+    assert not backend_io.exists([key])[0]
+    assert backend_io.store_batch(batch, 0)[0].evidence.succeeded
+    assert not backend_io.exists([key])[0]
     assert backend_io.commit_store_sessions([key]) == (0,)
-    assert backend_io.observe_objects((remote_object,))[0].readable
+    assert backend_io.exists([key])[0]
     assert not backend_io._store_sessions
+    assert store.objects[key][2]
 
 
 def test_gva_load_admission_resolves_after_lease_and_releases_only_owned_keys(monkeypatch) -> None:
-    backend = FakeGVABackend()
-    backend_io = GVABackendIO(backend, make_gva_spec())
-    work = make_work(physical_layer_id=0)
-    first, second = (item.key for item in work.remote_objects)
-    backend.store.objects.update(
+    backend_io, batch, store = make_gva_binding()
+    first, second = batch.selected_keys()
+    store.objects.update(
         {
             first: (1000, 64, True),
             second: (2000, 64, True),
             "wrong-size": (3000, 8, True),
         }
     )
-    backend.store.lease_result = [0, -7, 0]
-    original_add_lease = backend.store.batch_add_lease
+    store.lease_result = [0, -7, 0]
+    original_add_lease = store.batch_add_lease
 
     def acquire(keys):
-        backend.store.objects[first] = (4000, 64, True)
+        store.objects[first] = (4000, 64, True)
         return original_add_lease(keys)
 
-    monkeypatch.setattr(backend.store, "batch_add_lease", acquire)
+    monkeypatch.setattr(store, "batch_add_lease", acquire)
     assert backend_io.start_load_sessions([first, second, "wrong-size"], [64, 64, 64]) == (0, -7, -1)
-    assert backend_io.load(work.select_keys({first}))[0].result_code == 0
-    assert len(backend_io._resolved_load_sessions) == 1
-    assert len(backend_io._resolved_load_batches) == 1
-    assert next(call for call in backend.store.calls if call[0] == "copy")[1] == (4000,)
+    completion = backend_io.load_batch(batch.select_keys({first}), 0)[0]
+    assert completion.transfer_evidence[0].result_code == 0
+    assert len(backend_io._rule_load_bases) == 1
+    assert next(call for call in store.calls if call[0] == "copy")[1] == (4000,)
     backend_io.finish_load_sessions([first, second, "wrong-size"])
-    assert backend.store.calls[-1] == ("release", (first,))
-    assert not backend.store.leases
-    assert not backend_io._resolved_load_sessions
-    assert not backend_io._resolved_load_batches
+    assert store.calls[-1] == ("release", (first,))
+    assert not store.leases
+    assert not backend_io._rule_load_bases
 
 
 def test_gva_store_admission_keeps_only_compatible_owned_allocations() -> None:
-    backend = FakeGVABackend()
-    backend_io = GVABackendIO(backend, make_gva_spec())
-    work = make_work(physical_layer_id=0)
-    first, second = (item.key for item in work.remote_objects)
-    backend.store.objects[first] = (1000, 8, True)
-    backend.store.allocation_result = [1000, 0]
+    backend_io, batch, store = make_gva_binding()
+    first, second = batch.selected_keys()
+    store.objects[first] = (1000, 8, True)
+    store.allocation_result = [1000, 0]
 
     assert backend_io.start_store_sessions([first, second], [64, 64]) == (-1, -1)
     assert not backend_io._store_sessions
-    assert backend_io.store(work).source_release_confirmed
-    assert not any(call[0] in ("copy", "publish") for call in backend.store.calls)
+    assert backend_io.store_batch(batch, 0)[0].evidence.source_release_confirmed
+    assert not any(call[0] in ("copy", "publish") for call in store.calls)
     assert backend_io.revoke_store_sessions([first, second]) == (0, 0)
-    assert backend.store.objects[first] == (1000, 8, True)
+    assert store.objects[first] == (1000, 8, True)
 
 
 def test_gva_copy_normalizes_batch_result_and_unknown_evidence() -> None:
-    work = make_work(physical_layer_id=0)
-    keys = [item.key for item in work.remote_objects]
-
     for native_result, expected_codes, succeeded, released in (
         (0, [0, 0], True, True),
         (-9, [-9, -9], False, False),
@@ -295,28 +324,26 @@ def test_gva_copy_normalizes_batch_result_and_unknown_evidence() -> None:
         ([0], [None, None], False, False),
         (RuntimeError("copy failed"), [None, None], False, False),
     ):
-        backend = FakeGVABackend()
-        backend.store.copy_result = native_result
-        backend_io = GVABackendIO(backend, make_gva_spec())
+        backend_io, batch, store = make_gva_binding()
+        keys = list(batch.selected_keys())
+        store.copy_result = native_result
         assert backend_io.start_store_sessions(keys, [64, 64]) == (0, 0)
-        result = backend_io.store(work)
-        assert [item.result_code for item in result.transfer_evidence] == expected_codes
-        assert all(item.source_release_confirmed is released for item in result.transfer_evidence)
-        assert result.succeeded is succeeded
-        assert result.source_release_confirmed is released
+        evidence = backend_io.store_batch(batch, 0)[0].evidence
+        assert [item.result_code for item in evidence.transfer_evidence] == expected_codes
+        assert all(item.source_release_confirmed is released for item in evidence.transfer_evidence)
+        assert evidence.succeeded is succeeded
+        assert evidence.source_release_confirmed is released
 
 
 def test_gva_publication_failure_does_not_hide_copy_source_release() -> None:
-    backend = FakeGVABackend()
-    backend.store.commit_result = [-8]
-    backend_io = GVABackendIO(backend, make_gva_spec())
-    work = make_work(physical_layer_id=0, block_ids=(1,))
-    key = work.remote_objects[0].key
+    backend_io, batch, store = make_gva_binding((1,))
+    store.commit_result = [-8]
+    key = batch.selected_keys()[0]
 
     assert backend_io.start_store_sessions([key], [64]) == (0,)
-    assert backend_io.store(work).source_release_confirmed
+    assert backend_io.store_batch(batch, 0)[0].evidence.source_release_confirmed
     assert backend_io.commit_store_sessions([key]) == (-8,)
-    assert not backend.store.objects[key][2]
+    assert not store.objects[key][2]
     assert backend_io.revoke_store_sessions([key]) == (-1,)
 
 
