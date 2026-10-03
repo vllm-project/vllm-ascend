@@ -10,7 +10,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, HiddenStateCacheSpec, KVCacheSpec
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
@@ -83,7 +83,9 @@ def build_kvpp_buffer_sizes(
             sizes.append(elements * spec.head_size * get_dtype_size(spec.dtype))
             if spec.scale_dim:
                 sizes.append(elements * spec.scale_dim * get_dtype_size(spec.scale_dtype))
-        elif isinstance(spec, AscendMLAAttentionSpec) and spec.cache_sparse_sfa_c8:
+        elif isinstance(spec, HiddenStateCacheSpec) or (
+            isinstance(spec, AscendMLAAttentionSpec) and spec.cache_sparse_sfa_c8
+        ):
             sizes.append(spec.page_size_bytes)
         else:
             dims = list(get_kvpp_attention_kv_dims(vllm_config, name, spec))
@@ -116,7 +118,7 @@ def register_kvpp_draft_layers(
 ) -> None:
     """Record loader-discovered ownership on this worker's cache modules."""
     spec = vllm_config.speculative_config
-    if spec is None or spec.method not in ("mtp", "dspark"):
+    if spec is None or not spec.uses_draft_kv_cache():
         return
     if not is_last_pp_rank:
         draft_names = set()
@@ -127,6 +129,8 @@ def register_kvpp_draft_layers(
         else:
             proposer = getattr(model_runner, "drafter", None)
             names = getattr(proposer, "_draft_attn_layer_names", None)
+            if names is None:
+                names = getattr(proposer, "attn_layer_names", None)
         if names is None:
             raise ValueError("KVPP requires draft cache layer names from the loaded proposer.")
         draft_names = set(names)
@@ -143,7 +147,7 @@ def register_kvpp_draft_layers(
 def find_draft_layers(vllm_config: VllmConfig, local_layer_names: Iterable[str]) -> set[str]:
     """Read exact worker-local ownership, never infer it from layer indices."""
     spec = vllm_config.speculative_config
-    if spec is None or spec.method not in ("mtp", "dspark"):
+    if spec is None or not spec.uses_draft_kv_cache():
         return set()
     context = vllm_config.compilation_config.static_forward_context
     result = set()

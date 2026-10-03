@@ -46,7 +46,9 @@ def make_kvpp_config(tp=3, pcp=1):
             use_mla=True,
             is_hybrid=False,
         ),
-        speculative_config=SimpleNamespace(method="mtp", num_speculative_tokens_per_batch_size=None),
+        speculative_config=SimpleNamespace(
+            method="mtp", num_speculative_tokens_per_batch_size=None, uses_draft_kv_cache=lambda: True
+        ),
         kv_transfer_config=None,
         quant_config=None,
         cache_config=SimpleNamespace(cache_dtype="auto"),
