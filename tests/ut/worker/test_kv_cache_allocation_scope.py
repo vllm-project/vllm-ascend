@@ -118,6 +118,9 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     worker.sleep_wakeup_manager = MagicMock()
 
     with (
+        # wake_up ends with a device barrier; this UT runs on a CPU runner, so the
+        # barrier must be mocked or torch.npu.synchronize() would try to init NPU.
+        patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device") as mock_synchronize,
         patch("vllm_ascend.worker.worker.CaMemAllocator") as mock_allocator_class,
         patch("vllm_ascend.worker.worker.get_ascend_config") as mock_get_config,
     ):
@@ -131,6 +134,7 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     assert runner.recovery_calls == 0
     assert model.get_buffer("_k_scale").item() == 0.5
     assert model.get_buffer("_v_scale").item() == 0.25
+    mock_synchronize.assert_called_once_with()
 
 
 def _make_sleep_worker(model: torch.nn.Module) -> NPUWorker:
