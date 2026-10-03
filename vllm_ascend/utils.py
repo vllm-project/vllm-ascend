@@ -802,6 +802,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         AscendApplyRotaryEmb,
         AscendDeepseekScalingRotaryEmbedding,
         AscendGemma4RotaryEmbedding,
+        AscendLlama3RotaryEmbedding,
         AscendMRotaryEmbedding,
         AscendRotaryEmbedding,
         AscendYaRNRotaryEmbedding,
@@ -896,6 +897,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 
         REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
+        # 310P keeps the upstream Llama 3 implementation; every other device
+        # gets the fused Ascend rotary forward.
+        REGISTERED_ASCEND_OPS["Llama3RotaryEmbedding"] = AscendLlama3RotaryEmbedding
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
