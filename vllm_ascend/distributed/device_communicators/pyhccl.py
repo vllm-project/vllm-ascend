@@ -66,11 +66,18 @@ class PyHcclCommunicator:
             self.world_size = group.world_size
 
         self.group = group
+        if isinstance(device, int):
+            device = torch.device(f"npu:{device}")
+        elif isinstance(device, str):
+            device = torch.device(device)
+        assert isinstance(device, torch.device)
+        self.device = device
+        self.comm: hcclComm_t | None = None
+        self.available = False
+        self.disabled = True
 
         # if world_size == 1, no need to create communicator
         if self.world_size == 1:
-            self.available = False
-            self.disabled = True
             return
 
         try:
@@ -86,14 +93,6 @@ class PyHcclCommunicator:
         self.disabled = False
 
         logger.info("vLLM is using pyhccl")
-
-        if isinstance(device, int):
-            device = torch.device(f"npu:{device}")
-        elif isinstance(device, str):
-            device = torch.device(device)
-        # now `device` is a `torch.device` object
-        assert isinstance(device, torch.device)
-        self.device = device
 
         if self.rank == 0:
             # get the unique id from HCCL
@@ -118,7 +117,7 @@ class PyHcclCommunicator:
         # `torch.npu.device` is a context manager that changes the
         # current npu device to the specified one
         with torch.npu.device(device):
-            self.comm: hcclComm_t = self.hccl.hcclCommInitRank(self.world_size, self.unique_id, self.rank)
+            self.comm = self.hccl.hcclCommInitRank(self.world_size, self.unique_id, self.rank)
 
             stream = current_stream()
             # A small all_reduce for warmup.
@@ -132,6 +131,7 @@ class PyHcclCommunicator:
         if not self.available:
             return
         self.available = False
+        assert self.comm is not None
         with torch.npu.device(self.device):
             # Collectives may have been submitted on an explicit stream.
             torch.npu.synchronize(self.device)
@@ -142,6 +142,7 @@ class PyHcclCommunicator:
             return None
         if not self.available:
             raise RuntimeError("HCCL communicator is closed")
+        assert self.comm is not None
         # hccl communicator created on a specific device
         # will only work on tensors on the same device
         # otherwise it will cause "illegal memory access"
@@ -169,6 +170,7 @@ class PyHcclCommunicator:
             return
         if not self.available:
             raise RuntimeError("HCCL communicator is closed")
+        assert self.comm is not None
         assert tensor.device == self.device, (
             f"this hccl communicator is created to work on {self.device}, but the input tensor is on {tensor.device}"
         )

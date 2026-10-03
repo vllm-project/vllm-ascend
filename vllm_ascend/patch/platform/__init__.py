@@ -49,9 +49,16 @@ import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
 
-# The Ascend Engram adapter requires `vllm.config.engram` (vLLM main/v0.30.0+).
-import vllm_ascend.patch.platform.patch_engram_config  # noqa
-
+# Engram is optional in upstream vLLM.  The Ascend patch is only applicable
+# when the installed vLLM exposes that config; otherwise importing it prevents
+# every model (including weight-transfer E2E models) from starting.
+try:
+    from vllm.config.engram import EngramConfig as _UpstreamEngramConfig  # noqa: F401
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm.config.engram":
+        raise
+else:
+    import vllm_ascend.patch.platform.patch_engram_config  # noqa: F401
 import vllm_ascend.patch.platform.patch_glm5next_config  # noqa
 import vllm_ascend.patch.platform.patch_indexer_kv_dtype  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa
