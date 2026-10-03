@@ -24,9 +24,9 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 
 def test_register_customop_overrides_mm_encoder_attention_for_310p():
-    original_registered = utils._ASCEND_CUSTOMOP_IS_REIGISTERED
+    original_registered = utils._ASCEND_CUSTOMOP_IS_REGISTERED
     try:
-        utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
+        utils._ASCEND_CUSTOMOP_IS_REGISTERED = False
         with (
             mock.patch("vllm.model_executor.custom_op.CustomOp.register_oot"),
             mock.patch(
@@ -38,7 +38,7 @@ def test_register_customop_overrides_mm_encoder_attention_for_310p():
 
         assert utils.REGISTERED_ASCEND_OPS["MMEncoderAttention"] is AscendMMEncoderAttention310
     finally:
-        utils._ASCEND_CUSTOMOP_IS_REIGISTERED = original_registered
+        utils._ASCEND_CUSTOMOP_IS_REGISTERED = original_registered
 
 
 def test_mm_encoder_attention_310_forward_oot_with_padding():

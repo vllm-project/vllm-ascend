@@ -395,12 +395,12 @@ class TestUtils(TestBase):
     def test_register_ascend_customop(
         self, mock_ascend_rmsnorm, mock_ascend_silu_and_mul, mock_ascend_quick_gelu, mock_customop
     ):
-        utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
+        utils._ASCEND_CUSTOMOP_IS_REGISTERED = False
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
         self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
-        self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
+        self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()

@@ -83,7 +83,7 @@ class XliteModelRunner(NPUModelRunner):
         argument to the base implementation unchanged.
         """
         if not is_profile and not is_graph_capturing:
-            # DP `excute_dummy_batch` must be routed to xlite forward path to avoid out of sync issues
+            # DP `execute_dummy_batch` must be routed to xlite forward path to avoid out of sync issues
             return super()._dummy_run(*args, is_profile=is_profile, is_graph_capturing=is_graph_capturing, **kwargs)  # type: ignore[return-value]
 
         with self._bypass_xlite_wrapper():
