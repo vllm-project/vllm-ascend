@@ -323,6 +323,11 @@ function help_info() {
     echo "to be continued ..."
 }
 
+function usage() {
+    help_info "$1"
+    exit 1
+}
+
 
 export BASE_PATH=$(
     cd "$(dirname $0)"
