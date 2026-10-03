@@ -733,9 +733,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         elif core_non_spec is not None:
             core_attn_out[:, :num_actual_tokens] = core_non_spec
 
-        # The registered Ascend FusedRMSNormGated uses the fused norm-gate
-        # kernel while preserving the upstream parameter/loading contract.
-        normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2)
-        core_attn_out[:, :num_actual_tokens].copy_(normalized)
+        # Keep the registered norm's parameters while writing into the
+        # caller-owned attention output directly.
+        norm_out = core_attn_out[:, :num_actual_tokens]
+        self.o_norm.forward_oot(norm_out, g2, out=norm_out)
         core_attn_out[:, num_actual_tokens:].zero_()
         maybe_save_kv_layer_to_connector("", [])

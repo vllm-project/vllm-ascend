@@ -536,6 +536,10 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
         recurrent_state.add_(1)
         return v.clone()
 
+    def norm_into(x, g, *, out):
+        assert out is x
+        out.copy_(x * torch.sigmoid(g))
+
     attention = SimpleNamespace(
         prefix="kda",
         head_dim=2,
@@ -544,7 +548,7 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
         get_parameter=lambda name: torch.empty(1),
         _run_causal_conv1d=lambda x, *args, **kwargs: x,
         _run_recurrent=recurrent,
-        o_norm=lambda x, g: x * torch.sigmoid(g),
+        o_norm=SimpleNamespace(forward_oot=norm_into),
     )
     output = torch.full((1, 8, 1, 2), torch.nan)
     with (

@@ -33,6 +33,19 @@ BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [4, 8, 16, 32]
 RCP_LN2 = 1.4426950408889634
 
+# The multi-row kernel is used only up to this feature width.
+_NORM_MULTIROW_MAX_FEATURES = 512
+# Flattened token/head rows: smaller batches use smaller tiles to launch
+# more programs, while prefill keeps the original 32-row tile.
+_KIMI_NORM_SMALL_BATCH_MAX_ROWS = 256
+_KIMI_NORM_MEDIUM_BATCH_MAX_ROWS = 768
+_KIMI_NORM_SMALL_BATCH_TILE_ROWS = 4
+_KIMI_NORM_MEDIUM_BATCH_TILE_ROWS = 16
+_NORM_MULTIROW_DEFAULT_TILE_ROWS = 32
+# Packed-gate BT=32 overflows UB at D=384 on A3/A5 and D=512 on A3.
+_KIMI_NORM_WIDE_FEATURE_THRESHOLD = 256
+_KIMI_NORM_WIDE_FEATURE_TILE_ROWS = 16
+
 
 def fused_recurrent_kda_fwd(
     q: torch.Tensor,
@@ -183,7 +196,7 @@ def fused_recurrent_kda(
         "HAS_BIAS": lambda args: args["b"] is not None,
     }
 )
-@triton.jit
+@triton.jit(do_not_specialize=["T", "eps", "G_ROW_STRIDE", "G_COL_STRIDE"])
 def layer_norm_gated_fwd_kernel(
     x,  # pointer to the input
     g,  # pointer to the gate
@@ -196,7 +209,13 @@ def layer_norm_gated_fwd_kernel(
     rstd,  # pointer to the 1/std
     eps,  # epsilon to avoid division by zero
     T,  # number of rows in x
+    G_ROW_STRIDE,
+    G_COL_STRIDE,
     D: tl.constexpr,  # number of columns in x
+    H: tl.constexpr,  # number of heads per token
+    PACKED_GATE: tl.constexpr,
+    STRIDED_GATE: tl.constexpr,
+    STORE_RSTD: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
     ACTIVATION: tl.constexpr,
@@ -211,8 +230,10 @@ def layer_norm_gated_fwd_kernel(
     o_d = tl.arange(0, BD)
     m_d = o_d < D
 
-    p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
+    rows = i_t * BT + tl.arange(0, BT)
+    mask = (rows[:, None] < T) & m_d[None, :]
+    offsets = rows[:, None] * D + o_d[None, :]
+    b_x = tl.load(x + offsets, mask, other=0).to(tl.float32)
     if HAS_RESIDUAL:
         p_res = tl.make_block_ptr(residual, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
         b_x += tl.load(p_res, boundary_check=(0, 1)).to(tl.float32)
@@ -230,7 +251,7 @@ def layer_norm_gated_fwd_kernel(
         b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
     b_rstd = 1 / tl.sqrt(b_var + eps)
 
-    if rstd is not None:
+    if STORE_RSTD:
         p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
         tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
 
@@ -244,16 +265,24 @@ def layer_norm_gated_fwd_kernel(
         b_y = b_y + b_b[None, :]
 
     # swish/sigmoid output gate
-    p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+    if PACKED_GATE:
+        beta_width = H
+        gate_width = H * D
+        packed_row_width = beta_width + gate_width + gate_width
+        g_rows = (rows // H) * packed_row_width + (rows % H) * D
+        g_offsets = g_rows[:, None] + o_d[None, :]
+    elif STRIDED_GATE:
+        g_offsets = rows[:, None] * G_ROW_STRIDE + o_d[None, :] * G_COL_STRIDE
+    else:
+        g_offsets = offsets
+    b_g = tl.load(g + g_offsets, mask, other=0).to(tl.float32)
     if ACTIVATION == "swish" or ACTIVATION == "silu":
         b_y = b_y * b_g * tl.sigmoid(b_g)
     elif ACTIVATION == "sigmoid":
         b_y = b_y * tl.sigmoid(b_g)
 
     # Write output
-    p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(y + offsets, b_y.to(y.dtype.element_ty), mask)
 
 
 @triton.heuristics(
@@ -264,7 +293,7 @@ def layer_norm_gated_fwd_kernel(
         "HAS_BIAS": lambda args: args["b"] is not None,
     }
 )
-@triton.jit
+@triton.jit(do_not_specialize=["G_ROW_STRIDE", "G_COL_STRIDE"])
 def layer_norm_gated_fwd_kernel1(
     x,  # pointer to the input
     g,  # pointer to the gate
@@ -276,7 +305,10 @@ def layer_norm_gated_fwd_kernel1(
     mean,  # pointer to the mean
     rstd,  # pointer to the 1/std
     eps,  # epsilon to avoid division by zero
+    G_ROW_STRIDE,
+    G_COL_STRIDE,
     D: tl.constexpr,  # number of columns in x
+    STRIDED_GATE: tl.constexpr,
     BD: tl.constexpr,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
@@ -288,7 +320,10 @@ def layer_norm_gated_fwd_kernel1(
     i_t = tl.program_id(0)
     x += i_t * D
     y += i_t * D
-    g += i_t * D
+    if STRIDED_GATE:
+        g += i_t * G_ROW_STRIDE
+    else:
+        g += i_t * D
     if HAS_RESIDUAL:
         residual += i_t * D
     if STORE_RESIDUAL_OUT:
@@ -323,7 +358,10 @@ def layer_norm_gated_fwd_kernel1(
         b_y = b_y + b_b
 
     # swish/sigmoid output gate
-    b_g = tl.load(g + o_d, mask=m_d, other=0.0).to(tl.float32)
+    if STRIDED_GATE:
+        b_g = tl.load(g + o_d * G_COL_STRIDE, mask=m_d, other=0.0).to(tl.float32)
+    else:
+        b_g = tl.load(g + o_d, mask=m_d, other=0.0).to(tl.float32)
     if ACTIVATION == "swish" or ACTIVATION == "silu":
         b_y = b_y * b_g * tl.sigmoid(b_g)
     elif ACTIVATION == "sigmoid":
@@ -369,9 +407,10 @@ def layer_norm_gated_fwd(
     if D > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
+    strided_gate = g.stride() != (D, 1)
 
-    if D <= 512:
-        BT = min(32, next_power_of_2(max(1, T)))
+    if D <= _NORM_MULTIROW_MAX_FEATURES:
+        BT = min(_NORM_MULTIROW_DEFAULT_TILE_ROWS, next_power_of_2(max(1, T)))
         layer_norm_gated_fwd_kernel[(cdiv(T, BT),)](
             x=x,
             g=g,
@@ -384,7 +423,13 @@ def layer_norm_gated_fwd(
             rstd=rstd,
             eps=eps,
             T=T,
+            G_ROW_STRIDE=g.stride(0),
+            G_COL_STRIDE=g.stride(1),
             D=D,
+            H=1,
+            PACKED_GATE=False,
+            STRIDED_GATE=strided_gate,
+            STORE_RSTD=return_stats,
             BD=BD,
             BT=BT,
             ACTIVATION=activation,
@@ -403,7 +448,10 @@ def layer_norm_gated_fwd(
             mean=mean,
             rstd=rstd,
             eps=eps,
+            G_ROW_STRIDE=g.stride(0),
+            G_COL_STRIDE=g.stride(1),
             D=D,
+            STRIDED_GATE=strided_gate,
             BD=BD,
             ACTIVATION=activation,
             IS_RMS_NORM=is_rms_norm,
@@ -411,6 +459,12 @@ def layer_norm_gated_fwd(
         )
     # residual_out is None if residual is None and residual_dtype == input_dtype
     return y, mean, rstd, residual_out if residual_out is not None else x
+
+
+def _packed_bfg_row_width(num_heads: int, head_dim: int) -> int:
+    # One beta value per head, followed by raw and output gate vectors.
+    gate_width = num_heads * head_dim
+    return num_heads + gate_width + gate_width
 
 
 def rms_norm_gated(
@@ -423,11 +477,88 @@ def rms_norm_gated(
     prenorm: bool = False,
     residual_in_fp32: bool = False,
     eps: float = 1e-6,
+    out: torch.Tensor | None = None,
 ):
     x_shape_og = x.shape
+    # K3 gates are views into the packed BFG projection. Flattening their
+    # token/head dimensions would materialize the projection gaps each layer.
+    if (
+        residual is None
+        and not prenorm
+        and x.shape[-1] <= _NORM_MULTIROW_MAX_FEATURES
+        and x.ndim in (3, 4)
+        and g.ndim in (3, 4)
+        and (x.ndim == 3 or x.shape[0] == 1)
+        and (g.ndim == 3 or g.shape[0] == 1)
+        and x.is_contiguous()
+        and (
+            g.is_contiguous()
+            or (
+                g.stride(-1) == 1
+                and g.stride(-2) == x.shape[-1]
+                and g.stride(-3) == _packed_bfg_row_width(x.shape[-2], x.shape[-1])
+            )
+        )
+    ):
+        if g.shape[-3:] != x.shape[-3:]:
+            raise ValueError("The norm input and gate must have matching rows and features.")
+        if out is not None and (out.shape != x.shape or out.dtype != x.dtype or out.device != x.device):
+            raise ValueError("The norm output must match the input shape, dtype and device.")
+        if out is not None and not out.is_contiguous():
+            raise ValueError("Direct norm output must be contiguous.")
+        if weight is not None and weight.shape != (x.shape[-1],):
+            raise ValueError("The norm weight must match the feature dimension.")
+        if bias is not None and bias.shape != (x.shape[-1],):
+            raise ValueError("The norm bias must match the feature dimension.")
+        y = torch.empty_like(x) if out is None else out
+        rows = x.numel() // x.shape[-1]
+        if rows:
+            packed_gate = not g.is_contiguous()
+            # Spread small decode batches over the vector cores, while keeping
+            # the original per-program row count for chunked prefill.
+            if rows <= _KIMI_NORM_SMALL_BATCH_MAX_ROWS:
+                block_rows = _KIMI_NORM_SMALL_BATCH_TILE_ROWS
+            elif rows <= _KIMI_NORM_MEDIUM_BATCH_MAX_ROWS:
+                block_rows = _KIMI_NORM_MEDIUM_BATCH_TILE_ROWS
+            else:
+                block_rows = _NORM_MULTIROW_DEFAULT_TILE_ROWS
+            if x.shape[-1] > _KIMI_NORM_WIDE_FEATURE_THRESHOLD:
+                block_rows = min(block_rows, _KIMI_NORM_WIDE_FEATURE_TILE_ROWS)
+            layer_norm_gated_fwd_kernel[(cdiv(rows, block_rows),)](
+                x=x,
+                g=g,
+                y=y,
+                w=weight,
+                b=bias,
+                residual=None,
+                residual_out=None,
+                mean=None,
+                rstd=None,
+                eps=eps,
+                T=rows,
+                G_ROW_STRIDE=x.shape[-1],
+                G_COL_STRIDE=1,
+                D=x.shape[-1],
+                H=x.shape[-2],
+                PACKED_GATE=packed_gate,
+                STRIDED_GATE=False,
+                STORE_RSTD=False,
+                BD=next_power_of_2(x.shape[-1]),
+                BT=block_rows,
+                ACTIVATION=activation,
+                IS_RMS_NORM=True,
+                num_warps=4,
+            )
+        return y
+    if out is not None:
+        if residual is not None or prenorm:
+            raise ValueError("Direct norm output does not support residual or prenorm.")
+        if out.shape != x.shape or out.dtype != x.dtype or out.device != x.device:
+            raise ValueError("The norm output must match the input shape, dtype and device.")
     # reshape input data into 2D tensor
     x = x.contiguous().reshape(-1, x.shape[-1])
-    g = g.contiguous().reshape(-1, g.shape[-1])
+    # Unsupported layouts may still need materialization during reshape.
+    g = g.reshape(-1, g.shape[-1])
     if residual is not None:
         assert residual.shape == x_shape_og
         residual = residual.contiguous().reshape(-1, residual.shape[-1])
@@ -446,6 +577,9 @@ def rms_norm_gated(
         return_stats=False,
     )
     y = y.reshape(x_shape_og)
+    if out is not None:
+        out.copy_(y)
+        return out
     return y if not prenorm else (y, residual_out.reshape(x_shape_og))
 
 
