@@ -8,6 +8,9 @@ import torch
 
 from vllm_ascend.attention.context_parallel import dsa_cp
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
+from vllm_ascend.attention.context_parallel.sfa_cp import (
+    AscendSFADSACPMetadataBuilder,
+)
 
 
 class TestAscendDSACPLayerMetadata:
@@ -40,6 +43,30 @@ class TestAscendDSACPLayerMetadata:
         assert layer_metadata.compressor_state is compressor_state_metadata
         assert layer_metadata.indexer_cache is indexer_cache_metadata
         assert layer_metadata.indexer_state is indexer_state_metadata
+
+
+def test_dsa_cp_prepare_parallel_metadata_fails_fast_on_none_cos_sin():
+    # Regression test for #17388: when the SFA layer uses NoPE
+    # (qk_rope_head_dim == 0) cos/sin are None. DSA context parallel relies on
+    # rotary cos/sin and is not supported in that case, so the metadata builder
+    # must fail fast with a clear ValueError instead of crashing on
+    # ``cos.shape`` with an AttributeError.
+    builder = AscendSFADSACPMetadataBuilder.__new__(AscendSFADSACPMetadataBuilder)
+    common_attn_metadata = SimpleNamespace()
+    slot_mapping = torch.zeros(4, dtype=torch.int64)
+    cum_query_lens = torch.tensor([0, 4])
+    seq_lens = torch.tensor([4])
+
+    with pytest.raises(ValueError, match="enable_dsa_cp requires rotary cos/sin"):
+        builder._prepare_parallel_metadata(
+            common_attn_metadata,
+            cos=None,
+            sin=None,
+            slot_mapping=slot_mapping,
+            cum_query_lens=cum_query_lens,
+            seq_lens=seq_lens,
+            draft_index=None,
+        )
 
 
 @pytest.mark.parametrize("fail_at", [None, "project", "copy"])
