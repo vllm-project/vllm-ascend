@@ -681,14 +681,35 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
 
+    def reuses_target_block_table(self) -> bool:
+        """Whether draft graph replay can view the target block table.
+
+        Replicated PCP and DCP drafts own a different block table, so those
+        replays rebuild draft attention metadata. Other drafts, including
+        Eagle3 GQA, share the target table. Rebuilding that metadata on every
+        decode step constructs full attention metadata before the graph
+        launches and adds the CPU cost to TPOT.
+        """
+        return not self.replicated_pcp and not self.use_dcp
+
     def build_fia_params(
         self,
         num_reqs_padded: int,
         draft_attn_metadata: Any,
         is_draft_model_prefill: bool,
     ) -> list[dict[str, Any]]:
-        layer_name, metadata = next(iter(draft_attn_metadata.items()))
-        block_table = metadata.block_tables
+        if draft_attn_metadata is None:
+            layer_name, metadata = next(
+                (name, layer_metadata)
+                for name, layer_metadata in self.model_state.attn_metadata.items()
+                if name in self.draft_attn_layer_names
+            )
+            block_table = metadata.block_tables
+            if block_table is not None:
+                block_table = block_table.as_strided((num_reqs_padded, block_table.shape[1]), block_table.stride())
+        else:
+            layer_name, metadata = next(iter(draft_attn_metadata.items()))
+            block_table = metadata.block_tables
         if is_draft_model_prefill:
             return [
                 {
