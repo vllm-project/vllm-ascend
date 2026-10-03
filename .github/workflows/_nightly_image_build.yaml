@@ -164,10 +164,16 @@ jobs:
             # the latest date for which the SWR base image exists; otherwise use the
             # user-supplied date (YYYYMMDD).
             if [ "${{ inputs.base_image_date }}" = "auto" ] || [ -z "${{ inputs.base_image_date }}" ]; then
+              # Daily base image tags carry a chip segment for non-a2 targets
+              # (e.g. nightly-main-a3-cann<ver>-<date>); a2 uses no chip marker.
+              CHIP_MARK=""
+              if [ "${{ inputs.target }}" != "a2" ]; then
+                CHIP_MARK="-${{ inputs.target }}"
+              fi
               DATE=""
               for i in $(seq 0 30); do
                 CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
-                CANDIDATE_TAG="nightly-${BASE_BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
+                CANDIDATE_TAG="nightly-${BASE_BRANCH_TAG}${CHIP_MARK}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
                 if docker buildx imagetools inspect "${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
                   DATE="$CANDIDATE_DATE"
                   echo "Found base image date: $DATE (tag: $CANDIDATE_TAG)"
@@ -297,10 +303,14 @@ jobs:
           MERGED_VARIANT=0
           for OS_MARK in "" "-openeuler"; do
             if [ "${{ inputs.base_image_date }}" = "auto" ] || [ -z "${{ inputs.base_image_date }}" ]; then
+              CHIP_MARK=""
+              if [ "${{ inputs.target }}" != "a2" ]; then
+                CHIP_MARK="-${{ inputs.target }}"
+              fi
               DATE=""
               for i in $(seq 0 30); do
                 CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
-                CANDIDATE_TAG="nightly-${BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
+                CANDIDATE_TAG="nightly-${BRANCH_TAG}${CHIP_MARK}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
                 if docker buildx imagetools inspect "${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
                   DATE="$CANDIDATE_DATE"
                   break
