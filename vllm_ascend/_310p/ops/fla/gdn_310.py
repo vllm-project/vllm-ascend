@@ -32,6 +32,19 @@ from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.utils import enable_sp
 
 
+def _host_cu_seqlens(attn_metadata: GDNAttentionMetadata, cu_seqlens: torch.Tensor) -> torch.Tensor | None:
+    """Reuse the host query offsets so chunk prefill does not D2H every layer."""
+    host = getattr(attn_metadata, "non_spec_query_start_loc_cpu", None)
+    if host is None:
+        return None
+    n = cu_seqlens.shape[0]
+    if host.shape[0] < n:
+        return None
+    if host.shape[0] != n:
+        host = host[:n]
+    return host
+
+
 def _zero_padded_tokens(
     tensor: torch.Tensor,
     valid_tokens: torch.Tensor,
@@ -373,6 +386,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     cu_seqlens=non_spec_query_start_loc,
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
+                    cu_seqlens_cpu=_host_cu_seqlens(attn_metadata, non_spec_query_start_loc),
                 )
 
                 # Init cache
