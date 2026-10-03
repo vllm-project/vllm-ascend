@@ -964,7 +964,6 @@ class ReqMeta:
     original_block_size: list[int] | int | None = None
 
     event_id: int | None = None
-    save_plan_id: int | None = None
 
     def __init__(
         self,
@@ -1005,7 +1004,6 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
-        save_plan_id: int | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1014,7 +1012,6 @@ class ReqMeta:
         self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
         self.target_token_len = token_len_chunk if target_token_len is None else target_token_len
         self.save_start_token = save_start_token
-        self.save_plan_id = save_plan_id
         if block_ids_by_group is None:
             block_ids_by_group = normalize_block_ids_by_group(block_ids or [])
         self.block_ids_by_group = block_ids_by_group
@@ -1102,7 +1099,6 @@ class ReqMeta:
             block_hashes = []
         target_token_len = tracker.token_len
         previous_saved_tokens = tracker.num_saved_tokens
-        save_start_token = previous_saved_tokens
 
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
@@ -1148,22 +1144,20 @@ class ReqMeta:
         skip_save = skip_save or (
             num_tokens_to_save < chunk_boundary and partial_block_index is None and not should_save_partial_block
         )
-        # Only the bounded synchronous GVA path can save a new suffix while
-        # loading the existing prefix. Other paths retain their original guard.
+        # A synchronous prefill can load an existing prefix and save a new
+        # suffix. Exclude the stored extent, including a full-hit tail that
+        # is recomputed only to obtain logits.
         if load_spec is not None and load_spec.can_load and not save_partial_block:
-            if allow_save_with_load:
-                pool_hit_tokens = (
-                    load_spec.kvpool_store_skip_tokens
-                    if load_spec.kvpool_store_skip_tokens is not None
-                    else load_spec.kvpool_cached_tokens
-                )
-                save_start_token = max(
-                    previous_saved_tokens,
-                    pool_hit_tokens // cache_transfer_granularity * cache_transfer_granularity,
-                )
-                skip_save = skip_save or num_tokens_to_save <= save_start_token
-            else:
-                skip_save = True
+            pool_hit_tokens = (
+                load_spec.kvpool_store_skip_tokens
+                if load_spec.kvpool_store_skip_tokens is not None
+                else load_spec.kvpool_cached_tokens
+            )
+            previous_saved_tokens = max(
+                previous_saved_tokens,
+                pool_hit_tokens // cache_transfer_granularity * cache_transfer_granularity,
+            )
+            skip_save = skip_save or not allow_save_with_load or num_tokens_to_save <= previous_saved_tokens
         if skip_save and load_spec is None:
             return None
 
@@ -1191,7 +1185,7 @@ class ReqMeta:
             token_len_chunk=num_tokens_to_save,
             save_end_token=num_tokens_to_save,
             target_token_len=target_token_len,
-            save_start_token=save_start_token,
+            save_start_token=previous_saved_tokens,
             block_ids_by_group=tracker.allocated_block_ids_by_group,
             can_save=not skip_save,
             load_spec=load_spec,
@@ -1360,7 +1354,6 @@ class LayerMultiBlockReqMeta:
 class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     completed_events: dict[int, int] = field(default_factory=dict)
     """key: event_id, value: completed worker count"""
-    cancelled_save_plan_ids: set[int] = field(default_factory=set)
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
         assert isinstance(other, AscendStoreKVConnectorWorkerMetadata), (
@@ -1373,6 +1366,4 @@ class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
                 merged[event_id] = other.completed_events[event_id]
             else:
                 merged[event_id] = merged[event_id] + other.completed_events[event_id]
-        return AscendStoreKVConnectorWorkerMetadata(
-            merged, self.cancelled_save_plan_ids | other.cancelled_save_plan_ids
-        )
+        return AscendStoreKVConnectorWorkerMetadata(merged)

@@ -22,7 +22,6 @@ from types import SimpleNamespace
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
-    AscendStoreKVConnectorWorkerMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
     LayerMultiBlockReqMeta,
@@ -585,67 +584,45 @@ class TestReqMeta(unittest.TestCase):
         self.assertFalse(meta.can_save)
 
     def test_from_request_tracker_can_load_suppresses_save(self):
-        # Port of vllm-project/vllm#43371: a ReqMeta must never carry both a
-        # save AND a load. When the request can load from the KV pool, force
-        # skip_save so the same req_id is not queued into both the send and
-        # recv threads (which double delayed-free and can crash the scheduler
-        # with `assert req_id in self.requests`).
+        # Callers that do not opt in retain LOAD-only metadata.
         tracker = RequestTracker(
             req_id="r1",
-            token_len=64,
-            allocated_block_ids=[0, 1, 2, 3],
+            token_len=32,
+            allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True)
-        meta = ReqMeta.from_request_tracker(
-            tracker, cache_transfer_granularity=16, load_spec=load_spec, block_hashes=[b"h"] * 4
-        )
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, load_spec=load_spec)
         self.assertIsNotNone(meta)
         self.assertIsNotNone(meta.load_spec)
         self.assertFalse(meta.can_save)
-        self.assertEqual(tracker.num_saved_tokens, 0)
 
-    def test_from_request_tracker_save_suffix_with_load(self):
-        # pool extent, actual load extent, target, hashes, previous cursor,
-        # force skip, expected save interval (None means no SAVE).
+    def test_load_and_save_only_new_complete_suffix(self):
+        # target, hit, stored extent, hash count, explicit skip, SAVE range
         cases = [
-            (32, 32, 64, 4, 0, False, (32, 64)),
-            (64, 63, 64, 4, 0, False, None),
-            (32, 32, 40, 2, 0, False, None),
-            (32, 32, 64, 3, 0, False, (32, 48)),
-            (32, 32, 64, 4, 48, False, (48, 64)),
-            (32, 32, 64, 4, 0, True, None),
-            (None, 32, 64, 4, 0, False, (32, 64)),
+            (96, 16, 16, 6, False, (16, 96)),
+            (31, 16, 16, 1, False, None),
+            (32, 31, 32, 2, False, None),
+            (96, 16, 16, 1, False, None),
+            (96, 16, 16, 6, True, None),
         ]
-        for pool_extent, load_extent, target, hashes, previous, skip, interval in cases:
-            with self.subTest(pool_extent=pool_extent, target=target, hashes=hashes, skip=skip):
-                tracker = RequestTracker("r1", target, allocated_block_ids=[0, 1, 2, 3], num_saved_tokens=previous)
-                load_spec = LoadSpec(0, load_extent, can_load=True, kvpool_store_skip_tokens=pool_extent)
+        for target, hit, stored, hash_count, skip, expected in cases:
+            with self.subTest(target=target, hit=hit, hashes=hash_count, skip=skip):
+                tracker = RequestTracker("r1", target, allocated_block_ids=list(range(6)), num_saved_tokens=0)
+                load = LoadSpec(0, hit, can_load=True, kvpool_store_skip_tokens=stored)
                 meta = ReqMeta.from_request_tracker(
                     tracker,
-                    cache_transfer_granularity=16,
-                    load_spec=load_spec,
-                    block_hashes=[b"h"] * hashes,
+                    16,
+                    load_spec=load,
                     skip_save=skip,
+                    block_hashes=[b"h"] * hash_count,
                     allow_save_with_load=True,
                 )
-                self.assertIsNotNone(meta)
-                self.assertIs(meta.load_spec, load_spec)
-                self.assertEqual(meta.can_save, interval is not None)
-                if interval is not None:
-                    self.assertEqual((meta.save_start_token, meta.save_end_token), interval)
-                    self.assertEqual(tracker.num_saved_tokens, interval[1])
-                else:
-                    self.assertEqual(tracker.num_saved_tokens, previous)
-
-    def test_worker_metadata_aggregation_keeps_cancellations(self):
-        first = AscendStoreKVConnectorWorkerMetadata({1: 1}, {7})
-        second = AscendStoreKVConnectorWorkerMetadata({1: 2, 2: 1}, {7, 8})
-        combined = first.aggregate(second)
-        self.assertEqual(combined.completed_events, {1: 3, 2: 1})
-        self.assertEqual(combined.cancelled_save_plan_ids, {7, 8})
-        self.assertEqual(first.completed_events, {1: 1})
-        self.assertEqual(first.cancelled_save_plan_ids, {7})
+                self.assertIs(meta.load_spec, load)
+                self.assertEqual(meta.can_save, expected is not None)
+                self.assertEqual(tracker.num_saved_tokens, expected[1] if expected else 0)
+                if expected:
+                    self.assertEqual((meta.save_start_token, meta.save_end_token), expected)
 
     def test_from_request_tracker_partial_tokens_discarded(self):
         tracker = RequestTracker(

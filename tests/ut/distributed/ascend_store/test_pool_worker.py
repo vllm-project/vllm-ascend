@@ -36,6 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerTransferTask,
     LoadSpec,
     ReqMeta,
+    RequestTracker,
     SharedBlockData,
     get_partial_block_index,
 )
@@ -1416,23 +1417,6 @@ class TestKVPoolWorkerBuildConnectorWorkerMeta(unittest.TestCase):
                 result = worker.build_connector_worker_meta()
                 self.assertEqual(None if result is None else result.completed_events, expected)
 
-    def test_save_plan_feedback_preserves_mamba_completed_events(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
-
-        worker = self._make_worker()
-        worker.use_mamba = True
-        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
-        worker.kv_send_thread.get_completed_events.side_effect = [{1: 2}, {}]
-        worker._has_save_plans = True
-        worker._cancelled_save_plan_ids = {7}
-
-        result = worker.build_connector_worker_meta()
-
-        self.assertEqual(result.completed_events, {1: 2})
-        self.assertEqual(result.cancelled_save_plan_ids, {7})
-        self.assertIsNone(worker.build_connector_worker_meta())
-        self.assertEqual(result.cancelled_save_plan_ids, {7})
-
 
 class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
     """Test get_finished with async recv thread."""
@@ -2020,6 +2004,46 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [0])
         self.assertEqual(request.load_keys, [])
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
+
+    def test_partial_hit_prepares_suffix_save_only_after_valid_load(self):
+        for gva, lease in ((201, 0), (0, 0), (201, -1)):
+            with self.subTest(gva=gva, lease=lease):
+                worker = self._make_gva_worker()
+                worker.layerwise_offload = False
+                worker.group_num_layers = {0: worker.num_layers}
+                info = MagicMock()
+                info.size.return_value = 64 if gva else 0
+                info.gva_list.return_value = [gva]
+                worker.m_store.batch_get_key_info.return_value = [info]
+                worker.m_store.batch_add_lease.return_value = [lease]
+                worker.m_store.batch_alloc.return_value = [301, 302, 303, 304, 305]
+                tracker = RequestTracker("r1", 96, allocated_block_ids=list(range(6)))
+                request = ReqMeta.from_request_tracker(
+                    tracker,
+                    16,
+                    load_spec=LoadSpec(0, 16, can_load=True),
+                    block_hashes=[f"h{i}" for i in range(6)],
+                    allow_save_with_load=True,
+                )
+
+                worker.process_layer_data([request])
+
+                if not gva or lease:
+                    self.assertFalse(request.can_save)
+                    self.assertTrue(all(not tasks for tasks in worker.layer_save_tasks))
+                    worker.m_store.batch_alloc.assert_not_called()
+                    self.assertEqual(worker.get_block_ids_with_load_errors(), {0})
+                else:
+                    self.assertTrue(request.can_save)
+                    self.assertEqual(request.block_gvas_np.tolist(), [0, 301, 302, 303, 304, 305])
+                    self.assertEqual(request.load_block_gvas_np.tolist(), [201, 0, 0, 0, 0, 0])
+                    for saves, loads in zip(worker.layer_save_tasks, worker.layer_load_tasks):
+                        self.assertEqual(
+                            (saves[0].block_ranges[0].start_block, saves[0].block_ranges[0].end_block), (1, 6)
+                        )
+                        self.assertEqual(
+                            (loads[0].block_ranges[0].start_block, loads[0].block_ranges[0].end_block), (0, 1)
+                        )
 
     def test_partial_lease_retries_until_snapshot_is_readable(self):
         worker = self._make_gva_worker()
@@ -2669,172 +2693,6 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
             [(r.start_block, r.end_block, r.partial_block_index) for r in ranges],
             [(1, 2, None), (3, 4, None)],
         )
-
-
-class TestKVPoolWorkerPoolSuffixSave(unittest.TestCase):
-    def _make_worker(self):
-        worker = make_worker(self, num_layers=4, extra_config={"backend": "memcache"}, use_layerwise=True)
-        worker.layerwise_offload = False
-        worker.independent_layers = list(range(4))
-        worker.prefetch_layer_map = {}
-        worker.num_kv_cache_groups = 1
-        worker.grouped_block_size = [16]
-        worker.kv_cache_group_families = ["default"]
-        worker.group_block_len = {0: [64] * 4}
-        worker.group_num_layers = {0: 4}
-        worker.hash_block_size = 16
-        worker.page_size_bytes = 64
-        worker.head_or_tp_rank = 0
-        worker.m_store = MagicMock()
-        worker.m_store.supports_explicit_write_finish = True
-        key_infos = []
-        for gva in (201, 202):
-            info = MagicMock()
-            info.size.return_value = 256
-            info.gva_list.return_value = [gva]
-            key_infos.append(info)
-        worker.m_store.batch_get_key_info.return_value = key_infos
-        worker.m_store.batch_add_lease.return_value = [0, 0]
-        worker.m_store.batch_alloc.side_effect = lambda keys, *_args: list(range(301, 301 + len(keys)))
-        worker.m_store.batch_write_finish.side_effect = lambda keys, _results: [0] * len(keys)
-        return worker
-
-    @staticmethod
-    def _make_request(save_plan_id=7, load=True):
-        block_ids = [7, 8, 9, 10]
-        return ReqMeta(
-            req_id="r1",
-            token_len_chunk=64,
-            save_start_token=0,
-            save_end_token=64,
-            target_token_len=64,
-            block_ids=block_ids,
-            block_hashes=["h0", "h1", "h2", "h3"],
-            can_save=True,
-            load_spec=LoadSpec(0, 32, can_load=True) if load else None,
-            block_ids_np=np.asarray(block_ids, dtype=np.int64),
-            block_ids_by_group_np=[np.asarray(block_ids, dtype=np.int64)],
-            save_plan_id=save_plan_id,
-        )
-
-    def test_partial_hit_keeps_separate_prefix_load_and_suffix_save(self):
-        worker = self._make_worker()
-        request = self._make_request()
-
-        worker.process_layer_data([request])
-
-        for layer_id in range(4):
-            load_range = worker.layer_load_tasks[layer_id][0].block_ranges[0]
-            save_range = worker.layer_save_tasks[layer_id][0].block_ranges[0]
-            self.assertEqual((load_range.start_block, load_range.end_block), (0, 2))
-            self.assertEqual((save_range.start_block, save_range.end_block), (2, 4))
-        self.assertEqual(request.load_block_gvas_np.tolist(), [201, 202, 0, 0])
-        self.assertEqual(request.block_gvas_np.tolist(), [0, 0, 301, 302])
-        load_keys = worker.m_store.batch_add_lease.call_args.args[0]
-        save_keys = worker.m_store.batch_alloc.call_args.args[0]
-        self.assertTrue(set(load_keys).isdisjoint(save_keys))
-        result = worker.build_connector_worker_meta()
-        self.assertEqual(result.cancelled_save_plan_ids, set())
-        self.assertIsNone(worker.build_connector_worker_meta())
-
-    def test_prefix_prepare_failure_cancels_every_layer_save(self):
-        for failure in ("gva", "lease"):
-            with self.subTest(failure=failure):
-                worker = self._make_worker()
-                request = self._make_request()
-                if failure == "gva":
-                    info = worker.m_store.batch_get_key_info.return_value[0]
-                    info.size.return_value = 0
-                    info.gva_list.return_value = []
-                    worker.m_store.batch_add_lease.return_value = [0]
-                    invalid_block = 7
-                else:
-                    worker.m_store.batch_add_lease.return_value = [-1, 0]
-                    invalid_block = 7
-
-                worker.process_layer_data([request])
-
-                self.assertFalse(request.can_save)
-                self.assertTrue(all(not tasks for tasks in worker.layer_save_tasks))
-                self.assertTrue(all(tasks for tasks in worker.layer_load_tasks))
-                worker.m_store.batch_alloc.assert_not_called()
-                self.assertEqual(worker.get_block_ids_with_load_errors(), {invalid_block})
-                self.assertEqual(worker.build_connector_worker_meta().cancelled_save_plan_ids, {7})
-
-    def test_old_sdk_and_deferred_last_save_cancel_mixed_plan(self):
-        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
-        for supports_finish, defer in ((False, False), (True, True)):
-            with self.subTest(supports_finish=supports_finish, defer=defer):
-                worker = self._make_worker()
-                worker.m_store.supports_explicit_write_finish = supports_finish
-                request = self._make_request()
-
-                with patch(f"{module}._LW_DEFER_LAST_SAVE", defer):
-                    worker.process_layer_data([request])
-
-                self.assertFalse(request.can_save)
-                self.assertTrue(all(not tasks for tasks in worker.layer_save_tasks))
-                self.assertTrue(all(tasks for tasks in worker.layer_load_tasks))
-                worker.m_store.batch_alloc.assert_not_called()
-                self.assertEqual(worker.build_connector_worker_meta().cancelled_save_plan_ids, {7})
-
-    def test_suffix_allocation_failure_cancels_plan_and_discards_unpublished_keys(self):
-        for allocated in ([301, 0], [0, -1]):
-            with self.subTest(allocated=allocated):
-                worker = self._make_worker()
-                request = self._make_request()
-                worker.m_store.batch_alloc.side_effect = None
-                worker.m_store.batch_alloc.return_value = allocated
-
-                worker.process_layer_data([request])
-
-                self.assertFalse(request.can_save)
-                self.assertTrue(all(not tasks for tasks in worker.layer_save_tasks))
-                self.assertTrue(all(tasks for tasks in worker.layer_load_tasks))
-                self.assertEqual(worker._allocated_gvas, {})
-                self.assertEqual(worker.build_connector_worker_meta().cancelled_save_plan_ids, {7})
-                allocated_keys = worker.m_store.batch_alloc.call_args.args[0]
-                if allocated[0] > 0:
-                    worker.m_store.batch_write_finish.assert_called_once_with([allocated_keys[0]], [-1])
-                else:
-                    worker.m_store.batch_write_finish.assert_not_called()
-
-    def test_suffix_allocation_result_shape_error_remains_fatal(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import BatchResultShapeError
-
-        worker = self._make_worker()
-        worker.m_store.batch_alloc.side_effect = None
-        worker.m_store.batch_alloc.return_value = [301]
-
-        with self.assertRaises(BatchResultShapeError):
-            worker.process_layer_data([self._make_request()])
-
-        self.assertTrue(all(not tasks for tasks in worker.layer_save_tasks))
-
-    def test_old_sdk_pure_save_keeps_existing_behavior(self):
-        worker = self._make_worker()
-        worker.m_store.supports_explicit_write_finish = False
-        request = self._make_request(save_plan_id=None, load=False)
-
-        worker.process_layer_data([request])
-
-        self.assertTrue(request.can_save)
-        self.assertTrue(all(not tasks for tasks in worker.layer_load_tasks))
-        for tasks in worker.layer_save_tasks:
-            block_range = tasks[0].block_ranges[0]
-            self.assertEqual((block_range.start_block, block_range.end_block), (0, 4))
-        worker.m_store.batch_alloc.assert_called_once()
-        self.assertIsNone(worker.build_connector_worker_meta())
-
-    def test_empty_next_bind_has_no_stale_plan_feedback(self):
-        worker = self._make_worker()
-        worker.m_store.supports_explicit_write_finish = False
-        worker.process_layer_data([self._make_request()])
-        self.assertEqual(worker.build_connector_worker_meta().cancelled_save_plan_ids, {7})
-
-        worker.prepare_layerwise_step(AscendConnectorMetadata(set(), set()))
-
-        self.assertIsNone(worker.build_connector_worker_meta())
 
 
 if __name__ == "__main__":

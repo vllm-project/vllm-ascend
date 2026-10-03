@@ -47,7 +47,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVTransferThread,
     LayerBatchBuilder,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 
 class FakeStore:
@@ -437,109 +436,6 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
 
         self.assertEqual(load_finished_observed, [False])
         self.assertTrue(load_finished[1].is_set())
-
-    def test_later_load_failure_prevents_suffix_publication_after_first_layer_copy(self):
-        send, store, _, _ = TestGVALayerTransferFailures()._make_sending_thread()
-        # Discard the helper's seeded task; the real worker will enqueue SAVE.
-        send.request_queue.get_nowait()
-        send.request_queue.task_done()
-        send.delete_finished_stored_request("r1")
-        recv, _, _, _ = self._make_thread()
-        recv.m_store = store
-        # L0 LOAD, L0 SAVE, then L1 LOAD fails in the real batch_copy path.
-        store.store.batch_copy.side_effect = [0, 0, 1]
-        store.batch_write_finish.return_value = [0, 0]
-        database = FakeTokenDatabase()
-        database.set_group_buffers(
-            {0: [1000, 2000, 3000, 4000]},
-            {0: [16, 16, 16, 16]},
-            {0: [16, 16, 16, 16]},
-            group_num_layers={0: 4},
-        )
-        save_builder = LayerBatchBuilder(database, page_size_bytes=64, num_layers=4)
-        load_builder = LayerBatchBuilder(database, page_size_bytes=64, num_layers=4)
-        send.group_builders = [save_builder]
-        recv.group_builders = [load_builder]
-        send.final_layer_id = recv.final_layer_id = 3
-        request = ReqMeta(
-            req_id="r1",
-            can_save=True,
-            load_spec=LoadSpec(0, 32, can_load=True),
-            save_start_token=32,
-            save_end_token=64,
-            save_plan_id=1,
-            is_last_chunk=True,
-            block_ids_np=np.asarray([0, 1, 2, 3]),
-            block_gvas_np=np.asarray([30000, 40000]),
-            gva_block_offset=2,
-            load_block_gvas_np=np.asarray([10000, 20000, 0, 0]),
-            load_keys=["prefix0", "prefix1"],
-        )
-        request.save_keys = ["suffix2", "suffix3"]
-        saves = [
-            LayerTransferTask(layer, [LayerBlockRange(request, 2, 4)], layer_idx_in_group=layer) for layer in range(4)
-        ]
-        loads = [
-            LayerTransferTask(layer, [LayerBlockRange(request, 0, 2)], layer_idx_in_group=layer) for layer in range(4)
-        ]
-        shared_save = save_builder.build_shared(saves[0], is_save=True)
-        shared_load = load_builder.build_shared(loads[0], is_save=False)
-        np.testing.assert_array_equal(shared_save.block_ids_arr, [2, 3])
-        np.testing.assert_array_equal(shared_load.block_ids_arr, [0, 1])
-        for save, load in zip(saves, loads):
-            save.shared_block_data = shared_save
-            load.shared_block_data = shared_load
-        saves[3].write_finish_keys = request.save_keys.copy()
-
-        worker = object.__new__(KVPoolWorker)
-        worker.num_layers = 4
-        worker.current_layer = 0
-        worker.kv_role = "kv_both"
-        worker.consumer_is_to_put = False
-        worker.use_block_key_layerwise = worker.block_key_hybrid = False
-        worker.prefetch_layer_map = {}
-        worker.num_prefetch_layers = 4
-        worker.next_layer_to_submit = 4
-        worker._attention_saved_layers = set()
-        worker._layer_load_aborted = threading.Event()
-        worker.layer_save_tasks = [[save] for save in saves]
-        worker.layer_load_tasks = [[load] for load in loads]
-        worker.layer_save_finished_events = [threading.Event() for _ in range(4)]
-        worker.layer_load_finished_events = [threading.Event() for _ in range(4)]
-        worker.sync_save_events = [MagicMock() for _ in range(4)]
-        send.layer_save_finished_events = recv.layer_save_finished_events = worker.layer_save_finished_events
-        send.sync_save_events = recv.sync_save_events = worker.sync_save_events
-        recv.layer_load_finished_events = worker.layer_load_finished_events
-        worker.kv_send_thread, worker.kv_recv_thread = send, recv
-        send.add_request = MagicMock(wraps=send.add_request)
-        # Stage all LOADs deterministically; the failed real receiver must stop
-        # before processing L2/L3, and the model must stop before saving them.
-        for layer in range(4):
-            recv.add_request(LayerLoadTask(None, worker.layer_load_tasks[layer], layer))
-        recv._handle_request(recv.request_queue.get_nowait())
-        worker.wait_for_layer_load()
-        worker.save_kv_layer(None)
-        send._handle_request(send.request_queue.get_nowait())
-        self.assertTrue(worker.layer_save_finished_events[0].is_set())
-        store.batch_write_finish.assert_not_called()
-
-        recv.start()
-        recv.join(timeout=1)
-        self.assertFalse(recv.is_alive())
-        with self.assertRaisesRegex(RuntimeError, "asynchronous transfer") as failure:
-            for _ in range(1, 4):
-                worker.wait_for_layer_load()
-                worker.save_kv_layer(None)
-        self.assertIn("Layerwise 1 load batch_copy failed", str(failure.exception.__cause__))
-        self.assertEqual([call.args[3] for call in store.store.batch_copy.call_args_list], [1, 0, 1])
-        self.assertEqual(worker.current_layer, 1)
-        self.assertTrue(worker._layer_load_aborted.is_set())
-        self.assertFalse(worker.layer_load_finished_events[1].is_set())
-        self.assertEqual(send.add_request.call_count, 1)
-        self.assertTrue(send.request_queue.empty())
-        self.assertEqual(recv.request_queue.qsize(), 2)
-        worker.sync_save_events[3].record.assert_not_called()
-        store.batch_write_finish.assert_not_called()
 
 
 class TestKVCacheStoreSendingThread(unittest.TestCase):

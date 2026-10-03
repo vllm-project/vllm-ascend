@@ -15,7 +15,6 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -143,8 +142,6 @@ class KVPoolScheduler:
         self.cache_coordinator = self._build_cache_coordinator()
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
-        self._next_save_plan_id = 0
-        self._pending_save_plans: dict[int, tuple[str, RequestTracker, int, int]] = {}
         self._preempted_req_ids: set[str] = set()
         # Whether to discard partial chunks
         self._discard_partial_chunks = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -823,9 +820,15 @@ class KVPoolScheduler:
         skip_save: bool | None,
     ):
         last_chunk_tokens_num = self._get_last_chunk_tokens_num(prompt_token_ids)
-        previous_saved_tokens = request_tracker.num_saved_tokens
-        allow_save_with_load = load_spec is not None and load_spec.can_load and self._can_save_with_load()
-        req_meta = ReqMeta.from_request_tracker(
+        # Keep failure recovery local: other ranks could otherwise publish a
+        # suffix computed with a prefix that failed to load on this rank.
+        allow_save_with_load = (
+            self.use_layerwise_transfer
+            and not self.use_hybrid
+            and self._expected_worker_count == 1
+            and not self.vllm_config.scheduler_config.async_scheduling
+        )
+        return ReqMeta.from_request_tracker(
             request_tracker,
             self.cache_transfer_granularity,
             load_spec=load_spec,
@@ -838,38 +841,6 @@ class KVPoolScheduler:
             save_partial_block=self.layerwise_offload,
             hash_block_size=self.hash_block_size,
             allow_save_with_load=allow_save_with_load,
-        )
-        if allow_save_with_load and req_meta is not None and req_meta.can_save:
-            self._next_save_plan_id += 1
-            req_meta.save_plan_id = self._next_save_plan_id
-            self._pending_save_plans[req_meta.save_plan_id] = (
-                request_tracker.req_id,
-                request_tracker,
-                previous_saved_tokens,
-                req_meta.save_end_token,
-            )
-        return req_meta
-
-    def _can_save_with_load(self) -> bool:
-        """Limit suffix saving to the synchronous, single-rank Memcache GVA path."""
-        if self.kv_cache_config is not None:
-            for group in self.kv_cache_config.kv_cache_groups:
-                spec = group.kv_cache_spec
-                specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
-                if any(not isinstance(cache_spec, FullAttentionSpec) for cache_spec in specs):
-                    return False
-        return (
-            self.backend_name == "memcache"
-            and self.use_layerwise_transfer
-            and not self.layerwise_offload
-            and not self.use_hybrid
-            and not self.use_eagle
-            and len(self.grouped_block_size) == 1
-            and not self.num_speculative_blocks_by_group
-            and self.tp_size == self.pp_size == self.pcp_size == self.dcp_size == 1
-            and self.vllm_config.scheduler_config.async_scheduling is False
-            and self._discard_partial_chunks is True
-            and getattr(self.store_scheduler, "supports_explicit_write_finish", False) is True
         )
 
     def _process_new_request(
@@ -1071,8 +1042,21 @@ class KVPoolScheduler:
         if not force_skip_save:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
+                tracker = self._request_trackers.get(req_id)
+                request_tuple = self._unfinished_requests.get(req_id)
+                retry_save = bool(
+                    not self.layerwise_offload
+                    and tracker is not None
+                    and request_tuple is not None
+                    and tracker.num_saved_tokens > request_tuple[0].num_computed_tokens
+                )
+                if retry_save:
+                    # LOAD-error recomputation reuses the same blocks and
+                    # tracker; its cancelled SAVE must be planned again.
+                    tracker.num_saved_tokens = request_tuple[0].num_computed_tokens
                 if (
                     not new_block_ids
+                    and not retry_save
                     and not self.tp_mismatch
                     and not self.layerwise_offload
                     and not self.save_decode_cache
@@ -1156,20 +1140,7 @@ class KVPoolScheduler:
         hand the connector_output, free non-null mamba blocks and so on.
         """
         meta = connector_output.kv_connector_worker_meta
-        if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata):
-            return
-
-        for plan_id in meta.cancelled_save_plan_ids:
-            plan = self._pending_save_plans.get(plan_id)
-            if plan is None:
-                continue
-            req_id, tracker, before, planned_end = plan
-            if self._request_trackers.get(req_id) is tracker and tracker.num_saved_tokens == planned_end:
-                tracker.num_saved_tokens = before
-        # Target plans cannot overlap: this metadata acknowledges the current
-        # synchronous batch, including its successful (uncancelled) plans.
-        self._pending_save_plans.clear()
-        if self._block_pool is None:
+        if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata) or self._block_pool is None:
             return
 
         for event_id, count in meta.completed_events.items():

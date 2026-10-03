@@ -467,8 +467,6 @@ class KVPoolWorker:
         self._layerwise_session_tracker = LayerwiseSessionTracker()
         self._current_layerwise_request_ids: set[str] = set()
         self._current_layerwise_last_chunk_req_ids: set[str] = set()
-        self._has_save_plans = False
-        self._cancelled_save_plan_ids: set[int] = set()
         # PERF-TUNE(4): per-step RPC result caches. Defined once here so
         # mypy does not flag repeated attribute definitions; they are reset
         # per step via .clear() in process_layer_data().
@@ -1581,7 +1579,7 @@ class KVPoolWorker:
             elif exists != 1:
                 raise RuntimeError(f"MemCache exists check failed for {key}: state={exists}")
 
-    def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> set[str]:
+    def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> None:
         """Allocate per-group GVA on the worker side right before batch_copy.
 
         For multi-group models, iterates all KV cache groups and allocates
@@ -1590,12 +1588,11 @@ class KVPoolWorker:
         compat with PR #11585).
         """
         if not self.use_layerwise_transfer:
-            return set()
+            return
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
-            return set()
+            return
         if not self._is_layerwise_save_leader():
-            return set()
-        failed_request_ids: set[str] = set()
+            return
         for request in requests:
             if request.can_save is None or not request.can_save:
                 continue
@@ -1604,7 +1601,6 @@ class KVPoolWorker:
             all_group_gvas: list[np.ndarray] = []
             all_group_block_ids: list[np.ndarray] = []
             all_group_save_keys: list[str] = []
-            allocation_failed = False
             request.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
                 group_block_size = self.grouped_block_size[group_id]
@@ -1678,10 +1674,7 @@ class KVPoolWorker:
                     new_gvas = self.m_store.batch_alloc(
                         new_keys, [alloc_size] * len(new_keys), LAYERWISE_READ_LEASE_TTL_MS
                     )
-                    if isinstance(request.save_plan_id, int):
-                        new_gvas = require_aligned_batch_results("batch_alloc", new_keys, new_gvas)
                     if any(gva <= 0 for gva in new_gvas):
-                        allocation_failed = True
                         logger.error(
                             "alloc_gvas FAIL: req=%s group=%d alloc_size=%d new_keys=%d gvas_sample=%s zero_count=%d",
                             request.req_id,
@@ -1756,31 +1749,14 @@ class KVPoolWorker:
                 all_group_gvas.append(np.asarray(full_gvas, dtype=np.int64))
                 all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
 
-            if allocation_failed and isinstance(request.save_plan_id, int):
-                failed_request_ids.add(request.req_id)
-                if all_group_save_keys:
-                    try:
-                        results = require_aligned_batch_results(
-                            "batch_write_finish",
-                            all_group_save_keys,
-                            self.m_store.batch_write_finish(all_group_save_keys, [-1] * len(all_group_save_keys)),
-                        )
-                    finally:
-                        for key in all_group_save_keys:
-                            self._allocated_gvas.pop(key, None)
-                    if any(result != 0 for result in results):
-                        raise RuntimeError(f"Layerwise cancelled save cleanup failed for request {request.req_id}")
-                request.save_keys = []
-                continue
             if all_group_gvas:
                 request.save_keys = all_group_save_keys
                 request.block_gvas_by_group_np = all_group_gvas
                 request.block_ids_by_group_np = all_group_block_ids
                 request.block_gvas_np = all_group_gvas[0]
                 request.gva_block_offset = 0
-        return failed_request_ids
 
-    def _prepare_load_gvas(self, requests: list[ReqMeta]) -> set[str]:
+    def _prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
         """Fetch per-rank GVA and acquire read lease for the load path.
 
         memcache requires batch_copy (read) to find the blob in the per-process
@@ -1791,8 +1767,7 @@ class KVPoolWorker:
           2. batch_add_lease to register the blob locally + acquire a read lease
         """
         if not self.use_layerwise_transfer:
-            return set()
-        failed_request_ids: set[str] = set()
+            return
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
@@ -1979,7 +1954,10 @@ class KVPoolWorker:
                 # failures, as the scheduler cannot handle inconsistent KV
                 # cache state across groups (see PR #9701 for rationale).
                 if invalid_block_ids:
-                    failed_request_ids.add(request.req_id)
+                    # The scheduler will recompute this request. Do not
+                    # publish a suffix computed from an incomplete prefix.
+                    if not self.layerwise_offload:
+                        request.can_save = False
                     if self.num_kv_cache_groups == 1:
                         with self._invalid_block_ids_lock:
                             self._invalid_block_ids.update(invalid_block_ids)
@@ -2032,7 +2010,6 @@ class KVPoolWorker:
                 request.load_block_gvas_by_group_np = all_group_load_gvas
                 request.load_block_gvas_np = all_group_load_gvas[0]
                 request.load_gva_block_offset = 0
-        return failed_request_ids
 
     def _record_layerwise_invalid_blocks(self, block_ids: list[int]) -> None:
         if not block_ids:
@@ -2500,9 +2477,6 @@ class KVPoolWorker:
         # Worker threads may still own the lists from the preceding step.
         self.layer_save_tasks = [[] for _ in range(self.num_layers)]
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
-        save_plans = [request for request in requests if isinstance(request.save_plan_id, int)]
-        self._has_save_plans = bool(save_plans)
-        self._cancelled_save_plan_ids.clear()
         if not requests:
             return
         # PERF-TUNE(4): cache repeated memcache RPC results within this step.
@@ -2520,29 +2494,14 @@ class KVPoolWorker:
         group_requests = {}
         if self.use_block_key_layerwise:
             group_requests = self.layerwise_protocol.prepare_layerwise_sessions(self, requests)
-        if save_plans:
-            failed_request_ids = self._prepare_load_gvas(requests)
-            supports_write_finish = getattr(self.m_store, "supports_explicit_write_finish", False) is True
-            for request in save_plans:
-                if _LW_DEFER_LAST_SAVE or not supports_write_finish or request.req_id in failed_request_ids:
-                    request.can_save = False
-                    assert request.save_plan_id is not None
-                    self._cancelled_save_plan_ids.add(request.save_plan_id)
-            failed_save_request_ids = self._alloc_gvas_for_save(requests)
-            for request in save_plans:
-                if request.req_id in failed_save_request_ids:
-                    request.can_save = False
-                    assert request.save_plan_id is not None
-                    self._cancelled_save_plan_ids.add(request.save_plan_id)
+        # Validate the prefix before constructing any suffix SAVE tasks.
+        self._prepare_load_gvas(requests)
         for local_layer in range(num_local):
             for group_id, layer_idx_in_group in self._groups_for_layerwise_transfer(local_layer):
                 self._process_save_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
                 )
-        # Protect the previous partial before allocating the next snapshot.
-        if not save_plans:
-            self._prepare_load_gvas(requests)
-            self._alloc_gvas_for_save(requests)
+        self._alloc_gvas_for_save(requests)
         self._build_shared_save_data()
         for local_layer in range(num_local):
             for group_id, layer_idx_in_group in self._groups_for_layerwise_transfer(local_layer):
@@ -3585,15 +3544,7 @@ class KVPoolWorker:
         return []
 
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
-        completed_events: dict[int, int] = {}
         if self.use_mamba and isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
-            completed_events = self.kv_send_thread.get_completed_events()
-        if not completed_events and not self._has_save_plans:
-            return None
-        metadata = AscendStoreKVConnectorWorkerMetadata(
-            completed_events=completed_events,
-            cancelled_save_plan_ids=self._cancelled_save_plan_ids.copy(),
-        )
-        self._has_save_plans = False
-        self._cancelled_save_plan_ids.clear()
-        return metadata
+            if ce := self.kv_send_thread.get_completed_events():
+                return AscendStoreKVConnectorWorkerMetadata(ce)
+        return None
