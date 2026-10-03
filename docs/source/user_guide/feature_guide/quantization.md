@@ -60,6 +60,47 @@ After quantization completes, the output directory will contain the quantized mo
 
 For more examples, refer to the [official examples](https://gitcode.com/Ascend/msmodelslim/tree/master/example).
 
+#### Low-Rank MoE Conversion
+
+ModelSlim 1.0.0 DeepSeek-V3 checkpoints with per-channel W4A8 routed
+experts can be converted to packed INT4 low-rank factors. The conversion is
+resumable and does not retain the original dense expert matrices:
+
+```bash
+python benchmarks/moe_svd/convert.py \
+    --input /path/to/modelslim_model \
+    --output /path/to/low_rank_model \
+    --rank 1024 \
+    --workers 16 \
+    --threads 4
+```
+
+The input and output directories must be different. The source expert weights
+must use symmetric, zero-offset, per-channel W4A8 quantization. The rank must
+be a multiple of 32, no larger than either expert dimension, and satisfy
+`rank * (hidden_size + moe_intermediate_size) < hidden_size * moe_intermediate_size`
+so that the packed expert weights contain fewer elements. Hidden and intermediate
+dimensions must also be multiples of 32.
+
+Conversion records SHA-256 fingerprints of source shards and checksums of output
+tensors. Resuming validates shard contents, shapes, and dtypes before reusing
+converted experts. Run one conversion process per output directory.
+
+Serve the converted checkpoint with Ascend quantization and expert
+parallelism when tensor parallelism is greater than one:
+
+```bash
+vllm serve /path/to/low_rank_model \
+    --quantization ascend \
+    --dtype bfloat16 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel
+```
+
+Low-rank MoE inference uses BF16 activations, bias-free SiLU experts, and static
+expert placement. SwiGLU clipping is preserved when configured. LoRA adapters
+are rejected when loading a low-rank checkpoint.
+
 ### 2. LLM-Compressor
 
 [LLM-Compressor](https://github.com/vllm-project/llm-compressor) is a unified compressed model library for faster vLLM inference.
