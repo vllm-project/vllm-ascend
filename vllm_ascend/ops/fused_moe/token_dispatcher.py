@@ -582,13 +582,19 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         (
             tokens_per_expert,
-            input_splits,
-            output_splits,
-            global_input_tokens_local_experts_indices,
+            input_splits_cpu,
+            output_splits_cpu,
+            num_global_tokens_per_local_expert,
+            splits_copy_done,
             num_out_tokens,
         ) = self._preprocess(topk_ids)
         hidden_shape_before_permute = hidden_states.shape
 
+        # Enqueue the first permutation before reading any host-side split
+        # value: npu_moe_token_permute only needs hidden_states / topk_ids /
+        # num_out_tokens, none of which depend on the async D2H copies issued
+        # by _preprocess. The device keeps executing it while the host waits
+        # on splits_copy_done below, instead of idling on a stream stall.
         permutated_local_input_tokens, reversed_local_input_permutation_mapping = torch_npu.npu_moe_token_permute(
             tokens=hidden_states,
             indices=topk_ids,
@@ -600,6 +606,25 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 self.lora_context,
                 topk_ids=topk_ids,
                 reversed_permutation_mapping=reversed_local_input_permutation_mapping,
+            )
+
+        # The only host synchronization point of the dispatch path: wait for
+        # the async D2H copies (not for npu_moe_token_permute, which is
+        # already enqueued and keeps the device busy meanwhile).
+        splits_copy_done.synchronize()
+        input_splits = input_splits_cpu.numpy()
+        output_splits = output_splits_cpu.numpy()
+        num_recv_tokens = int(output_splits.sum())
+
+        global_input_tokens_local_experts_indices = None
+        if self.num_local_experts > 1:
+            # Passing output_size (a host int) avoids the implicit .item()
+            # stream sync that repeat_interleave performs when it has to
+            # derive the output length from device-side repeats.
+            global_input_tokens_local_experts_indices = torch.repeat_interleave(
+                self.expert_ids_per_ep_rank,
+                num_global_tokens_per_local_expert.ravel(),
+                output_size=num_recv_tokens,
             )
 
         return (
@@ -614,47 +639,49 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         )
 
     def _preprocess(self, topk_ids: torch.Tensor):
+        """Compute AllToAll dispatch metadata without blocking the host.
+
+        Every value needed on the host (input_splits / output_splits) is
+        copied to the CPU asynchronously and guarded by a single NPU event.
+        The caller must synchronize on that event -- after enqueueing device
+        work that does not depend on these host values -- before reading
+        them; see _dispatch_preprocess.
+        """
         num_local_tokens_per_expert = torch.histc(topk_ids, bins=self.num_experts, min=0, max=self.num_experts)
 
         ep_size = self.ep_size
         num_out_tokens = topk_ids.numel()
 
-        input_splits = (
-            num_local_tokens_per_expert.reshape(ep_size, self.num_local_experts)
-            .sum(axis=1)
-            .to(torch.device("cpu"), non_blocking=True)
-            .numpy()
-        )
+        # [ep_size]: tokens this rank sends to each EP rank.
+        input_splits_dev = num_local_tokens_per_expert.reshape(ep_size, self.num_local_experts).sum(axis=1)
 
         num_global_tokens_per_expert = gather_from_sequence_parallel_region(
             num_local_tokens_per_expert, group=self.ep_group
         ).reshape(ep_size, self.num_experts)
+        # [ep_size, num_local_experts]: tokens each EP rank sends to each of
+        # this rank's local experts.
         num_global_tokens_per_local_expert = num_global_tokens_per_expert[
             :, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1
         ]
-        if num_global_tokens_per_local_expert is None:
-            raise ValueError("num_global_tokens_per_local_expert must be set before sum.")
 
-        output_splits = (
-            num_global_tokens_per_local_expert.sum(axis=-1).to(torch.device("cpu"), non_blocking=True).numpy()
-        )
+        # [ep_size]: tokens this rank receives from each EP rank.
+        output_splits_dev = num_global_tokens_per_local_expert.sum(axis=-1)
+        # [num_local_experts]: tokens each local expert has to compute.
         num_tokens_per_local_expert = num_global_tokens_per_local_expert.sum(axis=0)
 
-        global_input_tokens_local_experts_indices = None
-        if self.num_local_experts > 1:
-            if num_global_tokens_per_local_expert is None:
-                raise ValueError("num_global_tokens_per_local_expert must be set before operations.")
-            global_input_tokens_local_experts_indices = torch.repeat_interleave(
-                self.expert_ids_per_ep_rank, num_global_tokens_per_local_expert.ravel()
-            )
-        else:
-            torch.npu.synchronize()
+        # Async D2H copies: the host reads them only after synchronizing on
+        # the returned event, never inside this function.
+        input_splits_cpu = input_splits_dev.to(torch.device("cpu"), non_blocking=True)
+        output_splits_cpu = output_splits_dev.to(torch.device("cpu"), non_blocking=True)
+        splits_copy_done = torch.npu.Event()
+        splits_copy_done.record()
 
         return (
             num_tokens_per_local_expert,
-            input_splits,
-            output_splits,
-            global_input_tokens_local_experts_indices,
+            input_splits_cpu,
+            output_splits_cpu,
+            num_global_tokens_per_local_expert,
+            splits_copy_done,
             num_out_tokens,
         )
 
