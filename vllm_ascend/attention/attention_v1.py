@@ -16,7 +16,6 @@
 #
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any
 
 import torch
@@ -42,7 +41,7 @@ from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: igno
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, AscendAttentionState
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -142,14 +141,6 @@ class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
-
-
-class AscendAttentionState(Enum):
-    PrefillNoCache = 0
-    PrefillCacheHit = 1
-    DecodeOnly = 2
-    ChunkedPrefill = 3
-    SpecDecoding = 4
 
 
 @dataclass

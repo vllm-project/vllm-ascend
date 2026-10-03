@@ -4,6 +4,11 @@
 import torch
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.ops.triton.gating_top_k_map_and_record import (
+    gating_top_k_map_and_record,
+    hash_gating_top_k_map_and_record,
+)
+
 EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS = 1024
 
 
@@ -156,5 +161,66 @@ direct_register_custom_op(
     op_func=record_expert_tokens,
     mutates_args=["expert_load_view"],
     fake_impl=_record_expert_tokens_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
+def _gating_top_k_map_and_record_fake(
+    router_logits: torch.Tensor,
+    bias: torch.Tensor | None,
+    expert_replica_routing_table: torch.Tensor,
+    record_enabled: torch.Tensor,
+    num_valid_tokens: torch.Tensor,
+    expert_load_view: torch.Tensor,
+    local_expert_start: int,
+    local_expert_count: int,
+    k: int,
+    k_group: int,
+    group_count: int,
+    routed_scaling_factor: float,
+    norm_type: int = 1,
+    renorm: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_tokens = router_logits.shape[0]
+    return (
+        torch.empty((num_tokens, k), dtype=torch.float32, device=router_logits.device),
+        torch.empty((num_tokens, k), dtype=torch.int32, device=router_logits.device),
+    )
+
+
+direct_register_custom_op(
+    op_name="gating_top_k_map_and_record",
+    op_func=gating_top_k_map_and_record,
+    mutates_args=["expert_load_view"],
+    fake_impl=_gating_top_k_map_and_record_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
+def _hash_gating_top_k_map_and_record_fake(
+    router_logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    tid2eid: torch.Tensor,
+    expert_replica_routing_table: torch.Tensor,
+    record_enabled: torch.Tensor,
+    num_valid_tokens: torch.Tensor,
+    expert_load_view: torch.Tensor,
+    local_expert_start: int,
+    local_expert_count: int,
+    k: int,
+    routed_scaling_factor: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_tokens = router_logits.shape[0]
+    return (
+        torch.empty((num_tokens, k), dtype=torch.float32, device=router_logits.device),
+        torch.empty((num_tokens, k), dtype=torch.int32, device=router_logits.device),
+    )
+
+
+direct_register_custom_op(
+    op_name="hash_gating_top_k_map_and_record",
+    op_func=hash_gating_top_k_map_and_record,
+    mutates_args=["expert_load_view"],
+    fake_impl=_hash_gating_top_k_map_and_record_fake,
     dispatch_key="PrivateUse1",
 )
