@@ -28,7 +28,7 @@ ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 # ASCEND_INDEX_URL (optional): Extra pip index URL for Ascend/CANN Python packages.
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
 # MOONCAKE_TAG (optional): Version tag of the mooncake-transfer-engine-npu package.
-ARG MOONCAKE_TAG=0.3.11.post1
+ARG MOONCAKE_TAG=v0.3.14-rc1
 # VLLM_REPO (optional): Git repository URL of vLLM.
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 # VLLM_TAG (optional): vLLM release tag to clone when VLLM_COMMIT is empty.
@@ -104,6 +104,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend && \
     python3 -m pip install triton-ascend==3.2.2 --extra-index-url ${ASCEND_INDEX_URL} && \
+    pip install flash-attn-npu==0.4.1  --no-build-isolation && \
     python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
 
