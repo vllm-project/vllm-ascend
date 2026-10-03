@@ -79,6 +79,28 @@ def test_update_full_graph_params_dispatches_draft_metadata_by_keyword(mock_use_
     )
 
 
+def test_mte_address_capture_error_detection():
+    # Regression test for #16581: CANN error 507015 ("MTE instruction DDR
+    # address out of range") during graph capture should be detectable so the
+    # wrapper can map it to a friendly message. CPU-only: string matching.
+    exc = RuntimeError(
+        "npuSynchronizeDevice failed, error code is 507015; The DDR address of the MTE instruction is out of range."
+    )
+    assert acl_graph._is_mte_address_capture_error(exc)
+
+    # Error code alone matches.
+    assert acl_graph._is_mte_address_capture_error(RuntimeError("error code is 507015"))
+
+    # MTE marker alone matches.
+    assert acl_graph._is_mte_address_capture_error(RuntimeError("something about mte instruction is out of range"))
+
+    # Unrelated capture errors do not match.
+    assert not acl_graph._is_mte_address_capture_error(RuntimeError("alloc sq cq fail"))
+    assert not acl_graph._is_mte_address_capture_error(
+        RuntimeError("insufficient_stream_resources, error code is 207008")
+    )
+
+
 class TestACLGraphEntry(TestBase):
     def test_aclgraph_entry_initialization(self):
         """Test ACLGraphEntry initialization with default values"""
