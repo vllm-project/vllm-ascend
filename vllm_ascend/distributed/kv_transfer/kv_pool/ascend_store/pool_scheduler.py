@@ -824,6 +824,7 @@ class KVPoolScheduler:
         # suffix computed with a prefix that failed to load on this rank.
         allow_save_with_load = (
             self.use_layerwise_transfer
+            and request_tracker.token_len >= last_chunk_tokens_num
             and not self.use_hybrid
             and self._expected_worker_count == 1
             and not self.vllm_config.scheduler_config.async_scheduling

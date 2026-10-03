@@ -614,6 +614,41 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
                 self.assertEqual(scheduler._request_trackers["r1"].num_saved_tokens, 96 if meta.can_save else 0)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_load_save_only_at_last_cacheable_prefill_chunk(self, mock_client_cls):
+        for prompt_len, target, can_save in ((96, 64, False), (96, 96, True), (100, 98, True)):
+            with self.subTest(prompt_len=prompt_len, target=target):
+                config = self._make_config(extra_config={"backend": "memcache"})
+                config.scheduler_config.async_scheduling = False
+                scheduler = KVPoolScheduler(config, use_layerwise=True)
+                tracker = RequestTracker(
+                    "r1",
+                    target,
+                    allocated_block_ids=list(range((target + 15) // 16)),
+                )
+                meta = scheduler._build_req_meta(
+                    tracker,
+                    [b"h"] * 6,
+                    LoadSpec(0, 16, can_load=True),
+                    list(range(prompt_len)),
+                    False,
+                )
+                self.assertTrue(meta.load_spec.can_load)
+                self.assertEqual(meta.can_save, can_save)
+                self.assertEqual(meta.is_last_chunk, can_save)
+                self.assertEqual(tracker.num_saved_tokens, 96 if can_save else 0)
+                if can_save:
+                    self.assertEqual((meta.save_start_token, meta.save_end_token), (16, 96))
+                if target < prompt_len and can_save:
+                    # The remaining tail uses the already allocated block;
+                    # no later metadata is generated to save this suffix.
+                    request = MagicMock(num_computed_tokens=target, num_prompt_tokens=prompt_len)
+                    scheduler._unfinished_requests["r1"] = (request, [tracker.allocated_block_ids])
+                    scheduler._request_trackers["r1"] = tracker
+                    output = self._make_running_chunk_output([])
+                    output.num_scheduled_tokens = {"r1": prompt_len - target}
+                    self.assertEqual(scheduler.build_connector_meta(output).requests, [])
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_failed_load_retries_save_without_new_blocks(self, mock_client_cls):
         config = self._make_config(extra_config={"backend": "memcache"})
         config.scheduler_config.async_scheduling = False
