@@ -22,6 +22,7 @@ import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 import vllm_ascend.patch.platform.patch_parallel_config  # noqa
+import vllm_ascend.patch.platform.patch_parser_preserve_model_output  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
 import vllm_ascend.patch.platform.patch_use_v2_model_runner  # noqa
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -106,3 +107,45 @@ import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa
 #    Future Plan:
 #       Remove this patch when upstream supports per-group or backend-defined
 #       prefill boundaries.
+#
+# ** File: platform/patch_parser_preserve_model_output.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.parser.engine.parser_engine.ParserEngine._check_skip_tool_parsing`
+#    Why:
+#       When a request declares no `tools` (ChatCompletionRequest.tool_choice
+#       defaults to "none") or explicitly sets tool_choice="none", the
+#       engine-based tool parsers (glm45/glm47/qwen3_xml/... i.e. the Streaming
+#       Parser Engine) raise `_suppress_tool_calls`, consume the whole
+#       `<tool_call> ... </tool_call>` span, and the delegating layer then drops
+#       the parsed tool_calls. A tool-call-only response therefore reaches the
+#       client as `content=""` / `tool_calls=[]` while usage still reports the
+#       generated tokens - "successful but empty", which stalls agent loops.
+#    How:
+#       Run the engine with `skip_tool_parsing` for tool_choice="none" so the
+#       markup is surfaced verbatim as content, matching a request without a
+#       tool parser. The auto / required / named paths still run the original
+#       detection.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/55080
+#       https://github.com/vllm-project/vllm/pull/55089
+#       https://github.com/vllm-project/vllm-ascend/pull/9776
+#    Future Plan:
+#       Remove this patch when the pinned vLLM version contains the upstream fix.
+#
+#   2. `vllm.parser.engine.parser_engine.ParserEngine._events_to_delta`
+#    Why:
+#       A `<tool_call>` span whose tool name is not in `request.tools`
+#       (`validate_tool_names=True` in the GLM4.7 config) produces no tool call
+#       and its raw text is discarded instead of degrading back to `content`, so
+#       the client only sees the half sentence that preceded the span.
+#    How:
+#       Buffer the raw text of every tool-call span and, when a span ends
+#       without producing a tool call, append that text to `content`. Spans that
+#       do turn into tool calls are untouched.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/58227
+#       No upstream PR covers the raw-text fallback yet.
+#    Future Plan:
+#       Remove this patch when upstream surfaces discarded tool-call spans as
+#       content instead of dropping them.
+#
