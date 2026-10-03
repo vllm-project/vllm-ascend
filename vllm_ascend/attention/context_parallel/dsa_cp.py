@@ -350,6 +350,19 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # @override omitted only because of mypy limitation due to type variable.
         return AttentionCGSupport.UNIFORM_BATCH
 
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        **kwargs,
+    ) -> AscendDSAMetadata:
+        # Upstream capture calls this without Ascend kwargs. Forward the shared
+        # DSA cache that Model Runner V2 passes for legacy DSA-CP builders.
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            **kwargs,
+        )
+
     def build(
         self,
         common_prefix_len: int,
