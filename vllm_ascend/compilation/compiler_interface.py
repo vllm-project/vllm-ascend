@@ -161,6 +161,12 @@ def npugraph_ex_compile(
     key: str | None = None,
     cache_dir: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
+    # npugraph_ex registers pattern matcher passes itself, but direct FX
+    # rewrites must run before handing the graph to its backend.
+    pass_manager = compiler_config.get(COMPILATION_PASS_KEY)
+    if pass_manager is not None:
+        pass_manager.apply_graph_passes(graph, compile_range)
+
     # Try npugraph_ex first, fall back to torchair for backward compatibility.
     try:
         import npugraph_ex as nge
@@ -266,6 +272,8 @@ class AscendCompiler(CompilerInterface):
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
+        # Keep this for npugraph_ex cache-miss recompilation in load().
+        self._compiler_config = compiler_config
         # inductor can inplace modify the graph, so we need to copy it
         # see https://github.com/pytorch/pytorch/issues/138980
         graph = copy.deepcopy(graph)
@@ -341,7 +349,7 @@ class AscendCompiler(CompilerInterface):
             compiled_fn, _ = npugraph_ex_compile(
                 graph,
                 example_inputs,
-                {},
+                getattr(self, "_compiler_config", {}),
                 self.vllm_config,
                 ascend_compilation_config,
                 compile_range,
