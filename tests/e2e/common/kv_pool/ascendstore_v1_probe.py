@@ -31,6 +31,7 @@ def install_worker_io_probe(worker: Any) -> int:
         "runtime": runtime,
         "caches": caches,
         "stored_buffers": {},
+        "load_ranges_by_batch": {},
         "get_calls": 0,
         "loaded_keys": [],
         "loaded_ranges": [],
@@ -38,15 +39,16 @@ def install_worker_io_probe(worker: Any) -> int:
         "local_kv_cleared": False,
     }
     backend_io = runtime._backend_io
-    original_store, original_load = backend_io.store, backend_io.load
-    original_get = runtime._resources.backend.get
+    original_store_batch = backend_io.store_batch
+    original_load_batch = backend_io.load_batch
+    original_build_load_batch = runtime._build_load_batch
 
-    def record_store(work: Any) -> Any:
+    def record_store_batch(batch: Any, layer_id: int | None = None) -> Any:
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend.arguments import (
-            materialize_ranges,
+            materialize_rule_ranges,
         )
 
-        arguments = materialize_ranges(work)
+        arguments = materialize_rule_ranges(runtime._bound_rules, batch, layer_id=layer_id, store=True)
         snapshots = {
             key: _snapshot_buffers(caches, addresses, sizes)
             for key, addresses, sizes in zip(
@@ -57,19 +59,36 @@ def install_worker_io_probe(worker: Any) -> int:
             )
         }
         # Store reaches this boundary only after its SourceReady event has been synchronized.
-        evidence = original_store(work)
-        assert evidence.succeeded and evidence.source_release_confirmed, "The real Backend Store did not succeed"
-        assert len(evidence.transfer_evidence) == len(work.sources)
-        assert all(item.result_code == 0 for item in evidence.transfer_evidence)
+        completions = original_store_batch(batch, layer_id)
+        evidence = tuple(item for completion in completions for item in completion.evidence.transfer_evidence)
+        assert all(
+            completion.evidence.succeeded and completion.evidence.source_release_confirmed for completion in completions
+        ), "The real Backend Store did not succeed"
+        assert len(evidence) == len(arguments.sources)
+        assert all(item.result_code == 0 for item in evidence)
         probe["stored_buffers"].update(snapshots)
-        return evidence
+        return completions
 
-    def record_get(keys: list[str], addresses: list[list[int]], sizes: list[list[int]]) -> Any:
+    def record_load_batch(batch: Any, layer_id: int | None = None) -> Any:
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend.arguments import (
+            materialize_rule_ranges,
+        )
+
+        arguments = materialize_rule_ranges(runtime._bound_rules, batch, layer_id=layer_id, store=False)
+        if not arguments.sources:
+            return original_load_batch(batch, layer_id)
         assert probe["local_kv_cleared"], "GET must occur after erasing local KV, not during the cold request"
-        result = original_get(keys, addresses, sizes)
-        assert result is not None and len(result) == len(keys), "GET returned missing or unaligned results"
-        assert all(code == 0 for code in result), f"The real Backend GET failed: {result}"
-        for key, key_addresses, key_sizes in zip(keys, addresses, sizes, strict=True):
+        completions = original_load_batch(batch, layer_id)
+        evidence = tuple(item for completion in completions for item in completion.transfer_evidence)
+        assert len(evidence) == len(arguments.sources) and all(item.result_code == 0 for item in evidence), (
+            "The real Backend GET returned missing, unaligned, or failed evidence"
+        )
+        for key, key_addresses, key_sizes in zip(
+            arguments.keys,
+            arguments.addresses,
+            arguments.sizes,
+            strict=True,
+        ):
             assert key in probe["stored_buffers"], f"GET used a key not written by the cold request: {key}"
             actual = _snapshot_buffers(caches, key_addresses, key_sizes)
             expected = probe["stored_buffers"][key]
@@ -78,21 +97,25 @@ def install_worker_io_probe(worker: Any) -> int:
                 assert torch.equal(actual_buffer, expected_buffer), f"GET did not restore the stored bytes for {key}"
             probe["loaded_bytes"] += sum(key_sizes)
         probe["get_calls"] += 1
-        probe["loaded_keys"].extend(keys)
-        return result
+        probe["loaded_keys"].extend(arguments.keys)
+        probe["loaded_ranges"].extend(probe["load_ranges_by_batch"].pop(id(batch), ()))
+        return completions
 
-    def record_load(work: Any) -> Any:
-        evidence = original_load(work)
-        assert len(evidence) == len(work.sources) and all(item.result_code == 0 for item in evidence)
-        probe["loaded_ranges"].extend(
-            (source.chunk.token_range.start_token, source.chunk.token_range.end_token) for source in work.sources
+    def record_build_load_batch(commands: Any) -> Any:
+        batch = original_build_load_batch(commands)
+        granularity = runtime._spec.topology.cache_transfer_granularity
+        probe["load_ranges_by_batch"][id(batch)] = tuple(
+            (start, min(start + granularity, command.load_range.end_token))
+            for command in commands
+            for start in range(command.load_range.start_token, command.load_range.end_token, granularity)
         )
-        return evidence
+        return batch
 
-    runtime._resources.backend.get = record_get
-    backend_io.store, backend_io.load = record_store, record_load
+    backend_io.store_batch = record_store_batch
+    backend_io.load_batch = record_load_batch
+    runtime._build_load_batch = record_build_load_batch
     worker._ascendstore_v1_probe = probe
-    return runtime._program.topology.cache_transfer_granularity
+    return runtime._spec.topology.cache_transfer_granularity
 
 
 def clear_worker_local_kv(worker: Any) -> dict[str, Any]:

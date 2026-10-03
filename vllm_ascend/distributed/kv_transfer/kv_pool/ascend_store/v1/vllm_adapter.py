@@ -17,7 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 from ..backend import get_layerwise_data_plane, get_layerwise_protocol
-from .backend import resolve_backend_spec
+from .backend import LayerwiseAccessKind, resolve_backend_spec
 from .planning.availability import RemoteAvailabilityProbe
 from .planning.planner import TransferPlanner
 from .planning.progress import AllocationLoadPublication, LoadPublication, ScheduledLoadPublication
@@ -28,7 +28,6 @@ from .planning.step import (
     StateCheckpointHandoff,
     TransferPlanningStep,
 )
-from .program.compiler import compile_kv_pool_program
 from .program.spec.compilation import KVPoolCompilationSpec
 from .program.spec.schedule import KVPoolSchedule, LoadScheduleKind, StoreScheduleKind
 from .program.spec.topology import (
@@ -40,7 +39,7 @@ from .program.spec.topology import (
 )
 from .protocol.transfer import StateCheckpointSource
 from .rules import RuleBinder, compile_kv_pool_rules
-from .runtime.resources import KVPoolResources
+from .runtime.resources import GVAObjectLayout, KVPoolResources
 from .runtime.runtime import KVPoolRuntime
 
 if TYPE_CHECKING:
@@ -188,17 +187,37 @@ def _adapt_checkpoint_handoffs(
 
 
 def create_kv_pool_runtime(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> KVPoolRuntime:
-    """Compile vLLM startup state and bind its process-owned Worker resources."""
+    """Bind static rules, memory registration and Timeline ownership once."""
 
-    program = compile_kv_pool_program(resolve_kv_pool_compilation_spec(vllm_config, kv_cache_config))
-    backend_spec = resolve_backend_spec(program.backend_name)
+    spec = resolve_kv_pool_compilation_spec(vllm_config, kv_cache_config)
+    rule_binder = _compile_kv_pool_rule_binder(spec, vllm_config, kv_cache_config)
+    backend_spec = resolve_backend_spec(spec.backend_name)
     backend = backend_spec.backend_type(
         vllm_config.parallel_config,
         extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
     )
-    resources = KVPoolResources(backend, backend_spec, kv_cache_config.num_blocks, program.topology.groups)
+    gva_layout = None
+    if backend_spec.layerwise_access is LayerwiseAccessKind.GVA:
+        layer_start, _ = vllm_config.model_config.get_layers_start_end_indices(vllm_config.parallel_config)
+        topology = spec.topology
+        gva_layout = GVAObjectLayout(
+            layer_start,
+            vllm_config.model_config.get_total_num_hidden_layers(),
+            topology.transfer_groups[0].key_metadata.dcp_rank,
+            topology.dcp_size,
+            topology.put_step,
+        )
+    resources = KVPoolResources(
+        backend,
+        backend_spec,
+        kv_cache_config.num_blocks,
+        spec.topology.groups,
+        gva_layout=gva_layout,
+        align_shared_storage=gva_layout is not None
+        and uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_config.kv_cache_groups),
+    )
     try:
-        return KVPoolRuntime(program, resources)
+        return KVPoolRuntime(spec, rule_binder, resources)
     except BaseException:
         resources.close()
         raise
@@ -211,6 +230,14 @@ def compile_kv_pool_rule_binder(
     """Compile θ from vLLM state; the returned callable accepts registered μ."""
 
     spec = resolve_kv_pool_compilation_spec(vllm_config, kv_cache_config)
+    return _compile_kv_pool_rule_binder(spec, vllm_config, kv_cache_config)
+
+
+def _compile_kv_pool_rule_binder(
+    spec: KVPoolCompilationSpec,
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+) -> RuleBinder:
     if not spec.schedule.requires_layerwise_backend:
         return compile_kv_pool_rules(spec)
 
