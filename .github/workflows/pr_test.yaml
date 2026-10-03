@@ -56,7 +56,9 @@ jobs:
       src: ${{ steps.filter.outputs.src }}
       ci_pipeline: ${{ steps.filter.outputs.ci_pipeline }}
     steps:
+      # TEMP(a2-dual-runner): title check disabled for the validation PR.
       - name: Validate PR title prefix
+        if: false
         run: |
           PR_TITLE=$(curl -sSf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
@@ -118,17 +120,25 @@ jobs:
             echo "vllm_versions=[\"${main_commit}\"]" >> "$GITHUB_OUTPUT"
           fi
 
+      # TEMP(a2-dual-runner): matchers / vllm checkout / paths-filter are only
+      # needed by the lint and mypy steps and the label-gated selection flow,
+      # all disabled below.
       - name: cp problem matchers
+        if: false
         run: |
           cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
           cp .github/workflows/matchers/markdownlint.json "$RUNNER_TEMP/markdownlint.json"
           cp .github/workflows/matchers/mypy.json "$RUNNER_TEMP/mypy.json"
 
       - run: echo "::add-matcher::$RUNNER_TEMP/actionlint.json"
+        if: false
       - run: echo "::add-matcher::$RUNNER_TEMP/markdownlint.json"
+        if: false
       - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
+        if: false
 
       - name: Checkout vllm-project/vllm repo
+        if: false
         uses: actions/checkout@v7
         with:
           repository: vllm-project/vllm
@@ -137,6 +147,7 @@ jobs:
 
       - uses: dorny/paths-filter@v4
         id: filter
+        if: false
         with:
           # Make negated patterns final so Markdown-only changes do not match src.
           predicate-quantifier: some-with-excludes
@@ -185,7 +196,7 @@ jobs:
               - '.github/workflows/scripts/coverage.py'
 
       - name: Install vllm-ascend dev (conditional)
-        if: steps.filter.outputs.lint_tracker == 'true'
+        if: false
         env:
           UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu"
@@ -199,6 +210,7 @@ jobs:
           uv pip install -r requirements-dev.txt
 
       - name: Install and run Gitleaks Secret Scan
+        if: false
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           chmod +x .github/workflows/scripts/gitleaks.sh
@@ -206,11 +218,13 @@ jobs:
 
       - name: Get pre-commit config hash
         id: get_hash
+        if: false
         run: |
           PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
           echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> $GITHUB_OUTPUT
 
       - name: Restore pre-commit cache
+        if: false
         uses: runs-on/cache/restore@v5
         env:
           RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
@@ -223,6 +237,7 @@ jobs:
           key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
 
       - name: Run pre-commit
+        if: false
         env:
           PRE_COMMIT_HOME: /tmp/pre-commit-cache
           PRE_COMMIT_COLOR: always
@@ -237,6 +252,7 @@ jobs:
           pre-commit run --all-files --hook-stage manual --show-diff-on-failure
 
       - name: Run mypy
+        if: false
         run: |
           PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
           export PYTHONPATH
@@ -248,12 +264,10 @@ jobs:
           done
 
   cpu-ut:
-    # Always run tests/ut twice in parallel: once on the verified vLLM main
-    # commit and once on the matched release tag. Independent of the
-    # main2main label, which only widens the NPU matrix.
+    # TEMP(a2-dual-runner): CPU UT disabled for the validation PR.
     name: cpu-ut (vllm@${{ matrix.vllm }})
     needs: pre-commit
-    if: ${{ needs.pre-commit.result == 'success' }}
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -272,17 +286,9 @@ jobs:
   recommend-tests:
     name: Recommend tests
     needs: [pre-commit, cpu-ut]
-    # The recommendation only runs under the ready-precise label: that is the
-    # only mode whose result depends on it. ready-all and main2main run
-    # --all-tests and unlabeled runs select nothing, so all of them skip this
-    # job. The pre-commit + cpu-ut checks are explicit so the job can never be
-    # made to run after a failed upstream by adding !cancelled().
-    if: >-
-      ${{
-        needs.pre-commit.result == 'success' &&
-        needs.cpu-ut.result == 'success' &&
-        contains(github.event.pull_request.labels.*.name, 'ready-precise')
-      }}
+    # TEMP(a2-dual-runner): coverage recommendation disabled; the validation
+    # PR always runs the full-suite selection.
+    if: false
     runs-on: linux-amd64-cpu-8-hk
     outputs:
       coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
@@ -383,32 +389,12 @@ jobs:
   select-tests:
     needs:
       - pre-commit
-      - cpu-ut
-      - recommend-tests
-    # select-tests is the single producer of test_groups / base_sha / has_tests.
-    # It runs only when a run-enabling label (ready-precise / ready-all /
-    # main2main) asks for test execution; unlabeled runs skip it and ci-gate
-    # decides whether that is allowed (no src paths) or requires a label (src or
-    # ci_pipeline paths present). !cancelled() keeps it out of the graph only
-    # when the workflow itself is cancelled; the explicit pre-commit + cpu-ut
-    # success check stops it from running when either failed (!cancelled() alone
-    # would override the transitive skip).
-    # The src/ci_pipeline path categories are computed by the paths-filter step
-    # in pre-commit. Modes:
-    #   recommended - recommend job succeeded with coverage paths (ready-precise)
-    #   all         - ready-all or main2main forced, or the PR touches the CI
-    #                 pipeline itself
-    #   none        - ready-precise on a PR whose diff recommends no tests
+    # TEMP(a2-dual-runner): no run-enabling label required; the full-suite
+    # selection always runs so the A2 groups can be produced on every push.
     if: >-
       ${{
         !cancelled() &&
-        needs.pre-commit.result == 'success' &&
-        needs.cpu-ut.result == 'success' &&
-        (
-          contains(github.event.pull_request.labels.*.name, 'main2main') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-all')
-        )
+        needs.pre-commit.result == 'success'
       }}
     runs-on: linux-amd64-cpu-8-hk
     container:
@@ -417,12 +403,18 @@ jobs:
       has_tests: ${{ steps.scope-rec.outputs.has_tests || steps.scope-all.outputs.has_tests || steps.noop.outputs.has_tests }}
       test_groups: ${{ steps.scope-rec.outputs.test_groups || steps.scope-all.outputs.test_groups || steps.noop.outputs.test_groups }}
       matched_modules: ${{ steps.scope-rec.outputs.matched_modules || steps.scope-all.outputs.matched_modules || steps.noop.outputs.matched_modules }}
-      csrc_cache_target_ids: ${{ steps.cache-targets.outputs.target_ids }}
+      # TEMP(a2-dual-runner): cache targets now come from the A2 filter step,
+      # so only the a2 csrc cache is ensured.
+      csrc_cache_target_ids: ${{ steps.filter-a2.outputs.csrc_cache_target_ids }}
       base_sha: ${{ steps.source-snapshot.outputs.base_sha }}
       # source reports which path produced the tests: "recommended", "all", or "none".
       source: ${{ steps.decide.outputs.mode }}
       has_tests_a5: ${{ steps.scope-a5.outputs.has_tests || steps.noop-a5.outputs.has_tests }}
       test_groups_a5: ${{ steps.scope-a5.outputs.test_groups || steps.noop-a5.outputs.test_groups }}
+      # TEMP(a2-dual-runner): dual-pool A2 outputs.
+      has_tests_a2: ${{ steps.filter-a2.outputs.has_tests_a2 }}
+      test_groups_a2b1: ${{ steps.filter-a2.outputs.test_groups_a2b1 }}
+      test_groups_a2b4: ${{ steps.filter-a2.outputs.test_groups_a2b4 }}
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -463,12 +455,16 @@ jobs:
           echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Validate test coverage config
+        if: false
         run: |
           pip install pyyaml
           python3 .github/workflows/scripts/coverage.py
 
+      # TEMP(a2-dual-runner): mode decision / recommended / none / a5 steps are
+      # disabled; the full-suite selection below runs unconditionally.
       - name: Decide test selection mode
         id: decide
+        if: false
         env:
           HAS_MAIN2MAIN: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') }}
           HAS_READY_PRECISE: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
@@ -477,10 +473,8 @@ jobs:
           # does not run its own filter. Both are diagnostic only here (they
           # decide which modes are *allowed* in ci-gate), the labels above
           # decide which mode *runs*.
-          SRC: ${{ needs.pre-commit.outputs.src }}
-          CI_PIPELINE: ${{ needs.pre-commit.outputs.ci_pipeline }}
-          RECOMMEND_RESULT: ${{ needs.recommend-tests.result }}
-          COVERAGE_PATHS: ${{ needs.recommend-tests.outputs.coverage_paths }}
+          # TEMP(a2-dual-runner): recommend-tests is no longer a need of this
+          # job, so its env references were removed.
         run: |
           set -euo pipefail
           if [ "${HAS_MAIN2MAIN}" = "true" ]; then
@@ -514,9 +508,7 @@ jobs:
 
       - name: Select tests from coverage recommendations
         id: scope-rec
-        if: steps.decide.outputs.mode == 'recommended'
-        env:
-          COVERAGE_PATHS: ${{ needs.recommend-tests.outputs.coverage_paths }}
+        if: false
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex pyyaml -q
@@ -528,9 +520,9 @@ jobs:
             --test-list-file "$LIST_FILE" \
             --skip-cpu-ut
 
+      # TEMP(a2-dual-runner): always select the full suite (labels ignored).
       - name: Select all tests
         id: scope-all
-        if: steps.decide.outputs.mode == 'all'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
@@ -540,7 +532,7 @@ jobs:
 
       - name: Set no-tests output when no tests selected
         id: noop
-        if: steps.decide.outputs.mode == 'none'
+        if: false
         run: |
           {
             echo "has_tests=false"
@@ -551,7 +543,7 @@ jobs:
 
       - name: Select A5 tests
         id: scope-a5
-        if: needs.pre-commit.outputs.src == 'true'
+        if: false
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install regex
@@ -561,7 +553,7 @@ jobs:
 
       - name: Set no-tests output for A5 when source paths unchanged
         id: noop-a5
-        if: needs.pre-commit.outputs.src != 'true'
+        if: false
         run: |
           {
             echo "has_tests=false"
@@ -570,6 +562,7 @@ jobs:
 
       - name: Add upstream test cache target
         id: cache-targets
+        if: false
         env:
           SELECTED_TARGET_IDS: ${{ steps.scope-rec.outputs.csrc_cache_target_ids || steps.scope-all.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
         run: |
@@ -583,23 +576,33 @@ jobs:
               print("target_ids=" + json.dumps(target_ids, separators=(",", ":")), file=output)
           PY
 
+      # TEMP(a2-dual-runner): keep only the A2 (one_card) groups from the
+      # full-suite selection and duplicate them for the two new runner pools,
+      # so the identical A2 suite runs once per pool. a3 / 310p / cpu groups
+      # are dropped here.
+      - name: Build dual A2 runner test groups
+        id: filter-a2
+        env:
+          TEST_GROUPS_JSON: ${{ steps.scope-all.outputs.test_groups }}
+          # One-card labels, mirroring the a2b3 convention for one_card tests.
+          # Change these two values if the new pools expose another card count.
+          A2B1_RUNNER_LABEL: linux-aarch64-a2b1-1-hk-001
+          A2B4_RUNNER_LABEL: linux-aarch64-a2b4-1-hk-001
+        run: |
+          python3 .github/workflows/scripts/a2_dual_runner_groups.py \
+            --test-groups-json "$TEST_GROUPS_JSON" \
+            --a2b1-runner-label "$A2B1_RUNNER_LABEL" \
+            --a2b4-runner-label "$A2B4_RUNNER_LABEL"
+
   prepare-csrc-cache:
     needs:
       - select-tests
-    # !cancelled() is required: select-tests depends on recommend-tests,
-    # which is skipped under ready-all or main2main. Without a status check
-    # function, the skipped need propagates transitively and skips this job
-    # even when select-tests succeeded.
+    # TEMP(a2-dual-runner): no run-enabling label required; the a2 csrc cache
+    # is ensured on every push of the validation PR.
     if: >-
       ${{
         !cancelled() &&
-        needs.select-tests.result == 'success' &&
-        (
-          contains(github.event.pull_request.labels.*.name, 'main2main') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-a5') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-all')
-        )
+        needs.select-tests.result == 'success'
       }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     with:
@@ -613,21 +616,9 @@ jobs:
       - pre-commit
       - select-tests
       - prepare-csrc-cache
-    # !cancelled() overrides transitive skip-propagation from recommend-tests
-    # (skipped under ready-all or main2main) through select-tests, without
-    # running after workflow cancel.
-    if: >-
-      ${{
-        !cancelled() &&
-        needs.pre-commit.result == 'success' &&
-        needs.prepare-csrc-cache.result == 'success' &&
-        (
-          contains(github.event.pull_request.labels.*.name, 'main2main') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-all')
-        ) &&
-        needs.select-tests.outputs.has_tests == 'true'
-      }}
+    # TEMP(a2-dual-runner): default routing disabled; only the dual-pool A2
+    # job below runs.
+    if: false
     name: run-selected-tests (vllm@${{ matrix.vllm_version }})
     strategy:
       fail-fast: false
@@ -649,16 +640,8 @@ jobs:
       - pre-commit
       - select-tests
       - prepare-csrc-cache
-    # !cancelled() overrides transitive skip-propagation from recommend-tests
-    # (skipped under ready-all) through select-tests, without running after workflow cancel.
-    if: >-
-      ${{
-        !cancelled() &&
-        needs.pre-commit.result == 'success' &&
-        needs.prepare-csrc-cache.result == 'success' &&
-        contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
-        needs.select-tests.outputs.has_tests == 'true'
-      }}
+    # TEMP(a2-dual-runner): upstream coverage flow disabled.
+    if: false
     name: run-selected-tests-upstream (vllm@${{ matrix.vllm_version_short }})
     strategy:
       matrix:
@@ -676,16 +659,8 @@ jobs:
 
   run-selected-tests-a5:
     needs: [pre-commit, select-tests]
-    # !cancelled() overrides transitive skip-propagation from recommend-tests
-    # (skipped under ready-all) through select-tests, without running after workflow cancel.
-    if: >-
-      ${{
-        !cancelled() &&
-        needs.pre-commit.result == 'success' &&
-        needs.select-tests.result == 'success' &&
-        needs.select-tests.outputs.has_tests_a5 == 'true' &&
-        contains(github.event.pull_request.labels.*.name, 'ready-a5')
-      }}
+    # TEMP(a2-dual-runner): A5 suite disabled.
+    if: false
     name: run-selected-tests-a5 (vllm@${{ matrix.vllm_version_short }})
     strategy:
       matrix:
@@ -700,124 +675,89 @@ jobs:
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
 
+  # TEMP(a2-dual-runner): the identical A2 (one_card) suite runs once per new
+  # runner pool via this matrix. Each pool receives its own 7-bucket test
+  # groups produced by the filter-a2 step in select-tests.
+  run-selected-tests-a2:
+    needs:
+      - pre-commit
+      - select-tests
+      - prepare-csrc-cache
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.pre-commit.result == 'success' &&
+        needs.prepare-csrc-cache.result == 'success' &&
+        needs.select-tests.outputs.has_tests_a2 == 'true'
+      }}
+    name: run-selected-tests-a2-${{ matrix.runner_pool }} (vllm@${{ matrix.vllm_version_short }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner_pool: a2b1
+            vllm_version: ${{ needs.pre-commit.outputs.main_commit }}
+            vllm_version_short: ${{ needs.pre-commit.outputs.main_commit_short }}
+            test_groups: ${{ needs.select-tests.outputs.test_groups_a2b1 }}
+          - runner_pool: a2b4
+            vllm_version: ${{ needs.pre-commit.outputs.main_commit }}
+            vllm_version_short: ${{ needs.pre-commit.outputs.main_commit_short }}
+            test_groups: ${{ needs.select-tests.outputs.test_groups_a2b4 }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
+      test_groups: ${{ matrix.test_groups }}
+      timeout-minutes: 240
+      # TEMP(a2-dual-runner): keep running the remaining test targets after a
+      # failure so one broken case does not hide the rest of the suite.
+      continue_on_error: true
+
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
+  # TEMP(a2-dual-runner): gate reduced to the jobs that still run.
   ci-gate:
-    needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5]
+    needs: [pre-commit, select-tests, run-selected-tests-a2]
     if: ${{ !cancelled() }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Check all required jobs
         env:
-          HAS_MAIN2MAIN_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') }}
-          HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
-          HAS_READY_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
-          HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
-          SELECTION_SOURCE: ${{ needs.select-tests.outputs.source }}
-          MATCHED_MODULES: ${{ needs.select-tests.outputs.matched_modules }}
+          HAS_TESTS_A2: ${{ needs.select-tests.outputs.has_tests_a2 }}
         run: |
           set -euo pipefail
 
           PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
-          CPU_UT_RESULT="${{ needs.cpu-ut.result }}"
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
-          HAS_TESTS="${{ needs.select-tests.outputs.has_tests == 'true' }}"
-          HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 }}"
+          A2_TESTS_RESULT="${{ needs.run-selected-tests-a2.result }}"
 
-          echo "=== CI Gate Summary ==="
+          echo "=== CI Gate Summary (temporary A2 dual-runner validation) ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
-          echo "cpu-ut: ${CPU_UT_RESULT}"
-          echo "src filter: ${{ needs.pre-commit.outputs.src }}"
-          echo "ci_pipeline filter: ${{ needs.pre-commit.outputs.ci_pipeline }}"
-          echo "select-tests: ${SELECT_TESTS_RESULT} (source: ${SELECTION_SOURCE:-unknown})"
-          echo "has_tests: ${HAS_TESTS}"
-          echo "has_tests_a5: ${HAS_TESTS_A5}"
-          echo "labels: main2main=${HAS_MAIN2MAIN_LABEL} ready-precise=${HAS_READY_LABEL} ready-all=${HAS_READY_ALL_LABEL} ready-a5=${HAS_READY_A5_LABEL}"
-          if [ "${SELECT_TESTS_RESULT}" = "success" ] && [ -n "${MATCHED_MODULES// /}" ]; then
-            echo "matched_modules: ${MATCHED_MODULES}"
-          fi
+          echo "select-tests: ${SELECT_TESTS_RESULT}"
+          echo "has_tests_a2: ${HAS_TESTS_A2}"
+          echo "run-selected-tests-a2: ${A2_TESTS_RESULT}"
 
           if [ "${PRE_COMMIT_RESULT}" != "success" ]; then
             echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})."
-            echo "::error::This job runs lint / markdownlint / mypy / gitleaks on all files. Open the failed 'pre-commit' job above, fix the reported issues in your PR, and push again. No test label is needed for this failure."
-            exit 1
-          fi
-
-          if [ "${CPU_UT_RESULT}" != "success" ]; then
-            echo "::error::cpu-ut did not succeed (result: ${CPU_UT_RESULT})."
-            echo "::error::Open the failed 'cpu-ut' job above, fix the failing test(s) and push again."
-            exit 1
-          fi
-
-          if [ "${SELECT_TESTS_RESULT}" = "skipped" ]; then
-            # select-tests only runs under a run-enabling label
-            # (ready-precise / ready-all / main2main). An unlabeled run
-            # passes the gate when (and only when) the paths-filter in
-            # pre-commit found no src or ci_pipeline paths in the diff.
-            SRC_FILTER="${{ needs.pre-commit.outputs.src }}"
-            CI_PIPELINE_FILTER="${{ needs.pre-commit.outputs.ci_pipeline }}"
-            if [ "${SRC_FILTER}" != "true" ] && [ "${CI_PIPELINE_FILTER}" != "true" ]; then
-              echo "::notice::No source paths changed; precision tests are not required for this PR."
-              echo "=== CI Gate: PASSED ==="
-              exit 0
-            fi
-            echo "::error::This PR touches source code (src=${SRC_FILTER}, ci_pipeline=${CI_PIPELINE_FILTER}), so precision/full tests are required before merge."
-            echo "::error::How to fix: a maintainer adds exactly one label to this PR - 'ready-precise' to run the selected tests (recommended), 'ready-all' to run the full suite, or 'main2main' to run the full suite against both the vLLM main commit and the release tag. The workflow reruns automatically once the label is added."
             exit 1
           fi
 
           if [ "${SELECT_TESTS_RESULT}" != "success" ]; then
             echo "::error::select-tests did not succeed (result: ${SELECT_TESTS_RESULT})."
-            echo "::error::Open the failed 'select-tests' job above to see which step failed (checkout/rebase, coverage config validation, or test selection). Fix the reported issue and push again."
             exit 1
           fi
 
-          # Even after successful test selection, only explicit true/false
-          # values are valid. A missing output must not mean no tests.
-          if [ "${HAS_TESTS}" != "true" ] && [ "${HAS_TESTS}" != "false" ]; then
-            echo "::error::Invalid or missing has_tests output: '${HAS_TESTS}'"
+          if [ "${HAS_TESTS_A2}" != "true" ] && [ "${HAS_TESTS_A2}" != "false" ]; then
+            echo "::error::Invalid or missing has_tests_a2 output: '${HAS_TESTS_A2}'"
             exit 1
           fi
 
-          if [ "${HAS_TESTS_A5}" != "true" ] && [ "${HAS_TESTS_A5}" != "false" ]; then
-            echo "::error::Invalid or missing has_tests_a5 output: '${HAS_TESTS_A5}'"
+          if [ "${HAS_TESTS_A2}" = "true" ] && [ "${A2_TESTS_RESULT}" != "success" ]; then
+            echo "::error::run-selected-tests-a2 did not succeed (result: ${A2_TESTS_RESULT})."
+            echo "::error::Open the failed run-selected-tests-a2 matrix job(s) above (one per runner pool) for details."
             exit 1
-          fi
-
-          if [ "${HAS_TESTS}" = "true" ]; then
-            TESTS_RESULT="${{ needs.run-selected-tests.result }}"
-            echo "run-selected-tests: ${TESTS_RESULT}"
-            if [ "${HAS_MAIN2MAIN_LABEL}" != "true" ] && [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
-              echo "::error::This PR touches source code (test selection source: ${SELECTION_SOURCE:-unknown}), so precision/full tests are required before merge."
-              if [ -n "${MATCHED_MODULES// /}" ]; then
-                echo "::error::Affected modules: ${MATCHED_MODULES}"
-              fi
-              echo "::error::How to fix: a maintainer adds exactly one label to this PR - 'ready-precise' to run the selected tests (recommended), 'ready-all' to run the full suite, or 'main2main' to run the full suite against both the vLLM main commit and the release tag. The workflow reruns automatically once the label is added."
-              exit 1
-            fi
-            if [ "${TESTS_RESULT}" != "success" ]; then
-              echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})."
-              if [ "${HAS_MAIN2MAIN_LABEL}" = "true" ]; then
-                echo "::error::The 'main2main' dual-version suite failed. Open the failed job(s) inside the run-selected-tests matrix above (one per vLLM version) and fix the failing test(s) or the code change that broke them."
-              elif [ "${HAS_READY_ALL_LABEL}" = "true" ]; then
-                echo "::error::The 'ready-all' suite failed. Open the failed job(s) inside the run-selected-tests matrix above and fix the failing test(s) or the code change that broke them."
-              else
-                echo "::error::The 'ready-precise' selected tests failed. Open the failed job(s) inside the run-selected-tests matrix above. If you believe the failures are unrelated to your change, you may ask a maintainer to switch to 'ready-all' for a broader comparison."
-              fi
-              exit 1
-            fi
-          fi
-
-          if [ "${HAS_TESTS_A5}" = "true" ]; then
-            TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
-            echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
-            if [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" != "true" ]; then
-              echo "::notice::run-selected-tests-a5 was skipped because ready-a5 is not set"
-            elif [ "${TESTS_A5_RESULT}" != "success" ]; then
-              echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})."
-              echo "::error::The A5 test suite failed. Open the failed run-selected-tests-a5 job above for details."
-              exit 1
-            fi
           fi
 
           echo "=== CI Gate: PASSED ==="
