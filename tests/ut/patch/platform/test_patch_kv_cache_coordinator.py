@@ -79,18 +79,20 @@ class _FakeBlockPool:
 class _FakeFAManager:
     def __init__(self, **kwargs):
         self.use_eagle = False
+        self.block_size = kwargs["kv_cache_spec"].block_size
 
 
 class _FakeMambaManager:
     def __init__(self, **kwargs):
         self.use_eagle = False
+        self.block_size = kwargs["kv_cache_spec"].block_size
 
 
 def _fake_manager_factory(**kwargs):
     spec = kwargs["kv_cache_spec"]
     if isinstance(spec, MambaSpec):
-        return _FakeMambaManager()
-    return _FakeFAManager()
+        return _FakeMambaManager(**kwargs)
+    return _FakeFAManager(**kwargs)
 
 
 def _hybrid_config(
@@ -175,6 +177,14 @@ def test_coordinator_uses_resolved_retention_interval(monkeypatch, retention_int
         retention_interval=retention_interval,
     )
     assert coordinator.retention_interval == retention_interval
+
+
+def test_coordinator_exposes_group_block_sizes(monkeypatch):
+    # Regression for issue #17831: SimpleCPUOffloadScheduler reads
+    # cpu_coordinator.group_block_sizes, which upstream KVCacheCoordinator
+    # exposes. This subclass builds managers itself and must mirror it.
+    coordinator = _make_coordinator(monkeypatch, use_eagle=False)
+    assert coordinator.group_block_sizes == (FA_SPEC.block_size, MAMBA_SPEC.block_size)
 
 
 # ---------------------------------------------------------------------------

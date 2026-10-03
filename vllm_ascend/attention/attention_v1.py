@@ -51,6 +51,7 @@ from vllm_ascend.attention.utils import (
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
+    supports_kernel_block_spec,
     using_paged_attention,
 )
 from vllm_ascend.compilation.updatable_graph import (
@@ -60,6 +61,7 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.utils import vllm_version_is
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -139,8 +141,8 @@ class AscendAttentionBackend(AttentionBackend):
             key_caches[dst_indices] = key_caches[src_indices]
             value_caches[dst_indices] = value_caches[src_indices]
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    @supports_kernel_block_spec
+    def get_supported_kernel_block_sizes() -> list[int]:  # type: ignore[misc]
         return [128]
 
 
@@ -337,6 +339,39 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
+        # vLLM main keeps speculative-decode request metadata at the real
+        # request extent, so a padded FULL-graph decode query tensor can exceed
+        # the last cumulative query length. FIA's TND layout requires that last
+        # entry to equal the model input token count, so append the padded tail
+        # as a final synthetic request. This only applies to multi-token
+        # (speculative) decode where one request spans several query tokens:
+        # single-token decode never pads requests beyond the query start loc,
+        # and prefill (including the EAGLE drafter's merged prefill) reuses the
+        # target's num_input_tokens while its own query is shorter. Only the V2
+        # runner needs this: it applies the metadata to the FULL graph at every
+        # replay, while V1 bakes actual_seq_lengths_q into the captured graph
+        # (and trims the query to its last entry), so padding there only changes
+        # the captured graph. The V2 runner reports speculative decode as
+        # ChunkedPrefill, so decide from the per-request is_prefilling flags
+        # (falling back to the state when they are unavailable). v0.30.0 already
+        # pads this at the request level and stays unchanged behind
+        # vllm_version_is().
+        if not vllm_version_is("0.30.0") and self.vllm_config.use_v2_model_runner:
+            is_prefilling = common_attn_metadata.is_prefilling
+            if is_prefilling is None:
+                decode_like = common_attn_metadata.attn_state in (
+                    AscendAttentionState.DecodeOnly,
+                    AscendAttentionState.SpecDecoding,
+                )
+            else:
+                decode_like = not bool(is_prefilling.any())
+            if (
+                decode_like
+                and (common_attn_metadata.max_query_len or 0) > 1
+                and actual_seq_lengths_q
+                and common_attn_metadata.num_input_tokens > actual_seq_lengths_q[-1]
+            ):
+                actual_seq_lengths_q = actual_seq_lengths_q + [common_attn_metadata.num_input_tokens]
         seq_lens_list = seq_lens.tolist()
         # Sequence-parallel (or cudagraph) padding makes the model runner insert a
         # dummy padding request into query_start_loc to satisfy the FIA TND-layout

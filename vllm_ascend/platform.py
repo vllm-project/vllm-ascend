@@ -53,6 +53,7 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -488,6 +489,7 @@ class NPUPlatform(Platform):
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
         _validate_engram_config(vllm_config)
+        _validate_aux_output_config(vllm_config)
 
         # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
@@ -1657,6 +1659,27 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
                 "SFA C8 DCP with replicated indexer is not supported by the current hardware profile. "
                 "Disable enable_sparse_sfa_c8 to use non-C8 SFA DCP."
             )
+
+
+def _validate_aux_output_config(vllm_config: VllmConfig) -> None:
+    """Reject AuxOutput configurations the Ascend runner cannot service.
+
+    vLLM main moved routed-experts output to the AuxOutput connector and
+    requires Model Runner V2 for it. Ascend is an out-of-tree platform, so the
+    upstream check is skipped and only the V2 NPUModelRunner wires the worker
+    connector up. Without this guard a V1 run enables the scheduler-side
+    connector and crashes with "auxiliary output worker output is missing".
+    """
+    if vllm_version_is("0.30.0"):
+        return
+    if getattr(vllm_config, "aux_output_config", None) is None:
+        return
+    if vllm_config.aux_output_config.enabled and not vllm_config.use_v2_model_runner:
+        raise ValueError(
+            "enable_return_routed_experts (AuxOutput Connector) is only "
+            "supported by Model Runner V2 on Ascend. Set "
+            "VLLM_USE_V2_MODEL_RUNNER=1."
+        )
 
 
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:

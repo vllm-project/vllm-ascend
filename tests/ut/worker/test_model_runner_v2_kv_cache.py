@@ -25,6 +25,9 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
     runner.vocab_size = 16
     runner.max_model_len = 128
     runner.cache_config.kv_sharing_fast_prefill = False
+    # MagicMock makes aux_output_config.enabled truthy by default; disable it so
+    # the test exercises the KV-connector path only (main-only branch).
+    runner.vllm_config.aux_output_config.enabled = False
     runner.jit_warmup_registry.activate.side_effect = nullcontext
     config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[])
 

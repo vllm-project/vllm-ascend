@@ -20,6 +20,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+from vllm_ascend.attention.utils import supports_kernel_block_spec
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     get_kv_cache_compression_ratio,
@@ -235,8 +236,8 @@ class AscendIndexerKPoolBackend(AttentionBackend):
     def get_name() -> str:
         return "ASCEND_INDEXER_KPOOL"
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    @supports_kernel_block_spec
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:  # type: ignore[misc]
         # The scheduler manages logical token blocks. Triton consumes complete
         # compressed storage pages with their actual size and strides.
         return [MultipleOf(1)]
@@ -344,8 +345,8 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
     def get_name() -> str:
         return "ASCEND_INDEXER_KPOOL_TAIL"
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    @supports_kernel_block_spec
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:  # type: ignore[misc]
         # Ring capacity is independent of the pool size and SFA C128.
         return [MultipleOf(1)]
 

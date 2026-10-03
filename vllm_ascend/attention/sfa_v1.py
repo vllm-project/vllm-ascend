@@ -35,6 +35,7 @@ from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
+    supports_kernel_block_spec,
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
@@ -396,8 +397,8 @@ class AscendSFABackend(AttentionBackend):
 
         return resolve_sfa_impl(get_current_vllm_config())
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    @supports_kernel_block_spec
+    def get_supported_kernel_block_sizes() -> list[int]:  # type: ignore[misc]
         return [128]
 
 
