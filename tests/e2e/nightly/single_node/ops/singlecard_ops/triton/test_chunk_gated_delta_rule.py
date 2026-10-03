@@ -1,28 +1,49 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from tests.ut.base import PytestBase
 from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
+from vllm_ascend.ops.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 
 
 class TestChunkGatedDeltaRule(PytestBase):
-    def test_triton_fusion_ops(self):
+    @pytest.mark.parametrize("seq_lens", [(1, 8, 8), (17,), (1, 64, 65)])
+    def test_triton_fusion_ops(self, seq_lens):
+        torch.manual_seed(42)
         mock_attn_metadata = MagicMock()
-        mock_attn_metadata.num_decodes = 1
+        mock_attn_metadata.num_decodes = 0
         mock_forward_context = MagicMock()
         mock_forward_context.attn_metadata = mock_attn_metadata
 
-        q = torch.randn(1, 17, 4, 128, dtype=torch.bfloat16).npu()
-        k = torch.randn(1, 17, 4, 128, dtype=torch.bfloat16).npu()
-        v = torch.randn(1, 17, 8, 128, dtype=torch.bfloat16).npu()
-        g = torch.randn(1, 17, 8, dtype=torch.float32).npu()
-        beta = torch.randn(1, 17, 8, dtype=torch.bfloat16).npu()
-        initial_state = torch.randn(3, 8, 128, 128, dtype=torch.bfloat16).npu()
-        q_start_loc = torch.range(0, 3, dtype=torch.int).npu()
+        num_tokens = sum(seq_lens)
+        q = torch.randn(1, num_tokens, 4, 128, dtype=torch.bfloat16).npu()
+        k = torch.randn_like(q)
+        v = torch.randn(1, num_tokens, 8, 128, dtype=torch.bfloat16).npu()
+        g = torch.nn.functional.logsigmoid(torch.randn(1, num_tokens, 8, dtype=torch.float32)).npu()
+        beta = torch.rand(1, num_tokens, 8, dtype=torch.bfloat16).npu()
+        initial_state = (torch.randn(len(seq_lens), 8, 128, 128, dtype=torch.bfloat16) * 0.1).npu()
+        # Packed sequence boundaries must cover every input token. Each sequence
+        # rounds up its chunk count independently, including partial chunks.
+        q_start_loc_cpu = torch.tensor([0, *seq_lens], dtype=torch.int64).cumsum(0)
+        q_start_loc = q_start_loc_cpu.to(q.device)
+        # Use the production metadata builder, as the GDN prefill caller does.
+        # Only its configuration is reduced to the fields needed by this UT.
+        builder = SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(hf_text_config=SimpleNamespace(linear_num_value_heads=v.shape[2])),
+                parallel_config=SimpleNamespace(tensor_parallel_size=1),
+            )
+        )
+        prebuilt_meta = _build_non_spec_chunked_prefill_metadata(builder, q_start_loc_cpu, q.device)
 
-        with patch("vllm_ascend.ops.triton.fla.chunk.get_forward_context", return_value=mock_forward_context):
+        with (
+            patch("vllm_ascend.ops.triton.fla.chunk.get_forward_context", return_value=mock_forward_context),
+            patch("vllm_ascend.ops.triton.fla.chunk.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        ):
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -35,12 +56,35 @@ class TestChunkGatedDeltaRule(PytestBase):
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=q_start_loc,
+                prebuilt_meta=prebuilt_meta,
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
 
-        assert core_attn_out_non_spec.shape == (1, 17, 8, 128)
-        assert last_recurrent_state.shape == (3, 8, 128, 128)
+        assert core_attn_out_non_spec.shape == (1, num_tokens, 8, 128)
+        assert last_recurrent_state.shape == (len(seq_lens), 8, 128, 128)
+        # Normalize independently on CPU: the 310P reference's optional L2 norm
+        # uses npu_rms_norm, whereas the recurrence itself supports CPU tensors.
+        q_cpu, k_cpu = q.cpu().float(), k.cpu().float()
+        q_cpu = (q_cpu * torch.rsqrt(q_cpu.square().sum(-1, keepdim=True) + 1e-6)).to(q.dtype)
+        k_cpu = (k_cpu * torch.rsqrt(k_cpu.square().sum(-1, keepdim=True) + 1e-6)).to(k.dtype)
+        expected_out, expected_state = chunk_gated_delta_rule_pytorch(
+            q=q_cpu,
+            k=k_cpu,
+            v=v.cpu(),
+            g=g.cpu(),
+            beta=beta.cpu(),
+            # The PyTorch reference follows vLLM's [V, K] state layout.
+            initial_state=initial_state.cpu().transpose(-1, -2).contiguous(),
+            output_final_state=True,
+            cu_seqlens=q_start_loc.cpu(),
+            head_first=False,
+            use_qk_l2norm_in_kernel=False,
+        )
+        torch.testing.assert_close(core_attn_out_non_spec.cpu().float(), expected_out.float(), rtol=1e-2, atol=1e-3)
+        torch.testing.assert_close(
+            last_recurrent_state.cpu().float(), expected_state.transpose(-1, -2).float(), rtol=1e-2, atol=1e-2
+        )
 
 
 def test_chunk_gated_delta_rule_310_state_layout_matches_vllm():
