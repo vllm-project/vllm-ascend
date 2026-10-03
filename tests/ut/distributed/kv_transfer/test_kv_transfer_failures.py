@@ -235,6 +235,27 @@ class TestAscendStoreConnector(unittest.TestCase):
         self.assertEqual(result, {3, 7})
         connector.connector_worker.get_block_ids_with_load_errors.assert_called_once_with()
 
+    def test_get_transfer_results_includes_failed_recving(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.connector_worker = MagicMock()
+        connector.connector_worker.get_failed_recving.return_value = {"r1"}
+        connector.connector_worker.load_async = False
+        connector.use_layerwise = True
+        connector.get_finished = MagicMock(return_value=(set(), set()))
+        connector._get_connector_metadata = MagicMock(
+            return_value=types.SimpleNamespace(
+                requests=[
+                    types.SimpleNamespace(req_id="r1", load_spec=types.SimpleNamespace(can_load=True)),
+                    types.SimpleNamespace(req_id="r2", load_spec=types.SimpleNamespace(can_load=True)),
+                ]
+            )
+        )
+
+        results = connector.get_transfer_results(set())
+        self.assertEqual(results.failed_recving, {"r1"})
+        self.assertEqual(results.finished_recving, {"r1", "r2"})
+        connector.connector_worker.get_failed_recving.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()
