@@ -11,9 +11,12 @@ from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_cache_spec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     KeyMetadata,
+    infer_group_cache_families,
     infer_tp_mismatch_info,
+    uses_hybrid_kv_cache,
 )
 
+from ..backend import get_layerwise_data_plane, get_layerwise_protocol
 from .backend import resolve_backend_spec
 from .planning.availability import RemoteAvailabilityProbe
 from .planning.planner import TransferPlanner
@@ -36,6 +39,7 @@ from .program.spec.topology import (
     resolve_group_layers,
 )
 from .protocol.transfer import StateCheckpointSource
+from .rules import RuleBinder, compile_kv_pool_rules
 from .runtime.resources import KVPoolResources
 from .runtime.runtime import KVPoolRuntime
 
@@ -200,6 +204,64 @@ def create_kv_pool_runtime(vllm_config: VllmConfig, kv_cache_config: KVCacheConf
         raise
 
 
+def compile_kv_pool_rule_binder(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+) -> RuleBinder:
+    """Compile θ from vLLM state; the returned callable accepts registered μ."""
+
+    spec = resolve_kv_pool_compilation_spec(vllm_config, kv_cache_config)
+    if not spec.schedule.requires_layerwise_backend:
+        return compile_kv_pool_rules(spec)
+
+    protocol = get_layerwise_protocol(spec.backend_name)
+    if protocol is None:
+        raise ValueError(f"Backend {spec.backend_name!r} has no Layerwise key protocol")
+    topology = spec.topology
+    kv_cache_groups = kv_cache_config.kv_cache_groups
+    data_plane = get_layerwise_data_plane(protocol)
+    use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups) or (
+        data_plane == "block_key" and len(kv_cache_groups) > 1
+    )
+    model_name = topology.groups[0].key_metadata.model_name
+    key_builder = protocol.bind_layerwise_keys(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        model_name=model_name,
+        use_hybrid=use_hybrid,
+        grouped_block_size=[group.block_size for group in topology.groups],
+    )
+    make_partial_key = getattr(protocol, "make_partial_key", None)
+    bound_partial_key = None
+    if callable(make_partial_key):
+
+        def bound_partial_key(
+            request_id: str,
+            block_index: int,
+            end_token: int,
+            *,
+            group_id: int,
+            head_rank: int,
+            pp_rank: int,
+        ) -> str:
+            return make_partial_key(
+                model_name,
+                request_id,
+                group_id,
+                block_index,
+                end_token,
+                head_rank,
+                pp_rank,
+                topology.pp_size,
+            )
+
+    return compile_kv_pool_rules(
+        spec,
+        layerwise_full_key=key_builder.make_full_key,
+        layerwise_partial_key=bound_partial_key,
+    )
+
+
 def resolve_kv_pool_compilation_spec(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
@@ -261,8 +323,20 @@ def _resolve_kv_pool_topology(vllm_config: VllmConfig, kv_cache_config: KVCacheC
     )
     model_name = model_config.model.rstrip("/").split("/")[-1]
     base_layer_count = model_config.get_total_num_hidden_layers()
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    hf_config = getattr(model_config, "hf_config", hf_text_config)
+    cache_family_hf_config = hf_text_config or hf_config
+    compress_ratios = getattr(hf_text_config, "compress_ratios", None)
+    if compress_ratios is None:
+        compress_ratios = getattr(hf_config, "compress_ratios", None)
+    kv_cache_groups = kv_cache_config.kv_cache_groups
+    group_cache_families = infer_group_cache_families(
+        kv_cache_groups,
+        compress_ratios,
+        cache_family_hf_config,
+    )
     groups = []
-    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+    for group_id, group in enumerate(kv_cache_groups):
         kv_cache_spec = resolve_dcp_kv_cache_spec(group.kv_cache_spec, dcp_size)
         uses_align_state = kv_cache_spec_uses_align_state(kv_cache_spec)
         key_tp_rank = tp_rank if uses_align_state else head_or_tp_rank
@@ -271,7 +345,14 @@ def _resolve_kv_pool_topology(vllm_config: VllmConfig, kv_cache_config: KVCacheC
                 group_id=group_id,
                 kv_cache_spec=kv_cache_spec,
                 layers=resolve_group_layers(group.layer_names, base_layer_count),
-                key_metadata=KeyMetadata(model_name, key_tp_rank, dcp_rank, pp_rank, group_id),
+                key_metadata=KeyMetadata(
+                    model_name,
+                    key_tp_rank,
+                    dcp_rank,
+                    pp_rank,
+                    kv_cache_group_id=group_id,
+                    cache_family=group_cache_families[group_id],
+                ),
                 is_eagle_group=group.is_eagle_group,
             )
         )
