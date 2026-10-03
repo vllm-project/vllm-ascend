@@ -820,6 +820,15 @@ class KVPoolScheduler:
         skip_save: bool | None,
     ):
         last_chunk_tokens_num = self._get_last_chunk_tokens_num(prompt_token_ids)
+        # Keep failure recovery local: other ranks could otherwise publish a
+        # suffix computed with a prefix that failed to load on this rank.
+        allow_save_with_load = (
+            self.use_layerwise_transfer
+            and request_tracker.token_len >= last_chunk_tokens_num
+            and not self.use_hybrid
+            and self._expected_worker_count == 1
+            and not self.vllm_config.scheduler_config.async_scheduling
+        )
         return ReqMeta.from_request_tracker(
             request_tracker,
             self.cache_transfer_granularity,
@@ -832,6 +841,7 @@ class KVPoolScheduler:
             kv_cache_group_families=self.kv_cache_group_families,
             save_partial_block=self.layerwise_offload,
             hash_block_size=self.hash_block_size,
+            allow_save_with_load=allow_save_with_load,
         )
 
     def _process_new_request(
@@ -1033,8 +1043,21 @@ class KVPoolScheduler:
         if not force_skip_save:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
+                tracker = self._request_trackers.get(req_id)
+                request_tuple = self._unfinished_requests.get(req_id)
+                retry_save = bool(
+                    not self.layerwise_offload
+                    and tracker is not None
+                    and request_tuple is not None
+                    and tracker.num_saved_tokens > request_tuple[0].num_computed_tokens
+                )
+                if retry_save:
+                    # LOAD-error recomputation reuses the same blocks and
+                    # tracker; its cancelled SAVE must be planned again.
+                    tracker.num_saved_tokens = request_tuple[0].num_computed_tokens
                 if (
                     not new_block_ids
+                    and not retry_save
                     and not self.tp_mismatch
                     and not self.layerwise_offload
                     and not self.save_decode_cache

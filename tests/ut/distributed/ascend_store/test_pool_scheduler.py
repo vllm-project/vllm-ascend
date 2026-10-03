@@ -567,6 +567,120 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         return sched_output
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_partial_hit_save_scope(self, mock_client_cls):
+        for case in (
+            "supported",
+            "load_async",
+            "consumer",
+            "multi_worker",
+            "async",
+            "non_layerwise",
+            "hybrid",
+            "mooncake",
+        ):
+            with self.subTest(case=case):
+                config = self._make_config(
+                    kv_role="kv_consumer" if case == "consumer" else "kv_producer",
+                    extra_config={
+                        "backend": "mooncake" if case == "mooncake" else "memcache",
+                        "load_async": case == "load_async",
+                    },
+                )
+                config.scheduler_config.async_scheduling = case == "async"
+                config.parallel_config.world_size = 2 if case == "multi_worker" else 1
+                scheduler = KVPoolScheduler(config, use_layerwise=case != "non_layerwise")
+                scheduler.use_hybrid = case == "hybrid"
+                request = MagicMock(
+                    req_id="r1",
+                    num_computed_tokens=16,
+                    num_prompt_tokens=96,
+                    prompt_token_ids=list(range(96)),
+                    block_ids=list(range(6)),
+                    block_hashes=[b"h"] * 6,
+                )
+                scheduler._unfinished_requests["r1"] = (request, [request.block_ids])
+                scheduler.load_specs["r1"] = LoadSpec(0, 16, can_load=True)
+                output = self._make_running_chunk_output([])
+                output.scheduled_new_reqs = [request]
+                output.scheduled_cached_reqs.req_ids = []
+                output.num_scheduled_tokens = {"r1": 80}
+
+                (meta,) = scheduler.build_connector_meta(output).requests
+
+                self.assertTrue(meta.load_spec.can_load)
+                self.assertEqual(meta.can_save, case in ("supported", "load_async"))
+                if meta.can_save:
+                    self.assertEqual((meta.save_start_token, meta.save_end_token), (16, 96))
+                self.assertEqual(scheduler._request_trackers["r1"].num_saved_tokens, 96 if meta.can_save else 0)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_load_save_only_at_last_cacheable_prefill_chunk(self, mock_client_cls):
+        for prompt_len, target, can_save in ((96, 64, False), (96, 96, True), (100, 98, True)):
+            with self.subTest(prompt_len=prompt_len, target=target):
+                config = self._make_config(extra_config={"backend": "memcache"})
+                config.scheduler_config.async_scheduling = False
+                scheduler = KVPoolScheduler(config, use_layerwise=True)
+                tracker = RequestTracker(
+                    "r1",
+                    target,
+                    allocated_block_ids=list(range((target + 15) // 16)),
+                )
+                meta = scheduler._build_req_meta(
+                    tracker,
+                    [b"h"] * 6,
+                    LoadSpec(0, 16, can_load=True),
+                    list(range(prompt_len)),
+                    False,
+                )
+                self.assertTrue(meta.load_spec.can_load)
+                self.assertEqual(meta.can_save, can_save)
+                self.assertEqual(meta.is_last_chunk, can_save)
+                self.assertEqual(tracker.num_saved_tokens, 96 if can_save else 0)
+                if can_save:
+                    self.assertEqual((meta.save_start_token, meta.save_end_token), (16, 96))
+                if target < prompt_len and can_save:
+                    # The remaining tail uses the already allocated block;
+                    # no later metadata is generated to save this suffix.
+                    request = MagicMock(num_computed_tokens=target, num_prompt_tokens=prompt_len)
+                    scheduler._unfinished_requests["r1"] = (request, [tracker.allocated_block_ids])
+                    scheduler._request_trackers["r1"] = tracker
+                    output = self._make_running_chunk_output([])
+                    output.num_scheduled_tokens = {"r1": prompt_len - target}
+                    self.assertEqual(scheduler.build_connector_meta(output).requests, [])
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_failed_load_retries_save_without_new_blocks(self, mock_client_cls):
+        config = self._make_config(extra_config={"backend": "memcache"})
+        config.scheduler_config.async_scheduling = False
+        scheduler = KVPoolScheduler(config, use_layerwise=True)
+        request = MagicMock(
+            num_computed_tokens=0,
+            num_prompt_tokens=96,
+            prompt_token_ids=list(range(96)),
+            all_token_ids=list(range(96)),
+            block_hashes=[b"h"] * 6,
+        )
+        scheduler._unfinished_requests["r1"] = (request, [list(range(6))])
+        scheduler._request_trackers["r1"] = RequestTracker(
+            req_id="r1",
+            token_len=96,
+            allocated_block_ids=list(range(6)),
+            num_saved_tokens=96,
+        )
+        output = self._make_running_chunk_output([])
+        output.num_scheduled_tokens = {"r1": 96}
+
+        (meta,) = scheduler.build_connector_meta(output).requests
+
+        self.assertTrue(meta.can_save)
+        self.assertIsNone(meta.load_spec)
+        self.assertEqual((meta.save_start_token, meta.save_end_token), (0, 96))
+        self.assertEqual(scheduler._request_trackers["r1"].num_saved_tokens, 96)
+        request.num_computed_tokens = 96
+        output.num_scheduled_tokens = {"r1": 1}
+        self.assertEqual(scheduler.build_connector_meta(output).requests, [])
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_chunk_passes_computed_tokens_to_tracker(self, mock_client_cls):
         scheduler = KVPoolScheduler(self._make_config(), use_layerwise=False)
         request = MagicMock()
