@@ -32,7 +32,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
 )
 
-from ..program.spec.topology import KVPoolTopology
+from ..topology import KVPoolTopology
 
 ByteArray: TypeAlias = NDArray[np.uint64]
 ChunkRows: TypeAlias = tuple[ByteArray, ByteArray, tuple[BlockHash | str, ...]]

@@ -14,9 +14,6 @@ from vllm.logger import logger
 from ...attention_fence import reset_attention_compute_start_gate
 from ..backend import LayerwiseAccessKind
 from ..coordinates import TokenRange
-from ..program.spec.compilation import KVPoolCompilationSpec
-from ..program.values.evidence import ChunkAvailability, GroupAvailability
-from ..program.values.selection import KVSelection
 from ..protocol.lookup import LookupRequest, LookupResult
 from ..protocol.transfer import (
     CheckpointStoreCommand,
@@ -27,14 +24,17 @@ from ..protocol.transfer import (
 )
 from ..rules import KVPoolRules, RuleBinder
 from ..rules.identity import BlockRows, KeyAxes
+from ..rules.reachability import ChunkAvailability, GroupAvailability, KVSelection
+from ..timeline import StoreBatch
+from ..timeline.schedule import KVPoolSchedule
+from ..timeline.timeline import KVPoolTimeline
+from ..topology import KVPoolTopology
 from .backend import BackendIO, GVABackendIO, KeyRangeBackendIO
 from .backend.io import _batch_sources
 from .batch import KVGroupBatch, KVTransferBatch
 from .evidence import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence
 from .resources import KVPoolResources
 from .result import LoadResult
-from .timeline import StoreBatch
-from .timeline.composition import KVPoolTimelineRuntime
 
 _Parameters = ParamSpec("_Parameters")
 _Result = TypeVar("_Result")
@@ -56,17 +56,17 @@ class KVPoolRuntime:
 
     def __init__(
         self,
-        spec: KVPoolCompilationSpec,
+        topology: KVPoolTopology,
+        schedule: KVPoolSchedule,
         rule_binder: RuleBinder,
         resources: KVPoolResources,
         start_gate_factory: Callable[[], Any] = reset_attention_compute_start_gate,
         source_ready_event_factory: Callable[[], Any] | None = None,
     ) -> None:
-        topology = spec.topology
-        timeline = KVPoolTimelineRuntime(spec.schedule, topology)
+        timeline = KVPoolTimeline(schedule, topology)
         backend_io: BackendIO
         layerwise_backend: GVABackendIO | KeyRangeBackendIO | None = None
-        if spec.schedule.requires_layerwise_backend:
+        if schedule.requires_layerwise_backend:
             access_kind = resources.backend_spec.layerwise_access
             if access_kind is None:
                 raise ValueError("Layerwise timeline requires a session Backend")
@@ -78,7 +78,6 @@ class KVPoolRuntime:
         else:
             backend_io = BackendIO(resources.backend, resources.backend_spec)
 
-        self._spec = spec
         self._rule_binder = rule_binder
         self._rules: KVPoolRules | None = None
         self._resources = resources

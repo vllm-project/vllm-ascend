@@ -28,19 +28,18 @@ from .planning.step import (
     StateCheckpointHandoff,
     TransferPlanningStep,
 )
-from .program.spec.compilation import KVPoolCompilationSpec
-from .program.spec.schedule import KVPoolSchedule, LoadScheduleKind, StoreScheduleKind
-from .program.spec.topology import (
+from .protocol.transfer import StateCheckpointSource
+from .rules import KVPoolRuleSpec, RuleBinder, compile_kv_pool_rules
+from .runtime.resources import GVAObjectLayout, KVPoolResources
+from .runtime.runtime import KVPoolRuntime
+from .timeline.schedule import KVPoolSchedule, LoadScheduleKind, StoreScheduleKind
+from .topology import (
     KVPoolGroupTopology,
     KVPoolTopology,
     TPPartitionSpec,
     kv_cache_spec_uses_align_state,
     resolve_group_layers,
 )
-from .protocol.transfer import StateCheckpointSource
-from .rules import RuleBinder, compile_kv_pool_rules
-from .runtime.resources import GVAObjectLayout, KVPoolResources
-from .runtime.runtime import KVPoolRuntime
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -189,9 +188,9 @@ def _adapt_checkpoint_handoffs(
 def create_kv_pool_runtime(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> KVPoolRuntime:
     """Bind static rules, memory registration and Timeline ownership once."""
 
-    spec = resolve_kv_pool_compilation_spec(vllm_config, kv_cache_config)
-    rule_binder = _compile_kv_pool_rule_binder(spec, vllm_config, kv_cache_config)
-    backend_spec = resolve_backend_spec(spec.backend_name)
+    rule_spec, schedule = _resolve_kv_pool_configuration(vllm_config, kv_cache_config)
+    rule_binder = _compile_kv_pool_rule_binder(rule_spec, vllm_config, kv_cache_config)
+    backend_spec = resolve_backend_spec(rule_spec.backend_name)
     backend = backend_spec.backend_type(
         vllm_config.parallel_config,
         extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
@@ -199,7 +198,7 @@ def create_kv_pool_runtime(vllm_config: VllmConfig, kv_cache_config: KVCacheConf
     gva_layout = None
     if backend_spec.layerwise_access is LayerwiseAccessKind.GVA:
         layer_start, _ = vllm_config.model_config.get_layers_start_end_indices(vllm_config.parallel_config)
-        topology = spec.topology
+        topology = rule_spec.topology
         gva_layout = GVAObjectLayout(
             layer_start,
             vllm_config.model_config.get_total_num_hidden_layers(),
@@ -211,13 +210,13 @@ def create_kv_pool_runtime(vllm_config: VllmConfig, kv_cache_config: KVCacheConf
         backend,
         backend_spec,
         kv_cache_config.num_blocks,
-        spec.topology.groups,
+        rule_spec.topology.groups,
         gva_layout=gva_layout,
         align_shared_storage=gva_layout is not None
         and uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_config.kv_cache_groups),
     )
     try:
-        return KVPoolRuntime(spec, rule_binder, resources)
+        return KVPoolRuntime(rule_spec.topology, schedule, rule_binder, resources)
     except BaseException:
         resources.close()
         raise
@@ -227,18 +226,18 @@ def compile_kv_pool_rule_binder(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
 ) -> RuleBinder:
-    """Compile θ from vLLM state; the returned callable accepts registered μ."""
+    """Select static rules from vLLM state and return the memory binder."""
 
-    spec = resolve_kv_pool_compilation_spec(vllm_config, kv_cache_config)
-    return _compile_kv_pool_rule_binder(spec, vllm_config, kv_cache_config)
+    rule_spec, _ = _resolve_kv_pool_configuration(vllm_config, kv_cache_config)
+    return _compile_kv_pool_rule_binder(rule_spec, vllm_config, kv_cache_config)
 
 
 def _compile_kv_pool_rule_binder(
-    spec: KVPoolCompilationSpec,
+    spec: KVPoolRuleSpec,
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
 ) -> RuleBinder:
-    if not spec.schedule.requires_layerwise_backend:
+    if not spec.use_layerwise:
         return compile_kv_pool_rules(spec)
 
     protocol = get_layerwise_protocol(spec.backend_name)
@@ -289,22 +288,32 @@ def _compile_kv_pool_rule_binder(
     )
 
 
-def resolve_kv_pool_compilation_spec(
+def resolve_kv_pool_rule_spec(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
-) -> KVPoolCompilationSpec:
-    """Capture vLLM-owned process state before compiling the KV Pool program."""
+) -> KVPoolRuleSpec:
+    """Capture the resolved static facts consumed by KV rule compilation."""
 
+    rule_spec, _ = _resolve_kv_pool_configuration(vllm_config, kv_cache_config)
+    return rule_spec
+
+
+def _resolve_kv_pool_configuration(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+) -> tuple[KVPoolRuleSpec, KVPoolSchedule]:
     topology = _resolve_kv_pool_topology(vllm_config, kv_cache_config)
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-    return KVPoolCompilationSpec(
+    schedule = _resolve_schedule(vllm_config, extra_config)
+    rule_spec = KVPoolRuleSpec(
         topology=topology,
         backend_name=extra_config.get("backend", "mooncake").strip().lower(),
-        schedule=_resolve_schedule(vllm_config, extra_config),
         max_model_len=vllm_config.model_config.max_model_len,
+        use_layerwise=schedule.requires_layerwise_backend,
         use_eagle=_uses_eagle_block_drop(vllm_config),
         retention_interval=kv_cache_config.prefix_cache_retention_interval,
     )
+    return rule_spec, schedule
 
 
 def resolve_consumer_pipeline_partitions(vllm_config: VllmConfig) -> tuple[int, ...] | None:

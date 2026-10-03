@@ -10,12 +10,9 @@ import numpy as np
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
 from ...backend import BackendSpec
-from ...program.values.evidence import RemoteObjectObservation, StoreEvidence, TransferEvidence
-from ...program.values.representation import RemoteKVObject
-from ...program.values.selection import TransferWork
 from ..batch import KVGroupBatch, KVTransferBatch
 from ..evidence import TransferEvidence as RuntimeTransferEvidence
-from .arguments import ResolvedGVABatches, ResolvedGVASessions, materialize_gva, materialize_rule_gva
+from .arguments import materialize_rule_gva
 from .io import BackendIO, _batch_sources, _load_completions, _store_completions
 
 if TYPE_CHECKING:
@@ -26,7 +23,7 @@ GVA_SESSION_FAILURE = -1
 
 
 class GVABackendIO(BackendIO):
-    """Keep leased GVA addresses inside the Backend boundary, not the Program."""
+    """Keep leased GVA addresses inside the Backend boundary."""
 
     def __init__(self, backend: Backend, backend_spec: BackendSpec) -> None:
         super().__init__(backend, backend_spec)
@@ -38,10 +35,6 @@ class GVABackendIO(BackendIO):
         self._store = store
         self._load_sessions: dict[str, tuple[int, int] | None] = {}
         self._store_sessions: dict[str, tuple[int, int]] = {}
-        self._resolved_load_sessions: ResolvedGVASessions = {}
-        self._resolved_store_sessions: ResolvedGVASessions = {}
-        self._resolved_load_batches: ResolvedGVABatches = {}
-        self._resolved_store_batches: ResolvedGVABatches = {}
         self._rule_load_bases: dict[KVGroupBatch, np.ndarray] = {}
         self._rule_store_bases: dict[KVGroupBatch, np.ndarray] = {}
         self._load_direction = backend_spec.backend_module.MmcDirect.COPY_G2L.value
@@ -54,21 +47,10 @@ class GVABackendIO(BackendIO):
             if not callable(getattr(self._store, method, None)):
                 raise RuntimeError(f"Memcache GVA requires native {method}; upgrade the Backend library")
 
-    def observe_objects(self, remote_objects: tuple[RemoteKVObject, ...]) -> tuple[RemoteObjectObservation, ...]:
-        if not remote_objects:
-            return ()
-        regions = self._query_regions([remote_object.key for remote_object in remote_objects])
-        return tuple(
-            RemoteObjectObservation(remote_object, region is not None)
-            for remote_object, region in zip(remote_objects, regions, strict=True)
-        )
-
     def exists(self, keys: list[str]) -> tuple[bool, ...]:
         return tuple(region is not None for region in self._query_regions(keys))
 
     def start_load_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
-        self._resolved_load_sessions.clear()
-        self._resolved_load_batches.clear()
         self._rule_load_bases.clear()
         if not keys:
             return ()
@@ -93,8 +75,6 @@ class GVABackendIO(BackendIO):
         return tuple(result_codes)
 
     def finish_load_sessions(self, keys: list[str]) -> None:
-        self._resolved_load_sessions.clear()
-        self._resolved_load_batches.clear()
         self._rule_load_bases.clear()
         leased_keys = [key for key in keys if key in self._load_sessions]
         if not leased_keys:
@@ -106,8 +86,6 @@ class GVABackendIO(BackendIO):
             del self._load_sessions[key]
 
     def start_store_sessions(self, keys: list[str], object_sizes: list[int]) -> tuple[int, ...]:
-        self._resolved_store_sessions.clear()
-        self._resolved_store_batches.clear()
         self._rule_store_bases.clear()
         if not keys:
             return ()
@@ -185,57 +163,6 @@ class GVABackendIO(BackendIO):
         evidence = tuple(RuntimeTransferEvidence(source, int(result_code), succeeded) for source in arguments.sources)
         return _store_completions(batch, evidence)
 
-    def load(self, work: TransferWork) -> tuple[TransferEvidence, ...]:
-        if work.empty:
-            return ()
-        arguments = materialize_gva(
-            work,
-            self._load_sessions,
-            self._resolved_load_sessions,
-            self._resolved_load_batches,
-        )
-        result_code = self._store.batch_copy(
-            arguments.remote_addresses.tolist(),
-            arguments.local_addresses.tolist(),
-            arguments.sizes.tolist(),
-            self._load_direction,
-        )
-        if isinstance(result_code, bool) or not isinstance(result_code, Integral):
-            raise RuntimeError("GVA batch_copy returned a non-integer result")
-        # The native API reports the whole batch, not independently completed keys.
-        return tuple(TransferEvidence(source, int(result_code)) for source in work.sources)
-
-    def store(self, work: TransferWork) -> StoreEvidence:
-        if work.empty:
-            return StoreEvidence((), True, source_release_confirmed=True)
-        source_handed_off = False
-        try:
-            arguments = materialize_gva(
-                work,
-                self._store_sessions,
-                self._resolved_store_sessions,
-                self._resolved_store_batches,
-            )
-            source_handed_off = True
-            result_code = self._store.batch_copy(
-                arguments.remote_addresses.tolist(),
-                arguments.local_addresses.tolist(),
-                arguments.sizes.tolist(),
-                self._store_direction,
-            )
-            if isinstance(result_code, bool) or not isinstance(result_code, Integral):
-                raise RuntimeError("GVA batch_copy returned a non-integer result")
-        except Exception as error:
-            return StoreEvidence(
-                self._unknown_transfer_evidence(work.sources, not source_handed_off),
-                False,
-                not source_handed_off,
-                error,
-            )
-        succeeded = result_code == 0
-        evidence = tuple(TransferEvidence(source, int(result_code), succeeded) for source in work.sources)
-        return StoreEvidence(evidence, succeeded, source_release_confirmed=succeeded)
-
     def commit_store_sessions(self, keys: list[str]) -> tuple[int, ...]:
         if not keys:
             return ()
@@ -246,8 +173,6 @@ class GVABackendIO(BackendIO):
         for key, code in zip(keys, result_codes, strict=True):
             if code == 0:
                 del self._store_sessions[key]
-        self._resolved_store_sessions.clear()
-        self._resolved_store_batches.clear()
         self._rule_store_bases.clear()
         return result_codes
 
@@ -255,8 +180,6 @@ class GVABackendIO(BackendIO):
         # Native failed-write notification deletes by key, even after a duplicate allocation.
         # Do not delete another writer's object; leave uncertain write leases to Backend expiry.
         result = tuple(GVA_SESSION_FAILURE if self._store_sessions.pop(key, None) is not None else 0 for key in keys)
-        self._resolved_store_sessions.clear()
-        self._resolved_store_batches.clear()
         self._rule_store_bases.clear()
         return result
 

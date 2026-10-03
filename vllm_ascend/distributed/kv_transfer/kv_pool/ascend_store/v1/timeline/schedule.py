@@ -1,4 +1,4 @@
-"""Define the fixed scheduling spec of one KV Pool program."""
+"""Define the fixed temporal policy selected for one KV Pool Runtime."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from enum import Enum
 
 
 class LoadScheduleKind(str, Enum):
-    """Fixed Load scheduling policy compiled into a KV Pool program."""
+    """Fixed Load scheduling policy owned by the Timeline."""
 
     SYNC = "synchronous"
     ASYNC = "asynchronous"
@@ -15,7 +15,7 @@ class LoadScheduleKind(str, Enum):
 
 
 class StoreScheduleKind(str, Enum):
-    """Fixed Store scheduling policy compiled into a KV Pool program."""
+    """Fixed Store scheduling policy owned by the Timeline."""
 
     ASYNC = "asynchronous"
     LAYERWISE = "layerwise"
@@ -23,7 +23,7 @@ class StoreScheduleKind(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class KVPoolSchedule:
-    """Time-axis rules compiled into one KV Pool program."""
+    """Time-axis policy used to construct the Runtime state machines."""
 
     load_kind: LoadScheduleKind
     store_kind: StoreScheduleKind | None

@@ -1,4 +1,4 @@
-"""Verify Φ as statically selected rules rather than an execution graph."""
+"""Verify statically selected KV rules without an execution graph."""
 
 from __future__ import annotations
 
@@ -14,19 +14,17 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     LayerwiseAccessKind,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.compilation import (
-    KVPoolCompilationSpec,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import (
+    KVMemoryRule,
+    KVPoolRules,
+    KVPoolRuleSpec,
+    compile_kv_pool_rules,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.topology import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import (
     KVPoolGroupTopology,
     KVPoolLayerTopology,
     KVPoolTopology,
     TPPartitionSpec,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import (
-    KVMemoryRule,
-    KVPoolRules,
-    compile_kv_pool_rules,
 )
 
 from .helpers import make_backend_spec, make_schedule, make_topology
@@ -54,6 +52,10 @@ def _registration(topology, *, block_length: int = 32):
     return bases, lengths, strides, layer_offsets
 
 
+def _rule_spec(topology: KVPoolTopology, *, layerwise: bool = False) -> KVPoolRuleSpec:
+    return KVPoolRuleSpec(topology, "fake", 64, use_layerwise=layerwise)
+
+
 def test_rules_bind_static_facts_once_then_share_dynamic_rows(monkeypatch) -> None:
     topology = replace(
         make_topology(),
@@ -64,11 +66,11 @@ def test_rules_bind_static_facts_once_then_share_dynamic_rows(monkeypatch) -> No
         pcp_size=2,
         tp_partition=TPPartitionSpec(False, 2, 1),
     )
-    spec = KVPoolCompilationSpec(topology, "fake", make_schedule(), 64)
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import rules
+    spec = _rule_spec(topology)
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import compiler
 
     monkeypatch.setattr(
-        rules,
+        compiler,
         "resolve_backend_spec",
         lambda _name: make_backend_spec(layerwise_access=None, requires_exists_before_put=True),
     )
@@ -100,9 +102,9 @@ def test_rules_bind_static_facts_once_then_share_dynamic_rows(monkeypatch) -> No
     assert len({axis[0] for axis in lookup_axes}) == 8
     assert phi.admit_store([True, False, False]).tolist() == [False, True, True]
 
-    # θ and μ are no longer consulted after binding.
+    # Configuration and registration inputs are no longer consulted after binding.
     monkeypatch.setattr(
-        rules,
+        compiler,
         "resolve_backend_spec",
         lambda _name: (_ for _ in ()).throw(AssertionError("static configuration was read again")),
     )
@@ -114,8 +116,22 @@ def test_rules_bind_static_facts_once_then_share_dynamic_rows(monkeypatch) -> No
     assert sizes == [[32, 32], [32, 32]]
 
 
+def test_rule_compiler_rejects_unsupported_static_compositions() -> None:
+    cases = (
+        (make_topology(tp_mismatch=True, consumer_pipeline_partitions=(1, 1)), False, "Consumer pipeline"),
+        (make_topology(tp_mismatch=True), True, "TP mismatch"),
+        (make_topology(consumer_pipeline_partitions=(1, 1)), True, "consumer pipeline"),
+    )
+    for topology, layerwise, message in cases:
+        with pytest.raises(ValueError, match=message):
+            compile_kv_pool_rules(
+                _rule_spec(topology, layerwise=layerwise),
+                layerwise_full_key=(lambda *_args: "key") if layerwise else None,
+            )
+
+
 def test_memory_rules_select_only_the_backend_layout_they_consume(monkeypatch) -> None:
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import rules
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import compiler
 
     cases = (
         ("bulk", make_topology(), make_schedule(), None),
@@ -130,7 +146,7 @@ def test_memory_rules_select_only_the_backend_layout_they_consume(monkeypatch) -
     )
     for name, topology, schedule, layerwise_access in cases:
         monkeypatch.setattr(
-            rules,
+            compiler,
             "resolve_backend_spec",
             lambda _name, access=layerwise_access: make_backend_spec(layerwise_access=access),
         )
@@ -141,7 +157,7 @@ def test_memory_rules_select_only_the_backend_layout_they_consume(monkeypatch) -
         )
         block_length = 31 if name == "bulk" else 32
         phi = compile_kv_pool_rules(
-            KVPoolCompilationSpec(topology, "fake", schedule, 64),
+            _rule_spec(topology, layerwise=schedule.requires_layerwise_backend),
             layerwise_full_key=full_key,
         )(*_registration(topology, block_length=block_length))
         block_ids = np.asarray([1, 3], dtype=np.uint64)
@@ -187,7 +203,7 @@ def test_memory_rules_select_only_the_backend_layout_they_consume(monkeypatch) -
 
 
 def test_hybrid_checkpoint_tail_and_gva_rules_keep_their_distinct_contracts(monkeypatch) -> None:
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import rules
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import compiler
 
     groups = (
         KVPoolGroupTopology(
@@ -224,16 +240,14 @@ def test_hybrid_checkpoint_tail_and_gva_rules_keep_their_distinct_contracts(monk
         consumer_pipeline_partitions=None,
     )
     monkeypatch.setattr(
-        rules,
+        compiler,
         "resolve_backend_spec",
         lambda _name: make_backend_spec(layerwise_access=None),
     )
-    phi = compile_kv_pool_rules(KVPoolCompilationSpec(hybrid, "fake", make_schedule(), 64))(*_registration(hybrid))
+    phi = compile_kv_pool_rules(_rule_spec(hybrid))(*_registration(hybrid))
 
     hybrid_consumer = replace(hybrid, consumer_pipeline_partitions=(1, 1))
-    consumer_phi = compile_kv_pool_rules(KVPoolCompilationSpec(hybrid_consumer, "fake", make_schedule(), 64))(
-        *_registration(hybrid_consumer)
-    )
+    consumer_phi = compile_kv_pool_rules(_rule_spec(hybrid_consumer))(*_registration(hybrid_consumer))
     for group_id, expected_pp_rank in ((0, 0), (1, 1)):
         keys = consumer_phi.store_keys(group_id, ("h0",))
         ranges = consumer_phi.memory.store_full(group_id, (1,))
@@ -272,9 +286,8 @@ def test_hybrid_checkpoint_tail_and_gva_rules_keep_their_distinct_contracts(monk
     assert phi.checkpoint_rows(4, ("h0",), {1: 0}, {0: (3,), 1: (99,)}) == ()
 
     layerwise = replace(make_topology(), tp_rank=1, tp_size=2, put_step=2)
-    schedule = make_schedule(layerwise=True)
     monkeypatch.setattr(
-        rules,
+        compiler,
         "resolve_backend_spec",
         lambda _name: make_backend_spec(layerwise_access=LayerwiseAccessKind.GVA),
     )
@@ -283,7 +296,7 @@ def test_hybrid_checkpoint_tail_and_gva_rules_keep_their_distinct_contracts(monk
         return f"g{group}:p{stage}:h{head}:{value}"
 
     binder = compile_kv_pool_rules(
-        KVPoolCompilationSpec(layerwise, "fake", schedule, 64),
+        _rule_spec(layerwise, layerwise=True),
         layerwise_full_key=full_key,
     )
     with pytest.raises(ValueError, match="global object sizes"):
@@ -291,7 +304,7 @@ def test_hybrid_checkpoint_tail_and_gva_rules_keep_their_distinct_contracts(monk
 
     parallel_layerwise = replace(make_topology(group_ids=(0, 1)), pp_size=2)
     parallel_binder = compile_kv_pool_rules(
-        KVPoolCompilationSpec(parallel_layerwise, "fake", schedule, 64),
+        _rule_spec(parallel_layerwise, layerwise=True),
         layerwise_full_key=full_key,
     )
     with pytest.raises(ValueError, match="group 1.*global object offset"):

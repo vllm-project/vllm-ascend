@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Paired CPU benchmark for legacy and bound-plan layerwise materialization.
+"""Paired CPU benchmark for legacy and bound-rule layerwise materialization.
 
 No Backend, NPU, event, queue or worker thread is involved.  Static cache
 registration is outside the timer for both implementations.
@@ -16,7 +16,7 @@ import json
 import math
 import statistics
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -30,27 +30,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerTransferTask,
     ReqMeta,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.lowering import (
-    bind_transfer_rows,
-    enumerate_transfer_work,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.memory import (
+    KVMemoryRule,
+    gva_arguments,
+    key_range_arguments,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.representation import (
-    KVBlockAssignment,
-    KVBlockAssignmentBatch,
-    KVChunk,
-    PhysicalCoordinate,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.selection import merge_transfer_work
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.transfer import (
-    BoundGroupPlan,
-    ContiguousLayoutPlan,
-    SubmissionPlan,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend.arguments import (
-    materialize_gva,
-    materialize_key_ranges,
-    resolve_gva_sessions,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.batch import (
+    KVGroupBatch,
 )
 
 AccessKind = Literal["gva", "key_range"]
@@ -75,8 +61,11 @@ class BenchmarkCase:
     legacy_builder: LayerBatchBuilder
     legacy_task: LayerTransferTask
     legacy_requests: tuple[ReqMeta, ...]
-    assignments: tuple[KVBlockAssignmentBatch, ...]
-    plan: BoundGroupPlan
+    block_ids: tuple[int, ...]
+    keys: tuple[str, ...]
+    request_splits: tuple[int, ...]
+    object_size: int
+    memory: KVMemoryRule
     sessions: dict[str, tuple[int, int]]
 
     def legacy_request(self) -> tuple[object, ...]:
@@ -94,47 +83,57 @@ class BenchmarkCase:
         assert shared is not None
         return tuple(self.legacy_builder.build_addrs(shared, layer) for layer in range(self.scenario.layers))
 
-    def new_request(self, access: AccessKind) -> tuple[object, ...]:
-        rows = tuple(bind_transfer_rows(self.plan, batch) for batch in self.assignments)
-        work_by_request = tuple(enumerate_transfer_work((request_rows,)) for request_rows in rows)
-        merged = tuple(
-            merge_transfer_work(tuple(request_work[layer] for request_work in work_by_request))
-            for layer in range(self.scenario.layers)
+    def bind_group(self) -> KVGroupBatch:
+        block_ids = _readonly(self.block_ids)
+        token_counts = _readonly([1] * len(block_ids))
+        request_splits = np.asarray(self.request_splits, dtype=np.intp)
+        request_splits.flags.writeable = False
+        return KVGroupBatch(
+            0,
+            block_ids,
+            token_counts,
+            (self.keys,),
+            request_splits,
+            tuple(range(self.scenario.layers)),
+            self.object_size,
+        )
+
+    def project(self, group: KVGroupBatch, access: AccessKind, layer: int, object_bases: np.ndarray | None):
+        ranges = self.memory.partial(
+            group.group_id,
+            group.block_ids,
+            group.token_counts,
+            layer_id=layer,
         )
         if access == "gva":
-            resolved_sessions = {}
-            resolved_batches = {}
-            for work in merged:
-                resolve_gva_sessions(work, self.sessions, resolved_sessions)
-            return tuple(materialize_gva(work, self.sessions, resolved_sessions, resolved_batches) for work in merged)
-        return tuple(materialize_key_ranges(work) for work in merged)
+            assert object_bases is not None
+            return gva_arguments(ranges, object_bases, group.selection)
+        return key_range_arguments(group.key_axes, ranges, group.selection)
+
+    def gva_bases(self, group: KVGroupBatch) -> np.ndarray:
+        result = np.asarray([self.sessions[key][0] for key in group.selected_keys()], dtype=np.uint64)
+        result.flags.writeable = False
+        return result
+
+    def new_request(self, access: AccessKind) -> tuple[object, ...]:
+        group = self.bind_group()
+        object_bases = self.gva_bases(group) if access == "gva" else None
+        return tuple(self.project(group, access, layer, object_bases) for layer in range(self.scenario.layers))
 
     def prepared(self, access: AccessKind) -> tuple[Operation, Operation]:
         shared = self.legacy_builder.build_shared(self.legacy_task, is_save=True)
         assert shared is not None
-        rows = tuple(bind_transfer_rows(self.plan, batch) for batch in self.assignments)
-        work_by_request = tuple(enumerate_transfer_work((request_rows,)) for request_rows in rows)
-        merged = tuple(
-            merge_transfer_work(tuple(request_work[layer] for request_work in work_by_request))
-            for layer in range(self.scenario.layers)
-        )
-        resolved_sessions = {}
-        resolved_batches = {}
-        if access == "gva":
-            for work in merged:
-                resolve_gva_sessions(work, self.sessions, resolved_sessions)
+        group = self.bind_group()
+        object_bases = self.gva_bases(group) if access == "gva" else None
 
         def legacy() -> int:
             result = tuple(self.legacy_builder.build_addrs(shared, layer) for layer in range(self.scenario.layers))
             return _consume(result)
 
         def new() -> int:
-            if access == "gva":
-                result = tuple(
-                    materialize_gva(work, self.sessions, resolved_sessions, resolved_batches) for work in merged
-                )
-            else:
-                result = tuple(materialize_key_ranges(work) for work in merged)
+            result = tuple(
+                self.project(group, access, layer, object_bases) for layer in range(self.scenario.layers)
+            )
             return _consume(result)
 
         return legacy, new
@@ -164,38 +163,37 @@ def make_case(scenario: Scenario, access: AccessKind, segment_count: int = 2) ->
 
     ranges = []
     requests = []
-    assignments = []
+    block_ids: list[int] = []
+    keys: list[str] = []
+    request_splits = [0]
     sessions: dict[str, tuple[int, int]] = {}
     global_row = 0
     for request_index in range(scenario.requests):
-        block_ids = np.arange(global_row + 1, global_row + scenario.chunks_per_request + 1, dtype=np.int64)
+        request_block_ids = np.arange(
+            global_row + 1,
+            global_row + scenario.chunks_per_request + 1,
+            dtype=np.int64,
+        )
         gvas = np.arange(
             10_000_000 + global_row * object_size,
             10_000_000 + (global_row + scenario.chunks_per_request) * object_size,
             object_size,
             dtype=np.int64,
         )
-        keys = [f"key-{global_row + row}" for row in range(scenario.chunks_per_request)]
+        request_keys = [f"key-{global_row + row}" for row in range(scenario.chunks_per_request)]
         request = ReqMeta(
             f"request-{request_index}",
-            block_ids_by_group=[block_ids.tolist()],
-            block_ids_by_group_np=[block_ids],
+            block_ids_by_group=[request_block_ids.tolist()],
+            block_ids_by_group_np=[request_block_ids],
             block_gvas_by_group_np=[gvas],
-            save_block_keys=keys,
+            save_block_keys=request_keys,
         )
         requests.append(request)
         ranges.append(LayerBlockRange(request, 0, scenario.chunks_per_request))
-        chunks = tuple(KVChunk(0, row, TokenRange(row, row + 1), key) for row, key in enumerate(keys))
-        assignments.append(
-            KVBlockAssignmentBatch(
-                0,
-                tuple(
-                    KVBlockAssignment(chunk, int(block_id), 1)
-                    for chunk, block_id in zip(chunks, block_ids, strict=True)
-                ),
-            )
-        )
-        sessions.update((key, (int(gva), object_size)) for key, gva in zip(keys, gvas, strict=True))
+        block_ids.extend(map(int, request.block_ids_by_group[0]))
+        keys.extend(request_keys)
+        request_splits.append(len(block_ids))
+        sessions.update((key, (int(gva), object_size)) for key, gva in zip(request_keys, gvas, strict=True))
         global_row += scenario.chunks_per_request
 
     task = LayerTransferTask(
@@ -205,38 +203,35 @@ def make_case(scenario: Scenario, access: AccessKind, segment_count: int = 2) ->
         layer_idx_in_group=0,
         use_key_major_ranges=access == "key_range",
     )
-    layouts = []
-    submissions = []
-    for layer in range(scenario.layers):
-        start = layer * segment_count
-        end = start + segment_count
-        offsets = np.asarray(
-            [start * segment_size + segment * segment_size for segment in range(segment_count)],
-            dtype=np.uint64,
-        )
-        layouts.append(
-            ContiguousLayoutPlan(
-                (layer,),
-                0,
-                object_size,
-                layer,
-                _readonly(bases[start:end]),
-                _readonly(strides[start:end]),
-                _readonly(sizes[start:end]),
-                offsets,
-                1,
-            )
-        )
-        submissions.append(SubmissionPlan(layer, (layer,)))
-    plan = BoundGroupPlan(
-        0,
-        (PhysicalCoordinate(),),
-        ("",),
-        tuple(layouts),
-        tuple(submissions),
-        scenario.requests * scenario.chunks_per_request + 1,
+    memory = KVMemoryRule(
+        group_ids=(0,),
+        block_sizes={0: block_size},
+        align_state_group_ids=frozenset(),
+        physical_layers={0: tuple(range(scenario.layers))},
+        base_addresses={0: bases},
+        block_lengths={0: sizes},
+        block_strides={0: strides},
+        layer_entry_offsets={0: layer_offsets},
+        strided_slice_count=1,
+        consumer_pipeline_partitions=None,
+        store_pipeline_ranks=None,
+        data_plane=access,
+        requires_global_offsets=False,
+        object_sizes={0: object_size} if access == "gva" else None,
+        object_offsets=None,
     )
-    case = BenchmarkCase(scenario, builder, task, tuple(requests), tuple(assignments), plan, sessions)
+    case = BenchmarkCase(
+        scenario,
+        builder,
+        task,
+        tuple(requests),
+        tuple(block_ids),
+        tuple(keys),
+        tuple(request_splits),
+        object_size,
+        memory,
+        sessions,
+    )
     _validate_oracle(case, access)
     return case
 
@@ -246,14 +241,16 @@ def _validate_oracle(case: BenchmarkCase, access: AccessKind) -> None:
     current = case.new_request(access)
     for legacy_layer, current_layer in zip(legacy, current, strict=True):
         if access == "gva":
-            assert legacy_layer.addr_array.tolist() == current_layer.local_addresses.tolist()
-            assert legacy_layer.size_array.tolist() == current_layer.sizes.tolist()
-            assert legacy_layer.gvas_array.tolist() == current_layer.remote_addresses.tolist()
+            remote_addresses, local_addresses, sizes = current_layer
+            assert legacy_layer.addr_array.tolist() == local_addresses.tolist()
+            assert legacy_layer.size_array.tolist() == sizes.tolist()
+            assert legacy_layer.gvas_array.tolist() == remote_addresses.tolist()
         else:
-            assert legacy_layer.keys == current_layer.keys
-            assert legacy_layer.all_buffers == current_layer.addresses
-            assert legacy_layer.all_sizes == current_layer.sizes
-            assert legacy_layer.all_offsets == current_layer.offsets
+            keys, addresses, sizes, offsets = current_layer
+            assert legacy_layer.keys == keys
+            assert legacy_layer.all_buffers == addresses
+            assert legacy_layer.all_sizes == sizes
+            assert legacy_layer.all_offsets == offsets
 
 
 def paired_measure(legacy: Operation, new: Operation, samples: int, minimum_sample_ms: float) -> dict[str, float]:
@@ -339,6 +336,12 @@ def _consume(values: tuple[object, ...]) -> int:
     if not values:
         return 0
     value = values[-1]
+    if isinstance(value, tuple):
+        for selected in reversed(value):
+            if len(selected) == 0:
+                continue
+            tail = selected[-1]
+            return int(tail[-1] if isinstance(tail, list) else tail)
     for attribute in ("gvas_array", "remote_addresses", "all_offsets", "offsets"):
         selected = getattr(value, attribute, None)
         if selected is None or len(selected) == 0:
@@ -363,7 +366,7 @@ def _quantile(values: list[float], fraction: float) -> float:
     return ordered[round((len(ordered) - 1) * fraction)]
 
 
-def _readonly(values: list[int]) -> np.ndarray:
+def _readonly(values: Sequence[int]) -> np.ndarray:
     result = np.asarray(values, dtype=np.uint64)
     result.flags.writeable = False
     return result

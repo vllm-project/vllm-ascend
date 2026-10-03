@@ -10,14 +10,14 @@ from typing import TYPE_CHECKING, Any, Protocol
 import numpy as np
 from vllm.logger import logger
 
-from ...program.spec.topology import KVPoolTopology
-from ..batch import KVTransferBatch
-from ..evidence import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence
+from ..runtime.batch import KVTransferBatch
+from ..runtime.evidence import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence
+from ..topology import KVPoolTopology
 from . import LoadTimelineProtocol, StoreBatch
 from .executor import TimelineExecutor
 
 if TYPE_CHECKING:
-    from ....attention_fence import AttentionComputeStartGate
+    from ...attention_fence import AttentionComputeStartGate
 
 _TIMELINE_POLL_INTERVAL_S = 1.0
 
