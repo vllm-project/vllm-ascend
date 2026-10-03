@@ -115,9 +115,11 @@ def test_prefetch_sequence_across_forwards(scheduler_device):
     assert transport.prefetch.call_count == 6
 
 
+@pytest.mark.parametrize("method", ["dspark", "dflash", "eagle3"])
 @pytest.mark.parametrize("draft_names", [None, ("draft.layers.9.attn", "draft.layers.103.attn", "draft.cache")])
-def test_dspark_draft_layers_are_absent_from_runtime_prefetch(monkeypatch, scheduler_device, draft_names):
+def test_draft_layers_are_absent_from_runtime_prefetch(monkeypatch, scheduler_device, method, draft_names):
     config, specs, drafts = make_dspark_kvpp_case(draft_names=draft_names)
+    config.speculative_config.method = method
     group = SimpleNamespace(rank_in_group=1, ranks=[0, 1, 2], device_group=object())
     monkeypatch.setattr(kvpp, "get_kvpp_group", lambda: group)
     monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: group)
