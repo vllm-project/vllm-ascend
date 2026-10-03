@@ -2,10 +2,8 @@ import vllm.envs as envs
 from vllm.config.vllm import VllmConfig
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.worker.v2.pp_utils import resolve_spec_pp_support
 
 _original_validate_v2_model_runner = VllmConfig._validate_v2_model_runner
-_original_get_unsupported_features = VllmConfig._get_v2_model_runner_unsupported_features
 
 _ASCEND_V1_SUPPORTED_FEATURES = frozenset(
     {
@@ -30,17 +28,7 @@ def _patched_use_v2_model_runner(self) -> bool:
     return False
 
 
-def _patched_get_unsupported_features(self) -> list[str]:
-    unsupported = _original_get_unsupported_features(self)
-    support = resolve_spec_pp_support(self)
-    unsupported_feature = support.unsupported_feature if support is not None else None
-    if unsupported_feature is not None and unsupported_feature in unsupported:
-        unsupported.remove(unsupported_feature)
-    return unsupported
-
-
 VllmConfig.use_v2_model_runner = property(_patched_use_v2_model_runner)
-VllmConfig._get_v2_model_runner_unsupported_features = _patched_get_unsupported_features
 
 
 def _patched_validate_v2_model_runner(self) -> None:

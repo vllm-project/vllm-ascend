@@ -103,17 +103,16 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, native, boundaries
         torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.parametrize("legacy,v2", [(True, True), (False, True), (False, False)])
-def test_aux_buffer_factory_uses_one_protocol(monkeypatch, legacy, v2):
+@pytest.mark.parametrize("v2", [False, True])
+def test_aux_buffer_factory_uses_one_protocol(monkeypatch, v2):
     factory = object()
     model = SimpleNamespace(make_empty_intermediate_tensors=factory)
     monkeypatch.setattr(patch_deepseek_v2, "_original_deepseek_v2_model_init", lambda *args, **kwargs: None)
-    monkeypatch.setattr(patch_deepseek_v2.pp_utils, "use_legacy_spec_pp", lambda: legacy)
     wrapped = object()
     monkeypatch.setattr(patch_deepseek_v2.pp_utils, "make_empty_intermediate_tensors", lambda *args: wrapped)
     patch_deepseek_v2._patched_deepseek_v2_model_init(model, vllm_config=SimpleNamespace(use_v2_model_runner=v2))
-    assert model._use_upstream_aux_relay is (v2 and not legacy)
-    assert model.make_empty_intermediate_tensors is (factory if v2 and not legacy else wrapped)
+    assert model._use_upstream_aux_relay is v2
+    assert model.make_empty_intermediate_tensors is (factory if v2 else wrapped)
 
 
 @pytest.mark.parametrize("native", [False, True])
