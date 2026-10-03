@@ -9,68 +9,27 @@ from unittest.mock import patch
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, KeyMetadata
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import KeyMetadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
     BackendSpec,
     LayerwiseAccessKind,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.lowering import (
-    bind_transfer_rows,
-    enumerate_transfer_work,
-    lower_transfer_plans,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import (
+    KVPoolRuleSpec,
+    compile_kv_pool_rules,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.program import KVPoolProgram
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.compilation import (
-    KVPoolCompilationSpec,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.schedule import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.runtime import KVPoolRuntime
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.timeline.schedule import (
     KVPoolSchedule,
     LoadScheduleKind,
     StoreScheduleKind,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.topology import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import (
     KVPoolGroupTopology,
     KVPoolLayerTopology,
     KVPoolTopology,
     TPPartitionSpec,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.admission import (
-    BackendExistenceStoreAdmission,
-    UnconditionalStoreAdmission,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.block import (
-    compile_block_resolutions,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.chunk import (
-    CheckpointChunkProjection,
-    SemanticChunkProjection,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.ownership import (
-    compile_store_ownership,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.reachability import (
-    UnitaryReachability,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.stages.remote import (
-    RemoteObjectProjection,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.representation import (
-    KVBlockAssignment,
-    KVBlockAssignmentBatch,
-    KVChunk,
-    KVMemoryGeometry,
-    KVMemorySegment,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.selection import (
-    TransferWork,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.transfer import (
-    BoundGroupPlan,
-    TransferRows,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import compile_kv_pool_rules
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.runtime import KVPoolRuntime
 
 
 class FakeBackend:
@@ -225,92 +184,12 @@ def make_topology(
     )
 
 
-def make_memory_geometry(
-    topology: KVPoolTopology,
-    *,
-    segments_per_layer: int = 1,
-) -> KVMemoryGeometry:
-    return {
-        group.group_id: tuple(
-            KVMemorySegment(
-                f"{layer.layer_names[0]}.segment.{segment_index}",
-                layer.physical_layer_id,
-                1000 + group.group_id * 10000 + layer.physical_layer_id * 1000 + segment_index * 100,
-                32,
-                64,
-                8,
-            )
-            for layer in group.layers
-            for segment_index in range(segments_per_layer)
-        )
-        for group in topology.transfer_groups
-    }
-
-
 def make_schedule(*, layerwise: bool = False, store: bool = True) -> KVPoolSchedule:
     return KVPoolSchedule(
         LoadScheduleKind.LAYERWISE if layerwise else LoadScheduleKind.SYNC,
         (StoreScheduleKind.LAYERWISE if layerwise else StoreScheduleKind.ASYNC) if store else None,
         2,
     )
-
-
-def make_plan(
-    *,
-    topology: KVPoolTopology | None = None,
-    layerwise: bool = False,
-    direction: str = "load",
-    segments_per_layer: int = 1,
-) -> BoundGroupPlan:
-    topology = topology or make_topology()
-    plans = lower_transfer_plans(
-        topology,
-        make_schedule(layerwise=layerwise),
-        make_memory_geometry(topology, segments_per_layer=segments_per_layer),
-        8,
-    )
-    selected = plans.load if direction == "load" else plans.store
-    return selected[0]
-
-
-def make_rows(
-    plan: BoundGroupPlan | None = None,
-    *,
-    block_ids: tuple[int, ...] = (1, 3),
-    token_counts: tuple[int, ...] | None = None,
-) -> TransferRows:
-    plan = plan or make_plan(layerwise=True)
-    token_counts = token_counts or tuple(4 for _ in block_ids)
-    chunks = tuple(
-        KVChunk(
-            plan.group_id,
-            index,
-            TokenRange(index * 4, (index + 1) * 4),
-            bytes([index + 1]),
-        )
-        for index in range(len(block_ids))
-    )
-    assignments = KVBlockAssignmentBatch(
-        plan.group_id,
-        tuple(
-            KVBlockAssignment(chunk, block_id, token_count)
-            for chunk, block_id, token_count in zip(chunks, block_ids, token_counts, strict=True)
-        ),
-    )
-    return bind_transfer_rows(plan, assignments)
-
-
-def make_work(
-    *,
-    layerwise: bool = True,
-    physical_layer_id: int | None = None,
-    block_ids: tuple[int, ...] = (1, 3),
-) -> TransferWork:
-    rows = make_rows(make_plan(layerwise=layerwise), block_ids=block_ids)
-    work = enumerate_transfer_work((rows,))
-    if physical_layer_id is None:
-        return work[0]
-    return next(item for item in work if item.physical_layer_id == physical_layer_id)
 
 
 class FakeEvent:
@@ -330,11 +209,11 @@ class FakeResources:
         self,
         backend: FakeBackend,
         backend_spec: BackendSpec,
-        geometry: KVMemoryGeometry,
+        topology: KVPoolTopology,
     ) -> None:
         self.backend = backend
         self.backend_spec = backend_spec
-        self._geometry = geometry
+        self._topology = topology
         self.num_blocks = 8
         self.kv_caches = None
         self.closed = False
@@ -347,19 +226,15 @@ class FakeResources:
         layer_entry_offsets = {}
         object_sizes = {}
         object_offsets = {}
-        for group_id, segments in self._geometry.items():
-            base_addresses[group_id] = [segment.base_address for segment in segments]
-            block_lengths[group_id] = [segment.block_length for segment in segments]
-            block_strides[group_id] = [segment.block_stride for segment in segments]
-            layer_offsets = [0]
-            previous_layer = None
-            for index, segment in enumerate(segments):
-                if previous_layer is not None and segment.physical_layer_id != previous_layer:
-                    layer_offsets.append(index)
-                previous_layer = segment.physical_layer_id
-            layer_offsets.append(len(segments))
-            layer_entry_offsets[group_id] = layer_offsets
-            object_sizes[group_id] = sum(block_lengths[group_id])
+        for group in self._topology.transfer_groups:
+            group_id = group.group_id
+            base_addresses[group_id] = [
+                1000 + group_id * 10000 + layer.physical_layer_id * 1000 for layer in group.layers
+            ]
+            block_lengths[group_id] = [32] * len(group.layers)
+            block_strides[group_id] = [64] * len(group.layers)
+            layer_entry_offsets[group_id] = list(range(len(group.layers) + 1))
+            object_sizes[group_id] = 32 * len(group.layers)
             object_offsets[group_id] = 0
         return {
             "base_addresses": base_addresses,
@@ -373,42 +248,6 @@ class FakeResources:
     def close(self) -> None:
         self.closed = True
         self.kv_caches = None
-
-
-def make_program(
-    topology: KVPoolTopology,
-    schedule: KVPoolSchedule,
-    *,
-    requires_exists_before_put: bool = False,
-) -> KVPoolProgram:
-    transfer_groups = topology.transfer_groups
-    database = ChunkedTokenDatabase(
-        [group.key_metadata for group in topology.groups],
-        [group.block_size for group in topology.groups],
-        None,
-        topology.hash_block_size,
-    )
-    blocks, checkpoint_blocks = compile_block_resolutions(topology, frozenset())
-    return KVPoolProgram(
-        topology,
-        UnitaryReachability(
-            topology.transfer_group_ids[0],
-            max_model_len=64,
-            cache_transfer_granularity=topology.cache_transfer_granularity,
-        ),
-        SemanticChunkProjection(database, transfer_groups, False),
-        CheckpointChunkProjection(database, transfer_groups, frozenset()),
-        RemoteObjectProjection(
-            topology,
-            {group.group_id: topology.tp_partition.key_rank_count for group in transfer_groups},
-        ),
-        blocks,
-        checkpoint_blocks,
-        compile_store_ownership(topology, frozenset()),
-        BackendExistenceStoreAdmission() if requires_exists_before_put else UnconditionalStoreAdmission(),
-        "fake",
-        schedule,
-    )
 
 
 def make_runtime(
@@ -433,19 +272,20 @@ def make_runtime(
         layerwise_access=LayerwiseAccessKind.KEY_RANGE if layerwise else None,
         requires_exists_before_put=requires_exists_before_put,
     )
-    resources = FakeResources(backend, backend_spec, make_memory_geometry(topology))
-    spec = KVPoolCompilationSpec(topology, "fake", schedule, 64)
+    resources = FakeResources(backend, backend_spec, topology)
+    rule_spec = KVPoolRuleSpec(topology, "fake", 64, use_layerwise=layerwise)
     full_key = lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}"
     with patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.rules.resolve_backend_spec",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.compiler.resolve_backend_spec",
         return_value=backend_spec,
     ):
         rule_binder = compile_kv_pool_rules(
-            spec,
+            rule_spec,
             layerwise_full_key=full_key if layerwise else None,
         )
     runtime = KVPoolRuntime(
-        spec,
+        topology,
+        schedule,
         rule_binder,
         resources,
         **({"start_gate_factory": start_gate_factory} if start_gate_factory is not None else {}),

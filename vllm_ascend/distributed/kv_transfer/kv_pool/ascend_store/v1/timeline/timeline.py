@@ -1,14 +1,13 @@
-"""Bind a compiled schedule to runtime timeline state."""
+"""Select and bind the state machines of one KV Pool timeline."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
 
-from ...program.spec.schedule import KVPoolSchedule, LoadScheduleKind, StoreScheduleKind
-from ...program.spec.topology import KVPoolTopology
-from ..batch import KVTransferBatch
-from ..evidence import LoadCompletion, StoreCompletion
+from ..runtime.batch import KVTransferBatch
+from ..runtime.evidence import LoadCompletion, StoreCompletion
+from ..topology import KVPoolTopology
 from . import LoadTimelineProtocol, StoreBatch, StoreTimelineProtocol
 from .bulk import AsyncLoadTimeline, LoadTimeline, StoreTimeline
 from .layerwise import (
@@ -18,13 +17,14 @@ from .layerwise import (
     LayerwiseStoreTimeline,
     LayerwiseStoreTimelineProtocol,
 )
+from .schedule import KVPoolSchedule, LoadScheduleKind, StoreScheduleKind
 
 LoadOperation = Callable[[KVTransferBatch, int | None], tuple[LoadCompletion, ...]]
 StoreOperation = Callable[[KVTransferBatch, Any, int | None], tuple[StoreCompletion, ...]]
 StoreAdmission = Callable[[KVTransferBatch], KVTransferBatch]
 
 
-class KVPoolTimelineRuntime:
+class KVPoolTimeline:
     """Own the state machines selected by one Load/Store schedule."""
 
     def __init__(self, schedule: KVPoolSchedule, topology: KVPoolTopology) -> None:

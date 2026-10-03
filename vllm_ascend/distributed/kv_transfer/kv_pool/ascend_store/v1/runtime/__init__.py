@@ -1,1 +1,1 @@
-"""Worker-local resources and timelines for driving the KV Pool program."""
+"""Worker-local batches, Backend I/O, resources, and execution evidence."""

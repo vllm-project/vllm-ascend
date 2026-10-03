@@ -1,7 +1,14 @@
+"""Select request-visible KV regions and reduce Backend availability.
+
+These rules retain only configuration-derived reachability behavior. Request
+hashes, token ranges, and observed availability remain call-time inputs.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol, cast
+from dataclasses import dataclass
+from typing import TypeAlias, cast
 
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -21,31 +28,58 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
 )
 
-from ...coordinates import TokenRange
-from ...protocol.lookup import TailKeyBoundary
-from ..spec.topology import KVPoolGroupTopology
-from ..values.evidence import GroupAvailability, ReachablePrefix
-from ..values.selection import GroupSelection, KVSelection
+from ..coordinates import TokenRange
+from ..protocol.lookup import TailKeyBoundary
+from ..topology import KVPoolGroupTopology
 
 BlockHashes = Sequence[BlockHash | str]
+ChunkMask: TypeAlias = tuple[bool, ...] | None
 
 
-class ReachableRegionSelection(Protocol):
-    """Select reachable logical regions and reduce their observed common frontier."""
+@dataclass(frozen=True, slots=True)
+class GroupSelection:
+    """Logical chunks selected for one original vLLM cache group."""
 
-    group_ids: tuple[int, ...]
+    group_id: int
+    chunk_mask: ChunkMask
 
-    def select_for_lookup(self, block_hashes: BlockHashes, query_range: TokenRange) -> KVSelection: ...
+    def includes(self, start_token: int, block_size: int) -> bool:
+        chunk_index = start_token // block_size
+        return self.chunk_mask is None or (chunk_index < len(self.chunk_mask) and self.chunk_mask[chunk_index])
 
-    def resolve_available_end(
-        self, selection: KVSelection, availability: Sequence[GroupAvailability]
-    ) -> ReachablePrefix: ...
 
-    def select_for_load(self, block_hashes: BlockHashes, load_range: TokenRange) -> KVSelection: ...
+@dataclass(frozen=True, slots=True)
+class KVSelection:
+    """Content-identified KV selected on the Token axis."""
 
-    def select_for_store(
-        self, block_hashes: BlockHashes, store_range: TokenRange, num_prompt_tokens: int
-    ) -> KVSelection: ...
+    token_range: TokenRange
+    block_hashes: tuple[BlockHash | str, ...]
+    groups: tuple[GroupSelection, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkAvailability:
+    """Backend availability observed for one semantic KV chunk."""
+
+    token_range: TokenRange
+    content_hash: BlockHash | str
+    available: bool
+
+
+@dataclass(frozen=True, slots=True)
+class GroupAvailability:
+    """Semantic chunk observations for one original vLLM cache group."""
+
+    group_id: int
+    chunks: tuple[ChunkAvailability, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReachablePrefix:
+    """Common reachable frontier and the remote identities needed by its tail."""
+
+    end_token: int
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
 class ExternalCachedBlockPool:
