@@ -80,6 +80,36 @@ class TestResolveBlockScales(TestBase):
             resolved = resolve_block_scales(weight, scale_inv, 2, 3, torch.float32)
         self.assertTrue(torch.equal(resolved, expected))
 
+    def test_aligned_chunks_and_partial_final_block(self):
+        # A chunk size smaller than the row block must still preserve scale
+        # indexing when the final output block contains fewer rows.
+        weight, scale_inv = make_block_weight(10, 12, 3, 4, seed=3)
+        for out_dtype in (torch.float32, torch.float16, torch.bfloat16):
+            with self.subTest(out_dtype=out_dtype):
+                expected = reference_resolve(weight, scale_inv, 3, 4, out_dtype)
+                with patch(f"{MODULE}._ROWS_PER_DEQUANT_STEP", 2):
+                    resolved = resolve_block_scales(weight, scale_inv, 3, 4, out_dtype)
+                self.assertTrue(torch.equal(resolved, expected))
+
+    def test_noncontiguous_weight_and_scales(self):
+        weight = torch.randn(12, 12).to(torch.float8_e4m3fn).t()
+        scale_inv = (torch.rand(3, 4) + 0.5).t()
+        self.assertFalse(weight.is_contiguous())
+        self.assertFalse(scale_inv.is_contiguous())
+        for out_dtype in (torch.float32, torch.float16, torch.bfloat16):
+            with self.subTest(out_dtype=out_dtype):
+                resolved = resolve_block_scales(weight, scale_inv, 3, 4, out_dtype)
+                expected = reference_resolve(weight, scale_inv, 3, 4, out_dtype)
+                self.assertTrue(torch.equal(resolved, expected))
+
+    def test_empty_dimensions(self):
+        for shape in ((0, 12), (12, 0), (0, 0)):
+            with self.subTest(shape=shape):
+                weight, scale_inv = make_block_weight(*shape, 3, 4)
+                resolved = resolve_block_scales(weight, scale_inv, 3, 4, torch.bfloat16)
+                self.assertEqual(resolved.shape, shape)
+                self.assertEqual(resolved.dtype, torch.bfloat16)
+
     def test_scale_is_applied_in_float32(self):
         # A block's shared scale is applied before the result is rounded to the
         # model dtype, so a scale bfloat16 cannot represent is not itself lossy.
