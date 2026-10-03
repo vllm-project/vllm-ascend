@@ -13,6 +13,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import Ke
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
     LayerwiseAccessKind,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.compilation import (
     KVPoolCompilationSpec,
 )
@@ -79,6 +80,8 @@ def test_rules_bind_static_facts_once_then_share_dynamic_rows(monkeypatch) -> No
     assert phi.requires_store_observation
     assert phi.required_object_sizes is None
     assert KVMemoryRule.__slots__ == ("full", "partial", "store_full", "store_partial")
+    assert phi.object_size(0) == 64
+    assert phi.lookup_selection(("h0",), TokenRange(0, 4)).groups[0].chunk_mask is None
 
     hashes = ["h0", "h1", "h2"]
     load_rows = phi.load_rows(0, 12, hashes, [4, 5, 6], mask=(True, False, True))

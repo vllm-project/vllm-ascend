@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -20,6 +21,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.lowerin
     lower_transfer_plans,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.program import KVPoolProgram
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.compilation import (
+    KVPoolCompilationSpec,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.schedule import (
     KVPoolSchedule,
     LoadScheduleKind,
@@ -65,6 +69,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.values.
     BoundGroupPlan,
     TransferRows,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import compile_kv_pool_rules
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.runtime import KVPoolRuntime
 
 
@@ -336,7 +341,34 @@ class FakeResources:
 
     def bind_kv_caches(self, kv_caches):
         self.kv_caches = kv_caches
-        return self._geometry
+        base_addresses = {}
+        block_lengths = {}
+        block_strides = {}
+        layer_entry_offsets = {}
+        object_sizes = {}
+        object_offsets = {}
+        for group_id, segments in self._geometry.items():
+            base_addresses[group_id] = [segment.base_address for segment in segments]
+            block_lengths[group_id] = [segment.block_length for segment in segments]
+            block_strides[group_id] = [segment.block_stride for segment in segments]
+            layer_offsets = [0]
+            previous_layer = None
+            for index, segment in enumerate(segments):
+                if previous_layer is not None and segment.physical_layer_id != previous_layer:
+                    layer_offsets.append(index)
+                previous_layer = segment.physical_layer_id
+            layer_offsets.append(len(segments))
+            layer_entry_offsets[group_id] = layer_offsets
+            object_sizes[group_id] = sum(block_lengths[group_id])
+            object_offsets[group_id] = 0
+        return {
+            "base_addresses": base_addresses,
+            "block_lengths": block_lengths,
+            "block_strides": block_strides,
+            "layer_entry_offsets": layer_entry_offsets,
+            "object_sizes": object_sizes,
+            "object_offsets": object_offsets,
+        }
 
     def close(self) -> None:
         self.closed = True
@@ -402,8 +434,19 @@ def make_runtime(
         requires_exists_before_put=requires_exists_before_put,
     )
     resources = FakeResources(backend, backend_spec, make_memory_geometry(topology))
+    spec = KVPoolCompilationSpec(topology, "fake", schedule, 64)
+    full_key = lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}"
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.rules.resolve_backend_spec",
+        return_value=backend_spec,
+    ):
+        rule_binder = compile_kv_pool_rules(
+            spec,
+            layerwise_full_key=full_key if layerwise else None,
+        )
     runtime = KVPoolRuntime(
-        make_program(topology, schedule, requires_exists_before_put=requires_exists_before_put),
+        spec,
+        rule_binder,
         resources,
         **({"start_gate_factory": start_gate_factory} if start_gate_factory is not None else {}),
         source_ready_event_factory=source_ready_event_factory or FakeEvent,

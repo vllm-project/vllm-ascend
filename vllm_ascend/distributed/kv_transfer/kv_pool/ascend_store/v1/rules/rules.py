@@ -11,6 +11,7 @@ import numpy as np
 from ..backend import LayerwiseAccessKind, resolve_backend_spec
 from ..program.spec.compilation import KVPoolCompilationSpec
 from ..program.spec.topology import KVPoolTopology
+from ..program.stages.reachability import HybridReachability, UnitaryReachability
 from .identity import (
     BlockRows,
     KeyAxes,
@@ -46,14 +47,19 @@ class KVPoolRules:
         "group_ids",
         "load_keys",
         "load_rows",
+        "load_selection",
         "lookup_chunks",
         "lookup_keys",
         "memory",
+        "object_size",
         "partial_key",
+        "resolve_lookup",
         "required_object_sizes",
         "requires_store_observation",
         "store_keys",
         "store_rows",
+        "store_selection",
+        "lookup_selection",
     )
 
     def __init__(
@@ -61,8 +67,12 @@ class KVPoolRules:
         *,
         group_ids: tuple[int, ...],
         lookup_chunks: Callable,
+        lookup_selection: Callable,
+        resolve_lookup: Callable,
         load_rows: Callable,
+        load_selection: Callable,
         store_rows: Callable,
+        store_selection: Callable,
         checkpoint_rows: Callable | None,
         lookup_keys: Callable,
         load_keys: Callable,
@@ -71,13 +81,18 @@ class KVPoolRules:
         requires_store_observation: bool,
         admit_store: Callable,
         memory: KVMemoryRule,
+        object_size: Callable,
         format_ranges: Callable,
         required_object_sizes_rule: Callable | None,
     ) -> None:
         self.group_ids = group_ids
         self.lookup_chunks = lookup_chunks
+        self.lookup_selection = lookup_selection
+        self.resolve_lookup = resolve_lookup
         self.load_rows = load_rows
+        self.load_selection = load_selection
         self.store_rows = store_rows
+        self.store_selection = store_selection
         self.checkpoint_rows = checkpoint_rows
         self.lookup_keys = lookup_keys
         self.load_keys = load_keys
@@ -86,6 +101,7 @@ class KVPoolRules:
         self.requires_store_observation = requires_store_observation
         self.admit_store = admit_store
         self.memory = memory
+        self.object_size = object_size
         self.format_ranges = format_ranges
         self.required_object_sizes = required_object_sizes_rule
 
@@ -110,6 +126,21 @@ def compile_kv_pool_rules(
     _validate_static_rules(spec, align_state_group_ids, layerwise_full_key)
 
     _, lookup_chunks, load_rows = bind_chunk_rules(topology)
+    if len(groups) == 1 and not align_state_group_ids:
+        reachability = UnitaryReachability(
+            topology.transfer_group_ids[0],
+            spec.max_model_len,
+            topology.cache_transfer_granularity,
+        )
+    else:
+        reachability = HybridReachability(
+            groups,
+            scheduler_block_size=topology.cache_transfer_granularity,
+            hash_block_size=topology.hash_block_size,
+            max_model_len=spec.max_model_len,
+            use_eagle=spec.use_eagle,
+            retention_interval=spec.retention_interval,
+        )
     store_pipeline_ranks = resolve_store_pipeline_ranks(topology)
     load_keys, store_keys, lookup_keys, partial_key = bind_key_rules(
         topology,
@@ -157,8 +188,12 @@ def compile_kv_pool_rules(
         _bind_rules,
         group_ids=topology.transfer_group_ids,
         lookup_chunks=lookup_chunks,
+        lookup_selection=reachability.select_for_lookup,
+        resolve_lookup=reachability.resolve_available_end,
         load_rows=load_rows,
+        load_selection=reachability.select_for_load,
         store_rows=store_rows,
+        store_selection=reachability.select_for_store,
         checkpoint_rows=checkpoint_rows,
         lookup_keys=lookup_keys,
         load_keys=load_keys,
@@ -182,8 +217,12 @@ def _bind_rules(
     object_offsets: Mapping[int, int] | None = None,
     group_ids: tuple[int, ...],
     lookup_chunks: Callable,
+    lookup_selection: Callable,
+    resolve_lookup: Callable,
     load_rows: Callable,
+    load_selection: Callable,
     store_rows: Callable,
+    store_selection: Callable,
     checkpoint_rows: Callable | None,
     lookup_keys: Callable,
     load_keys: Callable,
@@ -204,11 +243,24 @@ def _bind_rules(
         object_offsets=object_offsets,
         **memory_parameters,
     )
+    data_plane = memory_parameters["data_plane"]
+    object_size_by_group = {
+        group_id: (
+            int(object_sizes[group_id])
+            if data_plane == "gva" and object_sizes is not None
+            else int(sum(block_lengths[group_id]))
+        )
+        for group_id in group_ids
+    }
     return KVPoolRules(
         group_ids=group_ids,
         lookup_chunks=lookup_chunks,
+        lookup_selection=lookup_selection,
+        resolve_lookup=resolve_lookup,
         load_rows=load_rows,
+        load_selection=load_selection,
         store_rows=store_rows,
+        store_selection=store_selection,
         checkpoint_rows=checkpoint_rows,
         lookup_keys=lookup_keys,
         load_keys=load_keys,
@@ -217,9 +269,14 @@ def _bind_rules(
         requires_store_observation=requires_store_observation,
         admit_store=admit_store,
         memory=memory,
+        object_size=partial(_object_size, object_size_by_group),
         format_ranges=format_ranges,
         required_object_sizes_rule=required_object_sizes_rule,
     )
+
+
+def _object_size(sizes: Mapping[int, int], group_id: int) -> int:
+    return sizes[group_id]
 
 
 def _store_rows(

@@ -269,7 +269,7 @@ def test_store_completion_uses_transfer_source_evidence_without_reinterpreting_i
     assert failure.value.__cause__ is cause
 
 
-def test_bulk_runtime_store_success_and_failure_preserve_source_safety() -> None:
+def test_bulk_runtime_store_success_and_failure_preserve_source_safety(monkeypatch) -> None:
     command = RangeStoreCommand("request", TokenRange(0, 4), ((1,),), (b"a",), 4, 7)
 
     success, resources, backend = make_runtime(source_ready_event_factory=FakeEvent)
@@ -281,6 +281,46 @@ def test_bulk_runtime_store_success_and_failure_preserve_source_safety() -> None
     assert success.take_released_store_job_ids() == {7}
     success.close()
     assert resources.closed and backend.closed is False
+
+    duplicate_backend = FakeBackend()
+    duplicate_runtime, duplicate_resources, _ = make_runtime(
+        duplicate_backend,
+        source_ready_event_factory=FakeEvent,
+    )
+    duplicate_command = replace(
+        command,
+        request_id="duplicate",
+        block_ids_by_group=((3,),),
+        store_job_id=8,
+    )
+    begin_step(duplicate_runtime, store=StoreCommandBatch((command, duplicate_command)))
+    duplicate_runtime.finish_step()
+    duplicate_runtime.fence_previous_store()
+    put_call = next(call for call in duplicate_backend.calls if call[0] == "put")
+    assert len(put_call[1]) == 1
+    assert duplicate_runtime.take_released_store_job_ids() == {7, 8}
+    duplicate_runtime.close()
+    assert duplicate_resources.closed
+
+    admission_backend = FakeBackend()
+
+    def fail_admission(_keys):
+        raise RuntimeError("exists failed")
+
+    monkeypatch.setattr(admission_backend, "exists", fail_admission)
+    admission_failure, admission_resources, _ = make_runtime(
+        admission_backend,
+        requires_exists_before_put=True,
+        source_ready_event_factory=FakeEvent,
+    )
+    begin_step(admission_failure, store=StoreCommandBatch((command,)))
+    admission_failure.finish_step()
+    with pytest.raises(RuntimeError, match="Store failed"):
+        admission_failure.fence_previous_store()
+    assert admission_failure.take_released_store_job_ids() == {7}
+    with pytest.raises(RuntimeError, match="previous Store failure"):
+        admission_failure.close()
+    assert admission_resources.closed
 
     for native_result in ([-1], RuntimeError("put failed")):
         failed_backend = FakeBackend()

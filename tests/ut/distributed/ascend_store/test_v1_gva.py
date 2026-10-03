@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1 import backend as backend_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import (
@@ -13,6 +15,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend import 
     LayerwiseAccessKind,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.coordinates import TokenRange
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.compilation import (
+    KVPoolCompilationSpec,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.program.spec.schedule import (
     KVPoolSchedule,
     LoadScheduleKind,
@@ -23,8 +28,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.transf
     RangeStoreCommand,
     StoreCommandBatch,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules import compile_kv_pool_rules
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.backend import (
     GVABackendIO,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.resources import (
+    GVAObjectLayout,
+    KVPoolResources,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.runtime import (
     KVPoolRuntime,
@@ -35,7 +45,6 @@ from .v1.helpers import (
     FakeEvent,
     FakeResources,
     make_memory_geometry,
-    make_program,
     make_topology,
     make_work,
 )
@@ -136,9 +145,20 @@ def make_gva_runtime():
     backend = FakeGVABackend()
     topology = make_topology()
     schedule = KVPoolSchedule(LoadScheduleKind.LAYERWISE, StoreScheduleKind.LAYERWISE, 2)
-    resources = FakeResources(backend, make_gva_spec(), make_memory_geometry(topology))
+    backend_spec = make_gva_spec()
+    resources = FakeResources(backend, backend_spec, make_memory_geometry(topology))
+    spec = KVPoolCompilationSpec(topology, "memcache", schedule, 64)
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.rules.resolve_backend_spec",
+        return_value=backend_spec,
+    ):
+        rule_binder = compile_kv_pool_rules(
+            spec,
+            layerwise_full_key=lambda group, value, head, stage: f"g{group}:p{stage}:h{head}:{value}",
+        )
     runtime = KVPoolRuntime(
-        make_program(topology, schedule, requires_exists_before_put=True),
+        spec,
+        rule_binder,
         resources,
         source_ready_event_factory=FakeEvent,
     )
@@ -157,7 +177,7 @@ def test_backend_selection_fixes_access_kind_once(monkeypatch) -> None:
     assert {name: backend_module.resolve_backend_spec(name).layerwise_access for name in expected} == expected
 
 
-def test_gva_initialization_rejects_each_missing_native_capability(monkeypatch) -> None:
+def test_gva_initialization_validates_native_capabilities_and_registered_layout(monkeypatch) -> None:
     backend = FakeGVABackend()
     monkeypatch.setattr(backend.store, "batch_write_finish", None)
     monkeypatch.setattr(backend, "batch_write_finish", lambda *args: [0], raising=False)
@@ -168,6 +188,35 @@ def test_gva_initialization_rejects_each_missing_native_capability(monkeypatch) 
     monkeypatch.setattr(unavailable, "store", None)
     with pytest.raises(RuntimeError, match="store is unavailable"):
         GVABackendIO(unavailable, make_gva_spec())
+
+    topology = make_topology(physical_layers=(4, 5))
+    registration_backend = FakeBackend()
+    resources = KVPoolResources(
+        registration_backend,
+        make_gva_spec(),
+        8,
+        topology.groups,
+        gva_layout=GVAObjectLayout(
+            pipeline_layer_start=4,
+            total_hidden_layers=4,
+            dcp_rank=1,
+            dcp_size=2,
+            put_step=2,
+        ),
+    )
+    caches = {
+        layer_name: torch.empty((8, 4), dtype=torch.float32)
+        for layer_name in topology.groups[0].layer_names
+    }
+    registration = resources.bind_kv_caches(caches)
+
+    assert registration["base_addresses"] == {0: [cache.data_ptr() for cache in caches.values()]}
+    assert registration["block_lengths"] == {0: [16, 16]}
+    assert registration["block_strides"] == {0: [16, 16]}
+    assert registration["layer_entry_offsets"] == {0: [0, 1, 2]}
+    assert registration["object_offsets"] == {0: 2 * 1024 * 1024 + 64}
+    assert registration["object_sizes"] == {0: 4 * 1024 * 1024}
+    assert registration_backend.calls[-1][0] == "register_buffer"
 
 
 def test_gva_readability_changes_only_after_publication() -> None:
@@ -279,17 +328,14 @@ def test_gva_runtime_publishes_after_all_layers_and_reports_job_release() -> Non
     runtime.save_layer("layers.0.group.0")
     runtime._timeline.store._executor._queue.join()
     backend_io = runtime._backend_io
-    assert len(backend_io._resolved_store_sessions) == 1
-    assert len(backend_io._resolved_store_batches) == 1
-    resolved_session = next(iter(backend_io._resolved_store_sessions.values()))
-    resolved_batch = next(iter(backend_io._resolved_store_batches.values()))
+    assert len(backend_io._rule_store_bases) == 1
+    resolved_bases = next(iter(backend_io._rule_store_bases.values()))
     assert [call[0] for call in store.calls].count("copy") == 1
     assert not any(call[0] == "publish" for call in store.calls)
 
     runtime.save_layer("layers.1.group.0")
     runtime._timeline.store._executor._queue.join()
-    assert next(iter(backend_io._resolved_store_sessions.values())) is resolved_session
-    assert next(iter(backend_io._resolved_store_batches.values())) is resolved_batch
+    assert next(iter(backend_io._rule_store_bases.values())) is resolved_bases
     runtime.finish_step()
     assert [call[0] for call in store.calls if call[0] in ("alloc", "copy", "publish")] == [
         "alloc",
@@ -298,8 +344,7 @@ def test_gva_runtime_publishes_after_all_layers_and_reports_job_release() -> Non
         "publish",
     ]
     assert all(region[2] for region in store.objects.values())
-    assert not backend_io._resolved_store_sessions
-    assert not backend_io._resolved_store_batches
+    assert not backend_io._rule_store_bases
     assert runtime.take_released_store_job_ids() == {17}
     runtime.close()
     assert resources.closed
