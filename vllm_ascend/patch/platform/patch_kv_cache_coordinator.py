@@ -6,6 +6,7 @@ from math import lcm
 
 import vllm
 import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
@@ -205,12 +206,31 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for g in kv_cache_config.kv_cache_groups
                 if is_prefix_cacheable(g.kv_cache_spec)
             ), "block_size must be divisible by hash_block_size"
-        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
-            and g.kv_cache_spec.block_size > hash_block_size
-            for g in kv_cache_config.kv_cache_groups
+        has_partial_mamba_group = any(
+            isinstance(spec := _manager_spec(group.kv_cache_spec), MambaSpec)
+            and spec.mamba_cache_mode == "align"
+            and (
+                (dcp_world_size == 1 and spec.block_size > hash_block_size)
+                or (dcp_world_size > 1 and spec.block_size >= hash_block_size)
+            )
+            for group in kv_cache_config.kv_cache_groups
         )
+        self.enable_partial_hash_hits = allow_partial_hash_hits and has_partial_mamba_group
+        if self.enable_partial_hash_hits:
+            unsupported_partial_hit_managers = {
+                type(manager).__name__
+                for manager, group in zip(self.single_type_managers, kv_cache_config.kv_cache_groups)
+                if is_prefix_cacheable(group.kv_cache_spec)
+                and not manager.supports_fine_grained_hash_lookup
+                and manager.block_size != hash_block_size
+            }
+            if unsupported_partial_hit_managers:
+                self.enable_partial_hash_hits = False
+                logger.warning_once(
+                    "Disabling fine-grained prefix-cache hits because these KV "
+                    "cache managers require block-aligned lookups: %s.",
+                    ", ".join(sorted(unsupported_partial_hit_managers)),
+                )
         self.verify_and_split_kv_cache_groups()
 
         # Align the WRITE-path mask granularity (reachable_block_mask) with the
