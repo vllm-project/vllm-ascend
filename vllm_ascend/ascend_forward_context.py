@@ -310,6 +310,7 @@ def _select_capacity_and_expert_density_moe_comm_method(
         num_experts_per_device <= 24
         and ep_world_size >= 16
         and (num_tokens is None or num_tokens <= mc2_tokens_capacity)
+        and get_ascend_config().mc2_comm_alg != "hierarchy"
     ):
         return MoECommType.MC2
     return MoECommType.ALLGATHER
