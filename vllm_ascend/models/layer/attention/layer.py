@@ -37,9 +37,9 @@ def get_dsv4_block_sizes(use_a5_bf16_kv: bool = False):
         32: [[32, 32, 2, 8], [4160, 32768]],
     }
     _DSV4_COMPRESSED_BLOCK_SIZES = {
-        128: [[128, 128, 8, 16], [16896, 81920]],
-        64: [[64, 64, 4, 8], [8448, 40960]],
-        32: [[32, 32, 2, 4], [4224, 20480]],
+        128: [[128, 128, 8, 16], [16896, 77824]],
+        64: [[64, 64, 4, 8], [8448, 38912]],
+        32: [[32, 32, 2, 4], [4224, 19456]],
     }
     _DSV4_BLOCK_SIZES_A5_BF16 = {
         128: [[128, 128, 8, 16], [16896, 131072]],
@@ -194,7 +194,9 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         use_bf16_kv = is_a5_bf16_kv_enabled(vllm_config)
         has_compressed_cache = get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
 
-        cached_head_size = self.head_size + 128 if has_compressed_cache and not use_bf16_kv else self.head_size
+        # FP8 compressed cache row: quantMode=1 layout = 608 B/token, i.e.
+        # head_size + 96 (was head_size + 128 for the old 640 B layout).
+        cached_head_size = self.head_size + 96 if has_compressed_cache and not use_bf16_kv else self.head_size
         storage_block_size = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][0][0]
         # vLLM #51718 replaced MLAAttentionSpec.compress_ratio with
         # AttentionSpec.tokens_per_state on main.
