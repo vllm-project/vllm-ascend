@@ -35,8 +35,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_cache_family,
     infer_cache_transfer_granularity,
     infer_dcp_mismatch_info,
+    infer_decode_only_dcp,
     infer_group_block_sizes,
+    infer_peer_cp_sizes,
     masked_block_runs,
+    resolve_layout_dcp_size,
     uses_hybrid_kv_cache,
 )
 
@@ -795,3 +798,31 @@ class TestInferDcpMismatchInfo(unittest.TestCase):
 
     def test_invalid_peer_value_treated_as_local(self):
         self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": "bad"}, 2, 1))
+
+
+class TestDecodeOnlyDcpLayout(unittest.TestCase):
+    def test_infer_decode_only_dcp_true_for_decoder_sharded(self):
+        self.assertTrue(infer_decode_only_dcp(1, 1, 8, 1))
+        self.assertTrue(infer_decode_only_dcp(8, 1, 1, 1))
+
+    def test_infer_decode_only_dcp_false_when_both_sharded(self):
+        self.assertFalse(infer_decode_only_dcp(2, 1, 4, 1))
+
+    def test_infer_decode_only_dcp_false_when_pcp_present(self):
+        self.assertFalse(infer_decode_only_dcp(1, 2, 8, 1))
+
+    def test_infer_decode_only_dcp_false_when_symmetric(self):
+        self.assertFalse(infer_decode_only_dcp(1, 1, 1, 1))
+        self.assertFalse(infer_decode_only_dcp(8, 1, 8, 1))
+
+    def test_resolve_layout_dcp_size(self):
+        self.assertEqual(resolve_layout_dcp_size(True, 1, 8), 8)
+        self.assertEqual(resolve_layout_dcp_size(True, 8, 1), 8)
+        self.assertEqual(resolve_layout_dcp_size(False, 3, 8), 3)
+
+    def test_infer_peer_cp_sizes_by_role(self):
+        self.assertEqual(
+            infer_peer_cp_sizes("kv_consumer", {"prefill_dcp_size": 8, "prefill_pcp_size": 1}, 1, 1), (8, 1)
+        )
+        self.assertEqual(infer_peer_cp_sizes("kv_producer", {"decode_dcp_size": 4}, 1, 1), (4, 1))
+        self.assertEqual(infer_peer_cp_sizes("kv_consumer", {}, 2, 1), (2, 1))
