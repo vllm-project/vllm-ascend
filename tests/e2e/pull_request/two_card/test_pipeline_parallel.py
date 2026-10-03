@@ -14,9 +14,12 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
+from unittest.mock import patch
+
 import pytest
 
-from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
 
 DS3 = "deepseek-ai/DeepSeek-V2-Lite-Chat"
@@ -27,7 +30,7 @@ MOE_MODELS = [
     DS3,
 ]
 
-DATA_PARALLELS = [2]
+TENSOR_PARALLELS = [1]
 PIPELINE_PARALLELS = [2]
 DIST_EXECUTOR_BACKEND = ["mp", "ray"]
 
@@ -35,12 +38,7 @@ prompts = [
     "Hello, my name is",
     "The future of AI is",
 ]
-
-# After #15299, routing weights are preserved without intermediate dtype
-# casts, which deterministically changes greedy decoding for the DP2+PP2
-# path of DeepSeek-V2-Lite-Chat. The TP1+PP2 baseline lives in
-# tests/e2e/pull_request/two_card/test_pipeline_parallel.py.
-DP_GOLDEN = [
+GOLDEN = [
     (
         [
             17464,
@@ -59,13 +57,13 @@ DP_GOLDEN = [
             29,
             285,
             304,
-            608,
+            6,
+            76,
             245,
             459,
             6946,
-            29,
         ],
-        "Hello, my name is <strong>Alessandro</strong> and I am a <strong>",
+        "Hello, my name is <strong>Alessandro</strong> and I'm a <strong",
     ),
     (
         [
@@ -97,14 +95,15 @@ DP_GOLDEN = [
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dp_size", DATA_PARALLELS)
+@pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 @pytest.mark.parametrize("pp_size", PIPELINE_PARALLELS)
 @pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
+@patch.dict(os.environ, {"OMP_NUM_THREADS": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.6)
-def test_models_pp2_dp2(model: str, dp_size: int, pp_size: int, distributed_executor_backend: str) -> None:
-    with DPVllmRunner(
+def test_models_pp2_tp2(model: str, tp_size: int, pp_size: int, distributed_executor_backend: str) -> None:
+    with VllmRunner(
         model,
-        data_parallel_size=dp_size,
+        tensor_parallel_size=tp_size,
         pipeline_parallel_size=pp_size,
         compilation_config={
             "cudagraph_capture_sizes": [1, 2, 4],
@@ -116,7 +115,7 @@ def test_models_pp2_dp2(model: str, dp_size: int, pp_size: int, distributed_exec
         outputs = vllm_model.generate_greedy(prompts, 16)
         check_outputs_equal(
             outputs_0_lst=outputs,
-            outputs_1_lst=DP_GOLDEN,
-            name_0=f"{model}-dp{dp_size}pp{pp_size}",
+            outputs_1_lst=GOLDEN,
+            name_0=f"{model}-tp{tp_size}pp{pp_size}",
             name_1="GOLDEN",
         )
