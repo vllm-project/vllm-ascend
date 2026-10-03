@@ -127,6 +127,14 @@ a3:
         config_file_path: QWEN3_235B_PD_3_5K_1_5k.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
         size: 3
+      - name: DeepSeek-V4-Pro-w4a8-dspark-PD-MRV2
+        config_file_path: DeepSeek-V4-Pro-w4a8-dspark-PD-MRV2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
+      - name: DeepSeek-V4-Pro-w4a8-1M-PD-MRV2
+        config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD-MRV2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
 
   double_node:
     test_config:
