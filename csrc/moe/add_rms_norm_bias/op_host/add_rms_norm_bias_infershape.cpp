@@ -55,16 +55,15 @@ static ge::graphStatus InferShape4AddRmsNormBias(gert::InferShapeContext* contex
         return GRAPH_SUCCESS;
     }
 
-    OP_CHECK_IF(
-        xDimNum < gammaDimNum, OP_LOGE(context, "x dim num should not be smaller than gamma dim num."),
-        return GRAPH_FAILED);
+    OP_CHECK_IF(xDimNum < gammaDimNum, OP_LOGE(context, "x dim num should not be smaller than gamma dim num."),
+                return GRAPH_FAILED);
 
     rstdShape->SetDimNum(xDimNum);
-    for (size_t i = 0; i < xDimNum; i++) {
-        if (i < xDimNum - gammaDimNum) {
-            rstdShape->SetDim(i, x1Shape->GetDim(i));
+    for (size_t rmsIdx = 0; rmsIdx < xDimNum; rmsIdx++) {
+        if (rmsIdx < xDimNum - gammaDimNum) {
+            rstdShape->SetDim(rmsIdx, x1Shape->GetDim(rmsIdx));
         } else {
-            rstdShape->SetDim(i, 1);
+            rstdShape->SetDim(rmsIdx, 1);
         }
     }
 
@@ -83,4 +82,5 @@ static graphStatus InferDataType4AddRmsNormBias(gert::InferDataTypeContext* cont
 }
 
 IMPL_OP_INFERSHAPE(AddRmsNormBias).InferShape(InferShape4AddRmsNormBias).InferDataType(InferDataType4AddRmsNormBias);
+IMPL_OP_INFERSHAPE(InplaceAddRmsNormBias).InferShape(InferShape4AddRmsNormBias).InferDataType(InferDataType4AddRmsNormBias);
 } // namespace ops

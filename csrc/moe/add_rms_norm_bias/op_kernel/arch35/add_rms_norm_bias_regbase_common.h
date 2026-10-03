@@ -25,7 +25,7 @@
 #include "../rms_norm_base.h"
 #include "deps/rms_norm_regbase_common.h"
 #include "deps/reduce_common_regbase.h"
-namespace AddRmsNormBiasA5 {
+namespace AddRmsNorm {
 using namespace AscendC;
 using namespace AscendC::MicroAPI;
 using namespace NormCommon;
@@ -754,5 +754,5 @@ __aicore__ inline void ComputeLatterY(LocalTensor<float>& xFp32, LocalTensor<T>&
         }
     }
 }
-} // namespace AddRmsNormBiasA5
+} // namespace AddRmsNorm
 #endif // ADD_RMS_NORM_BIAS_REGBASE_COMMON_H

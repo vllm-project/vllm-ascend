@@ -8,244 +8,196 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-// Adapted from cann/ops-nn norm/add_rms_norm/op_host/add_rms_norm_tiling_arch35.cpp,
-// v9.2.0-beta.2 @ 30ef7dd563c8a4b74c3161835c8e47d1d96f87b6.
-// Local changes: isolated platform adapter, checked input/range contract and optional beta UB accounting.
-#include <algorithm>
-#include <cmath>
-#include <cstdint>
-#include <limits>
+/*!
+ * \file add_rms_norm_bias_tiling_arch35.cpp
+ * \brief
+ */
+// Adapted from cann/ops-nn v9.2.0-beta.2 @ 30ef7dd563c8a4b74c3161835c8e47d1d96f87b6.
+// Preserve upstream tiling; add optional beta storage and local platform/logging adapters.
 
+#include <algorithm>
+#include <map>
+#include "register/op_impl_registry.h"
 #include "add_rms_norm_bias_tiling.h"
 #include "log/ops_log.h"
 
 namespace optiling {
 namespace addRmsNormBiasRegbase {
-namespace {
-constexpr uint32_t X1_INDEX = 0;
-constexpr uint32_t X2_INDEX = 1;
+constexpr uint32_t ULONG_BIT_LEN = 64;
+constexpr uint32_t DTYPE_KEY_FP16 = 1;
+constexpr uint32_t DTYPE_KEY_FP32 = 2;
+constexpr uint32_t DTYPE_KEY_BF16 = 3;
+constexpr uint32_t FLOAT_BLOCK_ALIGN_NUM = 8;
+constexpr uint32_t FLOAT_PER_REAPEAT = 64;
+constexpr uint32_t BYTE_SIZE_2_BLOCK_ALIGN_NUM = 16;
+constexpr uint32_t X_INDEX = 0;
 constexpr uint32_t GAMMA_INDEX = 2;
 constexpr uint32_t BETA_INDEX = 3;
-constexpr uint32_t Y_INDEX = 0;
-constexpr uint32_t RSTD_INDEX = 1;
-constexpr uint32_t X_INDEX = 2;
-constexpr size_t MAX_DIM_NUM = 8;
-constexpr uint64_t UB_USED = 1024;
-constexpr uint64_t UB_RESERVE_FOR_RSTDALIGN = 1024;
-constexpr uint64_t MODE_R_FULL_LOAD = 1000;
-constexpr uint64_t MODE_SPLIT_D = 2000;
-constexpr uint64_t DOUBLE_BUFFER_NUM = 2;
-constexpr uint64_t FULL_LOAD_QUEUE_NUM = 4;
-constexpr uint64_t SPLIT_QUEUE_NUM = 5;
-constexpr uint64_t RETAINED_SIZE = 5120;
-constexpr uint64_t SPLIT_ALIGN_BYTES = 512;
-constexpr uint64_t NDDMA_BETTER_STAGE = 512;
-constexpr uint64_t ONCE_VECTOR_SIZE = 256;
-// Matches the copied arch35 kernel platform helpers; only used after ASCEND950 dispatch.
+// A5-only dispatch; matches the copied Device platform helpers.
 constexpr uint64_t UB_BLOCK_BYTES = 32;
 constexpr uint64_t VECTOR_REGISTER_BYTES = 256;
-constexpr uint64_t FP32_VECTOR_ELEMENTS = VECTOR_REGISTER_BYTES / sizeof(float);
-constexpr uint64_t MAX_SPLIT_UB_FACTOR = ONCE_VECTOR_SIZE * 2 * FP32_VECTOR_ELEMENTS;
-constexpr uint64_t UINT32_LIMIT = std::numeric_limits<uint32_t>::max();
-constexpr uint64_t MAX_FULL_LOAD_ROWS = std::numeric_limits<uint16_t>::max();
-constexpr uint64_t MAX_TOTAL_ELEMENTS = std::numeric_limits<int64_t>::max() / sizeof(float);
-constexpr size_t SYSTEM_WORKSPACE_BYTES = 16UL * 1024UL * 1024UL;
-constexpr size_t USER_WORKSPACE_BYTES = 256;
+constexpr uint32_t FLOAT_BYTE_SIZE = 4;
+constexpr uint32_t UB_USED = 1024;
+constexpr uint32_t UB_RESERVE_FOR_RSTDALIGN = 1024;
+constexpr uint32_t MODE_NORMAL = 1000;
+constexpr uint32_t MODE_SPLIT_D = 2000;
+constexpr uint32_t QUE_NUM = 5;
+constexpr uint32_t QUE_MODE_NORMAL_NUM = 4;
+constexpr uint64_t ALING_FACTOR_256 = 256;
+constexpr uint64_t ALING_FACTOR_512 = 512;
+constexpr uint32_t RETAINED_SIZE = 5120; // 256 * 5 * 4;
+constexpr uint32_t DOUBLE_BUFFER_NUM = 2;
+constexpr uint32_t MULTI_FACTOR_2 = 2;
+constexpr uint32_t NUM_2 = 2;
+constexpr uint32_t NDDMA_BETTER_STAGE = 512;
 
-bool SameShape(const gert::Shape& left, const gert::Shape& right)
+const std::map<ge::DataType, uint32_t> dTypeByteMap = {
+    {ge::DT_FLOAT16, 2},
+    {ge::DT_FLOAT, 4},
+    {ge::DT_BF16, 2},
+};
+
+template <typename T>
+auto CeilDiv(T x, T y) -> T
 {
-    if (left.GetDimNum() != right.GetDimNum()) {
-        return false;
-    }
-    for (size_t i = 0; i < left.GetDimNum(); ++i) {
-        if (left.GetDim(i) != right.GetDim(i)) {
-            return false;
-        }
-    }
-    return true;
+    return y == 0 ? x : (x + y - 1) / y;
 }
 
-ge::graphStatus ValidateInputs(gert::TilingContext* context, uint64_t& numRow, uint64_t& numCol,
-                              ge::DataType& dtype, bool& hasBeta, float& epsilon)
+void SetByDtype(ge::DataType dataType, uint32_t& dtypeKey, uint32_t& dataPerBlock)
 {
-    const auto x1 = context->GetInputShape(X1_INDEX);
-    const auto x2 = context->GetInputShape(X2_INDEX);
-    const auto gamma = context->GetInputShape(GAMMA_INDEX);
-    const auto y = context->GetOutputShape(Y_INDEX);
-    const auto rstd = context->GetOutputShape(RSTD_INDEX);
-    const auto x = context->GetOutputShape(X_INDEX);
-    OP_CHECK_IF(x1 == nullptr || x2 == nullptr || gamma == nullptr || y == nullptr || rstd == nullptr || x == nullptr,
-                OP_LOGE(context, "A5 AddRmsNormBias requires all mandatory input and output shapes."),
-                return ge::GRAPH_FAILED);
-    const auto& xShape = x1->GetStorageShape();
-    const auto& gammaShape = gamma->GetStorageShape();
-    const auto& rstdShape = rstd->GetStorageShape();
-    const size_t xRank = xShape.GetDimNum();
-    const size_t gammaRank = gammaShape.GetDimNum();
-    OP_CHECK_IF(xRank == 0 || xRank > MAX_DIM_NUM || gammaRank == 0 || gammaRank > xRank,
-                OP_LOGE(context, "A5 AddRmsNormBias requires 1 <= gamma rank <= x rank <= 8."),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(!SameShape(xShape, x2->GetStorageShape()) || !SameShape(xShape, y->GetStorageShape()) ||
-                    !SameShape(xShape, x->GetStorageShape()) || rstdShape.GetDimNum() != xRank,
-                OP_LOGE(context, "A5 AddRmsNormBias x1/x2/y/x shapes must match and rstd must have x rank."),
-                return ge::GRAPH_FAILED);
-
-    numRow = 1;
-    numCol = 1;
-    uint64_t totalElements = 1;
-    for (size_t i = 0; i < xRank; ++i) {
-        const int64_t dim = xShape.GetDim(i);
-        // GM offsets are widened in the A5 kernel; N and D remain uint32 SplitD fields.
-        // Check products before multiplication, including the FP32 byte-address range.
-        OP_CHECK_IF(dim <= 0 || static_cast<uint64_t>(dim) > MAX_TOTAL_ELEMENTS / totalElements,
-                    OP_LOGE(context, "A5 AddRmsNormBias requires positive dimensions within the address range."),
-                    return ge::GRAPH_FAILED);
-        totalElements *= static_cast<uint64_t>(dim);
-        const bool normalizedDim = i >= xRank - gammaRank;
-        OP_CHECK_IF(rstdShape.GetDim(i) != (normalizedDim ? 1 : dim),
-                    OP_LOGE(context, "A5 AddRmsNormBias rstd must keep the normalized dimensions as 1."),
-                    return ge::GRAPH_FAILED);
-        if (normalizedDim) {
-            OP_CHECK_IF(gammaShape.GetDim(i - (xRank - gammaRank)) != dim,
-                        OP_LOGE(context, "A5 AddRmsNormBias gamma must match the trailing input dimensions."),
-                        return ge::GRAPH_FAILED);
-            OP_CHECK_IF(static_cast<uint64_t>(dim) > UINT32_LIMIT / numCol,
-                        OP_LOGE(context, "A5 AddRmsNormBias normalized size D exceeds UINT32_MAX."),
-                        return ge::GRAPH_FAILED);
-            numCol *= static_cast<uint64_t>(dim);
-        } else {
-            OP_CHECK_IF(static_cast<uint64_t>(dim) > UINT32_LIMIT / numRow,
-                        OP_LOGE(context, "A5 AddRmsNormBias row count N exceeds UINT32_MAX."),
-                        return ge::GRAPH_FAILED);
-            numRow *= static_cast<uint64_t>(dim);
-        }
+    switch (dataType) {
+        case ge::DT_FLOAT16:
+            dtypeKey = DTYPE_KEY_FP16;
+            dataPerBlock = BYTE_SIZE_2_BLOCK_ALIGN_NUM;
+            break;
+        case ge::DT_BF16:
+            dtypeKey = DTYPE_KEY_BF16;
+            dataPerBlock = BYTE_SIZE_2_BLOCK_ALIGN_NUM;
+            break;
+        default:
+            dtypeKey = DTYPE_KEY_FP32;
+            dataPerBlock = FLOAT_BLOCK_ALIGN_NUM;
+            break;
     }
+}
 
-    const auto x1Desc = context->GetInputDesc(X1_INDEX);
-    const auto x2Desc = context->GetInputDesc(X2_INDEX);
-    const auto gammaDesc = context->GetInputDesc(GAMMA_INDEX);
-    const auto yDesc = context->GetOutputDesc(Y_INDEX);
-    const auto rstdDesc = context->GetOutputDesc(RSTD_INDEX);
-    const auto xDesc = context->GetOutputDesc(X_INDEX);
-    OP_CHECK_IF(x1Desc == nullptr || x2Desc == nullptr || gammaDesc == nullptr || yDesc == nullptr ||
-                    rstdDesc == nullptr || xDesc == nullptr,
-                OP_LOGE(context, "A5 AddRmsNormBias requires all mandatory tensor descriptors."),
-                return ge::GRAPH_FAILED);
-    dtype = x1Desc->GetDataType();
-    OP_CHECK_IF((dtype != ge::DT_FLOAT16 && dtype != ge::DT_BF16 && dtype != ge::DT_FLOAT) ||
-                    x2Desc->GetDataType() != dtype || gammaDesc->GetDataType() != dtype ||
-                    yDesc->GetDataType() != dtype || xDesc->GetDataType() != dtype ||
-                    rstdDesc->GetDataType() != ge::DT_FLOAT,
-                OP_LOGE(context, "A5 AddRmsNormBias requires matching FP16/BF16/FP32 tensors and FP32 rstd."),
-                return ge::GRAPH_FAILED);
-
-    const auto betaDesc = context->GetOptionalInputDesc(BETA_INDEX);
-    hasBeta = betaDesc != nullptr;
-    if (hasBeta) {
-        const auto betaShape = context->GetOptionalInputShape(BETA_INDEX);
-        OP_CHECK_IF(betaShape == nullptr || !SameShape(betaShape->GetStorageShape(), gammaShape) ||
-                        betaDesc->GetDataType() != dtype,
-                    OP_LOGE(context, "A5 AddRmsNormBias beta must have the same shape and dtype as gamma."),
-                    return ge::GRAPH_FAILED);
+uint32_t ComputeTotalBufSize(uint32_t bufferNum, ge::DataType dtype, uint32_t dtypeSize, uint32_t length, bool split, bool hasBeta)
+{
+    // queBuferSize: 计算搬运需要空间大小
+    uint32_t queBufSize = bufferNum * length * dtypeSize * QUE_NUM + FLOAT_PER_REAPEAT * bufferNum * FLOAT_BYTE_SIZE;
+    uint32_t tmpBufSzie = 0; // tmpBufSzie: UB内需要临时空间大小
+    if (split) {
+        // 切分场景下
+        tmpBufSzie = (dtype == ge::DT_FLOAT) ? 0 : length * FLOAT_BYTE_SIZE * NUM_2;
+    } else {
+        // 普通场景下：如果是float16及bfloat16数据类型，需要一块：转FP32
+        tmpBufSzie = length * FLOAT_BYTE_SIZE;
     }
-    const auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
-    const float* epsilonAttr = attrs->GetFloat(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, epsilonAttr);
-    epsilon = *epsilonAttr;
-    OP_CHECK_IF(!std::isfinite(epsilon) || epsilon < 0,
-                OP_LOGE(context, "A5 AddRmsNormBias epsilon must be finite and nonnegative."),
-                return ge::GRAPH_FAILED);
-    return ge::GRAPH_SUCCESS;
+    uint32_t betaBufSize = hasBeta ? bufferNum * length * dtypeSize : 0;
+    return queBufSize + betaBufSize + tmpBufSzie + RETAINED_SIZE;
 }
-
-uint64_t ComputeSplitBufferBytes(ge::DataType dtype, uint64_t dtypeBytes, uint64_t length)
-{
-    // A single beta tile replaces the second gamma tile, preserving the no-beta budget.
-    const uint64_t queueBytes = DOUBLE_BUFFER_NUM * length * dtypeBytes * SPLIT_QUEUE_NUM +
-                                FP32_VECTOR_ELEMENTS * DOUBLE_BUFFER_NUM * sizeof(float);
-    const uint64_t temporaryBytes = dtype == ge::DT_FLOAT ? 0 : length * sizeof(float) * 2;
-    return queueBytes + temporaryBytes + RETAINED_SIZE;
-}
-
-template <typename TilingData>
-ge::graphStatus SaveTiling(gert::TilingContext* context, TilingData& tiling, uint64_t key, uint32_t useCoreNum)
-{
-    auto rawTiling = context->GetRawTilingData();
-    OP_CHECK_IF(rawTiling == nullptr || rawTiling->GetData() == nullptr ||
-                    rawTiling->GetCapacity() < tiling.GetDataSize(),
-                OP_LOGE(context, "A5 AddRmsNormBias tiling buffer is too small."), return ge::GRAPH_FAILED);
-    auto workspace = context->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, workspace);
-    workspace[0] = USER_WORKSPACE_BYTES + SYSTEM_WORKSPACE_BYTES;
-    tiling.SaveToBuffer(rawTiling->GetData(), rawTiling->GetCapacity());
-    rawTiling->SetDataSize(tiling.GetDataSize());
-    context->SetTilingKey(key);
-    context->SetBlockDim(useCoreNum);
-    OPS_LOG_I(context, "A5 AddRmsNormBias key=%lu blockDim=%u nullptr_beta=%u", key, useCoreNum,
-              tiling.get_nullptr_beta());
-    return ge::GRAPH_SUCCESS;
-}
-} // namespace
 
 ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
 {
-    uint64_t numRow = 0;
-    uint64_t numCol = 0;
-    ge::DataType dtype;
-    bool hasBeta = false;
-    float epsilon = 0;
-    if (ValidateInputs(context, numRow, numCol, dtype, hasBeta, epsilon) != ge::GRAPH_SUCCESS) {
-        return ge::GRAPH_FAILED;
-    }
-
-    uint32_t numCore = 0;
-    uint64_t rawUbSize = 0;
-    const auto compileInfo = reinterpret_cast<const AddRmsNormBiasCompileInfo*>(context->GetCompileInfo());
-    if (compileInfo != nullptr) {
-        numCore = compileInfo->totalCoreNum;
-        rawUbSize = compileInfo->totalUbSize;
+    OP_LOGD(context, " TilingAddRmsNormBiasRegbase");
+    auto ptrCompileInfo = reinterpret_cast<const AddRmsNormBiasCompileInfo*>(context->GetCompileInfo());
+    uint32_t numCore;
+    uint64_t ubSize;
+    if (nullptr == ptrCompileInfo) {
+        auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+        numCore = ascendcPlatform.GetCoreNumAiv();
+        ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
     } else {
-        OP_CHECK_NULL_WITH_CONTEXT(context, context->GetPlatformInfo());
-        auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
-        numCore = platform.GetCoreNumAiv();
-        platform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, rawUbSize);
+        numCore = ptrCompileInfo->totalCoreNum;
+        ubSize = ptrCompileInfo->totalUbSize;
     }
-    OP_CHECK_IF(numCore == 0 || rawUbSize <= UB_USED || rawUbSize > UINT32_LIMIT,
-                OP_LOGE(context, "A5 AddRmsNormBias platform core count or UB capacity is invalid."),
-                return ge::GRAPH_FAILED);
-    const uint64_t ubSize = rawUbSize - UB_USED;
-    const uint64_t dtypeBytes = dtype == ge::DT_FLOAT ? sizeof(float) : sizeof(uint16_t);
-    const uint64_t blockFactor = CeilDiv<uint64_t>(numRow, numCore);
-    const uint32_t useCoreNum = static_cast<uint32_t>(CeilDiv(numRow, blockFactor));
-    const float avgFactor = 1.0f / static_cast<float>(numCol);
-    uint64_t numColAlign = CeilAlign(numCol * dtypeBytes, UB_BLOCK_BYTES) / dtypeBytes;
+    const gert::Shape xShape = context->GetInputShape(X_INDEX)->GetStorageShape();
 
-    uint64_t binAddQuotient = 1;
-    while (binAddQuotient <= numColAlign / 2) {
-        binAddQuotient *= 2;
+    const gert::Shape gammaShape = context->GetInputShape(GAMMA_INDEX)->GetStorageShape();
+    std::string opType(context->GetNodeType());
+    auto attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    const float* epsilon = attrs->GetFloat(0);
+    OP_CHECK_NULL_WITH_CONTEXT(context, epsilon);
+    OP_CHECK_IF(*epsilon < 0, OP_LOGE(context, "Epsilon less than zero, please check."), return ge::GRAPH_FAILED);
+    const auto betaDesc = context->GetOptionalInputDesc(BETA_INDEX);
+    const bool hasBeta = betaDesc != nullptr;
+    if (hasBeta) {
+        const auto betaShape = context->GetOptionalInputShape(BETA_INDEX);
+        OP_CHECK_IF(betaShape == nullptr ||
+                        betaDesc->GetDataType() != context->GetInputDesc(GAMMA_INDEX)->GetDataType(),
+                    OP_LOGE(context, "Beta must have the same shape and dtype as gamma."), return ge::GRAPH_FAILED);
+        const auto& shape = betaShape->GetStorageShape();
+        OP_CHECK_IF(shape.GetDimNum() != gammaShape.GetDimNum(),
+                    OP_LOGE(context, "Beta rank must match gamma."), return ge::GRAPH_FAILED);
+        for (size_t i = 0; i < gammaShape.GetDimNum(); ++i) {
+            OP_CHECK_IF(shape.GetDim(i) != gammaShape.GetDim(i),
+                        OP_LOGE(context, "Beta shape must match gamma."), return ge::GRAPH_FAILED);
+        }
     }
-    if (binAddQuotient == numColAlign) {
-        binAddQuotient /= 2;
+    uint64_t numCol = gammaShape.GetShapeSize();
+    float avgFactor = (numCol == 0U) ? 0.0f : 1.0f / static_cast<float>(numCol);
+    size_t xDimNum = xShape.GetDimNum();
+    size_t gammaDimNum = gammaShape.GetDimNum();
+    uint64_t numRow = 1;
+    for (size_t i = 0; i < xDimNum - gammaDimNum; i++) {
+        numRow *= xShape.GetDim(i);
     }
-    const uint64_t binAddBufferOneline = CeilAlign(CeilDiv(binAddQuotient, FP32_VECTOR_ELEMENTS),
-                                                   UB_BLOCK_BYTES / sizeof(float));
-    // Keep no-beta tiling: one residual-output row tile saves at least the single beta vector.
-    const uint64_t parameterBytes = numColAlign * dtypeBytes;
-    const uint64_t rowBytes = numColAlign * dtypeBytes * DOUBLE_BUFFER_NUM * FULL_LOAD_QUEUE_NUM +
-                              numColAlign * sizeof(float) + sizeof(float) * (DOUBLE_BUFFER_NUM + 1) +
-                              binAddBufferOneline * sizeof(float);
-    const uint64_t binaryAddMaxLength = FP32_VECTOR_ELEMENTS * FP32_VECTOR_ELEMENTS * 4;
+    for (size_t i = 0; i < xDimNum; i++) {
+        OP_LOGD(context, " TilingAddRmsNormBiasRegbase x shape:%ld", xShape.GetDim(i));
+    }
+    for (size_t i = 0; i < gammaDimNum; i++) {
+        OP_LOGD(context, " TilingAddRmsNormBiasRegbase gama shape:%ld", gammaShape.GetDim(i));
+    }
+    auto dataType = context->GetInputDesc(0)->GetDataType();
+    uint32_t dtypeKey = DTYPE_KEY_FP16;
+    size_t usrSize = 256;
+    size_t sysWorkspaceSize = 16UL * 1024UL * 1024UL;
+    size_t* currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = usrSize + sysWorkspaceSize;
+    uint64_t numColAlign = 0;
+    uint64_t ubBlockSize = UB_BLOCK_BYTES;
+    uint64_t ubfp32 = ubBlockSize / sizeof(float);
+    uint64_t vlfp32 = VECTOR_REGISTER_BYTES / sizeof(float);
+    uint64_t binaryAddElemtMaxLen = vlfp32 * vlfp32 * NUM_2 * NUM_2;
+    uint64_t blockFactor;
+    uint64_t ubFactor;
     uint64_t rowFactor = 0;
-    if (ubSize > UB_RESERVE_FOR_RSTDALIGN + parameterBytes && numColAlign <= binaryAddMaxLength) {
-        rowFactor = (ubSize - UB_RESERVE_FOR_RSTDALIGN - parameterBytes) / rowBytes;
+    uint32_t ubLoop{0};
+    uint64_t colBuferLength{0};
+    uint64_t multiNNum{0};
+
+    ubSize = ubSize - UB_USED;
+    uint32_t dataPerBlock;
+    SetByDtype(dataType, dtypeKey, dataPerBlock);
+
+    blockFactor = static_cast<uint32_t>(1);
+    uint64_t tileNum = CeilDiv(numRow, static_cast<uint64_t>(numCore));
+    blockFactor *= tileNum;
+    uint32_t useCoreNum = CeilDiv(numRow, blockFactor);
+    context->SetBlockDim(useCoreNum);
+
+    auto dtypeByteIterator = dTypeByteMap.find(dataType);
+    OP_CHECK_IF(dtypeByteIterator == dTypeByteMap.end(), OP_LOGE(context, "Fail to get dtype factor."),
+                return ge::GRAPH_FAILED);
+    uint32_t curElementByte = dtypeByteIterator->second;
+    numColAlign = CeilDiv(numCol * curElementByte, ubBlockSize) * ubBlockSize / curElementByte;
+
+    // 计算 二分累加 分界点
+    uint64_t binAddQuotient = numColAlign == 0 ? 1 : (1L << (ULONG_BIT_LEN - 1 - __builtin_clzl(numColAlign)));
+    binAddQuotient = (binAddQuotient == numColAlign) ? binAddQuotient / NUM_2 : binAddQuotient;
+    uint64_t binAddBufferOneline = CeilDiv((binAddQuotient + vlfp32 - 1) / vlfp32, ubfp32) * ubfp32;
+
+    // 可以全载的行数
+    int64_t tmpSize = static_cast<int64_t>(ubSize) - UB_RESERVE_FOR_RSTDALIGN - (numColAlign * curElementByte * (hasBeta ? NUM_2 : 1));
+    if (tmpSize > 0 && numColAlign <= binaryAddElemtMaxLen) {
+        rowFactor = tmpSize / (numColAlign * curElementByte * DOUBLE_BUFFER_NUM * QUE_MODE_NORMAL_NUM +
+                               numColAlign * sizeof(float) + sizeof(float) * (DOUBLE_BUFFER_NUM + 1) +
+                               binAddBufferOneline * sizeof(float));
     }
-    if (rowFactor != 0) {
-        // Full-load DMA blocks, VF row loops and CalculateXAdd's total vector
-        // loop count are uint16. Bound local FP32 byte offsets as well.
-        rowFactor = std::min({rowFactor, blockFactor, MAX_FULL_LOAD_ROWS,
-                              MAX_FULL_LOAD_ROWS * FP32_VECTOR_ELEMENTS / numColAlign,
-                              UINT32_LIMIT / (numColAlign * sizeof(float))});
+    if (rowFactor >= 1) {
+        // R能够全载
+        rowFactor = std::min(rowFactor, blockFactor); // 实际需要全载的行数
         AddRMSNormBiasRegbaseRFullLoadTilingData tiling;
         tiling.set_numRow(numRow);
         tiling.set_numCol(numCol);
@@ -253,41 +205,63 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
         tiling.set_blockFactor(blockFactor);
         tiling.set_rowFactor(rowFactor);
         tiling.set_binAddQuotient(binAddQuotient);
-        tiling.set_epsilon(epsilon);
+        tiling.set_epsilon(*epsilon);
         tiling.set_avgFactor(avgFactor);
         tiling.set_nullptr_beta(hasBeta ? 0 : 1);
-        return SaveTiling(context, tiling, MODE_R_FULL_LOAD, useCoreNum);
-    }
+        OP_LOGI(context,
+                "TilingData numCore: %u, ubSize: %lu, numRow: %u, numCol: %u, numColAlign: %u, "
+                "blockFactor: %u, rowFactor: %u, binAddQuotient: %u, "
+                "epsilon: %f, avgFactor: %f",
+                numCore, ubSize, tiling.get_numRow(), tiling.get_numCol(), tiling.get_numColAlign(),
+                tiling.get_blockFactor(), tiling.get_rowFactor(), tiling.get_binAddQuotient(), tiling.get_epsilon(),
+                tiling.get_avgFactor());
 
-    numColAlign = CeilAlign(numCol * dtypeBytes, SPLIT_ALIGN_BYTES) / dtypeBytes;
-    uint64_t ubFactor = 1;
-    while (ubFactor < MAX_SPLIT_UB_FACTOR &&
-           ComputeSplitBufferBytes(dtype, dtypeBytes, ubFactor * 2) < ubSize) {
-        ubFactor *= 2;
+        tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+        context->SetTilingKey(MODE_NORMAL);
+        context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    } else {
+        numColAlign = CeilDiv(numCol * curElementByte, ALING_FACTOR_512) * ALING_FACTOR_512 / curElementByte;
+        rowFactor = FLOAT_PER_REAPEAT;
+        ubFactor = 1U;
+        while (ComputeTotalBufSize(DOUBLE_BUFFER_NUM, dataType, curElementByte, ubFactor * MULTI_FACTOR_2, true, hasBeta) <
+               ubSize) {
+            ubFactor *= MULTI_FACTOR_2;
+        }
+        ubLoop = 1U;
+        while (ubLoop * MULTI_FACTOR_2 * ubFactor <= numCol) {
+            ubLoop *= MULTI_FACTOR_2;
+        }
+        colBuferLength = ubFactor;
+        uint32_t isNddma = numCol >= NDDMA_BETTER_STAGE ? 0U : 1U;
+
+        AddRMSNormBiasRegbaseTilingData tiling;
+        tiling.set_numRow(numRow);
+        tiling.set_numCol(numCol);
+        tiling.set_numColAlign(numColAlign);
+        tiling.set_blockFactor(blockFactor);
+        tiling.set_rowFactor(rowFactor);
+        tiling.set_ubFactor(ubFactor);
+        tiling.set_epsilon(*epsilon);
+        tiling.set_avgFactor(avgFactor);
+        tiling.set_nullptr_beta(hasBeta ? 0 : 1);
+        tiling.set_ubLoop(ubLoop);
+        tiling.set_colBuferLength(colBuferLength);
+        tiling.set_multiNNum(multiNNum);
+        tiling.set_isNddma(isNddma);
+        OP_LOGI(context,
+                "TilingData numCore: %u, ubSize: %lu, numRow: %u, numCol: %u, numColAlign: %u, colBuferLength: %u, "
+                "blockFactor: %u, rowFactor: %u, ubFactor: %u, "
+                "epsilon: %f, avgFactor: %f, ubLoop: %u, multiNNum: %u, isNddma: %u.",
+                numCore, ubSize, tiling.get_numRow(), tiling.get_numCol(), tiling.get_numColAlign(),
+                tiling.get_colBuferLength(), tiling.get_blockFactor(), tiling.get_rowFactor(), tiling.get_ubFactor(),
+                tiling.get_epsilon(), tiling.get_avgFactor(), tiling.get_ubLoop(), tiling.get_multiNNum(),
+                tiling.get_isNddma());
+
+        tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+        context->SetTilingKey(MODE_SPLIT_D);
+        context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     }
-    OP_CHECK_IF(numColAlign > UINT32_LIMIT || ubFactor > numCol || ubFactor * dtypeBytes < SPLIT_ALIGN_BYTES ||
-                    ComputeSplitBufferBytes(dtype, dtypeBytes, ubFactor) >= ubSize,
-                OP_LOGE(context, "A5 AddRmsNormBias SplitD shape or UB tile is outside the supported range."),
-                return ge::GRAPH_FAILED);
-    uint64_t ubLoop = 1;
-    while (ubLoop * 2 * ubFactor <= numCol) {
-        ubLoop *= 2;
-    }
-    AddRMSNormBiasRegbaseTilingData tiling;
-    tiling.set_numRow(static_cast<uint32_t>(numRow));
-    tiling.set_numCol(static_cast<uint32_t>(numCol));
-    tiling.set_numColAlign(static_cast<uint32_t>(numColAlign));
-    tiling.set_blockFactor(static_cast<uint32_t>(blockFactor));
-    tiling.set_rowFactor(FP32_VECTOR_ELEMENTS);
-    tiling.set_ubFactor(static_cast<uint32_t>(ubFactor));
-    tiling.set_epsilon(epsilon);
-    tiling.set_avgFactor(avgFactor);
-    tiling.set_ubLoop(static_cast<uint32_t>(ubLoop));
-    tiling.set_colBuferLength(static_cast<uint32_t>(ubFactor));
-    tiling.set_multiNNum(0);
-    tiling.set_isNddma(numCol >= NDDMA_BETTER_STAGE ? 0 : 1);
-    tiling.set_nullptr_beta(hasBeta ? 0 : 1);
-    return SaveTiling(context, tiling, MODE_SPLIT_D, useCoreNum);
+    return ge::GRAPH_SUCCESS;
 }
 } // namespace addRmsNormBiasRegbase
 } // namespace optiling
