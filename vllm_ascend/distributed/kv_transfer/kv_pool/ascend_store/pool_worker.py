@@ -467,6 +467,10 @@ class KVPoolWorker:
         self._layerwise_session_tracker = LayerwiseSessionTracker()
         self._current_layerwise_request_ids: set[str] = set()
         self._current_layerwise_last_chunk_req_ids: set[str] = set()
+        # (tag, req_id, group_id, start_block, end_block) -> runs, cleared per
+        # step in process_layer_data(). masked_block_runs inputs are
+        # layer-invariant, so only the first layer pays the O(blocks) scan.
+        self._masked_runs_cache: dict[tuple[str, str, int, int, int], list[tuple[int, int]]] = {}
         # PERF-TUNE(4): per-step RPC result caches. Defined once here so
         # mypy does not flag repeated attribute definitions; they are reset
         # per step via .clear() in process_layer_data().
@@ -1331,6 +1335,26 @@ class KVPoolWorker:
             return True
         return self.tp_rank == min(peers)
 
+    def _masked_block_runs_cached(
+        self,
+        tag: str,
+        request: ReqMeta,
+        group_id: int,
+        start_block: int,
+        end_block: int,
+        mask: Sequence[bool] | None,
+    ) -> list[tuple[int, int]]:
+        # masked_block_runs is O(end_block - start_block); the layer loop
+        # calls it with identical (mask, range) for every layer, so memoize
+        # per step. start_block/end_block stay in the key: the load path
+        # varies them across independent layers.
+        key = (tag, request.req_id, group_id, start_block, end_block)
+        runs = self._masked_runs_cache.get(key)
+        if runs is None:
+            runs = masked_block_runs(mask, start_block, end_block)
+            self._masked_runs_cache[key] = runs
+        return runs
+
     def _process_save_for_layer_batch(
         self,
         requests: list[ReqMeta],
@@ -1382,7 +1406,9 @@ class KVPoolWorker:
                 if request.store_masks is not None and group_id < len(request.store_masks)
                 else None
             )
-            block_runs = masked_block_runs(group_store_mask, save_start_block, save_end_block)
+            block_runs = self._masked_block_runs_cached(
+                "save", request, group_id, save_start_block, save_end_block, group_store_mask
+            )
             if not block_runs and partial_block_index is None:
                 continue
             for run_idx, (run_start_block, run_end_block) in enumerate(block_runs):
@@ -1494,7 +1520,9 @@ class KVPoolWorker:
                 if request.load_masks is not None and group_id < len(request.load_masks)
                 else None
             )
-            block_runs = masked_block_runs(group_load_mask, load_start_block, full_blocks)
+            block_runs = self._masked_block_runs_cached(
+                "load", request, group_id, load_start_block, full_blocks, group_load_mask
+            )
             if not block_runs and partial_block_index is None:
                 continue
             for run_idx, (run_start_block, run_end_block) in enumerate(block_runs):
@@ -2469,6 +2497,7 @@ class KVPoolWorker:
         self._wait_for_final_layer_save(num_local, self.kv_send_thread)
 
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
+        self._masked_runs_cache.clear()
         # Keep this method safe for direct callers as well as metadata binding.
         # Worker threads may still own the lists from the preceding step.
         self.layer_save_tasks = [[] for _ in range(self.num_layers)]
