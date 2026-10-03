@@ -481,3 +481,56 @@ class TestAscendGemma4RotaryEmbedding:
         check_parent_init_signature_has_not_changed(
             Gemma4RotaryEmbedding.__init__, AscendGemma4RotaryEmbedding.__init__
         )
+
+
+def _build_ascend_mrope(is_neox_style: bool):
+    """AscendMRotaryEmbedding positioned on the npu_mrope branch.
+
+    mrope_interleaved=False skips the Triton path and mrope_section must equal
+    the literal the fast path is gated on, otherwise forward_oot delegates to
+    MRotaryEmbedding.forward_oot and npu_mrope is never reached.
+    """
+    from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
+
+    emb = AscendMRotaryEmbedding.__new__(AscendMRotaryEmbedding)
+    emb.mrope_interleaved = False
+    emb.mrope_section = [16, 24, 24]
+    emb.is_neox_style = is_neox_style
+    emb.head_size = 128
+    emb.cos_sin_cache = torch.zeros(MAX_POS, 128, dtype=torch.float32)
+    return emb
+
+
+class TestAscendMRotaryEmbeddingForwardOOT:
+    @pytest.mark.parametrize("is_neox_style, expected_mode", [(True, "half"), (False, "interleave")])
+    @patch("torch_npu.npu_mrope", create=True)
+    def test_rotary_mode_follows_is_neox_style(self, mock_npu_mrope, is_neox_style, expected_mode):
+        """rotary_mode must follow is_neox_style; GPT-J models (GLM-OCR,
+        GLM-4V) otherwise receive Neox pairing and produce wrong output."""
+        emb = _build_ascend_mrope(is_neox_style)
+        positions = torch.zeros(3, 4, dtype=torch.long)
+        query = torch.zeros(4, 128, dtype=torch.float32)
+        key = torch.zeros(4, 128, dtype=torch.float32)
+        mock_npu_mrope.return_value = (query.clone(), key.clone())
+
+        emb.forward_oot(positions, query, key)
+
+        mock_npu_mrope.assert_called_once()
+        assert mock_npu_mrope.call_args.kwargs["rotary_mode"] == expected_mode
+
+    @patch("torch_npu.npu_mrope", create=True)
+    def test_other_mrope_section_delegates_to_super(self, mock_npu_mrope):
+        """Sections other than the gated literal must keep using the base
+        implementation, so this fix cannot change their behaviour."""
+        emb = _build_ascend_mrope(is_neox_style=False)
+        emb.mrope_section = [24, 20, 20]
+        positions = torch.zeros(3, 4, dtype=torch.long)
+        query = torch.zeros(4, 128, dtype=torch.float32)
+        key = torch.zeros(4, 128, dtype=torch.float32)
+
+        with patch("vllm.model_executor.layers.rotary_embedding.mrope.MRotaryEmbedding.forward_oot") as mock_super:
+            mock_super.return_value = (query, key)
+            emb.forward_oot(positions, query, key)
+
+        mock_super.assert_called_once()
+        mock_npu_mrope.assert_not_called()

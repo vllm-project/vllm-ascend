@@ -676,7 +676,10 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             self.cos_sin_cache.contiguous(),
             self.head_size,
             mrope_section=mrope_section,
-            rotary_mode="half",
+            # Neox pairs (x[i], x[i + d/2]) -> "half"; GPT-J pairs
+            # (x[2j], x[2j+1]) -> "interleave". Mirrors the 310P path in
+            # vllm_ascend/_310p/ops/rotary_embedding.py.
+            rotary_mode="half" if self.is_neox_style else "interleave",
         )
 
         return query, key
