@@ -37,6 +37,7 @@ from ..topology import KVPoolTopology
 ByteArray: TypeAlias = NDArray[np.uint64]
 ChunkRows: TypeAlias = tuple[ByteArray, ByteArray, tuple[BlockHash | str, ...]]
 BlockRows: TypeAlias = tuple[ByteArray, tuple[BlockHash | str, ...], ByteArray]
+StoreCandidateRows: TypeAlias = tuple[list[int], list[BlockHash | str], list[int]]
 KeyAxes: TypeAlias = tuple[tuple[str, ...], ...]
 LayerwiseFullKey = Callable[[int, str, int, int], str]
 LayerwisePartialKey = Callable[..., str]
@@ -203,6 +204,42 @@ def _block_rows(
     return _readonly(counts), tuple(hashes), _readonly(selected_block_ids)
 
 
+def _range_store_candidates(
+    end_token: int,
+    block_hashes: Sequence[BlockHash | str],
+    block_ids: Sequence[int],
+    *,
+    start_token: int = 0,
+    block_size: int,
+    hash_block_size: int,
+    cacheable: bool,
+) -> StoreCandidateRows:
+    """Keep ordinary Range Store rows in their cheap pre-admission shape."""
+
+    if not cacheable or not block_hashes or end_token <= 0:
+        return [], [], []
+    grouped_hashes = get_block_hashes(block_hashes, block_size, hash_block_size)
+    logical_count = min(len(grouped_hashes), _ceil_div(end_token, block_size))
+    block_offset = max(logical_count - len(block_ids), 0)
+    aligned_start_token = start_token // block_size * block_size
+    counts: list[int] = []
+    hashes: list[BlockHash | str] = []
+    selected_block_ids: list[int] = []
+    for block_index in range(logical_count):
+        start = block_index * block_size
+        end = min(start + block_size, end_token)
+        local_index = block_index - block_offset
+        if start < aligned_start_token or end <= start or local_index < 0 or local_index >= len(block_ids):
+            continue
+        block_id = block_ids[local_index]
+        if block_id < 0:
+            continue
+        counts.append(end - start)
+        hashes.append(grouped_hashes[block_index])
+        selected_block_ids.append(block_id)
+    return counts, hashes, selected_block_ids
+
+
 # =============================================================================
 # State Checkpoint Rows
 # =============================================================================
@@ -299,13 +336,41 @@ def _checkpoint_rows(
 def bind_store_ownership(topology: KVPoolTopology):
     selectors: dict[int, Callable] = {}
     for group in topology.transfer_groups:
-        replica_count = topology.put_step
-        if topology.tp_partition.tp_mismatch or topology.dcp_size > 1 or group.uses_align_state:
-            replica_count = 1
-        shard_rank = topology.pcp_rank * replica_count + topology.tp_rank % replica_count
-        shard_count = topology.pcp_size * replica_count
+        shard_rank, shard_count = _store_shard(topology, group)
         selectors[group.group_id] = partial(_owned_rows, shard_rank=shard_rank, shard_count=shard_count)
     return partial(_dispatch, selectors)
+
+
+def bind_store_candidate_rule(topology: KVPoolTopology):
+    """Bind the compact pre-admission row shape for one ordinary Store group."""
+
+    (group,) = topology.transfer_groups
+    candidates = partial(
+        _range_store_candidates,
+        block_size=group.block_size,
+        hash_block_size=topology.hash_block_size,
+        cacheable=group.group_id in topology.transfer_group_ids,
+    )
+    shard_rank, shard_count = _store_shard(topology, group)
+    if shard_count <= 1:
+        return candidates
+    return partial(_owned_candidate_rows, candidates, shard_rank=shard_rank, shard_count=shard_count)
+
+
+def _store_shard(topology: KVPoolTopology, group) -> tuple[int, int]:
+    replica_count = topology.put_step
+    if topology.tp_partition.tp_mismatch or topology.dcp_size > 1 or group.uses_align_state:
+        replica_count = 1
+    shard_rank = topology.pcp_rank * replica_count + topology.tp_rank % replica_count
+    return shard_rank, topology.pcp_size * replica_count
+
+
+def _owned_candidate_rows(
+    candidates: Callable, *args, shard_rank: int, shard_count: int, **kwargs
+) -> StoreCandidateRows:
+    counts, hashes, block_ids = candidates(*args, **kwargs)
+    selection = slice(shard_rank, len(counts), shard_count)
+    return counts[selection], hashes[selection], block_ids[selection]
 
 
 def _owned_rows(rows: BlockRows, *, shard_rank: int, shard_count: int) -> BlockRows:

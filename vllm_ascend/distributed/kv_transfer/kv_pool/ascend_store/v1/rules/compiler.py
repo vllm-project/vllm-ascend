@@ -26,6 +26,7 @@ from .identity import (
     bind_checkpoint_rule,
     bind_chunk_rules,
     bind_key_rules,
+    bind_store_candidate_rule,
     bind_store_ownership,
     resolve_store_pipeline_ranks,
 )
@@ -84,6 +85,7 @@ class KVPoolRules:
         "required_object_sizes",
         "requires_store_observation",
         "store_keys",
+        "store_candidate_rows",
         "store_rows",
         "store_selection",
         "lookup_selection",
@@ -99,6 +101,7 @@ class KVPoolRules:
         load_rows: Callable,
         load_selection: Callable,
         store_rows: Callable,
+        store_candidate_rows: Callable | None,
         store_selection: Callable,
         checkpoint_rows: Callable | None,
         lookup_keys: Callable,
@@ -119,6 +122,7 @@ class KVPoolRules:
         self.load_rows = load_rows
         self.load_selection = load_selection
         self.store_rows = store_rows
+        self.store_candidate_rows = store_candidate_rows
         self.store_selection = store_selection
         self.checkpoint_rows = checkpoint_rows
         self.lookup_keys = lookup_keys
@@ -179,10 +183,18 @@ def compile_kv_pool_rules(
     )
     ownership = bind_store_ownership(topology)
     checkpoint_rows = bind_checkpoint_rule(topology, ownership)
+    store_candidate_rows = None
     if spec.use_layerwise:
         store_rows = load_rows if _is_layerwise_store_leader(topology) else _discard_store_rows
     else:
         store_rows = partial(_store_rows, load_rows, ownership)
+        if (
+            len(groups) == 1
+            and not align_state_group_ids
+            and not topology.tp_partition.tp_mismatch
+            and store_pipeline_ranks is None
+        ):
+            store_candidate_rows = bind_store_candidate_rule(topology)
 
     backend = resolve_backend_spec(spec.backend_name)
     format_ranges: Callable
@@ -222,6 +234,7 @@ def compile_kv_pool_rules(
         load_rows=load_rows,
         load_selection=reachability.select_for_load,
         store_rows=store_rows,
+        store_candidate_rows=store_candidate_rows,
         store_selection=reachability.select_for_store,
         checkpoint_rows=checkpoint_rows,
         lookup_keys=lookup_keys,
@@ -259,6 +272,7 @@ def _bind_rules(
     load_rows: Callable,
     load_selection: Callable,
     store_rows: Callable,
+    store_candidate_rows: Callable | None,
     store_selection: Callable,
     checkpoint_rows: Callable | None,
     lookup_keys: Callable,
@@ -297,6 +311,7 @@ def _bind_rules(
         load_rows=load_rows,
         load_selection=load_selection,
         store_rows=store_rows,
+        store_candidate_rows=store_candidate_rows,
         store_selection=store_selection,
         checkpoint_rows=checkpoint_rows,
         lookup_keys=lookup_keys,
