@@ -687,12 +687,16 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # expert). MC2 / FUSED_MC2 / ALLTOALL route tokens to the selected
         # copy, so they keep the per-rank rotation.
         log2phy = self.log2phy
+        # ``__new__``-constructed instances (e.g. the routing-replay unit tests)
+        # skip ``__init__`` and lack the rank-independent map; treat it as absent
+        # and fall back to the per-rank log2phy.
+        rank_independent_log2phy = getattr(self, "log2phy_rank_independent", None)
         if (
             log2phy is not None
-            and self.log2phy_rank_independent is not None
+            and rank_independent_log2phy is not None
             and _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER
         ):
-            log2phy = self.log2phy_rank_independent
+            log2phy = rank_independent_log2phy
         if log2phy is not None:
             topk_ids = log2phy[topk_ids]
 
