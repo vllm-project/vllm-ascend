@@ -398,10 +398,15 @@ class _StoreSession:
             return
         self.request_keys = _keys_by_request(batch)
         object_sizes_by_key = _collect_object_sizes(batch)
-        missing_keys = tuple(dict.fromkeys(batch.selected_keys()))
-        if missing_keys:
-            self._start_sessions(missing_keys, object_sizes_by_key, backend_io)
-        self.selected = batch.select_keys(set(self.pending_finalization_keys), claim_once=True)
+        selected_keys = batch.selected_keys()
+        session_keys = tuple(dict.fromkeys(selected_keys))
+        if session_keys:
+            self._start_sessions(session_keys, object_sizes_by_key, backend_io)
+        self.selected = (
+            batch
+            if self.pending_finalization_keys == selected_keys
+            else batch.select_keys(set(self.pending_finalization_keys), claim_once=True)
+        )
         self.pending_layer_ids = {
             layer_id for group in self.selected.groups if group.selected_keys() for layer_id in group.physical_layer_ids
         }

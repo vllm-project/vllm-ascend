@@ -56,6 +56,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.rules.reachabil
     ReachablePrefix,
     UnitaryReachability,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.runtime.batch import KVTransferBatch
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.topology import (
     KVPoolGroupTopology,
     KVPoolLayerTopology,
@@ -401,6 +402,48 @@ def test_layerwise_store_commits_only_after_all_layers_and_unknown_failure_retai
     with pytest.raises(RuntimeError, match="previous Store failure"):
         failed.close()
     assert not failed_resources.closed
+
+
+def test_layerwise_store_reuses_fully_started_batch_and_filters_failed_sessions(monkeypatch) -> None:
+    original_select_keys = KVTransferBatch.select_keys
+    selections = []
+
+    def record_selection(self, accepted, *, claim_once=False):
+        selections.append((accepted, claim_once))
+        return original_select_keys(self, accepted, claim_once=claim_once)
+
+    monkeypatch.setattr(KVTransferBatch, "select_keys", record_selection)
+    first = RangeStoreCommand("first", TokenRange(0, 4), ((1,),), (b"a",), 4, 17)
+    second = RangeStoreCommand("second", TokenRange(0, 4), ((3,),), (b"b",), 4, 18)
+
+    runtime, resources, _ = make_runtime(layerwise=True)
+    begin_step(runtime, store=StoreCommandBatch((first, second)))
+    runtime.save_layer("layers.0.group.0")
+    runtime.save_layer("layers.1.group.0")
+    runtime.finish_step()
+    assert selections == []
+    runtime.close()
+    assert resources.closed
+
+    backend = FakeBackend()
+    backend.store_session_start_result = [0, -1]
+    failed, failed_resources, _ = make_runtime(backend, layerwise=True)
+    begin_step(failed, store=StoreCommandBatch((first, second)))
+    failed.save_layer("layers.0.group.0")
+    failed.save_layer("layers.1.group.0")
+    with pytest.raises(RuntimeError, match="Store success was not confirmed"):
+        failed.finish_step()
+
+    started_keys = next(call[1] for call in backend.calls if call[0] == "batch_put_start")
+    copied_keys = [call[1] for call in backend.calls if call[0] == "batch_copy_put"]
+    committed_keys = next(call[1] for call in backend.calls if call[0] == "batch_commit")
+    assert selections == [({started_keys[0]}, True)]
+    assert copied_keys == [(started_keys[0],), (started_keys[0],)]
+    assert committed_keys == (started_keys[0],)
+    assert failed.take_released_store_job_ids() == {17, 18}
+    with pytest.raises(RuntimeError, match="previous Store failure"):
+        failed.close()
+    assert failed_resources.closed
 
 
 def test_layerwise_store_prepares_asynchronously_behind_layer_jobs(monkeypatch) -> None:
