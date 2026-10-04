@@ -253,6 +253,7 @@ class FakeResources:
 def make_runtime(
     backend: FakeBackend | None = None,
     *,
+    topology: KVPoolTopology | None = None,
     layerwise: bool = False,
     async_load: bool = False,
     store: bool = True,
@@ -262,7 +263,7 @@ def make_runtime(
     start_gate_factory=None,
 ):
     backend = backend or FakeBackend()
-    topology = make_topology(physical_layers=physical_layers)
+    topology = topology or make_topology(physical_layers=physical_layers)
     schedule = KVPoolSchedule(
         LoadScheduleKind.LAYERWISE if layerwise else (LoadScheduleKind.ASYNC if async_load else LoadScheduleKind.SYNC),
         (StoreScheduleKind.LAYERWISE if layerwise else StoreScheduleKind.ASYNC) if store else None,

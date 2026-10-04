@@ -18,7 +18,6 @@ from ..protocol.transfer import (
     CheckpointStoreCommand,
     KVTransferStep,
     LoadCommand,
-    RangeStoreCommand,
     StoreCommand,
 )
 from ..rules import KVPoolRules, RuleBinder
@@ -36,7 +35,7 @@ from .result import LoadResult
 
 _Parameters = ParamSpec("_Parameters")
 _Result = TypeVar("_Result")
-_StoreRowsByRequest: TypeAlias = list[dict[int, BlockRows]]
+_StoreCandidateRowsByGroup: TypeAlias = tuple[StoreCandidateRows, ...]
 _StorePreparationResult: TypeAlias = tuple[KVTransferBatch | None, tuple[StoreCompletion, ...]]
 
 
@@ -50,13 +49,28 @@ class _KVPoolStepContext:
     store_submitted: bool = False
 
 
-@dataclass(slots=True)
-class _StoreCandidates:
-    """Keep pre-admission row values and keys aligned without freezing transfer arrays."""
+@dataclass(frozen=True, slots=True)
+class _StoreGroupCandidates:
+    """One cache Group's list-backed rows and object-key coordinates."""
 
     group_id: int
     rows_by_request: tuple[StoreCandidateRows, ...]
-    keys_by_request: tuple[tuple[str, ...], ...]
+    key_axes: KeyAxes
+
+    @property
+    def row_count(self) -> int:
+        return sum(len(rows[0]) for rows in self.rows_by_request)
+
+    @property
+    def object_count(self) -> int:
+        return len(self.key_axes) * self.row_count
+
+
+@dataclass(frozen=True, slots=True)
+class _StoreCandidates:
+    """All pre-admission Store objects in canonical group/axis/row order."""
+
+    groups: tuple[_StoreGroupCandidates, ...]
 
 
 class KVPoolRuntime:
@@ -319,57 +333,17 @@ class KVPoolRuntime:
         return self._backend_io.store_batch(selected)
 
     def _build_admitted_store_batch(self, commands: tuple[StoreCommand, ...]) -> KVTransferBatch | None:
-        rules = self._bound_rules
-        uses_candidate_path = rules.store_candidate_rows is not None and all(
-            isinstance(command, RangeStoreCommand) for command in commands
-        )
-        if uses_candidate_path:
-            candidates = self._build_range_store_candidates(commands)
-            candidate_keys = _store_candidate_keys(candidates)
-            accepted, claim_once = self._admitted_store_keys(candidate_keys)
-            if accepted is not None and not accepted:
-                return None
-            selected_objects = (
-                None
-                if accepted is None
-                else _select_store_candidate_objects(candidate_keys, accepted, claim_once=claim_once)
-            )
-            return self._materialize_store_candidates(commands, candidates, selected_objects)
-
-        rows_by_request, key_axes_by_group = self._build_store_candidates(commands)
-        candidate_keys = tuple(
-            key for group_id in self._bound_rules.group_ids for axis in key_axes_by_group[group_id] for key in axis
-        )
+        candidates = self._build_store_candidates(commands)
+        candidate_keys = _store_candidate_keys(candidates)
         accepted, claim_once = self._admitted_store_keys(candidate_keys)
         if accepted is not None and not accepted:
             return None
-        batch = self._assemble_batch(
-            tuple(command.request_id for command in commands),
-            rows_by_request,
-            None,
-            tuple(command.store_job_id for command in commands),
-            key_axes_by_group=key_axes_by_group,
+        selected_objects = (
+            None
+            if accepted is None
+            else _select_store_candidate_objects(candidate_keys, accepted, claim_once=claim_once)
         )
-        return batch if accepted is None else batch.select_keys(accepted, claim_once=claim_once)
-
-    def _build_range_store_candidates(self, commands: tuple[StoreCommand, ...]) -> _StoreCandidates:
-        rules = self._bound_rules
-        assert rules.store_candidate_rows is not None
-        (group_id,) = rules.group_ids
-        rows_by_request = []
-        keys_by_request = []
-        for command in commands:
-            assert isinstance(command, RangeStoreCommand)
-            request_rows = rules.store_candidate_rows(
-                command.store_range.end_token,
-                command.block_hashes,
-                command.block_ids_by_group[group_id],
-                start_token=command.store_range.start_token,
-            )
-            rows_by_request.append(request_rows)
-            (request_keys,) = rules.store_keys(group_id, request_rows[1])
-            keys_by_request.append(request_keys)
-        return _StoreCandidates(group_id, tuple(rows_by_request), tuple(keys_by_request))
+        return self._materialize_store_candidates(commands, candidates, selected_objects)
 
     def _materialize_store_candidates(
         self,
@@ -377,53 +351,104 @@ class KVPoolRuntime:
         candidates: _StoreCandidates,
         selected_objects: tuple[bool, ...] | None,
     ) -> KVTransferBatch:
-        group_id = candidates.group_id
-        row_count = sum(len(rows[0]) for rows in candidates.rows_by_request)
-        if selected_objects is not None and len(selected_objects) != row_count:
+        groups = []
+        object_offset = 0
+        for group_candidates in candidates.groups:
+            next_offset = object_offset + group_candidates.object_count
+            group_selection = None if selected_objects is None else selected_objects[object_offset:next_offset]
+            groups.append(self._materialize_store_group(group_candidates, group_selection))
+            object_offset = next_offset
+        if selected_objects is not None and object_offset != len(selected_objects):
             raise RuntimeError("Store candidate selection does not match the candidate object count")
 
-        token_counts: list[int] = []
-        block_ids: list[int] = []
-        keys: list[str] = []
-        request_splits = [0]
-        source_row_offset = 0
-        for rows, request_keys in zip(candidates.rows_by_request, candidates.keys_by_request, strict=True):
-            counts, hashes, ids = rows
-            request_row_count = len(counts)
-            if len(hashes) != request_row_count or len(ids) != request_row_count:
-                raise RuntimeError(f"Cache group {group_id} produced misaligned Store candidate rows")
-            if len(request_keys) != request_row_count:
-                raise RuntimeError(f"Cache group {group_id} produced misaligned Store candidate keys")
-            if selected_objects is None:
-                token_counts.extend(counts)
-                block_ids.extend(ids)
-                keys.extend(request_keys)
-            else:
-                request_selection = selected_objects[source_row_offset : source_row_offset + request_row_count]
-                for count, block_id, key, include in zip(counts, ids, request_keys, request_selection, strict=True):
-                    if include:
-                        token_counts.append(count)
-                        block_ids.append(block_id)
-                        keys.append(key)
-            request_splits.append(len(block_ids))
-            source_row_offset += request_row_count
-
-        selected_keys = tuple(keys)
-        topology = self._groups[group_id]
-        group = KVGroupBatch(
-            group_id,
-            _readonly_uint64(block_ids),
-            _readonly_uint64(token_counts),
-            (selected_keys,),
-            _readonly_indices(request_splits),
-            tuple(layer.physical_layer_id for layer in topology.layers),
-            self._bound_rules.object_size(group_id),
-            selected_key_values=selected_keys,
+        selected_keys = (
+            None if selected_objects is None else tuple(key for group in groups for key in group.selected_keys())
         )
         return KVTransferBatch(
             tuple(command.request_id for command in commands),
-            (group,),
+            tuple(groups),
             tuple(command.store_job_id for command in commands),
+            selected_keys,
+        )
+
+    def _materialize_store_group(
+        self,
+        candidates: _StoreGroupCandidates,
+        selected_objects: tuple[bool, ...] | None,
+    ) -> KVGroupBatch:
+        row_count = candidates.row_count
+        for counts, hashes, block_ids in candidates.rows_by_request:
+            if len(hashes) != len(counts) or len(block_ids) != len(counts):
+                raise RuntimeError(f"Cache group {candidates.group_id} produced misaligned Store candidate rows")
+        if any(len(axis) != row_count for axis in candidates.key_axes):
+            raise RuntimeError(f"Cache group {candidates.group_id} produced misaligned Store candidate keys")
+        if selected_objects is not None and len(selected_objects) != candidates.object_count:
+            raise RuntimeError(
+                f"Cache group {candidates.group_id} Store selection does not match its candidate objects"
+            )
+
+        key_axes: KeyAxes
+        if selected_objects is not None and len(candidates.key_axes) == 1:
+            token_counts, block_ids, request_splits, selected_axis = _compact_single_axis_rows(
+                candidates.rows_by_request,
+                candidates.key_axes[0],
+                selected_objects,
+            )
+            key_axes = (selected_axis,)
+            materialized_selection = None
+            selected_keys = selected_axis
+        elif selected_objects is None:
+            keep_rows: tuple[bool, ...] | None = None
+            key_axes = candidates.key_axes
+            materialized_selection = None
+            selected_keys = None
+        else:
+            selections_by_axis = tuple(
+                selected_objects[axis_index * row_count : (axis_index + 1) * row_count]
+                for axis_index in range(len(candidates.key_axes))
+            )
+            keep_rows = tuple(any(axis[row_index] for axis in selections_by_axis) for row_index in range(row_count))
+            key_axes = tuple(
+                tuple(key for key, keep in zip(axis, keep_rows, strict=True) if keep) for axis in candidates.key_axes
+            )
+            compact_selection = tuple(
+                include for axis in selections_by_axis for include, keep in zip(axis, keep_rows, strict=True) if keep
+            )
+            materialized_selection = None if all(compact_selection) else _readonly_bool(compact_selection)
+            selected_keys = tuple(
+                key
+                for axis, selection in zip(key_axes, _split_selection(compact_selection, len(key_axes)), strict=True)
+                for key, include in zip(axis, selection, strict=True)
+                if include
+            )
+
+        if selected_objects is None or len(candidates.key_axes) != 1:
+            token_counts = []
+            block_ids = []
+            request_splits = [0]
+            row_offset = 0
+            for counts, _hashes, ids in candidates.rows_by_request:
+                request_row_count = len(counts)
+                if keep_rows is None:
+                    token_counts.extend(counts)
+                    block_ids.extend(ids)
+                else:
+                    request_selection = keep_rows[row_offset : row_offset + request_row_count]
+                    token_counts.extend(count for count, keep in zip(counts, request_selection, strict=True) if keep)
+                    block_ids.extend(block_id for block_id, keep in zip(ids, request_selection, strict=True) if keep)
+                request_splits.append(len(block_ids))
+                row_offset += request_row_count
+
+        topology = self._groups[candidates.group_id]
+        return KVGroupBatch(
+            candidates.group_id,
+            _readonly_uint64(block_ids),
+            _readonly_uint64(token_counts),
+            key_axes,
+            _readonly_indices(request_splits),
+            tuple(layer.physical_layer_id for layer in topology.layers),
+            self._bound_rules.object_size(candidates.group_id),
+            materialized_selection,
             selected_keys,
         )
 
@@ -490,56 +515,62 @@ class KVPoolRuntime:
             )
         return self._assemble_batch(tuple(command.request_id for command in commands), rows_by_request, rules.load_keys)
 
-    def _build_store_candidates(
-        self, commands: tuple[StoreCommand, ...]
-    ) -> tuple[_StoreRowsByRequest, dict[int, KeyAxes]]:
+    def _build_store_candidates(self, commands: tuple[StoreCommand, ...]) -> _StoreCandidates:
         rules = self._bound_rules
-        rows_by_request: _StoreRowsByRequest = []
+        rows_by_group: list[list[StoreCandidateRows]] = [[] for _group_id in rules.group_ids]
+        keys_by_group: list[list[KeyAxes]] = [[] for _group_id in rules.group_ids]
         for command in commands:
-            if isinstance(command, CheckpointStoreCommand):
-                if rules.checkpoint_rows is None:
-                    raise ValueError("State checkpoint Store requires an align-state cache group")
-                boundaries = {source.boundary_token for source in command.sources}
-                if len(boundaries) != 1:
-                    raise ValueError("State checkpoints for one request must share one token boundary")
-                boundary = next(iter(boundaries))
-                source_blocks = {source.group_id: source.block_id for source in command.sources}
-                rows = dict(
-                    rules.checkpoint_rows(
-                        boundary,
-                        command.block_hashes,
-                        source_blocks,
-                        {group_id: command.block_ids_by_group[group_id] for group_id in rules.group_ids},
-                        published_store_end_token=command.published_store_end_token,
-                    )
-                )
-                rows_by_request.append(rows)
-                continue
-            assert isinstance(command, RangeStoreCommand)
-            masks = rules.store_selection(command.block_hashes, command.store_range, command.num_prompt_tokens)
-            rows_by_request.append(
-                {
-                    group_id: rules.store_rows(
-                        group_id,
-                        command.store_range.end_token,
-                        command.block_hashes,
-                        command.block_ids_by_group[group_id],
-                        start_token=command.store_range.start_token,
-                        mask=mask,
-                    )
-                    for group_id, mask in zip(rules.group_ids, masks, strict=True)
-                }
+            for group_index, (group_id, rows) in enumerate(
+                zip(rules.group_ids, self._store_candidate_rows(command), strict=True)
+            ):
+                rows_by_group[group_index].append(rows)
+                keys_by_group[group_index].append(rules.store_keys(group_id, rows[1]))
+        return _StoreCandidates(
+            tuple(
+                _StoreGroupCandidates(group_id, tuple(rows), _merge_key_axes(group_id, keys_by_group[group_index]))
+                for group_index, (group_id, rows) in enumerate(zip(rules.group_ids, rows_by_group, strict=True))
             )
-        return rows_by_request, self._key_axes_by_group(rows_by_request, rules.store_keys)
+        )
+
+    def _store_candidate_rows(self, command: StoreCommand) -> _StoreCandidateRowsByGroup:
+        rules = self._bound_rules
+        if isinstance(command, CheckpointStoreCommand):
+            if rules.checkpoint_rows is None:
+                raise ValueError("State checkpoint Store requires an align-state cache group")
+            boundaries = {source.boundary_token for source in command.sources}
+            if len(boundaries) != 1:
+                raise ValueError("State checkpoints for one request must share one token boundary")
+            boundary = next(iter(boundaries))
+            source_blocks = {source.group_id: source.block_id for source in command.sources}
+            rows_by_group = dict(
+                rules.checkpoint_rows(
+                    boundary,
+                    command.block_hashes,
+                    source_blocks,
+                    {group_id: command.block_ids_by_group[group_id] for group_id in rules.group_ids},
+                    published_store_end_token=command.published_store_end_token,
+                )
+            )
+            return tuple(rows_by_group.get(group_id, _empty_candidate_rows()) for group_id in rules.group_ids)
+
+        masks = rules.store_selection(command.block_hashes, command.store_range, command.num_prompt_tokens)
+        return tuple(
+            rules.store_candidate_rows(
+                group_id,
+                command.store_range.end_token,
+                command.block_hashes,
+                command.block_ids_by_group[group_id],
+                start_token=command.store_range.start_token,
+                mask=mask,
+            )
+            for group_id, mask in zip(rules.group_ids, masks, strict=True)
+        )
 
     def _assemble_batch(
         self,
         request_ids: tuple[str, ...],
         rows_by_request: list[dict[int, BlockRows]],
-        key_rule: Callable[[int, Sequence], KeyAxes] | None,
-        store_job_ids: tuple[int | None, ...] | None = None,
-        *,
-        key_axes_by_group: dict[int, KeyAxes] | None = None,
+        key_rule: Callable[[int, Sequence], KeyAxes],
     ) -> KVTransferBatch:
         groups = []
         for group_id in self._bound_rules.group_ids:
@@ -552,18 +583,13 @@ class KVPoolRuntime:
                 block_parts.append(block_ids)
                 count_parts.append(counts)
                 request_splits.append(request_splits[-1] + len(block_ids))
-            if key_axes_by_group is None:
-                if key_rule is None:
-                    raise RuntimeError("Batch assembly requires a key rule or precomputed key axes")
-                key_axes = _merge_key_axes(
-                    group_id,
-                    [
-                        key_rule(group_id, rows_by_group.get(group_id, _empty_rows())[1])
-                        for rows_by_group in rows_by_request
-                    ],
-                )
-            else:
-                key_axes = key_axes_by_group[group_id]
+            key_axes = _merge_key_axes(
+                group_id,
+                [
+                    key_rule(group_id, rows_by_group.get(group_id, _empty_rows())[1])
+                    for rows_by_group in rows_by_request
+                ],
+            )
             topology = self._groups[group_id]
             groups.append(
                 KVGroupBatch(
@@ -576,21 +602,7 @@ class KVPoolRuntime:
                     self._bound_rules.object_size(group_id),
                 )
             )
-        return KVTransferBatch(request_ids, tuple(groups), store_job_ids)
-
-    def _key_axes_by_group(
-        self, rows_by_request: _StoreRowsByRequest, key_rule: Callable[[int, Sequence], KeyAxes]
-    ) -> dict[int, KeyAxes]:
-        return {
-            group_id: _merge_key_axes(
-                group_id,
-                [
-                    key_rule(group_id, rows_by_group.get(group_id, _empty_rows())[1])
-                    for rows_by_group in rows_by_request
-                ],
-            )
-            for group_id in self._bound_rules.group_ids
-        }
+        return KVTransferBatch(request_ids, tuple(groups))
 
     def _raise_store_error(self) -> None:
         if self._store_error is not None:
@@ -658,7 +670,7 @@ def _store_command_completions(
 
 
 def _store_candidate_keys(candidates: _StoreCandidates) -> tuple[str, ...]:
-    return tuple(key for request_keys in candidates.keys_by_request for key in request_keys)
+    return tuple(key for group in candidates.groups for axis in group.key_axes for key in axis)
 
 
 def _select_store_candidate_objects(
@@ -681,6 +693,43 @@ def _merge_key_axes(group_id: int, key_parts: list[KeyAxes]) -> KeyAxes:
     if any(len(keys) != key_axis_count for keys in key_parts):
         raise RuntimeError(f"Cache group {group_id} changed its key coordinate count at runtime")
     return tuple(tuple(key for keys in key_parts for key in keys[axis_index]) for axis_index in range(key_axis_count))
+
+
+def _split_selection(selection: tuple[bool, ...], axis_count: int) -> tuple[tuple[bool, ...], ...]:
+    if axis_count == 0:
+        return ()
+    if len(selection) % axis_count:
+        raise RuntimeError("Store selection does not form aligned key axes")
+    row_count = len(selection) // axis_count
+    return tuple(selection[index * row_count : (index + 1) * row_count] for index in range(axis_count))
+
+
+def _compact_single_axis_rows(
+    rows_by_request: tuple[StoreCandidateRows, ...],
+    key_axis: tuple[str, ...],
+    selected_rows: tuple[bool, ...],
+) -> tuple[list[int], list[int], list[int], tuple[str, ...]]:
+    token_counts: list[int] = []
+    block_ids: list[int] = []
+    selected_keys: list[str] = []
+    request_splits = [0]
+    row_offset = 0
+    for counts, _hashes, ids in rows_by_request:
+        request_row_count = len(counts)
+        selection = selected_rows[row_offset : row_offset + request_row_count]
+        keys = key_axis[row_offset : row_offset + request_row_count]
+        for count, block_id, key, keep in zip(counts, ids, keys, selection, strict=True):
+            if keep:
+                token_counts.append(count)
+                block_ids.append(block_id)
+                selected_keys.append(key)
+        request_splits.append(len(block_ids))
+        row_offset += request_row_count
+    return token_counts, block_ids, request_splits, tuple(selected_keys)
+
+
+def _empty_candidate_rows() -> StoreCandidateRows:
+    return [], [], []
 
 
 def _empty_rows() -> BlockRows:
@@ -708,5 +757,11 @@ def _readonly_indices(values: Sequence[int]) -> np.ndarray:
 
 def _readonly_uint64(values: Sequence[int]) -> np.ndarray:
     result = np.asarray(values, dtype=np.uint64)
+    result.flags.writeable = False
+    return result
+
+
+def _readonly_bool(values: Sequence[bool]) -> np.ndarray:
+    result = np.asarray(values, dtype=np.bool_)
     result.flags.writeable = False
     return result
