@@ -94,8 +94,47 @@ class BaseModel(nn.Module):
 
 
 class Norm(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("weight", torch.ones(3))
+        self.variance_epsilon = 1e-5
+
     def forward(self, hidden, residual=None):
         return hidden if residual is None else (hidden + residual, hidden + residual)
+
+
+def attn_res_fwd_cpu(
+    prefix,
+    addend,
+    blocks,
+    projection,
+    gamma,
+    epsilon,
+    valid,
+    output_gamma=None,
+    output_epsilon=1e-5,
+    block_write_idx=-1,
+    return_materialized=False,
+    mix=True,
+    optimize_prefill=False,
+):
+    """Reference the fused op's add/mix/norm/write contract without NPU dispatch."""
+    raw = prefix if addend is None else prefix + addend
+    materialized = raw
+    if mix and valid:
+        values = torch.cat((blocks[:, :valid], raw.unsqueeze(1)), dim=1).float()
+        normalized = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + epsilon)
+        logits = (normalized * gamma.float() * projection.float()).sum(-1)
+        materialized = (logits.softmax(-1).unsqueeze(-1) * values).sum(1).to(raw.dtype)
+    output = materialized
+    if output_gamma is not None:
+        value = materialized.float()
+        output = (value * torch.rsqrt(value.square().mean(-1, keepdim=True) + output_epsilon) * output_gamma).to(
+            raw.dtype
+        )
+    if block_write_idx >= 0:
+        blocks[:, block_write_idx].copy_(raw)
+    return output, raw, materialized if return_materialized else output
 
 
 class BaseMLP(nn.Module):
@@ -167,7 +206,7 @@ def runtime(monkeypatch):
         "Sequence": Sequence,
         "_PP_TRANSPORT_PREFIX": "pp_transport",
         "cdiv": lambda a, b: (a + b - 1) // b,
-        "apply_attn_res": None,
+        "_use_attn_res_prefill_cache": lambda: False,
         "envs": SimpleNamespace(VLLM_MOE_SKIP_PADDING=True),
         "is_forward_context_available": lambda: True,
         "get_forward_context": lambda: context.forward,
@@ -200,9 +239,10 @@ def runtime(monkeypatch):
     # Exercise the real kernels on CPU without PrivateUse1 dispatch or NPU initialization.
     for name in ("ascend_sp_shard_impl", "ascend_sp_padding_mask_impl"):
         monkeypatch.setattr(torch.ops.vllm, name, namespace[f"_{name}"], raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", attn_res_fwd_cpu, raising=False)
     load_definitions(
         "vllm_ascend/models/kimi_k3.py",
-        {"_apply_ascend_attn_res", "AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP"},
+        {"AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP"},
         namespace,
         bases={
             "AscendKimiLinearModel": "BaseModel",
@@ -216,7 +256,7 @@ def runtime(monkeypatch):
                 "make_empty_intermediate_tensors",
                 "_cache_aux_pp_layout",
             },
-            "AscendKimiDecoderLayer": {"forward_attn_residual", "_run_self_attn"},
+            "AscendKimiDecoderLayer": {"forward", "prepare_attn_residual", "forward_attn_residual", "_run_self_attn"},
             "AscendKimiMLP": {"forward"},
         },
     )
@@ -235,7 +275,7 @@ def make_model(namespace, context, start, end, block_size, sp, materialized):
     model.start_layer, model.end_layer = start, end
     model.use_sequence_parallel = sp
     model.dspark_aux_capture_materialized = materialized
-    model.aux_hidden_state_layers = (0, 1, 3, 4)
+    model.aux_hidden_state_layers = (0, 1, 2, 3, 4, 5)
     model.layers = nn.ModuleList()
     for idx in range(end):
         layer = namespace["AscendKimiDecoderLayer"]()
@@ -265,9 +305,10 @@ def make_model(namespace, context, start, end, block_size, sp, materialized):
 
 
 @pytest.mark.parametrize("materialized", [False, True])
+@pytest.mark.parametrize("sp", [False, True])
 @pytest.mark.parametrize("tp,num_tokens", [(2, 8), (2, 3), (16, 8)])
-@pytest.mark.parametrize("cuts", [(0, 1, 3, 5), (0, 0, 3, 5)])
-def test_pipeline_shards_match_unsplit_model(runtime, materialized, tp, num_tokens, cuts):
+@pytest.mark.parametrize("cuts", [(0, 1, 3, 5), (0, 0, 3, 5), (0, 2, 2, 5), (0, 2, 5, 5)])
+def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_tokens, cuts):
     block_size = 2
     namespace, context = runtime
     dtype = torch.float32
@@ -295,7 +336,7 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, tp, num_toke
         for stage, (start, end) in enumerate(zip(cuts, cuts[1:])):
             context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == len(cuts) - 2)
             context.forward = SimpleNamespace(is_padding=torch.zeros(num_tokens, dtype=torch.bool))
-            model = make_model(namespace, context, start, end, block_size, True, materialized)
+            model = make_model(namespace, context, start, end, block_size, sp, materialized)
             if intermediate is not None:
                 model._cache_aux_pp_layout()
                 capacity = max(12, num_tokens)
@@ -317,16 +358,19 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, tp, num_toke
                     {name: tensor[:num_tokens] for name, tensor in buffers.tensors.items()}
                 )
             output = model(None, positions, intermediate, inputs_embeds=inputs if stage == 0 else None)
-            expected_mask = torch.arange((num_tokens + tp - 1) // tp) + rank * ((num_tokens + tp - 1) // tp)
-            torch.testing.assert_close(context.forward.is_padding, expected_mask >= num_tokens)
+            if sp:
+                expected_mask = torch.arange((num_tokens + tp - 1) // tp) + rank * ((num_tokens + tp - 1) // tp)
+                torch.testing.assert_close(context.forward.is_padding, expected_mask >= num_tokens)
+            else:
+                assert not context.forward.is_padding.any()
             if context.pp.is_last_rank:
                 return output
             intermediate = output
 
     with ThreadPoolExecutor(max_workers=tp) as pool:
         outputs = list(pool.map(run_rank, range(tp)))
-    assert all(count > 0 for count in shards_per_rank)
-    assert len(set(collectives.calls)) == 1 and collectives.calls[0] > 0
+    assert all((count > 0) == sp for count in shards_per_rank)
+    assert len(set(collectives.calls)) == 1 and (collectives.calls[0] > 0) == sp
     for output, aux in outputs:
         torch.testing.assert_close(output, expected)
         assert len(aux) == len(expected_aux)
